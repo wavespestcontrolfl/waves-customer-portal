@@ -709,6 +709,20 @@ export class ApiClient {
     });
   }
 
+  // People named on a call who get visit texts only (no app login). Holder
+  // session only; :customerId is a profile id of the signed-in account.
+  getReminderContacts(customerId) {
+    return this.request(`/notifications/reminder-contacts/${customerId}`);
+  }
+
+  stopReminderContact(customerId, reminderId) {
+    return this.request(`/notifications/reminder-contacts/${customerId}/${reminderId}/stop`, { method: 'POST' });
+  }
+
+  restartReminderContact(customerId, reminderId) {
+    return this.request(`/notifications/reminder-contacts/${customerId}/${reminderId}/restart`, { method: 'POST' });
+  }
+
   // ---- Requests ----
   createRequest(data) {
     return this.request('/requests', {

@@ -5459,6 +5459,89 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
   );
 }
 
+// People named on a call ("text my husband Bob too"): visit texts only, no app
+// login. The account holder can stop or restart each one, or give one app
+// access through the on-location contacts editor (same consent tick). Holder
+// sessions only; a failed load hides the section.
+function ReminderContactsSection({ profileId, enabled, savedContactsKey, muted, buttonStyle, onGiveAccess }) {
+  const [list, setList] = useState([]);
+  const [busyId, setBusyId] = useState(null);
+  useEffect(() => {
+    if (!enabled || !profileId) { setList([]); return undefined; }
+    let alive = true;
+    Promise.resolve(api.getReminderContacts(profileId))
+      .then((res) => { if (alive) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
+      .catch((err) => { console.error(err); if (alive) setList([]); });
+    return () => { alive = false; };
+  // savedContactsKey: a count of contact saves, so a save that gives someone app access re-reads hasAppAccess.
+  }, [enabled, profileId, savedContactsKey]);
+  if (!enabled || !list.length) return null;
+  const toggle = async (person) => {
+    if (busyId) return;
+    setBusyId(person.id);
+    try {
+      const res = person.stopped
+        ? await api.restartReminderContact(profileId, person.id)
+        : await api.stopReminderContact(profileId, person.id);
+      if (res?.reminderContact) {
+        setList((prev) => prev.map((x) => (x.id === person.id ? res.reminderContact : x)));
+      }
+    } catch (err) {
+      console.error(err);
+      showCustomerAlert(whenOffline(person.stopped
+        ? 'Could not restart texts. Please try again.'
+        : 'Could not stop texts. Please try again.'));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  return (
+    <div data-testid="reminder-contacts" style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Also gets visit texts</div>
+      <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.4 }}>
+        People named on a call get the booking, reminder and on-the-way texts for every visit. They can&rsquo;t sign in.
+      </div>
+      {list.map((person) => {
+        const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'Contact';
+        const busy = busyId === person.id;
+        return (
+          <div key={person.id} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between', padding: '10px 0', borderTop: '1px solid #E7E2D7', marginTop: 10 }}>
+            <div style={{ minWidth: 0, flex: '1 1 160px' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{name}</div>
+              <div style={{ fontSize: 14, color: muted }}>{formatPhoneDisplay(person.phone)}</div>
+              {person.stopped && <div style={{ fontSize: 14, fontWeight: 700, color: B.orange }}>Stopped</div>}
+              {person.hasAppAccess && !person.stopped && <div style={{ fontSize: 14, color: muted }}>Has app access</div>}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {!person.stopped && !person.hasAppAccess && (
+                <button
+                  type="button"
+                  onClick={() => onGiveAccess(person)}
+                  disabled={!!busyId}
+                  className="waves-focus-ring"
+                  style={{ ...buttonStyle, position: 'relative' }}
+                >
+                  Give app access
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => toggle(person)}
+                disabled={!!busyId}
+                aria-label={`${person.stopped ? 'Restart texts' : 'Stop texts'} for ${name}`}
+                className="waves-focus-ring"
+                style={{ ...buttonStyle, position: 'relative', opacity: busy ? 0.6 : 1 }}
+              >
+                {busy ? 'Saving...' : person.stopped ? 'Restart texts' : 'Stop texts'}
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ScheduleTab({ customer, properties = [], activePropertyId: activePropertyIdProp, selectedProperty = null, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   // The entry this session is scoped to (saved-property key, else the profile
   // id). Falls back to the profile for callers that do not pass one.
@@ -5530,6 +5613,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Per-property attestation that listed on-location contacts agreed to
   // receive service texts. Re-attested on every contact save.
   const [contactConsent, setContactConsent] = useState({});
+  // Per-property note shown after "Give app access" fills the editor.
+  const [accessNote, setAccessNote] = useState({});
+  // Successful contact saves per property: the reminder list re-reads after each one.
+  const [contactSaves, setContactSaves] = useState({});
   // Multi-property accounts: every property's next visit for the picker and
   // the "next visit at each property" chips. Independent of the schedule
   // load so a failure here never blanks the tab; null = still loading.
@@ -5728,6 +5815,29 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     });
   };
 
+  // "Give app access": copy a named-on-a-call person into the editor. Nothing
+  // is saved until the holder ticks the consent box and taps Save. Goes through
+  // setPropertyContacts so the consent tick is cleared like any other edit.
+  const handleGiveAppAccess = (propertyId, person) => {
+    const property = propertyPrefs.find(p => p.id === propertyId);
+    if (!property) return;
+    const current = displayContacts(property);
+    const isBlank = (c) => !(c.firstName || '').trim() && !(c.lastName || '').trim() && !(c.phone || '').trim() && !(c.email || '').trim();
+    if (!current.some(isBlank) && current.length >= MAX_PROPERTY_CONTACTS) {
+      showCustomerAlert('All 3 contact spots are in use. Remove one first.');
+      return;
+    }
+    const entry = { firstName: person.firstName || '', lastName: person.lastName || '', phone: person.phone || '', email: '' };
+    setPropertyContacts(propertyId, (contacts) => {
+      const at = contacts.findIndex(isBlank);
+      if (at >= 0) return contacts.map((c, i) => (i === at ? entry : c));
+      return contacts.length >= MAX_PROPERTY_CONTACTS ? contacts : [...contacts, entry];
+    });
+    setAccessNote(prev => ({ ...prev, [propertyId]: true }));
+    const box = typeof document !== 'undefined' ? document.getElementById(`svc-contact-consent-${propertyId}`) : null;
+    if (box && typeof box.focus === 'function') box.focus();
+  };
+
   const handlePropertyContactSave = async (propertyId) => {
     const property = propertyPrefs.find(p => p.id === propertyId);
     if (!property || prefsLocked[`${propertyId}:contact`]) return;
@@ -5766,6 +5876,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           }
           : p
       )));
+      setAccessNote(prev => (prev[propertyId] ? { ...prev, [propertyId]: false } : prev));
+      setContactSaves(prev => ({ ...prev, [propertyId]: (prev[propertyId] || 0) + 1 }));
     } catch (err) {
       showCustomerAlert(whenOffline('Could not save the on-location contacts. Please try again.'));
       console.error(err);
@@ -6696,6 +6808,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                         + Add another contact
                       </button>
                     )}
+                    {accessNote[property.id] && (
+                      <div role="status" style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginBottom: 8 }}>
+                        Check the box and tap Save to give them app access.
+                      </div>
+                    )}
                     <label htmlFor={`svc-contact-consent-${property.id}`} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', margin: '2px 0 12px', cursor: 'pointer' }}>
                       <input
                         id={`svc-contact-consent-${property.id}`}
@@ -6743,6 +6860,14 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                         {prefsLocked[contactLockKey] ? 'Saving...' : contacts.length > 1 ? 'Save contacts' : 'Save contact'}
                       </button>
                     </div>
+                    <ReminderContactsSection
+                      profileId={property.customerId || property.id}
+                      enabled={!contactSession}
+                      savedContactsKey={contactSaves[property.id] || 0}
+                      muted={muted}
+                      buttonStyle={secondaryButton}
+                      onGiveAccess={(person) => handleGiveAppAccess(property.id, person)}
+                    />
                   </div>
                 </div>
               );

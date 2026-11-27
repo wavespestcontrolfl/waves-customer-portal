@@ -9734,6 +9734,74 @@ function CustomerContactNotificationChoices({ customerId, isAdmin }) {
   );
 }
 
+// People named on a call ("text my husband Bob too"): visit texts only, no app
+// login. Staff can stop or restart each one (admin only on the server). Hidden
+// when the list is empty or fails to load.
+function CustomerReminderContacts({ customerId, isAdmin }) {
+  const [list, setList] = useState([]);
+  const [busyId, setBusyId] = useState(null);
+  const [err, setErr] = useState("");
+  const seqRef = useRef(0);
+  useEffect(() => {
+    const seq = ++seqRef.current;
+    setList([]);
+    setErr("");
+    setBusyId(null);
+    adminFetch(`/admin/customers/${customerId}/reminder-contacts`)
+      .then((data) => { if (seqRef.current === seq) setList(Array.isArray(data?.reminderContacts) ? data.reminderContacts : []); })
+      .catch(() => { if (seqRef.current === seq) setList([]); });
+  }, [customerId]);
+  if (!list.length) return null;
+  const toggle = async (person) => {
+    if (!isAdmin || busyId) return;
+    const seq = seqRef.current;
+    setBusyId(person.id);
+    setErr("");
+    try {
+      const response = await adminFetch(
+        `/admin/customers/${customerId}/reminder-contacts/${person.id}/${person.stopped ? "restart" : "stop"}`,
+        { method: "POST" },
+      );
+      if (seqRef.current === seq && response?.reminderContact) {
+        setList((prev) => prev.map((x) => (x.id === person.id ? response.reminderContact : x)));
+      }
+    } catch (e) {
+      if (seqRef.current === seq) setErr(e.message || "Could not update this person");
+    } finally {
+      if (seqRef.current === seq) setBusyId(null);
+    }
+  };
+  const statusFor = (person) => {
+    if (!person.stopped) return "Getting texts";
+    return person.stoppedBy === "staff" ? "Stopped by staff" : "Stopped by customer";
+  };
+  return (
+    <div className="mt-3" data-testid="reminder-contacts">
+      <div className="text-ui-caption ui-label text-ink-tertiary mb-1.5">Named on a call (texts only)</div>
+      {list.map((person) => {
+        const name = [person.firstName, person.lastName].filter(Boolean).join(" ") || "Contact";
+        return (
+          <div key={person.id} className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-ui-label font-medium text-zinc-900">{name}</div>
+                <div className="text-ui-label text-ink-secondary break-all">{person.phone}</div>
+                <div className="text-ui-label text-ink-secondary">{statusFor(person)}</div>
+              </div>
+              {isAdmin && (
+                <Button variant="ghost" disabled={!!busyId} onClick={() => toggle(person)} aria-label={`${person.stopped ? "Restart" : "Stop"} texts for ${name}`}>
+                  {person.stopped ? "Restart" : "Stop"}
+                </Button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {err && <div className="text-ui-label text-alert-fg">{err}</div>}
+    </div>
+  );
+}
+
 function CustomerRecipientDetails({
   c,
   payer,
@@ -9825,6 +9893,7 @@ function CustomerRecipientDetails({
           ))}
         </div>
         <CustomerContactNotificationChoices customerId={c.id} isAdmin={isAdmin} />
+        <CustomerReminderContacts customerId={c.id} isAdmin={isAdmin} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
           <label className="block">
             <span className="ui-label text-ink-tertiary block mb-1">
