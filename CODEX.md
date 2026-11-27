@@ -4,15 +4,15 @@ Follow [docs/development.md](docs/development.md) for the shared worktree,
 startup, debugging and QA procedure. Work from the task checkout, never another
 session's branch. No production database access is part of local setup.
 
+On the owner's multi-session Mac, install dependencies through the shared queue wrapper (never bare `npm ci`; fails closed if the wrapper is unavailable):
+
 ```sh
-if [ -x "$HOME/.claude/bin/npm-ci-serial" ]; then
-  "$HOME/.claude/bin/npm-ci-serial"
-elif [ -d "$HOME/.claude" ] || [ "$(uname -s)" = "Darwin" ]; then
-  echo "ERROR: ~/.claude/bin/npm-ci-serial missing or not executable on shared Mac" >&2
-  exit 1
-else
-  npm ci
-fi
+~/.claude/bin/npm-ci-serial
+```
+
+In isolated CI, cloud sandboxes, or other single-user machines, run `npm ci` instead. Then initialize and start the worktree:
+
+```sh
 npm run worktree:setup
 npm run dev:doctor -- --frontend
 npm run dev:managed-client
