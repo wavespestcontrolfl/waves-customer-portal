@@ -813,7 +813,7 @@ async function reconcilePendingDrafts(now = new Date()) {
   const rows = await db('emails')
     .where('draft_gmail_id', 'pending')
     .where('draft_claimed_at', '<', staleCutoff)
-    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'snippet', 'label_ids', 'classification', 'message_id', 'reply_to', 'received_at', 'auto_action', 'lead_id');
+    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'to_address', 'cc_address', 'bcc_address', 'subject', 'body_text', 'body_html', 'snippet', 'label_ids', 'classification', 'message_id', 'reply_to', 'received_at', 'authentication_results', 'customer_id', 'auto_action', 'lead_id');
   const counts = { settled: 0, released: 0, redrafted: 0 };
   for (const row of rows) {
     try {

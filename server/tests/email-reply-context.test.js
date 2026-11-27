@@ -307,4 +307,133 @@ describe('assembleEmailReplyContext', () => {
     expect(result.limits).toMatchObject({ truncated: true });
     expect(result.limits.omitted).toBeGreaterThan(0);
   });
+
+  test('uses arrivalStartForService shared arrival window for combined-booking upcoming visits', async () => {
+    const visit = {
+      type: 'Lawn fertilization',
+      date: '2026-09-15',
+      window: '10:00 AM–12:00 PM',
+      status: 'confirmed',
+      tech: 'Technician',
+    };
+    Object.defineProperty(visit, 'scheduledServiceId', { value: 'svc-combined-2', enumerable: false });
+    const baseDb = fakeDatabase();
+    const database = jest.fn((table) => {
+      if (table === 'scheduled_services') {
+        const q = {
+          whereIn: () => q,
+          select: async () => [{
+            id: 'svc-combined-2',
+            window_start: '10:00:00',
+            reservation_service_mix: { allocatedServiceIds: ['svc-combined-1', 'svc-combined-2'] },
+          }],
+        };
+        return q;
+      }
+      return baseDb(table);
+    });
+    database.raw = jest.fn(async (sql, bindings) => {
+      expect(sql).toContain('reservation_arrival_start');
+      expect(bindings).toEqual(['svc-combined-2']);
+      return { rows: [{ window_start: '09:00:00' }] };
+    });
+
+    const result = await assembleEmailReplyContext(EMAIL, {
+      database,
+      aggregator: { getContextForCustomer: jest.fn(async () => aggregatorContext({ upcomingServices: [visit] })) },
+      mailboxAddress: MAILBOX,
+    });
+    expect(result.ok).toBe(true);
+    const visitFact = result.facts.find((f) => f.key === 'upcoming_visit');
+    expect(visitFact.value.window).toBe('between 9:00 AM and 11:00 AM');
+  });
+
+  test('withholds arrival window when combined-booking shared lookup fails and preserves billing uncertainty on $0 balance', async () => {
+    const visit = {
+      type: 'Lawn fertilization',
+      date: '2026-09-15',
+      window: '10:00 AM–12:00 PM',
+      status: 'confirmed',
+      tech: 'Technician',
+    };
+    Object.defineProperty(visit, 'scheduledServiceId', { value: 'svc-combined-2', enumerable: false });
+    const baseDb = fakeDatabase();
+    const database = jest.fn((table) => {
+      if (table === 'scheduled_services') {
+        const q = {
+          whereIn: () => q,
+          select: async () => [{
+            id: 'svc-combined-2',
+            window_start: '10:00:00',
+            reservation_service_mix: { allocatedServiceIds: ['svc-combined-1', 'svc-combined-2'] },
+          }],
+        };
+        return q;
+      }
+      return baseDb(table);
+    });
+    database.raw = jest.fn(async () => { throw new Error('function unavailable'); });
+
+    const result = await assembleEmailReplyContext(EMAIL, {
+      database,
+      aggregator: {
+        getContextForCustomer: jest.fn(async () => aggregatorContext({
+          upcomingServices: [visit],
+          billing: {
+            unavailable: false,
+            outstandingBalance: 0,
+            hasProcessingPayment: true,
+            hasUncountedPartialDue: true,
+            openInvoice: null,
+            payerBilledInvoice: false,
+            recentPayments: [],
+          },
+        })),
+      },
+      mailboxAddress: MAILBOX,
+    });
+    expect(result.ok).toBe(true);
+    const visitFact = result.facts.find((f) => f.key === 'upcoming_visit');
+    expect(visitFact.value.window).toBeNull();
+    const balanceFact = result.facts.find((f) => f.key === 'outstanding_balance');
+    expect(balanceFact.status).toBe('unavailable');
+    expect(balanceFact.value).toBeNull();
+    const uncertaintyFact = result.facts.find((f) => f.key === 'billing_uncertainty');
+    expect(uncertaintyFact.value).toMatchObject({ hasProcessingPayment: true, hasUncountedPartialDue: true });
+  });
+
+  test('excludes multi-recipient/unauthenticated thread emails and strips tokenized SMS URLs before model dispatch', async () => {
+    const groupEmail = {
+      ...EMAIL,
+      id: 'email-group-old',
+      cc_address: 'thirdparty@other.example',
+      body_text: 'Private group-thread note should never leak',
+      received_at: '2026-09-09T12:00:00Z',
+    };
+    const unauthedEmail = {
+      ...EMAIL,
+      id: 'email-unauthed-old',
+      authentication_results: 'mx.google.com; dkim=fail header.d=example.test',
+      body_text: 'Spoofed prior inbound should never enter thread',
+      received_at: '2026-09-08T12:00:00Z',
+    };
+    const result = await assembleEmailReplyContext(EMAIL, {
+      database: fakeDatabase({ emails: [EMAIL, groupEmail, unauthedEmail] }),
+      aggregator: {
+        getContextForCustomer: jest.fn(async () => aggregatorContext({
+          smsHistory: [{
+            direction: 'outbound',
+            body: 'Manage your visit at https://wavespestcontrol.com/reschedule/secret-bearer-token-999 anytime.',
+            date: '2026-09-09T15:00:00Z',
+          }],
+        })),
+      },
+      mailboxAddress: MAILBOX,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.factsBlock).not.toContain('Private group-thread note');
+    expect(result.factsBlock).not.toContain('Spoofed prior inbound');
+    expect(result.factsBlock).not.toContain('secret-bearer-token-999');
+    expect(result.factsBlock).toContain('(link omitted)');
+  });
 });
