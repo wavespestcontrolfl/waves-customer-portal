@@ -538,7 +538,14 @@ async function unmappedRefusal({ knex, svc, spots, propertyId }) {
   }
   const rows = claims.filter((row) => takeAll.has(String(row.productId || '').toLowerCase()));
   if (!rows.length) return null;
-  const mapped = new Set((await loadActive(knex, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
+  // A warning only (owner 2026-11-26): a failed read of the mapped areas never stops the completion.
+  let mapped;
+  try {
+    mapped = new Set((await loadActive(knex, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
+  } catch (err) {
+    logger.warn(`[lawn-trouble-areas] mapped take-all areas unavailable at completion for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
   // Every place the row names must be mapped; the refusal names the first one that is not.
   for (const row of rows) {
     const place = placesOfInput(row).find((id) => !mapped.has(id));
