@@ -6264,7 +6264,14 @@ keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 which expands SERVER-SIDE via `quoteServicesForKey` — the posted body can
 only add the site-collected options `mergeKeyedRequestOptions` allows
 (today: the lawn grass `track`, forwarded into `lawn` AND
-`lawnPestControl`). Service-menu phase 2 (2026-09-03) widened the instant
+`lawnPestControl`; since 2026-11-26, new quotes only, the one lawn price lane:
+a bermuda or zoysia lawn plan prices from the St. Augustine rows of the market
+table, and the one-time lawn treatment and the lawn pest knockdown price at
+1.8 x the St. Augustine 6-visit anchor for every grass, +20% for insect or
+fungus work; the posted track still picks the program, the bahia review and
+the grass the line reports; a draft stored before that keeps its own grass
+rows and the old one-time multiple, estimate stamp `legacyLawnOneLane` (kept
+on the wizard's stored draft, not in the response)). Service-menu phase 2 (2026-09-03) widened the instant
 set by two keys: `oneTimeMosquito` (menu `mosquito_one_time`; priced by
 treatable lot area; station / dunk add-ons are staff-scoped and never
 site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
@@ -6704,6 +6711,10 @@ agent-readable /pricing.md surface and directly by AI agents (both
 surfaces read this same computed payload — neither carries its own copy
 of the sweep). Exact per-property pricing stays on POST
 /api/public/quote/calculate.
+The lawn rows (one lawn price lane, owner 2026-11-26, new quotes only): `lawn_care_program` still sweeps every plan grass (a
+bermuda or zoysia plan reads the St. Augustine market rows but keeps its own cost, so an armed cost floor can lift it above them),
+`one_time_lawn` and `lawn_pest_knockdown` sweep no grass (one price for every grass; their anchor never takes the cost floor), and
+no lawn row's `notes` names a grass type. Keys and shape are unchanged.
 The `wdo_inspection` row (owner ruling 2026-11-26, $150-$275 by home size and construction): its range comes from the code
 table `SPECIALTY.wdo.sizeTable` (`server/services/pricing-engine/constants.js`), not from a `pricing_config` row. `low`/`high` are the
 table's floor and ceiling ($150-$275, the sweep widens them if a value ever falls outside) and `notes` ends "Price by home size and

@@ -85,11 +85,15 @@ const formatUnitCost = (value, unit) => {
 
 // What a field means when the row's meaning changed under it (owner 2026-11-26, "only new estimtes"): the one-time pest floor and
 // multiple price only quotes made before 11-26 and bedroom-priced (apartment/condo) quotes; new house quotes use fixed constants in
-// the code, not these fields.
+// the code, not these fields. The one-time lawn multiple and its treatment multipliers are the same since the one-price lawn rule
+// (owner 2026-11-26): they price only quotes made before it.
 const FIELD_HELP = {
   "onetime_pest.floor": "Applies to quotes made before 11-26 and to apartment/condo (bedroom-priced) quotes. New house quotes use a fixed $199 / 1.8x / 10% minimum.",
   "onetime_pest.multiplier": "Applies to quotes made before 11-26 and to apartment/condo (bedroom-priced) quotes. New house quotes use a fixed $199 / 1.8x / 10% minimum.",
+  "onetime_lawn.recurringPerAppMultiplier": "Applies to quotes made before the one-price lawn rule, as do the treatment multipliers below. New quotes use a fixed 1.8x of the St. Augustine price, plus 20% for insect or fungus work.",
 };
+// The lawn tables that price only quotes made before the one-price lawn rule: a new quote for these grasses reads the St. Augustine table.
+const LAWN_TABLES_FOR_OLD_QUOTES = ["bermuda", "zoysia"];
 const fieldHelp = (configKey, field) => FIELD_HELP[`${configKey}.${field}`] || "";
 
 function StatusBadge({ status }) {
@@ -364,6 +368,7 @@ function LawnBracketsTab() {
   return <Card><CardHeader className="flex flex-wrap items-center justify-between gap-3"><CardTitle className="text-16">Monthly price brackets</CardTitle>{saving && <Badge tone="strong">Saving...</Badge>}</CardHeader><CardBody className="space-y-4">
     {error && <ActionFeedback error>{error}</ActionFeedback>}
     <div className="flex flex-wrap gap-2" aria-label="Lawn type">{trackKeys.map((track) => <Button key={track} variant={activeTrack === track ? "primary" : "secondary"} aria-pressed={activeTrack === track} onClick={() => setActiveTrack(track)}>{trackLabels[track] || track}</Button>)}</div>
+    {LAWN_TABLES_FOR_OLD_QUOTES.includes(activeTrack) && <p className="text-ui-body text-ink-secondary">This table prices only quotes made before the one-price lawn rule. New {trackLabels[activeTrack]} quotes use the St. Augustine table.</p>}
     <Table className="min-w-[650px]" aria-label="Monthly lawn price brackets"><THead><TR><TH>Lawn SqFt</TH>{tiers.map((tier) => <TH key={tier} align="right">{tier === "standard" ? "6 applications / yr" : tier === "enhanced" ? "9 applications / yr" : "12 applications / yr"}</TH>)}</TR></THead><TBody>{squareFootBrackets.map((squareFeet) => <TR key={squareFeet}><TD nums>{squareFeet.toLocaleString()}</TD>{tiers.map((tier) => { const row = trackData.find((item) => item.sqft_bracket === squareFeet && item.tier === tier); return <TD key={tier} align="right"><span className="mr-1 text-ink-secondary">$</span><EditCell value={row ? Number(row.monthly_price) : 0} onSave={(value) => handleCellUpdate(squareFeet, tier, value)} /></TD>; })}</TR>)}</TBody></Table>
   </CardBody></Card>;
 }

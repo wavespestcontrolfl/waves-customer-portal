@@ -15,6 +15,8 @@ describe('public recurring lawn range', () => {
     return new Set(spy.mock.calls.map(([, options]) => options.track));
   };
 
+  // One lawn price lane (2026-11-26): a new bermuda or zoysia plan reads the St. Augustine market rows but keeps its own cost, so
+  // an armed cost floor can still lift it; every plan grass stays in the sweep.
   test('gate off: bahia is swept with the other tracks', () => {
     expect([...recurringTracks()].sort()).toEqual(['bahia', 'bermuda', 'st_augustine', 'zoysia']);
   });
