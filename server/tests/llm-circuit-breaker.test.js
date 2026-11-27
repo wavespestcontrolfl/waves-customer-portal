@@ -118,6 +118,17 @@ describe('llm/circuit-breaker', () => {
       circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_timeout', generation: 0, now: recoverAt + 70 + i });
     }
     expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt + 100 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: 1 });
+
+    // A mandatory final leg (hasBackup=false) still claims a free probe after cooldown so a failing backup re-opens.
+    circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529', now: 400_000 });
+    circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529', now: 400_100 });
+    circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529', now: 400_200 });
+    expect(circuitBreaker.isAvailable('anthropic', { now: 405_000 })).toBe(false);
+    expect(circuitBreaker.isAvailable('anthropic', { now: 431_000 })).toBe(true);
+    const finalLegProbe = circuitBreaker.beforeAttempt('anthropic', { hasBackup: false, now: 431_000 });
+    expect(finalLegProbe).toMatchObject({ allow: true, isProbe: true });
+    circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_503', probeId: finalLegProbe.probeId, now: 431_050 });
+    expect(circuitBreaker.isAvailable('anthropic', { now: 435_000 })).toBe(false);
   });
 
   test('disabling the gate mid-probe still releases the probe slot so re-enabling can recover', () => {
@@ -284,6 +295,27 @@ describe('llm/circuit-breaker', () => {
       expect(rPdf.ok).toBe(true);
       expect(rPdf.provider).toBe('openai');
       expect(global.fetch).toHaveBeenCalledTimes(4);
+
+      // When payload requires tools (Anthropic-only in dispatch()), OpenAI backup cannot serve it, so Anthropic primary is NOT skipped.
+      process.env.ANTHROPIC_API_KEY = 'test-anthropic';
+      cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
+      cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
+      const toolsPolicy = {
+        name: 'testToolsCircuit',
+        primary: { provider: 'anthropic', model: MODELS.WORKHORSE },
+        fallback: { provider: 'openai', model: MODELS.OPENAI_FAST },
+      };
+      const rTools = await llm.dispatchWithFallback(toolsPolicy, {
+        text: 'search web',
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        jsonMode: true,
+      });
+      expect(rTools.ok).toBe(true);
+      expect(rTools.provider).toBe('anthropic');
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(4);
+      cb.resetCircuitBreakers();
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
 
       // When primary is skipped (circuit_open) and backup fails with a timeout,
       // the dispatch row keeps circuit_open in failure_reasons AND classifies error_class from the backup's timeout.

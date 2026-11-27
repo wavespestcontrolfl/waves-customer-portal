@@ -950,6 +950,7 @@ const PROVIDER_CAN_SERVE = {
 function canRouteServePayload(route, payload = {}) {
   if (!route?.provider || !route.model) return false;
   if (payload.audio && route.provider !== PROVIDER.GEMINI) return false;
+  if (payload.tools?.length && route.provider !== PROVIDER.ANTHROPIC) return false;
   const check = PROVIDER_CAN_SERVE[route.provider];
   return typeof check === 'function' ? check(payload) : false;
 }

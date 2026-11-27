@@ -96,10 +96,16 @@ function beforeAttempt(provider, { hasBackup = false, now = null } = {}) {
     return { allow: true, isProbe: false, probeId: null, generation: null };
   }
   const breaker = breakerFor(provider);
-  if (!hasBackup || breaker.state === 'closed') {
+  if (breaker.state === 'closed') {
     return { allow: true, isProbe: false, probeId: null, generation: breaker.generation };
   }
-  return breaker.admitAttempt(now ?? Date.now(), { cooldownMs: cooldownMs() });
+  const gate = breaker.admitAttempt(now ?? Date.now(), { cooldownMs: cooldownMs() });
+  // Mandatory/final legs always run, but still claim a free post-cooldown probe
+  // so a failing backup re-opens instead of staying indefinitely available.
+  if (!hasBackup && !gate.allow) {
+    return { allow: true, isProbe: false, probeId: null, generation: breaker.generation };
+  }
+  return gate;
 }
 
 /**
