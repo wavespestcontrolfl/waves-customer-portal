@@ -3174,15 +3174,18 @@ async function wdoTableForBooking({ customer, propertyId = null, estimateId = nu
   }
 }
 
-// Inside the booking transaction of a save that named no property and no estimate: the visit is stamped with the customer's
-// sole active property, read again inside the transaction (soleActivePropertyId). A WDO table price read before it
+// Inside the booking transaction of a save that named no property: its home is read again there, the way the price read it.
+// A linked estimate's home is that estimate's (bookedHomeProperty, read on the transaction); else the visit is stamped with
+// the customer's sole active property (soleActivePropertyId, `propertyId`). A WDO table price read before the transaction
 // (buildAppointmentPricing's `wdoTable`) must be that same home's, or the save refuses before any write and the screen reads
-// the price again (WDO_PRICE_CHANGED): a property added, removed or edited in between is another home (pre-push audit P0).
-// Reads the customer and property rows on the transaction, never the property record. No table price: nothing to check.
-async function assertWdoTableHomeUnchanged(table, { customerId, propertyId = null, trx }) {
+// the price again (WDO_PRICE_CHANGED): a property added, removed or edited, or an estimate moved, in between is another
+// home (pre-push audit P0). Reads the customer, estimate and property rows on the transaction, never the property record.
+// No table price: nothing to check.
+async function assertWdoTableHomeUnchanged(table, { customerId, propertyId = null, estimateId = null, trx }) {
   if (!table) return;
-  const customer = await trx('customers').where({ id: customerId }).first();
-  if (customer && await wdoTableStillApplies(table, { customer, propertyId, conn: trx })) return;
+  const home = estimateId ? await bookedHomeProperty({ customerId, propertyId: null, estimateId, conn: trx }) : { propertyId };
+  const customer = home.unsure ? null : await trx('customers').where({ id: customerId }).first();
+  if (customer && await wdoTableStillApplies(table, { customer, propertyId: home.propertyId || null, conn: trx })) return;
   throw Object.assign(
     httpError(409, 'The home for this visit changed while saving, so its WDO price may be different. This visit was not booked. Check the price and save again.'),
     { code: 'WDO_PRICE_CHANGED' },
@@ -3246,20 +3249,20 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
 // primary), plus one more case it cannot settle: a linked estimate with NO property_id that quotes an address. That address
 // is the primary only when it matches (estimateQuotesCustomerAddress); otherwise it must name exactly ONE of the customer's
 // saved properties. { unsure: true } when the home cannot be told: the hint shows nothing and the WDO line keeps its catalog
-// price, never a guess.
-async function bookedHomeProperty({ customerId, propertyId, estimateId }) {
-  const chosen = await callBookingGuardPropertyId(db, {
+// price, never a guess. Reads on `conn`: a save's transaction reads it again there (assertWdoTableHomeUnchanged).
+async function bookedHomeProperty({ customerId, propertyId, estimateId, conn = db }) {
+  const chosen = await callBookingGuardPropertyId(conn, {
     bookingProperty: propertyId ? { property_id: propertyId } : null,
     linkedEstimateId: estimateId || null,
   });
   if (chosen || propertyId || !estimateId) return { propertyId: chosen || null };
-  const estimate = await db('estimates').where({ id: estimateId }).first('address', 'customer_id');
+  const estimate = await conn('estimates').where({ id: estimateId }).first('address', 'customer_id');
   if (!estimate) return { unsure: true };
   if (estimate.customer_id && String(estimate.customer_id) !== String(customerId)) return { unsure: true };
   const { estimateQuotesCustomerAddress } = require('../services/estimate-property-linkage');
-  const customer = await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+  const customer = await conn('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
   if (!customer || estimateQuotesCustomerAddress(estimate.address, customer)) return { propertyId: null };
-  const saved = await db('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'address_line1', 'address_line2', 'city', 'zip');
+  const saved = await conn('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'address_line1', 'address_line2', 'city', 'zip');
   const matches = (Array.isArray(saved) ? saved : []).filter((row) => estimateQuotesCustomerAddress(estimate.address, row));
   return matches.length === 1 ? { propertyId: matches[0].id } : { unsure: true };
 }
@@ -10273,8 +10276,8 @@ async function scheduleCreateHandler(req, res, next) {
         insertData.property_id = await require('../services/customer-properties')
           .soleActivePropertyId(customerId, trx);
       }
-      if (!bookingProperty && !linkedEstimateId) {
-        await assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId, propertyId: insertData.property_id || null, trx });
+      if (!bookingProperty) {
+        await assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId, propertyId: insertData.property_id || null, estimateId: linkedEstimateId || null, trx });
       }
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;

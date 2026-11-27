@@ -63,8 +63,9 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, co
     : null;
   const written = !propertyId && serviceRow ? serviceAddressText(serviceAddress) : null;
   if (!row) return written ? { address: written } : { refusal: 'no customer and no service address' };
-  const { customerAtBookingProperty, sameHome } = require('./one-time-pest-booking-price');
+  const { customerAtBookingProperty } = require('./one-time-pest-booking-price');
   const { addressForCustomer } = require('./customer-pricing-ai');
+  const { addressKey } = require('./customer-properties');
   // No property named: a booking stamps the customer's sole active property when there is exactly one
   // (customer-properties soleActivePropertyId), so that property is the home priced, even one not marked primary
   // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row.
@@ -77,18 +78,18 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, co
   // now, by the same key (one ZIP carries several town names), or the visit would be stamped with one home and priced at
   // another (pre-push audit P0).
   if (propertyId && serviceRow) {
-    const { addressKey } = require('./customer-properties');
     const property = await conn('customer_properties').where({ id: propertyId, customer_id: row.id, active: true }).first('address_line1', 'address_line2', 'city', 'zip');
     if (!property || addressKey(property) !== addressKey(serviceRow)) return { refusal: 'the saved property no longer has the address the visit is stamped with' };
   }
-  // A written address that is not the customer's home is read on its own record: only the account's own tier calls it
-  // commercial, never the home's records (pre-push audit P0).
-  const writtenRow = written && serviceRow;
-  const commercial = writtenRow && !sameHome(writtenRow, at.customer)
+  // A written address that is not the customer's home, by the same address key (one ZIP carries several town names), is
+  // read on its own record: only the account's own tier calls it commercial, never the home's records. The home under
+  // another town name is the home: its own records, read at its own address (pre-push audit P0).
+  const writtenElsewhere = !!written && addressKey(serviceRow) !== addressKey(at.customer);
+  const commercial = writtenElsewhere
     ? require('./pricing-engine/commercial-helpers').normalizePropertyType(row.waveguard_tier) === 'commercial'
     : at.commercial;
   if (commercial) return { refusal: 'the stored records call this a commercial property' };
-  return { address: written || addressForCustomer(at.customer) };
+  return { address: writtenElsewhere ? written : addressForCustomer(at.customer) };
 }
 
 // The engine's WDO line for a home's property record, as the estimate tool prices a looked-up home nobody has typed over.

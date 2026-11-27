@@ -18,6 +18,7 @@ vi.mock('../../hooks/useDiscountStacking', () => ({
 import CreateAppointmentModal, {
   newCallerBookBlockReason, wdoLineHintText, wdoQuoteAnswer, wdoQuoteBody, wdoQuoteQuery, wdoSubmitGate,
 } from './CreateAppointmentModal.jsx';
+import modalSource from './CreateAppointmentModal.jsx?raw';
 
 afterEach(() => {
   cleanup();
@@ -154,7 +155,7 @@ function futureDate(days = 30) {
 const PEST_ONCE = { id: 'svc-pest1', service_key: 'one_time_pest', name: 'One-Time Pest Service', billing_type: 'one_time', base_price: 150, default_duration_minutes: 30 };
 
 // `quote(body)` answers the line's POST (read each time, so a test can change the answer); `save(body)` answers a save.
-function installFetch({ quote, save = () => json({ id: 'appt-1' }), catalog = [WDO, PEST_ONCE] }) {
+function installFetch({ quote, save = () => json({ id: 'appt-1' }), catalog = [WDO, PEST_ONCE], estimates = [] }) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.endsWith('/admin/schedule/wdo-inspection-quote') && options.method === 'POST') {
@@ -169,7 +170,7 @@ function installFetch({ quote, save = () => json({ id: 'appt-1' }), catalog = [W
     if (url.includes('/admin/triage?')) return Promise.resolve(json({ items: [] }));
     if (url.includes('/admin/services?')) return Promise.resolve(json({ services: catalog }));
     if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
-    if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
+    if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
     if (url.endsWith('/annual-prepay-availability')) return Promise.resolve(json({ enabled: false }));
@@ -380,6 +381,46 @@ describe('a WDO line in the modal', () => {
     fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '0' } });
     await waitFor(() => expect(hint()?.textContent).toBe('Table price: $200.00 (2,600 sq ft, wood frame).'));
     expect(quoteCalls(fetcher).at(-1)).toEqual({ customerId: 'customer-a' });
+  });
+
+  it('Save compares the form after its last read (the address re-read), just before its first POST', () => {
+    const lastRead = modalSource.indexOf('? await recheckAddressAskAtSubmit({');
+    const compare = modalSource.indexOf('|| latestForm.wdoQuoteKey !== wdoQuoteKey)) {');
+    const firstPost = modalSource.indexOf('const groups = groupServicesForAppointmentSubmit(services);', lastRead);
+    expect(lastRead).toBe(modalSource.lastIndexOf('? await recheckAddressAskAtSubmit({'));
+    expect(lastRead).toBeGreaterThan(0);
+    expect(compare).toBeGreaterThan(lastRead);
+    expect(firstPost).toBeGreaterThan(compare);
+  });
+
+  it('an estimate unlinked while Save re-reads the WDO price books nothing, so the quote is not marked accepted', async () => {
+    let holdReads = false;
+    const releases = [];
+    const fetcher = installFetch({
+      quote: () => (holdReads ? new Promise((resolve) => { releases.push(() => resolve(FRAME_2600)); }) : FRAME_2600),
+      estimates: [{ id: 'est-1', status: 'sent', serviceInterest: 'WDO inspection', lines: [], propertyId: null }],
+    });
+    mount();
+    const estimateSelect = async () => (await screen.findByRole('option', { name: /WDO inspection/ })).closest('select');
+    fireEvent.change(await estimateSelect(), { target: { value: 'est-1' } });
+    await addWdoLine();
+    await waitFor(() => expect(quoteCalls(fetcher).at(-1)).toEqual({ customerId: 'customer-a', estimateId: 'est-1' }));
+    await waitFor(() => expect(hint()?.textContent).toContain('$200.00'));
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    holdReads = true;
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(releases).toHaveLength(1));
+    // The office unlinks the estimate while the price is re-read.
+    fireEvent.change(await estimateSelect(), { target: { value: '' } });
+    releases.forEach((release) => release());
+    expect(await screen.findByText(/The booking changed while the WDO price was checked/)).toBeTruthy();
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+    holdReads = false;
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', wdoExpectedPrice: 200 });
+    expect(schedulePosts(fetcher)[0].sourceEstimateId).toBeUndefined();
   });
 
   it('a line edited while Save re-reads the WDO price books nothing; the next save books what the form shows', async () => {

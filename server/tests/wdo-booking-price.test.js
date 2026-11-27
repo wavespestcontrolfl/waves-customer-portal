@@ -202,14 +202,37 @@ describe('a blank WDO line books at the table price of the home', () => {
     await expect(check(undefined, null)).resolves.toBeUndefined();
   });
 
+  test('inside the save, a booking from an estimate is checked at that estimate\'s home, read again: an estimate moved to another property refuses', async () => {
+    const { assertWdoTableHomeUnchanged } = adminSchedule._test;
+    lookup.mockResolvedValue(record(4200, 'crawl'));
+    const ESTIMATE_ID = 'e5f6a7b8-3333-4c4d-9e5f-7a8b9c0d1e2f';
+    const OTHER = { ...RENTAL, id: 'c0d1e2f3-2222-4b3c-8d4e-6f7a8b9c0d1e', address_line1: '300 Sample Ct' };
+    let estimate = { id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: PROPERTY_ID, address: null };
+    wireDb({
+      customers: HOME,
+      estimates: () => estimate,
+      customer_properties: (cond) => (cond.id ? [RENTAL, OTHER].find((property) => property.id === cond.id) : (cond.is_primary ? undefined : [RENTAL, OTHER])),
+    });
+    const pricing = await bookBlankWdo({ refillContext: { propertyId: null, sourceEstimateId: ESTIMATE_ID } });
+    expect(pricing.finalPrice).toBe(275);
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('200 Sample Rd'));
+    const check = () => assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId: CUSTOMER_ID, propertyId: null, estimateId: ESTIMATE_ID, trx: dbMock });
+    await expect(check()).resolves.toBeUndefined();
+    estimate = { ...estimate, property_id: OTHER.id };
+    await expect(check()).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
   test('the office save runs that check inside its transaction, right after it stamps the sole active property', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const stamp = source.indexOf('.soleActivePropertyId(customerId, trx);');
-    const checked = source.indexOf('await assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId, propertyId: insertData.property_id || null, trx });');
+    // Every save that named no property: an estimate's included.
+    const checked = source.indexOf(['      if (!bookingProperty) {',
+      '        await assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId, propertyId: insertData.property_id || null, estimateId: linkedEstimateId || null, trx });'].join('\n'));
     expect(stamp).toBe(source.lastIndexOf('.soleActivePropertyId(customerId, trx);'));
     expect(stamp).toBeGreaterThan(0);
     expect(checked).toBeGreaterThan(stamp);
-    expect(source.slice(stamp, checked).split('\n')).toHaveLength(4);
+    expect(source.slice(stamp, checked).split('\n')).toHaveLength(3);
   });
 
   test('a failed read never blocks a booking: the catalog price stands', async () => {
@@ -457,6 +480,14 @@ describe('phone bookings (the call pipeline, the voice agent, the new caller boo
     // A commercial account is commercial at any address.
     wireDb({ customers: { ...HOME, waveguard_tier: 'commercial' }, customer_properties: undefined });
     expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: elsewhere })).toBe(CATALOG);
+    // The customer's own home under another town name of its ZIP is the home: its own records still call it commercial,
+    // and a home they call a house is read at its own address.
+    const homeAlias = { propertyId: null, address: { ...ADDRESS, city: 'Lakewood Ranch' } };
+    wireDb({ customers: { ...HOME, property_type: 'commercial' }, customer_properties: undefined });
+    expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: homeAlias })).toBe(CATALOG);
+    wireDb({ customers: HOME, customer_properties: undefined });
+    expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: homeAlias })).toMatchObject({ price: 200, source: 'wdo_table' });
+    expect(lookup).toHaveBeenLastCalledWith(expect.stringContaining('Bradenton'));
   });
 
   test('a call linked to a saved property is priced at it only while the property still has the call\'s address (by its address key: one ZIP carries several town names)', async () => {

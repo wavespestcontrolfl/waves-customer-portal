@@ -4504,14 +4504,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setTimeout(() => setToast(''), wdoHold.holdMs);
         return;
       }
-      // A line or the property changed while the WDO price was re-read: this save would post the form as it was at the
-      // click, so it posts nothing (pre-push audit P1; Book checks its whole body the same way).
-      const latestForm = latestSaveRef.current;
-      if (unsavedBlankWdoLines > 0 && (latestForm.services !== services || latestForm.selectedPropertyId !== selectedPropertyId)) {
-        setToast('The booking changed while the WDO price was checked — check it, then save again');
-        setTimeout(() => setToast(''), 3200);
-        return;
-      }
       // Keep this as the final await before the first appointment POST.
       const recheckController = new AbortController();
       addressSubmitRecheckRef.current?.controller.abort();
@@ -4536,6 +4528,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setTimeout(() => {
           if (modalMountedRef.current) setToast('');
         }, 4000);
+        return;
+      }
+      // A line, the property or the linked estimate changed while the WDO price or the address was re-read (above): this
+      // save would post the form as it was at the click, so it posts nothing (pre-push audit P1; Book checks its whole body
+      // the same way). Checked after the last read, just before the first POST.
+      const latestForm = latestSaveRef.current;
+      if (unsavedBlankWdoLines > 0 && (latestForm.services !== services || latestForm.selectedPropertyId !== selectedPropertyId
+        || latestForm.wdoQuoteKey !== wdoQuoteKey)) {
+        setToast('The booking changed while the WDO price was checked — check it, then save again');
+        setTimeout(() => setToast(''), 3200);
         return;
       }
       const groups = groupServicesForAppointmentSubmit(services);
@@ -5526,7 +5528,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // form as it is when it fires (a technician or note changed during the wait
   // is booked as shown), never the values from when the wait began.
   const latestSaveRef = useRef(null);
-  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine, services, selectedPropertyId };
+  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine, services, selectedPropertyId, wdoQuoteKey };
   useEffect(() => {
     if (!pendingQuickAddSave) return undefined;
     if (selectedCustomerIdRef.current !== pendingQuickAddSave.customerId) {
