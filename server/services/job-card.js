@@ -2401,7 +2401,12 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
 function primaryProgramKey(svc, protocols) {
   const identity = { serviceKey: svc.service_key, name: svc.service_type };
   if (isMistingDesignConsultation(identity) || isMistingSystemServiceUnconfigured(identity)) return null;
-  if (!svc.service_category) return matchServiceProtocol(protocols, svc.service_type, { serviceKey: svc.service_key }).reason === 'no_protocol' ? null : undefined;
+  if (!svc.service_category) {
+    // A lawn name ("Fertilization", "Weed Control") keeps the lawn plan, as the card does (detectServiceLine): the matcher has
+    // no lawn rule, so its no-card answer is for other names only.
+    if (detectServiceLine(svc.service_type) === 'lawn') return undefined;
+    return matchServiceProtocol(protocols, svc.service_type, { serviceKey: svc.service_key }).reason === 'no_protocol' ? null : undefined;
+  }
   return addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key);
 }
 
@@ -2583,5 +2588,5 @@ module.exports = {
   resolveVisitLines,
   describeLine,
   ALTERNATE_ADDRESS_BLOCK,
-  _test: { protocolBand, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { primaryProgramKey, protocolBand, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

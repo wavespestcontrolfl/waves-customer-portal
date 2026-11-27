@@ -670,6 +670,21 @@ export function pestRowDefaultArea(applicationMethod) {
     .filter((area) => AREAS_BY_SERVICE.pest.includes(area) && AREA_SCOPES[scope].includes(area))
     .join(", ");
 }
+// A seeded row the tech never touched: it carries a seed flag AND its copy in one of the seed snapshots (JSON arrays of the
+// rows as seeded) has the same product and the same value in every field the tech can edit. No copy, or any difference,
+// means the row is the tech's.
+const SEED_EDITABLE_FIELDS = ["totalAmount", "amountUnit", "rate", "rateUnit", "applicationMethod", "applicationArea", "areaValue", "areaUnit", "carrierGallons", "targets"];
+const seedFieldText = (value) => (value === null || value === undefined ? "" : String(value));
+export function untouchedSeedRow(row, snapshots) {
+  if (!row || !(row.protocolDefaultProduct || row.pestDefaultMixProduct)) return false;
+  return (snapshots || []).some((snapshot) => {
+    let rows;
+    try { rows = JSON.parse(snapshot || "null"); } catch { return false; }
+    return Array.isArray(rows) && rows.some((seeded) => seeded
+      && productRowId(seeded) === productRowId(row)
+      && SEED_EDITABLE_FIELDS.every((field) => seedFieldText(seeded[field]) === seedFieldText(row[field])));
+  });
+}
 export function withPestRowDefaultArea(row) {
   if (!row || row.applicationArea) return row;
   const applicationArea = pestRowDefaultArea(row.applicationMethod);
@@ -14365,16 +14380,26 @@ export function CompletionPanel({
     pestDefaultMixSnapshotRef.current = null;
   }, [visitOutcome, selectedProducts]);
   // A draft restored on a confirmed no-card visit (noCardConfirmed) may still carry the automatic house-mix or card-default
-  // rows from before that answer: they are dropped, so nothing automatic submits under the "Inspection only, no product"
-  // note. A product row the tech added by hand stays (owner 2026-11-26: a check never stops him recording what he
-  // applied). Card action ticks and their note markers are dropped at submit (reconcileProtocolActions).
-  // A seeded row the tech edited (techEdited) is his and stays.
+  // rows from before that answer. A row is dropped only when it still equals its seeded copy (untouchedSeedRow), so nothing
+  // automatic submits under the "Inspection only, no product" note. Any row the tech added or edited stays, and so does a
+  // row from an older draft with no seeded copy to prove it untouched (owner 2026-11-26: a check never stops him recording
+  // what he applied; he can remove it himself). Card action ticks and their note markers are dropped at submit
+  // (reconcileProtocolActions).
   useEffect(() => {
     if (!noCardConfirmed) return;
-    const automatic = (p) => (p.protocolDefaultProduct || p.pestDefaultMixProduct) && !p.techEdited;
+    const copies = [pestDefaultMixSnapshotRef.current, protocolCompletionDefaultsSnapshotRef.current];
+    const automatic = (p) => untouchedSeedRow(p, copies);
     if (!selectedProducts.some(automatic)) return;
     setSelectedProducts((current) => current.filter((p) => !automatic(p)));
   }, [noCardConfirmed, selectedProducts]);
+  // The card answer is still on its way while a restored draft holds automatic rows or card actions: the submit waits for
+  // it, so those entries never reach the record before a no-card answer could drop them. Both reads always settle (a
+  // failed read settles too), so this wait is short and never stops a visit.
+  const cardAnswerPending = !isTypedFindings && !specialtyCompletion && !isLawn
+    && (protocolActionsLoading || !protocolCompletionDefaultsSettled)
+    && (selectedProducts.some((p) => p.protocolDefaultProduct || p.pestDefaultMixProduct)
+      || selectedProtocolActionLabels.length > 0
+      || markerTexts(notes, PROTOCOL_MARKER_TAGS).length > 0);
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
@@ -15070,6 +15095,8 @@ export function CompletionPanel({
       // still be on its way. No submission until discovery settles
       // (pre-push Codex P1 on 705d7acad).
       ? "Loading saved draft…"
+    : cardAnswerPending
+      ? "Loading protocol card…"
     : committedReplayReady
       ? "Resume Closeout"
       : completionPricingPending
@@ -15781,6 +15808,8 @@ export function CompletionPanel({
         // restored from a draft must still read as the baseline, not as
         // tech-authored rows (pre-push audit on #5049).
         protocolCompletionDefaultsSnapshot: protocolCompletionDefaultsSnapshotRef.current,
+        // The house mix as seeded: a no-card cleanup drops a restored row only when it still equals this copy.
+        pestDefaultMixSnapshot: pestDefaultMixSnapshotRef.current,
         lawnAreaOverride,
         lawnAreaOverrideFor,
         propertyVisitArea,
@@ -16064,6 +16093,7 @@ export function CompletionPanel({
     if (savedDraft.protocolCompletionDefaultsSnapshot) {
       protocolCompletionDefaultsSnapshotRef.current = savedDraft.protocolCompletionDefaultsSnapshot;
     }
+    if (savedDraft.pestDefaultMixSnapshot) pestDefaultMixSnapshotRef.current = savedDraft.pestDefaultMixSnapshot;
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
     // A restored override with no recorded property (an older draft, or one
     // saved before the areas answered) cannot be verified: withheld whenever
@@ -17842,9 +17872,7 @@ export function CompletionPanel({
       // over them (pre-push audit P1). Idempotent while an owner remains.
       return promoteTankOwner(prev.map((p) => {
         if (productRowId(p) !== rowId) return propagateTank ? followTank(p, value) : p;
-        // techEdited: the tech changed this row by hand, so it is his record and never an automatic seed (a no-card visit's
-        // cleanup keeps it; noCardConfirmed).
-        const next = { ...p, [field]: value, techEdited: true };
+        const next = { ...p, [field]: value };
         // Leaving a per-gallon rate retires the tank with it, on every lane —
         // a pest perimeter or tree/shrub row never reaches the rate-unit
         // branch below, so a hidden volume would survive the round-trip back.
@@ -18371,7 +18399,7 @@ export function CompletionPanel({
     if (submitting && !resumingPoll) return;
     // Draft discovery still settling (see baseCompletionCtaLabel): the button
     // is disabled, but a keyboard/programmatic submit must not race it.
-    if (draftLoading || propertyAreasBlocked) return;
+    if (draftLoading || cardAnswerPending || propertyAreasBlocked) return;
     setSubmitError("");
     // A committed chain replays the pinned body byte-for-byte — the stored
     // body already passed every pre-submit gate when it committed, and the
@@ -22628,6 +22656,7 @@ export function CompletionPanel({
               disabled={
                 submitting ||
                 draftLoading ||
+                cardAnswerPending ||
                 generating ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
@@ -22639,6 +22668,7 @@ export function CompletionPanel({
                 opacity:
                   submitting ||
                   draftLoading ||
+                  cardAnswerPending ||
                   (!committedReplayReady &&
                     (completionPricingPending || closeoutAdvisoriesPending ||
                       treeShrubCompletionBlocked || propertyAreasBlocked ||
@@ -24916,6 +24946,7 @@ export function CompletionPanel({
             disabled={
               submitting ||
               draftLoading ||
+              cardAnswerPending ||
               generating ||
               (!committedReplayReady &&
                 (completionPricingPending || closeoutAdvisoriesPending ||
@@ -24935,6 +24966,7 @@ export function CompletionPanel({
               opacity:
                 submitting ||
                 draftLoading ||
+                cardAnswerPending ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
                     treeShrubCompletionBlocked || propertyAreasBlocked ||

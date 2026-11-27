@@ -291,17 +291,20 @@ it('a no-card answer from the defaults read holds the house mix, whatever the ac
   expect(screen.queryByText('Taurus SC')).toBeNull();
 });
 
-it('a draft restored on a no-card visit drops its automatic house-mix rows and keeps a row the tech added', async () => {
+it('a draft restored on a no-card visit drops an untouched house-mix row and keeps a row the tech added or edited', async () => {
   const visit = cockroachService({ serviceType: 'Courtesy Visit', completionProfile: null, findingsSchema: null });
+  const taurus = { productId: 'm1', name: 'Taurus SC', totalAmount: 1.6, amountUnit: 'fl_oz', pestDefaultMixProduct: true, applicationMethod: 'perimeter_spray', areaValue: '', areaUnit: 'linear_ft', targets: [] };
+  const crosscheck = { productId: 'm2', name: 'LESCO Crosscheck Plus', totalAmount: 1.2, amountUnit: 'fl_oz', pestDefaultMixProduct: true, applicationMethod: 'perimeter_spray', areaValue: '', areaUnit: 'linear_ft', targets: [] };
   localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
     serviceId: visit.id,
     savedAt: Date.now(),
     notes: 'Courtesy stop',
+    // The house mix as seeded: Taurus is unchanged, the tech changed the Crosscheck amount.
+    pestDefaultMixSnapshot: JSON.stringify([taurus, crosscheck]),
     selectedProducts: [
-      { productId: 'm1', name: 'Taurus SC', totalAmount: 1.6, amountUnit: 'fl_oz', pestDefaultMixProduct: true, areaValue: '', areaUnit: '' },
+      taurus,
       { productId: 'c3', name: 'Advion Cockroach Gel Bait', totalAmount: 1, amountUnit: 'g', applicationMethod: 'bait_placement', areaValue: '', areaUnit: '' },
-      // A seeded row the tech edited is his record: it stays.
-      { productId: 'm2', name: 'LESCO Crosscheck Plus', totalAmount: 1.2, amountUnit: 'fl_oz', pestDefaultMixProduct: true, techEdited: true, areaValue: '', areaUnit: '' },
+      { ...crosscheck, totalAmount: 0.8 },
     ],
   }));
   stubFetchWithActions({ serviceType: 'Courtesy Visit', programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
@@ -314,6 +317,64 @@ it('a draft restored on a no-card visit drops its automatic house-mix rows and k
   await waitFor(() => expect(screen.queryByText('Taurus SC')).toBeNull());
   expect(screen.getByText('LESCO Crosscheck Plus')).toBeTruthy();
   expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
+});
+
+it('a restored draft with an automatic row waits for the card answer before it can submit', async () => {
+  const visit = cockroachService({ serviceType: 'Courtesy Visit', completionProfile: null, findingsSchema: null });
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: 'Courtesy stop',
+    selectedProducts: [
+      { productId: 'm1', name: 'Taurus SC', totalAmount: 1.6, amountUnit: 'fl_oz', pestDefaultMixProduct: true, applicationMethod: 'perimeter_spray', areaValue: '', areaUnit: 'linear_ft', targets: [] },
+    ],
+  }));
+  let answer;
+  const pending = new Promise((resolve) => { answer = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (String(url).includes('/completion-actions')) {
+      await pending;
+      return { ok: true, json: async () => ({ serviceType: 'Courtesy Visit', programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE }) };
+    }
+    if (String(url).includes('/default-products')) {
+      await pending;
+      return { ok: true, json: async () => ({ serviceId: visit.id, programKey: null, matchedVisit: { visit: null, reason: 'no_protocol', matched: false }, source: 'none', products: [], unresolved: [], taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 } }) };
+    }
+    return { ok: true, json: async () => ({ customer: {}, actions: [], available: false }) };
+  }));
+  const onSubmit = vi.fn().mockResolvedValue({});
+  const catalog = [...cockroachCatalog, { id: 'm1', name: 'Taurus SC', category: 'Insecticide' }];
+  await act(async () => {
+    render(<CompletionPanel service={visit} products={catalog} onClose={() => {}} onSubmit={onSubmit} />);
+  });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  const waiting = await screen.findAllByRole('button', { name: /Loading protocol card/ });
+  expect(waiting.every((button) => button.disabled)).toBe(true);
+  await act(async () => { answer(); await pending; });
+  expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
+  await waitFor(() => expect(screen.queryAllByRole('button', { name: /Loading protocol card/ })).toHaveLength(0));
+  expect(onSubmit).not.toHaveBeenCalled();
+});
+
+it('an older draft with no seeded copy keeps its house-mix rows on a no-card visit: nothing proves them untouched', async () => {
+  const visit = cockroachService({ serviceType: 'Courtesy Visit', completionProfile: null, findingsSchema: null });
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: 'Courtesy stop',
+    selectedProducts: [
+      { productId: 'm1', name: 'Taurus SC', totalAmount: 1.1, amountUnit: 'fl_oz', pestDefaultMixProduct: true, totalAmountSeeded: false, areaValue: '', areaUnit: '' },
+    ],
+  }));
+  stubFetchWithActions({ serviceType: 'Courtesy Visit', programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
+  const catalog = [...cockroachCatalog, { id: 'm1', name: 'Taurus SC', category: 'Insecticide' }];
+  await act(async () => {
+    render(<CompletionPanel service={visit} products={catalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  expect(screen.getByText('Taurus SC')).toBeTruthy();
 });
 
 it('a no-card answer from the defaults read alone shows the note and no action picker when the actions read fails', async () => {

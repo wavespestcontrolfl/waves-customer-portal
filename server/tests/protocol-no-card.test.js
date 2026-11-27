@@ -360,3 +360,12 @@ describe('the defaults read: a no-card answer only on a key it read', () => {
   });
 });
 
+describe('the job card tank lookup: a category-less lawn name keeps the lawn plan', () => {
+  const { _test: { primaryProgramKey } } = require('../services/job-card');
+  test('"Fertilization" and "Weed Control" stay on the lawn path; a name with no card reads as no card', () => {
+    expect(primaryProgramKey({ service_type: 'Fertilization', service_key: 'lawn_fertilization', service_category: null }, protocols)).toBeUndefined();
+    expect(primaryProgramKey({ service_type: 'Weed Control', service_key: null, service_category: null }, protocols)).toBeUndefined();
+    expect(primaryProgramKey({ service_type: 'Service Visit', service_key: 'web_sweep', service_category: null }, protocols)).toBeNull();
+  });
+});
+
