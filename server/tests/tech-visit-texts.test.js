@@ -60,6 +60,7 @@ describe('textVerdict', () => {
   test.each([
     '4111 1111 1111 1111', '4111111111111111', 'the number is 5555-5555-5555-4444', 'cvv 123', 'security code is 456', 'expires 08/27',
     'my routing is 021000021', 'account number 123456789', 'acct # 99887766', 'checking acct 12345678', 'account 12345678', 'acct: 998877', 'savings 123456789', '021000021', 'checking account 1234 5678', 'bank acct 1234-5678-90', 'account 123 456 789',
+    'Exp: 08/27', 'exp 8/2027', 'valid thru 08/27', '4111\u20131111\u20131111\u20131111', '4111\u20111111\u20111111\u20111111', '123-45-6789', '123\u201345\u20136789',
   ])('a card or bank detail hides the whole text even with no money word: %s', (body) => {
     expect(hasCardCredentials(body)).toBe(true);
     expect(textVerdict(inbound({ message_body: body }))).toBe('hidden');
@@ -72,6 +73,12 @@ describe('textVerdict', () => {
     expect(hasLink(body)).toBe(true);
     expect(textVerdict(outbound({ message_type: 'appointment_rescheduled', message_body: body }))).toBe('hidden');
     expect(textVerdict(outbound({ message_type: 'rain_out_customer_pick_v1', message_body: body }))).toBe('hidden');
+  });
+
+  test('an app push record in sms_log is neither shown nor counted', () => {
+    expect(textVerdict(outbound({ message_type: 'appointment_cancelled', from_phone: 'push', message_body: 'Your visit moved to Thursday' }))).toBe('skip');
+    expect(textVerdict(outbound({ message_type: 'manual', metadata: { channel: 'push' } }))).toBe('skip');
+    expect(textVerdict(outbound({ message_type: 'appointment_cancelled', from_phone: '+19415550100', message_body: 'Your visit moved to Thursday' }))).toBe('show');
   });
 
   test('a manual text shows only when a staff member wrote it', () => {

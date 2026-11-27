@@ -11,6 +11,7 @@
 const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { scrubPansDetailed } = require('../utils/pan-scrub');
+const { scrubNoteText } = require('../utils/note-secret-scrubber');
 const { isSmsReaction } = require('./sms-intent');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -46,7 +47,7 @@ const MONEY_WORDS = /\b(bills?|billed|billing|invoices?|invoiced|charges?|charge
 const DOLLAR_AMOUNT = /\$\s?\d|\b\d[\d,]*(\.\d{1,2})?\s*(dollars?|bucks)\b/i;
 
 // Card or bank details a customer may text: a labeled CVV / security code / expiry, a routing or account number.
-const CREDENTIAL_WORDS = /\b(?:cvv2?|cvc2?|cid|security code|card code|expir(?:y|es|ation|ing)|exp\.? date|routing)\b|\b(?:account|acct|acc|bank|checking|savings)\b[^\n]{0,24}?\d(?:[\s.-]?\d){5,}|\b(?:account|acct)\.?\s*(?:number|no\.?|#)|\b\d{8,17}\b/i;
+const CREDENTIAL_WORDS = /\b(?:cvv2?|cvc2?|cid|security code|card code|expir(?:y|es|ation|ing)|exp\.? date|valid (?:thru|through)|routing)\b|\bexp\b\.?[^\n]{0,12}?\d{1,2}\s*[/-]\s*\d{2,4}|\b(?:account|acct|acc|bank|checking|savings)\b[^\n]{0,24}?\d(?:[\s.-]?\d){5,}|\b(?:account|acct)\.?\s*(?:number|no\.?|#)|\b\d{8,17}\b/i;
 // A link: a customer-action link (reschedule, pay, estimate, portal) works without a login, and a technician must never
 // read one that belongs to another visit of the customer. Any text carrying a URL, a www. address or a short link is held back.
 const LINK = /https?:\/\/|\bwww\.|\b[a-z0-9-]+\.(?:com|net|org|io|co|us|app|link|ly|me|info|biz)\b/i;
@@ -62,8 +63,10 @@ function hasLink(body) {
 }
 
 function hasCardCredentials(body) {
-  const text = String(body || '');
-  return CREDENTIAL_WORDS.test(text) || scrubPansDetailed(text).count > 0;
+  // Typographic dashes and full-width digits read as the plain ones, as the card and SSN screens expect.
+  const text = String(body || '').normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-');
+  // scrubNoteText reads a normalized copy (typographic dashes, full-width digits) and also finds SSNs, tokens and keys.
+  return CREDENTIAL_WORDS.test(text) || scrubPansDetailed(text).count > 0 || scrubNoteText(text).removed > 0;
 }
 
 function parseMetadata(value) {
@@ -85,11 +88,17 @@ function photosOf(row) {
   return mediaOf(row).filter((item) => item && item.key && isImageType(item.contentType));
 }
 
+// An app notification a device accepted is logged in sms_log (status 'sent', from_phone 'push', metadata.channel 'push'): it is
+// not a text, so it is neither shown nor counted (the same check customer-activity-timeline.js makes).
+function isPushProof(row) {
+  return String(row.from_phone || '').toLowerCase() === 'push' || String(parseMetadata(row.metadata).channel || '').toLowerCase() === 'push';
+}
+
 // 'show' | 'hidden' | 'skip' for one sms_log row ({ direction, message_type, status, message_body, metadata }).
 function textVerdict(row) {
   const type = row.message_type || '';
   const inbound = row.direction === 'inbound';
-  if (QUIET_TYPES.has(type) || (inbound && isSmsReaction(row.message_body))) return 'skip';
+  if (QUIET_TYPES.has(type) || isPushProof(row) || (inbound && isSmsReaction(row.message_body))) return 'skip';
   if (!inbound && UNSENT_STATUSES.has(row.status)) return 'skip';
   if (!(inbound ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(type)) return 'hidden';
   if (hasMoneyWords(row.message_body) || hasCardCredentials(row.message_body) || hasLink(row.message_body)) return 'hidden';
@@ -159,7 +168,7 @@ async function windowRows(db, customerId, start, now) {
       .orderBy('sl.id', 'desc')
       .limit(PAGE_SIZE)
       .offset(page * PAGE_SIZE)
-      .select('sl.id', 'sl.direction', 'sl.message_body', 'sl.message_type', 'sl.status', 'sl.admin_user_id', 'sl.metadata', 'sl.created_at');
+      .select('sl.id', 'sl.direction', 'sl.message_body', 'sl.message_type', 'sl.status', 'sl.from_phone', 'sl.admin_user_id', 'sl.metadata', 'sl.created_at');
     for (const row of batch) if (!seen.has(row.id)) { seen.add(row.id); rows.push(row); }
     if (batch.length < PAGE_SIZE) break;
   }
