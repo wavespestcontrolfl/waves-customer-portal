@@ -2441,6 +2441,22 @@ const SPECIALTY = {
     brackets: [
       { maxSqFt: Infinity, price: r(250) },
     ],
+    // Owner ruling 2026-11-26: the inspection price varies by home size and construction, $150 floor up to $275, for NEW
+    // quotes only (a quote saved before the rule keeps the flat `brackets` price above: the legacyWdoFlat stamp). A code
+    // constant, not a Settings row, so a Settings edit never moves it. Size is the home's living area (sq ft) the quote priced
+    // (<= maxSqFt; the footprint stands in when no living area is known). Columns: `block` = concrete block / masonry on a slab;
+    // `frame` = wood frame or mixed construction on a slab; `crawl` = any crawl space or raised foundation (wins over the walls).
+    // Unknown or untrusted construction / foundation prices as `block` and carries an internal staff note.
+    sizeTable: {
+      tiers: [
+        { maxSqFt: 2000, block: r(150), frame: r(175), crawl: r(200) },
+        { maxSqFt: 3000, block: r(175), frame: r(200), crawl: r(225) },
+        { maxSqFt: 4000, block: r(200), frame: r(225), crawl: r(250) },
+        { maxSqFt: Infinity, block: r(225), frame: r(250), crawl: r(275) },
+      ],
+      // Internal only: every staff note priceWDO adds to the line's warnings starts with this marker (the customer payload strips by it).
+      staffNoteMarker: 'WDO staff note:',
+    },
   },
 };
 

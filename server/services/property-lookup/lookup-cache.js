@@ -34,6 +34,7 @@
  */
 
 const crypto = require('crypto');
+const { normalizeConstruction, normalizeFoundation } = require('../pricing-engine/structural-facts');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
@@ -97,23 +98,9 @@ function intInRange(value, min, max) {
 // "tile" would clear the field-verify nudge while leaving the rodent/termite
 // modifiers at baseline. Mirrors the route's normalizers, but unrecognized
 // values are DROPPED rather than stored as UNKNOWN.
-function normalizeVerifiedConstruction(raw) {
-  const s = String(raw || '').toUpperCase();
-  if (/CONCRETE|CBS|BLOCK|MASONRY|STUCCO/.test(s)) return 'CBS';
-  if (/WOOD|FRAME|TIMBER/.test(s)) return 'WOOD_FRAME';
-  if (/METAL|STEEL|PREFAB/.test(s)) return 'METAL';
-  if (/BRICK/.test(s)) return 'BRICK';
-  return undefined;
-}
-
-function normalizeVerifiedFoundation(raw) {
-  const s = String(raw || '').toUpperCase();
-  if (/SLAB|CONCRETE/.test(s)) return 'SLAB';
-  if (/CRAWL/.test(s)) return 'CRAWLSPACE';
-  if (/RAISED|PIER|PILING|STILT/.test(s)) return 'RAISED';
-  if (/BASEMENT/.test(s)) return 'BASEMENT';
-  return undefined;
-}
+// Construction and foundation text go through the one shared normalizer pair (pricing-engine/structural-facts.js).
+const normalizeVerifiedConstruction = normalizeConstruction;
+const normalizeVerifiedFoundation = normalizeFoundation;
 
 function normalizeVerifiedRoof(raw) {
   const s = String(raw || '').toUpperCase();

@@ -138,7 +138,9 @@ function publicEnrichedProfile(enriched) {
   // countyRoofRaw / roofStyleHint / roofTileStyle (the county's own roof
   // words and the barrel-vs-flat tile reads, owner 2026-11-19) are staff
   // evidence for a later price: stripped like permitBuildingFacts.
-  const { subdivisionMedian, permitBuildingFacts, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, unitScopedLookup: _unitScopedLookup, countyRoofRaw: _countyRoofRaw, roofStyleHint: _roofStyleHint, roofTileStyle: _roofTileStyle, ...rest } = enriched;
+  // constructionTrusted / foundationTrusted (the lookup's trust verdicts the WDO price reads, owner 2026-11-26) are staff-side pricing
+  // evidence: never part of the public payload or the lead snapshot.
+  const { subdivisionMedian, permitBuildingFacts, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, unitScopedLookup: _unitScopedLookup, countyRoofRaw: _countyRoofRaw, roofStyleHint: _roofStyleHint, roofTileStyle: _roofTileStyle, constructionTrusted: _constructionTrusted, foundationTrusted: _foundationTrusted, ...rest } = enriched;
   const permitStories = rest.storiesSource === 'permit';
   if (permitStories) { rest.stories = 1; rest.storiesSource = 'default'; }
   if ((!subdivisionMedian && !permitBuildingFacts) || !Array.isArray(rest.fieldVerifyFlags)) return rest;
