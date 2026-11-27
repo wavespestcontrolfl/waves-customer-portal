@@ -46,7 +46,7 @@ const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('./day-only-ai-conte
 // (545/545 upcoming in prod); en_route/on_site cover the same-day in-progress
 // case a texting customer may hit. The value lives in the canonical
 // visit-context module; the rationale above is this consumer's.
-const { UPCOMING_SERVICE_STATUSES, TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+const { UPCOMING_SERVICE_STATUSES, TERMINAL_ROW_STATUSES, LIVE_TRACK_STATES } = require('./visit-context/statuses');
 
 // Calls the extractor affirmatively classified as not-a-real-conversation
 // with this customer — their summaries must never ground an SMS reply.
@@ -990,7 +990,8 @@ function perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey) {
 // limit(3), so "where's the tech" reported no live location while the public
 // tracker was active. A customer with no live row, or whose live row is
 // already in the first three, gets EXACTLY the old rows in the old order.
-const LIVE_TRACK_STATES = ['en_route', 'on_property'];
+// LIVE_TRACK_STATES lives in visit-context/statuses.js with isUpcomingListedRow,
+// the row form of these two queries' status rule.
 function upcomingServicesBase(customer) {
   return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
 }
@@ -1845,7 +1846,8 @@ class ContextAggregator {
     // email replies, briefs and assistant snapshots never read it.
     if (includeVisitLoops && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
       try {
-        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row), ...(asOfDate ? { asOf: asOfDate } : {}) });
+        // upcomingServices: SCHEDULE CHANGES names exactly the visits UPCOMING SERVICES lists (the rows it renders: those with a date)
+        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row), upcomingServices: context.upcomingServices.filter((s) => s && s.date), ...(asOfDate ? { asOf: asOfDate } : {}) });
       } catch (err) {
         logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
         visitLoops = emptyVisitLoops();

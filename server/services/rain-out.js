@@ -3835,6 +3835,9 @@ module.exports = {
   commit,
   // Quick Move "let the customer pick a day".
   handOffToCustomer,
+  // The notes value on a hand-off's reschedule_log row (the visit sits on its due day with no time until the
+  // customer picks one): the alert clear-up agent reads it so a hand-off never counts as a booked move.
+  PICK_LOG_MARKER,
   pickRefusalResponse,
   customerPickOffer,
   previewMovedSms,
