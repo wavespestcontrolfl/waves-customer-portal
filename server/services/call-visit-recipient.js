@@ -965,11 +965,13 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     stoppedAt: row.stopped_at || null,
     stoppedBy: row.stopped_by || null,
     addedAt: row.created_at,
-    // In one of the account's on-location contact spots: their texts then follow that contact (its own choices and the
-    // holder's contacts editor), so a stop on this list is not offered for them.
+    // Also in one of the account's on-location contact spots: those texts have their own controls (the contacts editor);
+    // a stop on this list still stops the texts this list sends.
     inContacts: slotKeys.has(row.phone_key),
     // Can actually sign in: the contact login is on and the holder attested this number (the same check the login uses).
     hasAppAccess: loginLive && slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key),
+    // A contact save can give sign-in only while the contact login is on.
+    canGiveAppAccess: loginLive && !(slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key)),
   }));
 }
 
@@ -986,7 +988,8 @@ async function setReminderContactStopped({ customerId, id, stopped, by, conn = d
   if (stopped) query.whereNull('stopped_at');
   const updated = await query.update(patch).returning('id');
   if (!updated.length && !(await conn(REMINDER_TABLE).where({ id, customer_id: customerId }).first('id'))) return null;
-  return (await listReminderContacts(customerId, { conn })).find((entry) => String(entry.id) === String(id)) || null;
+  const want = String(id).toLowerCase();
+  return (await listReminderContacts(customerId, { conn })).find((entry) => String(entry.id).toLowerCase() === want) || null;
 }
 
 module.exports = {

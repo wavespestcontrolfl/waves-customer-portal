@@ -5521,12 +5521,12 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
               {person.stopped && <div style={{ fontSize: 14, fontWeight: 700, color: B.orange }}>Stopped</div>}
               {person.inContacts && (
                 <div style={{ fontSize: 14, color: muted }}>
-                  {person.hasAppAccess ? 'Has app access. ' : ''}In your contacts above: their texts follow that contact.
+                  {person.hasAppAccess ? 'Has app access. ' : ''}Also in your contacts above, which has its own text settings.
                 </div>
               )}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {!person.stopped && !person.hasAppAccess && (
+              {!person.stopped && person.canGiveAppAccess && (
                 <button
                   type="button"
                   onClick={() => { if (onGiveAccess(person)) setAccessNote(true); }}
@@ -5537,8 +5537,6 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
                   Give app access
                 </button>
               )}
-              {/* A person in the contact spots gets texts through that contact; a stop here would not stop them. */}
-              {!person.inContacts && (
               <button
                 type="button"
                 onClick={() => toggle(person)}
@@ -5549,7 +5547,6 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
               >
                 {busy ? 'Saving...' : person.stopped ? 'Restart texts' : 'Stop texts'}
               </button>
-              )}
             </div>
           </div>
         );

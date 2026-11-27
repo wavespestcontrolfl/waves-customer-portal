@@ -547,7 +547,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         test('a repeat stop keeps the first stop; another customer\'s id changes nothing', async () => {
           await record();
           const first = await stopBob('customer');
-          const again = await VisitRecipient.setReminderContactStopped({ customerId, id: first.id, stopped: true, by: 'staff' });
+          // an id in capitals is the same id
+          const again = await VisitRecipient.setReminderContactStopped({ customerId, id: String(first.id).toUpperCase(), stopped: true, by: 'staff' });
           expect(again).toMatchObject({ stoppedBy: 'customer' });
           const [{ id: strangerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Stranger', phone: phone(44) }).returning('id');
           try {
@@ -571,11 +572,12 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
             await db('customers').where({ id: customerId }).update({ service_contact2_phone: BOB });
             expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false })]);
             await db('customers').where({ id: customerId }).update({ service_contacts_consent_at: new Date() });
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: true })]);
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: true, canGiveAppAccess: false })]);
           } finally {
             delete process.env.GATE_CONTACT_LOGIN;
           }
-          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false })]);
+          // sign-in off: nothing can give access
+          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false, canGiveAppAccess: false })]);
         });
       });
 
