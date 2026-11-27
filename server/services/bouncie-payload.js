@@ -103,11 +103,11 @@ function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayloa
   // falls back to the truck's fresh last location (engineOffPoint).
   if (canonicalEventType === 'trip-end') {
     return (
+      pointFromSource(payload.end) ||
+      pointFromSource(payload.disconnect) ||
       pointFromSource(payload) ||
       pointFromSource(payload.location) ||
-      pointFromSource(payload.position) ||
-      pointFromSource(payload.end) ||
-      pointFromSource(payload.disconnect)
+      pointFromSource(payload.position)
     );
   }
   return (
