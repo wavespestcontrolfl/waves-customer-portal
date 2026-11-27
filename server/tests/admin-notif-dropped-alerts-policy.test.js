@@ -285,27 +285,26 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     }
   });
 
-  test('source pin: all 4 combined-refund sites queue post-commit raiseAdminAlert with bell:true (propagating failures for Stripe retry) and no-show hold sites use raiseAdminAlert with bell:true', () => {
+  test('source pin: all 4 combined-refund sites share one stable per-refund dedupeKey across settlement and no-show hold sites use raiseAdminAlert with bell:true', () => {
     const stripeSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
     expect(stripeSrc).toMatch(/await emitCombinedRefundAlerts\(combinedRefundAlerts\);/);
     expect(stripeSrc).toMatch(/async function emitCombinedRefundAlerts\(alerts\)[\s\S]*?const res = await raiseAdminAlert\('billing', spec, opts\);\s*if \(!res\) \{\s*throw new Error/);
-    for (const key of [
-      'combined-partial-refund:',
-      'combined-cumulative-refund:',
-      'combined-presettlement-partial:',
+    const refundKeyMatches = stripeSrc.match(/dedupeKey:\s*`combined-refund:\$\{chargeId\}:\$\{refundId \|\| 'unknown'\}`/g) || [];
+    expect(refundKeyMatches).toHaveLength(4);
+    for (const action of [
+      'reconcile a partial refund on a combined charge',
+      'reconcile a combined charge refunded in parts',
+      'reconcile a pre-settlement partial refund',
+      'review a pre-settlement combined refund',
     ]) {
-      const idx = stripeSrc.indexOf(key);
+      const idx = stripeSrc.indexOf(action);
       expect(idx).toBeGreaterThan(-1);
-      const snippet = stripeSrc.slice(Math.max(0, idx - 950), idx + 120);
-      expect(snippet).toMatch(/combinedRefundAlerts\.push\(/);
+      const snippet = stripeSrc.slice(Math.max(0, idx - 200), idx + 1100);
       expect(snippet).toMatch(/bell:\s*true/);
+      expect(snippet).toMatch(/refreshOnDedupe:\s*true/);
+      expect(snippet).toMatch(/dedupeKey:\s*`combined-refund:\$\{chargeId\}:\$\{refundId \|\| 'unknown'\}`/);
       expect(snippet).not.toMatch(/await\s+raiseAdminAlert\(/);
     }
-    const preFullIdx = stripeSrc.indexOf('combined-presettlement-full:');
-    expect(preFullIdx).toBeGreaterThan(-1);
-    const preFullSnippet = stripeSrc.slice(Math.max(0, preFullIdx - 700), preFullIdx + 120);
-    expect(preFullSnippet).toMatch(/function buildPreSettlementFullRefundAlert/);
-    expect(preFullSnippet).toMatch(/bell:\s*true/);
     expect(stripeSrc).toMatch(/combinedRefundAlerts\.push\(buildPreSettlementFullRefundAlert\(/);
     // Re-queued on retry when refundFence already committed.
     expect(stripeSrc).toMatch(/combinedRows\.every\(\(r\) => rowMeta\(r\)\.pre_settlement && r\.status === 'refunded'\)/);

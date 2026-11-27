@@ -3773,7 +3773,8 @@ async function handleChargeRefunded(charge) {
             },
             opts: {
               bell: true,
-              dedupeKey: `combined-partial-refund:${chargeId}:${refundId || 'unknown'}`,
+              refreshOnDedupe: true,
+              dedupeKey: `combined-refund:${chargeId}:${refundId || 'unknown'}`,
               detail: `Partial refund ${refundId || 'unknown'} of $${refundAmountDollars} on combined charge ${chargeId} settled multiple invoices and cannot be auto-attributed. Reconcile in /admin/revenue.`,
               metadata: {
                 stripe_charge_id: chargeId,
@@ -3823,7 +3824,8 @@ async function handleChargeRefunded(charge) {
             },
             opts: {
               bell: true,
-              dedupeKey: `combined-cumulative-refund:${chargeId}:${refundId || 'unknown'}`,
+              refreshOnDedupe: true,
+              dedupeKey: `combined-refund:${chargeId}:${refundId || 'unknown'}`,
               detail: `Combined charge ${chargeId} is now fully refunded ($${cumulativeRefundAmountDollars} total; final partial ${refundId || 'unknown'} of $${refundAmountDollars}). No rows were auto-unwound — reconcile the constituents in /admin/revenue.`,
               metadata: {
                 stripe_charge_id: chargeId,
@@ -4020,7 +4022,8 @@ async function handleChargeRefunded(charge) {
               },
               opts: {
                 bell: true,
-                dedupeKey: `combined-presettlement-partial:${chargeId}:${refundId || 'unknown'}`,
+                refreshOnDedupe: true,
+                dedupeKey: `combined-refund:${chargeId}:${refundId || 'unknown'}`,
                 detail: `Charge ${chargeId} backs multiple invoices (not yet settled); ${cumulativeFullPreSettle ? `it is now fully refunded across multiple partial refunds (final partial ${refundId || 'unknown'} of $${refundAmountDollars}) — every constituent is parked` : `partial refund ${refundId || 'unknown'} of $${refundAmountDollars} cannot be auto-attributed`}. Reconcile in /admin/revenue.`,
                 metadata: {
                   stripe_charge_id: chargeId,
@@ -7462,7 +7465,8 @@ function buildPreSettlementFullRefundAlert({ chargeId, paymentIntentId, refundId
     },
     opts: {
       bell: true,
-      dedupeKey: `combined-presettlement-full:${chargeId}:${refundId || 'unknown'}`,
+      refreshOnDedupe: true,
+      dedupeKey: `combined-refund:${chargeId}:${refundId || 'unknown'}`,
       detail: `Charge ${chargeId} (combined PI ${paymentIntentId}) was fully refunded for $${refundAmountDollars} before settlement — settlement is fenced; no invoice was marked paid.`,
       metadata: {
         stripe_charge_id: chargeId,
