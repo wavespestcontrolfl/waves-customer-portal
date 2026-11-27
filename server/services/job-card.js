@@ -2543,14 +2543,23 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // not a volume, and is never read.
   const statedVolumeOf = (hit) => {
     const m = /\bat the label volume of (\d+(?:\.\d+)?)\s*gal\b/i.exec(String(hit.raw || ''))
-      || /(?<!at least\s)\b(\d+(?:\.\d+)?)\s*gal(?:lons?)?\s*(?:of mix\s*)?per\s*1,?000\s*sq/i.exec(String(hit.raw || ''));
-    return m && Number(m[1]) > 0 ? Number(m[1]) : null;
+      || /(?<!at least\s)\b(\d+(?:\.\d+)?)\s*gal(?:lons?)?\s*(?:of mix\s*)?per\s*(\d[\d,]*)\s*sq/i.exec(String(hit.raw || ''));
+    if (!m || !(Number(m[1]) > 0)) return null;
+    // Normalized to gallons per 1,000 sq ft: "1 gallon per 1,500 sq ft" is 0.667 (the mosquito barrier card).
+    const area = m[2] ? Number(String(m[2]).replace(/,/g, '')) : 1000;
+    return area > 0 ? Math.round((Number(m[1]) / (area / 1000)) * 10000) / 10000 : null;
+  };
+  // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
+  // narrowed by the label band, as before.
+  const conflictLinesOf = (list) => {
+    const rates = new Set(list.map((h) => JSON.stringify(rateOf(h))));
+    return rates.size > 1 && list.some((h) => h.hit.labelUseRate || h.hit.declaredRate) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
   };
   const lineOf = (h) => {
     const stated = h.hit.labelCarrierGalPer1000 ? null : statedVolumeOf(h.hit);
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
-      ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 420) } : {}),
+      ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
       ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
       ...(stated ? { carrier: stated, statedVolume: true } : {}),
     };
@@ -2573,10 +2582,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // An "if needed" line of the same product on another booked service is a row of its own, marked as needing the call confirmed.
     const conditionalHits = tankHits.length ? hits.filter(({ hit }) => hit.selected === false && !hit.governed) : [];
     const conflictHits = [...rateHits, ...conditionalHits];
-    const rates = new Set(conflictHits.map((h) => JSON.stringify(rateOf(h))));
-    // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
-    // narrowed by the label band, as before.
-    const ratesDisagree = rates.size > 1 && conflictHits.some((h) => h.hit.labelUseRate || h.hit.declaredRate) ? { conflictLines: conflictHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
+    const ratesDisagree = conflictLinesOf(conflictHits);
     // A hold on any selected service's line holds the dose: the request names only the product, so another service's rate
     // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
     const heldHit = selectedHits.find((h) => h.hit.labelHold);
@@ -2586,7 +2592,8 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   }
   // A conditional ("if needed") line keeps its own rate, so the search shows the card's rate with the selection warning beside it.
   const [conditional] = hits;
-  return found(conditional ? { addon: conditional.c.addon, selected: false, ...lineOf(conditional), ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);
+  // Every service that lists the product only as "if needed" goes through the same per-service comparison as selected lines.
+  return found(conditional ? { addon: conditional.c.addon, selected: false, ...lineOf(conditional), ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}), ...conflictLinesOf(hits) } : null, owners);
 }
 
 // The booked add-on's own rate (protocols.json area_addon labelFacts: per 1,000 sq ft, in its unit) for a governed line, with the

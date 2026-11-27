@@ -2608,6 +2608,53 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(applies).not.toMatch(/\$5\.66/);
   });
 
+  // Owner 2026-11-26: a volume stated over another area is normalized before the rig comparison.
+  test('a line stating 1 gallon per 1,500 sq ft (the mosquito barrier card): a rig at 1 gal per 1,000 sq ft is compared to it', async () => {
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Barrier: Suspend Polyzone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft' }] } };
+    const polyzone = { id: 'pz', name: 'Suspend Polyzone', default_rate: '0.5-1.1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rig = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'backpack', system_name: 'Mist blower', carrier_gal_per_1000: 1, calibration_status: 'field_verified', tank_capacity_gal: '4.00' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [polyzone], equipment_calibrations: [rig], equipment_systems: [{ id: 'sys-1', name: 'Mist blower', system_type: 'backpack', tank_capacity_gal: '4.00' }], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('pz', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out).toMatchObject({ sprayVolumeGalPer1000: 0.6667, rigSprayGalPer1000: 1 });
+    expect(out.warnings.join(' ')).toMatch(/The card's rate is for 0\.67 gal per 1,000 sq ft\. Mist blower sprays 1/);
+  });
+
+  // Owner 2026-11-26: two services that each list the product only as "if needed" are rows of their own, with the full line text.
+  test('two services that list Antapex only as "if needed" show a row each, and the use text keeps its last restriction', async () => {
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Perimeter work', secondary: `Atticus Antapex WSG 20 g per gallon on live finds only; ${'keep people and pets out until dry; '.repeat(14)}never tank-mix with oil` }] },
+      flea: { visits: [{ visit: 1, month: 'Any', primary: 'Flea work', secondary: 'Atticus Antapex WSG 10 g per gallon if fleas persist', lineMeta: { 'Atticus Antapex WSG 10 g per gallon if fleas persist': { catalogProductHints: ['Atticus Antapex WSG'], tankRatePerGallon: { amount: 10, unit: 'g' } } } }] },
+    };
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    const text = (out.warnings || []).join(' ');
+    // Whatever resolves, no condition of either service may be dropped: the long restriction survives whole.
+    if (out.serviceAmounts) expect(out.serviceAmounts.every((row) => row.conditional)).toBe(true);
+    expect(text).toMatch(/never tank-mix with oil/);
+  });
+
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 2, month: 'Any', primary: 'German roach cleanout — Advion Gel per label' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },
