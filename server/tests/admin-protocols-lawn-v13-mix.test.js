@@ -721,7 +721,10 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       expect.objectContaining({ code: 'other_tank_sprayer_number', message: 'Udor tank #2: 4 gal per 1,000 sq ft, owner estimate.' }),
     ]));
     // No single coverage or full-tank mix: each tank's coverage, named.
-    expect(body.equipment.tankCoverageSqft).toBeNull();
+    expect(body.equipment).toMatchObject({ tankCoverageSqft: null, carrierGalPer1000: null, equipmentSystemId: null, systemName: 'No sprayer picked: 110-Gallon Spray Tank #1 or Udor tank #2' });
+    // An area mix keeps its product amount, not the first tank's spray volume.
+    const january = await lawnMix({ month: '1' });
+    expect(itemFor(january, NUTRA).jobMix).toMatchObject({ amount: 60, carrierGallons: null });
     expect(body.equipment.tankOptions.map((option) => [option.systemName, option.tankCoverageSqft])).toEqual([['110-Gallon Spray Tank #1', 55000], ['Udor tank #2', 27500]]);
     expect(itemFor(body, TETRINO)).toMatchObject({ fullTankMix: null, plannedFullTankMix: null });
     // A failed tank list read fails the sheet, never one tank's number alone.

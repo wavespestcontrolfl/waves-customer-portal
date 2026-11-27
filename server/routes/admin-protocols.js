@@ -1064,13 +1064,25 @@ function lawnMixRig(calibration) {
   return { carrier, tankCoverageSqft, equipment };
 }
 
-// No sprayer picked while the big tanks are on different numbers (owner 2026-11-27): no single coverage or full-tank mix (each
-// tank's comes in equipment.tankOptions and the items' tankAmounts.tankOptions); else the one rig as lawnMixRig gives it.
+// No sprayer picked while the big tanks are on different numbers (owner 2026-11-27): no single rig, carrier, coverage or full-tank
+// mix (each tank's comes in equipment.tankOptions and the items' tankAmounts.tankOptions), the name lists every tank; else the one
+// rig as lawnMixRig gives it.
 function lawnMixRigs(calibration, bigTanks) {
   const rig = lawnMixRig(calibration);
   if (!tanksDiffer(bigTanks) || !rig.equipment) return rig;
   const tankOptions = bigTanks.map((tank) => lawnMixRig(tank).equipment);
-  return { ...rig, tankCoverageSqft: 0, equipment: { ...rig.equipment, tankCoverageSqft: null, tankOptions } };
+  const equipment = {
+    ...rig.equipment, equipmentSystemId: null, calibrationId: null, carrierGalPer1000: null, tankCoverageSqft: null,
+    systemName: `No sprayer picked: ${tankOptions.map((tank) => tank.systemName).join(' or ')}`, tankOptions,
+  };
+  return { ...rig, tankCoverageSqft: 0, equipment };
+}
+
+// With no single rig (lawnMixRigs), an area mix keeps its product amount but not the spray volume of the first tank.
+const withoutRigCarrier = (mix) => (mix ? { ...mix, carrierGallons: null } : mix);
+function rigNeutralItems(items, equipment) {
+  if (!equipment?.tankOptions) return items;
+  return items.map((item) => ({ ...item, jobMix: withoutRigCarrier(item.jobMix), plannedMix: withoutRigCarrier(item.plannedMix) }));
 }
 
 // The sheet's warnings: a missing rig, unmatched priced lines, the required v13 gate notes of the
@@ -1385,7 +1397,7 @@ router.get('/lawn-mix', async (req, res, next) => {
         spreader: spreaderForTankLine(product, line, tankAmounts),
       };
     });
-    const items = resolveMixWith(bermuda.decorate(builtItems), products);
+    const items = resolveMixWith(bermuda.decorate(rigNeutralItems(builtItems, equipment)), products);
     const selectedItems = items.filter((item) => item.selected);
     // A mixing-order input: the line's recipe text, its catalog product, and the step marks.
     const mixInput = (item) => ({
