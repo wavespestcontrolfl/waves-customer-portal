@@ -2246,7 +2246,28 @@ async function isLandline(customerId, phone) {
   }
 }
 
-// ── Send SMS with landline guard ──
+// Restrict the live-reply overnight exemption strictly to validated US NANP (+1)
+// numbers matching in full E.164 format (Waves operates in SW Florida and SMS
+// scheduling offers are recorded strictly for US numbers), so a 10-digit
+// international number can never collide or be rewritten to a +1 destination.
+function sameCanonicalUsE164(a, b) {
+  const { toE164, isValidNanpNumber } = require('../utils/phone');
+  const ea = toE164(String(a || ''));
+  const eb = toE164(String(b || ''));
+  return Boolean(ea && eb && ea.startsWith('+1') && eb.startsWith('+1') && isValidNanpNumber(ea) && isValidNanpNumber(eb) && ea === eb);
+}
+
+// Per-contact quiet-hours exemption: when a caller supplies customerInitiatedPhone
+// (live SMS reply path), bind the exemption strictly to the CURRENT primary phone
+// and actual recipient via validated US E.164 equality so a mid-flight primary
+// change or international/NANP rewrite can never bypass quiet hours.
+function contactIsCustomerInitiated(sendOptions, contactPhone, primaryPhoneRaw, primaryLast10) {
+  if (sendOptions.customerInitiatedPhone) {
+    return sameCanonicalUsE164(contactPhone, primaryPhoneRaw)
+      && sameCanonicalUsE164(contactPhone, sendOptions.customerInitiatedPhone);
+  }
+  return sendOptions.customerInitiated === true && lastTenDigits(contactPhone) === primaryLast10;
+}
 
 async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null, operatorInitiated = false, customerInitiated = false) {
   // Per-contact phase state (codex r19): dispatchStarted must reflect THIS
@@ -2637,9 +2658,10 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     const contactMeta = sendOptions.expectedChannel === 'push'
       ? { ...metaExtra, requestedChannel: 'push' } : metaExtra;
     // sendOptions.customerInitiated covers the account holder only: on a
-    // self-booking that is who acted. Any other appointment contact keeps
-    // the send window (a held one rides the partial rail below).
-    const contactCustomerInitiated = sendOptions.customerInitiated === true && lastTenDigits(contact.phone) === primaryPhone;
+    // self-booking that is who acted. On a live SMS reply, customerInitiatedPhone
+    // additionally verifies the live sender matches the reloaded primary and actual
+    // recipient in canonical E.164 format at dispatch time.
+    const contactCustomerInitiated = contactIsCustomerInitiated(sendOptions, contact.phone, customer.phone, primaryPhone);
     const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, contactMeta, checkBeforeSend, sharedOutcome, sendOptions.operatorInitiated === true, contactCustomerInitiated);
     if (!sent && ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sharedOutcome.lastCode)) break;
     // sendOptions.noDeferredQueue (the cancel recovery send): a held recipient is never queued for a later replay, which would
@@ -6170,7 +6192,11 @@ const AppointmentReminders = {
             // The slot this text quotes, kept for its email version when safeSend leaves out the
             // promised slot (window_unknown): a bounce must not quote a later move's time.
             move_notice_slot_ms: newApptTime.getTime(),
-          }, dayState, newApptTime.getTime()), { sendOutcome: rescheduleNoticeOutcome });
+          }, dayState, newApptTime.getTime()), {
+            sendOutcome: rescheduleNoticeOutcome,
+            customerInitiated: options.customerInitiated === true,
+            customerInitiatedPhone: options.customerInitiatedPhone,
+          });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);

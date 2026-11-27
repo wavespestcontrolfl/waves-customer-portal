@@ -149,8 +149,26 @@ const MAX_SYNC_ATTEMPTS = 3;
 
 // GATE_DAY_ONLY_PROMISE part B2: the customer accepted an offered hour, which is a set time, so the move's notice keeps its
 // window and the visit records customer_asked_time = true. `previousDate` is the date the visit moved from.
-function setTimeMoveOptions(previousDate) {
-  return { timePromise: 'set_time', previousDate };
+// Owner rulings 2026-11-02 & 2026-11-27 (resched A): bypass the 8 AM–8 PM ET quiet-hours fence ONLY when a live
+// webhook reply came directly from the account holder's primary phone in validated canonical E.164 format, AND
+// re-verified against the reloaded primary and actual recipient inside safeSendAppointment at dispatch time.
+function liveAccountHolderSenderE164({ liveWebhook, fromPhone, accountHolderPhone }) {
+  if (liveWebhook !== true) return null;
+  const { toE164, isValidNanpNumber } = require('../utils/phone');
+  const sender = toE164(String(fromPhone || ''));
+  const holder = toE164(String(accountHolderPhone || ''));
+  return sender && holder && sender.startsWith('+1') && holder.startsWith('+1')
+    && isValidNanpNumber(sender) && isValidNanpNumber(holder) && sender === holder
+    ? sender : null;
+}
+
+function setTimeMoveOptions(previousDate, customerInitiatedPhone) {
+  return {
+    timePromise: 'set_time',
+    previousDate,
+    customerInitiated: Boolean(customerInitiatedPhone),
+    customerInitiatedPhone: customerInitiatedPhone || null,
+  };
 }
 const stampEffects = (dbh, key) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object(?::text, to_jsonb(now()))", [key]);
 const countAttempt = (dbh) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object('effects_attempts', COALESCE((execution->>'effects_attempts')::int, 0) + 1)");
@@ -167,7 +185,7 @@ const countAttempt = (dbh) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb
  * day-before reminder still tells the customer, and it can never send a
  * second confirmation, whatever happened to the first attempt.
  */
-async function syncReminders({ dbh, decisionId, visitId, date, start, notify, previousDate = null, deps = {} }) {
+async function syncReminders({ dbh, decisionId, visitId, date, start, notify, previousDate = null, customerInitiatedPhone = null, deps = {} }) {
   let synced = null;
   try {
     synced = await (deps.reminders || require('./appointment-reminders')).handleReschedule(
@@ -175,7 +193,7 @@ async function syncReminders({ dbh, decisionId, visitId, date, start, notify, pr
         expectSchedule: { date, windowStart: start },
         // Silent, and a confirmation still waiting to go (the first attempt's
         // after-hours hold, due at 8 AM) stays waiting.
-        ...(notify ? setTimeMoveOptions(previousDate) : { sendNotification: false, keepPendingConfirmation: true }),
+        ...(notify ? setTimeMoveOptions(previousDate, customerInitiatedPhone) : { sendNotification: false, keepPendingConfirmation: true }),
       },
     );
   } catch (err) {
@@ -260,21 +278,37 @@ async function finishMoveEffects({ now = new Date(), dbh = db, deps = {} } = {})
 
 // After the commit, each effect on its own: a failed sync must not read as a
 // failed move.
-async function afterMove({ dbh, decisionId, svc, date, window, result, deps }) {
+async function afterMove({ dbh, decisionId, svc, date, window, result, liveWebhook, fromPhone, accountHolderPhone, deps }) {
   await syncSelfBooking({ dbh, decisionId, visitId: svc.id, target: { date, start: window.start, end: window.end } });
+  const customerInitiatedPhone = liveAccountHolderSenderE164({
+    liveWebhook,
+    fromPhone,
+    accountHolderPhone: accountHolderPhone ?? svc.customer_phone,
+  });
+  const customerInitiated = Boolean(customerInitiatedPhone);
   if (result?.seriesMoveId) {
     // A recurring visit's date move shifted the later visits with it: the
     // shared pass owns the one series text, the reminder sync and the board,
     // and the reconciler finishes it if this process dies.
     try {
       const effects = deps.applySeriesMoveEffects || require('../routes/admin-dispatch').applySeriesMoveEffects;
-      await effects({ result, serviceId: svc.id, newDate: date, newWindow: window, notify: true, actorId: null, reasonText: null });
+      await effects({
+        result,
+        serviceId: svc.id,
+        newDate: date,
+        newWindow: window,
+        notify: true,
+        actorId: null,
+        reasonText: null,
+        customerInitiated,
+        customerInitiatedPhone,
+      });
     } catch (err) {
       logger.error(`[sms-scheduling-act] series effects failed for ${svc.id} (reconciler will retry): ${errorCode(err)}`);
     }
     return;
   }
-  await syncReminders({ dbh, decisionId, visitId: svc.id, date, start: window.start, notify: true, previousDate: dateOnlyString(svc.scheduled_date), deps });
+  await syncReminders({ dbh, decisionId, visitId: svc.id, date, start: window.start, notify: true, previousDate: dateOnlyString(svc.scheduled_date), customerInitiatedPhone, deps });
   try {
     await (deps.emitDispatchJobUpdate || require('./dispatch-assignment').emitDispatchJobUpdate)({ jobId: svc.id, actorId: null });
   } catch (err) {
@@ -282,7 +316,7 @@ async function afterMove({ dbh, decisionId, svc, date, window, result, deps }) {
   }
 }
 
-async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, now, deps }) {
+async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, liveWebhook, fromPhone, accountHolderPhone, now, deps }) {
   if (!repliedAt || new Date(now).getTime() - new Date(repliedAt).getTime() > MAX_REPLY_AGE_MS) return refusal('reply_too_old');
   const page = deps.reschedulePublic || require('../routes/reschedule-public')._internals;
   const svc = await page.loadById(offer.scheduled_service_id, dbh);
@@ -358,7 +392,7 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId,
   // no text is sent on an unchecked result.
   const marked = await dbh('sms_offer_decisions').where({ id: decisionId, execution_status: 'moved' }).first('id');
   if (!marked) return refusal('guard_not_run');
-  await afterMove({ dbh, decisionId, svc, date: slot.date, window, result, deps });
+  await afterMove({ dbh, decisionId, svc, date: slot.date, window, result, liveWebhook, fromPhone, accountHolderPhone, deps });
   return { executed: true, status: 'moved', ...target, seriesMoveId: result?.seriesMoveId || null };
 }
 
@@ -370,7 +404,7 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId,
  * → { executed: true, status: 'moved', date, start, end }
  *   or { executed: false, status?, reason }. Never throws.
  */
-async function executeMove({ decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, now = new Date(), dbh = db, deps = {} } = {}) {
+async function executeMove({ decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, liveWebhook, fromPhone, accountHolderPhone, now = new Date(), dbh = db, deps = {} } = {}) {
   if (!actMoveLive()) return { executed: false, reason: 'gate_off' };
   if (!decisionId || offer?.kind !== 'move_visit' || !offer.scheduled_service_id || !slot?.date || !slot?.start || !visit || !inboundSmsLogId) {
     return { executed: false, reason: 'missing_input' };
@@ -379,7 +413,7 @@ async function executeMove({ decisionId, offer, slot, visit, inboundSmsLogId, re
   try {
     claimed = await claimDecision(dbh, decisionId);
     if (!claimed) return { executed: false, reason: 'already_claimed' };
-    const outcome = await moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, now, deps });
+    const outcome = await moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId, repliedAt, liveWebhook, fromPhone, accountHolderPhone, now, deps });
     if (!outcome.executed) await closeClaim(dbh, decisionId, 'refused', { reason: outcome.reason, detail: outcome.detail || null });
     logger.info(`[sms-scheduling-act] decision ${decisionId} → ${outcome.executed ? 'moved' : `refused (${outcome.reason})`}`);
     return outcome;
