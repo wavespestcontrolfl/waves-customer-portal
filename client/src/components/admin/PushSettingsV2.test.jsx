@@ -53,3 +53,39 @@ it('inside Waves Admin, points to iPhone Settings instead of the browser push sw
     delete window.webkit;
   }
 });
+
+it('hides retired denylisted triggers, labels all categories, and reverts optimistic toggles on save failure without window.alert', async () => {
+  const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  const initial = {
+    preferences: [
+      { key: 'sms_reply', label: 'Customer text', group: 'Customer', push_enabled: true, bell_enabled: true, sound_enabled: true },
+      { key: 'repeat_caller', label: 'Repeat caller', group: 'Customer', push_enabled: true, bell_enabled: true, sound_enabled: true },
+      { key: 'dashboard_alert', label: 'Dashboard alert', group: 'Alerts', push_enabled: true, bell_enabled: true, sound_enabled: true },
+    ],
+    bellCategories: [
+      { key: 'category:customer_landline_from_call', category: 'customer_landline_from_call', bell_enabled: true },
+      { key: 'category:typed_decisions', category: 'typed_decisions', bell_enabled: true },
+    ],
+  };
+  global.fetch = vi.fn(async (_url, options) => {
+    if (options?.method === 'PUT') return { ok: false, status: 500 };
+    return { ok: true, json: async () => initial };
+  });
+
+  render(<PushSettingsV2 />);
+  expect(await screen.findByText('Customer text')).toBeInTheDocument();
+  expect(screen.queryByText('Repeat caller')).toBeNull();
+  expect(screen.queryByText('Dashboard alert')).toBeNull();
+  expect(screen.getByText('Landline numbers from calls')).toBeInTheDocument();
+  expect(screen.getByText('AI decision review list')).toBeInTheDocument();
+
+  const switches = screen.getAllByRole('switch');
+  expect(switches[0]).toHaveAttribute('aria-checked', 'true');
+  fireEvent.click(switches[0]);
+  expect(switches[0]).toHaveAttribute('aria-checked', 'false');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(/Couldn't save notification preferences/);
+  expect(switches[0]).toHaveAttribute('aria-checked', 'true');
+  expect(alertSpy).not.toHaveBeenCalled();
+});

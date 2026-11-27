@@ -25,7 +25,7 @@
 // - disablePush: must clean up the subscription server-side too,
 //   not just locally. Otherwise we keep firing pushes to an
 //   endpoint the browser has revoked.
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Badge, Button, Card, CardBody, Switch, cn } from "../../components/ui";
 import {
   ensurePushSubscription,
@@ -58,6 +58,19 @@ const PRIORITY_CLASS = {
   low: "bg-zinc-300",
 };
 
+// Triggers permanently retired from the bell/push pipeline by
+// TRIGGER_BELL_DENYLIST (server/services/notification-bell-policy.js) or
+// unemitted dead registry keys — hidden from the settings matrix so staff
+// never see toggles that have no effect.
+const RETIRED_TRIGGERS = new Set([
+  "payment_succeeded",
+  "payment_refunded",
+  "dashboard_alert",
+  "internal_admin_alert",
+  "repeat_caller",
+  "appointment_reschedule_intent",
+]);
+
 // Human labels for the bell-policy category overrides (keys come from
 // GET /admin/push/preferences → bellCategories; unknown keys fall back to
 // a title-cased version of the raw category).
@@ -71,6 +84,7 @@ const BELL_CATEGORY_LABELS = {
   estimate_hot_view: "Estimate hot views",
   estimate_change_request: "Estimate change requests",
   estimate_stuck: "Customers stuck or still deciding on an estimate",
+  customer_landline_from_call: "Landline numbers from calls",
   visit_prep_photos: "Customer photos before a visit",
   truck_kit: "Truck check tool issues",
   access_codes: "Gate codes found in messages",
@@ -102,6 +116,7 @@ const BELL_CATEGORY_LABELS = {
   email_alert: "Email alerts (complaints, lead review)",
   email_rescue: "Email rescued from spam",
   email_rescue_review: "Spam rescue needs review",
+  typed_decisions: "AI decision review list",
   llm_cost: "AI spend spikes",
   review_low_rating: "New Google reviews of 4 stars or fewer",
 };
@@ -120,14 +135,18 @@ export default function PushSettingsV2() {
   const [pushError, setPushError] = useState("");
   const [prefsLoading, setPrefsLoading] = useState(true);
   const [prefsFailed, setPrefsFailed] = useState(false);
+  const savedSnapshotRef = useRef({ prefs: [], catPrefs: [] });
 
   const loadPreferences = async () => {
     setPrefsLoading(true);
     setPrefsFailed(false);
     try {
       const r = await adminFetch("/admin/push/preferences");
-      setPrefs(r.preferences || []);
-      setCatPrefs(r.bellCategories || []);
+      const nextPrefs = r.preferences || [];
+      const nextCats = r.bellCategories || [];
+      setPrefs(nextPrefs);
+      setCatPrefs(nextCats);
+      savedSnapshotRef.current = { prefs: nextPrefs, catPrefs: nextCats };
     } catch {
       setPrefsFailed(true);
     } finally {
@@ -174,20 +193,27 @@ export default function PushSettingsV2() {
   const save = async () => {
     if (prefsLoading || prefsFailed) return;
     setSaving(true);
+    setPushError("");
     try {
       await adminFetch("/admin/push/preferences", {
         method: "PUT",
         body: JSON.stringify({ preferences: [...prefs, ...catPrefs] }),
       });
+      savedSnapshotRef.current = { prefs, catPrefs };
       showToast("Preferences saved");
     } catch (e) {
-      alert("Save failed: " + e.message);
+      // Revert optimistic toggles to the last server-confirmed state so the UI
+      // never displays unsaved settings as active.
+      setPrefs(savedSnapshotRef.current.prefs);
+      setCatPrefs(savedSnapshotRef.current.catPrefs);
+      setPushError(`Couldn't save notification preferences (${e.message}). Changes were reverted.`);
     } finally {
       setSaving(false);
     }
   };
 
   const test = async () => {
+    setPushError("");
     try {
       const result = await sendTestPush({ apiBase: API_BASE });
       showToast(
@@ -196,14 +222,16 @@ export default function PushSettingsV2() {
           : "No active device subscription",
       );
     } catch (e) {
-      alert(e.message);
+      setPushError(e.message || "Couldn't send test notification");
     }
   };
 
-  const groups = prefs.reduce((acc, p) => {
-    (acc[p.group] = acc[p.group] || []).push(p);
-    return acc;
-  }, {});
+  const groups = prefs
+    .filter((p) => !RETIRED_TRIGGERS.has(p.key))
+    .reduce((acc, p) => {
+      (acc[p.group] = acc[p.group] || []).push(p);
+      return acc;
+    }, {});
 
   return (
     <Card id="notifications">
@@ -273,11 +301,11 @@ export default function PushSettingsV2() {
           </Button>{" "}
         </div>
         )}
-        {/* Push error */}
+        {/* Push / save error */}
         {pushError && (
-          <div className="p-3 mb-4 bg-alert-bg border-hairline border-alert-fg rounded-md flex items-start gap-2.5">
+          <div role="alert" className="p-3 mb-4 bg-alert-bg border-hairline border-alert-fg rounded-md flex items-start gap-2.5">
             {" "}
-            <div className="flex-1 text-13 text-alert-fg leading-relaxed">
+            <div className="flex-1 text-14 text-alert-fg leading-relaxed">
               {pushError}
             </div>{" "}
             <button
@@ -369,11 +397,10 @@ export default function PushSettingsV2() {
               Bell + push categories
             </div>{" "}
             <div className="px-3 pb-2 text-12 text-ink-tertiary">
-              The bell, phone banner and app badge ring for customer
-              communication only (texts, emails, calls, voicemails, new
-              leads). These categories are silent by default. Toggle one on
-              to get its bell again — and its phone banner, for events that
-              push.
+              Customer communication (texts, emails, calls, voicemails, new
+              leads) rings by default. Most categories below start off;
+              categories that start on can also be silenced here. Each toggle
+              controls that category&apos;s bell and phone banner.
             </div>{" "}
             <div className="bg-white border-hairline rounded-md overflow-hidden">
               {catPrefs.map((c, i) => (
