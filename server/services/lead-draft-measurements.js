@@ -94,7 +94,12 @@ function countyMeasurements(lookup) {
   // count that fails any of these is left out; the county home and lot sizes stand.
   const { storiesSourceForPricing, storyCountHasEvidence } = require('./estimator-engine/draft-builder');
   const { statedStoryCount } = require('./voice-agent/story-count');
-  const storiesKnown = storiesSourceForPricing(facts) === 'lookup' && storyCountHasEvidence(propertyRecord)
+  // A technician's verified count stands first. The lookup cache's override writes the count and its own field evidence and
+  // restamps _storiesSource 'verified' (property-lookup-v2), but it leaves the AI fallback's older evidence (_storiesEvidence) on the
+  // record. That evidence describes the count the technician replaced, so it does not grade the verified one (the website quote
+  // reads the same stamp). The range and the lookup's verify flag still apply.
+  const storiesVerified = propertyRecord._storiesSource === 'verified';
+  const storiesKnown = (storiesVerified || (storiesSourceForPricing(facts) === 'lookup' && storyCountHasEvidence(propertyRecord)))
     && lookupDimensionIsTrustworthy(lookup.enriched, 'stories');
   const stories = storiesKnown ? statedStoryCount(propertyRecord.stories) : null;
   return { homeSqFt, lotSqFt, ...(stories ? { stories } : {}), source: MEASUREMENTS_SOURCE };

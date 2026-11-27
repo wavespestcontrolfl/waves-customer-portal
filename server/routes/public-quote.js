@@ -2356,6 +2356,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // tree-only commercial quote has no manual line, so it prices instantly.
     const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel
       || lotFlagForcesSiteQuote || homeSizeAbovePublicLimit;
+    // A held pest line on a big home names its size hold, whatever the engine lists first on that line. A home with no measured lot
+    // prices on a stand-in lot of 4 x the home size, and the engine lists that lot review (very_large_lot) first: reading reasons[0]
+    // told the homeowner that commercial properties need a manual quote, and filed the lead as commercial. Above the 20,000 sq ft
+    // ceiling the size hold names the quote; above the 5,500 sq ft table, the story-count hold.
+    const heldPestLine = ['pest_control', 'one_time_pest'].includes(manualQuoteLine?.service);
     const quoteRequiredReason = manualQuoteLine?.reason
       // The turf-review lines expose their reason via customQuoteReason /
       // manualReviewReasons, not `reason` — without these legs a parked
@@ -2363,11 +2368,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // below and told the customer commercial properties need a manual
       // quote (GH codex P2 on 2aaf7d9a5).
       || manualQuoteLine?.customQuoteReason
-      // The story-count hold above the pest table names its pest line, whatever the engine lists before it there. A big home with
-      // no measured lot prices on the stand-in lot (4 x the home size), and the engine lists that lot review (very_large_lot) first:
-      // reading reasons[0] told the homeowner that commercial properties need a manual quote.
-      || (['pest_control', 'one_time_pest'].includes(manualQuoteLine?.service)
-        && manualQuoteLine.manualReviewReasons?.includes('stories_estimated') ? 'stories_estimated' : null)
+      || (heldPestLine && homeSizeAbovePublicLimit ? 'home_size_above_public_limit' : null)
+      || (heldPestLine && manualQuoteLine.manualReviewReasons?.includes('stories_estimated') ? 'stories_estimated' : null)
       || manualQuoteLine?.manualReviewReasons?.[0]
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)

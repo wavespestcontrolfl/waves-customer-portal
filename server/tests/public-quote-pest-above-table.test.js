@@ -199,6 +199,31 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     expect(stored()).toBe(200000);
   });
 
+  // With no lot the route prices on a stand-in lot of 4 x the home size (96,000 sq ft for 24,000), and the engine lists that lot
+  // review (very_large_lot) first on the pest line. The quote read reasons[0]: the homeowner was told commercial properties need a
+  // manual quote, and the office notice filed a commercial lead.
+  test('above the ceiling with no lot size: the size hold names the quote, never the lot review on the pest line', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    for (const services of [{ pest: { frequency: 'quarterly' } }, { oneTimePest: {} }, { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine' } }]) {
+      notifyAdmin.mockClear();
+      const { status, json } = await calculate(24000, 2, services, null);
+      expect(status).toBe(202);
+      expect(json).toMatchObject({ quote_required: true, reason: 'home_size_above_public_limit' });
+      expect(['pest_control', 'one_time_pest']).toContain(json.service);
+      expect(json.message).toMatch(/A home this size is priced by our team/);
+      expect(json.per_application).toBeUndefined();
+      expect(storedEngineInput().lotSqFt).toBe(96000);
+      const bodies = notifyAdmin.mock.calls.map((call) => String(call[2]));
+      expect(bodies.some((body) => /needs property confirmation \(home_size_above_public_limit\)/.test(body))).toBe(true);
+      expect(bodies.some((body) => /commercial/i.test(body))).toBe(false);
+    }
+    // The engine does list the lot review on that line; the route does not read it as the quote's reason.
+    const { generateEstimate } = require('../services/pricing-engine');
+    await calculate(24000, 2, { pest: { frequency: 'quarterly' } }, null);
+    const pest = generateEstimate(storedEngineInput()).lineItems.find((line) => line.service === 'pest_control');
+    expect(pest.manualReviewReasons[0]).toBe('very_large_lot');
+  });
+
   test('a size at the ceiling still prices (20,000 sq ft two-story = 10,000 footprint = $164)', async () => {
     recordSays(2);
     const atLimit = await calculate(20000, 2);

@@ -117,6 +117,30 @@ describe('county sizes a lead draft may use', () => {
     expect(countyMeasurements(lookupOf(bigHome({ stories: '2', _fieldEvidence: countyStories })))).toMatchObject({ stories: 2 });
   });
 
+  test('a technician\'s verified count stands over the AI fallback\'s older estimate left on the record', () => {
+    const { applyVerifiedOverrides } = require('../services/property-lookup/lookup-cache');
+    // The cached record after an AI fallback inferred one floor; a technician then verified two. The override writes the count and its
+    // own field evidence, and the lookup restamps the source (property-lookup-v2 buildResultFromCachedLookup). The fallback's evidence stays.
+    const verifiedRecord = (count = 2) => {
+      const record = applyVerifiedOverrides(countyRecord({
+        squareFootage: 8000, stories: 1, _storiesSource: 'ai',
+        _storiesEvidence: { basis: 'inferred', confidence: 'medium', sourceUrl: 'https://example.com/listing', sourceType: 'listing' },
+      }), { stories: { value: count } });
+      record._storiesSource = 'verified';
+      return record;
+    };
+    const sizesOnly = { homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' };
+    expect(verifiedRecord()._storiesEvidence).toBeTruthy();
+    expect(countyMeasurements(lookupOf(verifiedRecord()))).toEqual({ ...sizesOnly, stories: 2 });
+    // The range and the lookup's own verify flag still apply to a verified count.
+    expect(countyMeasurements(lookupOf(verifiedRecord(12)))).toEqual(sizesOnly);
+    expect(countyMeasurements(lookupOf(verifiedRecord(), { fieldVerifyFlags: [{ field: 'stories', priority: 'HIGH' }] }))).toEqual(sizesOnly);
+    // The same record without the verified stamp is still the fallback's estimate: left out.
+    const unstamped = verifiedRecord();
+    unstamped._storiesSource = 'ai';
+    expect(countyMeasurements(lookupOf(unstamped))).toEqual(sizesOnly);
+  });
+
   test('only an address with no unit, in any position, describes one house', () => {
     expect(wholeHomeAddress(ADDRESS)).toBe(true);
     for (const unit of [
