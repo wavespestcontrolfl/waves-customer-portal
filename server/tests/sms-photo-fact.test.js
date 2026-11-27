@@ -88,7 +88,7 @@ describe('photoClaimInOwnWords - the model may not describe a photo itself', () 
     expect(photoFact.photoClaimInOwnWords("It's harmless.")).toBe(false);
   });
   test('on a photo text a singular declaration is held too', () => {
-    for (const text of ["It's a German cockroach.", "That's a termite.", 'This is a wasp.']) {
+    for (const text of ["It's a German cockroach.", "That's a termite.", 'This is a wasp.', "That's a mosquito.", "That's a scorpion."]) {
       expect([text, photoFact.photoClaimInOwnWords(text, { inboundHasPhoto: true })]).toEqual([text, true]);
     }
     expect(photoFact.photoClaimInOwnWords("It's a great day for your ant visit.", { inboundHasPhoto: true })).toBe(false);

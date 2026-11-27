@@ -20,7 +20,8 @@
  *     unanswered-reply stamp all read off. The drafter publishes a staff card or sends when the
  *     first two are on, and stamps a draft for the third. smsSuggestMode defaults ON outside
  *     production (feature-gates.js), so the job must run with NODE_ENV=production.
- *   - dedup: a text that already has ANY message_drafts row is never drafted again (so turning
+ *   - dedup: a text that already has a reply draft (any message_drafts row but the photo checker's
+ *     'photo_triage' reading, which a reply draft reads: texting AI gap 6) is never drafted again (so turning
  *     the live drafter back on cannot double up), and a Postgres advisory lock stops two
  *     overlapping runs picking the same text.
  *
@@ -29,6 +30,9 @@
  */
 
 const db = require('../models/db');
+
+// The photo checker's parked reading (photo-text-triage.js) is not a reply draft: it never blocks one.
+const PHOTO_TRIAGE_INTENT = 'photo_triage';
 const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isSmsReaction, hasSchedulingIntent } = require('./sms-intent');
@@ -108,7 +112,7 @@ function candidateQuery(dbi, { windowStart, cutoff, fetchLimit }) {
     .whereRaw("NULLIF(TRIM(s.message_body), '') IS NOT NULL")
     .whereRaw("COALESCE(s.metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
     .whereNotExists(function alreadyDrafted() {
-      this.select(dbi.raw('1')).from('message_drafts as md').whereRaw('md.sms_log_id = s.id');
+      this.select(dbi.raw('1')).from('message_drafts as md').whereRaw(`md.sms_log_id = s.id AND md.intent IS DISTINCT FROM '${PHOTO_TRIAGE_INTENT}'`);
     })
     .orderBy('s.created_at', 'asc')
     .orderBy('s.id', 'asc')
@@ -117,7 +121,8 @@ function candidateQuery(dbi, { windowStart, cutoff, fetchLimit }) {
 }
 
 async function hasDraft(dbi, smsLogId) {
-  const row = await dbi('message_drafts').where({ sms_log_id: smsLogId }).first('id');
+  const row = await dbi('message_drafts').where({ sms_log_id: smsLogId })
+    .whereRaw(`intent IS DISTINCT FROM '${PHOTO_TRIAGE_INTENT}'`).first('id');
   return Boolean(row);
 }
 
