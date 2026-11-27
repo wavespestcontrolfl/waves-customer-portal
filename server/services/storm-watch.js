@@ -25,7 +25,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { getHourlyRainOutlook } = require('./weather-forecast');
+const weatherForecast = require('./weather-forecast');
+const { getHourlyRainOutlook } = weatherForecast;
 const { etParts, etDateString } = require('../utils/datetime-et');
 const { outdoorStopRows } = require('./scheduling/rain-fit');
 
@@ -39,8 +40,12 @@ const SERVICE_HOURS_ET = { start: 7, end: 19 };
 const LOOKAHEAD_MINUTES = 150;          // stops starting within ~2.5h
 const FORECAST_HORIZON_MS = 2 * 60 * 60 * 1000; // probe the next 2h of sky
 const RAIN_CHANCE_THRESHOLD = Number(process.env.STORM_WATCH_THRESHOLD || 60);
+// Thunder/lightning triggers a rain-out nudge earlier than plain rain (owner 2026-11-26).
+const THUNDER_CHANCE_THRESHOLD = 50;
 
 const NOTIFICATION_TYPE = 'storm_watch_alert';
+// Heat and wind are alert-only safety banners — NEVER a rain-out move prompt (owner 2026-11-26).
+const ADVISORY_NOTIFICATION_TYPE = 'weather_safety_advisory';
 
 function hhmmToMinutes(value) {
   const m = String(value || '').match(/^(\d{1,2}):(\d{2})/);
@@ -72,6 +77,43 @@ function peakRainChance(hours, now = new Date()) {
     }
   }
   return peak;
+}
+
+// Evaluate move triggers (rain >= 60%, thunder >= 50%, or active NWS severe/tropical/thunderstorm
+// warning) vs alert-only advisories (heat/wind) inside the next 2h horizon.
+function stormSignal(hours, alerts, now = new Date()) {
+  const peak = peakRainChance(hours, now);
+  const horizonEnd = now.getTime() + FORECAST_HORIZON_MS;
+  let hasThunder = false;
+  if (Array.isArray(hours)) {
+    for (const hour of hours) {
+      const start = new Date(hour.startTime).getTime();
+      if (!Number.isFinite(start) || start + 3600_000 <= now.getTime() || start >= horizonEnd) continue;
+      if (hour.hasThunder === true && (hour.rainChance == null || hour.rainChance >= THUNDER_CHANCE_THRESHOLD)) {
+        hasThunder = true;
+      }
+    }
+  }
+  const overlaps = typeof weatherForecast.alertOverlapsWindow === 'function'
+    ? (a) => weatherForecast.alertOverlapsWindow(a, now.getTime(), horizonEnd)
+    : () => true;
+  const active = (Array.isArray(alerts) ? alerts : []).filter(overlaps);
+  const severeAlerts = active.filter((a) => a.moveTrigger === true);
+  const advisories = active.filter((a) => a.category === 'heat_advisory' || a.category === 'wind_advisory');
+  const shouldNudge = severeAlerts.length > 0 || hasThunder || (peak != null && peak >= RAIN_CHANCE_THRESHOLD);
+  return { peak, hasThunder, severeAlerts, advisories, shouldNudge };
+}
+
+function stormMessage(signal, timeLabel, where) {
+  const whenWhere = `${timeLabel ? `${timeLabel} ` : ''}${where}`;
+  if (signal.severeAlerts.length > 0) {
+    return `⛈ ${signal.severeAlerts[0].event} near your ${whenWhere} — review rain-out options?`;
+  }
+  if (signal.hasThunder && (signal.peak == null || signal.peak < RAIN_CHANCE_THRESHOLD)) {
+    const pct = signal.peak != null ? ` (${signal.peak}%)` : '';
+    return `⚡ Thunderstorms${pct} near your ${whenWhere} — review rain-out options?`;
+  }
+  return `⛈ ${signal.peak}% storms near your ${whenWhere} — review rain-out options?`;
 }
 
 // Remaining nudgeable stops today whose window starts inside the
@@ -116,13 +158,22 @@ async function upcomingStops(todayStr, nowMinutes) {
 // suppress. Scoped to the CURRENT technician_id so a mid-day
 // reassignment alerts the tech who actually owns the stop now; the
 // old tech's notification stays consumed and doesn't block them.
-async function alreadyAlertedToday(jobId, technicianId, todayStr) {
+async function alreadyAlertedToday(jobId, technicianId, todayStr, type = NOTIFICATION_TYPE) {
   const existing = await db('tech_notifications')
-    .where({ type: NOTIFICATION_TYPE, technician_id: technicianId })
+    .where({ type, technician_id: technicianId })
     .whereRaw("payload->>'job_id' = ?", [String(jobId)])
     .whereRaw('created_at >= ?::date', [todayStr])
     .first('id');
   return !!existing;
+}
+
+async function readActiveAlertsSafe(lat, lng, cache) {
+  if (typeof weatherForecast.getNwsActiveAlerts !== 'function') return null;
+  const key = `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
+  if (!cache.has(key)) {
+    cache.set(key, weatherForecast.getNwsActiveAlerts(lat, lng).catch(() => null));
+  }
+  return cache.get(key);
 }
 
 async function sweep(now = new Date()) {
@@ -136,53 +187,81 @@ async function sweep(now = new Date()) {
   const stops = await upcomingStops(todayStr, nowMinutes);
   if (stops.length === 0) return { checked: 0, alerted: 0 };
 
+  const alertsCache = new Map();
   let alerted = 0;
+  let advisoriesSent = 0;
   for (const job of stops) {
     // No customer coordinates → nothing to probe. Quietly skip; the
     // tech still has the manual Rain Out button.
     if (job.customer_latitude == null || job.customer_longitude == null) continue;
 
-    let peak = null;
+    let hours = null;
     try {
-      const hours = await getHourlyRainOutlook(job.customer_latitude, job.customer_longitude);
-      peak = peakRainChance(hours, now);
+      hours = await getHourlyRainOutlook(job.customer_latitude, job.customer_longitude);
     } catch (err) {
       logger.info(`[storm-watch] hourly outlook failed for job ${job.id}: ${err.message}`);
-      continue;
     }
-    if (peak == null || peak < RAIN_CHANCE_THRESHOLD) continue;
-
-    if (await alreadyAlertedToday(job.id, job.technician_id, todayStr)) continue;
-
+    const alerts = await readActiveAlertsSafe(job.customer_latitude, job.customer_longitude, alertsCache);
+    const signal = stormSignal(hours, alerts, now);
     const timeLabel = displayTime(job.window_start);
     const where = job.customer_city ? `${job.customer_city} stop` : 'next stop';
-    try {
-      await db('tech_notifications').insert({
-        technician_id: job.technician_id,
-        type: NOTIFICATION_TYPE,
-        message: `⛈ ${peak}% storms near your ${timeLabel ? `${timeLabel} ` : ''}${where} — review rain-out options?`,
-        payload: JSON.stringify({
-          job_id: job.id,
-          customer_id: job.customer_id,
-          service_type: job.service_type,
-          window_start: job.window_start,
-          window_end: job.window_end,
-          rain_chance: peak,
-          city: job.customer_city || null,
-        }),
-      });
-      alerted += 1;
-    } catch (err) {
-      logger.error(`[storm-watch] notification insert failed for job ${job.id}: ${err.message}`);
+
+    if (signal.shouldNudge && !(await alreadyAlertedToday(job.id, job.technician_id, todayStr, NOTIFICATION_TYPE))) {
+      try {
+        await db('tech_notifications').insert({
+          technician_id: job.technician_id,
+          type: NOTIFICATION_TYPE,
+          message: stormMessage(signal, timeLabel, where),
+          payload: JSON.stringify({
+            job_id: job.id,
+            customer_id: job.customer_id,
+            service_type: job.service_type,
+            window_start: job.window_start,
+            window_end: job.window_end,
+            rain_chance: signal.peak,
+            has_thunder: signal.hasThunder,
+            ...(signal.severeAlerts.length ? { severe_alerts: signal.severeAlerts.map((a) => a.event) } : {}),
+            ...(signal.advisories.length ? { advisories: signal.advisories.map((a) => a.event) } : {}),
+            city: job.customer_city || null,
+          }),
+        });
+        alerted += 1;
+      } catch (err) {
+        logger.error(`[storm-watch] notification insert failed for job ${job.id}: ${err.message}`);
+      }
+    } else if (signal.advisories.length > 0 && !(await alreadyAlertedToday(job.id, job.technician_id, todayStr, ADVISORY_NOTIFICATION_TYPE))) {
+      // Heat / wind advisories are alert-only safety banners — NEVER a rain-out reschedule prompt.
+      const adv = signal.advisories[0];
+      try {
+        await db('tech_notifications').insert({
+          technician_id: job.technician_id,
+          type: ADVISORY_NOTIFICATION_TYPE,
+          message: `⚠️ ${adv.event} near your ${timeLabel ? `${timeLabel} ` : ''}${where} — safety advisory only (no schedule move).`,
+          payload: JSON.stringify({
+            job_id: job.id,
+            customer_id: job.customer_id,
+            service_type: job.service_type,
+            window_start: job.window_start,
+            window_end: job.window_end,
+            advisory_only: true,
+            advisories: signal.advisories.map((a) => ({ event: a.event, category: a.category })),
+            city: job.customer_city || null,
+          }),
+        });
+        advisoriesSent += 1;
+      } catch (err) {
+        logger.error(`[storm-watch] advisory insert failed for job ${job.id}: ${err.message}`);
+      }
     }
   }
 
   if (alerted > 0) logger.info(`[storm-watch] sweep alerted ${alerted}/${stops.length} upcoming stops`);
-  return { checked: stops.length, alerted };
+  return advisoriesSent > 0 ? { checked: stops.length, alerted, advisories: advisoriesSent } : { checked: stops.length, alerted };
 }
 
 module.exports = {
   sweep,
   NOTIFICATION_TYPE,
-  _test: { peakRainChance, upcomingStops, RAIN_CHANCE_THRESHOLD, displayTime },
+  ADVISORY_NOTIFICATION_TYPE,
+  _test: { peakRainChance, stormSignal, stormMessage, upcomingStops, RAIN_CHANCE_THRESHOLD, THUNDER_CHANCE_THRESHOLD, displayTime },
 };

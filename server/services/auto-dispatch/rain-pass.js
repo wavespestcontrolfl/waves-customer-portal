@@ -34,8 +34,11 @@ const { etParts, etDateString, addETDays, parseETDateTime, formatETTime, dateOnl
 const GATE = 'GATE_AUTO_DISPATCH_RAIN_PASS';
 const KEY_PREFIX = 'rain-pass:';
 // A visit is wet at this chance; a target hour is dry below DRY_PCT.
+// Thunder/lightning triggers a move at THUNDER_MOVE_PCT (50%) and disqualifies candidate dry slots at THUNDER_DRY_PCT (40%).
 const MOVE_PCT = 70;
 const DRY_PCT = 40;
+const THUNDER_MOVE_PCT = 50;
+const THUNDER_DRY_PCT = 40;
 const LEAD_MINUTES = 120;
 // docs/admin-notifications.md section 3: at most this many new notices an ET
 // day, over every run of that day. The rest ring on a later day's run; a
@@ -112,6 +115,55 @@ function spanRain(hourly, date, startMin, endMin) {
   return { peak, complete };
 }
 
+// Companion storm/hazard check over the same span (owner ruling 2026-11-26):
+//   - Move triggers: rain >= MOVE_PCT (checked by caller), thunder/lightning (hasThunder && PoP >= thunderMinPct),
+//     or an active NWS Tropical Storm / Hurricane / Severe Thunderstorm / Tornado / Flash Flood alert overlapping the span.
+//   - Alert-only: Heat / Wind advisories are returned in `advisories` and NEVER set `wetByStorm`.
+function spanStorm(hourly, date, startMin, endMin, alerts = null, { thunderMinPct = THUNDER_MOVE_PCT } = {}) {
+  const { peak, complete } = spanRain(hourly, date, startMin, endMin);
+  const wf = require('../weather-forecast');
+  const parseThunder = typeof wf.parseHasThunder === 'function' ? wf.parseHasThunder : () => false;
+  const lastMin = Math.min(24 * 60, endMin + RAIN_AFTER_HOURS * 60);
+  let hasThunder = false;
+  if (Array.isArray(hourly)) {
+    for (let m = Math.floor(startMin / 60) * 60; m < lastMin; m += 60) {
+      const key = `${date}T${String(Math.floor(m / 60)).padStart(2, '0')}`;
+      const hour = hourly.find((h) => String(h.startTime).slice(0, 13) === key);
+      if (!hour) continue;
+      const isThunder = hour.hasThunder === true || parseThunder(hour.shortForecast);
+      if (isThunder && (hour.rainChance == null || hour.rainChance >= thunderMinPct)) {
+        hasThunder = true;
+        break;
+      }
+    }
+  }
+  const startH = Math.floor(startMin / 60);
+  const startDt = parseETDateTime(`${date}T${String(startH).padStart(2, '0')}:00`);
+  const startMs = startDt ? startDt.getTime() : null;
+  const endMs = startMs != null ? startMs + (lastMin - startH * 60) * 60 * 1000 : null;
+  const overlaps = typeof wf.alertOverlapsWindow === 'function'
+    ? (a) => (startMs != null && endMs != null ? wf.alertOverlapsWindow(a, startMs, endMs) : true)
+    : () => true;
+  const active = (Array.isArray(alerts) ? alerts : []).filter(overlaps);
+  const severeAlerts = active.filter((a) => a.moveTrigger === true);
+  const advisories = active.filter((a) => a.category === 'heat_advisory' || a.category === 'wind_advisory');
+  const wetByStorm = severeAlerts.length > 0 || hasThunder;
+  const stormLabel = severeAlerts.length > 0 ? severeAlerts[0].event : (hasThunder ? 'thunderstorms' : null);
+  return { peak, complete, hasThunder, severeAlerts, advisories, wetByStorm, stormLabel };
+}
+
+// Per-area free NWS active alerts reader (fail-open, zero paid calls, zero throw).
+function nwsAlertsReader(readAlerts) {
+  const reads = new Map();
+  return (lat, lng) => {
+    const key = areaKey(lat, lng);
+    if (!reads.has(key)) {
+      reads.set(key, Promise.resolve().then(() => readAlerts(lat, lng)).catch(() => null).then((a) => (Array.isArray(a) ? a : [])));
+    }
+    return reads.get(key);
+  };
+}
+
 // The starts a stop could move to on its own date, on the hour from the day's
 // start: [{ own, start, end }], where `own` is the stop's own (anchor) start and
 // `start`..`end` its whole span (members that work before the anchor included).
@@ -135,11 +187,11 @@ function candidateStarts({ reach, earliestMin, dayStartMin, dayEndMin }) {
 // start, or null. Dry: every hour of the moved stop and its drying time
 // reads below DRY_PCT. Open: no other stop of that technician overlaps it.
 // Today's targets start at least LEAD_MINUTES from now.
-function dryStart({ hourly, date, reach, isFree, earliestMin, dayStartMin, dayEndMin }) {
+function dryStart({ hourly, alerts = null, date, reach, isFree, earliestMin, dayStartMin, dayEndMin }) {
   let best = null;
   for (const { own, start, end } of candidateStarts({ reach, earliestMin, dayStartMin, dayEndMin })) {
-    const rain = spanRain(hourly, date, start, end);
-    if (!rain.complete || rain.peak >= DRY_PCT || !isFree(start, end)) continue;
+    const storm = spanStorm(hourly, date, start, end, alerts, { thunderMinPct: THUNDER_DRY_PCT });
+    if (!storm.complete || storm.peak >= DRY_PCT || storm.wetByStorm || !isFree(start, end)) continue;
     if (best == null || Math.abs(own - reach.ownStartMin) < Math.abs(best - reach.ownStartMin)) best = own;
   }
   return best;
@@ -276,13 +328,27 @@ async function judgeStop(visit, ctx) {
   const point = areaPoint(visit.point);
   if (!point) return { wet: false, reason: 'no_point' };
   const hourly = await ctx.readHourly(point.lat, point.lng);
-  const { peak, complete } = spanRain(hourly, date, reach.startMin, reach.endMin);
-  if (peak == null) return { wet: false, reason: 'no_forecast' };
+  const alerts = ctx.readAlerts ? await ctx.readAlerts(point.lat, point.lng) : [];
+  const storm = spanStorm(hourly, date, reach.startMin, reach.endMin, alerts);
+  const { peak, complete } = storm;
+  const advisoryFields = storm.advisories.length ? { advisories: storm.advisories.map((a) => ({ event: a.event, category: a.category })) } : {};
+  if (peak == null && !storm.wetByStorm) return { wet: false, reason: 'no_forecast', ...advisoryFields };
   // `dry` only when every hour was read: a missing hour is not a dry one.
-  if (peak < MOVE_PCT) return { wet: false, reason: 'not_wet', peak, dry: complete };
+  // Heat/wind advisories stay informational only (never set wet: true).
+  if ((peak == null || peak < MOVE_PCT) && !storm.wetByStorm) return { wet: false, reason: 'not_wet', peak, dry: complete, ...advisoryFields };
   const isFree = (startMin, endMin) => !occupancy.conflicts(visit, date, startMin, endMin);
-  const proposal = dryStart({ hourly, date, reach, isFree, earliestMin, dayStartMin: day.startMin, dayEndMin: day.endMin });
-  return { wet: true, reason: 'wet', peak, work, proposal: proposal == null ? null : toHHMM(proposal) };
+  const proposal = dryStart({ hourly, alerts, date, reach, isFree, earliestMin, dayStartMin: day.startMin, dayEndMin: day.endMin });
+  return {
+    wet: true,
+    reason: storm.wetByStorm && !(peak >= MOVE_PCT) ? 'storm' : 'wet',
+    peak,
+    work,
+    proposal: proposal == null ? null : toHHMM(proposal),
+    ...(storm.stormLabel ? { stormLabel: storm.stormLabel } : {}),
+    ...(storm.hasThunder ? { hasThunder: true } : {}),
+    ...(storm.severeAlerts.length ? { severeAlerts: storm.severeAlerts.map((a) => a.event) } : {}),
+    ...advisoryFields,
+  };
 }
 
 // The technician's other stops, from Rain Out's own occupancy probe (the one
@@ -318,12 +384,19 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
   const last = etDateString(addETDays(parseETDateTime(`${today}T12:00`), RAIN_DAYS - 1));
   const parts = etParts(now);
   const stops = await (deps.loadStops || loadStops)(db, today, last);
+  const wf = require('../weather-forecast');
+  const defaultAlertRead = typeof wf.getNwsActiveAlerts === 'function'
+    ? (lat, lng) => wf.getNwsActiveAlerts(lat, lng, { fetchTimeoutMs: wf.NWS_PATIENT_WAIT_MS || 10000 })
+    : null;
   const ctx = {
     db, deps: deps, today, nowMin: parts.hour * 60 + parts.minute,
     // A caller's own reader (the schedule rain record) is asked as before; the default is NWS only.
     readHourly: deps.hourlyRain
       ? (lat, lng) => deps.hourlyRain(lat, lng, true)
       : nwsOnlyReader(deps.nwsHourlyRain || ((...args) => require('../weather-forecast').getNwsHourlyRain(...args))),
+    readAlerts: deps.activeAlerts
+      ? nwsAlertsReader(deps.activeAlerts)
+      : (defaultAlertRead ? nwsAlertsReader(defaultAlertRead) : async () => []),
     occupancy: await loadDayOccupancy(today, last, deps), day: serviceDay(deps),
   };
   const rows = [];
@@ -367,7 +440,10 @@ async function sendNotice(row, { db, deps, reopen = null, now = new Date() }) {
   const spokenDay = at.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).replace(',', '');
   const service = String(row.work || visit.service_type || 'visit').replace(/\s+/g, ' ').trim();
   const dry = proposal ? `; ${formatETTime(parseETDateTime(`${date}T${proposal}`))} is dry and open` : '; no dry open hour that day';
-  const tail = ` ${spokenDay} ${formatETTime(at)} has ${peak}% rain${dry}.`;
+  const weatherDesc = row.stormLabel
+    ? `${row.stormLabel}${peak != null ? ` (${peak}% rain)` : ''}`
+    : `${peak}% rain`;
+  const tail = ` ${spokenDay} ${formatETTime(at)} has ${weatherDesc}${dry}.`;
   return (deps.raiseAdminAlert || raiseAdminAlert)(
     'schedule',
     {
@@ -399,10 +475,15 @@ async function sendNotice(row, { db, deps, reopen = null, now = new Date() }) {
       bellDefault: true,
       ...(reopen ? { dedupeVersion: reopen } : {}),
       detail: `${name || 'A customer'}: ${service} on ${date} at ${start}. `
-        + `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `
+        + (row.stormLabel
+          ? `Forecast / NWS alert: ${row.stormLabel}${peak != null ? ` (${peak}% hourly rain chance)` : ''} across the visit span through ${RAIN_AFTER_HOURS} hours after it ends. `
+          : `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `)
         + (proposal ? `${proposal} that day reads below ${DRY_PCT}% and no other stop is in it. ` : `No hour that day is both below ${DRY_PCT}% and open. `)
         + 'Nothing was moved and the customer was not contacted. Move it with Quick Move.',
       metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false,
+        ...(row.stormLabel ? { storm_hazard: row.stormLabel } : {}),
+        ...(row.severeAlerts?.length ? { severe_alerts: row.severeAlerts } : {}),
+        ...(row.hasThunder ? { has_thunder: true } : {}),
         // The central test-account suppression reads the customer from here.
         customerId: visit.customer_id,
         // Only a call that can ring stamps the day; a quiet rewrite keeps the row's own.
@@ -480,5 +561,5 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
   }
 }
 
-// loadStops, loadPoints, spanRain, dryStart and serviceDay are read-only; the schedule rain record (scheduling/rain-schedule-record.js) reuses them.
-module.exports = { runRainPass, planRainPass, loadStops, loadPoints, spanRain, dryStart, candidateStarts, serviceDay, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };
+// loadStops, loadPoints, spanRain, spanStorm, dryStart and serviceDay are read-only; the schedule rain record (scheduling/rain-schedule-record.js) reuses them.
+module.exports = { runRainPass, planRainPass, loadStops, loadPoints, spanRain, spanStorm, dryStart, candidateStarts, serviceDay, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, THUNDER_MOVE_PCT, THUNDER_DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, spanStorm, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };

@@ -8,11 +8,18 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 // The default forecast read is NWS only: the paid Open-Meteo backup must never be reached.
-jest.mock('../services/weather-forecast', () => ({
-  getNwsHourlyRain: jest.fn(),
-  getHourlyRainOutlook: jest.fn(),
-  getNwsHourlyRainPatient: (...args) => jest.requireActual('../services/weather-forecast').getNwsHourlyRainPatient(...args),
-}));
+jest.mock('../services/weather-forecast', () => {
+  const actual = jest.requireActual('../services/weather-forecast');
+  return {
+    getNwsHourlyRain: jest.fn(),
+    getHourlyRainOutlook: jest.fn(),
+    getNwsActiveAlerts: jest.fn(async () => []),
+    getNwsHourlyRainPatient: (...args) => actual.getNwsHourlyRainPatient(...args),
+    parseHasThunder: (...args) => actual.parseHasThunder(...args),
+    alertOverlapsWindow: (...args) => actual.alertOverlapsWindow(...args),
+    classifyNwsAlertEvent: (...args) => actual.classifyNwsAlertEvent(...args),
+  };
+});
 const weather = require('../services/weather-forecast');
 
 const { runRainPass, planRainPass, _test } = require('../services/auto-dispatch/rain-pass');
@@ -401,6 +408,61 @@ describe('auto-dispatch rain pass', () => {
       expect(weather.getNwsHourlyRain.mock.calls.at(-1)).toEqual([27.4, -82.4, { cacheOnly: true }]);
       expect(rows.find((r) => r.visit.id === 'visit-1')).toMatchObject({ wet: true });
       expect(rows.filter((r) => r.reason === 'no_forecast')).toHaveLength(2);
+    });
+  });
+
+  describe('thunder, tropical storms, and alert-only heat/wind advisories (owner 2026-11-26)', () => {
+    test('thunderstorms at 50% PoP trigger a storm move and dryStart skips thunder hours at >= 40%', async () => {
+      process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+      const hourly = hourlyFor([]).map((h) => {
+        if (h.startTime.startsWith(`${D1}T14`)) return { ...h, rainChance: 55, hasThunder: true, shortForecast: 'Chance Showers And Thunderstorms' };
+        if (h.startTime.startsWith(`${D1}T10`)) return { ...h, rainChance: 40, hasThunder: true, shortForecast: 'Chance Thunderstorms' };
+        return h;
+      });
+      const d = deps([stop()], { hourlyRain: jest.fn(async () => hourly), activeAlerts: jest.fn(async () => []) });
+      const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+      expect(row).toMatchObject({ wet: true, reason: 'storm', hasThunder: true, stormLabel: 'thunderstorms' });
+      // 10:00 has thunder at 40% (and 08:00/09:00 drying window touches 10:00), so candidate start must avoid 10:00.
+      expect(row.proposal).not.toBe('10:00');
+      await runRainPass({ now: NOW, db: {}, deps: d });
+      expect(d.raiseAdminAlert).toHaveBeenCalledTimes(1);
+      const [, spec] = d.raiseAdminAlert.mock.calls[0];
+      expect(spec.why).toMatch(/thunderstorms/i);
+    });
+
+    test('active Tropical Storm Warning marks a dry-looking visit wet for storm movement', async () => {
+      const hourly = hourlyFor([]); // 10% rain all day
+      const tsAlert = {
+        event: 'Tropical Storm Warning',
+        category: 'tropical_storm',
+        moveTrigger: true,
+        onset: `${D1}T06:00:00-04:00`,
+        expires: `${D1}T22:00:00-04:00`,
+      };
+      const d = deps([stop()], { hourlyRain: jest.fn(async () => hourly), activeAlerts: jest.fn(async () => [tsAlert]) });
+      const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+      expect(row).toMatchObject({
+        wet: true,
+        reason: 'storm',
+        stormLabel: 'Tropical Storm Warning',
+        severeAlerts: ['Tropical Storm Warning'],
+        proposal: null,
+      });
+    });
+
+    test('Heat Advisory and Wind Advisory stay informational only and never mark a dry visit wet', async () => {
+      process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+      const hourly = hourlyFor([]); // 10% rain all day
+      const advisories = [
+        { event: 'Heat Advisory', category: 'heat_advisory', moveTrigger: false, onset: `${D1}T11:00:00-04:00`, expires: `${D1}T19:00:00-04:00` },
+        { event: 'Wind Advisory', category: 'wind_advisory', moveTrigger: false, onset: `${D1}T11:00:00-04:00`, expires: `${D1}T19:00:00-04:00` },
+      ];
+      const d = deps([stop()], { hourlyRain: jest.fn(async () => hourly), activeAlerts: jest.fn(async () => advisories) });
+      const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+      expect(row).toMatchObject({ wet: false, reason: 'not_wet' });
+      expect(row.advisories).toHaveLength(2);
+      expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 0, noticed: 0 });
+      expect(d.raiseAdminAlert).not.toHaveBeenCalled();
     });
   });
 });

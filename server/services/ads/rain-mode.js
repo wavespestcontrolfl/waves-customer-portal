@@ -41,12 +41,13 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../weather-forecast');
+const weatherForecast = require('../weather-forecast');
+const { getNwsHourlyRain, getNwsHourlyRainPatient } = weatherForecast;
 const { fetchMrmsDailyRain } = require('../mrms-qpe');
 const { ZONE_COORDS } = require('../scheduling/forecast-zones');
 const workHours = require('../scheduling/work-hour-rain');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
-const { etDateString, etParts } = require('../../utils/datetime-et');
+const { etDateString, etParts, parseETDateTime } = require('../../utils/datetime-et');
 // One sold-day rule for the budget run and this record; one route-line classifier with ads/route-fill.js.
 const { soldDay } = require('./budget-manager');
 const { routeLineOf } = require('./route-fill');
@@ -85,16 +86,19 @@ function rainClassOf(campaign) {
   return null;
 }
 
-/** Work hours of `day` at RAIN_PCT or more, and the hours with no reading. */
+/** Work hours of `day` at RAIN_PCT or more (or thunder at >= 50%), and the hours with no reading. */
+const THUNDER_WET_PCT = 50;
 function countWetHours(hours, day) {
+  const parseThunder = typeof weatherForecast.parseHasThunder === 'function' ? weatherForecast.parseHasThunder : () => false;
   let wet = 0;
   let missing = 0;
   for (let m = DAY_OPEN; m < DAY_CLOSE; m += HOUR) {
     const key = `${day}T${String(Math.floor(m / HOUR)).padStart(2, '0')}`;
     const hour = hours.find((h) => String(h?.startTime || '').slice(0, 13) === key);
     const chance = hour && Number.isFinite(hour.rainChance) ? hour.rainChance : null;
-    if (chance == null) missing += 1;
-    else if (chance >= RAIN_PCT) wet += 1;
+    const isThunder = hour && (hour.hasThunder === true || parseThunder(hour.shortForecast));
+    if (chance == null && !isThunder) missing += 1;
+    else if ((chance != null && chance >= RAIN_PCT) || (isThunder && (chance == null || chance >= THUNDER_WET_PCT))) wet += 1;
   }
   return { wet, missing };
 }
@@ -103,33 +107,61 @@ function countWetHours(hours, day) {
  * The forecast call for `day`: { day, call: 'rain' | 'dry' | 'unknown', areas: [{ zone, wet, missing, rain }],
  * unread: [zone] }. An area NWS does not answer, or answers with no hour of the day, is unread. An area whose missing
  * hours could still make it wet (wet < RAIN_HOURS <= wet + missing: NWS drops hours already over, so on the sold day's
- * morning a wet early span can be gone) is open (`rain: null`) and is not counted either way. The call needs
- * MIN_AREAS settled areas.
+ * morning a wet early span can be gone) is open (`rain: null`) and is not counted either way. Active NWS Tropical Storm /
+ * Hurricane / Severe Thunderstorm warnings overlapping work hours settle the area as wet (`rain: true`). Heat and wind
+ * advisories are kept as informational advisories only (never trigger a rain day). The call needs MIN_AREAS settled areas.
  */
-async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
+async function forecastDay(day, { read = getNwsHourlyRain, readAlerts } = {}) {
   const zones = Object.keys(ZONE_COORDS);
   const areas = [];
   const unread = [];
   const chances = {};
+  const stormAlerts = [];
+  const advisories = [];
+  const alertReader = readAlerts || (typeof weatherForecast.getNwsActiveAlerts === 'function'
+    ? (lat, lng) => weatherForecast.getNwsActiveAlerts(lat, lng, { fetchTimeoutMs: weatherForecast.NWS_PATIENT_WAIT_MS || 10000 })
+    : null);
+  const startDt = parseETDateTime(`${day}T${String(Math.floor(DAY_OPEN / HOUR)).padStart(2, '0')}:00`);
+  const endDt = parseETDateTime(`${day}T${String(Math.floor(DAY_CLOSE / HOUR)).padStart(2, '0')}:00`);
+  const overlaps = typeof weatherForecast.alertOverlapsWindow === 'function' && startDt && endDt
+    ? (a) => weatherForecast.alertOverlapsWindow(a, startDt.getTime(), endDt.getTime())
+    : () => true;
   // No one waits on this cron: the patient NWS read (long wait, one retry). The first prod ticks (2026-11-24) lost 4 of
   // 6 areas to the 2.5 s default at the busy top of the hour.
   await Promise.all(zones.map(async (zone) => {
-    const hours = await getNwsHourlyRainPatient(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng, { read });
+    const [hours, zoneAlerts] = await Promise.all([
+      getNwsHourlyRainPatient(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng, { read }),
+      alertReader ? Promise.resolve().then(() => alertReader(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng)).catch(() => null) : Promise.resolve(null),
+    ]);
+    const active = (Array.isArray(zoneAlerts) ? zoneAlerts : []).filter(overlaps);
+    const severe = active.filter((a) => a.moveTrigger === true);
+    const adv = active.filter((a) => a.category === 'heat_advisory' || a.category === 'wind_advisory');
+    for (const a of severe) if (!stormAlerts.includes(a.event)) stormAlerts.push(a.event);
+    for (const a of adv) if (!advisories.includes(a.event)) advisories.push(a.event);
+
     const counted = Array.isArray(hours) ? countWetHours(hours, day) : null;
     const total = (DAY_CLOSE - DAY_OPEN) / HOUR;
-    if (!counted || counted.missing >= total) { unread.push(zone); return; }
-    chances[zone] = workHours.workHourChances(hours, day);
+    if ((!counted || counted.missing >= total) && severe.length === 0) { unread.push(zone); return; }
+    if (Array.isArray(hours)) chances[zone] = workHours.workHourChances(hours, day);
     let rain = null;
-    if (counted.wet >= RAIN_HOURS) rain = true;
-    else if (counted.wet + counted.missing < RAIN_HOURS) rain = false;
-    areas.push({ zone, wet: counted.wet, missing: counted.missing, rain });
+    if (severe.length > 0 || (counted && counted.wet >= RAIN_HOURS)) rain = true;
+    else if (counted && counted.wet + counted.missing < RAIN_HOURS) rain = false;
+    areas.push({ zone, wet: counted ? counted.wet : 0, missing: counted ? counted.missing : total, rain, ...(severe.length ? { storm_alerts: severe.map((a) => a.event) } : {}) });
   }));
   areas.sort((a, b) => zones.indexOf(a.zone) - zones.indexOf(b.zone));
   unread.sort((a, b) => zones.indexOf(a) - zones.indexOf(b));
   const settled = areas.filter((a) => a.rain !== null);
   let call = 'unknown';
   if (settled.length >= MIN_AREAS) call = settled.filter((a) => a.rain).length * 2 >= settled.length ? 'rain' : 'dry';
-  return { day, call, areas, unread, chances };
+  return {
+    day,
+    call,
+    areas,
+    unread,
+    chances,
+    ...(stormAlerts.length ? { storm_alerts: stormAlerts } : {}),
+    ...(advisories.length ? { advisories } : {}),
+  };
 }
 
 /** What the rule would set for a campaign of `rainClass` under `call`: 'base' | 'stop' | null (no change). */

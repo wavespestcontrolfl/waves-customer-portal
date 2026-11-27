@@ -1,11 +1,16 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/weather-forecast', () => ({
-  getHourlyRainOutlook: jest.fn().mockResolvedValue(null),
-}));
+jest.mock('../services/weather-forecast', () => {
+  const actual = jest.requireActual('../services/weather-forecast');
+  return {
+    getHourlyRainOutlook: jest.fn().mockResolvedValue(null),
+    getNwsActiveAlerts: jest.fn().mockResolvedValue([]),
+    alertOverlapsWindow: actual.alertOverlapsWindow,
+  };
+});
 
 const db = require('../models/db');
-const { getHourlyRainOutlook } = require('../services/weather-forecast');
+const { getHourlyRainOutlook, getNwsActiveAlerts } = require('../services/weather-forecast');
 const StormWatch = require('../services/storm-watch');
 
 // 2026-06-11T16:00:00Z = 12:00 PM ET — mid-service-day.
@@ -268,5 +273,45 @@ describe('storm-watch sweep', () => {
     ];
     expect(StormWatch._test.peakRainChance(hours, now)).toBe(55);
     expect(StormWatch._test.peakRainChance(null, now)).toBeNull();
+  });
+
+  test('thunder at 50% (hasThunder: true) and active NWS Tropical Storm / Severe Thunderstorm alerts trigger storm_watch_alert', async () => {
+    const { notifInsert } = wireDb({ stops: [stop()] });
+    getHourlyRainOutlook.mockResolvedValue([{ startTime: new Date(NOON_ET.getTime() + 30 * 60_000).toISOString(), rainChance: 50, hasThunder: true, shortForecast: 'Thunderstorms' }]);
+    getNwsActiveAlerts.mockResolvedValue([]);
+
+    const thunderRes = await StormWatch.sweep(NOON_ET);
+    expect(thunderRes).toEqual({ checked: 1, alerted: 1 });
+    expect(notifInsert.mock.calls[0][0].type).toBe('storm_watch_alert');
+    expect(notifInsert.mock.calls[0][0].message).toContain('Thunderstorms (50%)');
+
+    jest.clearAllMocks();
+    const { notifInsert: notifInsert2 } = wireDb({ stops: [stop()] });
+    getHourlyRainOutlook.mockResolvedValue([{ startTime: new Date(NOON_ET.getTime() + 30 * 60_000).toISOString(), rainChance: 20, hasThunder: false }]);
+    getNwsActiveAlerts.mockResolvedValue([{
+      event: 'Tropical Storm Warning', category: 'tropical_storm', moveTrigger: true,
+      onset: new Date(NOON_ET.getTime() - 3600_000).toISOString(), expires: new Date(NOON_ET.getTime() + 4 * 3600_000).toISOString(),
+    }]);
+
+    const tropicalRes = await StormWatch.sweep(NOON_ET);
+    expect(tropicalRes).toEqual({ checked: 1, alerted: 1 });
+    expect(notifInsert2.mock.calls[0][0].type).toBe('storm_watch_alert');
+    expect(notifInsert2.mock.calls[0][0].message).toContain('Tropical Storm Warning');
+  });
+
+  test('NWS Heat Advisory / Wind Advisory emits weather_safety_advisory only — never a rain-out storm_watch_alert (owner 2026-11-26)', async () => {
+    const { notifInsert } = wireDb({ stops: [stop()] });
+    getHourlyRainOutlook.mockResolvedValue([{ startTime: new Date(NOON_ET.getTime() + 30 * 60_000).toISOString(), rainChance: 10, hasThunder: false }]);
+    getNwsActiveAlerts.mockResolvedValue([{
+      event: 'Heat Advisory', category: 'heat_advisory', moveTrigger: false,
+      onset: new Date(NOON_ET.getTime() - 3600_000).toISOString(), expires: new Date(NOON_ET.getTime() + 4 * 3600_000).toISOString(),
+    }]);
+
+    const res = await StormWatch.sweep(NOON_ET);
+    expect(res).toEqual({ checked: 1, alerted: 0, advisories: 1 });
+    expect(notifInsert).toHaveBeenCalledTimes(1);
+    expect(notifInsert.mock.calls[0][0].type).toBe('weather_safety_advisory');
+    expect(notifInsert.mock.calls[0][0].message).toContain('Heat Advisory');
+    expect(notifInsert.mock.calls[0][0].message).toContain('no schedule move');
   });
 });

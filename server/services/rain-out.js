@@ -28,7 +28,8 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { buildRescheduleLink } = require('./reschedule-link');
-const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
+const weatherForecast = require('./weather-forecast');
+const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = weatherForecast;
 const { etParts, etDateString, deriveWindowEnd, dateOnlyString, addETDays } = require('../utils/datetime-et');
 const { DAY_START_HOUR, DAY_END_HOUR } = require('./scheduling/find-time');
 const { arrivalWindowRange, formatSmsTimeRange, ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
@@ -1883,11 +1884,20 @@ async function getOptions(serviceId, { caller = null, reasonCode, initiatedBy = 
   // reading for that hour, and the header's "today" line.
   let outlook = null;
   let hourly = null;
+  let weatherAlerts = [];
   try {
-    [outlook, hourly] = await Promise.all([
+    const alertsPromise = typeof weatherForecast.getNwsActiveAlerts === 'function'
+      ? weatherForecast.getNwsActiveAlerts(service.customer_latitude, service.customer_longitude).catch(() => null)
+      : Promise.resolve(null);
+    let rawAlerts = null;
+    [outlook, hourly, rawAlerts] = await Promise.all([
       getDailyRainOutlook(service.customer_latitude, service.customer_longitude),
       getHourlyRainOutlook(service.customer_latitude, service.customer_longitude).catch(() => null),
+      alertsPromise,
     ]);
+    if (Array.isArray(rawAlerts)) {
+      weatherAlerts = rawAlerts.filter((a) => a.moveTrigger || a.category === 'heat_advisory' || a.category === 'wind_advisory');
+    }
   } catch (err) {
     logger.info(`[rain-out] outlook lookup failed for ${serviceId}: ${err.message}`);
   }
@@ -2014,6 +2024,7 @@ async function getOptions(serviceId, { caller = null, reasonCode, initiatedBy = 
       date: todayStr,
       rainChance: outlook?.[todayStr]?.rainChance ?? null,
       shortForecast: outlook?.[todayStr]?.shortForecast ?? null,
+      ...(weatherAlerts.length ? { weatherAlerts } : {}),
     },
     sameDay,
     days,

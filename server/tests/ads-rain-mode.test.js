@@ -396,5 +396,33 @@ describe('recordRun', () => {
     const later = rainMode.nextDayRow(fixed, { day: '2026-11-25', forecast: forecast('dry'), call: 'dry', cutoffRun: true, at: '2026-11-24T22:00:00.000Z' });
     expect(later).toMatchObject({ cutoff_call: 'rain', cutoff_at: at, call: 'dry' });
   });
+
+  test('thunderstorms (>=50%) and Tropical Storm Warnings call a rain day; Heat/Wind Advisories stay dry (owner 2026-11-26)', async () => {
+    const thunderHours = Array.from({ length: 9 }, (_, i) => ({
+      startTime: `2026-11-25T${String(8 + i).padStart(2, '0')}:00:00-05:00`,
+      rainChance: i < 4 ? 55 : 10,
+      hasThunder: i < 4,
+    }));
+    expect(rainMode.countWetHours(thunderHours, '2026-11-25')).toEqual({ wet: 4, missing: 0 });
+    const stormOut = await rainMode.forecastDay('2026-11-25', {
+      read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]),
+      readAlerts: jest.fn(async () => [{
+        event: 'Tropical Storm Warning', category: 'tropical_storm', moveTrigger: true,
+        onset: '2026-11-25T07:00:00-05:00', expires: '2026-11-25T20:00:00-05:00',
+      }]),
+    });
+    expect(stormOut.call).toBe('rain');
+    expect(stormOut.storm_alerts).toEqual(['Tropical Storm Warning']);
+
+    const heatOut = await rainMode.forecastDay('2026-11-25', {
+      read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]),
+      readAlerts: jest.fn(async () => [{
+        event: 'Heat Advisory', category: 'heat_advisory', moveTrigger: false,
+        onset: '2026-11-25T07:00:00-05:00', expires: '2026-11-25T20:00:00-05:00',
+      }]),
+    });
+    expect(heatOut.call).toBe('dry');
+    expect(heatOut.advisories).toEqual(['Heat Advisory']);
+  });
 });
 

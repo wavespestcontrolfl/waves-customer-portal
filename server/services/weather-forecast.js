@@ -121,8 +121,10 @@ async function readOpenMeteoHours(latNum, lngNum, timeoutMs, fromMs = Math.floor
       startTime,
       rainChance: Number.isFinite(row.precipitation_probability_pct) ? row.precipitation_probability_pct : null,
       shortForecast: null,
+      hasThunder: false,
       temperatureF: Number.isFinite(row.temperature_f_exact) ? row.temperature_f_exact : null,
       windMph: Number.isFinite(row.wind_mph_exact) ? row.wind_mph_exact : null,
+      windGustMph: null,
       // The shared forecast module's ready 16-point label ("N" .. "NNW"); null until a row carries it.
       windDirection: typeof row.wind_dir === 'string' && row.wind_dir ? row.wind_dir : null,
       relativeHumidity: Number.isFinite(row.humidity_pct) ? row.humidity_pct : null,
@@ -349,6 +351,220 @@ function parseWindMph(text) {
   return Math.max(...nums.map(Number));
 }
 
+// Thunder / lightning / squall detection from NWS hourly shortForecast text.
+const THUNDER_FORECAST_RE = /\b(thunder\w*|t-?storm\w*|lightning|squall\w*)\b/i;
+const THUNDER_MOVE_PCT = 50;
+
+function parseHasThunder(shortForecast) {
+  return THUNDER_FORECAST_RE.test(String(shortForecast || ''));
+}
+
+// Parse NWS windGust (either a string like "25 mph" or a QuantitativeValue object { value, unitCode }).
+function parseWindGustMph(raw) {
+  if (raw == null) return null;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === 'string') return parseWindMph(raw);
+  if (typeof raw === 'object' && Number.isFinite(raw.value)) {
+    const unit = String(raw.unitCode || '').toLowerCase();
+    if (unit.includes('km_h') || unit.includes('km/h')) return Math.round(raw.value * 0.621371 * 10) / 10;
+    if (unit.includes('kt') || unit.includes('knot')) return Math.round(raw.value * 1.15078 * 10) / 10;
+    return raw.value;
+  }
+  return null;
+}
+
+// Owner ruling 2026-11-26:
+//   - Move triggers: rain, lightning/thunder, tropical storm / hurricane / severe thunderstorm / tornado / flash flood.
+//   - Alert-only (NEVER moves visits or pauses ads): heat advisories and wind advisories.
+const TROPICAL_ALERT_RE = /hurricane|tropical\s+(storm|depression|cyclone)|storm\s+surge/i;
+const SEVERE_STORM_ALERT_RE = /tornado|severe\s+thunderstorm|special\s+marine|extreme\s+wind|flash\s+flood|flood\s+warning/i;
+const LIGHTNING_THUNDER_ALERT_RE = /lightning|thunderstorm/i;
+const HEAT_ALERT_RE = /excessive\s+heat|heat\s+(advisory|warning|watch)/i;
+const WIND_ALERT_RE = /wind\s+(advisory|warning)|high\s+wind|gale/i;
+
+function classifyNwsAlertEvent(event) {
+  const text = String(event || '').trim();
+  if (!text) return { category: 'other', moveTrigger: false };
+  if (TROPICAL_ALERT_RE.test(text)) return { category: 'tropical_storm', moveTrigger: true };
+  if (SEVERE_STORM_ALERT_RE.test(text)) return { category: 'severe_storm', moveTrigger: true };
+  if (LIGHTNING_THUNDER_ALERT_RE.test(text)) return { category: 'lightning_thunder', moveTrigger: true };
+  if (HEAT_ALERT_RE.test(text)) return { category: 'heat_advisory', moveTrigger: false };
+  if (WIND_ALERT_RE.test(text)) return { category: 'wind_advisory', moveTrigger: false };
+  return { category: 'other', moveTrigger: false };
+}
+
+// Bounded cache + in-flight dedupe for free keyless NWS active alerts (/alerts/active?point=lat,lng).
+const _alertsCache = new Map();
+const _nwsAlertsInFlight = new Map();
+const ALERTS_CACHE_TTL_MS = 10 * 60 * 1000;
+
+async function fetchNwsActiveAlerts(latNum, lngNum, timeoutMs) {
+  const data = await fetchJson(
+    `${NWS_BASE}/alerts/active?point=${latNum.toFixed(4)},${lngNum.toFixed(4)}`,
+    'active alerts',
+    timeoutMs,
+  );
+  if (!data || !Array.isArray(data.features)) return null;
+  return data.features
+    .map((f) => f?.properties)
+    .filter((p) => p && typeof p.event === 'string' && p.event.trim())
+    .map((p) => {
+      const { category, moveTrigger } = classifyNwsAlertEvent(p.event);
+      return {
+        id: p.id || null,
+        event: p.event.trim(),
+        severity: p.severity || null,
+        urgency: p.urgency || null,
+        certainty: p.certainty || null,
+        headline: p.headline || null,
+        onset: p.onset || p.effective || null,
+        expires: p.ends || p.expires || null,
+        category,
+        moveTrigger,
+      };
+    });
+}
+
+/**
+ * Free, keyless NWS active weather alerts for a coordinate (api.weather.gov/alerts/active).
+ * Fail-open: returns null on network/parse error, [] when NWS reports no active alerts.
+ * Never logs coordinates or URLs.
+ */
+async function getNwsActiveAlerts(lat, lng, { fetchTimeoutMs: askedMs, cacheOnly = false } = {}) {
+  if (lat == null || lng == null || lat === '' || lng === '') return null;
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+  const key = cacheKey(latNum, lngNum);
+  const cached = _alertsCache.get(key);
+  if (cached && Date.now() - cached.at < ALERTS_CACHE_TTL_MS) return cached.value;
+  if (cacheOnly) return null;
+
+  const timeoutMs = Math.max(FETCH_TIMEOUT_MS, Number(askedMs) || 0);
+  const pending = _nwsAlertsInFlight.get(key);
+  if (pending) return raceDeadline(pending, timeoutMs);
+
+  const read = fetchNwsActiveAlerts(latNum, lngNum, timeoutMs).catch(() => null);
+  const shared = read.finally(() => _nwsAlertsInFlight.delete(key));
+  _nwsAlertsInFlight.set(key, shared);
+  const alerts = await shared;
+  if (Array.isArray(alerts)) cachePut(_alertsCache, key, { at: Date.now(), value: alerts }, ALERTS_CACHE_TTL_MS);
+  return alerts;
+}
+
+// True when an NWS alert's active interval [onset, expires] overlaps [startMs, endMs].
+// Missing onset/expires fails open as active across the current/near window so a warning with
+// an open-ended expiration is never silently ignored.
+function alertOverlapsWindow(alert, startMs, endMs) {
+  if (!alert || !Number.isFinite(startMs) || !Number.isFinite(endMs)) return false;
+  const onsetMs = alert.onset ? Date.parse(alert.onset) : -Infinity;
+  const expiresMs = alert.expires ? Date.parse(alert.expires) : Infinity;
+  const start = Number.isFinite(onsetMs) ? onsetMs : -Infinity;
+  const end = Number.isFinite(expiresMs) ? expiresMs : Infinity;
+  return start < endMs && end > startMs;
+}
+
+// Approximate NOAA heat index (°F) when temp >= 80°F and relative humidity >= 40%.
+function heatIndexF(tempF, rh) {
+  if (!Number.isFinite(tempF) || !Number.isFinite(rh) || tempF < 80 || rh < 40) return tempF ?? null;
+  return Math.round(
+    -42.379 + 2.04901523 * tempF + 10.14333127 * rh - 0.22475541 * tempF * rh
+    - 6.83783e-3 * tempF * tempF - 5.481717e-2 * rh * rh + 1.22874e-3 * tempF * tempF * rh
+    + 8.5282e-4 * tempF * rh * rh - 1.99e-6 * tempF * tempF * rh * rh,
+  );
+}
+
+const maxFinite = (cur, val) => (Number.isFinite(val) && (cur == null || val > cur) ? val : cur);
+
+function selectHazardWindow(hours, { day, startMin, endMin, afterHours, now }) {
+  const list = Array.isArray(hours) ? hours : [];
+  if (day) {
+    const startH = Math.floor(startMin / 60);
+    const lastMin = Math.min(24 * 60, endMin + afterHours * 60);
+    const startDate = parseETDateTime(`${day}T${String(startH).padStart(2, '0')}:00`);
+    const windowStartMs = startDate ? startDate.getTime() : null;
+    const windowEndMs = windowStartMs != null ? windowStartMs + (lastMin - startH * 60) * 60 * 1000 : null;
+    const keys = new Set();
+    for (let m = startH * 60; m < lastMin; m += 60) keys.add(`${day}T${String(Math.floor(m / 60)).padStart(2, '0')}`);
+    return { windowStartMs, windowEndMs, matchingHours: list.filter((h) => keys.has(String(h?.startTime || '').slice(0, 13))) };
+  }
+  if (!now) return { windowStartMs: null, windowEndMs: null, matchingHours: [] };
+  const windowStartMs = now.getTime();
+  const windowEndMs = windowStartMs + Math.max(1, (endMin - startMin) || 120) * 60 * 1000;
+  const matchingHours = list.filter((h) => {
+    const s = Date.parse(h?.startTime);
+    return Number.isFinite(s) && s + 3600000 > windowStartMs && s < windowEndMs;
+  });
+  return { windowStartMs, windowEndMs, matchingHours };
+}
+
+function summarizeHazardHours(matchingHours, thunderPct) {
+  let peakRain = null;
+  let hasThunder = false;
+  let peakWindGust = null;
+  let peakWind = null;
+  let peakHeatIndex = null;
+  for (const h of matchingHours) {
+    if (!h) continue;
+    peakRain = maxFinite(peakRain, h.rainChance);
+    peakWindGust = maxFinite(peakWindGust, h.windGustMph);
+    peakWind = maxFinite(peakWind, h.windMph);
+    peakHeatIndex = maxFinite(peakHeatIndex, heatIndexF(h.temperatureF, h.relativeHumidity));
+    const isThunder = h.hasThunder === true || parseHasThunder(h.shortForecast);
+    if (isThunder && (h.rainChance == null || h.rainChance >= thunderPct)) hasThunder = true;
+  }
+  return { peakRain, hasThunder, peakWindGust, peakWind, peakHeatIndex };
+}
+
+const HAZARD_DEFAULTS = {
+  day: null, startMin: 8 * 60, endMin: 17 * 60, afterHours: 0, now: null,
+  rainThresholdPct: 70, thunderPct: THUNDER_MOVE_PCT,
+};
+
+/**
+ * Unified hazard classifier (owner ruling 2026-11-26):
+ *   - Move triggers: rain >= rainThresholdPct, thunder/lightning (hasThunder && PoP >= thunderPct),
+ *     or active NWS tropical_storm / severe_storm / lightning_thunder alert overlapping the window.
+ *   - Alert-only (NEVER sets moveTrigger): heat advisories/high heat index (>=105°F), wind advisories/high gusts (>=30 mph or sustained >=25 mph).
+ */
+function classifyWeatherHazard(hours, alerts, options) {
+  const cfg = { ...HAZARD_DEFAULTS, ...options };
+  const { windowStartMs, windowEndMs, matchingHours } = selectHazardWindow(hours, cfg);
+  const hasWindow = windowStartMs != null && windowEndMs != null;
+  const activeAlerts = (Array.isArray(alerts) ? alerts : []).filter((a) => !hasWindow || alertOverlapsWindow(a, windowStartMs, windowEndMs));
+  const severeAlerts = activeAlerts.filter((a) => a.moveTrigger === true);
+  const allAdvisories = activeAlerts.filter((a) => a.category === 'heat_advisory' || a.category === 'wind_advisory');
+  const { peakRain, hasThunder, peakWindGust, peakWind, peakHeatIndex } = summarizeHazardHours(matchingHours, cfg.thunderPct);
+
+  // Synthesize alert-only advisory banners for extreme heat/wind even if NWS has no formal advisory posted.
+  const categories = new Set(allAdvisories.map((a) => a.category));
+  if (!categories.has('heat_advisory') && peakHeatIndex >= 105) {
+    allAdvisories.push({ event: `High Heat (${peakHeatIndex}°F heat index)`, category: 'heat_advisory', moveTrigger: false });
+  }
+  if (!categories.has('wind_advisory') && (peakWindGust >= 30 || peakWind >= 25)) {
+    const mph = peakWindGust >= 30 ? `${peakWindGust} mph gusts` : `${peakWind} mph wind`;
+    allAdvisories.push({ event: `High Wind (${mph})`, category: 'wind_advisory', moveTrigger: false });
+  }
+
+  const severeCats = new Set(severeAlerts.map((a) => a.category));
+  const reasons = [
+    severeCats.has('tropical_storm') && 'tropical_storm',
+    severeCats.has('severe_storm') && 'severe_storm',
+    (hasThunder || severeCats.has('lightning_thunder')) && 'lightning_thunder',
+    peakRain >= cfg.rainThresholdPct && 'rain',
+  ].filter(Boolean);
+
+  return {
+    moveTrigger: reasons.length > 0,
+    stormTrigger: severeAlerts.length > 0 || hasThunder,
+    reasons,
+    peakRain,
+    hasThunder,
+    severeAlerts,
+    advisories: allAdvisories,
+  };
+}
+
 // Optional `budgetMs` / `nwsBudgetMs` (best-times ranking, Codex #6102 r2):
 // a caller with a short wait caps NWS at `nwsBudgetMs` so a slow NWS failure
 // still leaves the Open-Meteo backup time inside `budgetMs`. Defaults are
@@ -447,12 +663,14 @@ async function nwsHourly(latNum, lngNum, deadlineAt, fetchTimeoutMs = FETCH_TIME
         ? p.probabilityOfPrecipitation.value
         : null,
       shortForecast: p.shortForecast || null,
+      hasThunder: parseHasThunder(p?.shortForecast),
       // Temperature (°F) and sustained wind (mph) ride the same period so the
       // job-card spray check can read label limits off one NWS fetch. NWS
       // renders windSpeed as "5 mph" / "5 to 10 mph" — the upper bound is
       // the conservative number for a max-wind label limit.
       temperatureF: Number.isFinite(p?.temperature) ? p.temperature : null,
       windMph: parseWindMph(p?.windSpeed),
+      windGustMph: parseWindGustMph(p?.windGust),
       // The compass label NWS gives ("E", "ENE") and the relative humidity (%): the card names the wind's
       // direction, and the tech heat line needs the humidity.
       windDirection: typeof p?.windDirection === 'string' && p.windDirection.trim() ? p.windDirection.trim() : null,
@@ -488,8 +706,15 @@ module.exports = {
   getHourlyRainOutlook,
   getNwsHourlyRain,
   getNwsHourlyRainPatient,
+  getNwsActiveAlerts,
+  classifyNwsAlertEvent,
+  classifyWeatherHazard,
+  alertOverlapsWindow,
+  parseHasThunder,
+  parseWindGustMph,
+  THUNDER_MOVE_PCT,
   NWS_PATIENT_WAIT_MS,
   getOpenMeteoDaytime,
   forecastLinkForZip,
-  _test: { cachePut, CACHE_MAX_ENTRIES, dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
+  _test: { cachePut, CACHE_MAX_ENTRIES, dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, _nwsAlertsInFlight, cacheKey, _cache, _hourlyCache, _alertsCache, _dailyFailCooldown, parseWindMph, parseHasThunder, parseWindGustMph, heatIndexF },
 };

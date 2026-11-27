@@ -6,11 +6,18 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/weather-forecast', () => ({
-  getNwsHourlyRain: jest.fn(),
-  getHourlyRainOutlook: jest.fn(),
-  getNwsHourlyRainPatient: (...args) => jest.requireActual('../services/weather-forecast').getNwsHourlyRainPatient(...args),
-}));
+jest.mock('../services/weather-forecast', () => {
+  const actual = jest.requireActual('../services/weather-forecast');
+  return {
+    getNwsHourlyRain: jest.fn(),
+    getHourlyRainOutlook: jest.fn(),
+    getNwsActiveAlerts: jest.fn(async () => []),
+    getNwsHourlyRainPatient: (...args) => actual.getNwsHourlyRainPatient(...args),
+    parseHasThunder: (...args) => actual.parseHasThunder(...args),
+    alertOverlapsWindow: (...args) => actual.alertOverlapsWindow(...args),
+    classifyNwsAlertEvent: (...args) => actual.classifyNwsAlertEvent(...args),
+  };
+});
 jest.mock('../services/mrms-qpe', () => ({ fetchMrmsDailyRain: jest.fn() }));
 
 const fs = require('fs');
@@ -1092,5 +1099,42 @@ describe('audit fixes', () => {
     mixed.rainOut.conflictsForTarget = jest.fn(() => { throw new Error('occupancy rows unreadable'); });
     const two = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: mixed, read: jest.fn(async () => hoursFor(MORNING)) });
     expect(two.problems[0]).toMatch(/forecast unread for all 1 outdoor visit/);
+  });
+
+  test('thunderstorms at 50% PoP and Tropical Storm Warnings trigger reorder/day_move while Heat Advisory stays dry', async () => {
+    // Thunder during 09:00 on Wednesday (55% PoP, below 70% rain threshold) -> reorders to dry afternoon slot.
+    const thunderHours = hoursFor({}).map((h) => (
+      h.startTime.startsWith(`${WED}T09`) ? { ...h, rainChance: 55, hasThunder: true, shortForecast: 'Chance Thunderstorms' } : h
+    ));
+    const thunderOut = await run({
+      now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()], { activeAlerts: jest.fn(async () => []) }),
+      read: jest.fn(async () => thunderHours),
+    });
+    expect(thunderOut.proposals[0]).toMatchObject({ decision: 'reorder', storm_hazard: 'thunderstorms' });
+
+    // Tropical Storm Warning covering all of Wednesday (10% rain) -> day_move to Thursday.
+    n = 0;
+    const tsAlert = {
+      event: 'Tropical Storm Warning', category: 'tropical_storm', moveTrigger: true,
+      onset: `${WED}T06:00:00-05:00`, expires: `${WED}T22:00:00-05:00`,
+    };
+    const tsOut = await run({
+      now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()], { activeAlerts: jest.fn(async () => [tsAlert]) }),
+      read: jest.fn(async () => hoursFor({})),
+    });
+    expect(tsOut.proposals[0]).toMatchObject({ decision: 'day_move', to_date: THU, storm_hazard: 'Tropical Storm Warning' });
+
+    // Heat Advisory on dry Wednesday -> remains forecast_dry with informational advisories.
+    n = 0;
+    const heatAlert = {
+      event: 'Heat Advisory', category: 'heat_advisory', moveTrigger: false,
+      onset: `${WED}T10:00:00-05:00`, expires: `${WED}T18:00:00-05:00`,
+    };
+    const heatOut = await run({
+      now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()], { activeAlerts: jest.fn(async () => [heatAlert]) }),
+      read: jest.fn(async () => hoursFor({})),
+    });
+    expect(heatOut.proposals[0]).toMatchObject({ decision: 'none', reason: 'forecast_dry' });
+    expect(heatOut.proposals[0].advisories).toEqual([{ event: 'Heat Advisory', category: 'heat_advisory' }]);
   });
 });

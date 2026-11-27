@@ -98,11 +98,11 @@ describe('weather-forecast (NWS)', () => {
 
     const hours = await getHourlyRainOutlook(27.1, -82.45);
     expect(hours).toHaveLength(2);
-    // temperatureF / windMph ride along for the job-card spray check; the
-    // wind upper bound is the conservative number for a max-wind label limit.
-    expect(hours[0]).toEqual({ startTime: '2026-06-11T13:00:00-04:00', rainChance: 72, shortForecast: 'Thunderstorms', temperatureF: 88, windMph: 10, windDirection: null, relativeHumidity: null });
+    // temperatureF / windMph / hasThunder / windGustMph ride along for the job-card spray check
+    // and storm/thunder hazard triggers; the wind upper bound is the conservative number for a max-wind label limit.
+    expect(hours[0]).toEqual({ startTime: '2026-06-11T13:00:00-04:00', rainChance: 72, shortForecast: 'Thunderstorms', hasThunder: true, temperatureF: 88, windMph: 10, windGustMph: null, windDirection: null, relativeHumidity: null });
     expect(hours[1].rainChance).toBeNull();
-    expect(hours[1]).toMatchObject({ temperatureF: null, windMph: null, windDirection: null, relativeHumidity: null });
+    expect(hours[1]).toMatchObject({ hasThunder: false, temperatureF: null, windMph: null, windGustMph: null, windDirection: null, relativeHumidity: null });
 
     // Cached on the second call; null coords rejected without fetching.
     await getHourlyRainOutlook(27.1, -82.45);
@@ -168,5 +168,88 @@ describe('coordinate caches are size-bounded (Codex #6126 r4)', () => {
     }));
     for (let i = 0; i < 1000; i += 1) await getHourlyRainOutlook(27 + i / 100, -82.4);
     expect(_test._hourlyCache.size).toBe(CACHE_MAX_ENTRIES);
+  });
+});
+
+describe('NWS active alerts & unified weather hazard classification (owner 2026-11-26)', () => {
+  const wf = require('../services/weather-forecast');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    _test._alertsCache.clear();
+    global.fetch = jest.fn();
+  });
+
+  test('parseHasThunder and parseWindGustMph parse NWS fields cleanly', () => {
+    expect(wf.parseHasThunder('Chance Showers And Thunderstorms')).toBe(true);
+    expect(wf.parseHasThunder('Isolated T-Storms')).toBe(true);
+    expect(wf.parseHasThunder('Partly Sunny')).toBe(false);
+    expect(wf.parseWindGustMph('28 mph')).toBe(28);
+    expect(wf.parseWindGustMph({ value: 50, unitCode: 'wmoUnit:km_h-1' })).toBeCloseTo(31.1, 1);
+    expect(wf.parseWindGustMph(null)).toBeNull();
+  });
+
+  test('classifyNwsAlertEvent separates move triggers (tropical/severe/thunder) from alert-only (heat/wind)', () => {
+    expect(wf.classifyNwsAlertEvent('Tropical Storm Warning')).toEqual({ category: 'tropical_storm', moveTrigger: true });
+    expect(wf.classifyNwsAlertEvent('Hurricane Watch')).toEqual({ category: 'tropical_storm', moveTrigger: true });
+    expect(wf.classifyNwsAlertEvent('Severe Thunderstorm Warning')).toEqual({ category: 'severe_storm', moveTrigger: true });
+    expect(wf.classifyNwsAlertEvent('Tornado Warning')).toEqual({ category: 'severe_storm', moveTrigger: true });
+    expect(wf.classifyNwsAlertEvent('Flash Flood Warning')).toEqual({ category: 'severe_storm', moveTrigger: true });
+    expect(wf.classifyNwsAlertEvent('Heat Advisory')).toEqual({ category: 'heat_advisory', moveTrigger: false });
+    expect(wf.classifyNwsAlertEvent('Excessive Heat Warning')).toEqual({ category: 'heat_advisory', moveTrigger: false });
+    expect(wf.classifyNwsAlertEvent('Wind Advisory')).toEqual({ category: 'wind_advisory', moveTrigger: false });
+  });
+
+  test('getNwsActiveAlerts reads free api.weather.gov/alerts/active, caches, and fails open without PII logs', async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        features: [
+          { properties: { id: 'a1', event: 'Tropical Storm Warning', severity: 'Severe', onset: '2026-09-10T10:00:00-04:00', expires: '2026-09-10T22:00:00-04:00' } },
+          { properties: { id: 'a2', event: 'Heat Advisory', severity: 'Moderate', onset: '2026-09-10T12:00:00-04:00', expires: '2026-09-10T18:00:00-04:00' } },
+        ],
+      }),
+    });
+    const alerts = await wf.getNwsActiveAlerts(27.34, -82.53);
+    expect(alerts).toHaveLength(2);
+    expect(alerts[0]).toMatchObject({ event: 'Tropical Storm Warning', category: 'tropical_storm', moveTrigger: true });
+    expect(alerts[1]).toMatchObject({ event: 'Heat Advisory', category: 'heat_advisory', moveTrigger: false });
+    // Second call uses cache.
+    await wf.getNwsActiveAlerts(27.34, -82.53);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    // Fail-open without logging coords/URL.
+    global.fetch.mockRejectedValueOnce(new Error('timeout'));
+    expect(await wf.getNwsActiveAlerts(27.9912, -82.9987)).toBeNull();
+    for (const call of logger.info.mock.calls) {
+      expect(String(call[0])).not.toContain('27.99');
+      expect(String(call[0])).not.toContain('api.weather.gov');
+    }
+  });
+
+  test('classifyWeatherHazard: thunder/tropical move; heat and wind are alert-only and never move', () => {
+    const day = '2026-09-10';
+    const hotWindyHours = [
+      { startTime: `${day}T10:00:00-04:00`, rainChance: 10, shortForecast: 'Sunny', hasThunder: false, temperatureF: 96, relativeHumidity: 65, windMph: 26, windGustMph: 34 },
+    ];
+    const heatWindOnly = wf.classifyWeatherHazard(hotWindyHours, [
+      { event: 'Heat Advisory', category: 'heat_advisory', moveTrigger: false, onset: `${day}T09:00:00-04:00`, expires: `${day}T18:00:00-04:00` },
+      { event: 'Wind Advisory', category: 'wind_advisory', moveTrigger: false, onset: `${day}T09:00:00-04:00`, expires: `${day}T18:00:00-04:00` },
+    ], { day, startMin: 10 * 60, endMin: 11 * 60 });
+    expect(heatWindOnly.moveTrigger).toBe(false);
+    expect(heatWindOnly.advisories.map((a) => a.category)).toEqual(['heat_advisory', 'wind_advisory']);
+
+    const thunderHours = [
+      { startTime: `${day}T14:00:00-04:00`, rainChance: 55, shortForecast: 'Chance Thunderstorms', hasThunder: true },
+    ];
+    const thunder = wf.classifyWeatherHazard(thunderHours, [], { day, startMin: 14 * 60, endMin: 15 * 60 });
+    expect(thunder.moveTrigger).toBe(true);
+    expect(thunder.reasons).toContain('lightning_thunder');
+
+    const tropical = wf.classifyWeatherHazard(hotWindyHours, [
+      { event: 'Tropical Storm Warning', category: 'tropical_storm', moveTrigger: true, onset: `${day}T08:00:00-04:00`, expires: `${day}T20:00:00-04:00` },
+    ], { day, startMin: 10 * 60, endMin: 11 * 60 });
+    expect(tropical.moveTrigger).toBe(true);
+    expect(tropical.reasons).toContain('tropical_storm');
   });
 });

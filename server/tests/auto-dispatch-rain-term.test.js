@@ -151,6 +151,14 @@ describe('forecast read', () => {
     // Hours outside the work day do not count: rain at night only is a dry day.
     const nightOnly = hoursFor({ [VISIT_DATE]: 0 }).map((h) => (Number(h.startTime.slice(11, 13)) < 8 ? { ...h, rainChance: 100 } : h));
     expect(rainTerm.dayWetness(nightOnly, VISIT_DATE)).toBe(0);
+    // Thunderstorms (>=40% PoP) and active Tropical Storm warnings read full wetness (1.0).
+    const thunderDay = hoursFor({ [VISIT_DATE]: 45 }).map((h) => ({ ...h, hasThunder: true }));
+    expect(rainTerm.dayWetness(thunderDay, VISIT_DATE)).toBe(1);
+    const tropical = rainTerm._test.dayReading(hoursFor({ [VISIT_DATE]: 10 }), VISIT_DATE, [{
+      event: 'Tropical Storm Warning', category: 'tropical_storm', moveTrigger: true,
+      onset: `${VISIT_DATE}T07:00:00-05:00`, expires: `${VISIT_DATE}T19:00:00-05:00`,
+    }]);
+    expect(tropical).toEqual({ wetness: 1, complete: true });
   });
 });
 
