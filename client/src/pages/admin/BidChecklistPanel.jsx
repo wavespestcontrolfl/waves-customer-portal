@@ -106,17 +106,25 @@ function Details({ bid, busy, save }) {
 function EstimateLink({ bid, estimate, busy, save }) {
   const [query, setQuery] = useState("");
   const [found, setFound] = useState(null);
+  const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
+  const searchSeqRef = useRef(0);
   const search = async () => {
+    const seq = ++searchSeqRef.current;
+    setSearching(true);
     setError("");
     try {
       const res = await adminFetch(`/admin/bid-desk/estimates?q=${encodeURIComponent(query.trim())}`);
       const body = await res.json().catch(() => ({}));
+      if (seq !== searchSeqRef.current) return;
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
       setFound(body.estimates || []);
     } catch (err) {
+      if (seq !== searchSeqRef.current) return;
       setFound(null);
       setError(`Search failed: ${err.message}`);
+    } finally {
+      if (seq === searchSeqRef.current) setSearching(false);
     }
   };
   if (bid.estimate_id && estimate) {
@@ -137,7 +145,7 @@ function EstimateLink({ bid, estimate, busy, save }) {
             <Input value={query} onChange={(event) => setQuery(event.target.value)} autoComplete="off" />
           </Field>
         </div>
-        <Button variant="secondary" disabled={busy || query.trim().length < 2} onClick={search}>Search estimates</Button>
+        <Button variant="secondary" disabled={busy || searching || query.trim().length < 2} onClick={search}>Search estimates</Button>
       </div>
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       {found && found.length === 0 && <div className="text-ui-body text-ink-secondary">No estimate matches.</div>}
@@ -157,10 +165,13 @@ function EstimateLink({ bid, estimate, busy, save }) {
 
 function Documents({ documents }) {
   const [error, setError] = useState("");
+  const [downloadingId, setDownloadingId] = useState(null);
   const download = async (doc) => {
+    if (downloadingId === doc.id) return;
+    setDownloadingId(doc.id);
     setError("");
     try {
-      const res = await adminFetch(`/admin/email/message/${doc.email_id}/attachment/${encodeURIComponent(doc.gmail_attachment_id)}`, { skipContentType: true });
+      const res = await adminFetch(`/admin/email/message/${doc.email_id}/attachment/${encodeURIComponent(doc.gmail_attachment_id)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const url = URL.createObjectURL(await res.blob());
       const link = document.createElement("a");
@@ -169,9 +180,11 @@ function Documents({ documents }) {
       document.body.appendChild(link);
       link.click();
       link.remove();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL?.(url), 10000);
     } catch {
       setError("Could not download the file. Try again.");
+    } finally {
+      setDownloadingId((cur) => (cur === doc.id ? null : cur));
     }
   };
   if (!documents.length) return <div className="text-ui-body text-ink-secondary">No files came with the emails on this bid.</div>;
@@ -183,7 +196,11 @@ function Documents({ documents }) {
             <span className="min-w-0 break-words font-medium">{doc.name}</span>
             {doc.size != null && <span className="text-ink-secondary">{sizeText(doc.size)}</span>}
             <span className="min-w-0 break-words text-ink-secondary">from “{doc.email_subject || "(no subject)"}”</span>
-            {doc.gmail_attachment_id && <Button size="sm" variant="secondary" aria-label={`Download ${doc.name}`} onClick={() => download(doc)}>Download</Button>}
+            {doc.gmail_attachment_id && (
+              <Button size="sm" variant="secondary" disabled={downloadingId === doc.id} aria-label={`Download ${doc.name}`} onClick={() => download(doc)}>
+                Download
+              </Button>
+            )}
           </li>
         ))}
       </ul>
@@ -310,7 +327,7 @@ function AddRow({ busy, onAdd }) {
 
 function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, kit }) {
   const act = (path, method, body, query = "") => adminFetch(`/admin/bid-desk/${bidId}/checklist${path}${query}`, { method, ...(body === undefined ? {} : { body }) });
-  const start = (query) => run(() => act("/start", "POST", bid.solicitation_type ? { type: bid.solicitation_type } : {}, query));
+  const start = (query) => run(() => act("/start", "POST", {}, query));
   // "Add missing lines" is offered whenever the bid has template lines it does not carry (an unset type means the base
   // ten), even with no live lines left (a line added and removed must not leave the page with no way to start).
   const addMissing = missing > 0 && (
@@ -387,6 +404,9 @@ function Submission({ bid, busy, save, invite }) {
  */
 export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite, onProgress }) {
   const [state, setState] = useState(extras);
+  useEffect(() => {
+    setState(extras);
+  }, [extras]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState({ text: "", error: false });
   const [refreshError, setRefreshError] = useState("");

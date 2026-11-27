@@ -91,3 +91,61 @@ test('the scheduler runs the job under the cron lock', () => {
   expect(block).toContain("runExclusive('bid-desk-intake'");
   expect(block).toContain('runBidDeskTick');
 });
+
+describe('saveBidUpdate and checklist reorder hardening', () => {
+  const { saveBidUpdate } = require('../routes/admin-bid-desk');
+  const checklist = require('../services/bid-desk/checklist');
+
+  test('rejects archived estimates when linking estimateId', async () => {
+    const queries = [];
+    const trx = (table) => {
+      const state = { table, whereNulls: [] };
+      queries.push(state);
+      const q = {
+        where: () => q,
+        whereNull: (col) => { state.whereNulls.push(col); return q; },
+        forUpdate: () => q,
+        first: async () => (table === 'bid_opportunities' ? { id: ID, status: 'new', updated_at: new Date('2026-10-02T12:00:00.000Z') } : undefined),
+      };
+      return q;
+    };
+    const out = await saveBidUpdate(trx, ID, { estimateId: '22222222-2222-4333-8444-555555555555' });
+    expect(out).toEqual({ status: 400, body: { error: 'That estimate does not exist or is archived' } });
+    expect(queries.find((q) => q.table === 'estimates')?.whereNulls).toEqual(['archived_at']);
+  });
+
+  test('enforces expected_updated_at concurrency fence on non-date updates when supplied', async () => {
+    let fencedSql = null;
+    const trx = () => {
+      const q = {
+        where: () => q,
+        forUpdate: () => q,
+        first: async () => ({ id: ID, status: 'new', updated_at: new Date('2026-10-02T13:00:00.000Z') }),
+        modify: (fn) => { fn(q); return q; },
+        whereRaw: (sql, args) => { fencedSql = [sql, args]; return q; },
+        update: async () => 0,
+      };
+      return q;
+    };
+    trx.raw = (sql) => sql;
+    const out = await saveBidUpdate(trx, ID, { status: 'bid', expected_updated_at: '2026-10-02T12:00:00.000Z' });
+    expect(out).toEqual({ status: 409, body: { error: 'This bid changed since you opened it. Reload and check it again.' } });
+    expect(fencedSql).toEqual(["date_trunc('milliseconds', updated_at) = ?::timestamptz", ['2026-10-02T12:00:00.000Z']]);
+  });
+
+  test('reorderItems updates positions in a single batched VALUES query', async () => {
+    const rawCalls = [];
+    const id1 = '11111111-1111-4111-8111-111111111111';
+    const id2 = '22222222-2222-4222-8222-222222222222';
+    const conn = () => {
+      const q = { where: () => q, whereNull: () => q, forUpdate: () => q, select: async () => [{ id: id1 }, { id: id2 }] };
+      return q;
+    };
+    conn.raw = jest.fn(async (sql, bindings) => { rawCalls.push({ sql, bindings }); });
+    const ok = await checklist.reorderItems(conn, ID, [id2, id1]);
+    expect(ok).toBe(true);
+    expect(rawCalls).toHaveLength(1);
+    expect(rawCalls[0].sql).toContain('FROM (VALUES (?::uuid, ?::int), (?::uuid, ?::int)) AS v(id, pos)');
+    expect(rawCalls[0].bindings).toEqual([id2, 1, id1, 2, ID]);
+  });
+});

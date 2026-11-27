@@ -60,7 +60,7 @@ it("starts a checklist from the bid's type, then ticks a line", async () => {
   renderPage();
   fireEvent.click(await screen.findByRole("button", { name: "Start checklist" }));
   await waitFor(() => expect(start).toHaveBeenCalled());
-  expect(start.mock.calls[0][0].body).toEqual({ type: "itb" });
+  expect(start.mock.calls[0][0].body).toEqual({});
   expect(await screen.findByText("Line 1")).toBeInTheDocument();
   expect(screen.getByText(/Section 3.2, page 4/)).toBeInTheDocument();
   const panel = () => within(screen.getByTestId("bid-checklist-panel"));
@@ -101,6 +101,7 @@ it("saves the type, the dates and the mandatory walk in one request", async () =
   await waitFor(() => expect(patch).toHaveBeenCalled());
   expect(patch.mock.calls[0][0].body).toEqual({
     solicitationType: "rfp", scored: true, questionsDueAt: "2026-10-10T17:00", jobWalkAt: "2026-10-12T09:30", jobWalkMandatory: true,
+    expected_updated_at: "2026-10-02T12:00:00.000Z",
   });
 });
 
@@ -126,7 +127,7 @@ it("lists the documents and links an estimate to its proposal", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Search estimates" }));
   fireEvent.click(await screen.findByRole("button", { name: "Link" }));
   await waitFor(() => expect(link).toHaveBeenCalled());
-  expect(link.mock.calls[0][0].body).toEqual({ estimateId: "e1" });
+  expect(link.mock.calls[0][0].body).toEqual({ estimateId: "e1", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   const open = await screen.findByRole("link", { name: "Open proposal" });
   expect(open).toHaveAttribute("href", "/admin/estimates/e1/proposal");
 });
@@ -143,11 +144,11 @@ it("invites the submission record when Submitted is chosen, and saves it without
   // Submitting with nothing typed is allowed.
   fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
-  expect(patch.mock.calls[0][0].body).toEqual({ status: "submitted", decision_note: "" });
+  expect(patch.mock.calls[0][0].body).toEqual({ status: "submitted", decision_note: "", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   fireEvent.change(screen.getByLabelText("Confirmation number or receipt"), { target: { value: "Receipt 55" } });
   fireEvent.click(screen.getByRole("button", { name: "Save submission" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-  expect(patch.mock.calls[1][0].body).toEqual({ submittedAt: null, submissionConfirmation: "Receipt 55" });
+  expect(patch.mock.calls[1][0].body).toEqual({ submittedAt: null, submissionConfirmation: "Receipt 55", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   expect(within(screen.getByTestId("bid-checklist-panel")).getByText("Submission record")).toBeInTheDocument();
 });
 
@@ -161,7 +162,7 @@ it("shows a template-read site visit date as unconfirmed and confirms it without
   renderPage();
   fireEvent.click(await screen.findByRole("button", { name: "Confirm site visit date" }));
   await waitFor(() => expect(confirm).toHaveBeenCalled());
-  expect(confirm.mock.calls[0][0].body).toEqual({ jobWalkConfirmed: true });
+  expect(confirm.mock.calls[0][0].body).toEqual({ jobWalkConfirmed: true, expected_updated_at: "2026-10-02T12:00:00.000Z" });
   await waitFor(() => expect(screen.queryByRole("button", { name: "Confirm site visit date" })).toBeNull());
 });
 
@@ -198,7 +199,7 @@ it("saving only the type does not send the prefilled site visit or questions dat
   fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
   await waitFor(() => expect(patch).toHaveBeenCalled());
   const body = patch.mock.calls[0][0].body;
-  expect(body).toEqual({ solicitationType: "itb" });
+  expect(body).toEqual({ solicitationType: "itb", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   expect(body).not.toHaveProperty("jobWalkAt");
   expect(body).not.toHaveProperty("questionsDueAt");
 });
@@ -214,7 +215,7 @@ it("sends a date only after the operator edits that field", async () => {
   fireEvent.change(await screen.findByLabelText(/Site visit or job walk/), { target: { value: "2026-10-10T10:00" } });
   fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
   await waitFor(() => expect(patch).toHaveBeenCalled());
-  expect(patch.mock.calls[0][0].body).toEqual({ jobWalkAt: "2026-10-10T10:00" });
+  expect(patch.mock.calls[0][0].body).toEqual({ jobWalkAt: "2026-10-10T10:00", expected_updated_at: "2026-10-02T12:00:00.000Z" });
 });
 
 it("ticking a checklist line moves the chip in the list row at once", async () => {
@@ -245,7 +246,7 @@ it("with no live lines left, still offers Add missing lines for the bid's type a
   expect(await screen.findByRole("button", { name: "Start checklist" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Add missing lines for this type" }));
   await waitFor(() => expect(add).toHaveBeenCalled());
-  expect(add.mock.calls[0][0].body).toEqual({ type: "quote" });
+  expect(add.mock.calls[0][0].body).toEqual({});
 });
 
 it("offers no Add missing lines when nothing is missing, and shows the server's message when every template line was removed", async () => {
@@ -279,7 +280,7 @@ it("downloads a document through the email attachment route, built by the page f
   expect(screen.queryByRole("button", { name: "Download no-download.txt" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Download bid-form.pdf" }));
   await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
-  expect(adminFetch).toHaveBeenCalledWith("/admin/email/message/m1/attachment/g%2F1", { skipContentType: true });
+  expect(adminFetch).toHaveBeenCalledWith("/admin/email/message/m1/attachment/g%2F1");
 });
 
 it("offers Add missing lines once the type changes on a checklist that is already started", async () => {

@@ -9,7 +9,7 @@ import { useAdminTableScroll } from "../../hooks/useAdminTableScroll";
 import { useAdminTableViews } from "../../hooks/useAdminTableViews";
 import { normalizeTableColumns } from "../../lib/adminTableViewStorage";
 import { adminFetch } from "../../lib/adminFetch";
-import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
+import { etDateString, etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
 import BidChecklistPanel, { UNCONFIRMED_MESSAGE } from "./BidChecklistPanel";
 
 // Bid Desk. Bid invites the email sync stored, filed by a job. The page only reads them and
@@ -36,6 +36,11 @@ function SourceLines({ bid }) {
       {bid.solicitation_number && <div><span className="text-ink-secondary">Solicitation: </span>{bid.solicitation_number}</div>}
       {isSamLink(bid.external_url) && (
         <div><a className="underline" href={bid.external_url} target="_blank" rel="noopener noreferrer">Open the notice on SAM.gov</a></div>
+      )}
+      {bid.source === "sam_gov" && bid.source_active === false && (
+        <div className="text-alert-fg">
+          SAM.gov no longer lists this notice as active. Check the notice on SAM.gov and decide the bid.
+        </div>
       )}
     </>
   );
@@ -301,8 +306,11 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const save = async (body, done) => {
     setBusy(true);
     setMessage("");
+    const payload = !("expected_updated_at" in body) && state.bid?.updated_at
+      ? { ...body, expected_updated_at: state.bid.updated_at }
+      : body;
     try {
-      const data = await api(`/${bidId}`, { method: "PATCH", body });
+      const data = await api(`/${bidId}`, { method: "PATCH", body: payload });
       setState((s) => ({ ...s, bid: data.bid }));
       // Only a date save resets the date field: a decision saved first keeps a date the operator typed but has
       // not saved yet.
@@ -318,6 +326,10 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
     } catch (err) {
       if (err instanceof ApiError) {
         setMessage(`Not saved: ${err.message}`);
+        if (err.status === 409) {
+          onChanged();
+          await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+        }
       } else {
         // No answer arrived (the network dropped): the server may have written the change, so show what it has.
         // Awaited before the saves unlock (finally): a save made meanwhile would be overwritten by this older read.
@@ -556,10 +568,12 @@ export default function BidDeskPage({ embedded = false }) {
   const { state: tableState, setState: setTableState } = tableViews;
   const { filter, showEarlier, search, sort, visibleColumns, page, pageSize, scrollTop } = tableState;
 
+  const loadedDayRef = useRef(etDateString());
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const data = await api("/");
+      loadedDayRef.current = etDateString();
       setBids(data.bids);
       setError({ text: "", off: false });
     } catch (err) {
@@ -569,6 +583,12 @@ export default function BidDeskPage({ embedded = false }) {
     }
   }, []);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (etDateString() !== loadedDayRef.current) load();
+    }, 60 * 1000);
+    return () => clearInterval(timer);
+  }, [load]);
 
   // A checklist change in the open bid moves its chip in the list at once.
   const setProgress = useCallback((id, progress) => {
