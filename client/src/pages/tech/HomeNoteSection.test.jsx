@@ -10,7 +10,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const PATH = '/admin/customers/c1/home-note';
 const CUSTOMER = 'c1';
-const NOTE = { body: 'Side gate sticks. Dog stays inside.', revision: 3, updatedAt: '2026-11-26T15:00:00.000Z', updatedByFirstName: 'Ada' };
+const NOTE = { id: 'note-a', body: 'Side gate sticks. Dog stays inside.', revision: 3, updatedAt: '2026-11-26T15:00:00.000Z', updatedByFirstName: 'Ada' };
 const refusal = (status, details, message = 'refused') => Object.assign(new Error(message), { status, details });
 const puts = (request) => request.mock.calls.filter(([, options]) => options?.method === 'PUT');
 
@@ -42,7 +42,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
     expect(await screen.findByText('Saved.')).toBeInTheDocument();
     expect(screen.getByText('New text')).toBeInTheDocument();
     expect(puts(request)[0][0]).toBe(PATH);
-    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'New text', expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER });
+    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'New text', expectedNoteId: NOTE.id, expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER });
   });
 
   it('counts past 1000 (a joined note can be longer), and will not save until it is shortened', async () => {
@@ -58,7 +58,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
   });
 
   it('on a stale save shows their newer text; Keep editing pins their time, Cancel drops the draft', async () => {
-    const theirs = { ...NOTE, body: 'Their newer text', revision: 4, updatedAt: '2026-11-26T15:30:00.000Z', updatedByFirstName: 'Sam' };
+    const theirs = { ...NOTE, id: 'note-b', body: 'Their newer text', revision: 4, updatedAt: '2026-11-26T15:30:00.000Z', updatedByFirstName: 'Sam' };
     let calls = 0;
     const request = vi.fn(async (_path, options) => {
       if (options?.method !== 'PUT') return { note: NOTE, editable: true, customerId: CUSTOMER };
@@ -77,7 +77,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText('Saved.')).toBeInTheDocument();
     expect(JSON.parse(puts(request)[0][1].body).expectedRevision).toBe(NOTE.revision);
-    expect(JSON.parse(puts(request)[1][1].body).expectedRevision).toBe(4);
+    expect(JSON.parse(puts(request)[1][1].body)).toMatchObject({ expectedNoteId: 'note-b', expectedRevision: 4 });
   });
 
   it('Cancel on a stale save shows the newer note and closes the editor', async () => {
@@ -137,7 +137,7 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
   it('shows the note the brief carried without asking the server, and refreshes the brief after a save', async () => {
     const request = vi.fn(async () => ({ note: { ...NOTE, body: 'New text' } }));
     const onSaved = vi.fn();
-    render(<HomeNoteSection request={request} services={services} byService={answered(NOTE)} onSaved={onSaved} />);
+    render(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(NOTE)} onSaved={onSaved} />);
     expect(screen.getByText(NOTE.body)).toBeInTheDocument();
     expect(request).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
@@ -149,50 +149,64 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
   it('a brief that refreshes under an open editor does not move the pinned revision: Save sends the ORIGINAL one', async () => {
     const request = vi.fn(async () => ({ note: { ...NOTE, body: 'Mine' } }));
     const newer = { ...NOTE, body: 'Changed by someone', revision: 4, updatedAt: '2026-11-26T15:45:00.000Z' };
-    const { rerender } = render(<HomeNoteSection request={request} services={services} byService={answered(NOTE)} />);
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(NOTE)} />);
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Mine' } });
-    rerender(<HomeNoteSection request={request} services={services} byService={answered(newer)} />);
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(newer)} />);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(puts(request)).toHaveLength(1));
-    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'Mine', expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER });
+    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'Mine', expectedNoteId: NOTE.id, expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER });
   });
 
   it('a refreshed brief brings a newer note down when no editor is open', async () => {
-    const { rerender } = render(<HomeNoteSection request={vi.fn()} services={services} byService={answered(NOTE)} />);
-    rerender(<HomeNoteSection request={vi.fn()} services={services} byService={answered({ ...NOTE, body: 'From the refreshed brief' })} />);
+    const { rerender } = render(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={services} byService={answered(NOTE)} />);
+    rerender(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={services} byService={answered({ ...NOTE, body: 'From the refreshed brief' })} />);
     expect(await screen.findByText('From the refreshed brief')).toBeInTheDocument();
   });
 
   it('null note reads No note yet; no member that carried the key shows nothing', () => {
-    const { container, rerender } = render(<HomeNoteSection request={vi.fn()} services={services} byService={answered(null)} />);
+    const { container, rerender } = render(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={services} byService={answered(null)} />);
     expect(screen.getByText('No note yet.')).toBeInTheDocument();
-    rerender(<HomeNoteSection request={vi.fn()} services={services} byService={{ a: { brief: { brief: null } } }} />);
+    rerender(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={services} byService={{ a: { brief: { brief: null } } }} />);
     expect(container).toBeEmptyDOMElement();
     expect(homeNoteFor(services, { a: { brief: { homeNote: { note: null, customerId: CUSTOMER } } }, b: { brief: { homeNote: { note: NOTE, customerId: CUSTOMER } } } })).toEqual({ id: 'a', note: null, customerId: CUSTOMER });
   });
 
-  it('switching to another stop drops the open draft, and a late answer from the old stop is ignored', async () => {
+  it('a different stopKey drops the draft and its pinned route at once; a late answer from the old stop is ignored', async () => {
     let release;
     const request = vi.fn((_path, options) => (options?.method === 'PUT' ? new Promise((resolve) => { release = () => resolve({ note: { ...NOTE, body: 'Mine' } }); }) : Promise.resolve({})));
     const onSaved = vi.fn();
-    const { rerender } = render(<HomeNoteSection request={request} services={services} byService={answered(NOTE)} onSaved={onSaved} />);
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(NOTE)} onSaved={onSaved} />);
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Mine' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(screen.getByLabelText('About this home')).toBeDisabled();
-    const other = [{ id: 'z' }];
-    rerender(<HomeNoteSection request={request} services={other} byService={{ z: { brief: { homeNote: { note: null, customerId: 'c2' } } } }} onSaved={onSaved} />);
+    // The new stop's brief is still loading (no homeNote yet) and is the SAME customer: still a different stop.
+    rerender(<HomeNoteSection request={request} stopKey="stop-2" services={[{ id: 'z' }]} byService={{}} onSaved={onSaved} />);
+    expect(screen.queryByLabelText('About this home')).toBeNull();
+    expect(screen.queryByText('Edit')).toBeNull();
+    rerender(<HomeNoteSection request={request} stopKey="stop-2" services={[{ id: 'z' }]} byService={{ z: { brief: { homeNote: { note: null, customerId: CUSTOMER } } } }} onSaved={onSaved} />);
     release();
     await waitFor(() => expect(screen.getByText('No note yet.')).toBeInTheDocument());
+    expect(screen.queryByLabelText('About this home')).toBeNull();
     expect(screen.queryByText('Saved.')).toBeNull();
     expect(onSaved).not.toHaveBeenCalled();
+    expect(puts(request)).toHaveLength(1);
     expect(puts(request)[0][0]).toBe('/admin/schedule/b/home-note');
+  });
+
+  it('a different customer under the same stopKey also drops the draft', async () => {
+    const request = vi.fn(async () => ({}));
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(NOTE)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={{ b: { brief: { homeNote: { note: null, customerId: 'c2' } } } }} />);
+    await waitFor(() => expect(screen.queryByLabelText('About this home')).toBeNull());
+    expect(screen.getByText('No note yet.')).toBeInTheDocument();
   });
 
   it('a visit that moved to another customer is refused: the error shows, no conflict card', async () => {
     const request = vi.fn(async () => { throw refusal(409, { code: 'customer_changed' }, 'This visit now belongs to another customer. Reload it.'); });
-    render(<HomeNoteSection request={request} services={services} byService={answered(null)} />);
+    render(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(null)} />);
     fireEvent.click(screen.getByRole('button', { name: 'Add note' }));
     fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'x' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -202,23 +216,23 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
 
   it('a refresh that omits the note (lookup failed) leaves an open draft exactly as typed, pinned route and revision intact', async () => {
     const request = vi.fn(async () => ({ note: { ...NOTE, body: 'Mine' } }));
-    const { rerender } = render(<HomeNoteSection request={request} services={services} byService={answered(NOTE)} />);
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(NOTE)} />);
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Half typed note' } });
-    rerender(<HomeNoteSection request={request} services={services} byService={{ b: { brief: { brief: null } } }} />);
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={{ b: { brief: { brief: null } } }} />);
     expect(screen.getByLabelText('About this home')).toHaveValue('Half typed note');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(puts(request)).toHaveLength(1));
     expect(puts(request)[0][0]).toBe('/admin/schedule/b/home-note');
-    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'Half typed note', expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER });
+    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'Half typed note', expectedNoteId: NOTE.id, expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER });
   });
 
   it('a grouped stop that switches which member supplies the note (same customer) keeps the draft and its pin', async () => {
     const request = vi.fn(async () => ({ note: { ...NOTE, body: 'Mine' } }));
-    const { rerender } = render(<HomeNoteSection request={request} services={services} byService={answered(NOTE)} />);
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(NOTE)} />);
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Still mine' } });
-    rerender(<HomeNoteSection request={request} services={services} byService={{ a: { brief: { homeNote: { note: { ...NOTE, revision: 5 }, customerId: CUSTOMER } } } }} />);
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={{ a: { brief: { homeNote: { note: { ...NOTE, revision: 5 }, customerId: CUSTOMER } } } }} />);
     expect(screen.getByLabelText('About this home')).toHaveValue('Still mine');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(puts(request)).toHaveLength(1));

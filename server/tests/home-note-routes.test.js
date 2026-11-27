@@ -80,7 +80,7 @@ const call = (base, path, { method = 'GET', role = 'admin', body } = {}) => fetc
   ...(body ? { body: JSON.stringify(body) } : {}),
 });
 
-const NOTE = { body: 'Side gate sticks.', revision: 3, updatedAt: '2026-11-26T15:00:00.000Z', updatedByFirstName: 'Ada' };
+const NOTE = { id: 'note-a', body: 'Side gate sticks.', revision: 3, updatedAt: '2026-11-26T15:00:00.000Z', updatedByFirstName: 'Ada' };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -96,11 +96,11 @@ describe('visit routes', () => {
       expect(read.status).toBe(200);
       expect(await read.json()).toEqual({ note: NOTE, editable: true, customerId: CUSTOMER });
       expect(mockRead).toHaveBeenCalledWith(VISIT_ROW);
-      const put = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'New text', expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER } });
+      const put = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'New text', expectedNoteId: NOTE.id, expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER } });
       expect(put.status).toBe(200);
       const [row, input, opts] = mockSave.mock.calls[0];
       expect(row).toEqual(VISIT_ROW);
-      expect(input).toMatchObject({ body: 'New text', expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER, actor: { type: 'technician', id: 'tech-1' } });
+      expect(input).toMatchObject({ body: 'New text', expectedNoteId: NOTE.id, expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER, actor: { type: 'technician', id: 'tech-1' } });
       expect(opts.conn).toBeDefined();
     });
   });

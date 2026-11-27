@@ -85,9 +85,9 @@ jest.setTimeout(30000);
 
   test('a stale save is 409 with the current note and writes nothing', async () => {
     const first = await saveHomeNote(visit(), { body: 'v1', actor: actor() });
-    const second = await saveHomeNote(visit(), { body: 'v2', expectedRevision: first.note.revision, actor: actor({ type: 'admin' }) });
+    const second = await saveHomeNote(visit(), { body: 'v2', expectedNoteId: first.note.id, expectedRevision: first.note.revision, actor: actor({ type: 'admin' }) });
     expect(second.status).toBe(200);
-    const stale = await saveHomeNote(visit(), { body: 'v3', expectedRevision: first.note.revision, actor: actor() });
+    const stale = await saveHomeNote(visit(), { body: 'v3', expectedNoteId: first.note.id, expectedRevision: first.note.revision, actor: actor() });
     expect(stale).toMatchObject({ status: 409, code: 'note_changed', note: { body: 'v2', revision: 2 } });
     expect((await readHomeNote(visit())).note.body).toBe('v2');
     // A second editor that thought there was no note is also stale.
@@ -100,11 +100,29 @@ jest.setTimeout(30000);
     const RealDate = Date;
     global.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : [fixed])); } };
     try {
-      const a = await saveHomeNote(visit(), { body: 'v5', expectedRevision: 2, actor: actor() });
-      const b = await saveHomeNote(visit(), { body: 'v6', expectedRevision: 2, actor: actor() });
+      const a = await saveHomeNote(visit(), { body: 'v5', expectedNoteId: first.note.id, expectedRevision: 2, actor: actor() });
+      const b = await saveHomeNote(visit(), { body: 'v6', expectedNoteId: first.note.id, expectedRevision: 2, actor: actor() });
       expect([a.status, b.status]).toEqual([200, 409]);
       expect(a.note.revision).toBe(3);
     } finally { global.Date = RealDate; }
+  });
+
+  test('delete then recreate: an editor holding the OLD note (id A, revision 1) is refused on save and on delete', async () => {
+    const a = await saveHomeNote(visit(), { body: 'old note', actor: actor() });
+    expect(a.note.revision).toBe(1);
+    await saveHomeNote(visit(), { body: '', expectedNoteId: a.note.id, expectedRevision: 1, actor: actor() });
+    const b = await saveHomeNote(visit(), { body: 'replacement', actor: actor() });
+    expect(b.note.revision).toBe(1);
+    expect(b.note.id).not.toBe(a.note.id);
+    const staleSave = await saveHomeNote(visit(), { body: 'overwrite', expectedNoteId: a.note.id, expectedRevision: 1, actor: actor() });
+    expect(staleSave).toMatchObject({ status: 409, code: 'note_changed', note: { id: b.note.id, body: 'replacement' } });
+    const staleDelete = await saveHomeNote(visit(), { body: '', expectedNoteId: a.note.id, expectedRevision: 1, actor: actor() });
+    expect(staleDelete.status).toBe(409);
+    expect((await readHomeNote(visit())).note.body).toBe('replacement');
+    // The right id with a wrong revision, and the right revision with no id, are refused too.
+    expect((await saveHomeNote(visit(), { body: 'x', expectedNoteId: b.note.id, expectedRevision: 9, actor: actor() })).status).toBe(409);
+    expect((await saveHomeNote(visit(), { body: 'x', expectedNoteId: null, expectedRevision: 1, actor: actor() })).status).toBe(409);
+    expect((await saveHomeNote(visit(), { body: 'ok', expectedNoteId: b.note.id, expectedRevision: 1, actor: actor() })).status).toBe(200);
   });
 
   test('two first saves at once: one wins, the other is told 409 with the winner\'s note', async () => {
@@ -120,7 +138,7 @@ jest.setTimeout(30000);
     expect((await saveHomeNote(visit(), { body: 'x'.repeat(1001), actor: actor() })).status).toBe(400);
     expect((await saveHomeNote(visit(), { body: 'x'.repeat(1000), actor: actor() })).status).toBe(200);
     const current = (await readHomeNote(visit())).note;
-    const gone = await saveHomeNote(visit(), { body: '   ', expectedRevision: current.revision, actor: actor() });
+    const gone = await saveHomeNote(visit(), { body: '   ', expectedNoteId: current.id, expectedRevision: current.revision, actor: actor() });
     expect(gone).toEqual({ status: 200, note: null });
     expect(await database('home_notes').count('* as n').first()).toMatchObject({ n: '0' });
     expect((await database('audit_log').pluck('action')).sort()).toEqual(['home_note.create', 'home_note.delete']);

@@ -78,6 +78,22 @@ function Conflict({ note, onKeep, onCancel }) {
   );
 }
 
+function NoteReadView({ note, onEdit }) {
+  return (
+    <>
+      {note ? (
+        <>
+          <p style={{ fontSize: 14, color: C.text, margin: '3px 0 0', whiteSpace: 'pre-wrap' }}>{note.body}</p>
+          <p style={lineStyle}>{byline(note)}</p>
+        </>
+      ) : <p style={lineStyle}>No note yet.</p>}
+      <div style={{ marginTop: 6 }}>
+        <button type="button" onClick={onEdit} style={quietBtn}>{note ? 'Edit' : 'Add note'}</button>
+      </div>
+    </>
+  );
+}
+
 const IDLE = { busy: false, error: '', saved: false, conflict: null };
 
 const loadedFrom = (data) => ({ status: data?.editable === false ? 'none' : 'ready', note: data?.note || null, customerId: data?.customerId || null });
@@ -90,6 +106,19 @@ const saveFailure = (err) => {
   if (err?.status === 409 && code !== 'customer_changed') return { ...IDLE, conflict: { note: refusalNote(err) || null } };
   return { ...IDLE, error: String(err?.message || err).slice(0, 160) };
 };
+const initialLoad = (picked) => (picked
+  ? { status: 'ready', note: picked.note, customerId: picked.customerId }
+  : { status: 'loading', note: null, customerId: null });
+// What editing is checked against: the stop, the customer, and the exact note (id + revision) it started from.
+const pinFor = (route, stopKey, load) => ({
+  route, stopKey, noteId: load.note?.id || null, revision: load.note?.revision || 0, customerId: load.customerId,
+});
+const repinned = (pin, note) => ({ ...pin, noteId: note?.id || null, revision: note?.revision || 0 });
+// An answer with no `note` field (an unreadable 2xx) is an unknown outcome: the draft stays.
+const confirmedNote = (out) => {
+  if (!out || !('note' in out)) throw new Error('Could not confirm the save. Your text is still here; check the note and try again.');
+  return out.note || null;
+};
 const movedToOtherCustomer = (pin, customerId) => Boolean(pin && customerId && pin.customerId && customerId !== pin.customerId);
 // An open draft keeps its own route when a refreshed brief carries no note (a failed lookup) or another stop member supplies it.
 const noteRoute = (picked, pin, path) => {
@@ -97,19 +126,23 @@ const noteRoute = (picked, pin, path) => {
   return picked ? visitNotePath(picked.id) : (pin && pin.route) || null;
 };
 
-export default function HomeNoteSection({ request, path, services, byService, onSaved }) {
+export default function HomeNoteSection({ request, path, stopKey, services, byService, onSaved }) {
   const picked = services ? homeNoteFor(services, byService) : null;
   const fed = Boolean(services);
-  const [load, setLoad] = useState(picked ? { status: 'ready', note: picked.note, customerId: picked.customerId } : { status: 'loading', note: null, customerId: null });
+  const [load, setLoad] = useState(initialLoad(picked));
   const [draft, setDraft] = useState(null);
   // What editing started from: the route, the customer and the note's revision. Every save is checked against these, never
   // against what the panel shows now, so a refreshed brief or a stop switched under an open editor cannot redirect it.
   const [pin, setPin] = useState(null);
   const [state, setState] = useState(IDLE);
-  const route = noteRoute(picked, pin, fed ? null : path);
+  // The draft belongs to ONE stop: a different stopKey ends it at once (nothing of it renders or can be saved), while the same
+  // stopKey keeps it across a refresh that omits the note or a grouped stop switching the member that supplies it.
+  const livePin = pin && pin.stopKey === stopKey ? pin : null;
+  const shownDraft = livePin ? draft : null;
+  const route = noteRoute(picked, livePin, fed ? null : path);
   // The pin an in-flight save belongs to: an answer arriving after the draft ended (Cancel, another customer) is ignored.
   const pinRef = useRef(null);
-  pinRef.current = pin;
+  pinRef.current = livePin;
   const read = useCallback(() => {
     setLoad({ status: 'loading', note: null, customerId: null });
     request(route)
@@ -125,18 +158,18 @@ export default function HomeNoteSection({ request, path, services, byService, on
   // a different customer (the office page: another path). A brief that omits the note, or a grouped stop that switches
   // which member supplies it, leaves the draft exactly as typed.
   const dropDraft = () => { setDraft(null); setPin(null); setState(IDLE); };
-  useEffect(() => { if (movedToOtherCustomer(pin, pickedCustomer)) dropDraft(); }, [pickedCustomer]);
+  useEffect(() => { if (movedToOtherCustomer(livePin, pickedCustomer)) dropDraft(); }, [pickedCustomer]);
+  useEffect(() => { if (pin && !livePin) dropDraft(); }, [stopKey]);
   useEffect(() => { if (!fed) dropDraft(); }, [fed, path]);
 
   async function save() {
-    if (state.busy || !pin) return;
+    if (state.busy || !livePin) return;
+    const pin = livePin;
     setState({ ...IDLE, busy: true });
     try {
-      const out = await request(pin.route, { method: 'PUT', body: JSON.stringify({ body: draft, expectedRevision: pin.revision, expectedCustomerId: pin.customerId }) });
+      const out = await request(pin.route, { method: 'PUT', body: JSON.stringify({ body: draft, expectedNoteId: pin.noteId, expectedRevision: pin.revision, expectedCustomerId: pin.customerId }) });
       if (pinRef.current !== pin) return;
-      // An answer with no `note` field (an unreadable 2xx) is an unknown outcome: the draft stays.
-      if (!out || !('note' in out)) throw new Error('Could not confirm the save. Your text is still here; check the note and try again.');
-      setLoad({ status: 'ready', note: out.note || null, customerId: pin.customerId });
+      setLoad({ status: 'ready', note: confirmedNote(out), customerId: pin.customerId });
       setDraft(null);
       setPin(null);
       setState({ ...IDLE, saved: true });
@@ -146,13 +179,12 @@ export default function HomeNoteSection({ request, path, services, byService, on
       setState(saveFailure(err));
     }
   }
-  const startEdit = () => { setPin({ route, revision: load.note?.revision || 0, customerId: load.customerId }); setDraft(load.note?.body || ''); setState(IDLE); };
+  const startEdit = () => { setPin(pinFor(route, stopKey, load)); setDraft(load.note?.body || ''); setState(IDLE); };
   // Keep editing: the draft stays, and the next save is checked against the newer note it just saw.
-  const keepMine = () => { setPin({ ...pin, revision: state.conflict.note?.revision || 0 }); setLoad({ ...load, note: state.conflict.note }); setState(IDLE); };
+  const keepMine = () => { setPin(repinned(livePin, state.conflict.note)); setLoad({ ...load, note: state.conflict.note }); setState(IDLE); };
   const cancelEdit = () => { if (state.conflict) setLoad({ ...load, note: state.conflict.note }); setDraft(null); setPin(null); setState(IDLE); };
 
   if (!request || !route || load.status === 'none') return load.message ? <p style={lineStyle}>{load.message}</p> : null;
-  const note = load.note;
   return (
     <div data-testid="home-note-section">
       <div style={labelStyle}>About this home</div>
@@ -162,20 +194,8 @@ export default function HomeNoteSection({ request, path, services, byService, on
           Couldn&apos;t load the note. <button type="button" onClick={read} style={{ ...quietBtn, minHeight: 40, marginLeft: 8 }}>Retry</button>
         </p>
       )}
-      {load.status === 'ready' && draft === null && (
-        <>
-          {note ? (
-            <>
-              <p style={{ fontSize: 14, color: C.text, margin: '3px 0 0', whiteSpace: 'pre-wrap' }}>{note.body}</p>
-              <p style={lineStyle}>{byline(note)}</p>
-            </>
-          ) : <p style={lineStyle}>No note yet.</p>}
-          <div style={{ marginTop: 6 }}>
-            <button type="button" onClick={startEdit} style={quietBtn}>{note ? 'Edit' : 'Add note'}</button>
-          </div>
-        </>
-      )}
-      {draft !== null && <NoteEditor draft={draft} setDraft={setDraft} state={state} onSave={save} onCancel={cancelEdit} />}
+      {load.status === 'ready' && shownDraft === null && <NoteReadView note={load.note} onEdit={startEdit} />}
+      {shownDraft !== null && <NoteEditor draft={shownDraft} setDraft={setDraft} state={state} onSave={save} onCancel={cancelEdit} />}
       {state.conflict && <Conflict note={state.conflict.note} onKeep={keepMine} onCancel={cancelEdit} />}
       {state.saved && <p role="status" style={lineStyle}>Saved.</p>}
       {state.error && <p role="alert" style={{ ...lineStyle, color: C.red }}>{state.error}</p>}

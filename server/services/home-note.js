@@ -9,7 +9,7 @@
  *
  * Keyed by customer alone, like property_preferences: a customer with several homes shares one note.
  *
- * Stale guard: a save carries the revision the editor last saw (`expectedRevision`, 0 or null = "no note yet"). When the
+ * Stale guard: a save carries the note id and revision the editor last saw (`expectedNoteId` + `expectedRevision`; none = "no note yet"). When the
  * stored row differs, nothing is written and the answer is 409 with the current note, so two phones never overwrite
  * each other unseen.
  */
@@ -28,7 +28,7 @@ async function shapeNote(row, conn) {
     name = firstName(tech && tech.name);
   }
   return {
-    body: row.body, revision: row.revision, updatedAt: new Date(row.updated_at).toISOString(), updatedByFirstName: name,
+    id: row.id, body: row.body, revision: row.revision, updatedAt: new Date(row.updated_at).toISOString(), updatedByFirstName: name,
   };
 }
 
@@ -48,6 +48,14 @@ async function readHomeNote(row, { conn = db } = {}) {
 // A database error can carry the bound values (the note's text) in its message; only the operation and the code go on.
 const sanitized = (err) => Object.assign(new Error(`home note save failed (${(err && err.code) || 'unknown'})`), { code: 'home_note_save_failed' });
 
+// The editor's pin must name the note that is stored now: with no stored note only an editor that saw none (no id, revision
+// 0 or null) passes; with one, BOTH its id and its revision must match. The id matters because a deleted note's replacement
+// starts again at revision 1, so a stale editor holding the old note's revision 1 would otherwise match the new one.
+const editorSawThisNote = (current, noteId, revision) => {
+  if (!current) return !noteId && !revision;
+  return noteId === current.id && revision === current.revision;
+};
+
 const refusal = (status, error, extra = {}) => ({ status, error, ...extra });
 
 async function writeRow(trx, customerId, current, body, actor) {
@@ -66,7 +74,7 @@ async function writeRow(trx, customerId, current, body, actor) {
  * Save (or, with an empty body, delete) the customer's note. `actor` = { type: 'technician' | 'admin', id, ip, userAgent }.
  * Returns { status: 200, note } | { status: 400 | 409 | 422, error, note? }. Never throws for those refusals.
  */
-async function saveHomeNote(row, { body, expectedRevision = null, expectedCustomerId = null, actor }, { conn = db } = {}) {
+async function saveHomeNote(row, { body, expectedNoteId = null, expectedRevision = null, expectedCustomerId = null, actor }, { conn = db } = {}) {
   const text = typeof body === 'string' ? body.trim() : null;
   if (text === null) return refusal(400, 'The note must be text.');
   if (text.length > MAX_LENGTH) return refusal(400, `The note can be at most ${MAX_LENGTH} characters.`, { code: 'too_long' });
@@ -83,8 +91,7 @@ async function saveHomeNote(row, { body, expectedRevision = null, expectedCustom
     const live = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id');
     if (!live) return refusal(404, 'Customer not found');
     const current = await currentRow(trx, customerId, { lock: true });
-    // 0 or null = the editor saw no note; anything else must be the stored revision.
-    if ((current ? current.revision : 0) !== (expectedRevision || 0)) return changed(current, trx);
+    if (!editorSawThisNote(current, expectedNoteId, expectedRevision)) return changed(current, trx);
     if (!text && !current) return { status: 200, note: null };
     let noteId = current && current.id;
     if (!text) await trx('home_notes').where({ id: current.id }).del();
@@ -119,6 +126,7 @@ const saveInput = (req) => {
   const b = req.body || {};
   return {
     body: b.body,
+    expectedNoteId: typeof b.expectedNoteId === 'string' ? b.expectedNoteId : null,
     expectedRevision: Number.isInteger(b.expectedRevision) ? b.expectedRevision : null,
     expectedCustomerId: typeof b.expectedCustomerId === 'string' ? b.expectedCustomerId : null,
   };
