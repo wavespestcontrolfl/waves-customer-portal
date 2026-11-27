@@ -368,6 +368,10 @@ function makeMoveGuard({ service, best, config = {} }) {
     // Anti-oscillation cooldown: refuse bouncing back onto a date auto-dispatch
     // moved this visit off of recently (bounce-guard.js; conflict moves exempt).
     await bounceGuard.assertNotBouncingBack(trx, [row], best.date, config, refuse);
+    // Serialize against in-flight 72h/24h reminder sends (appointment-reminders.js
+    // withReminderSendFence holds lockCustomerComms for the full delivery).
+    // Taken before assertStillApproved (customer-comms -> customers lock order).
+    await fenceCustomerCommsForMove(trx, row, refuse);
     // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.
     await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination, true);
@@ -428,6 +432,19 @@ async function keepPlanTechnician(trx, rows, receiving) {
       .where(function notPinned() { this.whereNull('recurring_technician_override').orWhere({ recurring_technician_override: false }); })
       .update({ recurring_technician_id: trx.raw('COALESCE(recurring_technician_id, technician_id)'), recurring_technician_override: true });
   }
+}
+
+// Non-blocking per-customer comms fence inside the move transaction: closes
+// the race where checkAndSendReminders (withReminderSendFence) is mid-delivery
+// of a 72h/24h text/email for the old time while auto-dispatch checks
+// loadToldVisitIds and commits a move. Non-blocking because rebooker already
+// holds row/date locks; a busy comms lock refuses this move so the next run
+// re-checks after the send finishes.
+async function fenceCustomerCommsForMove(trx, row, refuse) {
+  if (!row || !row.customer_id || !trx || !trx.isTransaction || typeof trx.raw !== 'function') return;
+  const { tryLockCustomerComms } = require('../../utils/customer-comms-lock');
+  const locked = await tryLockCustomerComms(trx, row.customer_id);
+  if (!locked) throw refuse(row.id, 'has a customer reminder or comms send in progress (no move, fail closed)');
 }
 
 // Night told-lock (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move

@@ -2219,96 +2219,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:20AM — ROUTE-TIERS nightly intra-day reorder (tier 3: 72h–7d
-  // band). Rewrites route_order per tech-day via the shared optimizer when
-  // savings clear the floor; NEVER moves a visit's date/window/tech, skips any
-  // day containing a frozen visit (<72h or 72h reminder sent), never touches
-  // >25-stop tech-days (Google cap — logged, not truncated). Double-gated
-  // (cronJobs AND routeReorder); the tier day-moves themselves ride the 4:10
-  // auto-dispatch run above (its eligibility is tier-aware when
-  // GATE_ROUTE_TIERS is on). Zero customer comms by construction.
+  // DAILY 4:20AM — Schedule quality alert reconciliation.
+  // The legacy nightly Route-Tiers intra-day reorder pass (days 1-6) was
+  // retired: the 4:40 AM Day Re-Plan owns intra-day ordering across days 1-14
+  // with arrival-window flexibility and zero lock contention on
+  // 'auto-dispatch-recurring'. Quality alert reconciliation still runs here
+  // under its own gates with zero route_order writes.
   // =========================================================================
   cron.schedule('20 4 * * *', async () => {
-    // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
-    // takes effect on the next tick without a redeploy — matching the
-    // documented gate contract and the service's own internal check.
-    if (!gateEnvValue('GATE_ROUTE_REORDER')) {
-      // The reorder pass below is also the ONLY nightly trigger for the
-      // route-quality alert reconciliation folded into it — with reorder
-      // off, existing defects never got an initial card and no card ever
-      // expired, even with the measurement + alert gates on (codex #4295
-      // r2 P2). Run just that reconciliation, under its own gates, over the
-      // same six-date band; skip repair and distance optimization entirely.
-      // No runExclusive: unlike the reorder pass, this never writes
-      // route_order, so it needs none of that writer-serialization, and
-      // the reconciler already self-serializes on its own advisory lock.
-      try {
-        const { runScheduleQualityAlertsOnly } = require('./route-reorder');
-        const result = await runScheduleQualityAlertsOnly();
-        if (result.status === 'failed') {
-          logger.error('[route-reorder] quality-alerts-only cron run failed');
-        } else if (result.status === 'reconciled') {
-          logger.info(`[route-reorder] quality-alerts-only cron run: created=${result.created} resolved=${result.resolved}`);
-        }
-      } catch (err) {
-        logger.error(`[route-reorder] quality-alerts-only cron run failed: ${err.message}`);
-      }
-      return;
-    }
-    logger.info('Running: Route-Tiers nightly reorder');
     try {
-      // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap
-      // double-runs of THIS job; nesting inside 'auto-dispatch-recurring'
-      // serializes the two autonomous schedule WRITERS — auto-dispatch's
-      // apply pass can land moves onto reorder-band days (destination floor
-      // is 5 days out, band is 1–6), and SERIALIZABLE isolation alone cannot
-      // fence a concurrent writer running at weaker isolation. If the 4:10
-      // run is still holding the lock, the reorder tick waits up to 25 min for
-      // it (nightPassLockOptions) and only a wait that runs out is skipped and
-      // picked up tomorrow (advisory lock is non-blocking).
-      await runExclusive('route-tiers-nightly', async () => {
-        const { runRouteReorderIfEnabled, recordSkippedTick } = require('./route-reorder');
-        // recordHealth:false — this invocation only BORROWS the writer lock;
-        // recording it would stamp a fresh 4:20 success under the 4:10 job's
-        // name, clearing real failures and falsifying last_success_at.
-        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled(), nightPassLockOptions());
-        // STRICT boolean — a completed run returns skipped as a NUMERIC
-        // count of skipped tech-days (frozen days are routine), and a
-        // truthy check would ledger a false skipped tick + fail job health
-        // on any normal night with one skip. Only runExclusive's
-        // lock-contention shape ({ skipped: true, reason }) means the tick
-        // itself never ran (uncapped audit r27 P1).
-        if (inner && inner.skipped === true) {
-          // The 4:10 job still held the writer lock — the tick did NOT run.
-          // Ledger it as skipped so job health / the dispatch card never show
-          // a lock-starved night as a successful run with no output.
-          logger.warn(`[route-reorder] tick skipped (${inner.reason}) — auto-dispatch still holds the writer lock`);
-          const tickId = await recordSkippedTick(inner.reason);
-          // recordSkippedTick swallows insert errors and returns null — a
-          // lost skip ledger must fail job health like any lost ledger, or
-          // the night is invisible everywhere.
-          if (tickId == null) {
-            throw new Error(`route-reorder skipped tick (${inner.reason}) could not be ledgered`);
-          }
-          // Ledgered — but the night still had NO reorder pass. Returning
-          // normally would let the outer runExclusive stamp
-          // 'route-tiers-nightly' as a fresh SUCCESS, hiding the missed run
-          // from job health (uncapped audit r20 P1). Fail loud like every
-          // other not-fully-successful night; the ledger row keeps the
-          // dispatch card accurate either way.
-          throw new Error(`route-reorder tick skipped (${inner.reason}) — no reorder ran (ledger ${tickId})`);
-        }
-        const result = inner || {};
-        logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
-        // Anything short of a fully-successful, ledgered run must FAIL job
-        // health — a guard outage (completed_with_errors) or a lost ledger
-        // otherwise reads as a healthy night with no visible output.
-        if (result.status !== 'gate_off' && (result.status !== 'completed' || result.ledgerId == null)) {
-          throw new Error(`route-reorder run unhealthy: status=${result.status ?? 'unknown'} ledger=${result.ledgerId ?? 'none'}`);
-        }
-      });
+      const { runScheduleQualityAlertsOnly } = require('./route-reorder');
+      const result = await runScheduleQualityAlertsOnly();
+      if (result.status === 'failed') {
+        logger.error('[route-reorder] quality-alerts-only cron run failed');
+      } else if (result.status === 'reconciled') {
+        logger.info(`[route-reorder] quality-alerts-only cron run: created=${result.created} resolved=${result.resolved}`);
+      }
     } catch (err) {
-      logger.error(`Route-Tiers reorder run failed: ${err.message}`);
+      logger.error(`[route-reorder] quality-alerts-only cron run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
