@@ -134,9 +134,11 @@ function visitFactsGateEnabled() {
 const PAST_VISITS_LIMIT = 5;
 // One currency marker may cover a range ("$125-150", "USD 125 to 150"): both ends go.
 const NOTE_MONEY_RE = /(?:\$|\busd\s?)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\$?\d[\d,]*(?:\.\d+)?)?|\b\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\d[\d,]*(?:\.\d+)?)?\s?(?:dollars|bucks|usd)\b/gi;
+// A money word followed by a bare number ("Repair fee: 125.00"). Treatment quantities carry no money word.
+const NOTE_FEE_CUE_RE = /\b(fees?|prices?|costs?|charges?|totals?|quoted?|estimates?|balance)(\s*(?:is|of|was|at|:|=|-)?\s*)\d[\d,]*(?:\.\d+)?/gi;
 function pastVisitNoteText(safeNotes) {
   if (!safeNotes) return null;
-  return redactAccessCodes(String(safeNotes).replace(/\s+/g, ' ')).replace(NOTE_MONEY_RE, '[amount]');
+  return redactAccessCodes(String(safeNotes).replace(/\s+/g, ' ')).replace(NOTE_MONEY_RE, '[amount]').replace(NOTE_FEE_CUE_RE, '$1$2[amount]');
 }
 // A recorded label (service or product name) with price tokens removed and whitespace folded.
 function pastVisitLabel(value, max) {
@@ -167,6 +169,15 @@ function pastVisitServiceKey(row) {
   if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) return data.completedServiceKey;
   return row.service_key || row.service_key_snapshot || null;
 }
+// Free return mark from what the RECORD holds: its frozen key when it has one, else its own callback flag.
+// The visit's current key is editable after completion, so on a legacy record it can only rule a mark out
+// (a rodent follow-up), never add one.
+function pastVisitIsFreeReturn(mark, isReserviceVisit) {
+  const data = parseStoredBrief(mark.service_data);
+  const frozen = Boolean(data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey'));
+  const verdict = isReserviceVisit({ is_callback: mark.is_callback === true, service_key: pastVisitServiceKey(mark) });
+  return verdict && (frozen || mark.is_callback === true);
+}
 // What the portal history does not carry, for the records it listed: whether the record belongs to a visit
 // of the viewed day, and the keys for the free re-service mark.
 async function pastVisitMarks(dbh, svc, viewedDay, recordIds) {
@@ -178,7 +189,7 @@ async function pastVisitMarks(dbh, svc, viewedDay, recordIds) {
     .whereIn('sr.id', recordIds)
     .select('sr.id', 'sr.is_callback', 'sr.service_data', 'ss.scheduled_date as visit_date',
       'catalog.service_key', 'ss.service_key_snapshot');
-  return new Map(rows.map((r) => [String(r.id), { ...r, viewedDay: calendarDay(r.visit_date) === viewedDay }]));
+  return new Map(rows.map((r) => [String(r.id), { ...r, viewedDay: (calendarDay(r.visit_date) || '') >= viewedDay }]));
 }
 async function loadPastVisits(dbh, svc) {
   try {
@@ -204,7 +215,7 @@ async function loadPastVisits(dbh, svc) {
           type: pastVisitLabel(briefServiceIdentity(String(v.type || '').replace(NOTE_MONEY_RE, '')), 120),
           notes: previewText(pastVisitNoteText(v.notes)),
           products: pastVisitProductNames(v.products),
-          callback: isReserviceVisit({ is_callback: mark.is_callback === true, service_key: pastVisitServiceKey(mark) }),
+          callback: pastVisitIsFreeReturn(mark, isReserviceVisit),
         };
       });
   } catch (err) {

@@ -149,11 +149,12 @@ async function listPortalServiceHistory(customerId, {
   }
   if (completedOnly) query = query.whereRaw(COMPLETED_RECORD).whereRaw(ONE_RECORD_PER_APPOINTMENT);
   // beforeDay (the technician Visit Brief's past visits): only records dated before that calendar day that
-  // do not belong to a visit this customer has on it, filtered before the limit.
+  // do not belong to a visit this customer has on or after it (a project completion can carry an earlier
+  // date than its visit), filtered before the limit.
   if (beforeDay) {
     query = query.where('service_records.service_date', '<', beforeDay).whereRaw(
       `(service_records.scheduled_service_id IS NULL OR service_records.scheduled_service_id NOT IN (
-         SELECT vd.id FROM scheduled_services vd WHERE vd.customer_id = ? AND vd.scheduled_date = ?))`,
+         SELECT vd.id FROM scheduled_services vd WHERE vd.customer_id = ? AND vd.scheduled_date >= ?))`,
       [customerId, beforeDay],
     );
   }

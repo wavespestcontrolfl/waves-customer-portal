@@ -104,6 +104,8 @@ describe('deterministicVisitFacts past_visits', () => {
       // A project completion dated before the scheduled day, linked to a visit of the viewed day.
       withMark(visit('own', '2026-11-20', 'Pest Control Service'), { visit_date: '2026-11-26' }),
       withMark(visit('legacy', '2026-11-15', 'Pest Control Service'), { visit_date: null }),
+      // Linked to a LATER visit than the viewed one: not past either.
+      withMark(visit('later', '2026-11-14', 'Pest Control Service'), { visit_date: '2026-12-03' }),
       ...VISITS,
     ];
     const { past_visits: list } = await facts(SVC, { visits });
@@ -151,6 +153,7 @@ describe('deterministicVisitFacts past_visits', () => {
       visit('b', '2026-11-13', 'Pest Control Service', { notes: 'Treated the lanai for ants. Gate code 4471, lockbox 9902.' }),
       visit('c', '2026-11-12', 'Pest Control Service', { notes: 'Quoted $125–150 for repair. Inspection fee: USD 250. Fed both palms.' }),
       visit('d', '2026-11-11', 'Pest Control Service', { notes: null }),
+      visit('e', '2026-11-10', 'Pest Control Service', { notes: 'Repair fee: 125.00 per application. Applied 12 oz to 2 beds.' }),
     ];
     const { past_visits: list } = await facts(SVC, { visits });
     expect(list[0].notes).toContain('Treated the garage.');
@@ -160,6 +163,8 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(list[2].notes).toContain('Fed both palms.');
     expect(list[2].notes).not.toMatch(/125|150|250|\$/);
     expect(list[3].notes).toBeNull();
+    expect(list[4].notes).not.toContain('125');
+    expect(list[4].notes).toContain('Applied 12 oz to 2 beds.');
   });
 
   test('a long note gets the day payload\'s word-boundary preview', async () => {
@@ -196,7 +201,7 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(list[0].products).toHaveLength(9);
   });
 
-  test('free return mark: a re-service key counts with the record flag off; a rodent follow-up never does', async () => {
+  test('free return mark on a record with no frozen key: the record flag decides; an edited visit key cannot add it; a rodent follow-up never counts', async () => {
     const visits = [
       withMark(visit('c1', '2026-11-20', 'Pest Control Re-Service'), { service_key: 'pest_re_service' }),
       withMark(visit('c2', '2026-11-19', 'Lawn Care Re-Service'), { service_key_snapshot: 'lawn_re_service' }),
@@ -205,7 +210,9 @@ describe('deterministicVisitFacts past_visits', () => {
       visit('c5', '2026-11-16', 'Pest Control Service'),
     ];
     const { past_visits: list } = await facts(SVC, { visits });
-    expect(list.map((v) => v.callback)).toEqual([true, true, false, false, false]);
+    expect(list.map((v) => v.callback)).toEqual([false, false, false, false, false]);
+    const flagged = await facts(SVC, { visits: [withMark(visit('c6', '2026-11-20', 'Pest Control Service'), { is_callback: true })] });
+    expect(flagged.past_visits[0].callback).toBe(true);
   });
 
   test('free return mark: the record\'s own frozen key beats the scheduled row\'s current key (object or JSON string)', async () => {
@@ -216,7 +223,7 @@ describe('deterministicVisitFacts past_visits', () => {
       withMark(visit('f4', '2026-11-17', 'Pest Control Service'), { service_data: { other: 1 }, service_key_snapshot: 'lawn_re_service' }),
     ];
     const { past_visits: list } = await facts(SVC, { visits });
-    expect(list.map((v) => v.callback)).toEqual([true, false, true, true]);
+    expect(list.map((v) => v.callback)).toEqual([true, false, false, false]);
   });
 
   test('history read outage: no throw, key omitted, the other facts still answer', async () => {
