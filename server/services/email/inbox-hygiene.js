@@ -752,7 +752,7 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
       `SELECT * FROM (
          SELECT DISTINCT ON (gmail_thread_id)
            id, gmail_id, gmail_thread_id, from_address, from_name, subject, received_at,
-           classification, is_archived
+           classification, is_archived, auto_action
          FROM emails
          WHERE received_at >= ?
            AND NOT (label_ids \\? 'SENT')
@@ -763,6 +763,7 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
        WHERE classification = ANY(?)
          AND is_archived = false
          AND received_at <= ?
+         AND COALESCE(auto_action, '') <> 'lead_skipped_automated_sender'
        ORDER BY received_at ASC
        LIMIT ${pageSize} OFFSET ${page * pageSize}`,
       [oldest, normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com'), NUDGE_CATEGORIES, newest]

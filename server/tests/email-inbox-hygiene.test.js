@@ -314,6 +314,9 @@ describe('collectUnansweredNudges', () => {
     const sql = db.raw.mock.calls[0][0];
     expect(sql).toContain('DISTINCT ON (gmail_thread_id)');
     expect(sql).toContain('received_at DESC');
+    // Skipped automated senders (e.g. Google LSA call receipts) stay out of
+    // unanswered digest nudges, evaluated on the outer latest_per_thread row.
+    expect(sql).toMatch(/SELECT DISTINCT ON \(gmail_thread_id\)[\s\S]*auto_action[\s\S]*\) latest_per_thread[\s\S]*COALESCE\(auto_action, ''\) <> 'lead_skipped_automated_sender'/);
   });
 
   test('returns threads with no SENT message after the inbound mail; skips answered ones', async () => {
