@@ -711,9 +711,17 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
   return profile;
 }
 
+// A visit with a customer other than the caller. A hold has no customer.
+function visitBelongsToAnotherCustomer(row, customerId) {
+  return row?.customer_id != null && String(row.customer_id) !== String(customerId);
+}
+
 async function prepareReservationCommit(scheduledServiceId, options = {}) {
   const row = await db('scheduled_services').where({ id: scheduledServiceId }).first();
-  if (!row) return null;
+  // A visit that already has a customer is not a hold: the commit refuses it
+  // under its own lock, so no route proof is built for it (a proof built here
+  // could fail with the wrong recovery before that refusal is reached).
+  if (!row || row.customer_id != null) return null;
   const held = require('./combined-visit-capacity').capacityFromReservation(row);
   if (held?.version === 1 || (!capacityEnabled() && row.reservation_policy_version !== 2)) return null;
   const profile = await resolveReservationServiceProfile(db, row, { ...options, preserveCombinedCapacity: !!held });
@@ -2038,6 +2046,17 @@ async function reserveSlot({
  * the acquisition below is a reentrant no-op (pg advisory xact locks are
  * re-acquirable by the owning transaction).
  *
+ * Only an unclaimed hold (no customer on the row) graduates. A visit that
+ * already has a customer is a booking, not a hold, even when staff left its
+ * old hold timestamp on it:
+ *   - another customer's visit reads as a missing hold (RESERVATION_NOT_FOUND),
+ *     whatever its expiry, so a caller cannot probe or take it;
+ *   - the same customer's visit is refused (SLOT_UNAVAILABLE,
+ *     reservation_already_booked). The caller re-reads the booking instead of
+ *     overwriting its customer, price, service or window with the checkout's.
+ * Callers that replay a finished checkout do so from their own record, before
+ * reaching this write.
+ *
  * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
  * returns: updated scheduled_services row
  */
@@ -2108,7 +2127,8 @@ async function commitReservation({
     const preRow = await client('scheduled_services')
       .where({ id: scheduledServiceId })
       .first();
-    if (!preRow) {
+    // Another customer's visit reads as a missing hold, before any lock.
+    if (!preRow || visitBelongsToAnotherCustomer(preRow, customerId)) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
       throw err;
@@ -2197,7 +2217,8 @@ async function commitReservation({
       )
       .forUpdate()
       .first();
-    if (!row) {
+    // Re-checked on the locked row: staff can book the hold after the pre-read.
+    if (!row || visitBelongsToAnotherCustomer(row, customerId)) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
       throw err;
@@ -2208,10 +2229,17 @@ async function commitReservation({
       err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
+    // This customer's own booked visit (staff attached the customer to the
+    // hold, whether or not its timestamp is still set or was later cleared) is
+    // not a hold to graduate or replay: the write below would overwrite the
+    // booking's price, service and window with the checkout's.
+    if (row.customer_id != null) throw capacityError('reservation_already_booked');
     if (!row.reservation_expires_at) {
-      // Already committed. Idempotent — return the existing row rather
-      // than throw; a double-click on accept shouldn't fail.
-      return row;
+      // No customer and no hold timestamp: not a hold. A caller must not read
+      // this as a committed checkout, so it falls into the expired-hold recovery.
+      const err = new Error('reservation is no longer a hold');
+      err.code = 'RESERVATION_EXPIRED';
+      throw err;
     }
     // A make-room hold refreshed or re-assigned since the pre-read: same recoverable code as the capacity technician check.
     requireMakeRoomUnchanged(row, preRow, preparedCapacity);

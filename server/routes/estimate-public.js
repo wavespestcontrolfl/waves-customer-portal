@@ -91,6 +91,7 @@ const {
   lineFlagsBlockPercentDiscount,
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
+const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
 // held slot's date key ahead of its estimate/customer row locks.
@@ -1856,8 +1857,9 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
       }
     })
     .andWhere((builder) => {
-      builder.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      // A visit staff booked for this customer stays adoptable after its old
+      // hold timestamp lapses; only an unclaimed hold drops out at expiry.
+      bookedVisitOrLiveHold(builder);
       if (holdGraceMinutes > 0 && estimate.id) {
         builder.orWhere((own) => {
           own.where('scheduled_services.source_estimate_id', estimate.id)
@@ -8959,6 +8961,8 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
       }
       if (EXISTING_APPOINTMENT_ID) {
         payload.existingAppointmentId = EXISTING_APPOINTMENT_ID;
+        // This renderer offers only a booked visit, never a live hold.
+        payload.existingAppointmentWasHold = false;
         delete payload.slotId;
       }
       if (bookingState.serviceMode === 'recurring' && DEFAULT_RECURRING_FREQUENCY) {
@@ -10746,6 +10750,20 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       if (reservationRow._beyond_grace) {
         return res.status(409).json(HOLD_EXPIRED_409);
       }
+      // A row with a customer is a visit staff booked, not this estimate's hold.
+      // Refuse it here, before any lane (the sign-before-pay preference included)
+      // reads it as the customer's pick; a reload then offers the booked visit.
+      if (reservationRow.customer_id != null) {
+        // The commit grace belongs to unclaimed holds only. A booked visit's old
+        // timestamp is compared with the database clock: lapsed reads as the
+        // expiry, a live one as a taken slot.
+        const bookedStampLapsed = await db('scheduled_services')
+          .where({ id: reservationRow.id })
+          .whereRaw('reservation_expires_at <= NOW()')
+          .first('id');
+        if (bookedStampLapsed) return res.status(409).json(HOLD_EXPIRED_409);
+        return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
+      }
     }
 
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
@@ -10869,6 +10887,39 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       && String(existingAppointmentRow.customer_id) !== String(estimate.customer_id)
     ) {
       return res.status(409).json({ error: 'existing appointment belongs to a different customer' });
+    }
+    // A page that showed a HOLD must not adopt it once staff have booked it:
+    // adopting rewrites the booked visit's price and service with this
+    // estimate's, and the customer never saw that visit. The current page
+    // reports what it showed (existingAppointmentWasHold). A tab opened before
+    // that field existed sends no boolean: for a visit made from this very
+    // estimate's hold and now booked, that cannot be told from a hold the page
+    // showed, so it re-reads first.
+    const shownAsHold = req.body?.existingAppointmentWasHold;
+    // The other direction too: a page that showed a booked visit must not graduate
+    // a row that has since reverted to an unclaimed hold (staff cleared its owner).
+    const rowIsHold = !!existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow);
+    const shownAsBooked = shownAsHold === false;
+    if (existingAppointmentRow && (rowIsHold ? shownAsBooked : (shownAsHold === true
+        || (typeof shownAsHold !== 'boolean' && existingAppointmentRow.customer_id != null
+          && existingAppointmentRow.source_estimate_id != null
+          && String(existingAppointmentRow.source_estimate_id) === String(estimate.id))))) {
+      // A tab that predates the field cannot send the boolean on a retry. It
+      // gets the stale-page code both deployed clients already answer: the
+      // server-rendered page shows the message and reloads itself, the React
+      // page refetches and shows the message. A reload loads a page that sends
+      // the field.
+      // The same code answers a page that showed a booked visit when the row is
+      // now an unclaimed hold: the server-rendered page cannot clear an adopted
+      // visit with its slot-conflict handler, so it must reload to re-read it.
+      if (typeof shownAsHold !== 'boolean' || (rowIsHold && shownAsBooked)) {
+        return res.status(409).json({
+          code: 'LAWN_LIMITS_STALE',
+          error: 'This page is out of date. Please reload it to see your updated booking.',
+          reloadRequired: true,
+        });
+      }
+      return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundle = await buildPricingBundle(estimateForPricing);
@@ -12127,6 +12178,16 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // its own (hold ids are never reused), so no inversion opens.
       let acceptPreLockedDate = null;
       let acceptPreLockedTechId = null;
+      // Sign-before-pay books nothing, but it records the picked visit as the
+      // requested first visit: take that visit's date key before any row lock so
+      // the locked recheck below runs under it.
+      const termitePickRow = isTermiteAnnualSignBeforePay ? (reservationRow || existingAppointmentRow) : null;
+      let termitePickDate = null;
+      if (termitePickRow) {
+        const pickDateRow = await trx('scheduled_services').where({ id: termitePickRow.id }).first('scheduled_date');
+        termitePickDate = pickDateRow ? dateOnly(pickDateRow.scheduled_date) : null;
+        if (termitePickDate) await acquireOccupancyLock(trx, termitePickDate);
+      }
       {
         const acceptHoldRow = reservationRow
           || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow)
@@ -13169,6 +13230,20 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // requestedFirstVisit below) and the hold is released post-commit;
       // an adopted existing appointment is left untouched for the same
       // reason.
+      // Strict and narrow: this lane records an unclaimed live hold of THIS estimate
+      // and nothing else. A booked visit is never adopted here.
+      let termitePickLocked = null;
+      if (termitePickRow) {
+        termitePickLocked = await trx('scheduled_services')
+          .where({ id: termitePickRow.id, source_estimate_id: estimate.id })
+          .whereNull('customer_id')
+          .whereRaw('reservation_expires_at > NOW()')
+          .forUpdate()
+          .first();
+        if (!termitePickLocked || dateOnly(termitePickLocked.scheduled_date) !== termitePickDate) {
+          throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
+        }
+      }
       if (reservationRow && customerId && !isTermiteAnnualSignBeforePay) {
         try {
           const committedAppointment = await slotReservation.commitReservation({
@@ -13392,7 +13467,11 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               && String(lockedAdoptRow.source_estimate_id) === String(estimate.id));
           const lockedPropertyOk = lockedRowExplicitlyLinked
             || await makeAdoptionPropertyScope(trx, estimate)(lockedAdoptRow);
-          if (!lockedAdoptRow || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
+          // A booked visit keeps the owner the preflight saw: staff who cleared
+          // or changed it since must not have it restored here.
+          const lockedOwnerChanged = !!lockedAdoptRow && existingAppointmentRow.customer_id != null
+            && String(lockedAdoptRow.customer_id || '') !== String(existingAppointmentRow.customer_id);
+          if (!lockedAdoptRow || lockedOwnerChanged || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
             assertExistingAppointmentUpdateApplied(0);
           }
           const updates = {
@@ -13824,7 +13903,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           // The customer's pick, kept only as a scheduling preference for
           // staff once the plan is signed (nothing was booked).
           ...(isTermiteAnnualSignBeforePay && (reservationRow || existingAppointmentRow)
-            ? { requestedFirstVisit: requestedFirstVisitFromRow(reservationRow || existingAppointmentRow) }
+            ? { requestedFirstVisit: requestedFirstVisitFromRow(termitePickLocked || reservationRow || existingAppointmentRow) }
             : {}),
         });
         if (annualPrepayConversionResult?.annualPlanActivationStatus) {
@@ -22707,8 +22786,10 @@ function validateRecurringSlotPaymentPreference({
   return 'Choose pay per application or annual prepay before booking this recurring plan';
 }
 
+// A hold has a timestamp and no customer. A visit staff booked can keep its old
+// hold timestamp, but it is a booking: it is adopted, never committed as a hold.
 function isReservationHeldAppointment(row = {}) {
-  return !!row?.reservation_expires_at;
+  return !!row?.reservation_expires_at && row.customer_id == null;
 }
 
 function assertExistingAppointmentUpdateApplied(updatedCount) {

@@ -136,11 +136,13 @@ postgres('area add-ons on the booked visit (real Postgres)', () => {
     });
   });
 
-  test('exactly once: a replayed accept returns the booked visit and writes nothing more', async () => {
+  test('exactly once: a second commit of the booked visit is refused and writes nothing more', async () => {
     await withHold(async ({ trx, holdId, customerId }) => {
       await commit(trx, holdId, customerId);
-      await commit(trx, holdId, customerId);
-      await commit(trx, holdId, customerId);
+      // The visit has a customer now: a booking, not a hold. The accept route
+      // replays a finished accept from its own record, never through this write.
+      await expect(commit(trx, holdId, customerId)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'reservation_already_booked' });
+      await expect(commit(trx, holdId, customerId)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
       expect(await addons(trx, holdId)).toHaveLength(2);
     });
   });
