@@ -100,6 +100,13 @@ async function processJob(jobId) {
       await finish(trx, job, 'skipped', 'gone');
       return 'gone';
     }
+    // Only the address the customer confirmed goes to Stripe: a record that holds anything else now (an office edit
+    // since) is left alone, before any other check, so a stale job never raises an alert.
+    const email = String(job.email || '').trim();
+    if (!email || String(customer.email || '').trim().toLowerCase() !== email.toLowerCase()) {
+      await finish(trx, job, 'done', 'superseded');
+      return 'superseded';
+    }
     // The record's own saved cards must agree with its link: a card on a different Stripe profile (or cards on a
     // profile the record does not link) means ownership is unclear, and the office decides.
     const ownCardIds = [...new Set((await trx('payment_methods').where({ customer_id: customer.id })
@@ -120,13 +127,6 @@ async function processJob(jobId) {
       }
       await finish(trx, job, 'done', 'not_linked');
       return 'not_linked';
-    }
-    // Only the address the customer confirmed goes to Stripe: a record that holds anything else now (an office edit
-    // since) is left alone.
-    const email = String(job.email || '').trim();
-    if (!email || String(customer.email || '').trim().toLowerCase() !== email.toLowerCase()) {
-      await finish(trx, job, 'done', 'superseded');
-      return 'superseded';
     }
     const merged = await trx('customer_merge_journal')
       .where((q) => q.where({ winner_customer_id: customer.id }).orWhere({ loser_customer_id: customer.id })).first('id');
@@ -174,28 +174,44 @@ async function processJob(jobId) {
   });
 }
 
+// Up to `limit` jobs a tick, oldest due first. A job whose customer row another transaction holds answers 'busy' and
+// does not count: the drain moves past it (up to MAX_SCAN jobs a tick), so a few locked customers never starve the rest.
+const MAX_SCAN = 200;
 async function drainDue({ limit = 20 } = {}) {
   // A process with no Stripe key claims nothing, so it can never delay a job a configured process would send.
   if (!require('../config/stripe-config').secretKey) return {};
-  const due = await db(TABLE).where({ status: 'pending' }).where('next_attempt_at', '<=', db.fn.now())
-    .orderBy('next_attempt_at').limit(limit).select('id', db.raw('updated_at::text AS version'));
   const counts = {};
-  for (const { id, version: seen } of due) {
-    try {
-      const r = await processJob(id);
-      counts[r] = (counts[r] || 0) + 1;
-    } catch (err) {
-      // Something outside the Stripe call failed (the transaction rolled back): push the job back so a row that keeps
-      // failing never holds a place in every tick's batch. Best effort; a failure here is only logged.
-      counts.error = (counts.error || 0) + 1;
-      logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
-      // Only the version this drain saw: a job re-armed or rescheduled since keeps its own schedule.
-      await db(TABLE).where({ id, status: 'pending' }).whereRaw('updated_at::text = ?', [seen])
-        .update({ last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
-        .catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
+  let processed = 0;
+  // Every job tried this tick is excluded from the next page (a finished or rescheduled job leaves the due set anyway;
+  // a busy one, or one whose push-back missed, must not be picked again).
+  const tried = [];
+  while (processed < limit && tried.length < MAX_SCAN) {
+    let q = db(TABLE).where({ status: 'pending' }).where('next_attempt_at', '<=', db.fn.now());
+    if (tried.length) q = q.whereNotIn('id', tried);
+    const page = await q.orderBy('next_attempt_at').orderBy('id').limit(limit).select('id', db.raw('updated_at::text AS version'));
+    if (!page.length) break;
+    for (const { id, version: seen } of page) {
+      tried.push(id);
+      if (processed >= limit) break;
+      try {
+        const r = await processJob(id);
+        counts[r] = (counts[r] || 0) + 1;
+        if (r !== 'busy') processed += 1;
+      } catch (err) {
+        // Something outside the Stripe call failed (the transaction rolled back): push the job back so a row that keeps
+        // failing never holds a place in every tick's batch. Best effort; a failure here is only logged.
+        processed += 1;
+        counts.error = (counts.error || 0) + 1;
+        logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
+        // Only the version this drain saw: a job re-armed or rescheduled since keeps its own schedule.
+        await db(TABLE).where({ id, status: 'pending' }).whereRaw('updated_at::text = ?', [seen])
+          .update({ last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
+          .catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
+      }
     }
+    if (page.length < limit) break;
   }
-  if (due.length) logger.info(`[stripe-email-sync] drained ${due.length}: ${JSON.stringify(counts)}`);
+  if (tried.length) logger.info(`[stripe-email-sync] tried ${tried.length}: ${JSON.stringify(counts)}`);
   return counts;
 }
 

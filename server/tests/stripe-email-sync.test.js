@@ -25,7 +25,8 @@ describe('stripe-email-sync processJob', () => {
       };
       q.whereNot = (c) => { q.nots.push(c); return q; };
       q.orderBy = () => q;
-      q.limit = () => q;
+      q.limit = (n) => { q._lim = n; return q; };
+      q.whereNotIn = (col, vals) => { q.notIn = [col, vals]; return q; };
       q.pluck = async (col) => rows().map((r) => r[col]);
       q.forUpdate = () => { q.locked = true; return q; };
       q.skipLocked = () => { q.skip = true; return q; };
@@ -40,6 +41,7 @@ describe('stripe-email-sync processJob', () => {
       // drainDue selects id + updated_at::text AS version; the fake's updated_at is already a text version.
       q.whereNotNull = (col) => { q.notNull = col; return q; };
       q.select = async (...cols) => note(rows()).filter((r) => !q.notNull || r[q.notNull] != null)
+        .filter((r) => !q.notIn || !q.notIn[1].includes(r[q.notIn[0]])).slice(0, q._lim || undefined)
         .map((r) => (cols.length > 1 ? { id: r.id, version: r.updated_at } : cols[0] === 'stripe_customer_id' ? { stripe_customer_id: r.stripe_customer_id } : { id: r.id }));
       q.whereRaw = (sql, [v]) => { q.conds.push({ updated_at: v }); return q; };
       q.update = async (patch) => { rows().forEach((r) => Object.assign(r, patch)); return 1; };
@@ -109,6 +111,21 @@ describe('stripe-email-sync processJob', () => {
     sync = load({ customers: [cust()] });
     state.cards.push({ id: 'pm-1', customer_id: 'c1', stripe_customer_id: 'cus_1' });
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
+  });
+
+  test('an address changed since the confirm finishes quietly, before any card or link check could alert', async () => {
+    const sync = load({ customers: [cust({ email: 'office.edit@example.test' })] });
+    state.cards.push({ id: 'pm-1', customer_id: 'c1', stripe_customer_id: 'cus_other' });
+    await expect(sync.processJob('job-1')).resolves.toBe('superseded');
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('busy jobs (customer row held) do not count: the drain pages past them to reach due work', async () => {
+    const sync = load({ customers: [cust(), cust({ id: 'c2', stripe_customer_id: 'cus_2' })], lockedCustomers: ['c1'] });
+    state.jobs.push({ id: 'job-2', customer_id: 'c2', email: 'new@example.test', status: 'pending', attempts: 0, due: true, updated_at: 'v1' });
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
+    await expect(sync.drainDue({ limit: 1 })).resolves.toEqual({ busy: 1, updated: 1 });
+    expect(updateEmail).toHaveBeenCalledWith('cus_2', 'new@example.test', expect.any(Object));
   });
 
   test('a third-party payer on the same Stripe profile counts as shared: never written, office alerted', async () => {
