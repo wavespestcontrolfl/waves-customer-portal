@@ -184,7 +184,7 @@ function addTreeShrubService(wants, services, review) {
 
 const LAWN_FERT_PATTERN = /(?<!\b(?:shrub|shrubs|tree|trees|palm|palms|ornamental|ornamentals)\s)\bfertilization\b(?!\s(?:for|on|of|to)\s(?:the\s|my\s|our\s)?(?:shrubs?|trees?|palms?|ornamentals?)\b)/;
 const LAWN_EXPLICIT_SERVICE_PATTERN = new RegExp(`\\blawn\\s+(?:care|service|program|treatment|plan|maintenance|pest)\\b|${LAWN_FERT_PATTERN.source}|\\bweeds?\\b`);
-const LAWN_LOCATION_ONLY_PATTERN = /\b(?:in|on|around|throughout)\s+(?:the\s+|my\s+|our\s+|front\s+|back\s+)?lawn\b/;
+const LAWN_LOCATION_ONLY_PATTERN = /\b(?:in|on|around|throughout)\s+(?:(?:the|my|our|a)\s+)?(?:(?:front|back|side|rear)\s+)?lawn\b/;
 
 function applyLawnServiceInterest(services, review, { text, pestWanted, oneTime, recurring, wants }) {
   const wantsExplicitLawn = wants(LAWN_EXPLICIT_SERVICE_PATTERN);
@@ -370,6 +370,15 @@ function resolvePoolCageFeature(body, countyFeatures) {
   return countyCagePayload(countyFeatures);
 }
 
+function filterPestPhotoFacts(body, photoFacts) {
+  if (!photoFacts || typeof photoFacts !== 'object') return null;
+  const out = { ...photoFacts };
+  if (firstNonEmpty(body.shrubDensity, body.shrubs)) delete out.shrubs;
+  if (firstNonEmpty(body.landscapeComplexity, body.complexity)) delete out.complexity;
+  if (explicitFormBool(body.nearWater ?? body.near_water) !== null) delete out.nearWater;
+  return Object.keys(out).length ? out : null;
+}
+
 function resolveLeadFeatures(body, county) {
   const cf = county?.features || null;
   const cage = resolvePoolCageFeature(body, cf);
@@ -494,7 +503,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   // Verified zero turf on a lawn request (recurring, one-time, or lawn pest)
   // must park for staff review: the engine treats lawnSqFt=0 as its smallest
   // bracket rather than "no lawn to treat".
-  if (isVerifiedZeroTurf(county) && (services.lawn || services.oneTimeLawn || services.lawnPestControl)) {
+  if (isVerifiedZeroTurf(measurements) && (services.lawn || services.oneTimeLawn || services.lawnPestControl)) {
     review.push('zero_turf_verified');
   }
   // Gate ON: an unresolved type stays literal 'unknown' — the pricing
@@ -506,7 +515,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   // strings are truthy but the pest normalizer silently defaults them —
   // without the marker such a draft stayed 'generated' with no review
   // reason at default single-family pricing.
-  const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || county?.propertyType || null;
+  const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || measurements?.propertyType || null;
   if (unitScopeGuardrailsEnabled()) {
     if (!resolvedPropertyType) {
       review.push('property_type_unresolved');
@@ -519,6 +528,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       } catch { /* fail-open: normalizer unavailable keeps today's behavior */ }
     }
   }
+  const pestPhotoFacts = filterPestPhotoFacts(body, measurements?.pestPhotoFacts);
 
   return {
     input: {
@@ -539,12 +549,12 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       treeShrubFootprintTrusted: false,
       stories: stories || 1,
       ...(storiesUnknownAboveTable ? { storiesSource: 'default' } : {}),
-      ...countyTurfEngineFields(county),
+      ...countyTurfEngineFields(measurements),
       propertyType: resolvedPropertyType || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family'),
       category: body.category || null,
       isCommercial: false,
-      features: resolveLeadFeatures(body, county),
-      ...(county?.pestPhotoFacts ? { pestPhotoFacts: county.pestPhotoFacts } : {}),
+      features: resolveLeadFeatures(body, measurements),
+      ...(pestPhotoFacts ? { pestPhotoFacts } : {}),
       services,
       leadSource: 'lead_webhook',
       address: leadDraftAddress({ intake, customer }),
@@ -823,8 +833,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
           + Number(estimate?.summary?.specialtyTotal || 0),
       };
     }
-    // The size bound names the hold first: a line's own review reason on that draft (an unknown story count) is the lesser fact.
+    // The size bound and verified zero-turf hold name the hold first: a line's own review reason on that draft is the lesser fact.
     automation.quoteRequiredReason = (engineInput.homeSizeAboveLimit ? HOME_SIZE_ABOVE_LIMIT_REASON : null)
+      || (zeroTurfLawn ? 'zero_turf_verified' : null)
       || manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
       || (typeUnresolved ? 'property_type_unresolved' : null)
       || (fieldVerifyRequired ? parkingFieldVerifyFlags[0] : null);

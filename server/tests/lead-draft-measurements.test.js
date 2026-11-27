@@ -530,6 +530,19 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     expect(formMediumBeatsNothing.automation.status).toBe('manual_review_required');
     expect(formMediumBeatsNothing.automation.quoteRequiredReason).toBe('large_pool_cage');
 
+    // Even when the lead states homeSqFt on the form (so county dimensions are not substituted),
+    // county-measured features like a 1,200 sf cage hold must still apply and cannot be bypassed.
+    const statedHomeStillHoldsBigCage = await buildAutomatedLeadDraftEstimate({
+      ...readyLead({ body: { homeSqFt: 2400, poolCage: 'yes', poolCageSize: 'medium' } }),
+      measurements: countyWithCage,
+    });
+    expect(statedHomeStillHoldsBigCage.automation.sizeSource).toBe('lead');
+    expect(statedHomeStillHoldsBigCage.automation.engineInput.features).toMatchObject({
+      poolCage: true, poolCageSize: 'large', poolCageReview: true,
+    });
+    expect(statedHomeStillHoldsBigCage.automation.status).toBe('manual_review_required');
+    expect(statedHomeStillHoldsBigCage.automation.quoteRequiredReason).toBe('large_pool_cage');
+
     const formLargeCage = await buildAutomatedLeadDraftEstimate({
       ...readyLead({ body: { poolCage: 'yes', poolCageSize: 'large' } }),
       measurements: countyMeasurements(lookupOf(countyRecord())),
@@ -584,8 +597,17 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     expect(zeroRecurringLawn.automation.status).toBe('manual_review_required');
     expect(zeroRecurringLawn.automation.generated).toBe(false);
     expect(zeroRecurringLawn.automation.quoteRequired).toBe(true);
+    expect(zeroRecurringLawn.automation.quoteRequiredReason).toBe('zero_turf_verified');
     expect(zeroRecurringLawn.automation.review).toContain('zero_turf_verified');
     expect(zeroRecurringLawn.monthly).toBe(0);
+
+    // Explicit form shrubDensity='light' must beat photo fact shrubs='heavy' (never silently overridden).
+    const explicitLightShrubs = await buildAutomatedLeadDraftEstimate({
+      ...readyLead({ body: { shrubDensity: 'light' } }),
+      measurements: measured,
+    });
+    expect(explicitLightShrubs.automation.engineInput.features.shrubs).toBe('light');
+    expect(explicitLightShrubs.automation.engineInput.pestPhotoFacts).toBeUndefined();
 
     const zeroOneTimeLawn = await buildAutomatedLeadDraftEstimate({
       ...readyLead({ serviceInterest: 'One-Time Weed Control' }),
@@ -644,6 +666,10 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     expect(antsInLawn.services).toHaveProperty('oneTimePest');
     expect(antsInLawn.services).not.toHaveProperty('lawn');
     expect(antsInLawn.services).not.toHaveProperty('oneTimeLawn');
+    const antsInFrontLawn = mapServiceInterestToEstimateServices('One-time treatment for ants in my front lawn');
+    expect(antsInFrontLawn.services).toHaveProperty('oneTimePest');
+    expect(antsInFrontLawn.services).not.toHaveProperty('lawn');
+    expect(antsInFrontLawn.services).not.toHaveProperty('oneTimeLawn');
     const oneTimePestAndLawn = mapServiceInterestToEstimateServices('One-time pest and lawn');
     expect(oneTimePestAndLawn.services).toHaveProperty('oneTimePest');
     expect(oneTimePestAndLawn.services).toHaveProperty('oneTimeLawn');
@@ -679,6 +705,22 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
       }),
     };
     const noLinkRow = { ...readyRow, id: 'lead-nolink', estimate_id: 'est-nolink', _est_has_link: false };
+    const defaultSizedRow = {
+      ...readyRow,
+      id: 'lead-default',
+      estimate_id: 'est-default',
+      _est_data: JSON.stringify({
+        automation: {
+          leadEstimateAutomation: { status: 'ready', review: ['property_measurements_defaulted'] },
+          draftEstimateAutomation: {
+            status: 'generated',
+            generated: true,
+            sizeSource: 'default',
+            review: ['property_measurements_defaulted'],
+          },
+        },
+      }),
+    };
     const heldRow = {
       ...readyRow,
       id: 'lead-2',
@@ -699,7 +741,7 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
         },
       }),
     };
-    const [outReady, outNoLink, outHeld] = withEstimatePreview([readyRow, noLinkRow, heldRow]);
+    const [outReady, outNoLink, outDefaultSized, outHeld] = withEstimatePreview([readyRow, noLinkRow, defaultSizedRow, heldRow]);
     expect(outReady).not.toHaveProperty('_est_data');
     expect(outReady).not.toHaveProperty('_est_authority');
     expect(outReady).not.toHaveProperty('_est_has_link');
@@ -711,6 +753,8 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
       sizeSource: 'county_assessed',
     });
     expect(outNoLink.estimate_preview.sendReady).toBe(false);
+    expect(outDefaultSized.estimate_preview.sendReady).toBe(false);
+    expect(outDefaultSized.estimate_preview.sizeSource).toBe('default');
     expect(outHeld.estimate_preview).toMatchObject({
       status: 'draft',
       monthly: 48,

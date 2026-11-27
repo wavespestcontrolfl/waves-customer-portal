@@ -824,6 +824,8 @@ function buildEstimatePreview(lead, estCols) {
   const totals = draft.provisionalTotals || {};
   const estRow = buildEstimateRowForPreview(lead, estCols, estData);
   const reasons = [...(gate.review || []), ...(draft.review || [])].filter(Boolean);
+  const uniqueReasons = [...new Set(reasons)];
+  const defaultedMeasurements = draft.sizeSource === 'default' || uniqueReasons.includes('property_measurements_defaulted');
   return {
     status: estRow.status,
     source: estRow.source,
@@ -831,11 +833,11 @@ function buildEstimatePreview(lead, estCols) {
     annual: previewMoney(estCols.annual, totals.annual),
     oneTime: previewMoney(estCols.onetime, totals.oneTimeTotal),
     provisional: String(estCols.authority ?? '').toUpperCase() !== 'SERVER',
-    sendReady: estimateRowIsSendReady(estRow),
+    sendReady: !defaultedMeasurements && estimateRowIsSendReady(estRow),
     sizeSource: draft.sizeSource ?? null,
     measurements: draft.measurements ?? null,
     quoteRequiredReason: draft.quoteRequiredReason ?? estData.quoteRequiredReason ?? null,
-    reviewReasons: [...new Set(reasons)],
+    reviewReasons: uniqueReasons,
   };
 }
 

@@ -54,6 +54,7 @@ const DRAFT_HOLD_LABELS = {
   home_size_above_public_limit: "Large home (>20k sf)",
   open_parcel_basis_unconfirmed_footprint: "Confirm bed area",
   low_confidence_turf_requires_field_verification: "Confirm lawn area",
+  zero_turf_verified: "No turf verified",
 };
 
 function leadDraftSummaryText(preview) {
