@@ -3,7 +3,7 @@
 // ============================================================
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_FREQS,
-  LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
+  LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_ONE_LANE, LAWN_BRACKETS,
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
@@ -37,6 +37,8 @@ const {
 // estimate-public shapeFromV1) can hold the customer-visible discounted price
 // at the floor without re-deriving cadence math from constants.
 const { pestProgramFloorPerVisit, pestProgramFloorAnnual } = require('./discount-engine');
+// One-time lawn for new quotes (one lawn price lane): code constants, read once here so no Settings sync or restore reaches them.
+const ONE_TIME_LAWN_NEW_RULE = ONE_TIME.lawn.newRule;
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -2248,6 +2250,17 @@ function lawnPriceBasis(options) {
   return { costPlusBasis: basis, costPlusKnobs: basis.costPlusList, marketSchedule: basis.market };
 }
 
+// One lawn price lane (owner 2026-11-26, new quotes only): the rows of the market table that price this lawn. A quote saved
+// before the rule (options.legacyLawnOneLane === true, read from its own stamp) reads its grass's own rows, so its lookup is the
+// one it was sold on, unchanged. A new bermuda or zoysia plan reads the LAWN_ONE_LANE.priceTrack rows, and the one-time anchor
+// (options.oneLaneAnchor, set only by priceOneTimeLawn) reads them for every grass. Only the market lookup moves: the material
+// budget, the cost floor, the cost-plus list, the Bermuda add-on, the bahia review and the track the line reports keep the real grass.
+function lawnMarketTrack(track, options) {
+  if (options.legacyLawnOneLane === true) return track;
+  if (options.oneLaneAnchor === true || LAWN_ONE_LANE.recurringTracks.includes(track)) return LAWN_ONE_LANE.priceTrack;
+  return track;
+}
+
 function priceLawnCare(property, options = {}) {
   const {
     track = 'st_augustine',
@@ -2389,11 +2402,13 @@ function priceLawnCare(property, options = {}) {
   // _FREQ_DISCOUNT everywhere-semantics the lift shipped with.
   const cadenceDiscountArmed = marketSchedule.cadenceFreqDiscountArmed
     && (lawnSqFt <= LAWN_TABLE_MAX_SQFT || !marketSchedule.edgeParityFloorArmed);
+  // The market rows that price this lawn (one lawn price lane): the grass's own for a quote saved before the rule.
+  const marketTrack = lawnMarketTrack(normalizedTrack, options);
   const tierCalcs = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
     const tierAnnualBudget = lawnMaterialBudget(normalizedTrack, tc.freq);
-    const market = lookupLawnBracket(lawnSqFt, tc.index, normalizedTrack, marketSchedule);
+    const market = lookupLawnBracket(lawnSqFt, tc.index, marketTrack, marketSchedule);
     const marketMonthly = market.monthly;
     const marketAnnual = Math.round(marketMonthly * 12);
     // Cost-plus mode: the basis is the ONLY source of tuning numbers; the
@@ -6866,6 +6881,22 @@ function priceOneTimePestUnitBand(property, options = {}) {
 // ============================================================
 // ONE-TIME LAWN
 // ============================================================
+// The rule a one-time lawn quote prices on. One lawn price lane (owner 2026-11-26, new quotes only): the anchor is the
+// St. Augustine 6-visit per-application price for every grass, times 1.8, at one price for fertilizer and weed work and +20% for
+// insect or fungus work (ONE_TIME.lawn.newRule, code constants). A quote saved before the rule (options.legacyLawnOneLane, read
+// from its own stamp) runs the code it was sold on, unchanged: its own grass's rows, the Settings multiple (2.2) and the Settings
+// treatment factors. `anchor` is the pair of options lawnMarketTrack reads to pick the market rows.
+function oneTimeLawnRule(options) {
+  if (options.legacyLawnOneLane === true) {
+    return {
+      multiplier: ONE_TIME.lawn.oneTimeMultiplier,
+      treatmentMultipliers: ONE_TIME.lawn.treatmentMultipliers,
+      anchor: { legacyLawnOneLane: true },
+    };
+  }
+  return { ...ONE_TIME_LAWN_NEW_RULE, anchor: { oneLaneAnchor: true } };
+}
+
 function priceOneTimeLawn(property, options = {}) {
   const {
     treatmentType = 'weed',
@@ -6880,8 +6911,11 @@ function priceOneTimeLawn(property, options = {}) {
 
   const normalizedTreatment = ['fertilization', 'fertilizer'].includes(treatmentType) ? 'fert' : treatmentType;
   assertEnum(normalizedTreatment, Object.keys(ONE_TIME.lawn.treatmentMultipliers), 'treatmentType');
+  const rule = oneTimeLawnRule(options);
   const lawnResult = priceLawnCare(property, {
     track,
+    // The market rows the anchor reads: the one price lane for a new quote, the grass's own for a quote saved before the rule.
+    ...rule.anchor,
     // The one-time anchor is not the v13 lawn program: no bahia review here.
     skipBahiaNoProgramReview: true,
     // One-time work anchors on the STANDARD (6x) per-app — the column the
@@ -6915,14 +6949,15 @@ function priceOneTimeLawn(property, options = {}) {
   const plateauMonthly = options.legacyOneTimePlateau === true || lawnResult.pricingSource !== 'MARKET_TABLE'
     || lawnResult.pricingBasis !== 'TABLE_INTERPOLATION' || lawnResult.bermudaSuppressionPerApp
     ? null
-    : oneTimeLawnPlateauMonthly(lawnResult.lawnSqFt, lawnResult.track);
+    // The rise reads the same rows the anchor was priced from.
+    : oneTimeLawnPlateauMonthly(lawnResult.lawnSqFt, lawnMarketTrack(lawnResult.track, rule.anchor));
   const tableMonthly = Number(lawnResult.perApp) * LAWN_TIERS.standard.freq / 12;
   const anchorPerApp = plateauMonthly !== null && plateauMonthly > tableMonthly
     ? plateauMonthly * 12 / LAWN_TIERS.standard.freq
     : lawnResult.perApp;
-  const base = Math.max(ONE_TIME.lawn.floor, Math.round(anchorPerApp * ONE_TIME.lawn.oneTimeMultiplier));
+  const base = Math.max(ONE_TIME.lawn.floor, Math.round(anchorPerApp * rule.multiplier));
 
-  const treatMult = ONE_TIME.lawn.treatmentMultipliers[normalizedTreatment] || 1.0;
+  const treatMult = rule.treatmentMultipliers[normalizedTreatment] || 1.0;
   const preUrgencyPrice = applyOneTimeFloor(Math.round(base * treatMult), ONE_TIME.lawn.floor);
   const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
   const discountBase = preUrgencyPrice * urgencyMultiplier;

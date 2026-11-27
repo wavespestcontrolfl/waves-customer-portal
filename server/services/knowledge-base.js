@@ -986,7 +986,8 @@ const KnowledgeBaseService = {
         'Tier qualification: 1 service = Bronze | 2 = Silver | 3 = Gold | 4+ = Platinum',
         '',
         '**Lawn Care Pricing**',
-        `Version: ${LAWN_PRICING_V2?.pricingVersion || 'LAWN_PRICING_V2'} — market bracket table (grass track × turf sqft × tier), DB-authoritative via lawn_pricing_brackets`,
+        `Version: ${LAWN_PRICING_V2?.pricingVersion || 'LAWN_PRICING_V2'} — market bracket table (turf sqft × tier), DB-authoritative via lawn_pricing_brackets`,
+        'One lawn price (new quotes): a St. Augustine, Bermuda or Zoysia plan prices from the St. Augustine rows; Bahia keeps its own rows. A quote made before the rule keeps the rows of its own grass. Grass type still picks the program and the products.',
         `Tiers: ${Object.values(LAWN_TIERS || {}).map((t) => `${t.label}${t.hidden ? ' (retired/hidden)' : ''}`).join(' | ')}`,
         // The tracks the live lawn program holds (v13 has no bahia track: those lawns are reviewed by the office).
         ...require('./lawn-program').lawnTrackKnowledgeLines(),

@@ -103,6 +103,8 @@ hidden internal anchor; new residential offers expose Enhanced 9x and Premium
 
 **Tracks:** `st_augustine` · `bermuda` · `zoysia` · `bahia` (bracket tables in `constants.js:LAWN_BRACKETS`)
 
+**One lawn price lane (new quotes only, owner 2026-11-26):** a `bermuda` or `zoysia` plan reads the `st_augustine` rows of the market table (`LAWN_ONE_LANE`, `lawnMarketTrack` in `service-pricing.js`), at every size and cadence, so the three grasses quote one price. `bahia` keeps its own rows. Only the market rows move: the line's `track` and `grassType`, the program, the Bermuda add-ons, the cost floor and the cost-plus list still read the real grass. A quote saved before the rule runs the existing code on its own grass's rows (estimate stamp `pricingMetadata.legacyLawnOneLane`; a priced estimate with no stamp, or inputs that ask for lawn, read as saved before). The `bermuda` and `zoysia` tables stay for those quotes.
+
 **St. Augustine shade handling (PROTOCOL ONLY — not a pricing input):** sun/shade
 affects the agronomic protocol (nitrogen rate / product selection) but NOT price —
 every lawn prices on its track's full-sun material budget. Do not re-wire shade
@@ -423,16 +425,16 @@ Standalone prices are applied via `priceOneTimePest` / `priceOneTimeLawn` /
 
 **Pest one-time:** `max($199, quarterlyPerApp × 2.2 multiplier)` — a straight multiple of the **quarterly** per-app rate (== pest line `basePrice`), never a discounted monthly/bimonthly per-app. Anchoring on the quarterly rate is the point: that rate already includes footprint and the current explicit pest adjustments described in §3, so one-time scales proportionally with real job difficulty — no separate sq-ft curve, no flat add-on. Lot size, tree density, and driveway do not add to the active pest price. The multiple keeps a one-off visit strictly **above** what a recurring customer pays on visit 1 ($99 setup + quarterly rate), preserving the incentive to commit. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $199 floor re-applied. Constants: `ONE_TIME.pest.{multiplier: 2.2, floor: $199}` (admin-editable via `onetime_pest` config keys `multiplier` / `floor`). `multiplier` is validated **`>= 2`** — combined with the $199 floor and the $89 pest quarterly floor, that guarantees one-time exceeds recurring visit-1 for every property; a lower value is rejected on sync. **New quotes only (owner 2026-11-26):** `max($199, round(quarterlyPerApp × 1.8), round((quarterlyPerApp + $99) × 1.10))` (`one-time-pest-price.js`; the 1.8 and 10% are code constants `ONE_TIME.pest.newRule`, not Settings), then the existing urgency, 15% perk and strictly-above-visit-1 clamp; the 10% is a list-price rule the perk does not take back. Home age adds nothing to a new pest price. A quote saved before the rule is stamped `legacyOneTimePestBuffer` (an unstamped priced estimate, or one that kept only inputs requesting pest, reads the same) and runs the paragraph above unchanged: the `multiplier` 2.2 and the plan's age step. A bedroom-band home keeps the band path.
 
-**Lawn one-time (per treatment):**
+**Lawn one-time (per treatment):** `round(max($115, round(anchor × multiple)) × treatment factor)`, floor $115, then urgency and the flat 15% one-time perk for active recurring customers, with the $115 floor re-applied. The anchor is the 6-visit per-application market price (with the flat-stretch rise), never a discounted cadence.
 
-| Treatment | Multiplier | Floor |
+| Treatment | Factor, new quotes | Factor, quotes saved before the rule |
 |---|---|---|
-| Fertilization | 1.00 | $115 |
-| Weed | 1.12 | $115 |
-| Pest | 1.30 | $115 |
-| Fungicide | 1.38 | $115 |
+| Fertilization | 1.00 | 1.00 |
+| Weed | 1.00 | 1.12 |
+| Insect (`pest`, the Lawn Pest Knockdown) | 1.20 | 1.30 |
+| Fungicide | 1.20 | 1.38 |
 
-Then × 1.50 standalone multiplier on top of recurring per-app rate. Urgency applies. Active recurring customers get the flat 15% one-time perk, with the $115 floor re-applied.
+**New quotes (one lawn price lane, owner 2026-11-26):** the anchor is the St. Augustine price for EVERY grass and the multiple is 1.8. The 1.8 and the factors are code constants (`ONE_TIME.lawn.newRule`), not Settings. A quote saved before the rule (estimate stamp `legacyLawnOneLane`; an unstamped priced estimate, or one that kept only inputs asking for lawn, reads the same) keeps its own grass's anchor, the Settings multiple (`onetime_lawn.recurringPerAppMultiplier`, 2.2) and the Settings factors.
 
 **Mosquito one-time:** based on mosquito treatable area, not gross lot. The
 code-default anchor prices (owner 2026-10-25) are SMALL at 7,500 sqft $199 ·

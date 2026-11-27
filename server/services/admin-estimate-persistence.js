@@ -1597,6 +1597,8 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
   // A cockroach treatment or rodent guarantee row is refused too: the browser cannot set either price (see the function).
   guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData });
+  // A lawn care or one-time lawn row is refused the same way (one lawn price lane, see the function).
+  guardLawnOneLaneOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
   // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
   // preview, or a reopened estimate's stored result), for a customer the rule no longer waives, would store
@@ -2251,6 +2253,36 @@ function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimate
   const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
   for (const container of containers.length ? containers : [estimateData]) {
     container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacyWholeHomeSizing: legacy };
+  }
+}
+
+// Lawn care and one-time lawn rows on a save the server could not price (the CLIENT_FALLBACK authority). One lawn price lane (owner
+// 2026-11-26, new quotes only): a bermuda or zoysia plan prices from the St. Augustine rows, and a one-time lawn treatment is 1.8 x
+// the St. Augustine anchor for every grass. The browser cannot prove which rule priced its row, nor that its prices match the live
+// tables: its lawn grid is hard-coded dollars (a Settings change to the lawn table never reaches it), a page cached before the rule
+// prices each grass's own rows and the 2.2 one-time multiple, and a rule stamp it posts proves none of that. So, the same rule as
+// the rows above: such a save is refused (409, reload and let the server price it) when it NAMES lawn care, a one-time lawn
+// treatment or the lawn pest knockdown anywhere outside its inputs, whatever grass and whatever stamp it posts, new or re-saved,
+// changed or not. No grass is exempt: only the server's price follows the live lawn tables.
+// "lawn" alone names no such row: every server result carries property.turfBasis "lawnSqFt", and plugging, top dressing and
+// dethatching are other services with their own prices ("Lawn Plugging Service"). The rows are known by their own names (Lawn Care,
+// lawn_care, One-Time Lawn, one_time_lawn, OT Lawn, Lawn Pest) or by the result key they sit under (results.lawn, results.lawnMeta).
+const LAWN_ONE_LANE_ROW_WORDS = {
+  test: (text) => /lawn[ _-]?care|one[ _-]?time[ _-]?lawn|\bot[ _-]?lawn|lawn[ _-]?pest/i.test(text) || /^lawn(Meta|Tiers)?$/.test(text),
+};
+// The lawn rule stamp of a browser-priced save that passed the refusal (it holds no lawn row) is the server's reading, never the
+// browser's: a revision keeps the stored estimate's stamp, so a lawn service the server adds later stays on the rule the estimate
+// was sold on; a first save is new. Written on every result container, so the reader finds it whichever one it picks.
+function guardLawnOneLaneOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (saveHoldsRowNamed(estimateData, LAWN_ONE_LANE_ROW_WORDS)) {
+    throw errorWithStatus('This estimate has a lawn care or one-time lawn price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
+  }
+  if (!isPlainRecord(estimateData)) return;
+  const legacy = !!storedEstimateData
+    && require('./estimate-floor-signal-replay').savedLegacyLawnOneLaneSignal(storedEstimateData).legacyLawnOneLane === true;
+  const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacyLawnOneLane: legacy };
   }
 }
 
@@ -4346,6 +4378,7 @@ module.exports = {
   assertSpecialtyClientFallbackSave,
   stampSpecialtyOnClientFallbackSave,
   guardWholeHomeSizingOnClientFallbackSave,
+  guardLawnOneLaneOnClientFallbackSave,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,

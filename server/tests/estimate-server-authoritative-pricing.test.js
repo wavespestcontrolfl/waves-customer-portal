@@ -380,13 +380,31 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
       body: baseBody({
         monthlyTotal: 90,
         annualTotal: 1080,
-        estimateData: { inputs: {}, result: { recurring: { grandTotal: 90, monthlyTotal: 90, annualTotal: 1080, services: [{ service: 'lawn_care', mo: 90 }] }, oneTime: { total: 0 } } },
+        // A service no browser-save rule refuses (a lawn row is refused since 2026-11-26, the test below).
+        estimateData: { inputs: {}, result: { recurring: { grandTotal: 90, monthlyTotal: 90, annualTotal: 1080, services: [{ service: 'rodent_bait', mo: 90 }] }, oneTime: { total: 0 } } },
       }),
     });
     const row = getInsert().row;
     expect(row.pricing_authority).toBe('CLIENT_FALLBACK');
     expect(row.monthly_total).toBe(90); // client preview retained
     expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it('a lawn row the server could not price is refused (409) and nothing is saved: only the server follows the live lawn tables', async () => {
+    const errSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    const { database, getInsert } = makeDatabase();
+    await expect(createOrReuseAdminEstimate({
+      database,
+      now: NOW,
+      recompute: async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('boom') }),
+      body: baseBody({
+        monthlyTotal: 90,
+        annualTotal: 1080,
+        estimateData: { inputs: {}, result: { recurring: { grandTotal: 90, monthlyTotal: 90, annualTotal: 1080, services: [{ service: 'lawn_care', mo: 90 }] }, oneTime: { total: 0 } } },
+      }),
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(getInsert()).toBeUndefined();
     errSpy.mockRestore();
   });
 

@@ -1063,6 +1063,15 @@ function lawnPricesFor(grassType) {
   return grid[grassType] || grid.st_augustine;
 }
 
+// One lawn price lane (owner 2026-11-26; server mirror: LAWN_ONE_LANE and lawnMarketTrack in service-pricing.js). A bermuda or
+// zoysia plan prices from the St. Augustine grid, and the one-time anchor reads that grid for every grass. The grass stays a real
+// input everywhere else: the cost floor, the grass name and code a row reports, the dethatching eligibility. This estimator only
+// prices new quotes, so it has no path for a quote saved before the rule (the server replays those).
+const LAWN_ONE_LANE = { priceTrack: 'st_augustine', recurringTracks: ['bermuda', 'zoysia'] };
+function lawnPlanPricesFor(grassType) {
+  return lawnPricesFor(LAWN_ONE_LANE.recurringTracks.includes(grassType) ? LAWN_ONE_LANE.priceTrack : grassType);
+}
+
 function toPositiveNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -2167,6 +2176,10 @@ export function calculateEstimate(inputs) {
     // server does, and says so. It is the preview's own record only: the server never stores a browser-priced cockroach, bed bug
     // or rodent guarantee row (409), and writes its own reading of this stamp on a save it could not price.
     legacyWholeHomeSizing: false,
+    // One lawn price lane (2026-11-26): this fallback prices lawn plans and one-time lawn under the rule, and says so. It is the
+    // preview's own record only: the server never stores a browser-priced lawn row (409), and writes its own reading of this stamp
+    // on a save it could not price.
+    legacyLawnOneLane: false,
     // Resolved program minimum for THIS run (0 = disarmed) — same replay
     // rule: estimate-public and the converter clamp/protect a saved fallback
     // quote at the minimum it was priced with, never the live global at
@@ -2472,7 +2485,9 @@ export function calculateEstimate(inputs) {
     // ── Smoothed turf factor (~5% per point) ──
     const tfTable = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33];
     const tf = tfTable[Math.min(sc, 9)];
+    // lp names the grass (its name and code on the row); lanePrices is the market grid that prices it (one lawn price lane).
     const lp = lawnPricesFor(grassType);
+    const lanePrices = lawnPlanPricesFor(grassType);
     const lsf = turfArea.turfSf;
     const selectedFreq = resolveLawnFreq(lawnFreq);
 
@@ -2500,7 +2515,7 @@ export function calculateEstimate(inputs) {
     R.lawn = [];
     const lawnCalcs = freqs.map((f) => {
       const freqIdx = LAWN_FREQS.indexOf(f.v);
-      const marketPrice = lawnLookup(lp, lsf, freqIdx);
+      const marketPrice = lawnLookup(lanePrices, lsf, freqIdx);
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
       const marketAnnual = marketPrice.monthly * 12;
       // Cost-floor SELECTION disarmed by default (owner ruling 2026-07-17:
@@ -3091,7 +3106,8 @@ export function calculateEstimate(inputs) {
   /* ── One-Time Lawn ───────────────────────────────────────── */
   if (svcOnetimeLawn && !isCommercial && lotSqFt > 0) {
     hasOT = true;
-    const lp = lawnPricesFor(grassType);
+    // One lawn price lane (owner 2026-11-26): the anchor reads the St. Augustine grid for every grass.
+    const lp = lawnPricesFor(LAWN_ONE_LANE.priceTrack);
     // One-time anchors on the STANDARD (6x) column — the one the cadence
     // frequency discount never moves (codex #3274 r4 P1, server mirror): a
     // standalone treatment makes no frequency commitment, so deriving from
@@ -3104,12 +3120,13 @@ export function calculateEstimate(inputs) {
     // Flat-stretch rise (owner 2026-11-26): only on the plain market table, never below the table price.
     const plateauMonthly = baselinePrice.pricingSource === 'MARKET_TABLE' ? lawnPlateauMonthly(lp, turfArea.turfSf) : null;
     if (plateauMonthly !== null && plateauMonthly > baselineMonthly) baselinePerApp = (plateauMonthly * 12) / 6;
-    // 2.20 = ONE_TIME.lawn.oneTimeMultiplier (owner 2026-11-04: same multiple as one-time pest).
-    let bl = Math.max(115, Math.round(baselinePerApp * 2.20));
+    // Server ONE_TIME.lawn.newRule (owner 2026-11-26, code constants there too): 1.80 x the anchor, at one price for
+    // fertilizer and weed work and +20% for insect or fungus work.
+    let bl = Math.max(115, Math.round(baselinePerApp * 1.80));
     let tm = 1.0, tl = 'Fertilization';
-    if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }
-    else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
-    else if (otLawnType === 'FUNGICIDE') { tm = 1.38; tl = 'Fungicide'; }
+    if (otLawnType === 'WEED') { tl = 'Weed Control'; }
+    else if (otLawnType === 'PEST') { tm = 1.20; tl = 'Lawn Pest'; }
+    else if (otLawnType === 'FUNGICIDE') { tm = 1.20; tl = 'Fungicide'; }
     const fp = Math.max(115, otP(Math.max(115, Math.round(bl * tm))));
     if (grassTypeWasDefaulted && !notes.some(n => n.type === 'LAWN_UNKNOWN_GRASS')) {
       notes.push({
