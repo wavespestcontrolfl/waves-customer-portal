@@ -29,8 +29,8 @@
  *   confirmed   -> re-derives the preview and refuses with preview_changed on any drift, then runs the handler, which
  *                  re-checks the card on the LOCKED customer row (lockedPlanCheck) before it writes.
  *
- * Linking two customer profiles as one family (the 10% Multi-Home Discount "Same family" link) is not this tool: it
- * stays on the customer page.
+ * Linking two customer profiles as one family (the 10% Multi-Home Discount "Same family" link) is not this tool:
+ * family-link-tools.js link_customer_family.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -55,7 +55,7 @@ const SERVICE_CONTACT_TOOLS = [
     description: `Add, change or remove ONE extra contact on a customer account: the customer page's "Service contacts" (up to three people besides the account holder, such as a spouse, a family member allowed to speak for the account, a tenant, or an on-site manager). The first call returns a PREVIEW and saves nothing; the operator approves it, and the approved run re-checks it and refuses if anything changed.
 action "add": name, relationship, and a phone or an email (both when known); goes in the first empty slot. action "change": slot (1-3), relationship (restate it), plus what changes. action "remove": slot (1-3). Without a slot, the reply lists the numbered contacts on file.
 Effects: a contact with an email can get this account's appointment emails, and service reports unless they are a tenant, as the account's notification settings allow. Texts to contacts need their consent in the app; a change to who is listed clears it. Removing a contact or changing their phone ends their app sign-in. Nothing is sent now. Admin only.
-Not this tool: linking two customer profiles as one family for the multi-home discount (customer page "Same family"), a payer who receives the invoices (set_customer_bill_to), or the account holder's own name, phone or email.
+Not this tool: linking two customer profiles as one family for the multi-home discount (link_customer_family), a payer who receives the invoices (set_customer_bill_to), or the account holder's own name, phone or email.
 Use for: "add his wife as a contact", "add <name> as an authorized family member", "put the tenant on the account", "add a second contact", "change the contact's phone", "remove <name> from the account".`,
     input_schema: {
       type: 'object',

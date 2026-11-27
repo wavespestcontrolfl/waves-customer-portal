@@ -453,6 +453,8 @@ const SCOPE_SNAPSHOT = {
     'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft',
     // resolve_dispatch_alert carries alert_id or job_id: inside a customer-specific task validateRecordTarget binds it to the alert's own visit (alertVisitBinding), so only that customer's alert passes.
     'resolve_dispatch_alert',
+    // link_customer_family carries customer_id + other_customer_id (CUSTOMER_PAIR_SELECTORS reads both as customer records); unlink_customer_family carries customer_id.
+    'link_customer_family', 'unlink_customer_family',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.

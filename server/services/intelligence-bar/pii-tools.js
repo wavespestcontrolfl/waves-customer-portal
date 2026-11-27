@@ -80,6 +80,9 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   // resolve_dispatch_alert previews name the customer and technician; unblock_sender previews carry the blocked address.
   'resolve_dispatch_alert',
   'unblock_sender',
+  // link_customer_family / unlink_customer_family previews name both profiles and their addresses.
+  'link_customer_family',
+  'unlink_customer_family',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',
