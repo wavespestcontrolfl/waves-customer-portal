@@ -76,6 +76,12 @@ function useVisitTexts(serviceId, key, enabled, request) {
   return state;
 }
 
+// The photos the server did not sign (the photo switch is off, or one failed): counted, never left as a silent gap.
+function PhotosNotShown({ missing }) {
+  if (!(missing > 0)) return null;
+  return <p style={mutedStyle}>{missing} {missing === 1 ? 'photo is' : 'photos are'} not shown. Ask the office.</p>;
+}
+
 // `byService` is the panel's per-visit brief map: the brief answer carries `visitTexts: true` while the gate is on, and
 // only then is the read made. The loaded answer is stored with the visit it was read for and shown only for that visit.
 export default function VisitTextsSection({ service, byService, request }) {
@@ -99,7 +105,7 @@ export default function VisitTextsSection({ service, byService, request }) {
           <p style={mutedStyle}>{t.direction === 'inbound' ? 'Customer' : 'Office'} · {whenLabel(t.at)}</p>
           {t.body && <p style={{ fontSize: 14, color: COLORS.text, margin: '2px 0 0', whiteSpace: 'pre-wrap' }}>{t.body}</p>}
           <PhotoThumbs photos={t.photos} />
-          {!t.photos?.length && t.photoCount > 0 && <p style={mutedStyle}>{t.photoCount} {t.photoCount === 1 ? 'photo is' : 'photos are'} not shown. Ask the office.</p>}
+          <PhotosNotShown missing={(t.photoCount || 0) - (t.photos?.length || 0)} />
         </div>
       ))}
       {hidden > 0 && <p style={mutedStyle}>{hidden} {hidden === 1 ? 'text is' : 'texts are'} hidden. Ask the office.</p>}

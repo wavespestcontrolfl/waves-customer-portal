@@ -98,7 +98,7 @@ describe('textVerdict', () => {
   });
 
   test.each([
-    'https://example.com/r/abc123', 'http://x.test/pick', 'www.example.com/pick', 'wavespestcontrol.com/reschedule/abc', 'tap bit.ly/3xyz to move your visit', 'go to example.co/r/1', 'is.gd/abc', 'rb.gy/x1', 'tiny.cc/z9', 'tap v.gd/abc', 'cutt.ly/q', 'Pick a time: s.id/abc',
+    'https://example.com/r/abc123', 'http://x.test/pick', 'www.example.com/pick', 'wavespestcontrol.com/reschedule/abc', 'tap bit.ly/3xyz to move your visit', 'go to example.co/r/1', 'is.gd/abc', 'rb.gy/x1', 'tiny.cc/z9', 'tap v.gd/abc', 'cutt.ly/q', 'Pick a time: s.id/abc', 'photos.example.dev/yard', 'see photos.example.dev', 'upload to cloud.example.photography/x', 'foo.co.uk/pick',
   ])('a text with a link is hidden, so no customer-action link reaches a technician: %s', (body) => {
     expect(hasLink(body)).toBe(true);
     expect(textVerdict(outbound({ message_type: 'appointment_rescheduled', message_body: body }))).toBe('hidden');
@@ -110,6 +110,26 @@ describe('textVerdict', () => {
     expect(textVerdict(outbound({ message_type: 'manual', metadata: { channel: 'push' } }))).toBe('skip');
     expect(textVerdict(outbound({ message_type: 'appointment_cancelled', from_phone: '+19415550100', message_body: 'Your visit moved to Thursday' }))).toBe('show');
   });
+
+  test.each([
+    'My verification code is 123456', 'your Google code is 482913', 'bank code 553311', 'login code: 884422', 'sign-in code 112233', 'use passcode 9988',
+    'the code to log in is 4455',
+  ])('a sign-in or verification code hides the whole row, photos with it: %s', (body) => {
+    const metadata = { media: [{ key: 'sms-media/inbound/a', contentType: 'image/jpeg' }] };
+    expect(hasCardCredentials(body)).toBe(true);
+    expect(textVerdict(inbound({ message_body: body, metadata }), { withPhotos: true })).toBe('hidden');
+    expect(textVerdict(outbound({ message_body: body }))).toBe('hidden');
+  });
+
+  test.each(['the gate code is 1234', 'gate code is 1234, side door 5566', 'garage code 7788 please', 'use the keypad at the gate, code 2468'])(
+    'an ordinary gate or door code instruction still shows: %s', (body) => {
+      expect(textVerdict(inbound({ message_body: body }))).toBe('show');
+    });
+
+  test.each(['All done.Thanks', 'Finished the front.Please call', 'Tuesday works.See you then', 'dogs are out.Ok'])(
+    'prose with a dot and no space is not a link: %s', (body) => {
+      expect(hasLink(body)).toBe(false);
+    });
 
   test('a manual text shows only with the composer\'s human_authored stamp; a staff id alone is skipped', () => {
     expect(textVerdict(outbound({ message_body: 'We will be there Tuesday' }))).toBe('show');

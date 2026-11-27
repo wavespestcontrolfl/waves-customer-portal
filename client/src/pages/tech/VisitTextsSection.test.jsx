@@ -75,6 +75,24 @@ describe('photos held back by the server', () => {
   });
 });
 
+describe('photos partly signed', () => {
+  it('counts the photos that have no link, beside the ones that do', async () => {
+    renderWith(vi.fn(async () => ({ enabled: true, hidden: 0, texts: [
+      { id: 't1', direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: 'Three photos', photos: [{ url: 'https://signed.example/a', contentType: 'image/jpeg' }], photoCount: 3 },
+    ] })));
+    expect(await screen.findByText('2 photos are not shown. Ask the office.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open customer photo' })).toBeInTheDocument();
+  });
+
+  it('shows no line when every photo has a link', async () => {
+    renderWith(vi.fn(async () => ({ enabled: true, hidden: 0, texts: [
+      { id: 't1', direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: 'One photo', photos: [{ url: 'https://signed.example/a', contentType: 'image/jpeg' }], photoCount: 1 },
+    ] })));
+    await screen.findByText('One photo');
+    expect(screen.queryByText(/not shown/)).toBeNull();
+  });
+});
+
 describe('one visit at a time', () => {
   it('never shows the previous visit\'s texts under a new visit', async () => {
     const answers = {

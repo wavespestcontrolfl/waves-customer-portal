@@ -17,6 +17,8 @@ const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { isPaymentScopedText } = require('./payment-status-contract');
 const { findShortenerHost } = require('./comms-lint');
+const { normalizeForLinkCheck } = require('./messaging/sms-link-policy');
+const psl = require('psl');
 
 const WINDOW_DAYS = 7;
 const MAX_TEXTS = 40;
@@ -60,17 +62,34 @@ function hasMoneyWords(body) {
 }
 
 // A card number (the repo's PAN detector, spoken and spaced forms included) or a labeled card / bank detail.
+// A scheme-less address on any real public suffix (photos.example.dev/yard, example.dev): every dotted host-shaped token, read from a
+// normalized copy (full-width dots, zero-width joins, percent-encoding), is checked against the public suffix list. A token whose last
+// label is not a listed suffix ("done.Thanks") is prose. Over-hiding a sentence that glues two words around a real suffix is accepted.
+function hasPublicHost(body) {
+  const lower = normalizeForLinkCheck(String(body || '')).toLowerCase();
+  const hosts = lower.match(/(?:[a-z0-9][a-z0-9-]*\.)+[a-z]{2,}/g) || [];
+  return hosts.some((host) => psl.parse(host).listed);
+}
+
 function hasLink(body) {
   // A bare shortened link (is.gd/abc, rb.gy/x) has no scheme and may sit outside the list below: the repo's shortener recognizer
   // (comms-lint.js: its host list plus the short-host fingerprint) covers the rest.
-  return LINK.test(String(body || '')) || Boolean(findShortenerHost(body));
+  return LINK.test(String(body || '')) || Boolean(findShortenerHost(body)) || hasPublicHost(body);
+}
+
+// A sign-in or verification code (a bank, Google, a login): the access-code reader's own verification wording, plus login and
+// passcode forms it does not list. A gate or door code ("gate code is 1234") is not one of these.
+const SIGN_IN_CODE = /\b(?:log[- ]?in|sign[- ]?in|passcode|pass code|login)\b[^.?!\n]{0,24}\bcodes?\b|\bpasscodes?\b|\bcodes?\b[^.?!\n]{0,24}\b(?:log[- ]?in|sign[- ]?in)\b/i;
+function hasSignInCode(body) {
+  const text = String(body || '');
+  return SIGN_IN_CODE.test(text) || require('./access-code-capture').VERIFICATION_CONTEXT.test(text);
 }
 
 function hasCardCredentials(body) {
   // Typographic dashes and full-width digits read as the plain ones, as the card and SSN screens expect.
   const text = String(body || '').normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-');
   // scrubNoteText reads a normalized copy (typographic dashes, full-width digits) and also finds SSNs, tokens and keys.
-  return CREDENTIAL_WORDS.test(text) || scrubPansDetailed(text).count > 0 || scrubNoteText(text).removed > 0;
+  return CREDENTIAL_WORDS.test(text) || hasSignInCode(text) || scrubPansDetailed(text).count > 0 || scrubNoteText(text).removed > 0;
 }
 
 function parseMetadata(value) {
