@@ -78,7 +78,7 @@ describe('Customer 360 -> named on a call (texts only)', () => {
     const block = await screen.findByTestId('reminder-contacts');
     expect(within(block).getByText('Named on a call (texts only)')).toBeInTheDocument();
     expect(await within(block).findByText('Bob Example')).toBeInTheDocument();
-    expect(within(block).getByText('Getting texts')).toBeInTheDocument();
+    expect(within(block).getByText('Active on the list')).toBeInTheDocument();
     expect(within(block).getByText('Stopped by customer')).toBeInTheDocument();
     expect(within(block).getByText('Stopped by staff')).toBeInTheDocument();
   });
@@ -92,14 +92,14 @@ describe('Customer 360 -> named on a call (texts only)', () => {
     expect(await within(block).findByText('Stopped by staff')).toBeInTheDocument();
     fireEvent.click(within(block).getByRole('button', { name: 'Restart texts for Bob Example' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([u, o]) => String(u).endsWith('/admin/customers/customer-a/reminder-contacts/r1/restart') && o?.method === 'POST')).toBe(true));
-    expect(await within(block).findByText('Getting texts')).toBeInTheDocument();
+    expect(await within(block).findByText('Active on the list')).toBeInTheDocument();
   });
 
   it('a person also in the on-location contacts says so and keeps Stop', async () => {
     stubFetch([person({ inContacts: true, hasAppAccess: true })]);
     await openComms();
     const block = await screen.findByTestId('reminder-contacts');
-    expect(await within(block).findByText('Getting texts · also an on-location contact (can sign in)')).toBeInTheDocument();
+    expect(await within(block).findByText('Active on the list · also an on-location contact (can sign in)')).toBeInTheDocument();
     expect(within(block).getByRole('button', { name: 'Stop texts for Bob Example' })).toBeInTheDocument();
   });
 

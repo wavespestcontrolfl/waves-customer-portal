@@ -544,6 +544,15 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toEqual([]);
         });
 
+        test('a call that records a tenant marks a contact spot already holding the number; it never widens a role', async () => {
+          // Give app access first: Bob sits in a spot with no role
+          await db('customers').where({ id: customerId }).update({ service_contact2_phone: `1-${BOB.slice(2)}`, service_contact2_role: null, service_contact3_phone: phone(45), service_contact3_role: 'home_buyer' });
+          await record({}, entry({ role: 'tenant' }));
+          const row = await db('customers').where({ id: customerId }).first('service_contact2_role', 'service_contact3_role', 'service_contact_role');
+          expect(row).toMatchObject({ service_contact2_role: 'tenant', service_contact3_role: 'home_buyer' });
+          expect(row.service_contact_role).toBeNull();
+        });
+
         test('a repeat stop keeps the first stop; another customer\'s id changes nothing', async () => {
           await record();
           const first = await stopBob('customer');

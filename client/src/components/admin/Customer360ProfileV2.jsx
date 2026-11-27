@@ -9772,7 +9772,7 @@ function CustomerReminderContacts({ customerId, isAdmin }) {
     }
   };
   const statusFor = (person) => {
-    const base = !person.stopped ? "Getting texts" : person.stoppedBy === "staff" ? "Stopped by staff" : "Stopped by customer";
+    const base = !person.stopped ? "Active on the list" : person.stoppedBy === "staff" ? "Stopped by staff" : "Stopped by customer";
     // Also an on-location contact: those texts have their own controls.
     if (!person.inContacts) return base;
     return `${base} · also an on-location contact${person.hasAppAccess ? " (can sign in)" : ""}`;

@@ -75,7 +75,7 @@ function serviceContactsPayload(customerRow) {
 
 // Map an ordered contact list (≤3, already trimmed of empty entries) onto the
 // slot columns, nulling everything past the last filled slot.
-function serviceContactSlotUpdates(contacts = [], before = {}, tenantKeys = new Set()) {
+function serviceContactSlotUpdates(contacts = [], before = {}) {
   const updates = {};
   const slotColumns = [
     ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
@@ -107,10 +107,22 @@ function serviceContactSlotUpdates(contacts = [], before = {}, tenantKeys = new 
     updates[nameCol] = contact?.name || null;
     updates[phoneCol] = contact?.phone || null;
     updates[emailCol] = contact?.email || null;
-    // A number a call recorded as a TENANT on this customer stays a tenant in the slot (deny wins): a tenant never reaches
-    // the service reports (slotWithheldFromReports), however the person was added (owner 2026-11-27, Give app access).
-    updates[roleCol] = contact && tenantKeys.has(phoneKey(contact.phone)) ? 'tenant' : (matchPrev(contact)?.role || null);
+    updates[roleCol] = matchPrev(contact)?.role || null;
   });
+  return updates;
+}
+
+// A number a call recorded as a TENANT on this customer is a tenant in its slot (deny wins), however the person was added
+// (owner 2026-11-27, Give app access): a tenant never reaches the service reports (slotWithheldFromReports). Read under
+// the customers row lock the save holds; the call side marks a slot that already exists (call-visit-recipient.js
+// recordForVisit takes the same row), so neither order leaves a roleless tenant.
+async function applyTenantRoles(trx, customerId, updates) {
+  const tenantKeys = await require('../services/call-visit-recipient').tenantPhoneKeys(customerId, { conn: trx });
+  if (!tenantKeys.size) return updates;
+  const phoneKey = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  for (const [phoneCol, roleCol] of [['service_contact_phone', 'service_contact_role'], ['service_contact2_phone', 'service_contact2_role'], ['service_contact3_phone', 'service_contact3_role']]) {
+    if (phoneCol in updates && roleCol in updates && tenantKeys.has(phoneKey(updates[phoneCol]))) updates[roleCol] = 'tenant';
+  }
   return updates;
 }
 
@@ -1379,8 +1391,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
         propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
       } : null;
-      const tenantKeys = await require('../services/call-visit-recipient').tenantPhoneKeys(req.params.customerId);
-      const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow, tenantKeys);
+      const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow);
       const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
       let lockedBefore = beforeRow;
       let lockedAt = null;
@@ -1393,6 +1404,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         // orders the events even if a later save's insert lands first.
         lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         lockedAt = new Date();
+        await applyTenantRoles(trx, req.params.customerId, slotUpdates);
         // The assigned addresses take the shared email key after the row
         // lock, so a bounce recovery's ownership check cannot be overtaken
         // by this save (utils/customer-comms-lock.js lockAssignedCustomerEmails).
@@ -1460,7 +1472,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
         });
       }
-      const slot1 = serviceContactSlotUpdates([contact], beforeRow, await require('../services/call-visit-recipient').tenantPhoneKeys(req.params.customerId));
+      const slot1 = serviceContactSlotUpdates([contact], beforeRow);
       // Same artifact rule AND same claim-in-transaction opt-in flow as the
       // list save — the legacy shape must not be a loophole that enrolls a
       // new phone without the confirmation flow or its rollback semantics.
@@ -1487,6 +1499,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         // describe the actual DB transition, not a possibly-stale snapshot.
         legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         legacyLockedAt = new Date();
+        await applyTenantRoles(trx, req.params.customerId, legacySlot1Updates);
         await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, legacySlot1Updates);
         if (legacyOptinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
@@ -1656,6 +1669,7 @@ router._private = {
   serviceContactPayload,
   serviceContactsPayload,
   serviceContactSlotUpdates,
+  applyTenantRoles,
   serviceContactConsentUpdates,
   serviceContactsRequireConsent,
   normalizeContactInput,

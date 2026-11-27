@@ -192,6 +192,10 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
+      // A call that records the person as a TENANT also marks a contact spot of this customer that already holds the number
+      // (deny only: a tenant never reaches the service reports). It takes the customers row, the same lock the holder's
+      // contacts save holds while it reads tenant records, so neither order leaves a roleless tenant (owner 2026-11-27).
+      if (String(entry.role || '').trim().toLowerCase() === 'tenant') await markTenantSlots(trx, visit.customer_id, entry.phoneKey);
       const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source');
       // A row bound to this customer stands as it is, unless it is a copy this customer does not list (a merge moved it here):
       // that grants nothing, so like any ineligible row it is replaced by a fresh row with a NEW id (main's rule above).
@@ -225,6 +229,13 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
     result.recorded.push({ phoneKey: entry.phoneKey, created: outcome === 'created' });
   }
   return result;
+}
+
+// Set the tenant role on every contact spot of the customer that holds this number. Never clears or widens a role.
+async function markTenantSlots(trx, customerId, phoneKey) {
+  const slot = (n) => (n === 1 ? 'service_contact' : `service_contact${n}`);
+  const sets = [1, 2, 3].map((n) => `${slot(n)}_role = CASE WHEN right(regexp_replace(coalesce(${slot(n)}_phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN 'tenant' ELSE ${slot(n)}_role END`);
+  await trx.raw(`UPDATE customers SET ${sets.join(', ')} WHERE id = ?`, [phoneKey, phoneKey, phoneKey, customerId]);
 }
 
 /**
