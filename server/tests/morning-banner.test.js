@@ -40,17 +40,24 @@ const many = (n, meta) => Array.from({ length: n }, () => row(meta));
 const MORNING = new Date('2026-11-03T13:00:00Z'); // 8:00 AM EST
 
 let claimed;
+let activeAdmins;
 beforeEach(() => {
   jest.clearAllMocks();
   rowSeq = 0;
   claimed = new Set();
+  activeAdmins = [{ id: 1, email: 'contact@wavespestcontrol.com' }];
   mockDb.raw.mockImplementation(async (_sql, [key]) => {
     if (claimed.has(key)) return { rows: [] };
     claimed.add(key);
     return { rows: [{ id: claimed.size }] };
   });
   const del = jest.fn().mockResolvedValue(1);
-  mockDb.mockImplementation(() => ({ where: ({ claim_key: key }) => ({ del: async () => { claimed.delete(key); return del(); } }) }));
+  mockDb.mockImplementation((table) => {
+    if (table === 'technicians') {
+      return { where: () => ({ select: async () => activeAdmins }) };
+    }
+    return { where: ({ claim_key: key }) => ({ del: async () => { claimed.delete(key); return del(); } }) };
+  });
   mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
 });
 
@@ -71,7 +78,7 @@ describe('what counts as waiting', () => {
       total: 7,
       areas: [{ area: 'Comms', count: 3 }, { area: 'Billing', count: 2 }, { area: 'Schedule', count: 1 }, { area: 'Estimates', count: 1 }],
       day: '2026-11-03',
-    }, { pushOnly: true });
+    }, { pushOnly: true, onlyUserIds: [1] });
   });
 
   test('leaves out fyi, Claude and either rows, Activity-only rows, rows sent to Claude and unsorted rows', async () => {
@@ -150,7 +157,7 @@ describe('once per ET day', () => {
     // Late in the evening ET it is still the same ET day.
     expect((await runMorningBanner({ now: new Date('2026-11-04T03:30:00Z') })).skipped).toBe('already_claimed');
     expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect([...claimed]).toEqual(['morning_banner:2026-11-03']);
+    expect([...claimed]).toEqual(['morning_banner:2026-11-03:owner']);
   });
 
   test('the next ET day sends again, across the November fall-back day too', async () => {
@@ -163,16 +170,27 @@ describe('once per ET day', () => {
     expect(mockTrigger.mock.calls.map(([, payload]) => payload.day)).toEqual(['2026-10-31', '2026-11-01', '2026-11-02']);
   });
 
-  test('a send that definitely did not happen releases the claim so a rerun can send', async () => {
+  test('a send that definitely did not happen releases the claim so a rerun can send, while post-handoff failure keeps it', async () => {
     mockOpenRows.mockResolvedValue(many(2));
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, prefsUnavailable: true });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
+    expect(claimed.size).toBe(0);
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'recipient_lookup' });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
+    expect(claimed.size).toBe(0);
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'before_handoff' });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
     expect(claimed.size).toBe(0);
     mockTrigger.mockRejectedValueOnce(new Error('boom'));
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
     expect(claimed.size).toBe(0);
+    // Provider handoff may already have happened -> keep the claim so rerun does not duplicate.
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'push_dispatch' });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: true });
     expect(claimed.size).toBe(1);
+    mockTrigger.mockClear();
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, skipped: 'already_claimed' });
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('a claim that cannot be taken sends nothing', async () => {
@@ -253,6 +271,37 @@ describe('once per ET day', () => {
       'waiting_summary',
       { count: 2, total: 2, areas: [{ area: 'Comms', count: 1 }, { area: 'Billing', count: 1 }], day: '2026-11-03' },
       { pushOnly: true, onlyUserIds: [1] },
+    );
+
+    // Same-day rerun after the alert mix changes (shared-only -> mixed) keeps stable keys
+    // and never sends a duplicate banner to either audience.
+    mockTrigger.mockClear();
+    claimed.clear();
+    mockOpenRows.mockResolvedValue([row({ area: 'Comms' })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 1, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(2);
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03:owner', 'morning_banner:2026-11-03:shared']);
+
+    mockTrigger.mockClear();
+    mockOpenRows.mockResolvedValue([row({ area: 'Comms' }), row({ area: 'Billing', ownerOnly: true })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 2, sent: false, skipped: 'already_claimed' });
+    expect(mockTrigger).not.toHaveBeenCalled();
+
+    // Reverse mix change (owner-only -> mixed): owner is already claimed, so only non-owner admins send.
+    mockTrigger.mockClear();
+    claimed.clear();
+    mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 1, sent: true });
+    expect([...claimed]).toEqual(['morning_banner:2026-11-03:owner']);
+
+    mockTrigger.mockClear();
+    mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true }), row({ area: 'Comms' })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 1, total: 1, areas: [{ area: 'Comms', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [2] },
     );
   });
 });

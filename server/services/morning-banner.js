@@ -103,7 +103,13 @@ async function splitAdminIdsByOwnerAccess() {
 }
 
 function deliverySucceeded(result) {
-  return Boolean(result && !result.error && !result.prefsUnavailable);
+  return Boolean(
+    result
+    && !result.error
+    && !result.prefsUnavailable
+    && result.pushFailed !== 'recipient_lookup'
+    && result.pushFailed !== 'before_handoff',
+  );
 }
 
 async function sendClaimedAudience({ key, payload, triggerOptions }) {
@@ -120,7 +126,11 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
     const result = await triggerNotification('waiting_summary', payload, triggerOptions);
     if (!deliverySucceeded(result)) {
       await releaseKey(key);
-      const reason = result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result';
+      const reason = result?.error
+        ? 'dispatch error'
+        : result?.prefsUnavailable
+          ? 'preferences unavailable'
+          : result?.pushFailed || 'no result';
       logger.error(`[morning-banner] ${key}: banner not sent (${reason})`);
       return { status: 'dispatch_failed' };
     }
@@ -132,10 +142,13 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
   }
 }
 
+// Always claim stable per-audience keys (`:owner` and `:shared`) so a same-day
+// alert-mix change (shared-only -> mixed, or owner-only -> mixed) can never
+// re-notify an audience that already received today's banner.
 async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
   const { ownerIds, otherAdminIds } = await splitAdminIdsByOwnerAccess();
   const audiences = [];
-  if (ownerIds.length > 0) {
+  if (ownerSummary.count > 0 && ownerIds.length > 0) {
     audiences.push({
       key: `${CLAIM_PREFIX}${day}:owner`,
       payload: { count: ownerSummary.count, total: ownerSummary.total, areas: ownerSummary.areas, day },
@@ -162,32 +175,15 @@ async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
   return { count: ownerSummary.count, sent: true, result: sent.result };
 }
 
-// The send for a day that has something waiting: claim the day, then the pushOnly banner. Never throws.
+// The send for a day that has something waiting: claim per audience, then send pushOnly banners. Never throws.
 async function claimAndSend(day, { count, total, areas, shared }) {
   const sharedSummary = shared || { count, total, areas };
-  const hasOwnerOnlyDelta = sharedSummary.count !== count || sharedSummary.total !== total;
-  if (hasOwnerOnlyDelta) {
-    try {
-      return await dispatchScopedBanners(day, { count, total, areas }, sharedSummary);
-    } catch (err) {
-      logger.error(`[morning-banner] ${day}: scoped banner failed: ${err?.message || 'error'}`);
-      return { count, sent: false, error: 'dispatch_failed' };
-    }
+  try {
+    return await dispatchScopedBanners(day, { count, total, areas }, sharedSummary);
+  } catch (err) {
+    logger.error(`[morning-banner] ${day}: scoped banner failed: ${err?.message || 'error'}`);
+    return { count, sent: false, error: 'dispatch_failed' };
   }
-  const outcome = await sendClaimedAudience({
-    key: `${CLAIM_PREFIX}${day}`,
-    payload: { count, total, areas, day },
-    triggerOptions: { pushOnly: true },
-  });
-  if (outcome.status === 'sent') {
-    logger.info(`[morning-banner] ${day}: ${count} unread of ${total} waiting, banner sent`);
-    return { count, sent: true, result: outcome.result };
-  }
-  if (outcome.status === 'already_claimed') {
-    logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
-    return { count, sent: false, skipped: 'already_claimed' };
-  }
-  return { count, sent: false, error: outcome.status };
 }
 
 // Never throws. { skipped } | { count, sent: false, skipped | error } | { count, sent: true, result }.
