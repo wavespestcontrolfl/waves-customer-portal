@@ -259,7 +259,7 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
  * this customer is left alone; a row for the number bound to anyone else is replaced. Serialized with recordForVisit by the same
  * per-visit advisory lock. Throws on a database error (the sender treats it like an unreadable recipient list).
  */
-async function materializeForVisit(scheduledServiceId, conn = db) {
+async function materializeForVisit(scheduledServiceId, conn = db, { expectedCustomerId = null } = {}) {
   if (!scheduledServiceId) return null;
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
@@ -267,16 +267,22 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
     const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
     if (!visit || !visit.customer_id) return null;
     const owner = String(visit.customer_id);
+    // The sender's notice was built for one customer: a visit that belongs to another now copies nothing and sends nothing
+    // (a failed read: one staff bell).
+    if (expectedCustomerId && String(expectedCustomerId) !== owner) {
+      throw Object.assign(new Error('visit customer is not the notice\'s customer'), { code: 'VISIT_CUSTOMER_CHANGED' });
+    }
+    const live = [...LIVE_STATUSES];
     // A row for a listed number that is NOT bound to the visit's current customer (never bound, or left over from a customer the
     // visit was moved away from) would hold the unique key and block the copy: delete it first, so the copy is a fresh row with a
     // NEW id and anything queued or minted under the old id (a held text, a claim, a tracker token) finds no row and drops.
     await trx.raw(
       `DELETE FROM ${TABLE} r
         USING scheduled_services s
-        WHERE s.id = ? AND s.customer_id = ? AND r.scheduled_service_id = s.id
+        WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${live.map(() => '?').join(', ')}) AND r.scheduled_service_id = s.id
           AND r.customer_id IS DISTINCT FROM s.customer_id
           AND r.phone_key IN (SELECT c.phone_key FROM ${REMINDER_TABLE} c WHERE c.customer_id = s.customer_id)`,
-      [scheduledServiceId, owner],
+      [scheduledServiceId, owner, ...live],
     );
     // A copy of THIS customer whose entry is gone, for a number the customer lists again under a NEW entry: rebound in place
     // to that entry with its tracker token cleared (an entry id is never reused, so an old link never revives; the delivery
@@ -285,10 +291,10 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
       `UPDATE ${TABLE} r SET reminder_contact_id = c.id, track_token = NULL, first_name = c.first_name, last_name = c.last_name,
               role = c.role, consent_version = c.consent_version, call_log_id = c.call_log_id
          FROM scheduled_services s, ${REMINDER_TABLE} c
-        WHERE s.id = ? AND s.customer_id = ? AND r.scheduled_service_id = s.id AND r.customer_id = s.customer_id
-          AND r.source = ? AND c.customer_id = s.customer_id AND c.phone_key = r.phone_key
+        WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${live.map(() => '?').join(', ')}) AND r.scheduled_service_id = s.id
+          AND r.customer_id = s.customer_id AND r.source = ? AND c.customer_id = s.customer_id AND c.phone_key = r.phone_key
           AND r.reminder_contact_id IS DISTINCT FROM c.id`,
-      [scheduledServiceId, owner, REMINDER_SOURCE],
+      [scheduledServiceId, owner, ...live, REMINDER_SOURCE],
     );
     await trx.raw(
       `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id, reminder_contact_id)
@@ -547,12 +553,11 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
  * `gate(contact)`: optional per-recipient check by the sender, 'send' (default), 'skip' or 'abort'
  * (the pipeline lost its claim). Never throws into the sender. Returns false only when a gate aborted.
  */
-async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones = [], context = {}, dayOnly = false, gate = null, conn = db }) {
+async function notifyVisitRecipients({ scheduledServiceId, kind, customerId, excludePhones = [], context = {}, dayOnly = false, gate = null, conn = db }) {
   if (!gateLive() || !KINDS[kind] || !scheduledServiceId) return true;
   let contacts;
   try {
-    const copiedFor = await materializeForVisit(scheduledServiceId, conn);
-    contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true, copiedFor });
+    contacts = await copyThenList(scheduledServiceId, kind, { customerId, excludePhones, conn });
   } catch (err) {
     // A lookup that throws is NOT "nobody is owed": the person named on the call may have been left without a text. No retry
     // (a late retry cannot prove it is still for the same slot); ONE admin bell per visit and notice, so someone can text them.
@@ -571,6 +576,12 @@ async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones =
     logger.warn(`[call-visit-recipient] ${kind} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
   }
   return true;
+}
+
+// The every-visit copy for the notice's customer, then the people owed this text. Throws on any failed read.
+async function copyThenList(scheduledServiceId, kind, { customerId, excludePhones, conn }) {
+  const copiedFor = await materializeForVisit(scheduledServiceId, conn, { expectedCustomerId: customerId });
+  return contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true, copiedFor });
 }
 
 // The bell for a notice that could not be sent because the recipients could not be read. The copy and the dedupe key carry no

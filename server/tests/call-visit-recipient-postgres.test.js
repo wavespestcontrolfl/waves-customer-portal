@@ -526,6 +526,34 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         }
       });
 
+      test('a notice built for another customer copies and sends nothing (one staff bell)', async () => {
+        const notifications = require('../services/notification-service');
+        const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+        try {
+          await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', customerId: '00000000-0000-0000-0000-000000000001', excludePhones: [HOLDER] });
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+          expect(await otherRows()).toHaveLength(0);
+          expect(bell).toHaveBeenCalledTimes(1);
+        } finally {
+          bell.mockRestore();
+        }
+      });
+
+      test('a closed visit keeps its old rows: the copy never deletes or rebinds on a cancelled or completed visit', async () => {
+        const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(47) }).returning('id');
+        try {
+          const [{ id: oldRow }] = await db('visit_text_recipients').insert({
+            scheduled_service_id: otherVisitId, customer_id: otherCustomerId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x',
+          }).returning('id');
+          await db('scheduled_services').where({ id: otherVisitId }).update({ status: 'completed' });
+          await VisitRecipient.materializeForVisit(otherVisitId);
+          expect((await otherRows()).map((r) => r.id)).toEqual([oldRow]);
+        } finally {
+          await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).del();
+          await db('customers').where({ id: otherCustomerId }).del();
+        }
+      });
+
       test('a cancelled or waiting-to-rebook visit copies nobody', async () => {
         for (const status of ['cancelled', 'rescheduled', 'completed']) {
           await db('scheduled_services').where({ id: otherVisitId }).update({ status });

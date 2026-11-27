@@ -427,7 +427,7 @@ describe('sendTechEnRoute hands the en-route text to the visit-only recipients',
     process.env[GATE] = 'true';
     const result = await enRoute();
     expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({
-      scheduledServiceId: 'ss-1', kind: 'en_route', excludePhones: [HOLDER],
+      scheduledServiceId: 'ss-1', kind: 'en_route', customerId: 'cust-1', excludePhones: [HOLDER],
       context: { techName: expect.any(String), etaMinutes: 15, trackUrlFor: expect.any(Function) },
     });
     expect(sentTo()).toEqual([HOLDER]);
