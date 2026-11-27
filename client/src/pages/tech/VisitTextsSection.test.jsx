@@ -63,6 +63,17 @@ describe('VisitTextsSection', () => {
   });
 });
 
+describe('photos held back by the server', () => {
+  it('says how many photos are not shown instead of leaving a gap', async () => {
+    renderWith(vi.fn(async () => ({ enabled: true, hidden: 0, texts: [
+      { id: 't1', direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: 'Brown patch', photos: [], photoCount: 2 },
+      { id: 't2', direction: 'inbound', at: '2026-11-20T16:00:00.000Z', body: 'One more', photos: [], photoCount: 1 },
+    ] })));
+    expect(await screen.findByText('2 photos are not shown. Ask the office.')).toBeInTheDocument();
+    expect(screen.getByText('1 photo is not shown. Ask the office.')).toBeInTheDocument();
+  });
+});
+
 describe('one visit at a time', () => {
   it('never shows the previous visit\'s texts under a new visit', async () => {
     const answers = {

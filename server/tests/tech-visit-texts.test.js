@@ -50,17 +50,16 @@ describe('textVerdict', () => {
     expect(textVerdict(inbound({ message_body: '' }))).toBe('skip');
   });
 
-  test('a photo with no words shows only when it is a displayable image', () => {
+  test('a photo with no words is never shown: nothing to screen it by, whatever its type', () => {
     const media = (contentType) => JSON.stringify({ media: [{ key: 'sms-media/inbound/a', contentType }] });
-    expect(textVerdict(inbound({ message_body: '', metadata: media('image/jpeg') }))).toBe('show');
-    expect(textVerdict(inbound({ message_body: '', metadata: media('image/HEIC; charset=x') }))).toBe('show');
+    expect(textVerdict(inbound({ message_body: '', metadata: media('image/jpeg') }))).toBe('skip');
     expect(textVerdict(inbound({ message_body: '', metadata: media('application/pdf') }))).toBe('skip');
-    expect(textVerdict(inbound({ message_body: '', metadata: media(null) }))).toBe('skip');
+    expect(textVerdict(inbound({ message_body: 'Brown patch by the gate', metadata: media('image/jpeg') }))).toBe('show');
   });
 
   test.each([
     '4111 1111 1111 1111', '4111111111111111', 'the number is 5555-5555-5555-4444', 'cvv 123', 'security code is 456', 'expires 08/27',
-    'my routing is 021000021', 'account number 123456789', 'acct # 99887766', 'checking acct 12345678', 'account 12345678', 'acct: 998877', 'savings 123456789', '021000021',
+    'my routing is 021000021', 'account number 123456789', 'acct # 99887766', 'checking acct 12345678', 'account 12345678', 'acct: 998877', 'savings 123456789', '021000021', 'checking account 1234 5678', 'bank acct 1234-5678-90', 'account 123 456 789',
   ])('a card or bank detail hides the whole text even with no money word: %s', (body) => {
     expect(hasCardCredentials(body)).toBe(true);
     expect(textVerdict(inbound({ message_body: body }))).toBe('hidden');
@@ -108,25 +107,37 @@ describe('windowStart', () => {
   });
 });
 
-// A tiny sms_log: applies the customer, the created_at bounds, the order and the limit the service asks for.
+// A tiny sms_log: applies the customer, the created_at bounds, the order, the limit and the offset the service asks for.
+// The raw-SQL pieces (provider twin, recruiting and reservation filters) are only recorded; withoutQueueParents covers the twin in JS.
+const col = (name) => String(name).replace(/^sl\./, '');
 function fakeDb(rows) {
-  const calls = { where: [] };
-  const db = () => {
+  const calls = { selects: 0, tables: [], raw: 0 };
+  const sub = () => {
+    const b = {};
+    for (const m of ['select', 'from', 'where', 'whereRaw', 'whereNull', 'orWhere', 'whereNotExists']) b[m] = (...args) => { if (m === 'whereRaw') calls.raw += 1; if (typeof args[0] === 'function') args[0].call(b, b); return b; };
+    b.modify = (cb) => { cb(b); return b; };
+    return b;
+  };
+  const db = (table) => {
+    calls.tables.push(table);
     let list = rows.slice();
     let skip = 0;
     let max = Infinity;
     const q = {
       where(a, op, val) {
-        calls.where.push([a, op, val]);
-        if (typeof a === 'object') list = list.filter((r) => Object.entries(a).every(([k, v]) => r[k] === v));
-        else if (op === '>=') list = list.filter((r) => r[a] >= val);
-        else if (op === '<=') list = list.filter((r) => r[a] <= val);
+        if (typeof a === 'function') { a.call(sub(), sub()); return q; }
+        if (typeof a === 'object') list = list.filter((r) => Object.entries(a).every(([k, v]) => r[col(k)] === v));
+        else if (op === '>=') list = list.filter((r) => r[col(a)] >= val);
+        else if (op === '<=') list = list.filter((r) => r[col(a)] <= val);
+        else list = list.filter((r) => r[col(a)] === op);
         return q;
       },
-      orderBy(col, dir) { list.sort((x, y) => (dir === 'desc' ? -1 : 1) * (x[col] < y[col] ? -1 : x[col] > y[col] ? 1 : 0)); return q; },
+      whereNotExists(cb) { cb.call(sub(), sub()); return q; },
+      whereRaw() { calls.raw += 1; return q; },
+      orderBy(c, dir) { const k = col(c); list.sort((x, y) => (dir === 'desc' ? -1 : 1) * (x[k] < y[k] ? -1 : x[k] > y[k] ? 1 : 0)); return q; },
       limit(n) { max = n; return q; },
       offset(n) { skip = n; return q; },
-      select() { calls.selects = (calls.selects || 0) + 1; return Promise.resolve(list.slice(skip, skip + max)); },
+      select() { calls.selects += 1; return Promise.resolve(list.slice(skip, skip + max)); },
     };
     return q;
   };
@@ -153,7 +164,9 @@ describe('visitTexts', () => {
     expect(out.texts.map((t) => t.id)).toEqual(['edge', 'mid']);
     expect(out.hidden).toBe(2);
     expect(JSON.stringify(out)).not.toMatch(/balance/);
-    expect(Object.keys(out.texts[0]).sort()).toEqual(['at', 'body', 'direction', 'id', 'photos']);
+    expect(Object.keys(out.texts[0]).sort()).toEqual(['at', 'body', 'direction', 'id', 'photoCount', 'photos']);
+    expect(db.calls.tables[0]).toBe('sms_log as sl');
+    expect(db.calls.raw).toBeGreaterThan(0); // the provider-twin, recruiting and reservation filters were applied
   });
 
   test('caps at 40, keeping the newest, oldest first', async () => {
@@ -183,17 +196,30 @@ describe('visitTexts', () => {
     expect(out.texts).toEqual([]);
   });
 
-  test('a document is never signed, and a row left with nothing to show is dropped', async () => {
+  test('a scheduled send left as a queue parent and a provider row shows once', async () => {
+    const parent = row('parent', '2026-11-22T15:00:00Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday' });
+    const twin = row('twin', '2026-11-22T15:00:05Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: JSON.stringify({ scheduled_sms_log_id: 'parent' }) });
+    const out = await visitTexts(fakeDb([parent, twin]), SVC, { now: NOW });
+    expect(out.texts.map((t) => t.id)).toEqual(['twin']);
+  });
+
+  test('photos: off by default, so no photo is ever signed and the count says so', async () => {
+    const sign = jest.fn();
+    const r = row('p0', '2026-11-22T15:00:00Z', { message_body: 'Brown patch', metadata: { media: [{ key: 'sms-media/inbound/a', contentType: 'image/jpeg' }] } });
+    const out = await visitTexts(fakeDb([r]), SVC, { now: NOW, sign });
+    expect(sign).not.toHaveBeenCalled();
+    expect(out.texts[0]).toMatchObject({ photos: [], photoCount: 1 });
+  });
+
+  test('a document is never signed, and only an image is', async () => {
     const media = [
       { key: 'sms-media/inbound/pic', contentType: 'image/png' },
       { key: 'sms-media/inbound/doc', contentType: 'application/pdf' },
     ];
     const sign = jest.fn(async (items) => items.map((m) => ({ ...m, url: `https://signed.example/${m.key}` })));
-    const only = row('docs', '2026-11-22T15:00:00Z', { message_body: '', metadata: { media: [media[1]] } });
-    const both = row('both', '2026-11-22T16:00:00Z', { message_body: '', metadata: { media } });
-    const out = await visitTexts(fakeDb([only, both]), SVC, { now: NOW, sign });
-    expect(out.texts.map((t) => t.id)).toEqual(['both']);
+    const out = await visitTexts(fakeDb([row('both', '2026-11-22T16:00:00Z', { message_body: 'Brown patch', metadata: { media } })]), SVC, { now: NOW, sign, withPhotos: true });
     expect(out.texts[0].photos).toEqual([{ url: 'https://signed.example/sms-media/inbound/pic', contentType: 'image/png' }]);
+    expect(out.texts[0].photoCount).toBe(1);
     expect(sign).toHaveBeenCalledTimes(1);
     expect(sign).toHaveBeenCalledWith([media[0]]);
   });
@@ -203,17 +229,21 @@ describe('visitTexts', () => {
     expect(out).toEqual({ texts: [], hidden: 0 });
   });
 
-  test('photos: only a stored key is linked, a provider URL never leaves', async () => {
-    const media = [{ key: 'sms-media/inbound/a', providerUrl: 'https://api.twilio.com/x/Media/1', contentType: 'image/jpeg' }, { providerUrl: 'https://api.twilio.com/x/Media/2', contentType: 'image/jpeg' }];
-    const sign = jest.fn(async (items) => items.map((m) => ({ ...m, url: 'https://signed.example/a?sig=1' })));
-    const failed = jest.fn(async (items) => items.map((m) => ({ ...m, url: m.providerUrl })));
-    const db = () => fakeDb([row('p1', '2026-11-22T15:00:00Z', { message_body: '', metadata: { media } })])();
-    const ok = await visitTexts(db, SVC, { now: NOW, sign });
-    expect(sign).toHaveBeenCalledWith([media[0]]);
-    expect(ok.texts[0].photos).toEqual([{ url: 'https://signed.example/a?sig=1', contentType: 'image/jpeg' }]);
-    const bad = await visitTexts(db, SVC, { now: NOW, sign: failed });
+  test('photos: only a stored key is linked; a failed signature never falls back to a stored url or a provider url', async () => {
+    const media = [
+      { key: 'sms-media/inbound/a', url: 'https://old.example/a', providerUrl: 'https://api.twilio.com/x/Media/1', contentType: 'image/jpeg' },
+      { providerUrl: 'https://api.twilio.com/x/Media/2', contentType: 'image/jpeg' },
+    ];
+    const ok = jest.fn(async (items) => items.map((m) => ({ ...m, url: 'https://signed.example/a?sig=1' })));
+    // the real signer's failure path: url || providerUrl || null
+    const failed = jest.fn(async (items) => items.map((m) => ({ ...m, url: m.url || m.providerUrl || null })));
+    const db = () => fakeDb([row('p1', '2026-11-22T15:00:00Z', { message_body: 'Brown patch', metadata: { media } })])();
+    const good = await visitTexts(db, SVC, { now: NOW, sign: ok, withPhotos: true });
+    expect(ok).toHaveBeenCalledWith([{ key: 'sms-media/inbound/a', contentType: 'image/jpeg' }]);
+    expect(good.texts[0].photos).toEqual([{ url: 'https://signed.example/a?sig=1', contentType: 'image/jpeg' }]);
+    const bad = await visitTexts(db, SVC, { now: NOW, sign: failed, withPhotos: true });
     expect(bad.texts[0].photos).toEqual([]);
-    expect(JSON.stringify(bad)).not.toMatch(/twilio/);
+    expect(JSON.stringify(bad)).not.toMatch(/twilio|old\.example/);
   });
 
   test('a visit with no customer reads nothing', async () => {

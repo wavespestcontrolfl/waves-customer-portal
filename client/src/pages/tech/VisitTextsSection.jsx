@@ -94,6 +94,7 @@ export default function VisitTextsSection({ serviceId, byService, request }) {
           <p style={mutedStyle}>{t.direction === 'inbound' ? 'Customer' : 'Office'} · {whenLabel(t.at)}</p>
           {t.body && <p style={{ fontSize: 14, color: COLORS.text, margin: '2px 0 0', whiteSpace: 'pre-wrap' }}>{t.body}</p>}
           <PhotoThumbs photos={t.photos} />
+          {!t.photos?.length && t.photoCount > 0 && <p style={mutedStyle}>{t.photoCount} {t.photoCount === 1 ? 'photo is' : 'photos are'} not shown. Ask the office.</p>}
         </div>
       ))}
       {hidden > 0 && <p style={mutedStyle}>{hidden} {hidden === 1 ? 'text is' : 'texts are'} hidden. Ask the office.</p>}
