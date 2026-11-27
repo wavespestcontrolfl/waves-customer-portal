@@ -61,7 +61,7 @@ async function loadPackingAnchors({ db, dateFrom, dateTo, excludeServiceIds = []
     dateTo,
     excludeServiceIds,
     withCoords: true,
-    noCustomerReads,
+    ...(noCustomerReads ? { noCustomerReads: true } : {}),
   });
   return rows.map((row) => {
     const rawStartMin = row.startMin;

@@ -74,11 +74,11 @@ describe('practice-line get_availability (zero paid provider calls)', () => {
       expect(mockBuildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
         lat: 27.4989,
         lng: -82.5748,
-        surface: 'voice',
         paidLookups: false,
         noCustomerReads: true,
         verifiedOnly: true,
       }));
+      expect(mockBuildBookingAvailability.mock.calls[0][0].surface).toBeUndefined();
       expect(out).toContain('Open times: Tuesday December 1 at 9 AM; Wednesday December 2 at 1 PM.');
       expect(out).toContain('PRACTICE LINE — NOTHING IS BOOKED OR HELD.');
       expect(out).toMatch(/call or text the Waves office/);
@@ -189,6 +189,106 @@ describe('practice-line get_availability (zero paid provider calls)', () => {
       expect(queriedTables).toContain('tech_schedule_blocks');
       expect(queriedTables.some((t) => t.includes('customers'))).toBe(false);
       expect(joinedTables.some((t) => t.includes('customers'))).toBe(false);
+    } finally {
+      if (oldCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = oldCapacity;
+    }
+  });
+
+  test('coalesces overlapping schedule blocks and enclosed visits so blocked hours are never offered', async () => {
+    const oldCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      let findAvailableSlots;
+      const makeChain = (table) => {
+        let rows = [];
+        if (table === 'technicians') rows = [{ id: 'tech-1', name: 'Tech One' }];
+        else if (table === 'scheduled_services') {
+          rows = [
+            {
+              id: 'svc-enclosed',
+              technician_id: 'tech-1',
+              scheduled_date: '2026-12-01',
+              window_start: '09:00:00',
+              window_end: '10:00:00',
+              status: 'scheduled',
+              service_type: 'Pest Control',
+            },
+            {
+              id: 'svc-overlap',
+              technician_id: 'tech-1',
+              scheduled_date: '2026-12-02',
+              window_start: '10:00:00',
+              window_end: '12:00:00',
+              status: 'scheduled',
+              service_type: 'Pest Control',
+            },
+          ];
+        } else if (table === 'tech_schedule_blocks') {
+          rows = [
+            { id: 'blk-full', date: '2026-12-01', technician_id: 'tech-1', start_time: '08:00:00', end_time: '17:00:00' },
+            { id: 'blk-morning', date: '2026-12-02', technician_id: 'tech-1', start_time: '08:00:00', end_time: '11:00:00' },
+          ];
+        }
+        const q = {
+          where: () => q,
+          whereIn: () => q,
+          whereNot: () => q,
+          whereNotIn: () => q,
+          whereBetween: () => q,
+          whereNull: () => q,
+          whereNotNull: () => q,
+          whereRaw: () => q,
+          andWhere: () => q,
+          orWhere: () => q,
+          orWhereRaw: () => q,
+          orderBy: () => q,
+          limit: () => q,
+          leftJoin: () => q,
+          select: () => Promise.resolve(rows),
+          first: () => Promise.resolve(null),
+          then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+        };
+        return q;
+      };
+      const strictDb = jest.fn((table) => makeChain(table));
+      strictDb.raw = (sql) => sql;
+
+      jest.isolateModules(() => {
+        jest.doMock('../models/db', () => strictDb);
+        jest.doMock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
+        jest.doMock('../services/technician-eligibility', () => ({
+          applyAssignable: (q) => q,
+          absentTechDays: jest.fn(async () => new Set()),
+          loadTechShifts: jest.fn(async () => () => null),
+          shiftBounds: (_s, openMin, closeMin) => ({ openMin, closeMin }),
+        }));
+        jest.doMock('../services/scheduling/tech-start-point', () => ({
+          techColumns: (cols) => cols,
+          techStartPoint: () => null,
+        }));
+        jest.doMock('../services/scheduling/expected-service-minutes', () => ({
+          ensureCatalogLoaded: jest.fn(async () => {}),
+          expectedMinutesSync: (_row, fallback) => fallback,
+        }));
+        ({ findAvailableSlots } = require('../services/scheduling/find-time'));
+      });
+
+      const slotsRes = await findAvailableSlots({
+        lat: 27.4989,
+        lng: -82.5748,
+        durationMinutes: 60,
+        dateFrom: '2026-12-01',
+        dateTo: '2026-12-02',
+        includeWeekends: true,
+        noCustomerReads: true,
+        providerTravel: false,
+      });
+      const dec1Slots = slotsRes.slots.filter((s) => s.date === '2026-12-01');
+      const dec2Slots = slotsRes.slots.filter((s) => s.date === '2026-12-02');
+      expect(dec1Slots).toEqual([]);
+      expect(dec2Slots.length).toBeGreaterThan(0);
+      expect(dec2Slots.every((s) => s.start_time >= '12:00')).toBe(true);
     } finally {
       if (oldCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = oldCapacity;

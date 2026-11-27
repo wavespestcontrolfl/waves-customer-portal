@@ -1162,6 +1162,20 @@ async function loadPracticeScheduleBlocks({ dateFrom, dateTo, noCustomerReads = 
   return Array.isArray(rows) ? rows : [];
 }
 
+function coalesceOccupiedStops(stops) {
+  const sorted = [...stops].sort((a, b) => a.startMin - b.startMin || b.endMin - a.endMin);
+  const merged = [];
+  for (const stop of sorted) {
+    const prev = merged[merged.length - 1];
+    if (!prev || stop.startMin > prev.endMin) {
+      merged.push({ ...stop });
+    } else if (stop.endMin > prev.endMin) {
+      merged[merged.length - 1] = { ...prev, endMin: stop.endMin, lat: stop.lat, lng: stop.lng };
+    }
+  }
+  return merged;
+}
+
 function mergeScheduleBlockStops(dayStops, scheduleBlocks, date, techId) {
   if (!Array.isArray(scheduleBlocks) || !scheduleBlocks.length) return dayStops;
   const matching = scheduleBlocks
@@ -1178,7 +1192,7 @@ function mergeScheduleBlockStops(dayStops, scheduleBlocks, date, techId) {
       service_type: 'schedule_block',
     }));
   if (!matching.length) return dayStops;
-  return [...dayStops, ...matching].sort((a, b) => a.startMin - b.startMin);
+  return coalesceOccupiedStops([...dayStops, ...matching]);
 }
 
 function candidatesForDay(date, tech, params) {

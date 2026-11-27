@@ -680,7 +680,6 @@ async function resolvePracticeAvailability({ city }) {
       rangeTo,
       config,
       today,
-      surface: 'voice',
       paidLookups: false,
       noCustomerReads: true,
       verifiedOnly: true,
