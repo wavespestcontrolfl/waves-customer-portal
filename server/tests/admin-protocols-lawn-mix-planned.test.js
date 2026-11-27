@@ -210,7 +210,7 @@ describe('lawn-mix response for optional products', () => {
       application: 'spray', bigTank: true, ratePer1000: 3, rateUnit: 'fl_oz', fixedCarrierGalPer1000: null,
       per100Gal: { gallons: 100, amount: 150, carrierGalPer1000: 2, carrierSource: 'calibration' },
       fullTank: { gallons: 40, amount: 60 },
-      backpack4Gal: { gallons: 4, amount: 9.023, amountUnit: 'fl_oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },
+      backpack4Gal: { gallons: 4, amount: 9.023, amountUnit: 'fl_oz', carrierGalPer1000: 1.33, carrierSource: 'calibration', sprayerName: 'FlowZone fixture backpack' },
     });
     expect(rescue).toMatchObject({ selected: false, jobMix: null, fullTankMix: null });
     expect(rescue.tankAmounts).toMatchObject({ bigTank: false, per100Gal: null, fullTank: null, backpack4Gal: { amount: 0.872, amountUnit: 'oz' } });
@@ -284,7 +284,7 @@ describe('lawn-mix response for optional products', () => {
       expect(item.tankAmounts).toMatchObject({ per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: true });
     }
     expect(body.materialCostSummary).toMatchObject({ total: 0, pricedLineCount: 0 });
-    if (warning) expect(body.warnings).toEqual([expect.objectContaining({ code: warning })]);
+    if (warning) expect(body.warnings).toEqual([expect.objectContaining({ code: warning, message: 'No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.' })]);
   });
 });
 

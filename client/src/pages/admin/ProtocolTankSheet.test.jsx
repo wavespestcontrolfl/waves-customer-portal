@@ -167,17 +167,39 @@ describe("110-gallon tank reference", () => {
       tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
     plan.items = [
       spray("cel", "Celsius WG", {}),
-      spray("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG" }),
+      { ...spray("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG" }), selected: true },
+      // Partners that are not today's instruction: unselected, or selected but at a limit.
+      spray("nis", "Synthetic surfactant", { mixWith: "Celsius WG" }),
+      { ...spray("cap", "Synthetic capped partner", { mixWith: "Celsius WG", planState: "capped" }), selected: true },
       spray("tet", "Tetrino Insecticide", { applyAlone: true }),
       { ...spray("step", "Synthetic removal step", {}), gateNotes: [{ key: "x", severity: "required", text: "Keep the synthetic 2(ee) sheet on hand." }, { key: "y", severity: "note", text: "Synthetic note only." }] },
     ];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("Tank with: Certainty Turf Herbicide")).toBeInTheDocument();
-      expect(within(surface).getByText("Add to the Celsius WG mix")).toBeInTheDocument();
+      expect(within(surface).getAllByText("Add to the Celsius WG mix")).toHaveLength(3);
       expect(within(surface).getByText("Apply alone in its own tank")).toBeInTheDocument();
       expect(within(surface).getByText("Keep the synthetic 2(ee) sheet on hand.")).toHaveClass("text-alert-fg");
       expect(within(surface).queryByText("Synthetic note only.")).not.toBeInTheDocument();
+    }
+  });
+
+  it("an unselected product keeps its amounts and says its limits are not checked; a selected one does not", () => {
+    const plan = fixture();
+    plan.items.push({ ...plan.items[0], selected: false, conditional: true, product: { ...plan.items[0].product, id: "opt", name: "Synthetic optional" } });
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getAllByText("Not selected: yearly and visit limits are not checked here.")).toHaveLength(1);
+      expect(within(surface).getAllByText("12.5 oz / 110 gal")).toHaveLength(2);
+    }
+  });
+
+  it("a backpack amount names the FlowZone unit whose test it used", () => {
+    const plan = fixture();
+    plan.items[0].tankAmounts.backpack4Gal.sprayerName = "FlowZone Typhoon Backpack #2";
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("FlowZone 4 gal").nextSibling).toHaveTextContent("0.12 oz (3.4 g) · FlowZone Typhoon Backpack #2 test");
     }
   });
 
@@ -222,10 +244,10 @@ describe("110-gallon tank reference", () => {
   it("keeps the no-combining sentence and leaves an amount out only when the server sends none", () => {
     const plan = fixture();
     plan.items[0].tankAmounts = { application: "spray", ratePer1000: 0.227, rateUnit: "oz", per100Gal: null, fullTank: null, backpack4Gal: null };
-    plan.warnings = [{ code: "missing_calibration", message: "No sprayer test on file for the selected tank, so tank amounts are not shown. Test the sprayer." }];
+    plan.warnings = [{ code: "missing_calibration", message: "No sprayer test on file for the selected tank: amounts that need its spray volume are not shown." }];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     expect(within(container).getByText("Products are not approved to be combined in one tank unless their card says so.")).toBeInTheDocument();
     expect(within(container).getByText("No amount")).toBeInTheDocument();
-    expect(within(container).getByText(/No sprayer test on file for the selected tank/)).toBeInTheDocument();
+    expect(within(container).getByText("No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.")).toBeInTheDocument();
   });
 });

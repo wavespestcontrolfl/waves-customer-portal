@@ -22,7 +22,9 @@ function applicationMethod(item, products) {
   const amounts = item.tankAmounts || {};
   if (isSpreader(item)) return "Spreader";
   if (amounts.mixWith) return `Add to the ${amounts.mixWith} mix`;
-  const partners = products.filter((other) => other.tankAmounts?.mixWith && nameKey(item.product.name).startsWith(nameKey(other.tankAmounts.mixWith)));
+  // Only partners selected for this sheet and not at a limit: "Tank with" is an instruction for today.
+  const partners = products.filter((other) => other.selected && other.tankAmounts?.planState !== "capped"
+    && other.tankAmounts?.mixWith && nameKey(item.product.name).startsWith(nameKey(other.tankAmounts.mixWith)));
   if (partners.length) return `Tank with: ${partners.map((other) => other.product.name).join(", ")}`;
   return amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label";
 }
@@ -42,7 +44,8 @@ function amountRows(amounts) {
   const rows = [["Rate", amounts.concentrationPercent ? `${num(amounts.concentrationPercent)}% of the spray volume` : rate || "Not on file. Use the label rate."]];
   if (amounts.per100Gal) rows.push(["100 gal tank", fillText(amounts.per100Gal)]);
   if (amounts.fullTank) rows.push([`Full ${num(amounts.fullTank.gallons)} gal tank`, fillText(amounts.fullTank)]);
-  if (amounts.backpack4Gal) rows.push(["FlowZone 4 gal", fillText(amounts.backpack4Gal)]);
+  // A backpack amount names the FlowZone unit whose test it used.
+  if (amounts.backpack4Gal) rows.push(["FlowZone 4 gal", `${fillText(amounts.backpack4Gal)}${amounts.backpack4Gal.sprayerName ? ` · ${amounts.backpack4Gal.sprayerName} test` : ""}`]);
   else if (amounts.backpackMissing) rows.push(["FlowZone 4 gal", "No FlowZone test on file. Test it to show this."]);
   if (amounts.fixedCarrierGalPer1000) rows.push(["Spray volume", `${num(amounts.fixedCarrierGalPer1000)} gal per 1,000 sq ft (${CARRIER_SOURCE[amounts.fixedCarrierSource]})`]);
   const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
@@ -58,6 +61,7 @@ function productCautions(item, exclusions) {
     !product.labelVerifiedAt && "Label not verified in the app.",
     excludesDefaultTurf && "Not labeled for St. Augustine.",
     item.conditional && "Conditional: confirm the trigger first.",
+    !item.selected && "Not selected: yearly and visit limits are not checked here.",
     amounts?.application === "spray" && !TANK_MIX_CATEGORIES.has(product.mixingOrderCategory) && "Tank mixing not set in the app. Check the label.",
     PLAN_STATE_NOTES[amounts?.planState],
     item.fieldHold && "On hold: see the warning above.",

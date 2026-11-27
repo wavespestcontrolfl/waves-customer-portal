@@ -70,6 +70,8 @@ describe('the carrier the job calculation already uses', () => {
     const item = { raw: 'Dimension 2EW — spring pre-emergent catch-up, hose', role: 'conditional', conditional: true, roundsCatchUp: true };
     const row = { applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz', carrierGalPer1000: 1 };
     const ref = tankReference({ product: dimension, item, v13Line: { row, state: 'calculate' }, rig: TANK, backpack: BACKPACK });
+    // A fill sized on the row names no sprayer; one sized on a test names that unit.
+    expect(ref.backpack4Gal.sprayerName).toBeNull();
     expect(ref).toMatchObject({
       fixedCarrierGalPer1000: 1, fixedCarrierSource: 'row',
       per100Gal: { amount: 50, carrierGalPer1000: 1, carrierSource: 'row' },

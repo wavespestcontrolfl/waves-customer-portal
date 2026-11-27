@@ -80,7 +80,8 @@ function metricFor(amount, unit) {
   return {};
 }
 
-function fill({ gallons, carrier, carrierSource, rateArgs, percent }) {
+// `sprayer`: the calibration a 'calibration' fill is sized on; the fill names that unit, so the dose is used with that sprayer.
+function fill({ gallons, carrier, carrierSource, rateArgs, percent, sprayer }) {
   if (percent) {
     const amount = Number(((percent / 100) * gallons * FL_OZ_PER_GAL).toFixed(3));
     return { gallons, carrierGalPer1000: null, carrierSource: 'concentration', amount, amountUnit: 'fl oz', ...metricFor(amount, 'fl oz') };
@@ -88,7 +89,8 @@ function fill({ gallons, carrier, carrierSource, rateArgs, percent }) {
   if (!(carrier > 0)) return null;
   const mix = calculateProductAmount({ ...rateArgs, lawnSqft: (gallons / carrier) * 1000, carrierGalPer1000: carrier });
   if (!(mix.amount > 0) || !mix.amountUnit) return null;
-  return { gallons, carrierGalPer1000: carrier, carrierSource, amount: mix.amount, amountUnit: mix.amountUnit, ...metricFor(mix.amount, mix.amountUnit) };
+  const sprayerName = carrierSource === 'calibration' ? sprayer?.system_name || null : null;
+  return { gallons, carrierGalPer1000: carrier, carrierSource, sprayerName, amount: mix.amount, amountUnit: mix.amountUnit, ...metricFor(mix.amount, mix.amountUnit) };
 }
 
 const rigCarrier = (calibration) => Number(calibration?.carrier_gal_per_1000 || 0);
@@ -144,7 +146,7 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
   const bigTank = goesInBigTank(product, item, row);
   const tankFills = bigTank && rig?.system_type !== 'backpack';
   const sized = (gallons, calibration) => fill({
-    gallons, carrier: lineCarrier || rigCarrier(calibration), carrierSource: lineSource || 'calibration', rateArgs, percent,
+    gallons, carrier: lineCarrier || rigCarrier(calibration), carrierSource: lineSource || 'calibration', rateArgs, percent, sprayer: calibration,
   });
   const fullGallons = fullTankGallons(rig);
   const backpack4Gal = sized(BACKPACK_GAL, backpack);

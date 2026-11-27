@@ -1005,7 +1005,7 @@ function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipa
   if (!calibration) {
     warnings.push({
       code: 'missing_calibration',
-      message: 'No sprayer test on file for the selected tank, so tank amounts are not shown. Test the sprayer.',
+      message: 'No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.',
     });
   }
   // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide).
