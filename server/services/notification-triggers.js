@@ -1841,7 +1841,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     // Push: send to all admin/technician subscriptions whose user has push enabled.
-    let belllessClaimKey = null;
+    let pushClaimKey = null;
     try {
       const enabledUserIds = pushEnabledIds;
 
@@ -1856,11 +1856,15 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
 
       if (enabledUserIds.length > 0) {
-        const claim = await claimBelllessKeyedPush({
-          triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, anyBellEnabled, enabledUserIds,
+        const lease = await claimKeyedPushLease({
+          triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, enabledUserIds,
         });
-        if (!claim.claimed) return { ...stats, deduped: true };
-        belllessClaimKey = claim.key;
+        if (lease.state !== 'acquired') {
+          return lease.state === 'delivered'
+            ? { ...stats, deduped: true, push: { sent: 1, deduped: true } }
+            : { ...stats, deduped: true };
+        }
+        pushClaimKey = lease.key;
         const newlyDeliveredIds = [];
         const wantsSoundByUser = new Map(
           activeAdmins.map((u) => {
@@ -1984,18 +1988,18 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             beforeDispatch,
             ...(typeof beforeHandoff === 'function' ? { beforeHandoff } : {}),
             ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}),
-            ...(belllessClaimKey ? { onDelivered: (sub) => { if (sub?.id) newlyDeliveredIds.push(sub.id); } } : {}),
+            ...(pushClaimKey ? { onDelivered: (sub) => { if (sub?.id) newlyDeliveredIds.push(sub.id); } } : {}),
           },
         );
         if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
-        await finalizeBelllessKeyedPush(belllessClaimKey, stats, newlyDeliveredIds);
+        await finalizeKeyedPushLease(pushClaimKey, stats, newlyDeliveredIds);
         // Stopped before any device: nothing went. A fan-out beforeHandoff stopped part way keeps its count.
         if (stats.push?.superseded && !stats.push.sent) {
           stats.push = { sent: 0, skipped: 'superseded_before_push' };
         }
       }
     } catch (e) {
-      await releaseBelllessKeyedPush(belllessClaimKey, pushHandoffStarted);
+      await releaseKeyedPushLease(pushClaimKey, pushHandoffStarted);
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
       stats.pushFailed = pushHandoffStarted ? 'push_dispatch' : 'before_handoff';
       // A resumed event owns its retry: a failure before any handoff (the
@@ -2009,16 +2013,16 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
   }
 }
 
-const BELLLESS_PUSH_CLAIM_PREFIX = 'notif_push_dedupe:';
+const PUSH_DEDUPE_CLAIM_PREFIX = 'notif_push_dedupe:';
 
-function belllessPushClaimKey(triggerKey, token) {
-  const raw = `${BELLLESS_PUSH_CLAIM_PREFIX}${triggerKey}:${token}`;
+function keyedPushClaimKey(triggerKey, token) {
+  const raw = `${PUSH_DEDUPE_CLAIM_PREFIX}${triggerKey}:${token}`;
   if (raw.length <= 200) return raw;
   const hash = require('crypto').createHash('sha256').update(raw).digest('hex');
-  return `${BELLLESS_PUSH_CLAIM_PREFIX}${hash}`;
+  return `${PUSH_DEDUPE_CLAIM_PREFIX}${hash}`;
 }
 
-function resolveBelllessClaimToken({ triggerKey, dedupeKey, payload, refreshOnDedupe }) {
+function resolveKeyedPushToken({ triggerKey, dedupeKey, payload, refreshOnDedupe }) {
   // Rolling thread triggers (sms_reply, tracking-line new_lead, or any
   // refreshOnDedupe caller) reuse one thread dedupeKey across distinct messages.
   // Key the push claim by per-message Twilio MessageSid when present, and never
@@ -2028,49 +2032,55 @@ function resolveBelllessClaimToken({ triggerKey, dedupeKey, payload, refreshOnDe
   return dedupeKey || null;
 }
 
-// When every active admin disabled bells (push-only preference), writeBell never
-// runs so notifications.dedupe_key cannot suppress a replayed keyed push. Claim
-// the keyed push in sms_send_claims (retained 30d by pruneSmsSendClaims) so
-// replays stay single-shot independently of bell visibility.
-async function claimBelllessKeyedPush({
-  triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, anyBellEnabled, enabledUserIds,
+// Unified push deduplication across bell-enabled and bell-disabled preference
+// states: every keyed push takes a recoverable 'pending' lease in
+// sms_send_claims (retained 30d once 'delivered') so toggling bells on/off
+// between retries cannot re-push an already-delivered event, while an
+// abandoned pending lease recovers after 5 minutes.
+async function claimKeyedPushLease({
+  triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, enabledUserIds,
 }) {
-  if (!dedupeKey || pushOnly || pushOnDedupe || Array.isArray(deliveredSubscriptionIds) || anyBellEnabled || !enabledUserIds.length) {
-    return { claimed: true, key: null };
+  if (!dedupeKey || pushOnly || pushOnDedupe || Array.isArray(deliveredSubscriptionIds) || !enabledUserIds.length) {
+    return { state: 'acquired', key: null };
   }
-  const token = resolveBelllessClaimToken({ triggerKey, dedupeKey, payload, refreshOnDedupe });
-  if (!token || typeof db.raw !== 'function') return { claimed: true, key: null };
-  const key = belllessPushClaimKey(triggerKey, token);
-  const { takeSendClaim } = require('./sms-send-claims');
-  const claimed = await takeSendClaim(key, db);
-  return { claimed, key };
+  const token = resolveKeyedPushToken({ triggerKey, dedupeKey, payload, refreshOnDedupe });
+  if (!token || typeof db.raw !== 'function') return { state: 'acquired', key: null };
+  const key = keyedPushClaimKey(triggerKey, token);
+  const { acquirePushDedupeLease } = require('./sms-send-claims');
+  const state = await acquirePushDedupeLease(key, {}, db);
+  return { state, key };
 }
 
-// Confirmed zero-delivery failures (all devices failed or superseded before
-// delivery) release the claim so the retry can contact devices. Partial
-// deliveries keep the claim and surface deliveredSubscriptionIds so callers
-// retrying remaining devices can pass deliveredSubscriptionIds without
-// double-pushing already-delivered devices.
-async function finalizeBelllessKeyedPush(claimKey, stats, newlyDeliveredIds) {
+// Once at least one device accepted the push, stamp outcome='delivered' so
+// replays settle cleanly without duplicating. Whenever fan-out confirms zero
+// deliveries (failed, expired, skipped, empty subscriptions, or superseded),
+// release the pending lease so replay succeeds after recovery.
+async function finalizeKeyedPushLease(claimKey, stats, newlyDeliveredIds) {
   if (!claimKey) return;
   const sent = Number(stats.push?.sent) || 0;
   const failed = Number(stats.push?.failed) || 0;
-  if (sent === 0 && (failed > 0 || stats.push?.superseded)) {
-    await releaseBelllessKeyedPush(claimKey, false);
+  if (sent > 0) {
+    try {
+      const { markPushDedupeDelivered } = require('./sms-send-claims');
+      await markPushDedupeDelivered(claimKey, db);
+    } catch (err) {
+      logger.warn(`[notification-triggers] failed to mark keyed push delivered: ${err?.code || err?.message || 'error'}`);
+    }
+    if (failed > 0 && newlyDeliveredIds.length > 0) {
+      stats.deliveredSubscriptionIds = [...new Set(newlyDeliveredIds)];
+    }
     return;
   }
-  if (sent > 0 && failed > 0 && newlyDeliveredIds.length > 0) {
-    stats.deliveredSubscriptionIds = [...new Set(newlyDeliveredIds)];
-  }
+  await releaseKeyedPushLease(claimKey, false);
 }
 
-async function releaseBelllessKeyedPush(claimKey, handoffStarted) {
+async function releaseKeyedPushLease(claimKey, handoffStarted) {
   if (!claimKey || handoffStarted) return;
   try {
-    const { releaseSendClaim } = require('./sms-send-claims');
-    await releaseSendClaim(claimKey, db);
+    const { releasePushDedupeLease } = require('./sms-send-claims');
+    await releasePushDedupeLease(claimKey, db);
   } catch (err) {
-    logger.warn(`[notification-triggers] failed to release keyed push claim: ${err?.code || err?.message || 'error'}`);
+    logger.warn(`[notification-triggers] failed to release keyed push lease: ${err?.code || err?.message || 'error'}`);
   }
 }
 

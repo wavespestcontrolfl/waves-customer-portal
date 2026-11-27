@@ -65,4 +65,52 @@ async function releaseSendClaim(claimKey, conn = db) {
   await conn('sms_send_claims').where({ claim_key: claimKey }).del();
 }
 
-module.exports = { pruneSmsSendClaims, takeSendClaim, releaseSendClaim, WEEKLY_CLAIM_PREFIXES, MONTHLY_CLAIM_PREFIXES };
+// Lease-backed keyed push claim in sms_send_claims (uses existing `outcome`
+// column: 'pending' with a 5-minute recoverable lease, or 'delivered' once at
+// least one device accepted the push).
+// Returns:
+//   'acquired'  — caller owns the pending lease and may dispatch push
+//   'delivered' — a previous attempt already confirmed delivery (caller settles)
+//   'in_flight' — another attempt holds a fresh pending lease (skip without claiming delivered)
+async function acquirePushDedupeLease(claimKey, { leaseMinutes = 5 } = {}, conn = db) {
+  const inserted = await conn.raw(
+    `INSERT INTO sms_send_claims (claim_key, outcome) VALUES (?, 'pending')
+     ON CONFLICT (claim_key) DO NOTHING
+     RETURNING id`,
+    [claimKey],
+  );
+  if ((inserted?.rows || []).length > 0) return 'acquired';
+
+  const reclaimed = await conn.raw(
+    `UPDATE sms_send_claims
+        SET created_at = NOW(), outcome = 'pending'
+      WHERE claim_key = ?
+        AND outcome = 'pending'
+        AND created_at < NOW() - (? * interval '1 minute')
+      RETURNING id`,
+    [claimKey, leaseMinutes],
+  );
+  if ((reclaimed?.rows || []).length > 0) return 'acquired';
+
+  const existing = await conn('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
+  if (existing?.outcome === 'delivered') return 'delivered';
+  return 'in_flight';
+}
+
+async function markPushDedupeDelivered(claimKey, conn = db) {
+  await conn('sms_send_claims')
+    .where({ claim_key: claimKey })
+    .update({ outcome: 'delivered', created_at: conn.fn ? conn.fn.now() : new Date() });
+}
+
+async function releasePushDedupeLease(claimKey, conn = db) {
+  await conn('sms_send_claims')
+    .where({ claim_key: claimKey, outcome: 'pending' })
+    .del();
+}
+
+module.exports = {
+  pruneSmsSendClaims, takeSendClaim, releaseSendClaim,
+  acquirePushDedupeLease, markPushDedupeDelivered, releasePushDedupeLease,
+  WEEKLY_CLAIM_PREFIXES, MONTHLY_CLAIM_PREFIXES,
+};
