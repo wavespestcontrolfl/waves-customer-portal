@@ -340,6 +340,18 @@ describe('activity-only rows never reach the admin bell', () => {
     expect(owner.read_at).not.toBeNull();
     expect(engineering.read_at).toBeNull();
   });
+
+  test('markAllReadAdmin leaves already-done unread rows (e.g. quiet-72h fall-offs) untouched', async () => {
+    await seedRows();
+    const openRow = mockRows.notifications[0];
+    await NotificationService.create({ recipientType: 'admin', category: 'ops_digest', title: 'Expired alert', body: 'b', metadata: { feed: null } });
+    const doneRow = mockRows.notifications[2];
+    doneRow.done_at = new Date('2026-11-20T00:00:00Z');
+    doneRow.done_by = 'quiet-72h';
+    await NotificationService.markAllReadAdmin({ role: 'admin', fullAccess: true });
+    expect(openRow.read_at).not.toBeNull();
+    expect(doneRow.read_at).toBeNull();
+  });
 });
 
 // create() swallows its own errors and returns null, so a gate reader that is

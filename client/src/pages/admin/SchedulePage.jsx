@@ -217,6 +217,7 @@ import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-n
 import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups, techTipYardLine, techTipSourceLabels } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 import { directionsHref } from "../../lib/directionsHref";
+import { remapRestoredActionLabels } from "../../lib/protocol-action-renames";
 import { tankCoverageLines, tankFillLines } from "./protocolTankOptions";
 // The marker under "Time on site" on a completed visit (server timeOnSite.evidence).
 const TIME_ON_SITE_SOURCE_LABEL = {
@@ -549,6 +550,27 @@ export function withoutProtocolMarkerLines(notes, labels) {
         || !drop.has(entry.text.toLowerCase());
     })
     .join("\n");
+}
+// A restored draft's action marker lines follow a renamed card line (remapRestoredActionLabels): the old text is
+// rewritten to the current one, keeping its tag, and dropped when the notes already hold the current marker, so the
+// server never reads the action back twice.
+export function renameProtocolMarkerLines(notes, renames) {
+  const byOld = new Map(Object.entries(renames || {}).map(([from, to]) => [String(from || "").trim().toLowerCase(), to]));
+  if (!byOld.size) return String(notes || "");
+  const lines = String(notes || "").split("\n");
+  const renamedTo = (entry) => (entry && PROTOCOL_MARKER_TAGS.includes(entry.tag) ? byOld.get(entry.text.toLowerCase()) : undefined);
+  // Markers already in their current form count as present; a marker being renamed does not count against itself.
+  const present = new Set(lines.map(parseMarkerLine).filter((entry) => entry && renamedTo(entry) === undefined)
+    .map((entry) => `${entry.tag}\n${entry.text.toLowerCase()}`));
+  return lines.flatMap((line) => {
+    const entry = parseMarkerLine(line);
+    const to = renamedTo(entry);
+    if (to === undefined) return [line];
+    const key = `${entry.tag}\n${to.toLowerCase()}`;
+    if (present.has(key)) return [];
+    present.add(key);
+    return [line.replace(entry.text, to)];
+  }).join("\n");
 }
 // Submit-time allowlist for restored/selected protocol action labels. First
 // rule with an opinion decides (true keep / false drop / null pass); no
@@ -15501,19 +15523,29 @@ export function CompletionPanel({
   // kept as the technician's text). An empty or unloaded list leaves the
   // fallback chips as the selector, and "Any" programs never change by month.
   useEffect(() => {
+    if (isLawn || generating || !protocolActionsLoaded || !protocolActions.length) return;
+    const offeredLabels = protocolActions.map((action) => (action.label || action.note || action.raw || "").trim());
+    // A draft saved before a card line was reworded holds the old text: it follows the current line first
+    // (labels, scopes and marker lines), and a former line with no current match leaves with its markers, so a
+    // re-check never submits both wordings (remapRestoredActionLabels).
+    const { labels: remapped, renames, dropped: formerDropped } = remapRestoredActionLabels(selectedProtocolActionLabels, offeredLabels);
+    // Then, on a month-keyed list, a selection it still does not offer is stale.
     const listMonth = protocolActionMeta?.visit?.month;
-    if (isLawn || generating || !protocolActionsLoaded || !protocolActions.length || !listMonth || listMonth === "Any") return;
-    const offered = new Set(protocolActions.map((action) => (action.label || action.note || action.raw || "").trim()));
-    const stale = selectedProtocolActionLabels.filter((label) => !offered.has(String(label).trim()));
-    if (!stale.length) return;
-    if (typeof preGenerationNotesRef.current === "string") {
-      preGenerationNotesRef.current = withoutProtocolMarkerLines(preGenerationNotesRef.current, stale);
-    }
-    invalidateGeneratedReportOnTypedEdit();
-    setNotes((current) => withoutProtocolMarkerLines(current, stale));
-    setSelectedProtocolActionLabels((current) => current.filter((label) => !stale.includes(label)));
+    const offered = new Set(offeredLabels);
+    const monthStale = listMonth && listMonth !== "Any" ? remapped.filter((label) => !offered.has(String(label).trim())) : [];
+    const stale = [...formerDropped, ...monthStale];
+    if (!stale.length && !Object.keys(renames).length) return;
+    const fixNotes = (current) => renameProtocolMarkerLines(withoutProtocolMarkerLines(current, stale), renames);
+    if (typeof preGenerationNotesRef.current === "string") preGenerationNotesRef.current = fixNotes(preGenerationNotesRef.current);
+    if (stale.length) invalidateGeneratedReportOnTypedEdit();
+    setNotes(fixNotes);
+    setSelectedProtocolActionLabels(remapped.filter((label) => !monthStale.includes(label)));
     setActionScopeByLabel((current) => {
       const next = { ...current };
+      Object.entries(renames).forEach(([from, to]) => {
+        if (next[from] !== undefined && next[to] === undefined) next[to] = next[from];
+        if (from !== to) delete next[from];
+      });
       stale.forEach((label) => { delete next[label]; });
       return next;
     });

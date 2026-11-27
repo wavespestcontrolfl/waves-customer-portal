@@ -9,7 +9,7 @@ jest.mock('../models/db', () => {
     let byToken = false;
     const q = {};
     q.where = jest.fn((arg, val) => { if ((arg && arg['s.track_view_token']) || (arg === 's.track_view_token' && val)) byToken = true; return q; });
-    for (const m of ['leftJoin', 'join', 'whereNotNull', 'orderBy', 'whereRaw', 'select', 'limit', 'whereNull']) q[m] = jest.fn(() => q);
+    for (const m of ['leftJoin', 'join', 'whereNotNull', 'orderBy', 'whereRaw', 'whereNotExists', 'select', 'limit', 'whereNull']) q[m] = jest.fn(() => q);
     q.first = jest.fn(async () => (byToken && 'byToken' in state ? state.byToken : state.first) ?? null);
     q.then = (resolve, reject) => Promise.resolve(state.list ?? []).then(resolve, reject);
     return q;

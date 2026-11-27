@@ -477,7 +477,10 @@ function validateTransition(request, action, guard) {
   // A received request whose automatic order landed after that receipt admits ONE more receive, or a
   // no-stock close when an invoice already counted that late order.
   const secondReceive = ['receive', 'close_counted'].includes(action) && status === 'received' && !!guard.landedAfterReceive;
-  if (!['open', 'ordered'].includes(status) && !secondReceive) throw inventoryError(`Restock request is already ${status}; refresh the list`, 409, 'request_closed');
+  // A CANCELLED request whose automatic order may be out (the one outstanding-order rule): when the goods arrive staff
+  // receive them, or close it as already counted. The request becomes received, which settles the order.
+  const cancelledOrderArrived = ['receive', 'close_counted'].includes(action) && status === 'cancelled' && !!guard.outstanding;
+  if (!['open', 'ordered'].includes(status) && !secondReceive && !cancelledOrderArrived) throw inventoryError(`Restock request is already ${status}; refresh the list`, 409, 'request_closed');
   if (action === 'mark_ordered' && status !== 'open') throw inventoryError(`Only an open request can be marked ordered (this one is ${status})`, 409, 'request_not_open');
   return secondReceive;
 }

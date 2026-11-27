@@ -276,4 +276,20 @@ describe("OfferTimeline", () => {
       await waitFor(() => expect(setChecklistItem).toHaveBeenCalledWith("app-1", "offer-9", "i9", true, null));
     });
   });
+
+  it("applies scoped print classes to the signed copy dialog so multi-page agreements do not clip", async () => {
+    fetchSignedCopy.mockResolvedValueOnce({
+      signedName: "Jordan Rivera",
+      signedAt: "2026-12-12T15:00:00Z",
+      signedIp: "203.0.113.9",
+      signatureHash: "abc123",
+      markdown: "## Offer\nFull agreement text.",
+    });
+    render(card({ offer: record({ status: "accepted", signedAt: "2026-12-12T15:00:00Z" }) }));
+    fireEvent.click(screen.getByRole("button", { name: /View signed copy/i }));
+    const dialog = await screen.findByRole("dialog", { name: "Signed copy" });
+    expect(dialog.querySelector(".signed-offer-dialog")).toBeInTheDocument();
+    expect(dialog.querySelector(".signed-offer-dialog-body")).toBeInTheDocument();
+    expect(dialog.querySelector(".signed-offer-copy")).toHaveTextContent("Full agreement text.");
+  });
 });

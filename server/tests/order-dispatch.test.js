@@ -27,6 +27,8 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: jest.fn(async () => ({ email: 'a@b.c', password: 'x', accountNumber: '123' })) }));
+// The open-request alert's own SQL runs against Postgres (autobuy-retry-postgres.test.js); here only the wiring is checked.
+jest.mock('../services/procurement/stale-request-alert', () => ({ syncStaleRequestAlerts: jest.fn(async () => ({ stale: 0, closed: 0 })) }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({
   vendorPricingFor: jest.fn(async () => mockState.pricing),
@@ -998,10 +1000,10 @@ test('monthly sum counts only placing reservations and dispatched rows', async (
   const dbFn = require('../models/db');
   const seen = [];
   const orig = dbFn.getMockImplementation();
-  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { q.where = (...a) => { seen.push(a); if (typeof a[0] === 'function') { const inner = { where: (...b) => { seen.push(['inner', ...b]); return inner; }, orWhereNotNull: (...b) => { seen.push(['inner', 'orWhereNotNull', ...b]); return inner; } }; a[0].call(inner); } return q; }; } return q; });
+  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { q.where = (...a) => { seen.push(a); if (typeof a[0] === 'function') { const inner = { where: (...b) => { seen.push(['inner', ...b]); return inner; }, orWhereRaw: (...b) => { seen.push(['inner', 'orWhereRaw', ...b]); return inner; } }; a[0].call(inner); } return q; }; } return q; });
   try {
     await dispatch.monthlySpentCents(dbFn, { now: new Date(), excludeId: 'x' });
-    expect(seen).toEqual(expect.arrayContaining([['inner', 'status', 'placing'], ['inner', 'orWhereNotNull', 'placed_at']]));
+    expect(seen).toEqual(expect.arrayContaining([['inner', 'status', 'placing'], ['inner', 'orWhereRaw', expect.stringMatching(/vendor_orders\.placed_at IS NOT NULL OR split_part\(COALESCE\(vendor_orders\.error, ''\), ':', 1\) IN \('ambiguous_after_submit'/)]]));
   } finally { dbFn.mockImplementation(orig); }
 });
 
@@ -1085,13 +1087,13 @@ describe('a pre-submit park for a vendor that is never auto-ordered sends staff 
     expect(notify).toHaveBeenLastCalledWith('system', HEADLINE, WHY, expect.objectContaining({ detail: `${evidence.bell.title}\n${evidence.bell.body}` }));
   });
 
-  test('a vendor the dispatcher does place for keeps the plain hand-off', async () => {
+  test('a vendor the dispatcher does place for: a park before the click says the robot stopped; buy it and press Mark Ordered, or press Cancel', async () => {
     const refused = Object.assign(new Error('account has 0 payment methods; exactly one is required'), { refuse: 'no_payment' });
     expect(await run(mockAdapter({ place: jest.fn(async () => { throw refused; }) }))).toMatchObject({ status: 'needs_review', reason: 'no_payment' });
     expect(alert()).toMatchObject({
-      headline: 'Inventory — order Yard sign sticker by hand',
-      why: 'The auto-order did not go through; order it manually, then mark the restock request ordered.',
-      detail: expect.stringMatching(/ The restock request stays open — order manually, then mark it ordered\.$/),
+      headline: expect.stringMatching(/^Inventory — Yard sign sticker auto-order stopped/),
+      why: 'No order was sent; buy it and press Mark Ordered, or press Cancel for a fresh check.',
+      detail: expect.stringMatching(/The robot stopped before buying: account has 0 payment methods; exactly one is required\. Buy it yourself and press Mark Ordered, or press Cancel and the next morning check opens a fresh request\.$/),
     });
     expect(alert().detail).not.toMatch(/account first/);
   });
@@ -1440,3 +1442,42 @@ test('in the fertilizer blackout the claim holds a product whose N shows only in
   expect(r.skipped).toBe('fertilizer_blackout');
 });
 
+
+describe('price on file passed to an adapter that checks it', () => {
+  test('exact in millionths of a dollar: $1.0060 stays 1006000, a price under half a cent is never 0, none stays null', () => {
+    expect(dispatch.priceMicros('1.0060')).toBe(1006000);
+    expect(dispatch.priceMicros(47)).toBe(47000000);
+    expect(dispatch.priceMicros('0.0040')).toBe(4000);
+    expect(dispatch.priceMicros('0.0000001')).toBe(1);
+    expect(dispatch.priceMicros(0)).toBeNull();
+    expect(dispatch.priceMicros(null)).toBeNull();
+    expect(dispatch.priceMicros('x')).toBeNull();
+  });
+
+  test('place gets priceOnFileMicros from the eligible price row (price_amount first), only when the adapter checks prices', async () => {
+    mockState.pricing = { vendor_sku: '4242', price: '314.00', price_amount: '313.9950', quantity: '500' };
+    const checks = mockAdapter({ checksPrice: true });
+    await run(checks);
+    expect(checks.place).toHaveBeenCalledWith(expect.objectContaining({ priceOnFileMicros: 313995000 }));
+    const plain = mockAdapter();
+    await run(plain);
+    expect(plain.place.mock.calls[0][0]).not.toHaveProperty('priceOnFileMicros');
+  });
+});
+
+describe('open-request alert wiring (runVendorOrderDispatch)', () => {
+  const { syncStaleRequestAlerts } = require('../services/procurement/stale-request-alert');
+  beforeEach(() => syncStaleRequestAlerts.mockClear());
+
+  test('the server run (reconcile) syncs the alerts once; the Mac run (reconcile false) leaves them to it', async () => {
+    await dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV });
+    expect(syncStaleRequestAlerts).toHaveBeenCalledTimes(1);
+    await dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV, reconcile: false });
+    expect(syncStaleRequestAlerts).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failed alert write turns the run red but does not stop the dispatch', async () => {
+    syncStaleRequestAlerts.mockRejectedValueOnce(new Error('alert not persisted'));
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV })).rejects.toThrow('open-request alerts failed: alert not persisted');
+  });
+});

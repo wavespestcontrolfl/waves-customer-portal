@@ -55,7 +55,7 @@ const cell = (text, width) => {
 };
 
 (async () => {
-  const result = await listNeedsMe({ who, area, limit, after });
+  const result = await listNeedsMe({ who, area, limit, after, fullAccess: true });
   if (process.argv.includes('--quality')) {
     const { alertQuality } = require('./report-evidence');
     result.quality = alertQuality(result);

@@ -27,6 +27,22 @@ describe('model-switchboard', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
+  it('scripts/check-models selects only Anthropic tier keys and never flags other providers', () => {
+    const { selectAnthropicTiers } = require('../../scripts/check-models');
+    const defaults = MODELS.DEFAULTS;
+    const defaultExports = Object.fromEntries(
+      Object.entries(MODELS).map(([k, v]) => [k, Object.prototype.hasOwnProperty.call(defaults, k) ? defaults[k] : v]),
+    );
+    const tiers = selectAnthropicTiers(defaultExports);
+    expect(tiers).toContain('FLAGSHIP');
+    expect(tiers).toContain('SMS_SONNET');
+    expect(tiers).toContain('ALERT_CLEAR');
+    expect(tiers).toContain('EMAIL_CLASSIFY');
+    for (const k of tiers) expect({ k, v: defaultExports[k] }).toEqual({ k, v: expect.stringMatching(/^claude-/) });
+    // Key-based exclusion keeps catching a misconfigured Anthropic tier.
+    expect(selectAnthropicTiers({ ...defaultExports, FLAGSHIP: 'gpt-typo' })).toContain('FLAGSHIP');
+  });
+
   it('route and policy attributions match the registry (drift guard)', () => {
     for (const [route, selKey] of Object.entries(sb.ROUTE_SELECTOR)) {
       expect(MODELS.ROUTES[route]).toBeDefined();

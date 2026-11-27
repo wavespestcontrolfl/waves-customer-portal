@@ -1,5 +1,5 @@
 const { sourceSchema, policySchema, validate, renderSource, checkRelease, hash } = require('../services/staff-document-source');
-const { recordAnswers } = require('../services/staff-documents');
+const { recordAnswers, parseSignedName, hasSignatureField } = require('../services/staff-documents');
 const { validateTemplatePayload } = require('../services/document-template-library');
 const starters = require('../services/staff-document-starters');
 
@@ -29,16 +29,98 @@ test('shared values render consistently while prior rendered copies and hashes r
 });
 test('unresolved shared values and owner decisions fail issuance', () => {
   expect(() => checkRelease(source(), renderSource(source()), new Date())).toThrow(/Resolve/);
-  const decision = source('## Authority {#authority}\n[DECISION: choose the approver]');
-  expect(() => checkRelease(decision, renderSource(decision), new Date())).toThrow(/approver/);
+  for (const marker of [
+    '[DECISION: choose the approver]',
+    '[OWNER: confirm 15% and 40%]',
+    '[CPA: overtime check]',
+    '[LAWYER/CPA: regular rate]',
+    '[To write: level rules]',
+    '[BAR]',
+  ]) {
+    const blocked = source(`## Authority {#authority}\n${marker}`);
+    expect(() => checkRelease(blocked, renderSource(blocked, values), new Date())).toThrow(/Resolve/);
+  }
+});
+test('renders markdown pipe tables, ordered lists, and mixed paragraph+bullet blocks safely', () => {
+  const md = [
+    '## Pay examples {#pay-examples}',
+    '**1. Step one.**',
+    '- Bullet A',
+    '- Bullet B',
+    '',
+    '1. First item',
+    '2. Second item',
+    '',
+    '| Week | Pay |',
+    '|---|---|',
+    '| Slow | **$920** |',
+    '| Strong | <script>alert(1)</script> |',
+  ].join('\n');
+  const html = renderSource(source(md), values).sections[0].html;
+  expect(html).toContain('<p><strong>1. Step one.</strong></p>');
+  expect(html).toContain('<ul><li>Bullet A</li><li>Bullet B</li></ul>');
+  expect(html).toContain('<ol><li value="1">First item</li><li value="2">Second item</li></ol>');
+  expect(html).toContain('<table><thead><tr><th>Week</th><th>Pay</th></tr></thead>');
+  expect(html).toContain('<td><strong>$920</strong></td>');
+  expect(html).not.toContain('<script>');
+  expect(html).toMatch(/&(?:lt|#x3C);script/);
+  const escaped = renderSource(source('## Escaped {#escaped}\n| Rule | Formula | Notes |\n|---|---|---|\n| Pay | $23/hr \\| 22% | Final cell |'), values).sections[0].html;
+  expect(escaped).toContain('<td>$23/hr | 22%</td>');
+  expect(escaped).toContain('<td>Final cell</td>');
 });
 test('shared values cannot issue with embedded decision markers or merge placeholders', () => {
-  for (const pay_schedule of ['[DECISION: approve the pay dates]', '{{approved.pay_dates}}']) {
+  for (const pay_schedule of ['[DECISION: approve the pay dates]', '[DECISION: confirm payday', '[OWNER: pick one', '{{approved.pay_dates}}']) {
     expect(() => validate(policySchema, { ...values, pay_schedule })).toThrow(/Resolve placeholders/);
   }
   const draft = source('## Pay dates {#pay-dates}\n{{policy.pay_schedule}}');
   const rendered = renderSource(draft, { ...values, pay_schedule: '[DECISION: approve pay dates]' });
   expect(() => checkRelease(draft, rendered, new Date())).toThrow(/Resolve/);
+  const unterminated = renderSource(source('## Pay dates {#pay-dates}\nPaid [DECISION: confirm payday'), values);
+  expect(unterminated.unresolved).toEqual(['[DECISION: confirm payday']);
+  expect(() => checkRelease(draft, unterminated, new Date())).toThrow(/Resolve/);
+});
+test('oversized or overwide Markdown tables stay editable in drafts and are rejected at issuance', () => {
+  const wideHeaders = Array.from({ length: 13 }, (_, i) => `C${i}`).join(' | ');
+  const wideSep = Array.from({ length: 13 }, () => '---').join(' | ');
+  const wideDraft = source(`## Wide {#wide}\n| ${wideHeaders} |\n| ${wideSep} |\n| ${wideHeaders} |`);
+  const wideRendered = renderSource(wideDraft, values);
+  expect(wideRendered.sections[0].html).not.toContain('<table>');
+  expect(wideRendered.sections[0].html).toContain('C12');
+  expect(() => checkRelease(wideDraft, wideRendered, new Date())).toThrow(/maximum of 12 columns/);
+
+  const tenHeaders = Array.from({ length: 10 }, (_, i) => `C${i}`).join(' | ');
+  const tenSep = Array.from({ length: 10 }, () => '---').join(' | ');
+  const manyRows = Array.from({ length: 105 }, () => '| a |').join('\n');
+  const tallDraft = source(`## Tall {#tall}\n| ${tenHeaders} |\n| ${tenSep} |\n${manyRows}`);
+  const tallRendered = renderSource(tallDraft, values);
+  expect(tallRendered.sections[0].html).not.toContain('<table>');
+  expect(() => checkRelease(tallDraft, tallRendered, new Date())).toThrow(/maximum of 1000 rendered cells/);
+
+  const overwideDraft = source('## Extra {#extra}\n| A | B |\n|---|---|\n| 1 | 2 | kept-third-cell |');
+  const overwideRendered = renderSource(overwideDraft, values);
+  expect(overwideRendered.sections[0].html).not.toContain('<table>');
+  expect(overwideRendered.sections[0].html).toContain('kept-third-cell');
+  expect(() => checkRelease(overwideDraft, overwideRendered, new Date())).toThrow(/more cells than the header row/);
+});
+test('unresolved placeholders in displayed metadata are flagged and rejected at issuance', () => {
+  const draft = source('## Scope {#scope}\nClean body.');
+  draft.metadata.owner_role = '[TBD]';
+  draft.metadata.fields = [{ id: 'note', label: '[OWNER: pick field label]', type: 'text', required: false }];
+  draft.metadata.citations = [{ anchor: 'scope', label: '[DECISION: verify citation]', url: 'https://example.com', verified_on: day(-1), review_on: day(30) }];
+  const rendered = renderSource(draft, values);
+  expect(rendered.unresolved).toEqual(expect.arrayContaining(['[TBD]', '[OWNER: pick field label]', '[DECISION: verify citation]']));
+  expect(() => checkRelease(draft, rendered, new Date())).toThrow(/Resolve before issuing/);
+
+  const bindingDraft = source('## Scope {#scope}\nClean body.');
+  bindingDraft.metadata.owner_role = '{{policy.pay_schedule}}';
+  bindingDraft.metadata.fields = [{ id: 'note', label: '{{policy.pay_frequency}}', type: 'text', required: false }];
+  const bindingRendered = renderSource(bindingDraft, values);
+  expect(bindingRendered.unresolved).toEqual(expect.arrayContaining(['{{policy.pay_schedule}}', '{{policy.pay_frequency}}']));
+  expect(() => checkRelease(bindingDraft, bindingRendered, new Date())).toThrow(/Resolve before issuing/);
+
+  const unclosedBodyBinding = renderSource(source('## Scope {#scope}\nPay schedule: {{policy.pay_schedule'), values);
+  expect(unclosedBodyBinding.unresolved).toEqual(expect.arrayContaining(['{{']));
+  expect(() => checkRelease(draft, unclosedBodyBinding, new Date())).toThrow(/Resolve before issuing/);
 });
 test('HTML, scripts, images and unsafe links cannot become executable content', () => {
   const html = renderSource(source('## Example {#example}\n<img src=x onerror=alert(1)> [bad](javascript:alert) [good](https://example.com/?q="x") **Bold**')).sections[0].html;
@@ -64,6 +146,37 @@ test('form records reject extra fields and require a completed required checkbox
   expect(() => recordAnswers(version, { answers: { unknown: 'x' }, completed_steps: [], complete: false })).toThrow();
   expect(() => recordAnswers(version, { answers: { reviewed: false }, completed_steps: [], complete: true })).toThrow();
   expect(recordAnswers(version, { answers: { reviewed: true }, completed_steps: [], complete: true }).answers).toBe('{"reviewed":true}');
+});
+test('signature fields require a full name (first and last) when completing a form', () => {
+  expect(parseSignedName('x')).toBeNull();
+  expect(parseSignedName('Jordan')).toBeNull();
+  expect(parseSignedName('  Jordan   Rivera  ')).toBe('Jordan Rivera');
+  expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'text', required: false }])).toBe(false);
+  expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'checkbox', required: true }])).toBe(false);
+  expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'date', required: true }])).toBe(false);
+  expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'text', required: true }])).toBe(true);
+  const nonTextSigVersion = {
+    staff_metadata: { fields: [{ id: 'signed-name', label: 'Signed check', type: 'checkbox', required: true }] },
+    content_snapshot: { kind: 'form', sections: [{ id: 'sig' }] },
+  };
+  expect(recordAnswers(nonTextSigVersion, { answers: { 'signed-name': true }, completed_steps: [], complete: true }).answers)
+    .toBe('{"signed-name":true}');
+  const version = {
+    staff_metadata: {
+      fields: [
+        { id: 'agree', label: 'I agree', type: 'checkbox', required: true },
+        { id: 'signed-name', label: 'Typed name', type: 'text', required: true },
+      ],
+    },
+    content_snapshot: { kind: 'form', sections: [{ id: 'sig' }] },
+  };
+  expect(() => recordAnswers(version, { answers: { agree: true, 'signed-name': 'x' }, completed_steps: [], complete: true })).toThrow(/full name/);
+  expect(() => recordAnswers(version, { answers: { agree: true, 'signed-name': '' }, completed_steps: [], complete: false }, { forOtherOwner: true }))
+    .toThrow(/Leave signature and agreement boxes blank/);
+  expect(() => recordAnswers(version, { answers: { agree: false, 'signed-name': 'Jordan Rivera' }, completed_steps: [], complete: false }, { forOtherOwner: true }))
+    .toThrow(/Leave signature and agreement boxes blank/);
+  expect(recordAnswers(version, { answers: { agree: true, 'signed-name': '  Jordan Rivera ' }, completed_steps: [], complete: true }).answers)
+    .toBe('{"agree":true,"signed-name":"Jordan Rivera"}');
 });
 test('procedure completion requires every step and rejects duplicate or invented steps', () => {
   const version = { staff_metadata: { fields: [] }, content_snapshot: { kind: 'procedure', sections: [{ id: 'first' }, { id: 'second' }] } };

@@ -5407,7 +5407,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.signals).toEqual([]);
   });
 
-  test('Waves AI payload includes grass type for lawn-only estimates when present', () => {
+  test('Waves AI payload never names a grass type for lawn-only estimates (owner 2026-11-26)', () => {
     const payload = buildWaveGuardIntelligencePayload({}, {
       inputs: {
         homeSqFt: 1900,
@@ -5423,8 +5423,8 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.title).toContain('Waves AI reviewed your lawn');
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Treatable lawn', value: '4,200 sq ft' },
-      { label: 'Grass type', value: 'St. Augustine' },
     ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
   });
 
   test('Waves AI payload drops Pool/Lanai and Complexity for lawn-only estimates', () => {
@@ -5444,14 +5444,12 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.metrics).toEqual(expect.arrayContaining([
-      { label: 'Grass type', value: 'St. Augustine' },
-    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Pool/Lanai')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
   });
 
-  test('Waves AI payload uses later object turf fields when the first field is a placeholder', () => {
+  test('Waves AI payload ignores turf profile fields: no grass type metric (owner 2026-11-26)', () => {
     const payload = buildWaveGuardIntelligencePayload({}, {
       inputs: {
         lawnSqFt: 4200,
@@ -5464,9 +5462,7 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.metrics).toEqual(expect.arrayContaining([
-      { label: 'Grass type', value: 'Bermuda' },
-    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
   });
 
   test('Waves AI payload does not invent a lawn grass type metric', () => {
@@ -6819,8 +6815,8 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('your estimate is ready!');
     expect(html).toContain('Waves AI reviewed your lawn before pricing this estimate');
-    expect(html).toContain('Grass type');
-    expect(html).toContain('St. Augustine');
+    expect(html).not.toContain('Grass type');
+    expect(html).not.toContain('St. Augustine');
     expect(html).toContain('Choose how you want to pay');
     expect(html).not.toContain('Choose how to start your lawn care plan');
     expect(html).toContain('Pick your first lawn care visit');

@@ -455,6 +455,20 @@ function findSpikes(dayByLane, baselineByLane, { minUsd = alertMinUsd(), multipl
   return spikes.sort((a, b) => b.usd - a.usd);
 }
 
+/**
+ * Lanes whose spend on `day` cleared `minUsd` but whose spike check was skipped
+ * because the baseline week contained unpriced calls (pure). Logging these keeps
+ * a model falling out of the price table from silently blinding spend alerts.
+ */
+function findSkippedUnpriced(dayByLane, baselineByLane, { minUsd = alertMinUsd() } = {}) {
+  const skipped = [];
+  for (const [laneId, day] of dayByLane) {
+    const unpricedCalls = baselineByLane.get(laneId)?.unpricedCalls || 0;
+    if (unpricedCalls > 0 && day.usd >= minUsd) skipped.push({ laneId, usd: day.usd, unpricedCalls });
+  }
+  return skipped.sort((a, b) => b.usd - a.usd);
+}
+
 // Standing spike items that must stay open: those naming a lane whose spend
 // cannot be judged (unpriced calls on the day just checked, or in the
 // baseline week findSpikes then skips). null = the items could not be read,
@@ -519,12 +533,17 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
   // standing items are left as they are
   if (!day.byLane.size) return { ran: true, raised: false, reason: 'no_ledger_rows', prices };
   const spikes = findSpikes(day.byLane, baseline.byLane);
+  const skippedUnpriced = findSkippedUnpriced(day.byLane, baseline.byLane);
+  if (skippedUnpriced.length) {
+    const summary = skippedUnpriced.map((s) => `${s.laneId} (${usd(s.usd)} day, ${s.unpricedCalls} unpriced baseline)`).join(', ');
+    logger.warn(`[llm-cost] spike check skipped for ${skippedUnpriced.length} lane(s) with unpriced baseline calls: ${summary}`);
+  }
   // a standing item naming a lane with unpriced calls (yesterday or in the
   // baseline) stays open on either path: its spend cannot be judged normal
   const held = await heldSpikeKeys(conn, day.byLane, baseline.byLane);
   if (!spikes.length) {
     await closeSpikeItems(conn, now, 'spend_normal', held).catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
-    return { ran: true, raised: false, spikes: 0, held: held ? held.size : null, prices };
+    return { ran: true, raised: false, spikes: 0, skippedUnpriced: skippedUnpriced.length, held: held ? held.size : null, prices };
   }
 
   const names = new Map(require('./model-switchboard').getSwitchboard().lanes.map((l) => [l.id, l.name]));
@@ -556,13 +575,13 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
     metadata: { lane: 'llm_cost', day: dayLabel, spikes: spikes.map((s) => ({ laneId: s.laneId, usd: Number(s.usd.toFixed(4)), avgUsd: Number(s.avgUsd.toFixed(4)) })) },
   });
   // silenced category (or any other suppression): no new item, so nothing is superseded
-  if (alert?.suppressed) return { ran: true, raised: false, reason: 'suppressed', spikes: spikes.length, prices };
+  if (alert?.suppressed) return { ran: true, raised: false, reason: 'suppressed', spikes: spikes.length, skippedUnpriced: skippedUnpriced.length, prices };
   if (!alert || alert.id == null) {
     logger.warn('[llm-cost] spend spike item was not persisted');
-    return { ran: true, raised: false, reason: 'alert_not_persisted', spikes: spikes.length, prices };
+    return { ran: true, raised: false, reason: 'alert_not_persisted', spikes: spikes.length, skippedUnpriced: skippedUnpriced.length, prices };
   }
   await closeSpikeItems(conn, now, 'superseded', held && new Set([...held, dedupeKey])).catch((err) => logger.warn(`[llm-cost] spike item close failed: ${err.message}`));
-  return { ran: true, raised: true, spikes: spikes.length, dedupeKey, prices };
+  return { ran: true, raised: true, spikes: spikes.length, skippedUnpriced: skippedUnpriced.length, dedupeKey, prices };
 }
 
 module.exports = {
@@ -582,6 +601,7 @@ module.exports = {
   parseTiers,
   foldLaneCosts,
   findSpikes,
+  findSkippedUnpriced,
   laneModelRows,
   ALERT_CATEGORY,
   KEY_PREFIX,

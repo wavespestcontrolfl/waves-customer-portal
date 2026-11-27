@@ -231,7 +231,7 @@ describe('answers', () => {
     expect(mockExecute).toHaveBeenCalledWith('needs_me', { limit: 5 }, {
       role: 'admin',
       context: 'platform',
-      actionContext: { isAdmin: true, technicianId: OWNER.id, actorId: OWNER.id, readCustomerIds: [], fullAccess: false },
+      actionContext: { isAdmin: true, technicianId: OWNER.id, actorId: OWNER.id, readCustomerIds: [], fullAccess: false, ownerAccess: true },
     });
     const answer = toolResult(body);
     const [item] = answer.data.items;

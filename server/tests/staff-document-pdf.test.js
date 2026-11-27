@@ -90,6 +90,7 @@ test('long controlled wording keeps complete clauses, citations, signature evide
   expect(html).toContain('ack-id');
   expect(html).toContain(acknowledgmentHash);
   expect(html).toContain(contentHash);
+  expect(html).toContain('data:image/png;base64,');
   const options = page.pdf.mock.calls[0][0];
   expect(options).toMatchObject({ format: 'Letter', printBackground: true, displayHeaderFooter: true });
   expect(options.headerTemplate).toContain('Controlled staff document · QA controlled policy');
@@ -97,4 +98,96 @@ test('long controlled wording keeps complete clauses, citations, signature evide
   expect(options.footerTemplate).toContain(`SHA-256: ${contentHash}`);
   expect(options.footerTemplate).toContain('class="pageNumber"');
   expect(options.footerTemplate).toContain('class="totalPages"');
+});
+
+test('completed signature forms render Yes/No checkboxes, staff name, and an electronic signature block', async () => {
+  const page = { route: jest.fn(), setContent: jest.fn(), pdf: jest.fn().mockResolvedValue(Buffer.from('pdf')) };
+  launchBrowser.mockResolvedValue({ newPage: jest.fn().mockResolvedValue(page), close: jest.fn() });
+  const agreement = {
+    document: { staff_kind: 'form', template_key: 'staff.vehicle-use-commuting-agreement' },
+    version: { version_number: 2, content_hash: 'c'.repeat(64), effective_at: '2027-01-01T14:00:00Z' },
+    rendered: {
+      title: 'Vehicle Use & Commuting Agreement', kind: 'form',
+      sections: [{ id: 'purpose', number: 1, title: 'Purpose', html: '<p>Commute rules.</p>' }],
+      metadata: {
+        owner_role: 'Owner', review_on: '2027-12-31', citations: [],
+        fields: [
+          { id: 'vehicle', label: 'Assigned vehicle', type: 'text', required: true },
+          { id: 'agree', label: 'I agree', type: 'checkbox', required: true },
+          { id: 'signed-name', label: 'Typed name', type: 'text', required: true },
+        ],
+      },
+    },
+  };
+  await renderStaffDocumentPdf(agreement, {
+    record: {
+      id: 'rec-veh', owner_id: 'tech-1', owner_name: 'Jordan Rivera', content_hash: 'c'.repeat(64),
+      due_at: '2027-01-05T14:00:00Z', completed_at: '2027-01-04T15:00:00Z', completed_steps: [],
+      answers: { vehicle: 'Ford Maverick', agree: true, 'signed-name': 'Jordan Rivera' },
+    },
+  });
+  const html = page.setContent.mock.calls[0][0];
+  expect(html).toContain('[x] Yes — confirmed');
+  expect(html).not.toContain('>true<');
+  expect(html).toContain('Electronic signature');
+  expect(html).toContain('Jordan Rivera (tech-1)');
+  expect(html).toContain('Florida Statutes 668.50');
+});
+
+test('optional signed-name fields stay as ordinary form fields without an electronic signature certificate', async () => {
+  const page = { route: jest.fn(), setContent: jest.fn(), pdf: jest.fn().mockResolvedValue(Buffer.from('pdf')) };
+  launchBrowser.mockResolvedValue({ newPage: jest.fn().mockResolvedValue(page), close: jest.fn() });
+  const optionalForm = {
+    document: { staff_kind: 'form', template_key: 'staff.optional-note' },
+    version: { version_number: 1, content_hash: 'd'.repeat(64), effective_at: '2027-01-01T14:00:00Z' },
+    rendered: {
+      title: 'Equipment Note', kind: 'form',
+      sections: [{ id: 'notes', number: 1, title: 'Notes', html: '<p>Notes.</p>' }],
+      metadata: {
+        owner_role: 'Owner', review_on: '2027-12-31', citations: [],
+        fields: [
+          { id: 'signed-name', label: 'Optional contact', type: 'text', required: false },
+        ],
+      },
+    },
+  };
+  await renderStaffDocumentPdf(optionalForm, {
+    record: {
+      id: 'rec-opt', owner_id: 'tech-1', owner_name: 'Jordan Rivera', content_hash: 'd'.repeat(64),
+      due_at: '2027-01-05T14:00:00Z', completed_at: '2027-01-04T15:00:00Z', completed_steps: [],
+      answers: { 'signed-name': 'Jordan Rivera' },
+    },
+  });
+  const html = page.setContent.mock.calls[0][0];
+  expect(html).not.toContain('Electronic signature');
+  expect(html).toContain('Optional contact');
+  expect(html).toContain('Jordan Rivera');
+});
+
+test('historical signature forms with invalid single-character names preserve the answer without certifying it', async () => {
+  const page = { route: jest.fn(), setContent: jest.fn(), pdf: jest.fn().mockResolvedValue(Buffer.from('pdf')) };
+  launchBrowser.mockResolvedValue({ newPage: jest.fn().mockResolvedValue(page), close: jest.fn() });
+  const agreement = {
+    document: { staff_kind: 'form', template_key: 'staff.vehicle-use-commuting-agreement' },
+    version: { version_number: 1, content_hash: 'e'.repeat(64), effective_at: '2026-04-01T14:00:00Z' },
+    rendered: {
+      title: 'Vehicle Agreement', kind: 'form',
+      sections: [{ id: 'purpose', number: 1, title: 'Purpose', html: '<p>Rules.</p>' }],
+      metadata: {
+        owner_role: 'Owner', review_on: '2027-12-31', citations: [],
+        fields: [{ id: 'signed-name', label: 'Typed name', type: 'text', required: true }],
+      },
+    },
+  };
+  await renderStaffDocumentPdf(agreement, {
+    record: {
+      id: 'rec-old', owner_id: 'tech-1', owner_name: 'Jordan Rivera', content_hash: 'e'.repeat(64),
+      due_at: '2026-04-05T14:00:00Z', completed_at: '2026-04-04T15:00:00Z', completed_steps: [],
+      answers: { 'signed-name': 'x' },
+    },
+  });
+  const html = page.setContent.mock.calls[0][0];
+  expect(html).not.toContain('Electronic signature');
+  expect(html).toContain('Typed name');
+  expect(html).toContain('>x<');
 });
