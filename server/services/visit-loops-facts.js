@@ -585,6 +585,9 @@ function provenLastMove(visit, logs) {
   if (!last || last.notes === CUSTOMER_PICK_LOG_MARKER || calendarDay(last.new_date) !== calendarDay(visit.scheduled_date)) return null;
   // the newest change was a placement: nothing is stated (never an older move behind it)
   if (isPlacement(last, logs)) return null;
+  // the move is told as this service's: the service the row held when it moved (frozen in
+  // the log) must be the one it holds now. A row with none frozen cannot tell: no fact.
+  if (!last.occurrence_service_type || last.occurrence_service_type !== visit.service_type) return null;
   const movedAt = toDate(last.created_at);
   if (!movedAt) return null;
   const toStart = loggedStart(last.new_window);
@@ -662,7 +665,7 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
       .whereNotNull('new_date')
       .orderBy('created_at', 'desc').orderBy('id', 'desc')
       .limit(500)
-      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'reason_code', 'initiated_by', 'notes', 'created_at'),
+      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'reason_code', 'initiated_by', 'notes', 'occurrence_service_type', 'created_at'),
   ]);
   // UPCOMING SERVICES' own row rule: an en-route or on-site visit today whose status
   // still reads `rescheduled` is listed there, so it is live here too.
@@ -736,7 +739,8 @@ async function loadStopped(conn, customerId, now) {
     .where({ customer_id: customerId })
     .where('scheduled_date', '>=', today).where('scheduled_date', '<=', etDateString(addETDays(now, SCHEDULE_HORIZON_DAYS)))
     // plus today's tracker-live rows (any status): UPCOMING SERVICES lists them
-    .where((q) => q.whereIn('status', [...UPCOMING_SERVICE_STATUSES, ...STOPPED_STATUSES])
+    // completed rows: a replacement done today still replaced the cancel
+    .where((q) => q.whereIn('status', [...UPCOMING_SERVICE_STATUSES, ...STOPPED_STATUSES, 'completed'])
       .orWhere((live) => live.where('scheduled_date', today).whereIn('track_state', LIVE_TRACK_STATES)))
     .orderBy('scheduled_date').orderBy('window_start').orderBy('id')
     // one customer's next two months: a backstop, far above a real account
@@ -747,7 +751,8 @@ async function loadStopped(conn, customerId, now) {
   const dayKey = (r) => `${calendarDay(r.scheduled_date)}|${r.service_type || ''}`;
   // UPCOMING SERVICES' own row rule: a replacement en route today that still reads
   // rescheduled replaces the cancel too
-  const replaced = new Set(rows.filter((r) => isUpcomingListedRow(r, today)).map(dayKey));
+  // rescheduled replaces the cancel too, and so does a replacement already completed
+  const replaced = new Set(rows.filter((r) => r.status === 'completed' || isUpcomingListedRow(r, today)).map(dayKey));
   return stoppedGroups(rows.filter((r) => STOPPED_STATUSES.includes(r.status) && !replaced.has(dayKey(r)))).slice(0, SCHEDULE_STOPPED_LIMIT);
 }
 // `listed`: the listed visits whose slot held, as { id, date, start } in UPCOMING SERVICES'

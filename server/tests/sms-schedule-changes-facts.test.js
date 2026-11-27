@@ -38,7 +38,7 @@ const visit = (over = {}) => ({
   id: 'v1', service_type: 'Pest Control', scheduled_date: '2026-12-04', status: 'confirmed', window_start: '13:00:00', cancelled_at: null, ...over,
 });
 const move = (over = {}) => ({
-  id: 'rl-1', scheduled_service_id: 'v1', customer_id: 'c1', original_date: '2026-12-02', new_date: '2026-12-04',
+  id: 'rl-1', scheduled_service_id: 'v1', customer_id: 'c1', occurrence_service_type: 'Pest Control', original_date: '2026-12-02', new_date: '2026-12-04',
   original_window: '09:00:00-10:00:00', new_window: '13:00:00-14:00:00', created_at: new Date('2026-11-24T15:00:00Z'), ...over,
 });
 // an UPCOMING SERVICES entry as context-aggregator builds it (the row id is non-enumerable there)
@@ -174,6 +174,14 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
     expect((await read([now], [booked, handOff], [listedFor(now)])).moves.map((m) => m.logId)).toEqual(['rl-9']);
   });
 
+  test('the move is told only for the service the row held when it moved', async () => {
+    // staff changed the service after the move, slot kept: no sentence
+    expect((await read([visit({ service_type: 'Lawn Care' })], [move()])).moves).toEqual([]);
+    // a log with no frozen service cannot tell: no sentence
+    expect((await read([visit()], [move({ occurrence_service_type: null })])).moves).toEqual([]);
+    expect((await read([visit()], [move()])).moves).toHaveLength(1);
+  });
+
   test('a same-day row that left no hour is a placement (a due date got its first hour), never a move', async () => {
     const placed = move({ original_date: '2026-12-04', original_window: null, reason_code: 'reschedule', initiated_by: 'office' });
     expect((await read([visit()], [placed])).moves).toEqual([]);
@@ -244,6 +252,9 @@ describe('loadScheduleChanges: skipped and cancelled', () => {
     const cancelled = visit({ id: 'v3', status: 'cancelled', scheduled_date: today });
     const live = visit({ id: 'v1', status: 'rescheduled', track_state: 'on_property', scheduled_date: today });
     expect((await read([live, cancelled], [], [])).stopped).toEqual([]);
+    // the replacement finished (on site, then completed): the cancel stays hidden
+    const done = visit({ id: 'v1', status: 'completed', track_state: 'completed', scheduled_date: today });
+    expect((await read([done, cancelled], [], [])).stopped).toEqual([]);
     // the tracker is idle: a rescheduled row replaces nothing
     const idle = visit({ id: 'v1', status: 'rescheduled', track_state: null, scheduled_date: today });
     expect((await read([idle, cancelled], [], [])).stopped.map((g) => g.visitIds)).toEqual([['v3']]);
