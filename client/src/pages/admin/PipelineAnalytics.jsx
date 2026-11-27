@@ -63,6 +63,11 @@ const SERVICE_META = {
     icon: Leaf,
     ticketSuffix: "manual quote",
   },
+  commercial_tree_shrub: {
+    label: "Commercial tree & shrub",
+    icon: Trees,
+    ticketSuffix: "manual quote",
+  },
   commercial_mosquito: {
     label: "Commercial mosquito",
     icon: Bug,

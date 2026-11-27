@@ -4,7 +4,7 @@
 // + conversion stats + last comms touchpoint. Everything fetched from
 // GET /admin/customers/:id/estimates-summary.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Phone,
@@ -30,11 +30,14 @@ import {
   cn,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
+import { formatETDate } from "../../lib/timezone";
 import CallBridgeLink from "../../components/admin/CallBridgeLink";
 
 const STATUS_TONES = {
   draft: "neutral",
   scheduled: "neutral",
+  sending: "neutral",
+  send_failed: "alert",
   sent: "neutral",
   viewed: "neutral",
   accepted: "strong",
@@ -45,6 +48,8 @@ const STATUS_TONES = {
 const STATUS_LABELS = {
   draft: "Draft",
   scheduled: "Scheduled",
+  sending: "Sending",
+  send_failed: "Send failed",
   sent: "Sent",
   viewed: "Viewed",
   accepted: "Accepted",
@@ -55,11 +60,21 @@ const STATUS_LABELS = {
 function fmtDate(d) {
   if (!d) return "";
   const dt = new Date(d);
-  return dt.toLocaleDateString("en-US", {
+  if (Number.isNaN(dt.getTime())) return "";
+  return formatETDate(dt, {
     month: "short",
     day: "numeric",
     year: "numeric",
   });
+}
+
+function estimateRowPrice(e) {
+  const monthly = Number(e.monthly_total || 0);
+  const onetime = Number(e.onetime_total || 0);
+  if (monthly <= 0 && onetime > 0) {
+    return { amount: fmtMoney(onetime), suffix: " one-time", active: true };
+  }
+  return { amount: fmtMoney(monthly), suffix: "/mo", active: monthly > 0 };
 }
 
 function fmtMoney(n) {
@@ -85,41 +100,60 @@ function timeAgo(d) {
   return fmtDate(d);
 }
 
-export default function CustomerEstimatesPanel({ customerId, onClose }) {
+export default function CustomerEstimatesPanel({
+  customerId,
+  onClose,
+  onEstimateChanged,
+}) {
   const [data, setData] = useState(null);
   const [comms, setComms] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const loadControllerRef = useRef(null);
+  const loadSeqRef = useRef(0);
 
   const load = useCallback(async () => {
+    loadControllerRef.current?.abort();
+    const controller = new AbortController();
+    loadControllerRef.current = controller;
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setErr("");
     try {
       const [summaryRes, commsRes] = await Promise.all([
-        adminFetch(`/admin/customers/${customerId}/estimates-summary`),
-        adminFetch(`/admin/customers/${customerId}/comms?limit=15`).catch(
-          () => null,
-        ),
+        adminFetch(`/admin/customers/${customerId}/estimates-summary`, {
+          signal: controller.signal,
+        }),
+        adminFetch(`/admin/customers/${customerId}/comms?limit=15`, {
+          signal: controller.signal,
+        }).catch(() => null),
       ]);
       const d = await summaryRes.json();
+      if (seq !== loadSeqRef.current || controller.signal.aborted) return;
       if (!summaryRes.ok)
         throw new Error(d?.error || `HTTP ${summaryRes.status}`);
       setData(d);
       if (commsRes && commsRes.ok) {
         const cd = await commsRes.json();
-        setComms(cd?.comms || []);
+        if (seq === loadSeqRef.current && !controller.signal.aborted) {
+          setComms(cd?.comms || []);
+        }
       } else {
         setComms([]);
       }
     } catch (e) {
+      if (e?.name === "AbortError" || seq !== loadSeqRef.current) return;
       setErr(e.message);
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   }, [customerId]);
 
   useEffect(() => {
     if (customerId) load();
+    return () => {
+      loadControllerRef.current?.abort();
+    };
   }, [customerId, load]);
 
   if (!customerId) return null;
@@ -408,119 +442,16 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                 </div>
               ) : (
                 <div className="space-y-1.5">
-                  {estimates.map((e) => {
-                    const tone = STATUS_TONES[e.status] || "neutral";
-                    const label = STATUS_LABELS[e.status] || e.status;
-                    const anchorDate =
-                      e.accepted_at ||
-                      e.declined_at ||
-                      e.viewed_at ||
-                      e.sent_at ||
-                      e.created_at;
-                    return (
-                      <div
-                        key={e.id}
-                        className="border border-hairline border-zinc-200 rounded-sm p-2.5 flex items-start justify-between gap-2 hover:bg-zinc-50"
-                      >
-                        {" "}
-                        <div className="min-w-0 flex-1">
-                          {" "}
-                          <div className="flex items-center gap-2 flex-wrap">
-                            {" "}
-                            <Badge tone={tone}>{label}</Badge>
-                            {e.waveguard_tier && (
-                              <span className="text-ui-body text-ink-secondary">
-                                {e.waveguard_tier}
-                              </span>
-                            )}
-                            <span className="text-ui-body text-ink-tertiary">
-                              {timeAgo(anchorDate)}
-                            </span>{" "}
-                          </div>
-                          {e.service_interest && (
-                            <div className="text-ui-body text-ink-secondary mt-0.5 truncate">
-                              {e.service_interest}
-                            </div>
-                          )}
-                          {e.decline_reason && (
-                            <div className="text-ui-body text-alert-fg mt-0.5">
-                              {/* An expired offer can carry a staff reason too (the
-                                  estimates page's Pick reason): it was lost, not declined. */}
-                              {e.status === "expired" ? "Lost" : "Declined"}: {e.decline_reason}
-                            </div>
-                          )}
-                        </div>{" "}
-                        <div className="text-right flex-shrink-0 flex flex-col items-end gap-1">
-                          {" "}
-                          <div
-                            className={cn(
-                              "text-14 font-medium u-nums",
-                              Number(e.monthly_total || 0) > 0
-                                ? "text-zinc-900"
-                                : "text-ink-tertiary",
-                            )}
-                          >
-                            {fmtMoney(e.monthly_total)}
-                            <span className="text-ui-body text-ink-tertiary">
-                              /mo
-                            </span>{" "}
-                          </div>{" "}
-                          <div className="flex items-center gap-3">
-                            {e.token && (
-                              <a
-                                // ?adminPreview=1 → real React (glass) page for
-                                // drafts too; bare /estimate/<token> serves the
-                                // legacy server-HTML renderer for unpublished rows.
-                                href={`/estimate/${e.token}?adminPreview=1`}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-ui-body text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
-                              >
-                                View →
-                              </a>
-                            )}
-                            {e.status === "draft" && (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                aria-label="Delete draft estimate"
-                                title="Delete this draft estimate"
-                                onClick={async () => {
-                                  const ok = window.confirm(
-                                    "Delete this draft estimate?\n\nThis permanently removes it from the admin portal.",
-                                  );
-                                  if (!ok) return;
-                                  try {
-                                    const r = await adminFetch(
-                                      `/admin/estimates/${e.id}`,
-                                      { method: "DELETE" },
-                                    );
-                                    if (!r.ok) {
-                                      const err = await r
-                                        .json()
-                                        .catch(() => ({}));
-                                      throw new Error(
-                                        err.error || `HTTP ${r.status}`,
-                                      );
-                                    }
-                                    load();
-                                  } catch (err) {
-                                    window.alert(
-                                      "Delete failed: " + err.message,
-                                    );
-                                  }
-                                }}
-                                className="h-9 w-9 px-0 text-alert-fg hover:bg-alert-bg"
-                              >
-                                {" "}
-                                <Trash2 size={14} strokeWidth={1.75} />{" "}
-                              </Button>
-                            )}
-                          </div>{" "}
-                        </div>{" "}
-                      </div>
-                    );
-                  })}
+                  {estimates.map((e) => (
+                    <EstimateHistoryRow
+                      key={e.id}
+                      estimate={e}
+                      onDeleted={() => {
+                        load();
+                        onEstimateChanged?.();
+                      }}
+                    />
+                  ))}
                 </div>
               )}
             </section>
@@ -586,6 +517,94 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
 }
 
 // Humanize lead_source enum values for display.
+function EstimateHistoryRow({ estimate: e, onDeleted }) {
+  const tone = STATUS_TONES[e.status] || "neutral";
+  const label = STATUS_LABELS[e.status] || e.status;
+  const anchorDate =
+    e.accepted_at || e.declined_at || e.viewed_at || e.sent_at || e.created_at;
+  const price = estimateRowPrice(e);
+  return (
+    <div className="border border-hairline border-zinc-200 rounded-sm p-2.5 flex items-start justify-between gap-2 hover:bg-zinc-50">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Badge tone={tone}>{label}</Badge>
+          {e.archived_at && <Badge tone="neutral">Archived</Badge>}
+          {e.waveguard_tier && (
+            <span className="text-ui-body text-ink-secondary">
+              {e.waveguard_tier}
+            </span>
+          )}
+          <span className="text-ui-body text-ink-tertiary">
+            {timeAgo(anchorDate)}
+          </span>
+        </div>
+        {e.service_interest && (
+          <div className="text-ui-body text-ink-secondary mt-0.5 truncate">
+            {e.service_interest}
+          </div>
+        )}
+        {e.decline_reason && (
+          <div className="text-ui-body text-alert-fg mt-0.5">
+            {e.status === "expired" ? "Lost" : "Declined"}: {e.decline_reason}
+          </div>
+        )}
+      </div>
+      <div className="text-right flex-shrink-0 flex flex-col items-end gap-1">
+        <div
+          className={cn(
+            "text-14 font-medium u-nums",
+            price.active ? "text-zinc-900" : "text-ink-tertiary",
+          )}
+        >
+          {price.amount}
+          <span className="text-ui-body text-ink-tertiary">{price.suffix}</span>
+        </div>
+        <div className="flex items-center gap-3">
+          {e.token && (
+            <a
+              href={`/estimate/${e.token}?adminPreview=1`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-ui-body text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
+            >
+              View →
+            </a>
+          )}
+          {e.status === "draft" && !e.archived_at && (
+            <Button
+              type="button"
+              variant="ghost"
+              aria-label="Delete draft estimate"
+              title="Delete this draft estimate"
+              onClick={async () => {
+                const ok = window.confirm(
+                  "Delete this draft estimate?\n\nThis permanently removes it from the admin portal.",
+                );
+                if (!ok) return;
+                try {
+                  const r = await adminFetch(`/admin/estimates/${e.id}`, {
+                    method: "DELETE",
+                  });
+                  if (!r.ok) {
+                    const errBody = await r.json().catch(() => ({}));
+                    throw new Error(errBody.error || `HTTP ${r.status}`);
+                  }
+                  onDeleted?.();
+                } catch (err) {
+                  window.alert("Delete failed: " + err.message);
+                }
+              }}
+              className="h-9 w-9 px-0 text-alert-fg hover:bg-alert-bg"
+            >
+              <Trash2 size={14} strokeWidth={1.75} />
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function formatLeadSource(src) {
   if (!src) return "";
   const map = {

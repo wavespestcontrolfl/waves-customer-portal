@@ -1064,4 +1064,16 @@ describe("PipelineAnalytics call-list cards", () => {
     fireEvent.click(card);
     expect(onFilterChange).toHaveBeenCalledWith("call_today");
   });
+
+  it("classifies commercial_tree_shrub service lines without dropping them into Unknown", () => {
+    const rows = aggregateServiceLineRows([
+      estimate({
+        status: "sent",
+        serviceLines: [{ key: "commercial_tree_shrub", amount: 0, amountBasis: "monthly" }],
+      }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].key).toBe("commercial_tree_shrub");
+    expect(rows[0].label).toBe("Commercial tree & shrub");
+  });
 });
