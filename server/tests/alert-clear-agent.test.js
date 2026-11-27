@@ -730,4 +730,132 @@ describe('the model never closes a silent missed call early', () => {
   test('a call with a voicemail keeps the model\'s nothing_to_answer (a wrong number, a sales call)', async () => {
     expect(await run({ customerId: null, hasVoicemail: true, textBackSent: false })).toMatchObject({ outcome: 'nothing_to_answer', source: 'ai' });
   });
+
+  // The trial's alerts said "waits for the 24-hour rule" on calls days old that the rule could never close.
+  test('the reason it stays open is the true one, never "waits" on an alert days old', async () => {
+    const days = new Date(ALERT_AT.getTime() + 3 * 24 * 3600 * 1000);
+    const why = async (call, { events = [], now = days } = {}) => {
+      const deps = makeDeps({
+        candidates: async () => [missed],
+        timeline: async () => timelineOf(events, { customerKnown: !!call.customerId, call }),
+        judge: jest.fn(async () => ({ outcome: 'nothing_to_answer', why: 'robocall', proof: null, model: 'm' })),
+      });
+      await agent.runAlertClearAgent({ now, deps });
+      const row = saved(deps)[0];
+      expect(row).toMatchObject({ outcome: 'still_owed', rule: 'silent_call_wait' });
+      return row.why;
+    };
+    const unknown = { customerId: null, hasVoicemail: false, textBackSent: false, textBackBounced: false, robocall: null };
+    expect(await why(unknown)).toBe('no text-back went out for this call');
+    expect(await why({ ...unknown, textBackBounced: true })).toBe('the text-back for this call did not deliver');
+    const again = ev({ type: 'call', id: 'c2', key: 'call:c2', inbound: true, line: 'CALL inbound' });
+    expect(await why({ ...unknown, textBackSent: true }, { events: [again] })).toBe('the number called or texted again after the alert');
+    expect(await why({ ...unknown, textBackSent: true }, { now: NOW })).toBe('under 24 hours since the call');
+    expect(await why({ ...unknown, customerId: 'c1' })).toBe('a customer left no voicemail: only a real answer closes it');
+  });
+});
+
+describe('rule 1 also closes a robocall that got no text-back', () => {
+  const missed = alertRow({ category: 'missed_call', title: 'Unknown caller', link: '/admin/communications#tab=calls&call=33333333-3333-4333-8333-333333333333' });
+  const robo = (robocall, over = {}) => timelineOf([], { customerKnown: false, call: { customerId: null, hasVoicemail: false, textBackSent: false, robocall }, ...over });
+  const run = async (timeline, now = new Date(ALERT_AT.getTime() + 25 * 3600 * 1000)) => {
+    const deps = makeDeps({ candidates: async () => [missed], timeline: async () => timeline });
+    await agent.runAlertClearAgent({ now, deps });
+    return { deps, rows: saved(deps) };
+  };
+
+  test.each([
+    ['failed the press-1 screen', 'screen_failed', 'robocall (failed the press-1 screen), no voicemail, silent 24 hours'],
+    ['carries the bell\'s robodialer marker', 'block_quiet', 'robocall (the missed-call bell marked it a robodialer), no voicemail, silent 24 hours'],
+  ])('a call that %s closes after 24 hours of silence, with no model call', async (_n, robocall, why) => {
+    const { deps, rows } = await run(robo(robocall));
+    expect(rows).toEqual([expect.objectContaining({ outcome: 'nothing_to_answer', source: 'rule', rule: 'quiet_robocall', why })]);
+    expect(deps.judge).not.toHaveBeenCalled();
+  });
+
+  test('not before 24 hours, not with a voicemail, not when the number called again', async () => {
+    const again = ev({ type: 'call', id: 'c2', key: 'call:c2', inbound: true, line: 'CALL inbound' });
+    for (const [timeline, now] of [
+      [robo('screen_failed'), new Date(ALERT_AT.getTime() + 3 * 3600 * 1000)],
+      [robo('screen_failed', { call: { customerId: null, hasVoicemail: true, textBackSent: false, robocall: 'screen_failed' } }), undefined],
+      [robo('block_quiet', { events: [again] }), undefined],
+    ]) {
+      const { rows } = await run(timeline, now);
+      expect(rows.every((r) => r.rule !== 'quiet_robocall')).toBe(true);
+    }
+  });
+
+  test('the two lanes\' own tests decide: a failed screen, or the bell\'s live marker on a caller who did not press 1', () => {
+    expect(agent.robocallOf({ metadata: { preconnect_screen: 'failed' } })).toBe('screen_failed');
+    expect(agent.robocallOf({ metadata: JSON.stringify({ missed_call_spam_wave: 'block_quiet' }) })).toBe('block_quiet');
+    expect(agent.robocallOf({ metadata: { missed_call_spam_wave: 'repeat_quiet', preconnect_screen: 'passed' } })).toBeNull();
+    expect(agent.robocallOf({ metadata: { missed_call_spam_repeat_shadow: true, missed_call_screen_quiet_shadow: true } })).toBeNull();
+    expect(agent.robocallOf({ metadata: { missed_call_spam_wave: 'not_a_marker' } })).toBeNull();
+    expect(agent.robocallOf({ metadata: null })).toBeNull();
+  });
+});
+
+describe('the text-back for this call', () => {
+  // A reader stand-in that answers each labelled read with a canned row.
+  const reader = (claim, text) => ({ conn: null, read: async (label) => (label === 'text-back-claim' ? [claim].filter(Boolean).map((outcome) => ({ outcome })) : [text].filter(Boolean).map((status) => ({ status }))) });
+  test.each([
+    ['a sent claim and a delivered text', 'sent', 'delivered', { sent: true, bounced: false }],
+    ['a sent claim with no text row yet', 'sent', null, { sent: true, bounced: false }],
+    ['a delivered text with no claim', null, 'delivered', { sent: true, bounced: false }],
+    ['a sent claim whose text bounced', 'sent', 'undelivered', { sent: false, bounced: true }],
+    ['a sent claim whose text failed', 'sent', 'failed', { sent: false, bounced: true }],
+    ['a claim still dispatching', 'dispatching', null, { sent: false, bounced: false }],
+  ])('%s', async (_n, claim, text, expected) => {
+    expect(await agent.textBackWasSent(reader(claim, text), 'call-1')).toMatchObject(expected);
+  });
+});
+
+describe('a visit move answers only when Waves staff made it and the visit still holds it', () => {
+  const day = (iso) => new Date(`${iso}T00:00:00Z`);
+  const move = (over = {}) => ({
+    id: 'rl-1', created_at: after(60), reason_code: 'admin_series', initiated_by: 'admin', original_date: day('2026-11-23'), new_date: day('2026-11-27'),
+    original_window: '09:00-10:00', new_window: '15:00-16:00', visit_date: day('2026-11-27'), window_start: '15:00:00', window_end: '16:00:00', ...over,
+  });
+
+  test('a staff move the visit still holds is a date change, and the model reads where it went', () => {
+    const e = agent.rescheduleEvent(move());
+    expect(e.proof).toBe('date_change');
+    expect(e.line).toBe('VISIT MOVED by Waves staff after the alert (admin_series), from 2026-11-23 09:00-10:00 to 2026-11-27 15:00-16:00; the visit still holds that time');
+  });
+
+  test.each([
+    ['the day planner moved it', { initiated_by: 'day_replan' }, /by an automatic job \(day_replan\).*; not an answer from Waves$/],
+    ['auto-dispatch moved it', { initiated_by: 'auto_dispatch' }, /by an automatic job \(auto_dispatch\)/],
+    ['the customer moved it', { initiated_by: 'customer_self_serve' }, /by the customer .*; not an answer from Waves$/],
+    ['no mover is named', { initiated_by: null }, /by an unknown mover/],
+    ['the visit moved to another day since', { visit_date: day('2026-12-05'), window_start: '12:00:00', window_end: '13:00:00' }, /not an answer now: the visit has moved since, to 2026-12-05 12:00-13:00$/],
+    ['the visit moved to another time that day since', { window_start: '08:00:00', window_end: '09:00:00' }, /moved since, to 2026-11-27 08:00-09:00$/],
+  ])('no proof when %s', (_n, over, line) => {
+    const e = agent.rescheduleEvent(move(over));
+    expect(e.proof).toBeNull();
+    expect(e.line).toMatch(line);
+  });
+
+  test('the day and start decide: a 30-minute logged window holds on a one-hour visit; a move with no time holds on its day only', () => {
+    expect(agent.rescheduleEvent(move({ new_window: '15:00-15:30' })).proof).toBe('date_change');
+    expect(agent.rescheduleEvent(move({ new_window: null })).proof).toBe('date_change');
+    expect(agent.rescheduleEvent(move({ new_window: null, visit_date: day('2026-11-28') })).proof).toBeNull();
+    expect(agent.rescheduleEvent(move({ visit_date: null })).proof).toBeNull();
+  });
+
+  test('a Quick Move by a tech and an Intelligence Bar move are a person\'s', () => {
+    expect(agent.rescheduleEvent(move({ initiated_by: 'tech' })).proof).toBe('date_change');
+    expect(agent.rescheduleEvent(move({ initiated_by: 'admin_ib' })).proof).toBe('date_change');
+  });
+
+  // The trial's case: a staff move matched "after 3", then the day planner and the customer moved the visit again.
+  test('the model citing a move the visit no longer holds is refused, and a bare yes waits for a real booking', async () => {
+    const stale = agent.rescheduleEvent(move({ visit_date: day('2026-12-05'), window_start: '12:00:00', window_end: '13:00:00' }));
+    const judge = jest.fn(async () => ({ outcome: 'answered', why: 'moved to after 3', proof: 'E1', model: 'm' }));
+    const deps = makeDeps({ timeline: async () => timelineOf([stale]), judge });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(saved(deps)[0]).toMatchObject({ outcome: 'still_owed', rule: 'proof_rejected' });
+    expect(agent.computeFacts(timelineOf([stale])).bookingOrDateChangeAfter).toBe(false);
+    expect(agent.computeFacts(timelineOf([agent.rescheduleEvent(move())])).bookingOrDateChangeAfter).toBe(true);
+  });
 });

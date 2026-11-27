@@ -904,6 +904,8 @@ const QUIET_RULES = [
 ];
 // The stamps one pass writes: the quiet marker and each gated rule's shadow.
 const PASS_STAMP_KEYS = ['missed_call_spam_wave', ...QUIET_RULES.filter((rule) => rule.shadow).map((rule) => rule.shadow)];
+// The live quiet markers (missed_call_spam_wave values): this bell judged the call a robodialer. Shadow stamps live under their own keys.
+const QUIET_STAMPS = Object.freeze(QUIET_RULES.map((rule) => rule.quiet));
 
 async function quietRobodialerPush(row, fenced) {
   const flags = {
@@ -1428,4 +1430,6 @@ module.exports = {
   UNANSWERED_STATUSES,
   TERMINAL_STATUSES,
   VOICEMAIL_GRACE_MS,
+  // Exported so the alert clear-up agent reads this bell's robodialer decision instead of re-deriving it.
+  QUIET_STAMPS,
 };
