@@ -132,9 +132,6 @@ function visitFactsGateEnabled() {
 // Fail-soft: an unreadable scheduled_date or a read failure returns null so the
 // key is omitted and the client keeps its single-visit section.
 const PAST_VISITS_LIMIT = 5;
-// The portal read is newest first; the viewed day's own records and (for an older stop) later visits are dropped
-// after it, so it reads more than five.
-const PAST_VISITS_READ = 40;
 // One currency marker may cover a range ("$125-150", "USD 125 to 150"): both ends go.
 const NOTE_MONEY_RE = /(?:\$|\busd\s?)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\$?\d[\d,]*(?:\.\d+)?)?|\b\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\d[\d,]*(?:\.\d+)?)?\s?(?:dollars|bucks|usd)\b/gi;
 function pastVisitNoteText(safeNotes) {
@@ -144,8 +141,9 @@ function pastVisitNoteText(safeNotes) {
 // A recorded label (service or product name) with price tokens removed and whitespace folded.
 function pastVisitLabel(value, max) {
   const { stripPriceTokensFromText } = require('./protocol-reader');
-  const text = stripPriceTokensFromText(String(value || '')).replace(NOTE_MONEY_RE, '')
-    .replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
+  // Whole ranges first: the token strip would take one end and leave the other.
+  const text = stripPriceTokensFromText(String(value || '').replace(NOTE_MONEY_RE, ''))
+    .replace(/[\s\u2013\u2014-]+$/, '').replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
   return cleanText(text, max);
 }
 // The product names recorded on that visit, as written that day, each once.
@@ -189,7 +187,7 @@ async function loadPastVisits(dbh, svc) {
     const { listPortalServiceHistory } = require('./portal-service-history');
     const { isReserviceVisit } = require('./reservice-asks');
     const { services } = await listPortalServiceHistory(svc.customer_id, {
-      limit: PAST_VISITS_READ, completedOnly: true, database: dbh,
+      limit: PAST_VISITS_LIMIT, completedOnly: true, database: dbh, beforeDay: viewedDay, lean: true,
     });
     const earlier = (services || []).filter((v) => { const day = calendarDay(v.date); return day && day < viewedDay; });
     const marks = await pastVisitMarks(dbh, svc, viewedDay, earlier.map((v) => v.id));

@@ -84,9 +84,9 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(mockHistory).toHaveBeenCalledTimes(1);
     const [customerId, opts] = mockHistory.mock.calls[0];
     expect(customerId).toBe('cust-1');
-    expect(opts).toEqual(expect.objectContaining({ completedOnly: true }));
+    // The date bound and the limit of five both run in the reader's query, so newer records cannot crowd out older ones.
+    expect(opts).toEqual(expect.objectContaining({ completedOnly: true, beforeDay: '2026-11-26', lean: true, limit: 5 }));
     expect(typeof opts.database).toBe('function');
-    expect(opts.limit).toBeGreaterThan(5);
   });
 
   test('five newest visits across every line; nothing from the viewed day or later', async () => {
@@ -168,16 +168,16 @@ describe('deterministicVisitFacts past_visits', () => {
     const visits = [
       visit('n1', '2026-11-14', 'Palm Treatment ($125)', {
         products: [
-          { product_name: 'Example Potash 0-0-25 ($2.18)' }, { product_name: 'Example Bait (USD 40)' },
+          { product_name: 'Example Potash 0-0-25 ($2.18)' }, { product_name: 'Example Bait (USD 40)' }, { product_name: 'Example Dust $125–150' },
           { product_name: `${long} A` }, { product_name: `${long} B` },
         ],
       }),
       visit('n2', '2026-11-13', 'Palm Fertilization (125 dollars)'),
     ];
     const { past_visits: list } = await facts(SVC, { visits });
-    expect(JSON.stringify(list)).not.toMatch(/\$|125|2\.18|USD/);
+    expect(JSON.stringify(list)).not.toMatch(/\$|125|150|2\.18|USD/);
     expect(list[0].type).toBe('Palm Treatment');
-    expect(list[0].products.map((p) => p.name)).toEqual(['Example Potash 0-0-25', 'Example Bait', `${long} A`, `${long} B`]);
+    expect(list[0].products.map((p) => p.name)).toEqual(['Example Potash 0-0-25', 'Example Bait', 'Example Dust', `${long} A`, `${long} B`]);
     expect(list[1].type).toBe('Palm Fertilization');
   });
 

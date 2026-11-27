@@ -102,6 +102,7 @@ const ONE_RECORD_PER_APPOINTMENT = `(
 // a visit's sibling records never show as extra visits.
 async function listPortalServiceHistory(customerId, {
   limit = 20, offset = 0, type = null, scope = null, completedOnly = false, scheduledServiceId = null, database = db, historyProperty = null,
+  beforeDay = null, lean = false,
 } = {}) {
   let query = database('service_records')
     .where({ 'service_records.customer_id': customerId })
@@ -147,6 +148,15 @@ async function listPortalServiceHistory(customerId, {
     );
   }
   if (completedOnly) query = query.whereRaw(COMPLETED_RECORD).whereRaw(ONE_RECORD_PER_APPOINTMENT);
+  // beforeDay (the technician Visit Brief's past visits): only records dated before that calendar day that
+  // do not belong to a visit this customer has on it, filtered before the limit.
+  if (beforeDay) {
+    query = query.where('service_records.service_date', '<', beforeDay).whereRaw(
+      `(service_records.scheduled_service_id IS NULL OR service_records.scheduled_service_id NOT IN (
+         SELECT vd.id FROM scheduled_services vd WHERE vd.customer_id = ? AND vd.scheduled_date = ?))`,
+      [customerId, beforeDay],
+    );
+  }
 
   const services = await query;
 
@@ -161,7 +171,7 @@ async function listPortalServiceHistory(customerId, {
         .where({ service_record_id: svc.id })
         .select('product_name', 'product_category', 'active_ingredient', 'moa_group', 'notes');
 
-    const photoCount = suppressCustomerArtifacts
+    const photoCount = suppressCustomerArtifacts || lean
       ? { count: 0 }
       : await database('service_photos')
         .where({ service_record_id: svc.id })
@@ -239,6 +249,8 @@ async function listPortalServiceHistory(customerId, {
     };
   }));
 
+  // lean: a caller that shows no photo counts and does not page.
+  if (lean) return { services: enriched, total: null };
   // Get total count for pagination
   let totalQuery = database('service_records')
     .where({ 'service_records.customer_id': customerId });
