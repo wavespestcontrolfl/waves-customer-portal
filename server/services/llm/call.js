@@ -34,6 +34,7 @@ const { PROVIDER, MODEL_CATALOG } = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
 const agentContext = require('../agent-control/context');
 const { anthropicOnlyLane } = require('./max-plan-lanes');
+const circuitBreaker = require('./circuit-breaker');
 // Top-level (not lazy) so the ledger shares this module's agent-control
 // context instance; every use below is wrapped so it can never break a call.
 const metrics = require('../llm-dispatch-metrics');
@@ -938,6 +939,29 @@ function dispatchWithHardDeadline(route, routePayload, legMs) {
   return Promise.race([attempt, timedOut]).finally(() => clearTimeout(timer));
 }
 
+// Execute one route inside runFallbackChain with optional hardDeadline and
+// sliding-window circuit breaker (GATE_LLM_CIRCUIT_BREAKER, dark by default).
+async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, hasBackup, signal }) {
+  const gate = circuitBreaker.beforeAttempt(route.provider, { hasBackup });
+  if (!gate.allow) {
+    return { ok: false, reason: gate.reason || 'circuit_open' };
+  }
+  let result;
+  try {
+    result = hardDeadline ? await dispatchWithHardDeadline(route, routePayload, legMs) : await dispatch(route, routePayload);
+  } catch (err) {
+    logger.error(`[llm] ${route.provider} dispatch threw: ${err.message}`);
+    result = { ok: false, reason: 'error' };
+  }
+  circuitBreaker.afterAttempt(route.provider, {
+    ok: Boolean(result?.ok),
+    reason: result?.reason || null,
+    aborted: Boolean(signal?.aborted),
+    isProbe: gate.isProbe,
+  });
+  return result;
+}
+
 async function runFallbackChain(policy, payload, { validate, reserveFallbackBudget = false, maxAttemptMs, hardDeadline = false } = {}) {
   // The Mac job's fact-check lanes ride the Max plan, which answers Anthropic only: a fallback to
   // another provider would bill a paid API, so those lanes keep the Anthropic route (max-plan-lanes.js).
@@ -978,13 +1002,11 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
       ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
     const legMs = Math.min(shareMs, attemptCapMs);
     const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
-    let result;
-    try {
-      result = hardDeadline ? await dispatchWithHardDeadline(route, routePayload, legMs) : await dispatch(route, routePayload);
-    } catch (err) {
-      logger.error(`[llm] ${route.provider} dispatch threw: ${err.message}`);
-      result = { ok: false, reason: 'error' };
-    }
+    const result = await executeFallbackLeg(route, routePayload, legMs, {
+      hardDeadline,
+      hasBackup: index < routes.length - 1,
+      signal: payload.signal,
+    });
 
     if (!result.ok) {
       failures.push(legFailure(route, result.reason || 'error', result));
