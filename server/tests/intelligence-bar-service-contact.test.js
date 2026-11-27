@@ -144,6 +144,17 @@ describe('set_customer_service_contact preview', () => {
     expect(effectText(p)).toMatch(/home@example\.invalid can now get service reports/);
   });
 
+  test('a contact who already shares a phone can still have their relationship corrected', async () => {
+    Object.assign(state.customer, {
+      service_contact_name: 'Lou Landlord', service_contact_phone: '+19415550111', service_contact_role: 'landlord',
+      service_contact2_name: 'Tess Tenant', service_contact2_phone: '+19415550111', service_contact2_role: 'family_member',
+    });
+    const p = await preview({ action: 'change', slot: 2, relationship: 'tenant' });
+    expect(p.preview).toBe(true);
+    expect(p._version.roles).toEqual({ service_contact_role: 'landlord', service_contact2_role: 'tenant' });
+    expect((await preview({ action: 'change', slot: 2, relationship: 'tenant', phone: '+19415550100' })).code).toBe('already_on_account');
+  });
+
   test('a phone another slot still lists is not described as signed out', async () => {
     Object.assign(state.customer, {
       service_contact_name: 'Ava Example', service_contact_phone: '+19415550111',

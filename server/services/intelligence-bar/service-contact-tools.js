@@ -250,7 +250,15 @@ async function buildPlan(input, { database = db, lock = false } = {}) {
   // report rule both read it.
   const account = await require('../customer-contact').withAccountPrimaryContactStrict(customer, { db: database, forShare: lock });
   if (plan.action !== 'remove') {
-    const dupe = duplicateOf(account, before, plan.index, plan.next[plan.index]);
+    // Only a phone or email this request newly assigns is checked: a contact who already shares one (the page's
+    // writer allows it) can still have their name or relationship corrected.
+    const was = before[plan.index];
+    const now = plan.next[plan.index];
+    const fresh = {
+      phone: phoneKey(now.phone) !== phoneKey(was.phone) ? now.phone : '',
+      email: text(now.email).toLowerCase() !== text(was.email).toLowerCase() ? now.email : '',
+    };
+    const dupe = duplicateOf(account, before, plan.index, fresh);
     if (dupe) return refusal(`That phone or email is already on this account as ${dupe}. Change that contact instead.`, 'already_on_account');
   }
   const { problem, updates, roleColumns, after } = plannedWrite(customer, plan.next, plan.roles);
