@@ -174,6 +174,44 @@ describe('a blank WDO line books at the table price of the home', () => {
     expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
   });
 
+  test('inside the save, a booking that named no property is stamped with the home its WDO price was read at, or it refuses and the screen reads the price again', async () => {
+    const { assertWdoTableHomeUnchanged } = adminSchedule._test;
+    lookup.mockResolvedValue(record(4200, 'crawl'));
+    const rows = (active) => (cond) => {
+      if (cond.id) return active.find((property) => property.id === cond.id);
+      return cond.is_primary ? undefined : active;
+    };
+    wireDb({ customers: HOME, customer_properties: rows([RENTAL]) });
+    const pricing = await bookBlankWdo();
+    expect(pricing.finalPrice).toBe(275);
+    const check = (table, propertyId) => assertWdoTableHomeUnchanged(table, { customerId: CUSTOMER_ID, propertyId, trx: dbMock });
+    // The save stamps the same sole property: it goes on.
+    await expect(check(pricing.wdoTable, PROPERTY_ID)).resolves.toBeUndefined();
+    // The rental was replaced by another property, or its address was edited, before the save stamped it.
+    const OTHER = { ...RENTAL, id: 'c0d1e2f3-2222-4b3c-8d4e-6f7a8b9c0d1e', address_line1: '300 Sample Ct' };
+    wireDb({ customers: HOME, customer_properties: rows([OTHER]) });
+    await expect(check(pricing.wdoTable, OTHER.id)).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    wireDb({ customers: HOME, customer_properties: rows([{ ...RENTAL, address_line1: '300 Sample Ct' }]) });
+    await expect(check(pricing.wdoTable, PROPERTY_ID)).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    // Two active properties: the visit is stamped with neither, and the customer's own home was priced: it goes on.
+    wireDb({ customers: HOME, customer_properties: rows([RENTAL, OTHER]) });
+    const atHome = await bookBlankWdo();
+    await expect(check(atHome.wdoTable, null)).resolves.toBeUndefined();
+    // The property record is read only before the save; a booking with no table price has nothing to check.
+    expect(lookup).toHaveBeenCalledTimes(2);
+    await expect(check(undefined, null)).resolves.toBeUndefined();
+  });
+
+  test('the office save runs that check inside its transaction, right after it stamps the sole active property', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const stamp = source.indexOf('.soleActivePropertyId(customerId, trx);');
+    const checked = source.indexOf('await assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId, propertyId: insertData.property_id || null, trx });');
+    expect(stamp).toBe(source.lastIndexOf('.soleActivePropertyId(customerId, trx);'));
+    expect(stamp).toBeGreaterThan(0);
+    expect(checked).toBeGreaterThan(stamp);
+    expect(source.slice(stamp, checked).split('\n')).toHaveLength(4);
+  });
+
   test('a failed read never blocks a booking: the catalog price stands', async () => {
     lookup.mockRejectedValue(Object.assign(new Error('connection reset at 100 Example Ln'), { code: 'ECONNRESET' }));
     expect((await bookBlankWdo()).finalPrice).toBe(250);
@@ -419,6 +457,23 @@ describe('phone bookings (the call pipeline, the voice agent, the new caller boo
     // A commercial account is commercial at any address.
     wireDb({ customers: { ...HOME, waveguard_tier: 'commercial' }, customer_properties: undefined });
     expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: elsewhere })).toBe(CATALOG);
+  });
+
+  test('a call linked to a saved property is priced at it only while the property still has the call\'s address (by its address key: one ZIP carries several town names)', async () => {
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    wireDb({ customers: HOME, customer_properties: RENTAL });
+    const rental = { line1: RENTAL.address_line1, line2: '', city: RENTAL.city, state: RENTAL.state, zip: RENTAL.zip };
+    const linked = (address) => wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: { propertyId: PROPERTY_ID, address } });
+    expect(await linked(rental)).toMatchObject({ price: 200, source: 'wdo_table' });
+    expect(await linked({ ...rental, city: 'Duette' })).toMatchObject({ price: 200, source: 'wdo_table' });
+    expect(lookup).toHaveBeenCalledTimes(2);
+    expect(lookup).toHaveBeenLastCalledWith(expect.stringContaining('200 Sample Rd'));
+    // The property's address was edited after the call linked it, and the visit is stamped with the call's address: the
+    // catalog price stands, and nothing is read.
+    lookup.mockClear();
+    wireDb({ customers: HOME, customer_properties: { ...RENTAL, address_line1: '300 Sample Ct' } });
+    expect(await linked(rental)).toBe(CATALOG);
+    expect(lookup).not.toHaveBeenCalled();
   });
 
   test('the call pipeline reads the table before its transaction, and keeps it only for the same home', async () => {

@@ -54,10 +54,14 @@ function serviceAddressText(address) {
 //   A saved property, or none (the customer's own home): customerAtBookingProperty, the rule the one-time pest price reads
 //   the booked home by. It also says when the stored records call the place commercial.
 //   A service address with no saved property (a phone booking at an address the call gave, a new caller with no customer
-//   yet): that address as written.
+//   yet): that address as written. With a saved property (a phone booking whose address key-matched it): the property must
+//   still be at that address.
 async function bookedHome({ customer, customerId, propertyId, serviceAddress, conn }) {
   const row = customer || (customerId ? await conn('customers').where({ id: customerId }).first() : null);
-  const written = !propertyId && serviceAddress?.line1 ? serviceAddressText(serviceAddress) : null;
+  const serviceRow = serviceAddress?.line1
+    ? { address_line1: serviceAddress.line1, address_line2: serviceAddress.line2 || null, city: serviceAddress.city, zip: serviceAddress.zip }
+    : null;
+  const written = !propertyId && serviceRow ? serviceAddressText(serviceAddress) : null;
   if (!row) return written ? { address: written } : { refusal: 'no customer and no service address' };
   const { customerAtBookingProperty, sameHome } = require('./one-time-pest-booking-price');
   const { addressForCustomer } = require('./customer-pricing-ai');
@@ -68,9 +72,18 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, co
   const soleActive = Array.isArray(activeRows) && activeRows.length === 1 ? activeRows[0].id : null;
   const at = await customerAtBookingProperty(row, propertyId || soleActive, conn);
   if (!at) return { refusal: 'the booking property is not an active property of this customer' };
+  // A saved property named with the address the visit is stamped with (a phone booking: the call's address, linked to the
+  // property whose address key it matched, resolveCallBookingPropertyLinkage). The property must still have that address
+  // now, by the same key (one ZIP carries several town names), or the visit would be stamped with one home and priced at
+  // another (pre-push audit P0).
+  if (propertyId && serviceRow) {
+    const { addressKey } = require('./customer-properties');
+    const property = await conn('customer_properties').where({ id: propertyId, customer_id: row.id, active: true }).first('address_line1', 'address_line2', 'city', 'zip');
+    if (!property || addressKey(property) !== addressKey(serviceRow)) return { refusal: 'the saved property no longer has the address the visit is stamped with' };
+  }
   // A written address that is not the customer's home is read on its own record: only the account's own tier calls it
   // commercial, never the home's records (pre-push audit P0).
-  const writtenRow = written && { address_line1: serviceAddress.line1, address_line2: serviceAddress.line2 || null, city: serviceAddress.city, zip: serviceAddress.zip };
+  const writtenRow = written && serviceRow;
   const commercial = writtenRow && !sameHome(writtenRow, at.customer)
     ? require('./pricing-engine/commercial-helpers').normalizePropertyType(row.waveguard_tier) === 'commercial'
     : at.commercial;

@@ -15,7 +15,7 @@ const areaAddOnRows = require('../services/area-addon-visit-rows');
 const mistingRefill = require('../services/misting-refill');
 const { oneTimePestBookingPrice } = require('../services/one-time-pest-booking-price');
 const {
-  wdoBookingPrice, isWdoInspectionService, WDO_SERVICE_KEY, WDO_WITH_OTHER_LINES_NOTE, wdoPriceCheck, wdoExpectedPriceFrom,
+  wdoBookingPrice, wdoTableStillApplies, isWdoInspectionService, WDO_SERVICE_KEY, WDO_WITH_OTHER_LINES_NOTE, wdoPriceCheck, wdoExpectedPriceFrom,
 } = require('../services/wdo-booking-price');
 const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG_KEY: MISTING_REFILL_KEY } = require('../utils/mosquito-misting-system');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
@@ -3174,6 +3174,21 @@ async function wdoTableForBooking({ customer, propertyId = null, estimateId = nu
   }
 }
 
+// Inside the booking transaction of a save that named no property and no estimate: the visit is stamped with the customer's
+// sole active property, read again inside the transaction (soleActivePropertyId). A WDO table price read before it
+// (buildAppointmentPricing's `wdoTable`) must be that same home's, or the save refuses before any write and the screen reads
+// the price again (WDO_PRICE_CHANGED): a property added, removed or edited in between is another home (pre-push audit P0).
+// Reads the customer and property rows on the transaction, never the property record. No table price: nothing to check.
+async function assertWdoTableHomeUnchanged(table, { customerId, propertyId = null, trx }) {
+  if (!table) return;
+  const customer = await trx('customers').where({ id: customerId }).first();
+  if (customer && await wdoTableStillApplies(table, { customer, propertyId, conn: trx })) return;
+  throw Object.assign(
+    httpError(409, 'The home for this visit changed while saving, so its WDO price may be different. This visit was not booked. Check the price and save again.'),
+    { code: 'WDO_PRICE_CHANGED' },
+  );
+}
+
 // The server's own price for a blank line of one of those services, or null: the line takes its catalog price, as before
 // (mosquito: no lot size and no member perk; WDO: no table price). A WDO main line with a paid add-on line is priced at
 // the catalog price by buildAppointmentPricing.
@@ -3665,6 +3680,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
       maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
     } : null,
+    // The WDO table price this booking read (assertWdoTableHomeUnchanged checks its home inside the save).
+    ...(serverPricing.wdoTable ? { wdoTable: serverPricing.wdoTable } : {}),
   };
 }
 
@@ -10255,6 +10272,9 @@ async function scheduleCreateHandler(req, res, next) {
       if (cols.property_id && insertData.property_id === undefined && !propertyOwnedByEstimateLinkage) {
         insertData.property_id = await require('../services/customer-properties')
           .soleActivePropertyId(customerId, trx);
+      }
+      if (!bookingProperty && !linkedEstimateId) {
+        await assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId, propertyId: insertData.property_id || null, trx });
       }
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
@@ -30866,6 +30886,7 @@ router._test = {
   customerFacingCompanionTypes,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
+  assertWdoTableHomeUnchanged,
   assertPrepayTotalMatchesPricing,
   assertPriceMatchesPricing,
   discountStackGroupRowsForPricing,
