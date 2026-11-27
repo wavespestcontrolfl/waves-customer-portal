@@ -3706,16 +3706,10 @@ function RestockActionCell({
     );
   const lateOrderReceive =
     request.status === "received" && !!request.order?.landedAfterReceive;
-  // A cancelled request whose order may be out still blocks the product's next order: only the vendor cancellation clears it.
-  if (request.status === "cancelled" && orderOutstanding(request.order))
-    return (
-      <TD>
-        <div className="flex flex-wrap gap-[6px]">
-          <VendorCancelControls request={request} late={false} busy={receivingId === request.id} onVendorCancel={onVendorCancel} />
-        </div>
-      </TD>
-    );
-  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive)
+  // A cancelled request whose order may be out still blocks the product's next order: staff receive the goods when
+  // they arrive (or close it as already counted), or record the vendor cancellation. It never offers Cancel again.
+  const cancelledOut = request.status === "cancelled" && orderOutstanding(request.order);
+  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive && !cancelledOut)
     return (
       <TD>
         <span className="text-ink-secondary">Closed</span>

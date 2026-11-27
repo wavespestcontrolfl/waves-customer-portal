@@ -99,12 +99,14 @@ describe('Record vendor cancellation', () => {
     expect(await screen.findByRole('button', { name: 'Mark Ordered' })).toBeEnabled();
   });
 
-  it('a cancelled request whose order may be out offers only Record vendor cancellation', async () => {
+  it('a cancelled request whose order may be out offers Receive, Close already counted and Record vendor cancellation, never Cancel', async () => {
     const cancelled = { ...ORDERED_REQUEST, status: 'cancelled', order: { ...ORDER, status: 'needs_review', placedAt: null, error: 'ambiguous_after_submit: unknown', outstanding: true } };
     installFetch({ requests: [cancelled] });
     mount();
     expect(await screen.findByRole('button', { name: 'Record vendor cancellation' })).toBeEnabled();
-    expect(screen.queryByRole('button', { name: 'Receive' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Receive' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Close, already counted' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark Ordered' })).not.toBeInTheDocument();
   });
 

@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 
-const TABLES = ['products_catalog', 'product_restock_requests', 'vendor_orders', 'vendors', 'vendor_pricing', 'notifications', 'scheduled_services', 'customers'];
+const TABLES = ['products_catalog', 'product_restock_requests', 'vendor_orders', 'vendors', 'vendor_pricing', 'notifications', 'scheduled_services', 'customers', 'product_inventory_movements'];
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date();
 const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
@@ -204,6 +204,46 @@ jest.setTimeout(60000);
       expect((await mockConn('notifications').where({ id: first.note.id }).first()).done_at).not.toBeNull();
       expect((await listRestockRequests({ status: 'active' })).requests.find((r) => r.id === first.request.id)).toBeUndefined();
       expect(await run(second, a)).toMatchObject({ status: 'placed' });
+    });
+
+    test('the goods arrive on a cancelled request whose order may be out: Receive adds the stock and settles the order; Close, already counted settles it with no stock change', async () => {
+      const stock = async (product) => Number((await mockConn('products_catalog').where({ id: product.id }).first()).inventory_on_hand);
+      const received = await fixture({ ledger: noStamp, requestOver: { status: 'cancelled' } });
+      await inventory.updateRestockRequest(received.request.id, { action: 'receive', quantity: 500, unit: 'each' }, { actorId: null });
+      expect((await mockConn('product_restock_requests').where({ id: received.request.id }).first()).status).toBe('received');
+      expect(await stock(received.product)).toBe(540);
+      expect(await dispatch.findLiveAutoOrder(mockConn, received.product.id)).toBeUndefined();
+      expect((await mockConn('notifications').where({ id: received.note.id }).first()).done_at).not.toBeNull();
+      const counted = await fixture({ ledger: noStamp, requestOver: { status: 'cancelled' } });
+      await inventory.updateRestockRequest(counted.request.id, { action: 'close_counted' }, { actorId: null });
+      expect((await mockConn('product_restock_requests').where({ id: counted.request.id }).first()).status).toBe('received');
+      expect(await stock(counted.product)).toBe(40);
+      expect(await dispatch.findLiveAutoOrder(mockConn, counted.product.id)).toBeUndefined();
+    });
+
+    test('a cancelled request with nothing out still cannot be received, and Mark Ordered and Cancel stay closed', async () => {
+      const { request } = await fixture({ ledger: { reason: 'item_not_found' }, requestOver: { status: 'cancelled' } });
+      for (const action of ['receive', 'close_counted', 'mark_ordered', 'cancel']) {
+        const err = await refusal(inventory.updateRestockRequest(request.id, action === 'receive' ? { action, quantity: 1, unit: 'each' } : { action }, { actorId: null }));
+        expect(err.code).toBe('request_closed');
+      }
+      const out = await fixture({ ledger: noStamp, requestOver: { status: 'cancelled' } });
+      for (const action of ['mark_ordered', 'cancel']) {
+        expect((await refusal(inventory.updateRestockRequest(out.request.id, { action }, { actorId: null }))).statusCode).toBe(409);
+      }
+    });
+
+    test('the reconciliation alert of a cancelled request is re-rung while its order may be out, never for a pre-click park or a revoked order', async () => {
+      const out = await fixture({ ledger: { ...noStamp, evidence: { bellAt: '' } }, requestOver: { status: 'cancelled' } });
+      const pre = await fixture({ ledger: { reason: 'item_not_found', evidence: { bellAt: '' } }, requestOver: { status: 'cancelled' } });
+      const revoked = await fixture({ ledger: { ...noStamp, evidence: { bellAt: '', revokedAt: NOW.toISOString() } }, requestOver: { status: 'cancelled' } });
+      const rung = await dispatch.reringPendingBells({ conn: mockConn, notify: null, now: NOW });
+      expect(rung.rung).toEqual([out.row.id]);
+      expect(rung.pending).toEqual([]);
+      expect(pre.row.id).not.toBe(out.row.id);
+      expect(revoked.row.id).not.toBe(out.row.id);
+      expect((await mockConn('vendor_orders').where({ id: out.row.id }).first()).evidence.bellAt).toBeTruthy();
+      expect((await dispatch.reringPendingBells({ conn: mockConn, notify: null, now: NOW })).rung).toEqual([]);
     });
 
     test('the month\'s spend counts such an order too', async () => {

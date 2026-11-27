@@ -369,7 +369,7 @@ async function assertManualActionAllowed(trx, requestId, action) {
   }
   // Returned so both receive paths can admit ONE more receive on a received
   // request whose automatic order landed after that receipt (Codex r27 P1).
-  return { landedAfterReceive: !!meta(row.evidence).landedAfterReceive };
+  return { landedAfterReceive: !!meta(row.evidence).landedAfterReceive, outstanding: isOutstandingOrder(row) };
 }
 
 // A manual transition the guard admitted (mark ordered / cancel / receive)
@@ -654,7 +654,8 @@ async function reringPendingBells({ conn = db, notify = null, now = new Date() }
     // either way the stored instruction is obsolete, never re-rung (Codex
     // r24 P2, r25 P2, hook r27 P1). jsonb_exists, not the ? operator: Knex
     // reads a bare ? as a binding placeholder (hook r27 P1).
-    .whereRaw("prr.status <> 'cancelled'")
+    // A cancelled request still owes its reconciliation alert while its order may be out (the one outstanding-order rule).
+    .whereRaw(`(prr.status <> 'cancelled' OR (NULLIF(vo.evidence->>'revokedAt', '') IS NULL AND ${maybePlacedSql('vo')}))`)
     .whereRaw(RECEIVED_SETTLES_SQL)
     // A pre-submit park's bell ("order manually") is re-rung only while the
     // request is still open: staff who ordered by hand and marked it ordered
