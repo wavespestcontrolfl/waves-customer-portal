@@ -547,9 +547,14 @@ function logMovedSlot(row) {
 // A cross-day row that logged no window (the package follow-up date edit logs only the
 // days) proves the day, not the hour: it is a day-only fact (`dateOnly`), whatever
 // start the row holds. A same-day move always needs its logged start.
+// A rain-out "let the customer pick a day" hand-off (rain-out.js PICK_LOG_MARKER in
+// notes) parks the visit on a provisional due date the customer may still change: it is
+// no booked move, and while it is the newest move nothing is stated. The booking that
+// ends the pick (the customer's pick or Auto-Dispatch) logs its own row.
+const CUSTOMER_PICK_LOG_MARKER = 'customer_pick';
 function provenLastMove(visit, logs) {
   const last = logs.find((l) => String(l.scheduled_service_id) === String(visit.id) && logMovedSlot(l));
-  if (!last || calendarDay(last.new_date) !== calendarDay(visit.scheduled_date)) return null;
+  if (!last || last.notes === CUSTOMER_PICK_LOG_MARKER || calendarDay(last.new_date) !== calendarDay(visit.scheduled_date)) return null;
   const movedAt = toDate(last.created_at);
   if (!movedAt) return null;
   const toStart = loggedStart(last.new_window);
@@ -610,7 +615,7 @@ async function dayOnlyNowFor(conn, rows, now, needed) {
     return verdict.showHour === false;
   };
 }
-async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow, now) {
+async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow, now, strict) {
   const entries = (Array.isArray(upcomingServices) ? upcomingServices : []).filter((e) => listedId(e));
   if (!entries.length) return { moves: [], listed: [] };
   const ids = [...new Set(entries.map(listedId))];
@@ -624,7 +629,7 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
       .whereNotNull('new_date')
       .orderBy('created_at', 'desc').orderBy('id', 'desc')
       .limit(500)
-      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'created_at'),
+      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'notes', 'created_at'),
   ]);
   const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
   const byId = new Map((rows || []).map((r) => [String(r.id), r]));
@@ -636,7 +641,14 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
     const visit = byId.get(listedId(entry));
     // a listed visit that is gone or no longer live (cancelled since) states no move
     const slot = visit && UPCOMING_SERVICE_STATUSES.includes(visit.status) ? listedSlot(entry, visit, deriveWindow, dayOnlyNow) : null;
-    if (!slot) continue;
+    if (!slot) {
+      // Drafting: the prompt still shows this visit as UPCOMING SERVICES read it, but the row
+      // no longer holds that slot (it changed between the two reads). It is marked
+      // `unverified`, which no send-time rebuild ever produces, so the reply is refused.
+      // The rebuild itself just drops it, which changes the signature the same way.
+      if (!strict) listed.push({ id: listedId(entry), unverified: true });
+      continue;
+    }
     listed.push(slot);
     const proof = provenLastMove(visit, logs || []);
     if (!proof) continue;
@@ -696,9 +708,9 @@ async function loadStopped(conn, customerId, now) {
 // `listed`: the listed visits whose slot held, as { id, date, start } in UPCOMING SERVICES'
 // order. The draft persists it, so the send-time rebuild asks about the same visits and
 // checks each still holds the slot the draft verified.
-async function loadScheduleChanges({ conn, customerId, now, deriveWindow = null, upcomingServices = [] }) {
+async function loadScheduleChanges({ conn, customerId, now, deriveWindow = null, upcomingServices = [], strict = false }) {
   const [{ moves, listed }, stopped] = await Promise.all([
-    loadListedMoves(conn, customerId, upcomingServices, deriveWindow, now),
+    loadListedMoves(conn, customerId, upcomingServices, deriveWindow, now, strict),
     loadStopped(conn, customerId, now),
   ]);
   return { moves, stopped, listed };
@@ -712,7 +724,7 @@ function scheduleChangesSignature(scheduleChanges) {
   const key = (...parts) => parts.map((x) => (x == null ? '' : String(x))).join(':');
   // every listed slot (day, start, window text, day-only state): any slot change refuses,
   // a first move included (the moved visit drops out of the rebuilt list)
-  const listed = (scheduleChanges.listed || []).map((l) => `listed:${key(l.id, l.date, l.start, l.window, l.dayOnly === true)}`);
+  const listed = (scheduleChanges.listed || []).map((l) => (l.unverified ? `listed:${key(l.id)}:unverified` : `listed:${key(l.id, l.date, l.start, l.window, l.dayOnly === true)}`));
   const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, m.fromDate, `${m.toDate}T${m.toStart ?? ''}`, m.toWindow)}`);
   const stopped = (scheduleChanges.stopped || []).map((g) => `stopped:${key(g.status, g.type, [].concat(g.visitIds || []).join(','), g.date, g.lastDate)}`);
   return [...listed, ...moves, ...stopped].join('|');

@@ -646,6 +646,7 @@ async function visitStatusReason(conn, status, customerId, refs) {
   const facts = require('./visit-loops-facts');
   // the same UPCOMING SERVICES visits the draft listed, in its order, each with the slot the draft verified
   const upcomingServices = withSchedule
+    // an `unverified` entry carries no slot: it rebuilds as a mismatch, so the send refuses
     ? [].concat(status.scheduleVisits || []).filter((e) => e && typeof e.id === 'string' && e.id)
       .map((e) => ({ scheduledServiceId: e.id, date: e.date ?? null, start: e.start ?? null, window: e.window ?? null, dayOnly: e.dayOnly === true }))
     : [];

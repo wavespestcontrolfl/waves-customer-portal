@@ -97,14 +97,15 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
     const now = visit({ scheduled_date: '2026-12-05', window_start: '15:00:00' });
     // UPCOMING SERVICES showed it on Dec 4, 1-3 PM: another day now
     const staleDay = await read([now], [later, move()], [listed('v1', { date: '2026-12-04', window: '1–3 PM' })]);
-    expect(staleDay).toMatchObject({ moves: [], listed: [] });
+    // the prompt still shows the old slot: the entry is marked unverified (the send refuses)
+    expect(staleDay).toMatchObject({ moves: [], listed: [{ id: 'v1', unverified: true }] });
     // the same day, another window
     const sameDayNow = visit({ window_start: '15:00:00' });
     const staleWindow = await read([sameDayNow], [move({ new_window: '15:00:00-16:00:00' })], [listed('v1', { date: '2026-12-04', window: '1–3 PM' })]);
-    expect(staleWindow).toMatchObject({ moves: [], listed: [] });
+    expect(staleWindow).toMatchObject({ moves: [], listed: [{ id: 'v1', unverified: true }] });
     // the send-time form carries the raw slot the draft verified: a row off it states no move
     const slot = { scheduledServiceId: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false };
-    const rebuilt = (over) => facts.loadScheduleChanges({ conn: conn([visit()], [move()]), customerId: 'c1', now: NOW, deriveWindow, upcomingServices: [{ ...slot, ...over }] });
+    const rebuilt = (over) => facts.loadScheduleChanges({ conn: conn([visit()], [move()]), customerId: 'c1', now: NOW, deriveWindow, strict: true, upcomingServices: [{ ...slot, ...over }] });
     expect((await rebuilt({})).moves).toHaveLength(1);
     expect((await rebuilt({ start: '09:00:00' })).moves).toEqual([]);
     // the customer-visible window text and the day-only state are rechecked too
@@ -131,6 +132,16 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
     expect((await read([v15], [move()], [listedFor(v15)])).moves).toEqual([]);
     // a listed visit cancelled since states no move
     expect((await read([visit({ status: 'cancelled' })], [move()], [listedFor(visit())])).moves).toEqual([]);
+  });
+
+  test('a rain-out customer-pick hand-off is a provisional date, never a stated move; the booking that ends it is', async () => {
+    const handOff = move({ new_window: null, notes: 'customer_pick' });
+    const parked = visit({ window_start: null });
+    expect((await read([parked], [handOff], [listedFor(parked, { window: null })])).moves).toEqual([]);
+    // the customer picked Dec 5, 1 PM: that booking is the newest move and is stated
+    const booked = move({ id: 'rl-9', original_date: '2026-12-04', original_window: null, new_date: '2026-12-05', new_window: '13:00:00-14:00:00', created_at: new Date('2026-11-25T15:00:00Z') });
+    const now = visit({ scheduled_date: '2026-12-05' });
+    expect((await read([now], [booked, handOff], [listedFor(now)])).moves.map((m) => m.logId)).toEqual(['rl-9']);
   });
 
   test('a cross-day row that logged no window (the package date edit) is a day-only fact, whatever start the row holds', async () => {
@@ -304,6 +315,14 @@ describe('the send boundary, with the real loader', () => {
     await expect(openLoopsBlockReason({ decision, dbh: conn([after], []) })).resolves.toBe('schedule_changed');
     // re-windowed on the same day: refused
     await expect(openLoopsBlockReason({ decision, dbh: conn([visit({ scheduled_date: '2026-12-02', window_start: '13:00:00' })], []) })).resolves.toBe('schedule_changed');
+    // drafted while the visit changed between the two reads: never sendable
+    const raced = await facts.loadScheduleChanges({ conn: conn([after], []), customerId: 'c1', now: NOW, deriveWindow: aggregatorWindow,
+      upcomingServices: [listed('v1', { date: '2026-12-02', window: aggregatorWindow(before) })] });
+    expect(raced.listed).toEqual([{ id: 'v1', unverified: true }]);
+    const racedDecision = { id: 'd2', customer_id: 'c1', input_snapshot: JSON.stringify({ visit_loop_status: { signature: null, schedule: facts.scheduleChangesSignature(raced), scheduleVisits: raced.listed } }) };
+    for (const rows of [[before], [after]]) {
+      await expect(openLoopsBlockReason({ decision: racedDecision, dbh: conn(rows, []) })).resolves.toBe('schedule_changed');
+    }
     // a failed day-only read: retryable
     loadTimeDisplay.mockImplementationOnce(async () => { throw new Error('promise read down'); });
     await expect(openLoopsBlockReason({ decision, dbh: conn([before], []) })).resolves.toBe('open_loops_recheck_failed');
