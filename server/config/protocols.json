@@ -1923,7 +1923,7 @@
               "flowzone_4_gal"
             ],
             "sprayVolume": "2 qt per 160 linear ft",
-            "limit": "4 applications a calendar year at this strength; fewer when a 0.8 fl oz per gal application was made at the home this year",
+            "limit": "A calendar year allows four applications at this strength, or two at this strength and one at 0.8 fl oz per gal, or two at 0.8",
             "epa": "53883-279"
           },
           {
@@ -2586,7 +2586,7 @@
           {
             "product": "Summit Bti Dunks",
             "where": "Standing water that cannot be dumped",
-            "dose": "1 dunk per 100 sq ft of water, every 30 days",
+            "dose": "1 dunk per 100 sq ft of water, every 30 days. Never an HOA or CDD pond",
             "epa": "6218-87"
           }
         ]
@@ -2717,7 +2717,7 @@
           {
             "product": "Summit Bti Dunks",
             "where": "Standing water that cannot be dumped",
-            "dose": "1 dunk per 100 sq ft of water, every 30 days",
+            "dose": "1 dunk per 100 sq ft of water, every 30 days. Never an HOA or CDD pond",
             "epa": "6218-87"
           }
         ]
@@ -3854,10 +3854,9 @@
             },
             "sprayers": [
               "bg_1_gal",
-              "flowzone_4_gal",
-              "rig_100_gal"
+              "flowzone_4_gal"
             ],
-            "sprayVolume": "4 gal per 10 linear ft for each foot of depth",
+            "sprayVolume": "4 gal per 10 linear ft for each foot of depth. 100 gal tank: 78 fl oz (label table)",
             "limit": "Use the product and rate on the work order. Never weaker than 0.8 fl oz per gal",
             "epa": "7969-210"
           },
@@ -3870,10 +3869,9 @@
             },
             "sprayers": [
               "bg_1_gal",
-              "flowzone_4_gal",
-              "rig_100_gal"
+              "flowzone_4_gal"
             ],
-            "sprayVolume": "4 gal per 10 linear ft for each foot of depth",
+            "sprayVolume": "4 gal per 10 linear ft for each foot of depth. 100 gal tank: 78 fl oz (label table)",
             "limit": "Use the product and rate on the work order. Never weaker than 0.8 fl oz per gal",
             "epa": "53883-279"
           }

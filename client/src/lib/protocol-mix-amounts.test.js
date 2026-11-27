@@ -39,7 +39,8 @@ describe("protocol mix amounts", () => {
     expect(amounts("mosquito", 1, "Suspend Polyzone").flowzone_4_gal).toBe("4.4 fl oz");
     expect(amounts("mosquito", 1, "Suspend Polyzone").bg_1_gal).toBeUndefined();
     expect(amounts("flea", 1, "Tekko Pro IGR").bg_1_gal).toBe("0.66 fl oz (19.5 mL)");
-    expect(amounts("termite", 3, "Termidor SC").rig_100_gal).toBe("80 fl oz");
+    // The Termidor label prints its own 100-gallon batch (78 fl oz), so the termite rows carry no computed rig column.
+    expect(amounts("termite", 3, "Termidor SC").rig_100_gal).toBeUndefined();
     expect(amounts("termite", 3, "Termidor SC").bg_1_gal).toBe("0.8 fl oz (23.7 mL)");
   });
 });
