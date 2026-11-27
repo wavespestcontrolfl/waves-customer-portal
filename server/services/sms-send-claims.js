@@ -13,13 +13,14 @@
  * longer-lived claims.
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 
 const WEEKLY_CLAIM_PREFIXES = ['bi_briefing_sms:'];
-// Bell-less keyed push dedupe claims (notification-triggers.js): retained 30 days
-// so webhook/call replays across the full replay window stay single-shot even after
-// daily SMS claim cleanup runs.
-const MONTHLY_CLAIM_PREFIXES = ['notif_push_dedupe:'];
+// Keyed push dedupe leases & per-device partial-delivery markers
+// (notification-triggers.js): retained 30 days so webhook/call replays across
+// the full replay window stay single-shot even after daily SMS claim cleanup runs.
+const MONTHLY_CLAIM_PREFIXES = ['notif_push_dedupe:', 'notif_push_sub:'];
 
 // async: a sync throw while building the query becomes a rejection, which
 // the routes' fire-and-forget `.catch(() => {})` already swallows.
@@ -66,51 +67,92 @@ async function releaseSendClaim(claimKey, conn = db) {
 }
 
 // Lease-backed keyed push claim in sms_send_claims (uses existing `outcome`
-// column: 'pending' with a 5-minute recoverable lease, or 'delivered' once at
-// least one device accepted the push).
+// column: unique 'pending:<16hex>' owner token with a 5-minute recoverable
+// lease, or 'delivered' once all attempted devices finished without failures).
 // Returns:
-//   'acquired'  — caller owns the pending lease and may dispatch push
-//   'delivered' — a previous attempt already confirmed delivery (caller settles)
-//   'in_flight' — another attempt holds a fresh pending lease (skip without claiming delivered)
+//   { state: 'acquired', ownerToken } — caller owns the pending lease
+//   { state: 'delivered', ownerToken: null } — previous attempt confirmed full delivery
+//   { state: 'in_flight', ownerToken: null } — another attempt holds a fresh lease
 async function acquirePushDedupeLease(claimKey, { leaseMinutes = 5 } = {}, conn = db) {
+  const ownerToken = `pending:${crypto.randomBytes(8).toString('hex')}`;
   const inserted = await conn.raw(
-    `INSERT INTO sms_send_claims (claim_key, outcome) VALUES (?, 'pending')
+    `INSERT INTO sms_send_claims (claim_key, outcome) VALUES (?, ?)
      ON CONFLICT (claim_key) DO NOTHING
      RETURNING id`,
-    [claimKey],
+    [claimKey, ownerToken],
   );
-  if ((inserted?.rows || []).length > 0) return 'acquired';
+  if ((inserted?.rows || []).length > 0) return { state: 'acquired', ownerToken };
 
   const reclaimed = await conn.raw(
     `UPDATE sms_send_claims
-        SET created_at = NOW(), outcome = 'pending'
+        SET created_at = NOW(), outcome = ?
       WHERE claim_key = ?
-        AND outcome = 'pending'
+        AND (outcome = 'pending' OR outcome LIKE 'pending:%')
         AND created_at < NOW() - (? * interval '1 minute')
       RETURNING id`,
-    [claimKey, leaseMinutes],
+    [ownerToken, claimKey, leaseMinutes],
   );
-  if ((reclaimed?.rows || []).length > 0) return 'acquired';
+  if ((reclaimed?.rows || []).length > 0) return { state: 'acquired', ownerToken };
 
   const existing = await conn('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
-  if (existing?.outcome === 'delivered') return 'delivered';
-  return 'in_flight';
+  if (existing?.outcome === 'delivered') return { state: 'delivered', ownerToken: null };
+  return { state: 'in_flight', ownerToken: null };
 }
 
-async function markPushDedupeDelivered(claimKey, conn = db) {
-  await conn('sms_send_claims')
-    .where({ claim_key: claimKey })
+async function isPushDedupeLeaseOwner(claimKey, ownerToken, conn = db) {
+  if (!claimKey || !ownerToken) return false;
+  const row = await conn('sms_send_claims')
+    .where({ claim_key: claimKey, outcome: ownerToken })
+    .first('id');
+  return Boolean(row);
+}
+
+async function markPushDedupeDelivered(claimKey, ownerToken, conn = db) {
+  if (!claimKey || !ownerToken) return false;
+  const updated = await conn('sms_send_claims')
+    .where({ claim_key: claimKey, outcome: ownerToken })
     .update({ outcome: 'delivered', created_at: conn.fn ? conn.fn.now() : new Date() });
+  return Number(updated) > 0;
 }
 
-async function releasePushDedupeLease(claimKey, conn = db) {
-  await conn('sms_send_claims')
-    .where({ claim_key: claimKey, outcome: 'pending' })
+async function releasePushDedupeLease(claimKey, ownerToken, conn = db) {
+  if (!claimKey || !ownerToken) return false;
+  const deleted = await conn('sms_send_claims')
+    .where({ claim_key: claimKey, outcome: ownerToken })
     .del();
+  return Number(deleted) > 0;
+}
+
+function pushSubClaimPrefix(claimKey) {
+  const hash = crypto.createHash('sha256').update(String(claimKey)).digest('hex').slice(0, 16);
+  return `notif_push_sub:${hash}:`;
+}
+
+// Per-device partial-delivery marker stored in sms_send_claims (retained 30d)
+// so a retry after a partial fan-out skips devices that already accepted the
+// push without double-notifying them.
+async function recordPushDedupeSubDelivered(claimKey, subscriptionId, conn = db) {
+  if (!claimKey || !subscriptionId) return;
+  const subKey = `${pushSubClaimPrefix(claimKey)}${subscriptionId}`;
+  await conn.raw(
+    `INSERT INTO sms_send_claims (claim_key, outcome) VALUES (?, 'delivered')
+     ON CONFLICT (claim_key) DO NOTHING`,
+    [subKey],
+  );
+}
+
+async function listPushDedupeDeliveredSubs(claimKey, conn = db) {
+  if (!claimKey) return [];
+  const prefix = pushSubClaimPrefix(claimKey);
+  const rows = await conn('sms_send_claims')
+    .whereRaw('left(claim_key, ?) = ?', [prefix.length, prefix])
+    .select('claim_key');
+  return (rows || []).map((r) => String(r.claim_key).slice(prefix.length)).filter(Boolean);
 }
 
 module.exports = {
   pruneSmsSendClaims, takeSendClaim, releaseSendClaim,
-  acquirePushDedupeLease, markPushDedupeDelivered, releasePushDedupeLease,
+  acquirePushDedupeLease, isPushDedupeLeaseOwner, markPushDedupeDelivered, releasePushDedupeLease,
+  recordPushDedupeSubDelivered, listPushDedupeDeliveredSubs, pushSubClaimPrefix,
   WEEKLY_CLAIM_PREFIXES, MONTHLY_CLAIM_PREFIXES,
 };

@@ -3,7 +3,11 @@
 jest.mock('../models/db', () => jest.fn());
 const fs = require('fs');
 const path = require('path');
-const { takeSendClaim, releaseSendClaim, pruneSmsSendClaims, MONTHLY_CLAIM_PREFIXES } = require('../services/sms-send-claims');
+const {
+  takeSendClaim, releaseSendClaim, pruneSmsSendClaims,
+  acquirePushDedupeLease, isPushDedupeLeaseOwner, markPushDedupeDelivered, releasePushDedupeLease,
+  recordPushDedupeSubDelivered, listPushDedupeDeliveredSubs, MONTHLY_CLAIM_PREFIXES,
+} = require('../services/sms-send-claims');
 
 function fakeConn({ deleteFails = false } = {}) {
   const held = new Set();
@@ -51,8 +55,8 @@ test('both daily banners take and release their claim through this module', () =
   }
 });
 
-test('pruneSmsSendClaims retains notif_push_dedupe: claims for 30 days instead of daily cleanup', async () => {
-  expect(MONTHLY_CLAIM_PREFIXES).toContain('notif_push_dedupe:');
+test('pruneSmsSendClaims retains notif_push_dedupe: and notif_push_sub: claims for 30 days instead of daily cleanup', async () => {
+  expect(MONTHLY_CLAIM_PREFIXES).toEqual(expect.arrayContaining(['notif_push_dedupe:', 'notif_push_sub:']));
   const clauses = [];
   const makeBuilder = () => {
     const b = {
@@ -76,7 +80,84 @@ test('pruneSmsSendClaims retains notif_push_dedupe: claims for 30 days instead o
   const conn = jest.fn(() => makeBuilder());
   conn.raw = jest.fn((sql) => sql);
   await pruneSmsSendClaims(conn);
-  expect(clauses).toContainEqual(['whereRaw', 'left(claim_key, ?) <> ?', ['notif_push_dedupe:'.length, 'notif_push_dedupe:']]);
-  expect(clauses).toContainEqual(['whereRaw', 'left(claim_key, ?) = ?', ['notif_push_dedupe:'.length, 'notif_push_dedupe:']]);
+  for (const prefix of ['notif_push_dedupe:', 'notif_push_sub:']) {
+    expect(clauses).toContainEqual(['whereRaw', 'left(claim_key, ?) <> ?', [prefix.length, prefix]]);
+    expect(clauses).toContainEqual(['whereRaw', 'left(claim_key, ?) = ?', [prefix.length, prefix]]);
+  }
   expect(clauses).toContainEqual(['where', 'created_at', '<', "NOW() - interval '30 days'"]);
+});
+
+test('push dedupe leases enforce owner tokens so an expired owner cannot release or complete a replacement lease', async () => {
+  const store = new Map();
+  const conn = jest.fn(() => ({
+    where: (cond) => ({
+      first: async () => {
+        const row = store.get(cond.claim_key);
+        if (!row) return null;
+        if (cond.outcome !== undefined && row.outcome !== cond.outcome) return null;
+        return row;
+      },
+      update: async (patch) => {
+        const row = store.get(cond.claim_key);
+        if (!row || (cond.outcome !== undefined && row.outcome !== cond.outcome)) return 0;
+        if (patch.outcome) row.outcome = patch.outcome;
+        return 1;
+      },
+      del: async () => {
+        const row = store.get(cond.claim_key);
+        if (!row || (cond.outcome !== undefined && row.outcome !== cond.outcome)) return 0;
+        store.delete(cond.claim_key);
+        return 1;
+      },
+    }),
+    whereRaw: (_sql, [len, prefix]) => ({
+      select: async () => [...store.entries()]
+        .filter(([k]) => k.slice(0, len) === prefix)
+        .map(([claim_key]) => ({ claim_key })),
+    }),
+  }));
+  conn.raw = jest.fn(async (sql, params) => {
+    if (/INSERT INTO sms_send_claims/i.test(sql)) {
+      const [key, outcome = 'delivered'] = params;
+      if (store.has(key)) return { rows: [] };
+      store.set(key, { id: store.size + 1, outcome, stale: false });
+      return { rows: [{ id: store.size }] };
+    }
+    if (/UPDATE sms_send_claims/i.test(sql)) {
+      const [ownerToken, key] = params;
+      const row = store.get(key);
+      if (row && (row.outcome === 'pending' || row.outcome.startsWith('pending:')) && row.stale) {
+        row.outcome = ownerToken;
+        row.stale = false;
+        return { rows: [{ id: row.id }] };
+      }
+      return { rows: [] };
+    }
+    return { rows: [] };
+  });
+
+  const key = 'notif_push_dedupe:relay_unbooked_call:CA-owner-1';
+  const first = await acquirePushDedupeLease(key, {}, conn);
+  expect(first.state).toBe('acquired');
+  expect(first.ownerToken).toMatch(/^pending:[0-9a-f]{16}$/);
+  await expect(isPushDedupeLeaseOwner(key, first.ownerToken, conn)).resolves.toBe(true);
+
+  // Lease expires and worker 2 reclaims it with a new owner token.
+  store.get(key).stale = true;
+  const second = await acquirePushDedupeLease(key, {}, conn);
+  expect(second.state).toBe('acquired');
+  expect(second.ownerToken).not.toBe(first.ownerToken);
+
+  // Worker 1 (stale owner) is rejected on owner check, release, and mark-delivered.
+  await expect(isPushDedupeLeaseOwner(key, first.ownerToken, conn)).resolves.toBe(false);
+  await expect(releasePushDedupeLease(key, first.ownerToken, conn)).resolves.toBe(false);
+  await expect(markPushDedupeDelivered(key, first.ownerToken, conn)).resolves.toBe(false);
+  expect(store.get(key).outcome).toBe(second.ownerToken);
+
+  // Per-device sub markers round-trip and Worker 2 completes delivery cleanly.
+  await recordPushDedupeSubDelivered(key, 'sub-a', conn);
+  await recordPushDedupeSubDelivered(key, 'sub-b', conn);
+  await expect(listPushDedupeDeliveredSubs(key, conn)).resolves.toEqual(['sub-a', 'sub-b']);
+  await expect(markPushDedupeDelivered(key, second.ownerToken, conn)).resolves.toBe(true);
+  expect(store.get(key).outcome).toBe('delivered');
 });

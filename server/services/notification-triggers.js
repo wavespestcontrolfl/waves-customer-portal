@@ -1796,6 +1796,9 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       return { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true };
     }
 
+    const keyedPushLeaseEligible = isKeyedPushLeaseEligible({
+      triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, enabledUserIds: pushEnabledIds,
+    });
     let bellRowId = null;
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || defaultPreference(trigger);
@@ -1812,12 +1815,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           const created = await writeBell(bellMetadata);
           if (created && !created.suppressed) bellWritten = true;
           if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
-          // A dedupe HIT without a refresh means this keyed event already landed,
-          // so skip pushing again by default (fail-safe against duplicate pushes on
-          // retries/replays). Callers that intentionally retry failed device pushes
-          // on an existing bell row (e.g. payment_failed with deliveredSubscriptionIds
-          // or job_complete with an atomic beforePush DB claim) opt in via pushOnDedupe: true.
-          if (created?.deduped && !created.refreshed && dedupeKey && !pushOnDedupe && !Array.isArray(deliveredSubscriptionIds)) dedupedNoPush = true;
+          // For events NOT governed by a push lease, a dedupe HIT without a
+          // refresh skips pushing again (fail-safe against duplicate pushes on
+          // retries/replays). Lease-governed events defer push dedupe to
+          // claimKeyedPushLease below so a saved bell never blocks push recovery
+          // when an earlier attempt failed all devices.
+          if (shouldSkipPushOnBellDedupe(created, { dedupeKey, pushOnDedupe, deliveredSubscriptionIds, keyedPushLeaseEligible })) {
+            dedupedNoPush = true;
+          }
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -1841,7 +1846,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     // Push: send to all admin/technician subscriptions whose user has push enabled.
-    let pushClaimKey = null;
+    let pushLease = null;
+    const subPersistPromises = [];
     try {
       const enabledUserIds = pushEnabledIds;
 
@@ -1859,13 +1865,13 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
         const lease = await claimKeyedPushLease({
           triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, enabledUserIds,
         });
-        if (lease.state !== 'acquired') {
-          return lease.state === 'delivered'
-            ? { ...stats, deduped: true, push: { sent: 1, deduped: true } }
-            : { ...stats, deduped: true };
-        }
-        pushClaimKey = lease.key;
+        const leaseResult = leaseNonAcquiredResult(lease, stats);
+        if (leaseResult) return leaseResult;
+        pushLease = lease.key ? lease : null;
         const newlyDeliveredIds = [];
+        const persistedSubIds = await loadPersistedPushSubs(pushLease?.key);
+        const effectiveDeliveredSubIds = mergeDeliveredSubIds(deliveredSubscriptionIds, persistedSubIds);
+        const leaseGuard = createLeasedBeforeHandoff(pushLease, beforeHandoff);
         const wantsSoundByUser = new Map(
           activeAdmins.map((u) => {
             const pref = prefsByUser.get(u.id);
@@ -1986,20 +1992,29 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           // device's request runs still stops the rest.
           {
             beforeDispatch,
-            ...(typeof beforeHandoff === 'function' ? { beforeHandoff } : {}),
-            ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}),
-            ...(pushClaimKey ? { onDelivered: (sub) => { if (sub?.id) newlyDeliveredIds.push(sub.id); } } : {}),
+            ...(leaseGuard.beforeHandoff ? { beforeHandoff: leaseGuard.beforeHandoff } : {}),
+            ...(effectiveDeliveredSubIds ? { deliveredSubscriptionIds: effectiveDeliveredSubIds } : {}),
+            ...(pushLease ? {
+              onDelivered: (sub) => {
+                if (!sub?.id) return;
+                newlyDeliveredIds.push(sub.id);
+                subPersistPromises.push(persistDeliveredPushSub(pushLease.key, sub.id));
+              },
+            } : {}),
           },
         );
         if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
-        await finalizeKeyedPushLease(pushClaimKey, stats, newlyDeliveredIds);
+        await finalizeKeyedPushLease(pushLease, stats, {
+          newlyDeliveredIds, persistedSubIds, subPersistPromises, leaseLost: leaseGuard.isLost(),
+        });
         // Stopped before any device: nothing went. A fan-out beforeHandoff stopped part way keeps its count.
-        if (stats.push?.superseded && !stats.push.sent) {
+        if (stats.push?.superseded && !stats.push.sent && !leaseGuard.isLost()) {
           stats.push = { sent: 0, skipped: 'superseded_before_push' };
         }
       }
     } catch (e) {
-      await releaseKeyedPushLease(pushClaimKey, pushHandoffStarted);
+      await Promise.allSettled(subPersistPromises);
+      await releaseKeyedPushLease(pushLease, pushHandoffStarted);
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
       stats.pushFailed = pushHandoffStarted ? 'push_dispatch' : 'before_handoff';
       // A resumed event owns its retry: a failure before any handoff (the
@@ -2032,53 +2047,145 @@ function resolveKeyedPushToken({ triggerKey, dedupeKey, payload, refreshOnDedupe
   return dedupeKey || null;
 }
 
-// Unified push deduplication across bell-enabled and bell-disabled preference
-// states: every keyed push takes a recoverable 'pending' lease in
-// sms_send_claims (retained 30d once 'delivered') so toggling bells on/off
-// between retries cannot re-push an already-delivered event, while an
-// abandoned pending lease recovers after 5 minutes.
-async function claimKeyedPushLease({
+function isKeyedPushLeaseEligible({
   triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, enabledUserIds,
 }) {
   if (!dedupeKey || pushOnly || pushOnDedupe || Array.isArray(deliveredSubscriptionIds) || !enabledUserIds.length) {
-    return { state: 'acquired', key: null };
+    return false;
   }
-  const token = resolveKeyedPushToken({ triggerKey, dedupeKey, payload, refreshOnDedupe });
-  if (!token || typeof db.raw !== 'function') return { state: 'acquired', key: null };
-  const key = keyedPushClaimKey(triggerKey, token);
-  const { acquirePushDedupeLease } = require('./sms-send-claims');
-  const state = await acquirePushDedupeLease(key, {}, db);
-  return { state, key };
+  return Boolean(resolveKeyedPushToken({ triggerKey, dedupeKey, payload, refreshOnDedupe }) && typeof db.raw === 'function');
 }
 
-// Once at least one device accepted the push, stamp outcome='delivered' so
-// replays settle cleanly without duplicating. Whenever fan-out confirms zero
-// deliveries (failed, expired, skipped, empty subscriptions, or superseded),
-// release the pending lease so replay succeeds after recovery.
-async function finalizeKeyedPushLease(claimKey, stats, newlyDeliveredIds) {
-  if (!claimKey) return;
+// Unified push deduplication across bell-enabled and bell-disabled preference
+// states: every keyed push takes an owner-scoped recoverable lease in
+// sms_send_claims (retained 30d once 'delivered') so toggling bells on/off or
+// recovering after a failed push stays single-shot without dropping alerts.
+async function claimKeyedPushLease(opts) {
+  if (!isKeyedPushLeaseEligible(opts)) {
+    return { state: 'acquired', key: null, ownerToken: null };
+  }
+  const token = resolveKeyedPushToken(opts);
+  const key = keyedPushClaimKey(opts.triggerKey, token);
+  const { acquirePushDedupeLease } = require('./sms-send-claims');
+  const acquired = await acquirePushDedupeLease(key, {}, db);
+  return { state: acquired.state, key, ownerToken: acquired.ownerToken };
+}
+
+function shouldSkipPushOnBellDedupe(created, { dedupeKey, pushOnDedupe, deliveredSubscriptionIds, keyedPushLeaseEligible }) {
+  return Boolean(
+    created?.deduped && !created.refreshed && dedupeKey && !pushOnDedupe
+    && !Array.isArray(deliveredSubscriptionIds) && !keyedPushLeaseEligible
+  );
+}
+
+function leaseNonAcquiredResult(lease, stats) {
+  if (lease.state === 'delivered') return { ...stats, deduped: true, push: { sent: 1, deduped: true } };
+  if (lease.state === 'in_flight') return { ...stats, inFlight: true, retryable: true };
+  return null;
+}
+
+async function loadPersistedPushSubs(claimKey) {
+  if (!claimKey) return [];
+  try {
+    const { listPushDedupeDeliveredSubs } = require('./sms-send-claims');
+    return await listPushDedupeDeliveredSubs(claimKey, db);
+  } catch (err) {
+    logger.warn(`[notification-triggers] failed to load persisted push sub ids: ${err?.code || err?.message || 'error'}`);
+    return [];
+  }
+}
+
+async function persistDeliveredPushSub(claimKey, subscriptionId) {
+  try {
+    const { recordPushDedupeSubDelivered } = require('./sms-send-claims');
+    await recordPushDedupeSubDelivered(claimKey, subscriptionId, db);
+  } catch (err) {
+    logger.warn(`[notification-triggers] failed to persist delivered sub ${subscriptionId}: ${err?.code || err?.message || 'error'}`);
+  }
+}
+
+function mergeDeliveredSubIds(callerIds, persistedIds) {
+  const merged = [...new Set([...(callerIds || []), ...(persistedIds || [])])];
+  if (Array.isArray(callerIds)) return merged;
+  return merged.length > 0 ? merged : null;
+}
+
+function createLeasedBeforeHandoff(pushLease, callerBeforeHandoff) {
+  let lost = false;
+  if (!pushLease) {
+    return {
+      beforeHandoff: typeof callerBeforeHandoff === 'function' ? callerBeforeHandoff : null,
+      isLost: () => false,
+    };
+  }
+  return {
+    beforeHandoff: async () => {
+      const { isPushDedupeLeaseOwner } = require('./sms-send-claims');
+      const owned = await isPushDedupeLeaseOwner(pushLease.key, pushLease.ownerToken, db);
+      if (!owned) {
+        lost = true;
+        return false;
+      }
+      return typeof callerBeforeHandoff === 'function' ? callerBeforeHandoff() : true;
+    },
+    isLost: () => lost,
+  };
+}
+
+async function persistExtraDeliveredPushSubs(claimKey, returnedIds, alreadyTracked) {
+  for (const id of returnedIds) {
+    if (id && !alreadyTracked.has(id)) {
+      await persistDeliveredPushSub(claimKey, id);
+    }
+  }
+}
+
+async function markKeyedPushDeliveredSafe(pushLease) {
+  try {
+    const { markPushDedupeDelivered } = require('./sms-send-claims');
+    await markPushDedupeDelivered(pushLease.key, pushLease.ownerToken, db);
+  } catch (err) {
+    logger.warn(`[notification-triggers] failed to mark keyed push delivered: ${err?.code || err?.message || 'error'}`);
+  }
+}
+
+// Stamp outcome='delivered' ONLY when every attempted device finished without
+// failures (and this worker still owns the lease). On partial delivery
+// (sent > 0 && failed > 0), persist accepted subscription IDs and release the
+// pending lease so retries finish only the failed devices without re-pushing
+// devices that already accepted. On zero delivery, release the pending lease.
+async function finalizeKeyedPushLease(pushLease, stats, {
+  newlyDeliveredIds, persistedSubIds, subPersistPromises, leaseLost,
+}) {
+  if (!pushLease) return;
+  await Promise.allSettled(subPersistPromises);
+  const returnedIds = stats.push?.deliveredSubscriptionIds || [];
+  await persistExtraDeliveredPushSubs(pushLease.key, returnedIds, new Set([...persistedSubIds, ...newlyDeliveredIds]));
+  const allDelivered = [...new Set([...persistedSubIds, ...newlyDeliveredIds, ...returnedIds])];
   const sent = Number(stats.push?.sent) || 0;
   const failed = Number(stats.push?.failed) || 0;
-  if (sent > 0) {
-    try {
-      const { markPushDedupeDelivered } = require('./sms-send-claims');
-      await markPushDedupeDelivered(claimKey, db);
-    } catch (err) {
-      logger.warn(`[notification-triggers] failed to mark keyed push delivered: ${err?.code || err?.message || 'error'}`);
-    }
-    if (failed > 0 && newlyDeliveredIds.length > 0) {
-      stats.deliveredSubscriptionIds = [...new Set(newlyDeliveredIds)];
+  if (leaseLost) {
+    if (sent === 0) {
+      stats.inFlight = true;
+      stats.retryable = true;
     }
     return;
   }
-  await releaseKeyedPushLease(claimKey, false);
+  if (failed === 0 && (sent > 0 || persistedSubIds.length > 0)) {
+    await markKeyedPushDeliveredSafe(pushLease);
+    return;
+  }
+  if (failed > 0 && allDelivered.length > 0) {
+    stats.deliveredSubscriptionIds = allDelivered;
+  }
+  await releaseKeyedPushLease(pushLease, false);
 }
 
-async function releaseKeyedPushLease(claimKey, handoffStarted) {
-  if (!claimKey || handoffStarted) return;
+async function releaseKeyedPushLease(pushLease, handoffStarted) {
+  if (!pushLease || handoffStarted) return;
   try {
     const { releasePushDedupeLease } = require('./sms-send-claims');
-    await releasePushDedupeLease(claimKey, db);
+    await releasePushDedupeLease(pushLease.key, pushLease.ownerToken, db);
   } catch (err) {
     logger.warn(`[notification-triggers] failed to release keyed push lease: ${err?.code || err?.message || 'error'}`);
   }
