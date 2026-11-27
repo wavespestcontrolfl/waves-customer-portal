@@ -1054,12 +1054,13 @@ function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipa
       message: 'No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.',
     });
   }
-  // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide).
-  const rigWarning = sprayerTestWarning(calibration, { code: 'calibration_overdue_or_estimated' });
+  // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide). A standing
+  // number with no expiry (owner 2026-11-27) gets a neutral note instead.
+  const rigWarning = sprayerTestWarning(calibration, { code: 'calibration_overdue_or_estimated', noteCode: 'sprayer_number' });
   if (rigWarning) warnings.push(rigWarning);
   const usesBackpackTest = items.some((item) => item.tankAmounts?.backpack4Gal?.carrierSource === 'calibration');
   const backpackWarning = usesBackpackTest && backpack?.equipment_system_id !== calibration?.equipment_system_id
-    ? sprayerTestWarning(backpack, { code: 'backpack_calibration_overdue_or_estimated' }) : null;
+    ? sprayerTestWarning(backpack, { code: 'backpack_calibration_overdue_or_estimated', noteCode: 'backpack_sprayer_number' }) : null;
   if (backpackWarning) warnings.push(backpackWarning);
   const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
   if (unmatchedPricedLines.length) {
@@ -1215,6 +1216,8 @@ router.get('/lawn-mix', async (req, res, next) => {
     };
     const nitrogen = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }), scout });
     const { visit, targets: nutrientTargets, chinchRate, productSwap } = nitrogen;
+    // A line's own declared label rate per gallon (its spot fill on the FlowZone: lawn-tank-reference.js).
+    const lineMeta = visit.lineMeta || {};
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
@@ -1327,7 +1330,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       };
       const [jobMix, plannedMix] = mixPair(areaSqft, areaFactor, plannedAreaFactor);
       const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair(tankCoverageSqft) : [null, null];
-      const tankAmounts = tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack });
+      const tankAmounts = tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack, lineMeta: lineMeta[line.raw] });
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.

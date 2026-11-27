@@ -45,6 +45,17 @@ router.use(requireTechOrAdmin);
 const CARRIER_MIN = 0.05;
 const CARRIER_MAX = 10.0;
 const DEFAULT_EXPIRY_DAYS = 30;
+// Statuses a calibration may hold with no expiry (owner 2026-11-27, "we will use the best guess"): a field test the owner keeps
+// open-ended (tank #1, from tank counts) and an owner estimate. An explicit `expires_at: null` for one of these is kept; any other
+// status, or an omitted expires_at, still gets the 30-day default.
+const OPEN_ENDED_STATUSES = new Set(['field_verified', 'owner_estimate']);
+const keepsNoExpiry = (body, status) => Object.prototype.hasOwnProperty.call(body, 'expires_at') && body.expires_at === null && OPEN_ENDED_STATUSES.has(status);
+// A calibration's expiry on create and verify: none for an explicit null on a standing number (owner 2026-11-27), else the body's
+// date, else 30 days from the test.
+function expiryFor(body, status, from) {
+  if (keepsNoExpiry(body, status)) return null;
+  return body.expires_at ? new Date(body.expires_at) : new Date(from.getTime() + DEFAULT_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // technician_id intentionally NOT in this whitelist. POST always uses
@@ -478,10 +489,8 @@ router.post('/calibrations/:id/verify', requireAdmin, async (req, res, next) => 
       });
     }
 
-    const expiresAt = body.expires_at
-      ? new Date(body.expires_at)
-      : new Date(verifiedAt.getTime() + DEFAULT_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
-    if (Number.isNaN(expiresAt.getTime())) {
+    const expiresAt = expiryFor(body, 'field_verified', verifiedAt);
+    if (expiresAt && Number.isNaN(expiresAt.getTime())) {
       return res.status(400).json({
         error: 'Invalid calibration verification',
         details: ['expires_at must be a valid ISO date string'],
@@ -693,9 +702,7 @@ router.post('/:id/calibrations', requireAdmin, async (req, res, next) => {
     if (errors.length) return res.status(400).json({ error: 'Invalid calibration', details: errors });
 
     const calibratedAt = payload.calibrated_at ? new Date(payload.calibrated_at) : new Date();
-    const expiresAt = payload.expires_at
-      ? new Date(payload.expires_at)
-      : new Date(calibratedAt.getTime() + DEFAULT_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+    const expiresAt = expiryFor(payload, payload.calibration_status, calibratedAt);
 
     let saved;
     try {

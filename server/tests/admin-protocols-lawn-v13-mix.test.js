@@ -689,8 +689,8 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       // The label-rate row states no rate: the recipe line's 0.147 oz, never the catalog's 0.29 oz.
       ratePer1000: 0.147, rateSource: 'recipe_line_rate',
       backpack4Gal: { amount: 0.147, amountUnit: 'oz', metricAmount: 4.2, metricUnit: 'g', carrierGalPer1000: 4, carrierSource: 'line' },
-      // The FlowZone was tested at 1.33, not the line's 4 gal: the card warns; the spot row needs no big-tank check.
-      volumeChecks: [{ use: null, sprayerName: 'FlowZone Typhoon Backpack', labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3, otherSprayerName: null }],
+      // The FlowZone puts out 1.33, not the line's 4 gal: the card says how to put the dose on; the spot row needs no big-tank check.
+      volumeChecks: [{ use: null, labelGalPer1000: 4, sprayerGalPer1000: 1.33 }],
     });
     expect(itemFor(body, 'Celsius WG').tankAmounts).toMatchObject({
       ratePer1000: 0.085, backpack4Gal: { amount: 0.256, amountUnit: 'oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },
@@ -703,6 +703,18 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       code: 'backpack_calibration_overdue_or_estimated',
       message: 'Sprayer not field tested: FlowZone Typhoon Backpack at 1.33 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
     }));
+  });
+
+  test('the FlowZone on the owner\'s standing number (no expiry, owner 2026-11-27) gets a neutral note, not a test prompt', async () => {
+    Object.assign(BACKPACK, { carrier_gal_per_1000: 2, calibration_status: 'owner_estimate', expires_at: null });
+    try {
+      const body = await lawnMix({ month: '5' });
+      expect(body.warnings).toContainEqual({ code: 'backpack_sprayer_number', severity: 'note', equipmentSystemId: 'backpack', message: 'FlowZone Typhoon Backpack: 2 gal per 1,000 sq ft, owner estimate.' });
+      expect(body.warnings.filter((warning) => /FlowZone/.test(warning.message)).map((warning) => warning.code)).toEqual(['backpack_sprayer_number']);
+      expect(itemFor(body, 'Celsius WG').tankAmounts.backpack4Gal).toMatchObject({ amount: 0.17, carrierGalPer1000: 2, carrierSource: 'calibration' });
+    } finally {
+      Object.assign(BACKPACK, { carrier_gal_per_1000: 1.33, calibration_status: 'estimated', expires_at: '2099-01-01T00:00:00Z' });
+    }
   });
 
   test('a granular bag is a spreader line: its rate, no tank amount', async () => {

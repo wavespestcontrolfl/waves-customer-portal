@@ -34,10 +34,27 @@ export function computeCarrierRate(testAreaSqft, capturedGallons) {
 }
 function calibrationStatusLabel(status) {
   if (status === "field_verified") return "Field verified";
+  // The owner's standing number (owner 2026-11-27, "we will use the best guess"): not a sprayer test.
+  if (status === "owner_estimate") return "Owner estimate";
   if (status === "estimated_not_field_verified") {
     return "Estimated, not field verified";
   }
   return status || "Unspecified";
+}
+// A standing number with no expiry (owner 2026-11-27: the owner's estimates, tank #1 from its tank counts) shows no expiry line and
+// is never prompted for a field test; any other row that is not field verified is.
+const promptsVerify = (calibration) => calibration.calibration_status !== "field_verified" && Boolean(calibration.expires_at);
+function CalibrationExpiry({ expiresAt }) {
+  if (!expiresAt) return null;
+  return <div>
+      {" "}
+      <span style={{
+      color: "#71717A"
+    }}>
+        expires:
+      </span>{" "}
+      <span>{formatETDate(expiresAt)}</span>{" "}
+    </div>;
 }
 // readOnly: technicians see calibrations but cannot record or verify them
 // (owner 2026-10-03: calibration is not set up yet; skipped for now).
@@ -231,10 +248,6 @@ export default function EquipmentCalibrationPanel({ readOnly = false } = {}) {
       actionRef.current = false;
     }
   };
-  const fmtExpiry = iso => {
-    if (!iso) return "—";
-    return formatETDate(iso);
-  };
   return <div style={{
     maxWidth: 900,
     margin: "0 auto"
@@ -352,15 +365,7 @@ export default function EquipmentCalibrationPanel({ readOnly = false } = {}) {
                     gal/1,000 sqft
                   </span>{" "}
                 </div>{" "}
-                <div>
-                  {" "}
-                  <span style={{
-              color: "#71717A"
-            }}>
-                    expires:
-                  </span>{" "}
-                  <span>{fmtExpiry(activeCalibration.expires_at)}</span>{" "}
-                </div>{" "}
+                <CalibrationExpiry expiresAt={activeCalibration.expires_at} />{" "}
               </div>{" "}
               {activeCalibration.verified_at && <div style={{
           marginTop: 6,
@@ -371,7 +376,7 @@ export default function EquipmentCalibrationPanel({ readOnly = false } = {}) {
                   {activeCalibration.verified_test_area_sqft ? ` over ${activeCalibration.verified_test_area_sqft} sqft` : ""}
                   {activeCalibration.verified_captured_gallons ? ` using ${activeCalibration.verified_captured_gallons} gal` : ""}
                 </div>}
-              {!readOnly && activeCalibration.calibration_status !== "field_verified" && <div style={{
+              {!readOnly && promptsVerify(activeCalibration) && <div style={{
           marginTop: 10
         }}>
                   <Button type="button" onClick={() => setVerifyOpen(v => !v)} variant="primary" className="min-w-11" disabled={busy}>

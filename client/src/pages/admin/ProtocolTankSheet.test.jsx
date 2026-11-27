@@ -260,25 +260,37 @@ describe("110-gallon tank reference", () => {
     }
   });
 
-  it("a program volume the sprayer test does not put out warns on the card and keeps the amounts", () => {
+  it("a program volume the sprayer number does not put out says how to put one 1,000 sq ft dose on, never a pass count", () => {
     const plan = fixture();
     plan.items[0].tankAmounts.volumeChecks = [
-      { use: null, sprayerName: null, labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3 },
-      { use: null, sprayerName: "Fixture tank", labelGalPer1000: 1, testedGalPer1000: 2, passes: null, otherSprayerName: null },
-      { use: "mapped large patch", sprayerName: "FlowZone fixture", labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null, otherSprayerName: null },
-      { use: null, sprayerName: "FlowZone fixture", labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null, otherSprayerName: "Fixture tank" },
+      { use: null, labelGalPer1000: 4, sprayerGalPer1000: 2 },
+      // A second sprayer at another number below the label volume reads the same: one line.
+      { use: null, labelGalPer1000: 4, sprayerGalPer1000: 1.33 },
+      { use: null, labelGalPer1000: 1, sprayerGalPer1000: 2 },
+      { use: "mapped large patch", labelGalPer1000: 4, sprayerGalPer1000: 2 },
     ];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
-      expect(within(surface).getByText("Label volume is 4 gal per 1,000. This sprayer was tested at 1.33. Make 3 passes, or slow down to reach the label volume.")).toBeInTheDocument();
-      // A sprayer that puts out more is never told to make passes; with no other sprayer tested at the label volume, none is named.
-      expect(within(surface).getByText("Label volume is 1 gal per 1,000. Fixture tank was tested at 2. Speed up to reach 1.")).toBeInTheDocument();
-      // No whole pass count lands at or just under 2 on 1.33: never a pass count that over- or under-applies.
-      expect(within(surface).getByText("Mapped large patch: Label volume is 2 gal per 1,000. FlowZone fixture was tested at 1.33. Slow down to reach 2.")).toBeInTheDocument();
-      // The other sprayer only when the server found it tested at the label volume.
-      expect(within(surface).getByText("Label volume is 2 gal per 1,000. FlowZone fixture was tested at 1.33. Slow down to reach 2, or use Fixture tank (tested at 2).")).toBeInTheDocument();
+      expect(within(surface).getAllByText("Label volume 4 gal per 1,000 sq ft: mix one 1,000 sq ft dose in 4 gal, and put it on 1,000 sq ft in two crossing passes.")).toHaveLength(1);
+      expect(within(surface).getByText("Label volume 1 gal per 1,000 sq ft: this sprayer puts down more. Mix one 1,000 sq ft dose in 1 gal and cover 1,000 sq ft.")).toBeInTheDocument();
+      expect(within(surface).getByText("Mapped large patch: Label volume 4 gal per 1,000 sq ft: mix one 1,000 sq ft dose in 4 gal, and put it on 1,000 sq ft in two crossing passes.")).toBeInTheDocument();
+      expect(within(surface).queryByText(/passes, or|Speed up|Slow down|tested at/)).not.toBeInTheDocument();
       expect(within(surface).getAllByText("12.5 oz / 110 gal").length).toBeGreaterThan(0);
     }
+  });
+
+  it("a spot product's FlowZone fill at the label rate per gallon says so", () => {
+    const plan = fixture();
+    plan.items[0].tankAmounts.backpack4Gal = { gallons: 4, amount: 0.8, amountMax: 3.2, amountUnit: "fl_oz", carrierSource: "label_per_gallon", carrierGalPer1000: null, sprayerName: null };
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).getByText("FlowZone 4 gal").nextSibling).toHaveTextContent(/^0\.8 to 3\.2 .* · label spot rate per gallon$/);
+  });
+
+  it("a sprayer number's note (owner estimate, no expiry) is plain text, not an alert", () => {
+    const plan = fixture();
+    plan.warnings = [{ code: "sprayer_number", severity: "note", message: "FlowZone Typhoon 3.0 #1: 2 gal per 1,000 sq ft, owner estimate." }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).getByText("FlowZone Typhoon 3.0 #1: 2 gal per 1,000 sq ft, owner estimate.")).not.toHaveClass("text-alert-fg");
   });
 
   it("the Celsius heat rule shows on the surfactant card always, and on the Celsius card when they mix", () => {
