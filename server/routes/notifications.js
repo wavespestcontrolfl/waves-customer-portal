@@ -112,20 +112,6 @@ function serviceContactSlotUpdates(contacts = [], before = {}) {
   return updates;
 }
 
-// A number a call recorded as a TENANT on this customer is a tenant in its slot (deny wins), however the person was added
-// (owner 2026-11-27, Give app access): a tenant never reaches the service reports (slotWithheldFromReports). Read under
-// the customers row lock the save holds; the call side marks a slot that already exists (call-visit-recipient.js
-// recordForVisit takes the same row), so neither order leaves a roleless tenant.
-async function applyTenantRoles(trx, customerId, updates) {
-  const tenantKeys = await require('../services/call-visit-recipient').tenantPhoneKeys(customerId, { conn: trx });
-  if (!tenantKeys.size) return updates;
-  const phoneKey = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-  for (const [phoneCol, roleCol] of [['service_contact_phone', 'service_contact_role'], ['service_contact2_phone', 'service_contact2_role'], ['service_contact3_phone', 'service_contact3_role']]) {
-    if (phoneCol in updates && roleCol in updates && tenantKeys.has(phoneKey(updates[phoneCol]))) updates[roleCol] = 'tenant';
-  }
-  return updates;
-}
-
 function normalizeContactInput(contact = {}) {
   return {
     // slice: joined first+last (50+1+50) can exceed the varchar(100) column
@@ -1404,7 +1390,6 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         // orders the events even if a later save's insert lands first.
         lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         lockedAt = new Date();
-        await applyTenantRoles(trx, req.params.customerId, slotUpdates);
         // The assigned addresses take the shared email key after the row
         // lock, so a bounce recovery's ownership check cannot be overtaken
         // by this save (utils/customer-comms-lock.js lockAssignedCustomerEmails).
@@ -1499,7 +1484,6 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         // describe the actual DB transition, not a possibly-stale snapshot.
         legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         legacyLockedAt = new Date();
-        await applyTenantRoles(trx, req.params.customerId, legacySlot1Updates);
         await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, legacySlot1Updates);
         if (legacyOptinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
@@ -1669,7 +1653,6 @@ router._private = {
   serviceContactPayload,
   serviceContactsPayload,
   serviceContactSlotUpdates,
-  applyTenantRoles,
   serviceContactConsentUpdates,
   serviceContactsRequireConsent,
   normalizeContactInput,

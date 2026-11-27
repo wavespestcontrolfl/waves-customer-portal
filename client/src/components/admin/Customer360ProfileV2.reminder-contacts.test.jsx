@@ -35,7 +35,7 @@ function customerDetail() {
   };
 }
 
-const person = (over = {}) => ({ id: 'r1', firstName: 'Bob', lastName: 'Example', phone: '+19415550111', stopped: false, stoppedAt: null, stoppedBy: null, addedAt: '2026-11-20T00:00:00Z', hasAppAccess: false, ...over });
+const person = (over = {}) => ({ id: 'r1', firstName: 'Bob', lastName: 'Example', phone: '+19415550111', stopped: false, stoppedAt: null, stoppedBy: null, addedAt: '2026-11-20T00:00:00Z', inContacts: false, ...over });
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 beforeEach(() => {
@@ -96,10 +96,10 @@ describe('Customer 360 -> named on a call (texts only)', () => {
   });
 
   it('a person also in the on-location contacts says so and keeps Stop', async () => {
-    stubFetch([person({ inContacts: true, hasAppAccess: true })]);
+    stubFetch([person({ inContacts: true })]);
     await openComms();
     const block = await screen.findByTestId('reminder-contacts');
-    expect(await within(block).findByText('Active on the list · also an on-location contact (can sign in)')).toBeInTheDocument();
+    expect(await within(block).findByText('Active on the list · also an on-location contact')).toBeInTheDocument();
     expect(within(block).getByRole('button', { name: 'Stop texts for Bob Example' })).toBeInTheDocument();
   });
 

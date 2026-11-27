@@ -9775,7 +9775,7 @@ function CustomerReminderContacts({ customerId, isAdmin }) {
     const base = !person.stopped ? "Active on the list" : person.stoppedBy === "staff" ? "Stopped by staff" : "Stopped by customer";
     // Also an on-location contact: those texts have their own controls.
     if (!person.inContacts) return base;
-    return `${base} · also an on-location contact${person.hasAppAccess ? " (can sign in)" : ""}`;
+    return `${base} · also an on-location contact`;
   };
   return (
     <div className="mt-3" data-testid="reminder-contacts">

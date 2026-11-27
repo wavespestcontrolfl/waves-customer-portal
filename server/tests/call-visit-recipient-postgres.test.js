@@ -544,32 +544,6 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toEqual([]);
         });
 
-        test('a call that records a tenant marks a contact spot already holding the number; it never widens a role', async () => {
-          // Give app access first: Bob sits in a spot with no role
-          await db('customers').where({ id: customerId }).update({ service_contact2_phone: `1-${BOB.slice(2)}`, service_contact2_role: null, service_contact3_phone: phone(45), service_contact3_role: 'home_buyer' });
-          await record({}, entry({ role: 'tenant' }));
-          const row = await db('customers').where({ id: customerId }).first('service_contact2_role', 'service_contact3_role', 'service_contact_role');
-          expect(row).toMatchObject({ service_contact2_role: 'tenant', service_contact3_role: 'home_buyer' });
-          expect(row.service_contact_role).toBeNull();
-        });
-
-        test('a later call naming an existing visit recipient a tenant keeps the row and records the tenant: no app access', async () => {
-          await record();
-          const [before] = await rows();
-          await db('visit_text_recipients').where({ id: before.id }).update({ deliveries: JSON.stringify({ 'confirmation:x': { token: 't' } }) });
-          await record({}, entry({ role: 'tenant' }));
-          const [after] = await rows();
-          expect(after).toMatchObject({ id: before.id, role: 'tenant' });
-          expect(after.deliveries).toEqual({ 'confirmation:x': { token: 't' } });
-          expect([...(await VisitRecipient.tenantPhoneKeys(customerId))]).toEqual([BOB.slice(-10)]);
-          process.env.GATE_CONTACT_LOGIN = 'true';
-          try {
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false })]);
-          } finally {
-            delete process.env.GATE_CONTACT_LOGIN;
-          }
-        });
-
         test('a repeat stop keeps the first stop; another customer\'s id changes nothing', async () => {
           await record();
           const first = await stopBob('customer');
@@ -588,54 +562,13 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           }
         });
 
-        test('the list says who is in the contact spots and who can sign in (the login\'s own checks)', async () => {
+        test('the list says who is also in the contact spots', async () => {
           await record();
           expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([
-            expect.objectContaining({ firstName: 'Bob', lastName: 'Roe', phone: BOB, stopped: false, inContacts: false, hasAppAccess: false }),
+            expect.objectContaining({ firstName: 'Bob', lastName: 'Roe', phone: BOB, stopped: false, inContacts: false }),
           ]);
-          process.env.GATE_CONTACT_LOGIN = 'true';
-          try {
-            // in a spot, but the holder never attested it: no sign-in
-            await db('customers').where({ id: customerId }).update({ service_contact2_phone: BOB });
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false })]);
-            await db('customers').where({ id: customerId }).update({ service_contacts_consent_at: new Date() });
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: true, canGiveAppAccess: false })]);
-            // an inactive profile admits no contact login
-            await db('customers').where({ id: customerId }).update({ active: false });
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ hasAppAccess: false })]);
-            await db('customers').where({ id: customerId }).update({ active: true });
-          } finally {
-            delete process.env.GATE_CONTACT_LOGIN;
-          }
-          // a person the call recorded as a tenant is never offered app access (the save stores no role; reports)
-          await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ role: 'tenant' });
-          await db('customers').where({ id: customerId }).update({ service_contact2_phone: null });
-          process.env.GATE_CONTACT_LOGIN = 'true';
-          try {
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: false, canGiveAppAccess: false })]);
-            await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ role: 'spouse_partner' });
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: true })]);
-            // a number still waiting on its own YES reply: a save cannot give sign-in, so no button
-            await db('customers').where({ id: customerId }).update({ service_preferences: JSON.stringify({ unconsented_slot_phone_keys: [BOB.slice(-10)] }) });
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false })]);
-            await db('customers').where({ id: customerId }).update({ service_preferences: JSON.stringify({}) });
-            // a LATER call recorded the number as a tenant on a visit row (the list keeps the first call's role): no button
-            await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ role: 'Tenant ' });
-            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false })]);
-            await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ role: 'spouse_partner' });
-            // the number is someone's own Waves account: it signs in as that account, so no button and no "has app access"
-            const [{ id: bobsOwn }] = await db('customers').insert({ first_name: 'Bob', last_name: 'Own', phone: BOB, active: true }).returning('id');
-            try {
-              expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false, hasAppAccess: false })]);
-            } finally {
-              await db('customers').where({ id: bobsOwn }).del();
-            }
-          } finally {
-            delete process.env.GATE_CONTACT_LOGIN;
-          }
-          await db('customers').where({ id: customerId }).update({ service_contact2_phone: BOB });
-          // sign-in off: nothing can give access
-          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false, canGiveAppAccess: false })]);
+          await db('customers').where({ id: customerId }).update({ service_contact2_phone: `1-${BOB.slice(2)}` });
+          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true })]);
         });
       });
 

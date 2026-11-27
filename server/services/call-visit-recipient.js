@@ -192,20 +192,12 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
-      // A call that records the person as a TENANT also marks a contact spot of this customer that already holds the number
-      // (deny only: a tenant never reaches the service reports). It takes the customers row, the same lock the holder's
-      // contacts save holds while it reads tenant records, so neither order leaves a roleless tenant (owner 2026-11-27).
-      if (isTenantRole(entry.role)) await markTenantSlots(trx, visit.customer_id, entry.phoneKey);
       const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source');
       // A row bound to this customer stands as it is, unless it is a copy this customer does not list (a merge moved it here):
       // that grants nothing, so like any ineligible row it is replaced by a fresh row with a NEW id (main's rule above).
       const stands = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)
         && (existing.source !== REMINDER_SOURCE || await listedBy(visit.customer_id, entry.phoneKey, trx));
-      if (stands) {
-        // The row stands (same id, scope, claims), but a tenant answer is kept on it: tenant records are read from these rows.
-        if (isTenantRole(entry.role)) await trx(TABLE).where({ id: existing.id }).update({ role: 'tenant' });
-        return 'kept';
-      }
+      if (stands) return 'kept';
       if (existing) await trx(TABLE).where({ id: existing.id }).del();
       await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
       // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ONLY the pass that
@@ -233,17 +225,6 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
     result.recorded.push({ phoneKey: entry.phoneKey, created: outcome === 'created' });
   }
   return result;
-}
-
-function isTenantRole(role) {
-  return String(role || '').trim().toLowerCase() === 'tenant';
-}
-
-// Set the tenant role on every contact spot of the customer that holds this number. Never clears or widens a role.
-async function markTenantSlots(trx, customerId, phoneKey) {
-  const slot = (n) => (n === 1 ? 'service_contact' : `service_contact${n}`);
-  const sets = [1, 2, 3].map((n) => `${slot(n)}_role = CASE WHEN right(regexp_replace(coalesce(${slot(n)}_phone, ''), '[^0-9]', '', 'g'), 10) = ? THEN 'tenant' ELSE ${slot(n)}_role END`);
-  await trx.raw(`UPDATE customers SET ${sets.join(', ')} WHERE id = ?`, [phoneKey, phoneKey, phoneKey, customerId]);
 }
 
 /**
@@ -963,22 +944,16 @@ function releaseDeferredClaim(meta, { conn = db } = {}) {
 
 /**
  * The customer's list of people a caller named for the visit texts, for the account holder's app and for staff.
- * `inContacts`: the number sits in one of the account's on-location contact spots (its texts then follow that contact);
- * `hasAppAccess`: that contact can sign in now (contact login on, the holder attested the number). Read only.
+ * `inContacts`: the number also sits in one of the account's on-location contact spots (those texts have their own
+ * controls). Read only.
  */
 async function listReminderContacts(customerId, { conn = db } = {}) {
   if (!customerId) return [];
   const rows = await conn(REMINDER_TABLE).where({ customer_id: customerId }).orderBy('created_at', 'asc')
-    .select('id', 'phone_key', 'phone_e164', 'first_name', 'last_name', 'role', 'stopped_at', 'stopped_by', 'created_at');
+    .select('id', 'phone_key', 'phone_e164', 'first_name', 'last_name', 'stopped_at', 'stopped_by', 'created_at');
   if (!rows.length) return [];
   const customer = await conn('customers').where({ id: customerId }).first();
-  const { getServiceContactSlots, phoneKeyOf, contactSlotMayLogIn, unconsentedSlotPhoneKeys } = require('./customer-contact');
-  // Contact login admits only an active, undeleted profile.
-  const loginLive = require('../config/feature-gates').contactLoginLive() && !!customer && customer.active === true && !customer.deleted_at;
-  // Numbers waiting on their own YES reply: the holder's save keeps that hold, so it cannot give sign-in.
-  const held = unconsentedSlotPhoneKeys(customer || {});
-  const tenantKeys = await tenantPhoneKeys(customerId, { conn });
-  const ownAccount = loginLive ? await ownAccountKeys(rows, conn) : new Set();
+  const { getServiceContactSlots, phoneKeyOf } = require('./customer-contact');
   const slotKeys = new Set(getServiceContactSlots(customer).map((slot) => phoneKeyOf(slot.phone)).filter(Boolean));
   return rows.map((row) => ({
     id: row.id,
@@ -992,50 +967,7 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     // Also in one of the account's on-location contact spots: those texts have their own controls (the contacts editor);
     // a stop on this list still stops the texts this list sends.
     inContacts: slotKeys.has(row.phone_key),
-    // Can actually sign in: the contact login is on and the holder attested this number (the same check the login uses).
-    hasAppAccess: loginLive && !ownAccount.has(row.phone_key) && slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key),
-    // A contact save can give sign-in only while the contact login is on. Never for a person the call recorded as a
-    // TENANT: the contacts save stores no role, and a tenant must never reach the service reports (slotWithheldFromReports).
-    canGiveAppAccess: loginLive && !tenantKeys.has(row.phone_key) && !held.has(row.phone_key) && !ownAccount.has(row.phone_key)
-      && !(slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key)),
   }));
-}
-
-/**
- * Listed numbers that are someone's own Waves account: such a number signs in as that account (the login's holder-first
- * rule), never as a contact. One query finds the candidate numbers; only those go through the login's own admission
- * check. Errors carry a code only (no phone number reaches a log).
- */
-async function ownAccountKeys(rows, conn) {
-  const keys = [...new Set(rows.map((r) => r.phone_key).filter(Boolean))];
-  if (!keys.length) return new Set();
-  try {
-    const hits = await conn('customers').whereNull('deleted_at')
-      .whereRaw("right(regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g'), 10) = ANY(?)", [keys])
-      .select(conn.raw("right(regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g'), 10) AS phone_key"));
-    const candidates = new Set(hits.map((h) => h.phone_key));
-    const { holderLoginIdentity } = require('../routes/auth');
-    const own = new Set();
-    for (const row of rows) if (candidates.has(row.phone_key) && await holderLoginIdentity(row.phone_e164)) own.add(row.phone_key);
-    return own;
-  } catch {
-    throw Object.assign(new Error('own-account check failed'), { code: 'REMINDER_OWN_ACCOUNT_UNREADABLE' });
-  }
-}
-
-/**
- * Numbers a call recorded as a TENANT on this customer: any visit row or the list's own role. The holder's contacts save
- * gives such a number the tenant role in its slot (routes/notifications.js serviceContactSlotUpdates), so a tenant never
- * reaches the service reports, and the app offers them no "Give app access".
- */
-async function tenantPhoneKeys(customerId, { conn = db } = {}) {
-  if (!customerId) return new Set();
-  const isTenant = "lower(trim(coalesce(role, ''))) = 'tenant'";
-  const [visitRows, listRows] = await Promise.all([
-    conn(TABLE).where({ customer_id: customerId }).whereRaw(isTenant).distinct('phone_key'),
-    conn(REMINDER_TABLE).where({ customer_id: customerId }).whereRaw(isTenant).distinct('phone_key'),
-  ]);
-  return new Set([...visitRows, ...listRows].map((r) => r.phone_key));
 }
 
 /**
@@ -1061,7 +993,6 @@ async function setReminderContactStopped({ customerId, id, stopped, by, conn = d
 
 module.exports = {
   listReminderContacts,
-  tenantPhoneKeys,
   setReminderContactStopped,
   gateLive,
   SOURCE,

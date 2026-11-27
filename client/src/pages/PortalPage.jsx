@@ -5460,30 +5460,20 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
 }
 
 // People named on a call ("text my husband Bob too"): visit texts only, no app
-// login. The account holder can stop or restart each one, or give one app
-// access through the on-location contacts editor (same consent tick). Holder
-// sessions only; a failed load hides the section.
-function ReminderContactsSection({ property, enabled, savedContactsKey, editorLocked, muted, buttonStyle, onGiveAccess }) {
+// login. The account holder can stop or restart each one. Holder sessions only;
+// a failed load hides the section.
+function ReminderContactsSection({ property, enabled, muted, buttonStyle }) {
   const profileId = property.customerId || property.id;
   const [list, setList] = useState([]);
   const [busyId, setBusyId] = useState(null);
-  // Shown after "Give app access" filled the editor; a contact save clears it.
-  const [accessNote, setAccessNote] = useState(false);
-  // Every read and every successful Stop / Restart takes a number: a read answered after a newer change is dropped, so a
-  // slow reload never puts back a row the holder just stopped.
-  const readSeq = useRef(0);
   useEffect(() => {
     if (!enabled || !profileId) { setList([]); return undefined; }
     let alive = true;
-    const mine = ++readSeq.current;
-    const current = () => alive && readSeq.current === mine;
     Promise.resolve(api.getReminderContacts(profileId))
-      .then((res) => { if (current()) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
-      .catch((err) => { console.error(err); if (current()) setList([]); });
+      .then((res) => { if (alive) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
+      .catch((err) => { console.error(err); if (alive) setList([]); });
     return () => { alive = false; };
-  // savedContactsKey: a count of contact saves, so a save that gives someone app access re-reads hasAppAccess.
-  }, [enabled, profileId, savedContactsKey]);
-  useEffect(() => { setAccessNote(false); }, [savedContactsKey]);
+  }, [enabled, profileId]);
   if (!enabled || !list.length) return null;
   const toggle = async (person) => {
     if (busyId) return;
@@ -5493,7 +5483,6 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, editorLo
         ? await api.restartReminderContact(profileId, person.id)
         : await api.stopReminderContact(profileId, person.id);
       if (res?.reminderContact) {
-        readSeq.current += 1;
         setList((prev) => prev.map((x) => (x.id === person.id ? { ...x, ...res.reminderContact } : x)));
       }
     } catch (err) {
@@ -5511,11 +5500,6 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, editorLo
       <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.4 }}>
         People named on a call get the booking, reminder and on-the-way texts for every visit. They can&rsquo;t sign in.
       </div>
-      {accessNote && (
-        <div role="status" style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 8 }}>
-          Check the box above and tap Save to give them app access.
-        </div>
-      )}
       {list.map((person) => {
         const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'Contact';
         const busy = busyId === person.id;
@@ -5527,22 +5511,11 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, editorLo
               {person.stopped && <div style={{ fontSize: 14, fontWeight: 700, color: B.orange }}>Stopped</div>}
               {person.inContacts && (
                 <div style={{ fontSize: 14, color: muted }}>
-                  {person.hasAppAccess ? 'Has app access. ' : ''}Also in your contacts above, which has its own text settings.
+                  Also in your contacts above, which has its own text settings.
                 </div>
               )}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {!person.stopped && person.canGiveAppAccess && (
-                <button
-                  type="button"
-                  onClick={() => { if (onGiveAccess(person)) setAccessNote(true); }}
-                  disabled={!!busyId || editorLocked}
-                  className="waves-focus-ring"
-                  style={{ ...buttonStyle, position: 'relative' }}
-                >
-                  Give app access
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => toggle(person)}
@@ -5632,8 +5605,6 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // Per-property attestation that listed on-location contacts agreed to
   // receive service texts. Re-attested on every contact save.
   const [contactConsent, setContactConsent] = useState({});
-  // Successful contact saves per property: the reminder list re-reads after each one.
-  const [contactSaves, setContactSaves] = useState({});
   // Multi-property accounts: every property's next visit for the picker and
   // the "next visit at each property" chips. Independent of the schedule
   // load so a failure here never blanks the tab; null = still loading.
@@ -5832,34 +5803,6 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     });
   };
 
-  // "Give app access": copy a named-on-a-call person into the editor. Nothing
-  // is saved until the holder ticks the consent box and taps Save. Goes through
-  // setPropertyContacts so the consent tick is cleared like any other edit.
-  const handleGiveAppAccess = (propertyId, person) => {
-    const property = propertyPrefs.find(p => p.id === propertyId);
-    if (!property) return false;
-    const current = displayContacts(property);
-    const isBlank = (c) => !(c.firstName || '').trim() && !(c.lastName || '').trim() && !(c.phone || '').trim() && !(c.email || '').trim();
-    const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-    // Already in the editor (in a spot without sign-in, or a repeat tap before Save): nothing is added; the holder ticks
-    // the box and saves, which attests the number.
-    const already = current.some((c) => digits(c.phone) && digits(c.phone) === digits(person.phone));
-    if (!already && !current.some(isBlank) && current.length >= MAX_PROPERTY_CONTACTS) {
-      showCustomerAlert('All 3 contact spots are in use. Remove one first.');
-      return false;
-    }
-    const entry = { firstName: person.firstName || '', lastName: person.lastName || '', phone: person.phone || '', email: '' };
-    setPropertyContacts(propertyId, (contacts) => {
-      if (contacts.some((c) => digits(c.phone) && digits(c.phone) === digits(person.phone))) return contacts;
-      const at = contacts.findIndex(isBlank);
-      if (at >= 0) return contacts.map((c, i) => (i === at ? entry : c));
-      return contacts.length >= MAX_PROPERTY_CONTACTS ? contacts : [...contacts, entry];
-    });
-    const box = typeof document !== 'undefined' ? document.getElementById(`svc-contact-consent-${propertyId}`) : null;
-    if (box && typeof box.focus === 'function') box.focus();
-    return true;
-  };
-
   const handlePropertyContactSave = async (propertyId) => {
     const property = propertyPrefs.find(p => p.id === propertyId);
     if (!property || prefsLocked[`${propertyId}:contact`]) return;
@@ -5898,7 +5841,6 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           }
           : p
       )));
-      setContactSaves(prev => ({ ...prev, [propertyId]: (prev[propertyId] || 0) + 1 }));
     } catch (err) {
       showCustomerAlert(whenOffline('Could not save the on-location contacts. Please try again.'));
       console.error(err);
@@ -6879,11 +6821,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     <ReminderContactsSection
                       property={property}
                       enabled={!contactSession}
-                      savedContactsKey={contactSaves[property.id]}
-                      editorLocked={!!prefsLocked[contactLockKey]}
                       muted={muted}
                       buttonStyle={secondaryButton}
-                      onGiveAccess={(person) => handleGiveAppAccess(property.id, person)}
                     />
                   </div>
                 </div>

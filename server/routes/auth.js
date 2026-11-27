@@ -924,6 +924,3 @@ router.delete('/account', authenticate, async (req, res, next) => {
 
 module.exports = router;
 module.exports._private = { annualPrepayForCustomer };
-// The account-holder half of the login identity, for screens that say who can sign in as a contact
-// (services/call-visit-recipient.js listReminderContacts): a number that is someone's own account signs in as that account.
-module.exports.holderLoginIdentity = holderLoginIdentity;
