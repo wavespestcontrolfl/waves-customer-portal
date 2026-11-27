@@ -258,9 +258,14 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
   updatedInputs.addedServiceKeys = [serviceKey];
 
   try {
-    // A quoted flea package keeps the size rule it was sent under (estimate-flea-size-replay); the signal rides the engine call
-    // only, so the stored draft inputs stay clean. The area add-on and termite knobs are not replayed on this path.
-    const v1Result = generateEstimate({ ...updatedInputs, ...require('./estimate-flea-size-replay').fleaSizeReplayOverrides(estData) });
+    // A quoted flea package keeps the size rule it was sent under (estimate-flea-size-replay)
+    // and an existing misting installation keeps its saved installation knobs
+    // (estimate-tree-shrub-knob-replay); both ride the engine call only so stored inputs stay clean.
+    const v1Result = generateEstimate({
+      ...updatedInputs,
+      ...require('./estimate-flea-size-replay').fleaSizeReplayOverrides(estData),
+      ...require('./estimate-tree-shrub-knob-replay').mistingKnobSignalForReplay(estData),
+    });
     const legacyResult = mapV1ToLegacyShape(v1Result);
     const newMonthly = Number(legacyResult?.recurring?.monthlyTotal || 0);
     const newAnnual = Number(legacyResult?.recurring?.annualAfterDiscount || newMonthly * 12);

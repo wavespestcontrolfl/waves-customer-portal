@@ -1261,6 +1261,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // (activeServiceKeys), so a bundle that itself buys a recurring service still
   // legitimately earns the perk while a one-time-only lead cannot forge it.
   v1Input = sanitizeClientIdentityFields({ ...v1Input });
+  applyStoredYear1PrepaySignal(v1Input, deps.storedEstimateData);
   // The replay exemption of the lawn pricer's v13 bahia review is server-declared (the replay branch
   // below): a browser-posted copy of either field is never honored.
   delete v1Input.savedEstimateReplay;
@@ -1513,7 +1514,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, fleaRecord });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, fleaRecord, storedEstimateData });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -2272,6 +2273,11 @@ function stripYear1PrepayStamp(estimateData) {
   for (const carrier of carriers) {
     if (isPlainRecord(carrier)) delete carrier.year1PrepayNoPercent;
   }
+}
+
+function applyStoredYear1PrepaySignal(v1Input, storedEstimateData) {
+  if (!v1Input || typeof v1Input !== 'object' || !storedEstimateData) return;
+  v1Input.year1PrepayNoPercent = require('./estimate-converter').estimateHasNoYear1PrepayPercent(storedEstimateData);
 }
 
 // Year-1 no-5% annual prepay stamp (GATE_NO_YEAR1_PREPAY_DISCOUNT, 2026-11-27):

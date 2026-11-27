@@ -4,12 +4,13 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const constants = require('../services/pricing-engine/constants');
-const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
+const { syncConstantsFromDB, resetTrenchingRatchetFloor } = require('../services/pricing-engine/db-bridge');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 const { priceTrenching } = require('../services/pricing-engine/service-pricing');
 const {
   annualPrepayDiscountComponents,
   estimateHasNoYear1PrepayPercent,
+  formatAnnualPrepayInvoiceCopy,
   resolveAnnualPrepayInvoiceTotal,
 } = require('../services/estimate-converter');
 const { savedFloorReplaySignals } = require('../services/estimate-floor-signal-replay');
@@ -87,6 +88,7 @@ describe('Termite trenching one-way upward catalog cost ratchet (db-bridge)', ()
   const originalPreSlab = JSON.parse(JSON.stringify(constants.SPECIALTY.preSlabTermiticide));
 
   afterEach(() => {
+    resetTrenchingRatchetFloor();
     Object.assign(constants.SPECIALTY.trenching, JSON.parse(JSON.stringify(originalTrenching)));
     Object.assign(constants.SPECIALTY.preSlabTermiticide, JSON.parse(JSON.stringify(originalPreSlab)));
   });
@@ -194,6 +196,35 @@ describe('Termite trenching one-way upward catalog cost ratchet (db-bridge)', ()
       approvedVendorPricingRows: [{ id: 'vp-3' }],
     });
     await expect(syncConstantsFromDB(dbSync3)).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(174.72);
+  });
+
+  test('keeps accepted ratchet floor across refreshes while link stays enabled, even when a cheaper vendor appears', async () => {
+    // Refresh 1: Termidor spikes $174.72 -> $250 (accepted).
+    const dbRise = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
+      catalogRows: [{ name: 'Termidor SC', best_price: 250, unit_size_oz: 78, best_vendor_pricing_id: 'vp-rise' }],
+      approvedVendorPricingRows: [{ id: 'vp-rise' }],
+    });
+    await expect(syncConstantsFromDB(dbRise)).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(250);
+
+    // Refresh 2: link stays enabled, cheaper vendor drops catalog to $160 -> one-way ratchet keeps $250.
+    const dbDrop = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
+      catalogRows: [{ name: 'Termidor SC', best_price: 160, unit_size_oz: 78, best_vendor_pricing_id: 'vp-drop' }],
+      approvedVendorPricingRows: [{ id: 'vp-drop' }],
+    });
+    await expect(syncConstantsFromDB(dbDrop)).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(250);
+
+    // Explicit pricing reset (link disabled) clears the floor cleanly back to $174.72.
+    const dbReset = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: { link_container_costs_to_catalog: false } }],
+      catalogRows: [],
+      approvedVendorPricingRows: [],
+    });
+    await expect(syncConstantsFromDB(dbReset)).resolves.toBe(true);
     expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(174.72);
   });
 });
@@ -391,5 +422,98 @@ describe('GATE_NO_YEAR1_PREPAY_DISCOUNT — no 5% Year-1 prepay on new estimates
       storedEstimateData: postGateStored,
     });
     expect(estimateHasNoYear1PrepayPercent(revPostGate)).toBe(true);
+  });
+
+  test('successful SERVER staff revisions preserve the stored quote prepay decision across gate transitions', async () => {
+    const engineInputs = {
+      ...PROPERTY,
+      services: { lawn: { grassType: 'st_augustine', tier: 'enhanced', turfSqFt: 5000 } },
+    };
+    const clientPreview = { monthlyTotal: 60, annualTotal: 720, oneTimeTotal: 0 };
+
+    // 1) Pre-gate quote revised by staff AFTER gate turns ON -> keeps 5% (no stamp).
+    process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT = 'true';
+    const preGateStored = { result: { pricingMetadata: { legacyPricingRules: false } } };
+    const revisedPreGate = { engineInputs: { ...engineInputs }, result: {} };
+    const preRes = await resolveServerAuthoritativePricing({
+      estimateData: revisedPreGate,
+      clientPreview,
+      quoteRequired: false,
+      storedEstimateData: preGateStored,
+    });
+    expect(preRes.audit.pricing_authority).toBe('SERVER');
+    expect(estimateHasNoYear1PrepayPercent(revisedPreGate)).toBe(false);
+    expect(annualPrepayDiscountComponents({ recurringServices: LAWN_ONLY, estimateData: revisedPreGate }).discountRate).toBeCloseTo(0.05, 5);
+
+    // 2) Post-gate quote revised by staff AFTER gate turns OFF -> keeps 0% (stamped true).
+    delete process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT;
+    const postGateStored = { result: { pricingMetadata: { legacyPricingRules: false, year1PrepayNoPercent: true } } };
+    const revisedPostGate = { engineInputs: { ...engineInputs }, result: {} };
+    const postRes = await resolveServerAuthoritativePricing({
+      estimateData: revisedPostGate,
+      clientPreview,
+      quoteRequired: false,
+      storedEstimateData: postGateStored,
+    });
+    expect(postRes.audit.pricing_authority).toBe('SERVER');
+    expect(estimateHasNoYear1PrepayPercent(revisedPostGate)).toBe(true);
+    expect(annualPrepayDiscountComponents({ recurringServices: LAWN_ONLY, estimateData: revisedPostGate }).discountRate).toBe(0);
+  });
+
+  test('adding a service to an existing 30-nozzle Smart misting quote replays its saved $4,195 installation price', async () => {
+    const legacyMistingQuote = {
+      estimate_data: {
+        inputs: {
+          ...PROPERTY,
+          services: { mosquitoMisting: { tier: 'smart', nozzleCount: 30, systemCount: 1 } },
+        },
+        engineResult: {
+          lineItems: [{
+            service: 'mosquito_misting',
+            tier: 'smart',
+            nozzleCount: 30,
+            systemCount: 1,
+            installation: { price: 4195 },
+            pricingBasis: {
+              tierPrice: 2995,
+              includedNozzles: 10,
+              extraNozzlePrice: 60,
+              monthlyMaintenance: 149,
+            },
+          }],
+        },
+      },
+      monthly_total: 149,
+      annual_total: 1788,
+      onetime_total: 4195,
+      waveguard_tier: 'Bronze',
+    };
+    const rev = await buildEstimateServiceRevisionDraft(legacyMistingQuote, 'lawn_care');
+    expect(rev.status).toBe('priced');
+    const mistLine = (rev.draftEstimateData.result?.lineItems || []).find((l) => l.service === 'mosquito_misting');
+    expect(mistLine?.installation?.price ?? rev.updated.oneTime).toBe(4195);
+  });
+
+  test('annual prepay invoice copy uses neutral wording when neither prepay % nor setup waiver applies', () => {
+    const lawnZero = formatAnnualPrepayInvoiceCopy({
+      prepayPlanPrefix: 'WaveGuard Bronze',
+      prepayDiscountApplied: false,
+      prepayWaivesSetupFee: false,
+      estimateId: 'est-1',
+      setupFeeAmount: 99,
+    });
+    expect(lawnZero.prepayLineDescription).toBe('WaveGuard Bronze — 12 months prepaid');
+    expect(lawnZero.prepayLineDescription).not.toMatch(/setup fee waived/i);
+    expect(lawnZero.prepayNotes).not.toMatch(/setup fee waived/i);
+
+    const soloPestWaived = formatAnnualPrepayInvoiceCopy({
+      prepayPlanPrefix: 'WaveGuard Bronze',
+      prepayDiscountApplied: false,
+      prepayWaivesSetupFee: true,
+      estimateId: 'est-2',
+      setupFeeAmount: 99,
+    });
+    expect(soloPestWaived.prepayLineDescription).toBe('WaveGuard Membership — 12 months prepaid (setup fee waived)');
+    expect(soloPestWaived.prepayNotes).toContain('$99.00 setup fee waived');
   });
 });
