@@ -656,4 +656,66 @@ postgres('visit on hold on PostgreSQL', () => {
       expect(entry).toMatchObject({ technicianId: techId, estimatedDuration: 90, windowStart: expect.any(String) });
     });
   });
+
+  describe('codex #8690 r2', () => {
+    test('a held stop ahead is not counted in another customer\'s stops-ahead', async () => {
+      const priorStops = process.env.GATE_STOPS_AWAY;
+      process.env.GATE_STOPS_AWAY = 'true';
+      try {
+        const techId = randomUUID();
+        await trx('technicians').insert({ id: techId, name: 'Tech Ahead' });
+        const today = ymdOffset(0);
+        const otherCustomer = randomUUID();
+        await trx('customers').insert({
+          id: otherCustomer, first_name: 'Synthetic', last_name: 'Ahead', email: `${otherCustomer}@example.invalid`,
+          phone: `fixture-${otherCustomer.slice(0, 8)}`,
+        });
+        const ahead = randomUUID();
+        await trx('scheduled_services').insert({
+          id: ahead, customer_id: otherCustomer, technician_id: techId, scheduled_date: today, service_type: 'Quarterly Pest Control',
+          status: 'confirmed', track_state: 'scheduled', window_start: '08:00', window_end: '09:00', route_order: 1,
+        });
+        const target = await visit({
+          technician_id: techId, scheduled_date: today, track_state: 'scheduled', window_start: '10:00', window_end: '11:00', route_order: 2,
+        });
+        const { computeStopsAhead } = require('../services/stops-ahead');
+        const before = await computeStopsAhead(trx, target, { today });
+        await trx('scheduled_services').where({ id: ahead }).update({ held_at: new Date() });
+        const after = await computeStopsAhead(trx, target, { today });
+        expect(before?.totalStops).toBe(2);
+        expect(after?.totalStops).toBe(1);
+        expect(after?.stopsAhead).toBe(0);
+      } finally {
+        if (priorStops === undefined) delete process.env.GATE_STOPS_AWAY; else process.env.GATE_STOPS_AWAY = priorStops;
+      }
+    });
+
+    test('a held visit refuses Start job before any timer write', async () => {
+      const id = await visit({ scheduled_date: ymdOffset(0), held_at: new Date() });
+      const src = require('fs').readFileSync(require.resolve('../services/time-tracking'), 'utf8');
+      const startJobBody = src.slice(src.indexOf('async function startJob'));
+      const holdCheck = startJobBody.indexOf("require('./visit-hold').isVisitHeld(jobId, trx)");
+      const firstTimerWrite = startJobBody.search(/trx\('time_entries'\)\s*\.(insert|where)/);
+      expect(holdCheck).toBeGreaterThan(-1);
+      expect(firstTimerWrite === -1 || holdCheck < firstTimerWrite).toBe(true);
+      expect(await hold.isVisitHeld(id, trx)).toBe(true);
+    });
+
+    test('the legacy previsit balance email stays silent for a visit held after the batch read', async () => {
+      const id = await visit({ held_at: new Date() });
+      const email = require('../services/account-membership-email');
+      const spy = jest.spyOn(email, 'sendPrevisitBalanceReminder').mockResolvedValue({ ok: true });
+      try {
+        const { _test } = require('../services/previsit-balance-reminder');
+        const sent = await _test.deliverLegacyEmail({
+          visit: { id, customer_id: customerId, service_type: 'Quarterly Pest Control', scheduled_date: ymdOffset(5) },
+          amount: 10, fresh: true, emailLegAvailable: true,
+        });
+        expect(sent).toBe(false);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
 });

@@ -336,6 +336,10 @@ async function startJob(technicianId, jobId, { lat, lng, scopeReq = null } = {})
         if (await require('./street-level-hold').isStreetLevelHoldVisit(jobId, trx)) {
           throw Object.assign(new Error(require('./street-level-hold').HOLD_REFUSAL), { status: 409, code: 'street_level_hold' });
         }
+        // GATE_VISIT_HOLD: a visit the office put on hold is off the route; refuse before any timer write (same row lock).
+        if (await require('./visit-hold').isVisitHeld(jobId, trx)) {
+          throw Object.assign(new Error('That visit is on hold: the customer will call.'), { status: 409, code: 'VISIT_ON_HOLD' });
+        }
       }
     } else if (scopeReq && require('./technician-visit-scope').isTechnicianRequest(scopeReq)) {
       // A technician-scoped start must name a visit (codex #5568 r16 P2): a
