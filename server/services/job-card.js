@@ -1261,20 +1261,27 @@ function isTankMixable(product = {}) {
   return true;
 }
 
-// The LESCO spreader number for a granular line (spreader-settings.js), at the rate the plan puts down (else the line's own lb
-// rate, else the catalog rate when the line states none; a ranged line takes no catalog rate): every lawn granular, and another
-// service's granular only when a row names its product. `withheld`: the card withholds the dose (a spray-check hold, an
-// unverified label, a block), so it gives no number either; nor does an unverified label with no plan mix, or a line the
-// plan marks unavailable.
-function spreaderForCard(facts, line, product, withheld) {
+// The LESCO spreader number for a granular line (spreader-settings.js), at the rate the card applies: the plan's, else a sold
+// add-on's governed rate (when the card shows it), else the line's own lb rate, else the catalog rate when the line states none
+// (a ranged line takes no catalog rate). Every lawn granular spread by spreader (a product rated in lb, not applied as a gel, glue
+// board, station or injection), and another service's granular only when a row names its product. `withheld`: the card
+// withholds the dose (a spray-check hold, an unverified label, a block), so it gives no number either; nor does an unverified
+// label with no plan mix, a line the plan marks unavailable, or a governed rate the card withholds.
+const NOT_SPREAD = /gel|glue|station|trunk|inject/i;
+function cardRate(line, product, governed, substituted) {
+  if (line.planMix?.ratePer1000 > 0) return { rate: line.planMix.ratePer1000, rateUnit: line.planMix.rateUnit };
+  if (line.governed) return governed?.rate ? { rate: line.governed.ratePer1000, rateUnit: line.governed.rateUnit } : null;
+  if (substituted || !spreaderSettings.lineLbRate(line.raw)) return { rate: product.default_rate_per_1000, rateUnit: product.rate_unit };
+  return {};
+}
+function spreaderForCard(facts, line, product, { withheld, governed }) {
   if (withheld || !product.label_verified_at || line.planUnavailable || isTankMixable(product)) return null;
+  if (!/^lb/i.test(String(product.rate_unit || '')) || NOT_SPREAD.test(String(product.application_method || ''))) return null;
   const substituted = Boolean(line.substitutedFor);
   const names = substituted ? [product.name] : [product.name, String(line.raw || '').split(' \u2014 ')[0]];
   if (!facts.isLawn && !spreaderSettings.rowsFor(names).length) return null;
-  let rate = {};
-  if (line.planMix?.ratePer1000 > 0) rate = { rate: line.planMix.ratePer1000, rateUnit: line.planMix.rateUnit };
-  else if (substituted || !spreaderSettings.lineLbRate(line.raw)) rate = { rate: product.default_rate_per_1000, rateUnit: product.rate_unit };
-  return spreaderSettings.spreaderForLine({ productName: product.name, raw: line.raw, substituted, ...rate });
+  const rate = cardRate(line, product, governed, substituted);
+  return rate && spreaderSettings.spreaderForLine({ productName: product.name, raw: line.raw, substituted, ...rate });
 }
 
 function precautionText(product) {
@@ -1416,7 +1423,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
         planMix: item.mix || null,
         substitutedFor: item.substitution?.originalProductName || null,
         // The plan's own per-line state: a v13 line it marks unavailable (no linked row) gets no spreader number.
-        ...(item.unavailable ? { planUnavailable: true } : {}),
+        planUnavailable: Boolean(item.unavailable),
         // Only the primary lawn plan's lines take the "Use" tick: the ids ride to the plan engine, never to an add-on's protocol.
         ...(takesUseTick(item) ? { planOption: true } : {}),
         // The id the engine matches a Use tick against: the original product's when an approved substitution swaps it.
@@ -1889,6 +1896,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // Untracked stock is the catalog's normal state, not a warning worth a line.
     const stockNote = inventory?.warning && !short && inventory.status !== 'not_tracked' ? inventory.warning : null;
     const rotation = await rotationNote(dbh, facts, p);
+    const governed = governedForCard(line.governed, verdict, p, line.scope);
     cards.push({
       id: p.id,
       ...cardIdentity(line),
@@ -1906,7 +1914,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       ...(verdict.action ? { verdictAction: verdict.action } : {}),
       planned,
       // A chemical area add-on's label text (rate, area, limit, safety).
-      governed: governedForCard(line.governed, verdict, p, line.scope),
+      governed,
       // The plan's requirement for the shortage line — never an actionable
       // dose (it survives every withhold so "On hand X vs Y" stays whole).
       demand: demandMix ? { amount: Number(demandMix.amount), unit: demandMix.amountUnit || p.rate_unit || null } : null,
@@ -1923,7 +1931,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       labelUrl: p.label_url || null,
       sdsUrl: p.sds_url || null,
       rotation,
-      spreader: spreaderForCard(facts, line, p, doseWithheld),
+      spreader: spreaderForCard(facts, line, p, { withheld: doseWithheld, governed }),
       order: packSizes ? orderFor(p, packSizes[p.id], short ? inventory.plannedAmountInventoryUnit - onHand : null, { includePricing }) : null,
     });
   }

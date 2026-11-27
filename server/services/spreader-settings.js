@@ -50,7 +50,8 @@ function spreaderSetting({ names, lbPer1000 }) {
   const rate = Number(lbPer1000);
   const near = rate > 0
     ? rows.map((row) => ({ row, off: Math.abs(row.lbPer1000 - rate) / row.lbPer1000 }))
-      .filter(({ off }) => off <= config.rateTolerance)
+      // Inclusive, with room for float rounding: 2.06 on a 2 lb row is exactly 3%.
+      .filter(({ off }) => off <= config.rateTolerance + 1e-9)
       .sort((a, b) => a.off - b.off)[0]
     : null;
   if (!near) return { ...base, text: NO_RATE_NUMBER };

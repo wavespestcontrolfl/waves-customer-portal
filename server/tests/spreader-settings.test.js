@@ -17,6 +17,10 @@ describe('the spreader number for a rate', () => {
     const name = ['LESCO 44-0-0 100% PolyPlus OPTI120'];
     expect(spreaderSetting({ names: name, lbPer1000: 2.27 * 1.029 }).setting).toBe(8);
     expect(spreaderSetting({ names: name, lbPer1000: 2.27 * 0.971 }).setting).toBe(8);
+    // Both exact 3% boundaries count (float rounding: 2.06 / 2 is 0.030000000000000027 off).
+    expect(spreaderSetting({ names: ['Topchoice Granular Insecticide'], lbPer1000: 2.06 }).setting).toBe(8);
+    expect(spreaderSetting({ names: ['Topchoice Granular Insecticide'], lbPer1000: 1.94 }).setting).toBe(8);
+    expect(spreaderSetting({ names: ['Topchoice Granular Insecticide'], lbPer1000: 2.07 }).setting).toBeNull();
     for (const lbPer1000 of [2.27 * 1.04, 1.135, null]) {
       expect(spreaderSetting({ names: name, lbPer1000 })).toMatchObject({ setting: null, text: NO_RATE_NUMBER });
     }

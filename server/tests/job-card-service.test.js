@@ -1153,6 +1153,18 @@ describe('PR review r5', () => {
     expect(resolved.lines[0]).toMatchObject({ planUnavailable: true });
     const [unavailableCard] = await build({ isLawn: true }, resolved.lines[0]);
     expect(unavailableCard.spreader).toBeNull();
+    // A sold add-on with no plan mix (the fire-ant yard add-on): its governed 2 lb rate, not the catalog's; none while withheld.
+    const topchoice = { id: 'tc', name: 'Topchoice Granular Insecticide', rate_unit: 'lb', default_rate_per_1000: 1.5, label_verified_at: '2026-08-01' };
+    const governedLine = { raw: 'Topchoice Granular Insecticide — broadcast the granules', role: 'base', selected: true, product: topchoice, governed: { rate: '2 lb per 1,000 sq ft', ratePer1000: 2, rateUnit: 'lb' } };
+    const [governed] = await build({ isLawn: true }, governedLine);
+    expect(governed.spreader).toMatchObject({ setting: 8, text: 'Spreader: LESCO #8, start number. Weigh test at first use.' });
+    const [governedHeld] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04', isLawn: true }, lines: [governedLine], verdicts: [{ productId: 'tc', verdict: 'hold', reason: 'Synthetic hold' }], packSizes: {} });
+    expect(governedHeld.spreader).toBeNull();
+    // A product not spread by spreader (a gel, a station, an injection) or not rated in lb gets no spreader line on a lawn visit.
+    for (const product of [{ ...topchoice, id: 'g', name: 'Synthetic gel', application_method: 'gel bait' }, { ...topchoice, id: 'st', name: 'Synthetic station', rate_unit: 'each' }]) {
+      const [card] = await build({ isLawn: true }, { raw: `${product.name} — as labeled`, role: 'base', selected: true, product });
+      expect(card.spreader).toBeNull();
+    }
     const [pest] = await build({ isLawn: false }, { raw: 'Synthetic ant bait granule', role: 'base', selected: true, product: { id: 'a', name: 'Synthetic ant bait granule', rate_unit: 'lb', label_verified_at: '2026-08-01' } });
     expect(pest.spreader).toBeNull();
   });
