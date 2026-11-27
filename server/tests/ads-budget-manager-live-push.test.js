@@ -158,6 +158,19 @@ describe('BudgetManager live Google Ads push', () => {
         expect(mockCampaignUpdate).not.toHaveBeenCalled();
       });
 
+      test('a branded Search campaign is left alone by capacity automation', async () => {
+        campaignRows = [
+          baseCampaign(),
+          { ...baseCampaign(), id: 'c-brand-flag', campaign_name: 'Waves Brand', platform_campaign_id: '777', is_branded: true },
+          { ...baseCampaign(), id: 'c-brand-intent', campaign_name: 'Waves Brand 2', platform_campaign_id: '888', intent_type: 'branded' },
+        ];
+
+        await BudgetManager.adjustBudgets();
+
+        expect(mockUpdateBudget).toHaveBeenCalledTimes(1);
+        expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.4);
+      });
+
       test.each(['SEARCH', 'google_search'])('type %s is Search', async (campaignType) => {
         campaignRows = [{ ...baseCampaign(), campaign_type: campaignType }];
 
@@ -321,6 +334,19 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockUpdateBudget).toHaveBeenCalled();
       expect(mockCampaignUpdate).not.toHaveBeenCalled();
       expect(mockLogInsert).not.toHaveBeenCalled();
+    });
+
+    test('W01: manual lower live Google budget in base mode is respected (not pushed back up)', async () => {
+      BudgetManager.getCapacityForArea.mockResolvedValue({ utilizationPct: 50, booked: 4, slots: 8, techs: 1 });
+      // Base $40, owner manually lowered live Google budget to $20 (above $0.40 stop floor).
+      campaignRows = [{ ...baseCampaign(), budget_mode: 'base', daily_budget_base: '40', daily_budget_current: '20' }];
+      mockIsEnabled.mockReturnValue(true);
+      mockIsConfigured.mockReturnValue(true);
+
+      await BudgetManager.adjustBudgets();
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
     });
 
     test('failed restore-to-base heals: sync-restored throttle re-pushed up to base', async () => {
@@ -737,8 +763,19 @@ describe('in-lock rechecks (requireLivePush)', () => {
     campaignFirstRow = baseCampaign(); // base 40
     mockIsConfigured.mockReturnValue(true);
 
-    await expect(BudgetManager.setBudget('c-1', 3000, 'test', { requireLivePush: true, requireBoundFactor: 3 }))
+    await expect(BudgetManager.setBudget('c-1', 300, 'test', { requireLivePush: true, requireBoundFactor: 3 }))
       .rejects.toMatchObject({ code: 'budget_out_of_bounds' });
+
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+  });
+
+  test('setBudget rejects budgets above MAX_DAILY_BUDGET safety cap before touching DB or Google', async () => {
+    campaignFirstRow = baseCampaign();
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setBudget('c-1', BudgetManager.MAX_DAILY_BUDGET + 1, 'test', { requireLivePush: true }))
+      .rejects.toThrow(/exceeds the maximum/);
 
     expect(mockUpdateBudget).not.toHaveBeenCalled();
     expect(mockCampaignUpdate).not.toHaveBeenCalled();

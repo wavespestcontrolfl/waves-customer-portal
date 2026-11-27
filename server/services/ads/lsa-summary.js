@@ -43,9 +43,19 @@ async function leadCounts(start, end) {
       db.raw('COUNT(*) AS leads'),
       db.raw("COUNT(*) FILTER (WHERE charged IS TRUE AND COALESCE(credit_state, '') <> 'CREDITED') AS charged"),
       db.raw("COUNT(*) FILTER (WHERE match_basis IN ('phone_time', 'phone_customer')) AS matched"),
+      db.raw("COUNT(*) FILTER (WHERE lead_type = 'calls') AS calls"),
+      db.raw("COUNT(*) FILTER (WHERE lead_type = 'messages') AS messages"),
+      db.raw("COUNT(*) FILTER (WHERE lead_type = 'bookings') AS bookings"),
     )
     .first();
-  return { leads: toInt(row?.leads), charged: toInt(row?.charged), matched: toInt(row?.matched) };
+  return {
+    leads: toInt(row?.leads),
+    charged: toInt(row?.charged),
+    matched: toInt(row?.matched),
+    calls: toInt(row?.calls),
+    messages: toInt(row?.messages),
+    bookings: toInt(row?.bookings),
+  };
 }
 
 // excludeRows(qb) adds the dashboard's lead exclusions (soft-deleted, internal

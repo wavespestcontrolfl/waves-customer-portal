@@ -339,6 +339,11 @@ export default function AdsGapRulePanel() {
 
         {(data.campaigns || []).length > 0 && (
           <div className="flex flex-col">
+            {shadow && (
+              <div className="text-ui-body text-ink-secondary mb-2">
+                Automatic gap rule is watching only — manual holds below still push live to Google Ads.
+              </div>
+            )}
             {data.campaigns.map((c) => (
               <CampaignHold key={c.id} campaign={c} onChanged={load} />
             ))}

@@ -557,5 +557,40 @@ describe('normalize/fallback r9 — client availability and tiny-budget bound', 
     expect(rec.apply_action).toBeUndefined();
   });
 
+  test('W16: increase_budget below base/current and decrease_budget above base/current are stripped in normalizeRecommendations', () => {
+    const camp = {
+      id: 'g-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
+      budget_mode: 'base', daily_budget_base: 20, daily_budget_current: 20,
+    };
+    const badUp = advisor.normalizeRecommendations({ recommendations: [
+      { campaign: 'Pest Bradenton', apply_action: 'increase_budget', apply_value: 15 },
+    ] }, [camp]).recommendations[0];
+    expect(badUp.apply_action).toBeUndefined();
 
+    const badDown = advisor.normalizeRecommendations({ recommendations: [
+      { campaign: 'Pest Bradenton', apply_action: 'decrease_budget', apply_value: 30 },
+    ] }, [camp]).recommendations[0];
+    expect(badDown.apply_action).toBeUndefined();
+
+    const okDown = advisor.normalizeRecommendations({ recommendations: [
+      { campaign: 'Pest Bradenton', apply_action: 'decrease_budget', apply_value: 15 },
+    ] }, [camp]).recommendations[0];
+    expect(okDown.apply_action).toBe('decrease_budget');
+    expect(okDown.apply_value).toBe(15);
+  });
+
+  test('W16: POST /advisor/apply rejects backwards budget direction with 422', async () => {
+    mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20, daily_budget_current: 20, budget_mode: 'base' }];
+
+    const badUp = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 15 });
+    expect(badUp.status).toBe(422);
+    expect(badUp.body.applied).toBe(false);
+    expect(badUp.body.error).toMatch(/does not increase/i);
+
+    const badDown = await apply({ action: 'decrease_budget', campaignName: 'Pest Bradenton', value: 30 });
+    expect(badDown.status).toBe(422);
+    expect(badDown.body.applied).toBe(false);
+    expect(badDown.body.error).toMatch(/does not decrease/i);
+    expect(mockSetBudget).not.toHaveBeenCalled();
+  });
 });

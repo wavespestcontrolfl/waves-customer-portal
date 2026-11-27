@@ -1179,8 +1179,18 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       // already match the target — counting it as applied would be the same
       // false green. A same-base apply with DRIFTED current stays allowed:
       // that push reconciles the live budget back to the recorded base.
-      if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
+      const currentNum = toFiniteNumber(campaign.daily_budget_current);
+      if (amount === baseBudget && amount === currentNum) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
+      }
+      // Direction sanity check (W16): an increase_budget rec must raise the budget
+      // (or reconcile a drifted-down live budget back to base), and decrease_budget must lower it.
+      const isReconcileUp = amount === baseBudget && Number.isFinite(currentNum) && currentNum < amount;
+      if (action === 'increase_budget' && amount <= boundRef && !isReconcileUp) {
+        return res.status(422).json({ applied: false, error: `Refusing increase_budget to $${amount}/day because it does not increase the current $${boundRef}/day base.` });
+      }
+      if (action === 'decrease_budget' && amount >= boundRef) {
+        return res.status(422).json({ applied: false, error: `Refusing decrease_budget to $${amount}/day because it does not decrease the current $${boundRef}/day base.` });
       }
       result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;

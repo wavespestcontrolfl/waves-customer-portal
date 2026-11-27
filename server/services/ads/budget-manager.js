@@ -17,12 +17,13 @@ const adsGapRuleMode = () => (typeof featureGates.adsGapRuleMode === 'function' 
 let _googleAds;
 function getGoogleAds() { return _googleAds || (_googleAds = require('./google-ads')); }
 
-// ad_campaigns.daily_budget_base / daily_budget_current are decimal(10,2), so
-// the largest storable value is 99,999,999.99. A budget above that (a typo like
-// 100000000) could be accepted by Google BEFORE the local write, then fail the
-// DB update — leaving the live campaign changed but the DB out of sync. Reject
-// it up front, before any push. (Google itself enforces its own maxima too.)
-const MAX_DAILY_BUDGET = 99999999.99;
+// Safety cap on a campaign's daily budget before pushing to Google Ads.
+// Configurable via ADS_MAX_DAILY_BUDGET (default $1,000/day, bounded below decimal(10,2))
+// so a typo or rogue advisor value can never spend five or six figures in a day.
+const ENV_MAX_DAILY_BUDGET = Number(process.env.ADS_MAX_DAILY_BUDGET);
+const MAX_DAILY_BUDGET = Number.isFinite(ENV_MAX_DAILY_BUDGET) && ENV_MAX_DAILY_BUDGET > 0
+  ? Math.min(ENV_MAX_DAILY_BUDGET, 99999999.99)
+  : 1000;
 
 // ad_budget_log.reason is a varchar(255). A caller-supplied reason longer than
 // that would make the ad_budget_log insert fail AFTER the live Google push (and,
@@ -39,20 +40,24 @@ const MAX_REASON_LEN = 255;
 const SEARCH_CAMPAIGN_TYPES = new Set(['2', 'SEARCH', 'google_search']);
 
 // Physical stops per day for the gap window (see getGapWindow): a visit_id group
-// is one stop; with no visit_id, the same customer + same window_start (time,
-// NULL for a windowless placeholder) is one stop. visit_id is uuid and
-// window_start is time, so both are cast to text.
+// is one stop; with no visit_id, the same customer + same window_start + same
+// property (NULL for primary home) is one stop; an unclaimed anonymous hold
+// (customer_id IS NULL) counts as its own stop instead of collapsing to NULL.
 const GAP_STOPS_SQL = `COUNT(DISTINCT CASE
   WHEN visit_id IS NOT NULL THEN 'v:' || visit_id::text
-  ELSE 'c:' || customer_id::text || ':' || COALESCE(window_start::text, '')
+  WHEN customer_id IS NOT NULL THEN 'c:' || customer_id::text || ':' || COALESCE(window_start::text, '') || COALESCE(':' || property_id::text, '')
+  ELSE 'h:' || id::text
 END) AS stops`;
 // Under the caller's campaign row lock: every ad_budget_log writer holds the
 // same lock, so a change logged after this check can't slip in before the push.
+// Routine autonomous capacity-cron ticks (trigger = 'auto') do not block manual
+// or advisor-applied changes.
 async function assertNoChangeSince(trx, campaign, since) {
   if (!since) return;
   const recent = await trx('ad_budget_log')
     .where({ campaign_id: campaign.id })
     .where('created_at', '>=', since)
+    .where((q) => q.whereNull('trigger').orWhereNot('trigger', 'auto'))
     .first('created_at');
   if (recent) {
     const err = new Error(`"${campaign.campaign_name}" had a budget or mode change in the last 7 days, so this recommendation may repeat or undo it. Make the change manually if it's still right.`);
@@ -72,9 +77,9 @@ function boundReason(reason) {
 // the cron, the admin routes and the tests share one definition.
 // ---------------------------------------------------------------------------
 const GAP_RULE_DEFAULTS = Object.freeze({
-  weekday_limit: 9,
+  weekday_limit: 12,
   saturday_limit: 8,
-  sunday_limit: 6,
+  sunday_limit: 0,
   window_days: 7,
   run_at_open: 6,
   stop_below_open: 3,
@@ -196,18 +201,25 @@ function etDateWeekday(dateStr) {
 
 class BudgetManager {
   /**
-   * The active Google campaigns the capacity rule may change: Search only
-   * (SEARCH_CAMPAIGN_TYPES). Any other active Google campaign is named in the
-   * log on every run, so a campaign the rule leaves alone is visible.
+   * The active Google campaigns the capacity rule may change: non-branded Search
+   * only (SEARCH_CAMPAIGN_TYPES, excluding is_branded / intent_type='branded').
+   * Any other active Google campaign is named in the log on every run, so a
+   * campaign the rule leaves alone is visible.
    */
   async listCapacityCampaigns() {
     const rows = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
-    const skipped = rows.filter((c) => !SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? '')));
-    if (skipped.length) {
-      const names = skipped.map((c) => `${c.campaign_name} (type ${c.campaign_type ?? 'none'})`).join(', ');
-      logger.info(`Budget adjust: left ${skipped.length} non-Search campaign(s) alone: ${names}`);
+    const isBranded = (c) => c.is_branded === true || String(c.intent_type || '').toLowerCase() === 'branded';
+    const nonSearch = rows.filter((c) => !SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? '')));
+    if (nonSearch.length) {
+      const names = nonSearch.map((c) => `${c.campaign_name} (type ${c.campaign_type ?? 'none'})`).join(', ');
+      logger.info(`Budget adjust: left ${nonSearch.length} non-Search campaign(s) alone: ${names}`);
     }
-    return rows.filter((c) => !skipped.includes(c));
+    const branded = rows.filter((c) => !nonSearch.includes(c) && isBranded(c));
+    if (branded.length) {
+      const names = branded.map((c) => c.campaign_name).join(', ');
+      logger.info(`Budget adjust: left ${branded.length} branded campaign(s) alone: ${names}`);
+    }
+    return rows.filter((c) => !nonSearch.includes(c) && !branded.includes(c));
   }
 
   /**
@@ -322,10 +334,11 @@ class BudgetManager {
 
           // Holds and the live gap rule decide from the LOCKED row, so a hold set
           // or cleared (or a mode changed) since the list read is what they see.
-          // Gate off reads no hold. A hold wins over both rules; without one, live
-          // uses the gap decision and shadow keeps the old rule's mode.
+          // An active manual hold stored on the campaign is ALWAYS honored (even if
+          // GATE_ADS_GAP_RULE is flipped off, reading zero extra tables). Without a
+          // hold, live uses the gap decision and shadow/off keep the old rule's mode.
           let transitionReason = null;
-          const held = gapMode === 'off' ? null : activeBudgetHold(campaign.metadata, todayEt);
+          const held = activeBudgetHold(campaign.metadata, todayEt);
           if (held) {
             newMode = held.mode;
             transitionReason = holdLogReason(held);
@@ -402,8 +415,20 @@ class BudgetManager {
           // re-push the same budget every run. NULL current (never synced,
           // never set) is skipped — the daily sync populates it within a day.
           const expectedBudget = this.calculateBudget(campaign, campaign.budget_mode);
+          const expectedCents = Math.round(expectedBudget * 100);
           const currentCents = Math.round(parseFloat(campaign.daily_budget_current) * 100);
-          if (Number.isFinite(currentCents) && currentCents !== Math.round(expectedBudget * 100)) {
+          const stopCents = Math.round(this.calculateBudget(campaign, 'stop') * 100);
+          // W01: when the owner manually lowers a live Google Ads budget while in 'base'
+          // mode (currentCents < expectedCents and strictly above the 1% stop floor), do
+          // NOT push it back up — only heal a failed restore that is still stuck at/below
+          // the 1% stop throttle floor.
+          const isManualLowerInBase = campaign.budget_mode === 'base'
+            && Number.isFinite(currentCents)
+            && currentCents < expectedCents
+            && currentCents > stopCents;
+          if (isManualLowerInBase) {
+            logger.info(`Budget: ${campaign.campaign_name} live Google budget ($${(currentCents / 100).toFixed(2)}) is below base ($${expectedBudget.toFixed(2)}) in base mode — respecting lower live budget`);
+          } else if (Number.isFinite(currentCents) && currentCents !== expectedCents) {
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
@@ -500,31 +525,50 @@ class BudgetManager {
    * money on leads the crew cannot take. A customer's windowless rows on one day
    * count as one stop.
    */
+  /** Company blackout / holiday closure dates in [start, end] (fail-open empty set). */
+  async getBlackoutDatesForWindow(start, end) {
+    try {
+      const { getBlackoutDates } = require('../scheduling/blackout-dates');
+      const dates = await getBlackoutDates(start, end, db);
+      return dates instanceof Set ? dates : new Set(dates || []);
+    } catch {
+      return new Set();
+    }
+  }
+
   async getGapWindow(now, settings) {
     const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
     const dates = [];
     for (let i = 1; i <= settings.window_days; i += 1) dates.push(etDateString(addETDays(now, i)));
     const start = dates[0];
     const end = dates[dates.length - 1];
-    const rows = await db('scheduled_services')
-      .whereBetween('scheduled_date', [start, end])
-      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-      .where(function () {
-        this.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', db.fn.now());
-      })
-      .groupBy('scheduled_date')
-      .select(db.raw('scheduled_date::text AS day'))
-      .select(db.raw(GAP_STOPS_SQL));
+    const [rows, blackouts] = await Promise.all([
+      db('scheduled_services')
+        .whereBetween('scheduled_date', [start, end])
+        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+        .where(function () {
+          // A claimed booking (customer_id IS NOT NULL) counts even if reservation_expires_at
+          // was left populated; an unclaimed hold counts only while not expired.
+          this.whereNotNull('customer_id')
+            .orWhereNull('reservation_expires_at')
+            .orWhere('reservation_expires_at', '>', db.fn.now());
+        })
+        .groupBy('scheduled_date')
+        .select(db.raw('scheduled_date::text AS day'))
+        .select(db.raw(GAP_STOPS_SQL)),
+      this.getBlackoutDatesForWindow(start, end),
+    ]);
     const stopsByDay = new Map(rows.map((r) => [String(r.day).slice(0, 10), parseInt(r.stops, 10) || 0]));
 
     const days = [];
     for (const date of dates) {
       const weekday = etDateWeekday(date);
       const perTech = weekday === 6 ? settings.saturday_limit : weekday === 0 ? settings.sunday_limit : settings.weekday_limit;
-      const techs = await this.getTechCountForArea('general', date, { workDays: true });
+      const closed = blackouts.has(date);
+      const techs = closed ? 0 : await this.getTechCountForArea('general', date, { workDays: true });
       const stops = stopsByDay.get(date) || 0;
-      const limit = techs * perTech;
-      days.push({ date, stops, techs, limit, open: Math.max(0, limit - stops) });
+      const limit = closed ? 0 : techs * perTech;
+      days.push({ date, stops, techs, limit, open: Math.max(0, limit - stops), ...(closed ? { blackout: true } : {}) });
     }
     const sum = (k) => days.reduce((n, d) => n + d[k], 0);
     return { window_start: start, window_end: end, days, total_open: sum('open'), total_limit: sum('limit'), total_stops: sum('stops') };

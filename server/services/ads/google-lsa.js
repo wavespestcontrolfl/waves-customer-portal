@@ -240,14 +240,11 @@ function rebuildWindow(now = new Date()) {
 // campaign Google removed reads paused, and its last days of cost still come in.
 const CHANNEL_FILTER = "campaign.advertising_channel_type = 'LOCAL_SERVICES'";
 
-// Google can also run Local Services inside a Performance Max campaign. Its
-// leads are in local_services_lead like any other, but API v23 has no field
-// that tells such a campaign from a normal Performance Max one, so its cost
-// cannot be read here. Leads of both kinds against the cost of one would show
-// a cost per lead that is too low, so the run stops before it writes: in
-// readCampaigns for a campaign that is not removed, and in readDays for a
-// removed one that still has numbers inside the window.
-const PERFORMANCE_MAX_REFUSAL = 'this sync reads standalone Local Services campaigns only, so nothing was written';
+// Google can also run Local Services alongside a Performance Max campaign. We
+// still sync standalone LOCAL_SERVICES campaigns and leads (never bricking the
+// sync), while logging a clear warning and flagging `performanceMaxPresent` so
+// operators know CPL may include leads attributed from Performance Max.
+const PERFORMANCE_MAX_WARNING = 'standalone Local Services metrics still synced; Performance Max cost is excluded';
 
 async function readCampaigns(customer) {
   const all = await customer.query(`
@@ -262,17 +259,17 @@ async function readCampaigns(customer) {
   }
   const performanceMax = all.filter((r) => PERFORMANCE_MAX.has(r.campaign?.advertising_channel_type) && !REMOVED.has(r.campaign?.status));
   if (performanceMax.length) {
-    throw new Error(`the account has ${performanceMax.length} Performance Max campaign(s); ${PERFORMANCE_MAX_REFUSAL}`);
+    logger.warn(`[google-lsa] account has ${performanceMax.length} active/paused Performance Max campaign(s); ${PERFORMANCE_MAX_WARNING}`);
   }
-  return all.filter((r) => LOCAL_SERVICES.has(r.campaign?.advertising_channel_type));
+  const lsaCampaigns = all.filter((r) => LOCAL_SERVICES.has(r.campaign?.advertising_channel_type));
+  lsaCampaigns.performanceMaxPresent = performanceMax.length > 0;
+  return lsaCampaigns;
 }
 
 // The account's cost and leads per day inside the window.
 async function readDays(customer, { since, until }) {
-  // Google leaves out a campaign-day on which every selected metric is zero, so
-  // any row here is a Performance Max campaign (removed ones included) that ran
-  // inside the window. Impressions and clicks are selected too: a day that
-  // served at no cost can still have brought a lead.
+  // Check whether a Performance Max campaign ran inside the window (warn only,
+  // never abort the standalone Local Services sync).
   const performanceMaxDays = await customer.query(`
     SELECT campaign.id, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros
     FROM campaign
@@ -281,7 +278,7 @@ async function readDays(customer, { since, until }) {
     LIMIT 1
   `);
   if (performanceMaxDays.length) {
-    throw new Error(`a Performance Max campaign ran in the account between ${since} and ${until}; ${PERFORMANCE_MAX_REFUSAL}`);
+    logger.warn(`[google-lsa] a Performance Max campaign ran in the account between ${since} and ${until}; ${PERFORMANCE_MAX_WARNING}`);
   }
 
   const metricRows = await customer.query(`
