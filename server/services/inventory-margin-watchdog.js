@@ -198,54 +198,64 @@ function buildWatchdogDetail({ spikes, lowMargins, missingCogs }) {
   return parts.join(' ');
 }
 
-async function runInventoryMarginWatchdog({ deps = {}, now = new Date() } = {}) {
-  const enabled = deps.isLive
-    ? deps.isLive()
-    : require('../config/feature-gates').inventoryMarginWatchdogLive?.() === true;
-  if (!enabled) return { skipped: true, reason: 'gate_off' };
+function defaultWatchdogDeps(overrides = {}) {
+  return {
+    isLive: () => require('../config/feature-gates').inventoryMarginWatchdogLive?.() === true,
+    db,
+    loadInventoryCostRows: (...a) => require('./estimate-pricing-audit').loadInventoryCostRows(...a),
+    inventoryCostFromRows: (...a) => require('./estimate-pricing-audit').inventoryCostFromRows(...a),
+    generateEstimate: (...a) => require('./pricing-engine/estimate-engine').generateEstimate(...a),
+    laborRate: require('./pricing-engine/constants').GLOBAL?.LABOR_RATE || 35,
+    raiseAdminAlert: (...a) => require('./admin-alert-compose').raiseAdminAlert(...a),
+    closeAdminAlertKeys: (...a) => require('./admin-alert-episodes').closeAdminAlertKeys(...a),
+    ...overrides,
+  };
+}
 
-  const dbc = deps.db || db;
-  const loadInventoryCostRows = deps.loadInventoryCostRows || require('./estimate-pricing-audit').loadInventoryCostRows;
-  const inventoryCostFromRows = deps.inventoryCostFromRows || require('./estimate-pricing-audit').inventoryCostFromRows;
-  const generateEstimate = deps.generateEstimate || require('./pricing-engine/estimate-engine').generateEstimate;
-  const laborRate = deps.laborRate ?? (require('./pricing-engine/constants').GLOBAL?.LABOR_RATE || 35);
-  const raiseAdminAlert = deps.raiseAdminAlert || require('./admin-alert-compose').raiseAdminAlert;
-  const closeAdminAlertKeys = deps.closeAdminAlertKeys || require('./admin-alert-episodes').closeAdminAlertKeys;
+function buildWatchdogWhy({ spikes, lowMargins, missingCogs }) {
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  if (lowMargins.length) return `${plural(lowMargins.length, 'service')} dropped below 35% modeled gross margin.`;
+  if (spikes.length) return `${plural(spikes.length, 'active product')} saw an approved vendor cost jump over 10%.`;
+  return `${plural(missingCogs.length, 'service')} have missing or incomplete material cost mappings.`;
+}
+
+async function runInventoryMarginWatchdog({ deps: overrides = {}, now = new Date() } = {}) {
+  const deps = defaultWatchdogDeps(overrides);
+  if (!deps.isLive()) return { skipped: true, reason: 'gate_off' };
 
   const [catalogRows, approvedVendorRows, inventory] = await Promise.all([
-    dbc('products_catalog')
+    deps.db('products_catalog')
       .where('active', true)
       .whereNotNull('best_price')
       .select('id', 'name', 'active', 'best_price', 'unit_size_oz'),
-    eligibleVendorPricing(dbc('vendor_pricing'))
+    eligibleVendorPricing(deps.db('vendor_pricing'))
       .select('vendor_pricing.id', 'vendor_pricing.product_id', 'vendor_pricing.price_amount', 'vendor_pricing.price'),
-    loadInventoryCostRows(),
+    deps.loadInventoryCostRows(),
   ]);
 
   const spikes = detectVendorCostSpikes(catalogRows, approvedVendorRows);
   const { lowMargins, missingCogs } = inventory?.available
-    ? evaluateServiceMargins({ inventory, generateEstimate, inventoryCostFromRows, laborRate })
+    ? evaluateServiceMargins({
+      inventory,
+      generateEstimate: deps.generateEstimate,
+      inventoryCostFromRows: deps.inventoryCostFromRows,
+      laborRate: deps.laborRate,
+    })
     : { lowMargins: [], missingCogs: [] };
 
   const totalFindings = spikes.length + lowMargins.length + missingCogs.length;
   if (totalFindings === 0) {
-    await closeAdminAlertKeys(dbc, [WATCHDOG_ALERT_KEY], 'margin_watchdog_clean', {
+    await deps.closeAdminAlertKeys(deps.db, [WATCHDOG_ALERT_KEY], 'margin_watchdog_clean', {
       now,
       resolution: 'Inventory cost spikes and modeled service margins are within target bounds',
     });
     return { skipped: false, alerted: false, spikes, lowMargins, missingCogs };
   }
 
-  const why = lowMargins.length
-    ? `${lowMargins.length} service${lowMargins.length === 1 ? '' : 's'} dropped below 35% modeled gross margin.`
-    : spikes.length
-      ? `${spikes.length} active product${spikes.length === 1 ? '' : 's'} saw an approved vendor cost jump over 10%.`
-      : `${missingCogs.length} service${missingCogs.length === 1 ? '' : 's'} have missing or incomplete material cost mappings.`;
-
-  await raiseAdminAlert('system', {
+  await deps.raiseAdminAlert('system', {
     area: 'Inventory',
     action: 'review vendor cost spikes and service margins',
-    why,
+    why: buildWatchdogWhy({ spikes, lowMargins, missingCogs }),
     severity: 'needs-you',
     link: '/admin/inventory',
     subject: { type: 'check', id: WATCHDOG_ALERT_KEY },
