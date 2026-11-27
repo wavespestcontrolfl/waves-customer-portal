@@ -15,9 +15,13 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 // Rows in purchase_receipt_lines, as { vendor, order_number, shipment_key, line_no, email_id }.
-const mockState = { rows: [] };
+const mockState = { rows: [], alert: null };
 jest.mock('../models/db', () => {
   const fn = jest.fn((table) => {
+    if (table === 'notifications') {
+      const q = { where: () => q, whereRaw: () => q, orderBy: () => q, first: async () => mockState.alert };
+      return q;
+    }
     if (table !== 'purchase_receipt_lines') throw new Error(`unexpected table ${table}`);
     let matched = [];
     const builder = {
@@ -32,7 +36,7 @@ jest.mock('../models/db', () => {
   fn.transaction = async (run) => run('trx');
   return fn;
 });
-const mockEpisodes = { openAdminAlertMetadata: jest.fn(), raiseAdminAlertWithReopen: jest.fn(async () => ({})), closeAdminAlertKeys: jest.fn(async () => 1) };
+const mockEpisodes = { raiseAdminAlertWithReopen: jest.fn(async () => ({})), closeAdminAlertKeys: jest.fn(async () => 1) };
 jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
 
 const { reconcileFailedLineAlert, failedLineEntry, failedEmailEntry, DEDUPE_KEY } = require('../services/purchase-receipts/failed-lines-alert');
@@ -43,11 +47,14 @@ const entry = (n, receivedAt = '2026-11-25T15:00:00Z') => failedLineEntry({
 });
 const emailEntry = (id = 's1', receivedAt = '2026-11-25T15:00:00Z') => failedEmailEntry({ vendor: 'siteone', email: { id, received_at: receivedAt } });
 const rowFor = (e, extra = {}) => ({ vendor: e.vendor, order_number: e.orderNumber, shipment_key: e.shipmentKey, line_no: e.lineNo, raw_title: 'other', email_id: 'x', ...extra });
-const openAlert = (...failedLines) => mockEpisodes.openAdminAlertMetadata.mockResolvedValue(failedLines.length ? [{ failedLines, itemKeys: failedLines.map((l) => l.key) }] : []);
+const openAlert = (...failedLines) => { mockState.alert = failedLines.length ? { metadata: { failedLines, itemKeys: failedLines.map((l) => l.key) }, done_at: null } : null; };
+// A row staff pressed Done on: it still holds its entries in metadata.
+const doneAlert = (...failedLines) => { openAlert(...failedLines); mockState.alert.done_at = '2026-11-26T12:00:00Z'; };
 const raised = () => mockEpisodes.raiseAdminAlertWithReopen.mock.calls[0];
 
 beforeEach(() => {
   mockState.rows = [];
+  mockState.alert = null;
   Object.values(mockEpisodes).forEach((m) => m.mockClear());
   openAlert();
 });
@@ -161,9 +168,22 @@ describe('what keeps and what drops an entry', () => {
     expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 
-  test('a copy that numbered the lines differently still matches by product text', async () => {
+  test('a copy that numbered the lines differently still matches by product text that occurs once on the invoice', async () => {
     const failed = entry(1);
     mockState.rows = [rowFor(failed, { line_no: 7, raw_title: 'PRODUCT 1 50 lb. bag', email_id: 'copy-b' })];
+    expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(0);
+  });
+
+  test('product text that occurs twice on the invoice proves nothing: the failed line stays', async () => {
+    const failed = entry(1);
+    mockState.rows = [
+      rowFor(failed, { line_no: 7, raw_title: 'Product 1 50 LB. BAG', email_id: 'copy-b' }),
+      rowFor(failed, { line_no: 8, raw_title: 'product 1 50 lb bag', email_id: 'copy-b' }),
+    ];
+    expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(1);
+    // ...but the exact line number still clears it.
+    mockState.rows.push(rowFor(failed, { line_no: failed.lineNo, raw_title: 'Other', email_id: 'copy-b' }));
+    mockEpisodes.raiseAdminAlertWithReopen.mockClear();
     expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(0);
   });
 
@@ -194,10 +214,54 @@ describe('an invoice email that could not be read', () => {
     expect(mockEpisodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
   });
 
+  test('an older email\'s rows under the same invoice never clear a newer email that could not be read', async () => {
+    const e = emailEntry('s9');
+    openAlert(e);
+    mockState.rows = [{ vendor: 'siteone', order_number: 'INV1', shipment_key: 'INV1', line_no: 1, raw_title: 'Product 1', email_id: 's2-older' }];
+    expect(await reconcileFailedLineAlert({ failed: [e], settled: [] })).toBe(1);
+    expect(raised()[3].metadata.itemKeys).toEqual(['email|siteone|s9']);
+  });
+
   test('a purchase_receipt_lines row from that email also resolves it', async () => {
     const e = emailEntry('s7');
     openAlert(e);
     mockState.rows = [{ vendor: 'siteone', order_number: 'INV1', shipment_key: 'INV1', line_no: 1, email_id: 's7' }];
     expect(await reconcileFailedLineAlert({ failed: [], settled: [] })).toBe(0);
+  });
+});
+
+describe('after staff pressed Done', () => {
+  test('a new failure reopens the row listing only the new entry; handled ones are kept out of the list and count', async () => {
+    const handled = [entry(1), entry(2)];
+    doneAlert(...handled);
+    const fresh = entry(3);
+    expect(await reconcileFailedLineAlert({ failed: [...handled, fresh], settled: [] })).toBe(3);
+    const [, headline, , opts] = raised();
+    expect(headline).toBe('Inventory — check 1 failed receipt item');
+    expect(opts.detail).toContain('Product 3');
+    expect(opts.detail).not.toMatch(/Product [12] /);
+    expect(opts.ringOnRefresh(null, { itemKeys: handled.map((l) => l.key) })).toBe(true);
+    expect(opts.metadata).toMatchObject({ handledKeys: handled.map((l) => l.key), count: 1 });
+    expect(opts.metadata.itemKeys).toEqual([...handled, fresh].map((l) => l.key));
+  });
+
+  test('the handled set survives later runs while the row is open again', async () => {
+    const [a, b] = [entry(1), entry(2)];
+    openAlert(a, b);
+    mockState.alert.metadata.handledKeys = [a.key];
+    await reconcileFailedLineAlert({ failed: [a, b], settled: [] });
+    expect(raised()[3].detail).toContain('Product 2');
+    expect(raised()[3].detail).not.toContain('Product 1 ');
+  });
+
+  test('nothing new since Done writes nothing and keeps the row done; resolving them all closes it', async () => {
+    const a = entry(1);
+    doneAlert(a);
+    expect(await reconcileFailedLineAlert({ failed: [a], settled: [] })).toBe(1);
+    expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+    expect(mockEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    mockState.rows = [rowFor(a)];
+    expect(await reconcileFailedLineAlert({ failed: [], settled: [] })).toBe(0);
+    expect(mockEpisodes.closeAdminAlertKeys).toHaveBeenCalledTimes(1);
   });
 });

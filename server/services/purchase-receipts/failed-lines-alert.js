@@ -61,27 +61,31 @@ function failedEmailEntry({ vendor, email }) {
 
 // A line's identity across copies of one invoice. The sweep keys a SiteOne invoice by its number whichever email
 // carries it (siteOneInvoiceLines: the first copy handled owns the shipment), so a row from ANY email under the same
-// vendor and shipment_key counts, matched by line number or by the product text (a copy that numbered the lines differently).
+// vendor and shipment_key counts, matched by line number, or by product text only when that text occurs exactly once
+// among the invoice's rows (a copy that numbered the lines differently); a repeated text proves nothing about which line it was.
 const byLine = (vendor, shipmentKey, lineNo) => `${vendor}|${shipmentKey}|line|${lineNo}`;
 const byTitle = (vendor, shipmentKey, title) => `${vendor}|${shipmentKey}|title|${normalizeTitle(title)}`;
 
-// Keys that already have a purchase_receipt_lines row: a line by its identity above, an email by any row it wrote.
+// Keys that already have a purchase_receipt_lines row: a line by its identity above; an email ONLY by a row whose
+// source email is that email (an older email's rows under the same invoice number say nothing about a newer read).
 async function recordedKeys(entries, conn) {
   const recorded = new Set();
   const lines = entries.filter((entry) => entry.kind !== 'email');
   const shipments = [...new Set(lines.map((entry) => entry.shipmentKey))];
   const identities = new Set();
+  const titleCounts = new Map();
   for (let i = 0; i < shipments.length; i += ROW_CHECK_CHUNK) {
     const rows = await conn('purchase_receipt_lines').whereIn('shipment_key', shipments.slice(i, i + ROW_CHECK_CHUNK))
       .select('vendor', 'shipment_key', 'line_no', 'raw_title');
     for (const row of rows) {
       identities.add(byLine(row.vendor, row.shipment_key, row.line_no));
-      identities.add(byTitle(row.vendor, row.shipment_key, row.raw_title));
+      const title = byTitle(row.vendor, row.shipment_key, row.raw_title);
+      titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
     }
   }
   for (const entry of lines) {
     if (identities.has(byLine(entry.vendor, entry.shipmentKey, entry.lineNo))
-      || (entry.titleKey && identities.has(byTitle(entry.vendor, entry.shipmentKey, entry.titleKey)))) recorded.add(entry.key);
+      || (entry.titleKey && titleCounts.get(byTitle(entry.vendor, entry.shipmentKey, entry.titleKey)) === 1)) recorded.add(entry.key);
   }
   const emails = entries.filter((entry) => entry.kind === 'email');
   if (emails.length) {
@@ -136,6 +140,17 @@ function ringOnNewLine(keys) {
   };
 }
 
+// The open alert row for the key, newest first: its metadata and whether a person closed it (done_at set;
+// an auto-cleared row is a closed episode and carries nothing).
+async function standingAlert(conn) {
+  const row = await conn('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [DEDUPE_KEY])
+    .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
+    .orderBy('created_at', 'desc').first('metadata', 'done_at');
+  const meta = (typeof row?.metadata === 'string' ? JSON.parse(row.metadata) : row?.metadata) || {};
+  return { prior: Array.isArray(meta.failedLines) ? meta.failedLines : [], handled: new Set((meta.handledKeys || []).map(String)), done: Boolean(row?.done_at) };
+}
+
 /**
  * @param {{failed: object[], settled: {key: string}[]}} params failed: this run's failedLines bucket;
  *   settled: keys this run recorded an outcome for without throwing
@@ -143,8 +158,10 @@ function ringOnNewLine(keys) {
  */
 async function reconcileFailedLineAlert({ failed = [], settled = [] }, conn = db) {
   const episodes = require('../admin-alert-episodes');
-  const prior = (await episodes.openAdminAlertMetadata(conn, DEDUPE_KEY))
-    .flatMap((meta) => (Array.isArray(meta.failedLines) ? meta.failedLines : []));
+  const { prior, handled, done } = await standingAlert(conn);
+  // Pressing Done says every entry the row held was dealt with: they are never listed again, even when a NEW entry
+  // reopens the row, so staff do not add the same stock twice.
+  if (done) prior.forEach((entry) => handled.add(entry.key));
   if (!failed.length && !prior.length) return 0;
   const open = await openFailedLines({ failed, settled, prior, conn });
   if (!open.length) {
@@ -154,8 +171,12 @@ async function reconcileFailedLineAlert({ failed = [], settled = [] }, conn = db
     }));
     return 0;
   }
-  const { alert, detail } = composeFailedLinesAlert(open);
   const keys = open.map((entry) => entry.key);
+  const handledKeys = keys.filter((key) => handled.has(key));
+  const active = open.filter((entry) => !handled.has(entry.key));
+  // Everything still open was handled by staff and nothing new failed: leave the row exactly as it is (done).
+  if (!active.length) return open.length;
+  const { alert, detail } = composeFailedLinesAlert(active);
   await episodes.raiseAdminAlertWithReopen('inventory', alert.headline, alert.why, {
     dedupeKey: DEDUPE_KEY,
     bell: true,
@@ -164,7 +185,7 @@ async function reconcileFailedLineAlert({ failed = [], settled = [] }, conn = db
     bumpOnRefresh: true,
     detail,
     link: alert.link,
-    metadata: { ...alert.metadata, failedLines: open, itemKeys: keys, count: open.length },
+    metadata: { ...alert.metadata, failedLines: open, itemKeys: keys, handledKeys, count: active.length },
   });
   return open.length;
 }
