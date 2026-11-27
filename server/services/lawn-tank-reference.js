@@ -68,10 +68,14 @@ function mixFields(row, percent) {
   return { mixWith, applyAlone: row?.gates?.applyAlone === true, surfactantNote };
 }
 
-// Passes that put the label volume down with a sprayer that puts out less: a test output is rounded (1.33 is 4/3), so a ratio
-// within 2% of a whole number takes that number (4 / 1.33 = 3 passes). A sprayer that puts out more gets no pass count.
-const PASS_ROUNDING = 0.02;
-const passesFor = (label, tested) => (tested < label ? Math.ceil(label / tested - PASS_ROUNDING) : null);
+// Whole passes that put the label volume down with a sprayer that puts out less: only when that many passes land within 5% of the
+// label volume (4 on 1.33 = 3 passes, 3.99 gal). Otherwise (2 on 1.33: two passes put down 2.66) no pass count, and a sprayer that
+// puts out more never gets one.
+const PASS_TOLERANCE = 0.05;
+function passesFor(label, tested) {
+  const passes = Math.round(label / tested);
+  return tested < label && passes >= 2 && Math.abs(passes * tested - label) <= PASS_TOLERANCE * label ? passes : null;
+}
 
 // Each sprayer whose tested output differs from a volume the program fixes (Arena at 4 gal per 1,000 sq ft on a FlowZone tested
 // at 1.33), with the use it applies to (null = the whole line): the fill stays; the card says how to reach the label volume.
@@ -174,6 +178,14 @@ function goesInBigTank(product, item, row) {
   return row ? row.applicationMode !== 'spot' : item.role === 'base' && !item.conditional;
 }
 
+// A card with no tank fill: a SKIP or inspection line (the plan's INSPECTION_ONLY scope, "IF soil K >80 ppm: SKIP K-Flow") puts
+// nothing down; a granular product goes on by spreader or hand shaker at its rate.
+function noTankCard(base, { product, item, rate, percent }) {
+  if (item.scope === 'INSPECTION_ONLY') return { ...base, skipped: true };
+  if (!percent && isSpreaderProduct(product, rate.rateUnit)) return { ...base, application: 'spreader', applicator: granularApplicator(item.raw) };
+  return null;
+}
+
 /**
  * The reference amounts of one matched line. `rig` is the selected calibration (the big tank; a backpack picked as the rig gives
  * no 100 gal or full-tank fill), `backpack` the FlowZone's;
@@ -191,7 +203,8 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
     ratePer1000: rate.ratePer1000, rateUnit: rate.rateUnit, rateSource: recipe.lineRate ? 'recipe_line_rate' : rate.rateSource,
     concentrationPercent: percent, planState: planState || null, ...mixFields(row, percent), ...none,
   };
-  if (!percent && isSpreaderProduct(product, rate.rateUnit)) return { ...base, application: 'spreader', applicator: granularApplicator(item.raw) };
+  const noTank = noTankCard(base, { product, item, rate, percent });
+  if (noTank) return noTank;
   const [lineCarrier, lineSource] = fixedCarrier(item, row);
   // A backpack picked as the rig is not the big tank: no 100 gal or full-tank fill, whatever sets the carrier.
   const tankRig = rig?.system_type === 'backpack' ? null : rig;

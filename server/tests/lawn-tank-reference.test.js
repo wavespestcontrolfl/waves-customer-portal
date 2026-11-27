@@ -72,12 +72,17 @@ describe('a several-use line and a hand-shaker bait', () => {
     expect(ref).toMatchObject({ fixedCarrierGalPer1000: null, backpack4Gal: { amount: 1.504, carrierGalPer1000: 1.33, carrierSource: 'calibration' } });
     expect(ref.useFills).toEqual([expect.objectContaining({ use: 'mapped large patch', carrierGalPer1000: 2, backpack4Gal: expect.objectContaining({ amount: 1, carrierSource: 'line' }) })]);
     // The volume check names the use it applies to; the general fill on the sprayer's own volume gets none.
-    expect(ref.volumeChecks).toEqual([{ use: 'mapped large patch', sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 2, testedGalPer1000: 1.33, passes: 2 }]);
+    expect(ref.volumeChecks).toEqual([{ use: 'mapped large patch', sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null }]);
   });
   test('a one-use line keeps its volume for the whole line (Arena: the clause after it is a note)', () => {
     const arena = { name: 'Arena', default_rate_per_1000: 0.29, rate_unit: 'oz', mixing_order_category: 'dry_wg_wdg_wp_df' };
     const ref = tankReference({ product: arena, item: conditional('Arena 50 WDG — chinch, 0.147 oz per 1,000 sq ft in 4 gal per 1,000 sq ft, recheck at 5 and 12 days; a second application no sooner than 8 weeks later'), backpack: BACKPACK });
     expect(ref).toMatchObject({ fixedCarrierGalPer1000: 4, useFills: [], backpack4Gal: { amount: 0.147 } });
+  });
+  test('a SKIP line (the plan\'s inspection-only scope) gets no fill at all', () => {
+    const kflow = { name: 'K-Flow', default_rate_per_1000: 3, rate_unit: 'fl oz', mixing_order_category: 'liquid_fertilizer', container_size: '2.5 gal' };
+    const ref = tankReference({ product: kflow, item: { raw: 'IF soil K >80 ppm: SKIP K-Flow', role: 'conditional', conditional: true, scope: 'INSPECTION_ONLY' }, rig: TANK, backpack: BACKPACK });
+    expect(ref).toMatchObject({ skipped: true, per100Gal: null, fullTank: null, backpack4Gal: null, useFills: [], volumeChecks: [], backpackMissing: false });
   });
   test('a bait the line puts down by hand shaker is a hand-shaker card; another granular is a spreader', () => {
     const advion = { name: 'Advion Insect Granule', default_rate_per_1000: 3, rate_unit: 'lb' };
@@ -97,7 +102,10 @@ describe('a fixed volume the sprayer test does not put out, and the Celsius heat
       { use: null, sprayerName: 'Fixture tank', labelGalPer1000: 4, testedGalPer1000: 2, passes: 2 },
       { use: null, sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3 },
     ]);
-    // A sprayer that puts out more than the label volume gets no pass count.
+    // Passes only when that many land within 5% of the label volume; a sprayer that puts out more never gets one.
+    const passes = (label, tested) => tankReference({ product: arena, item: { ...item, raw: `Arena — 0.147 oz per 1,000 sq ft in ${label} gal per 1,000 sq ft` },
+      rig: { ...TANK, carrier_gal_per_1000: tested } }).volumeChecks[0].passes;
+    expect([passes(4, 2), passes(4, 1.33), passes(2, 1.33), passes(2, 4)]).toEqual([2, 3, null, null]);
     expect(tankReference({ product: arena, item: { ...item, raw: 'Arena — 0.147 oz per 1,000 sq ft in 1 gal per 1,000 sq ft' }, rig: TANK }).volumeChecks)
       .toEqual([{ use: null, sprayerName: 'Fixture tank', labelGalPer1000: 1, testedGalPer1000: 2, passes: null }]);
     expect(ref).toMatchObject({ per100Gal: { amount: 3.675, carrierSource: 'line' }, backpack4Gal: { amount: 0.147 } });

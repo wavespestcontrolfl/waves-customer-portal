@@ -168,6 +168,8 @@ describe('lawn-mix response for optional products', () => {
     expect(body.items[0]).toMatchObject({
       scope: 'INSPECTION_ONLY', matched: true, product: { id: 'kflow' }, selected: false,
       jobMix: null, fullTankMix: null, plannedMix: null, plannedFullTankMix: null,
+      // The tank sheet gives the SKIP line no fill either.
+      tankAmounts: { skipped: true, per100Gal: null, fullTank: null, backpack4Gal: null, useFills: [] },
     });
     expect(body.selectedItems).toEqual([]);
     expect(body.materialCostSummary).toMatchObject({ total: 0, pricedLineCount: 0 });

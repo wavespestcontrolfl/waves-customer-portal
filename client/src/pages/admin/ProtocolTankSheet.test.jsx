@@ -248,19 +248,20 @@ describe("110-gallon tank reference", () => {
     plan.items[0].tankAmounts.volumeChecks = [
       { use: null, sprayerName: null, labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3 },
       { use: null, sprayerName: "Fixture tank", labelGalPer1000: 1, testedGalPer1000: 2, passes: null },
-      { use: "mapped large patch", sprayerName: "FlowZone fixture", labelGalPer1000: 2, testedGalPer1000: 1.33, passes: 2 },
+      { use: "mapped large patch", sprayerName: "FlowZone fixture", labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null },
     ];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("Label volume is 4 gal per 1,000. This sprayer was tested at 1.33. Make 3 passes, or slow down to reach the label volume.")).toBeInTheDocument();
       // A sprayer that puts out more is never told to make passes.
       expect(within(surface).getByText("Label volume is 1 gal per 1,000. Fixture tank was tested at 2. Speed up or use the other sprayer.")).toBeInTheDocument();
-      expect(within(surface).getByText("Mapped large patch: Label volume is 2 gal per 1,000. FlowZone fixture was tested at 1.33. Make 2 passes, or slow down to reach the label volume.")).toBeInTheDocument();
+      // No whole pass count lands near 2 on 1.33: never a pass count that over-applies.
+      expect(within(surface).getByText("Mapped large patch: Label volume is 2 gal per 1,000. FlowZone fixture was tested at 1.33. Slow down to reach 2, or use a sprayer tested at 2.")).toBeInTheDocument();
       expect(within(surface).getAllByText("12.5 oz / 110 gal").length).toBeGreaterThan(0);
     }
   });
 
-  it("the Celsius heat rule shows on the surfactant card and the Celsius card when they mix, and not when they do not", () => {
+  it("the Celsius heat rule shows on the surfactant card always, and on the Celsius card when they mix", () => {
     const plan = fixture();
     const rule = "Leave the surfactant out if it is 90°F or hotter.";
     const item = (id, name, extra, selected) => ({ selected, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "adjuvant_last" },
@@ -270,9 +271,12 @@ describe("110-gallon tank reference", () => {
     expect(within(container).getAllByText(rule)).toHaveLength(2);
     expect(within(document.querySelector(".protocol-print-sheet")).getAllByText(rule)).toHaveLength(2);
     unmount();
+    // Neither selected: the surfactant card still carries it; the Celsius card does not.
     plan.items[0].selected = false;
+    plan.items[1].selected = false;
     const again = render(<ProtocolTankSheet plan={plan} />);
-    expect(within(again.container).queryByText(rule)).not.toBeInTheDocument();
+    expect(within(again.container).getAllByText(rule)).toHaveLength(1);
+    expect(within(document.querySelector(".protocol-print-sheet")).getAllByText(rule)).toHaveLength(1);
   });
 
   it("Bermuda removal: every card names the one shared tank, the surfactant last, never the herbicides pointing at each other", () => {
@@ -288,6 +292,16 @@ describe("110-gallon tank reference", () => {
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getAllByText("Same tank: Recognition + Fusilade II + Synthetic surfactant")).toHaveLength(3);
       expect(within(surface).queryByText(/Add to the|Tank with/)).not.toBeInTheDocument();
+    }
+  });
+
+  it("a SKIP line shows no amount and no fill: its heading says Skipped this round", () => {
+    const plan = fixture();
+    plan.items[0].tankAmounts = { ...tankAmounts(), skipped: true, per100Gal: null, fullTank: null, backpack4Gal: null };
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getAllByText("Skipped this round").length).toBeGreaterThan(0);
+      expect(within(surface).queryByText(/100 gal tank|FlowZone 4 gal|No amount/)).not.toBeInTheDocument();
     }
   });
 

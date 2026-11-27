@@ -65,18 +65,23 @@ function applicationMethod(item, products) {
 // The Celsius label's heat rule (server: lawn-weed-mix.js), on the surfactant card and the Celsius card whenever the sheet tells
 // them to mix.
 function surfactantNote(item, products) {
-  if (!mixable(item)) return null;
+  // The surfactant's own card always carries it, selected or not; the Celsius card when the sheet tells them to mix.
   const own = item.tankAmounts?.surfactantNote;
-  if (own) return products.some((base) => mixable(base) && mixesInto(item, base)) ? own : null;
+  if (own) return own;
+  if (!mixable(item)) return null;
   return products.find((other) => mixable(other) && other.tankAmounts?.surfactantNote && mixesInto(other, item))?.tankAmounts.surfactantNote || null;
 }
 
 // A program volume the sprayer's test does not put out (server: the pass count), named for the use it applies to.
 const sentenceCase = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+function volumeAdvice(label, tested, passes) {
+  if (tested > label) return "Speed up or use the other sprayer.";
+  return passes ? `Make ${passes} passes, or slow down to reach the label volume.` : `Slow down to reach ${num(label)}, or use a sprayer tested at ${num(label)}.`;
+}
 const volumeText = ({ use, sprayerName, labelGalPer1000: label, testedGalPer1000: tested, passes }) => [
   use ? `${sentenceCase(use)}:` : null,
   `Label volume is ${num(label)} gal per 1,000. ${sprayerName || "This sprayer"} was tested at ${num(tested)}.`,
-  passes ? `Make ${passes} passes, or slow down to reach the label volume.` : "Speed up or use the other sprayer.",
+  volumeAdvice(label, tested, passes),
 ].filter(Boolean).join(" ");
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
@@ -103,6 +108,7 @@ function amountHeading(amounts) {
 
 function amountRows(amounts) {
   if (!amounts) return { rows: [], heading: "No amount" };
+  if (amounts.skipped) return { rows: [], heading: "Skipped this round" };
   const rate = amounts.ratePer1000 ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} per 1,000 sq ft` : null;
   if (amounts.application === "spreader") {
     return { rows: [["Rate", rate || "Rate not on file. Use the label rate."]], heading: rate ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} / 1,000 sq ft` : "No amount" };
