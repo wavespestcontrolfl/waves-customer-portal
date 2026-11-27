@@ -82,10 +82,10 @@ postgres('payroll holiday work premium', () => {
     await trx.raw('ROLLBACK TO SAVEPOINT attempt');
     return error;
   };
-  const api = async (method, path, { body, raw = false } = {}) => {
+  const api = async (method, path, { body, email = 'contact@wavespestcontrol.com', raw = false } = {}) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
-      headers: { 'content-type': 'application/json', 'x-test-admin': ADMIN_ID },
+      headers: { 'content-type': 'application/json', 'x-test-admin': ADMIN_ID, ...(email ? { 'x-test-email': email } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (raw) return { status: response.status, text: await response.text() };

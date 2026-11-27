@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const { parseETDateTime, etParts, etDateString } = require('../utils/datetime-et');
 const { validate, reject } = require('../services/staff-document-source');
 const documents = require('../services/staff-documents');
@@ -59,7 +60,7 @@ router.get('/onboarding/team', requireAdmin, handle(async (req, res) => {
 router.get('/policy-values', requireAdmin, handle(async (req, res) => {
   res.json({ revisions: await db('policy_values').orderBy('revision', 'desc') });
 }));
-router.post('/policy-values', requireAdmin, handle(async (req, res) => {
+router.post('/policy-values', requireAdmin, requireFullAccess, handle(async (req, res) => {
   validate(Joi.object({ base_revision_id: uuid.allow(null).required(), values: Joi.object().required(), effective_at: Joi.string().required() }), req.body);
   res.status(201).json(await documents.updatePolicy(req.body, instant(req.body.effective_at, true), actor(req)));
 }));
@@ -86,7 +87,7 @@ router.post('/:id/preview', requireAdmin, handle(async (req, res) => {
   validate(Joi.object({ version_id: uuid.required(), effective_at: Joi.string().required() }), req.body);
   res.json(await documents.preview(req.params.id, req.body.version_id, instant(req.body.effective_at, true), actor(req)));
 }));
-router.post('/:id/issue', requireAdmin, handle(async (req, res) => {
+router.post('/:id/issue', requireAdmin, requireFullAccess, handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   validate(Joi.object({ version_id: uuid.required(), effective_at: Joi.string().required(), preview_hash: Joi.string().hex().length(64).required() }), req.body);
   res.json({ version: await documents.publish(req.params.id, req.body.version_id, instant(req.body.effective_at, true), req.body.preview_hash, actor(req)) });

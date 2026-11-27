@@ -383,6 +383,7 @@ describe('Staff active timer serialization', () => {
     const specs = [
       { table: 'time_entries', label: 'shiftLock', firstValue: { id: 'shift-1' } },
       { table: 'time_entries', label: 'breakCheck', firstValue: undefined },
+      { table: 'time_entries', label: 'jobClose', thenValue: 0 },
       {
         table: 'time_entries',
         label: 'breakInsert',
@@ -397,10 +398,11 @@ describe('Staff active timer serialization', () => {
       'shiftLock.forUpdate',
       'shiftLock.first',
       'breakCheck.first',
+      'jobClose.update',
       'breakInsert.insert',
       'transaction.commit',
     ]);
-    expect(specs[2].insertPayload.staff_write_generation).toBe(ACTIVE_WRITE_GENERATION);
+    expect(specs[3].insertPayload.staff_write_generation).toBe(ACTIVE_WRITE_GENERATION);
   });
 
   test('keeps job replacement rollback-safe when the generation-fenced insert fails', async () => {
@@ -702,6 +704,7 @@ describe('Staff active timer serialization', () => {
       { table: 'payroll_runs as r', label: 'closedWeek', firstValue: undefined },
       { table: 'time_weekly_summary', label: 'approvedWeek', firstValue: undefined },
       { table: 'time_entries', label: 'entryUpdate', returningValue: [saved] },
+      { table: 'audit_log', label: 'editAudit', returningValue: [{ id: 'audit-1' }] },
       { table: 'time_entries', label: 'dailyEntries', thenValue: [saved] },
       { table: 'time_entry_daily_summary', label: 'dailyUpsert', returningValue: [daily] },
       { table: 'time_entry_daily_summary', label: 'weeklyDailies', thenValue: [daily] },
@@ -779,6 +782,7 @@ describe('Staff active timer serialization', () => {
       { table: 'time_entries', label: 'entryUpdate', returningValue: [saved] },
       { table: 'time_entries', label: 'remainingDispute', firstValue: undefined },
       { table: 'time_entry_daily_summary', label: 'dayResolve', thenValue: 1 },
+      { table: 'audit_log', label: 'editAudit', returningValue: [{ id: 'audit-1' }] },
       { table: 'time_entries', label: 'dailyEntries', thenValue: [saved] },
       { table: 'time_entry_daily_summary', label: 'dailyUpsert', returningValue: [daily] },
       { table: 'time_entry_daily_summary', label: 'weeklyDailies', thenValue: [daily] },

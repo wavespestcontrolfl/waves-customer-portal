@@ -4577,7 +4577,7 @@ export function TeamTab({ showToast }) {
                         Hired
                       </button>
                     )}{" "}
-                    {isAdmin && (
+                    {isAdmin && t.hire_action !== "hire" && (
                       <button
                         onClick={(event) => {
                           if (t.active) {
@@ -4588,7 +4588,7 @@ export function TeamTab({ showToast }) {
                             handleActivate(t);
                           }
                         }}
-                        title={t.employment_status === "prospective" ? "Marks this hire as started. They set their password with Forgot password on the admin login (needs their email on this row)." : undefined}
+                        title={t.employment_status === "prospective" ? "Marks this hire as started. They sign in with their linked Google account or set a password via Forgot password on the admin login." : undefined}
                         style={{
                           padding: "4px 10px",
                           background: "transparent",

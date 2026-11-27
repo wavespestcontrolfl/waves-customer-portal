@@ -100,7 +100,7 @@ postgres('payroll time-off bank', () => {
     await trx.raw('ROLLBACK TO SAVEPOINT attempt');
     return error;
   };
-  const api = async (method, path, { body, email } = {}) => {
+  const api = async (method, path, { body, email = 'contact@wavespestcontrol.com' } = {}) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
       headers: { 'content-type': 'application/json', 'x-test-admin': ADMIN_ID, ...(email ? { 'x-test-email': email } : {}) },

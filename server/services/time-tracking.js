@@ -329,16 +329,16 @@ async function startJob(technicianId, jobId, { lat, lng, scopeReq = null } = {})
         // running timer — so exactly one of the two wins. Before any
         // time_entries write, so the technician's current timer is untouched.
         if (job.status === 'completed') {
-          throw Object.assign(new Error('This visit is already completed.'), { status: 409, code: 'job_already_completed' });
+          throw Object.assign(staffTimeHttpError(409, 'This visit is already completed.'), { status: 409, code: 'job_already_completed' });
         }
         // A live street-level address hold cannot be worked yet: refuse before any timer is created
         // (the same 409 the status routes give). Re-read under the row lock just taken.
         if (await require('./street-level-hold').isStreetLevelHoldVisit(jobId, trx)) {
-          throw Object.assign(new Error(require('./street-level-hold').HOLD_REFUSAL), { status: 409, code: 'street_level_hold' });
+          throw Object.assign(staffTimeHttpError(409, require('./street-level-hold').HOLD_REFUSAL), { status: 409, code: 'street_level_hold' });
         }
         // GATE_VISIT_HOLD: a visit the office put on hold is off the route; refuse before any timer write (same row lock).
         if (await require('./visit-hold').isVisitHeld(jobId, trx)) {
-          throw Object.assign(new Error('That visit is on hold: the customer will call.'), { status: 409, code: 'VISIT_ON_HOLD' });
+          throw Object.assign(staffTimeHttpError(409, 'That visit is on hold: the customer will call.'), { status: 409, code: 'VISIT_ON_HOLD' });
         }
       }
     } else if (scopeReq && require('./technician-visit-scope').isTechnicianRequest(scopeReq)) {
@@ -346,13 +346,14 @@ async function startJob(technicianId, jobId, { lat, lng, scopeReq = null } = {})
       // null or empty job id would skip the assignment lookup above, close
       // the current job entry below and insert an unowned one. Same miss as
       // a visit that is not theirs.
-      throw Object.assign(new Error('Job not found'), { status: 404, code: 'job_not_assigned' });
+      throw Object.assign(staffTimeHttpError(404, 'Job not found'), { status: 404, code: 'job_not_assigned' });
     }
 
-    // Close any other active job entry.
+    // Close any other active job or break entry so a tech cannot be on a job and on break at once.
     const now = new Date();
     await trx('time_entries')
-      .where({ technician_id: technicianId, entry_type: 'job', status: 'active' })
+      .where({ technician_id: technicianId, status: 'active' })
+      .whereIn('entry_type', ['job', 'break'])
       .update({
         status: 'completed',
         clock_out: now,
@@ -428,12 +429,23 @@ async function startBreak(technicianId) {
       .first('id');
     if (existingBreak) throw new Error('Already on break. End the current break first.');
 
+    // End any active job timer before starting a break so job and break timers never run in parallel.
+    const now = new Date();
+    await trx('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'job', status: 'active' })
+      .update({
+        status: 'completed',
+        clock_out: now,
+        duration_minutes: completedDurationSql(trx, now),
+        updated_at: now,
+      });
+
     const [created] = await trx('time_entries')
       .insert({
         technician_id: technicianId,
         entry_type: 'break',
         status: 'active',
-        clock_in: new Date(),
+        clock_in: now,
         source: 'app',
         staff_write_generation: ACTIVE_WRITE_GENERATION,
       })
@@ -573,6 +585,9 @@ function autoCloseReviewedBy(entry, updates, editedBy) {
   return { auto_close_reviewed_at: new Date(), auto_close_reviewed_by: editedBy || null };
 }
 
+const ALLOWED_ENTRY_TYPES = new Set(['shift', 'job', 'break', 'drive']);
+const MAX_EDITED_ENTRY_MINUTES = 24 * 60;
+
 /**
  * Admin edit an entry — preserves originals.
  */
@@ -580,6 +595,22 @@ async function adminEditEntry(entryId, {
   clock_in, clock_out, entry_type, notes, edit_reason, edited_by,
   target_duration_minutes, expected_updated_at,
 }) {
+  if (entry_type !== undefined && entry_type !== null && !ALLOWED_ENTRY_TYPES.has(entry_type)) {
+    throw staffTimeHttpError(400, 'entry_type must be shift, job, break, or drive.');
+  }
+  if (edit_reason !== undefined && (typeof edit_reason !== 'string' || !edit_reason.trim())) {
+    throw staffTimeHttpError(400, 'edit_reason cannot be empty.');
+  }
+  const normalizedReason = typeof edit_reason === 'string' ? edit_reason.trim() : edit_reason;
+  const parsedClockIn = clock_in ? new Date(clock_in) : null;
+  if (clock_in && Number.isNaN(parsedClockIn.getTime())) {
+    throw staffTimeHttpError(400, 'clock_in must be a valid date and time.');
+  }
+  const parsedClockOut = clock_out ? new Date(clock_out) : null;
+  if (clock_out && Number.isNaN(parsedClockOut.getTime())) {
+    throw staffTimeHttpError(400, 'clock_out must be a valid date and time.');
+  }
+
   const updated = await db.transaction(async (trx) => {
     // Read without a row lock first so we can acquire the advisory week locks
     // in the same order as approval. The locked re-read below detects a move
@@ -587,8 +618,8 @@ async function adminEditEntry(entryId, {
     const preview = await trx('time_entries').where({ id: entryId }).first();
     if (!preview) throw staffTimeHttpError(404, 'Entry not found.');
     const previewWorkDate = staffWorkDate(preview.clock_in);
-    const requestedWorkDate = clock_in
-      ? staffWorkDate(new Date(clock_in))
+    const requestedWorkDate = parsedClockIn
+      ? staffWorkDate(parsedClockIn)
       : previewWorkDate;
     const lockedWeeks = [previewWorkDate, requestedWorkDate]
       .map(staffWeekStartForWorkDate);
@@ -596,10 +627,11 @@ async function adminEditEntry(entryId, {
 
     const entry = await trx('time_entries').where({ id: entryId }).forUpdate().first();
     assertEntryStillInLockedWeek(entry, preview.technician_id, lockedWeeks[0]);
+    const finalType = entry_type || entry.entry_type;
     await assertEntryMutable(trx, entry, 'edit', [
       staffWorkDate(entry.clock_in),
       requestedWorkDate,
-    ], (entry_type || entry.entry_type) === 'shift' ? requestedWorkDate : null);
+    ], finalType === 'shift' ? requestedWorkDate : null);
     // Optimistic version check (codex P2 #3152 round 22): an automated
     // caller (the time-on-site linked-timer sync) states the updated_at it
     // observed — if a payroll admin edited the entry between that snapshot
@@ -623,7 +655,7 @@ async function adminEditEntry(entryId, {
       approved_by: null,
       approved_at: null,
       approval_notes: null,
-      edit_reason,
+      edit_reason: normalizedReason,
       edited_by,
       edited_at: new Date(),
       updated_at: new Date(),
@@ -635,8 +667,8 @@ async function adminEditEntry(entryId, {
       updates.original_clock_out = entry.clock_out;
     }
 
-    if (clock_in) updates.clock_in = new Date(clock_in);
-    if (clock_out) updates.clock_out = new Date(clock_out);
+    if (parsedClockIn) updates.clock_in = parsedClockIn;
+    if (parsedClockOut) updates.clock_out = parsedClockOut;
     // Duration-based edit (codex P1 #3152, pre-push audit): the caller
     // states the INTERVAL and the clock_out is derived from the LOCKED
     // row's start (or the clock_in supplied in this same edit) — a
@@ -664,9 +696,9 @@ async function adminEditEntry(entryId, {
     // A completed/edited payroll interval must be positive and internally
     // consistent. Recompute the duration from the final timestamps so edits
     // cannot introduce a negative or stale paid interval.
-    const finalIn = updates.clock_in || entry.clock_in;
-    const finalOut = updates.clock_out || entry.clock_out;
-    const durationMinutes = (new Date(finalOut) - new Date(finalIn)) / 60000;
+    const finalIn = new Date(updates.clock_in || entry.clock_in);
+    const finalOut = new Date(updates.clock_out || entry.clock_out);
+    const durationMinutes = (finalOut - finalIn) / 60000;
     updates.duration_minutes = Math.round(durationMinutes * 100) / 100;
     if (!isCompletedEntryIntervalValid({
       ...entry,
@@ -678,6 +710,18 @@ async function adminEditEntry(entryId, {
         400,
         'clock_out must be after clock_in and match a finite positive duration.',
       );
+    }
+    if ((parsedClockIn || parsedClockOut) && finalOut.getTime() > Date.now() + 60000) {
+      throw staffTimeHttpError(400, 'clock_out cannot be in the future.');
+    }
+    if ((parsedClockIn || parsedClockOut || target_duration_minutes) && updates.duration_minutes > MAX_EDITED_ENTRY_MINUTES) {
+      throw staffTimeHttpError(400, 'An edited time entry cannot exceed 24 hours. Check the dates and AM/PM.');
+    }
+    const shiftSpanChanged = finalType === 'shift' && (
+      parsedClockIn || parsedClockOut || target_duration_minutes || (entry_type && entry_type !== entry.entry_type)
+    );
+    if (shiftSpanChanged) {
+      await assertNoShiftOverlap(trx, entry.technician_id, finalIn, finalOut, entry.id);
     }
 
     const [saved] = await trx('time_entries')
@@ -693,11 +737,26 @@ async function adminEditEntry(entryId, {
     if (entry.approval_status === 'disputed') {
       await resolveDisputedDailyStatuses(trx, saved.technician_id, affectedWorkDates);
     }
+    await recordAuditEvent({
+      trx,
+      critical: true,
+      actor_type: 'admin',
+      actor_id: edited_by || null,
+      action: 'payroll.time_entry_edited',
+      resource_type: 'time_entries',
+      resource_id: saved.id,
+      metadata: {
+        technician_id: saved.technician_id,
+        entry_type: saved.entry_type,
+        old_duration_minutes: entry.duration_minutes != null ? Number(entry.duration_minutes) : null,
+        new_duration_minutes: saved.duration_minutes != null ? Number(saved.duration_minutes) : null,
+      },
+    });
     await recomputeEntryMutationSummaries(trx, saved.technician_id, affectedWorkDates);
     return saved;
   });
 
-  logger.info(`[time-tracking] Entry ${entryId} edited by ${edited_by}`, { edit_reason });
+  logger.info(`[time-tracking] Entry ${entryId} edited by ${edited_by}`);
   return updated;
 }
 
@@ -753,13 +812,14 @@ async function lockTechnicianForAddedShift(trx, technicianId) {
   }
 }
 
-async function assertNoShiftOverlap(trx, technicianId, clockIn, clockOut) {
-  const clash = await trx('time_entries')
+async function assertNoShiftOverlap(trx, technicianId, clockIn, clockOut, excludeId = null) {
+  let query = trx('time_entries')
     .where({ technician_id: technicianId, entry_type: 'shift' })
     .whereNot({ status: 'voided' })
     .where('clock_in', '<', clockOut)
-    .where((q) => q.whereNull('clock_out').orWhere('clock_out', '>', clockIn))
-    .first('id');
+    .where((q) => q.whereNull('clock_out').orWhere('clock_out', '>', clockIn));
+  if (excludeId) query = query.whereNot({ id: excludeId });
+  const clash = await query.first('id');
   if (clash) {
     const error = staffTimeHttpError(409, 'That time overlaps a shift already on this technician. Edit that shift instead.');
     error.code = 'SHIFT_OVERLAP';
@@ -968,17 +1028,30 @@ async function moveShiftStartToTruck(trx, shift, { at, now = new Date() }) {
  * week's minutes do not change.
  */
 async function confirmAutoClose(entryId, { reviewed_by } = {}) {
-  const [saved] = await db('time_entries')
-    .where({ id: entryId, entry_type: 'shift' })
-    .whereNotNull('auto_closed_at')
-    .whereNull('auto_close_reviewed_at')
-    .whereNot({ status: 'voided' })
-    .update({
-      auto_close_reviewed_at: new Date(),
-      auto_close_reviewed_by: reviewed_by || null,
-    })
-    .returning('*');
-  if (!saved) throw staffTimeHttpError(409, 'That clock-out is not waiting for review.');
+  const saved = await db.transaction(async (trx) => {
+    const [row] = await trx('time_entries')
+      .where({ id: entryId, entry_type: 'shift' })
+      .whereNotNull('auto_closed_at')
+      .whereNull('auto_close_reviewed_at')
+      .whereNot({ status: 'voided' })
+      .update({
+        auto_close_reviewed_at: new Date(),
+        auto_close_reviewed_by: reviewed_by || null,
+      })
+      .returning('*');
+    if (!row) throw staffTimeHttpError(409, 'That clock-out is not waiting for review.');
+    await recordAuditEvent({
+      trx,
+      critical: true,
+      actor_type: 'admin',
+      actor_id: reviewed_by || null,
+      action: 'payroll.auto_close_confirmed',
+      resource_type: 'time_entries',
+      resource_id: row.id,
+      metadata: { technician_id: row.technician_id, work_date: staffWorkDate(row.clock_in) },
+    });
+    return row;
+  });
   logger.info(`[time-tracking] Automatic clock-out ${entryId} confirmed by ${reviewed_by}`);
   return saved;
 }
@@ -1017,11 +1090,25 @@ async function voidEntry(entryId, { reason, voided_by }) {
     if (entry.approval_status === 'disputed') {
       await resolveDisputedDailyStatuses(trx, saved.technician_id, affectedWorkDates);
     }
+    await recordAuditEvent({
+      trx,
+      critical: true,
+      actor_type: 'admin',
+      actor_id: voided_by || null,
+      action: 'payroll.time_entry_voided',
+      resource_type: 'time_entries',
+      resource_id: saved.id,
+      metadata: {
+        technician_id: saved.technician_id,
+        entry_type: saved.entry_type,
+        work_date: affectedWorkDates[0],
+      },
+    });
     await recomputeEntryMutationSummaries(trx, saved.technician_id, affectedWorkDates);
     return saved;
   });
 
-  logger.info(`[time-tracking] Entry ${entryId} voided by ${voided_by}`, { reason });
+  logger.info(`[time-tracking] Entry ${entryId} voided by ${voided_by}`);
   return updated;
 }
 

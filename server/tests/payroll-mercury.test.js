@@ -4,7 +4,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
-  adminAuthenticate: (req, _res, next) => { req.technicianId = 'admin-1'; next(); },
+  adminAuthenticate: (req, _res, next) => {
+    req.technicianId = 'admin-1';
+    req.techRole = 'admin';
+    req.technician = { id: 'admin-1', role: 'admin', email: req.headers['x-test-email'] ?? 'contact@wavespestcontrol.com' };
+    next();
+  },
   requireAdmin: (_req, _res, next) => next(),
 }));
 

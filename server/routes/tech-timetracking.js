@@ -37,7 +37,7 @@ function dateColumnToYMD(value) {
 // ---------------------------------------------------------------------------
 router.post('/clock-in', async (req, res, next) => {
   try {
-    const { lat, lng, notes } = req.body;
+    const { lat, lng, notes } = req.body || {};
     const entry = await timeTracking.clockIn(req.technicianId, { lat, lng, notes, source: 'app' });
     res.json(entry);
   } catch (err) {
@@ -51,7 +51,7 @@ router.post('/clock-in', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.post('/clock-out', async (req, res, next) => {
   try {
-    const { lat, lng, notes } = req.body;
+    const { lat, lng, notes } = req.body || {};
     const entry = await timeTracking.clockOut(req.technicianId, { lat, lng, notes });
     res.json(entry);
   } catch (err) {
@@ -65,13 +65,18 @@ router.post('/clock-out', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.post('/start-job/:jobId', async (req, res, next) => {
   try {
-    const { lat, lng } = req.body;
+    const { lat, lng } = req.body || {};
     const entry = await timeTracking.startJob(req.technicianId, req.params.jobId, { lat, lng, scopeReq: req });
     res.json(entry);
   } catch (err) {
     if (err.message.includes('Must be clocked in')) return res.status(409).json({ error: err.message });
     if (err.code === 'job_not_assigned') return res.status(404).json({ error: err.message });
-    if (err.code === 'street_level_hold') return res.status(409).json({ error: err.message, code: 'street_level_hold' });
+    if (err.code === 'street_level_hold' || err.code === 'job_already_completed' || err.code === 'VISIT_ON_HOLD') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
+    if (err.statusCode || err.status) {
+      return res.status(err.statusCode || err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    }
     next(err);
   }
 });
@@ -81,7 +86,7 @@ router.post('/start-job/:jobId', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.post('/end-job', async (req, res, next) => {
   try {
-    const { lat, lng } = req.body;
+    const { lat, lng } = req.body || {};
     const entry = await timeTracking.endJob(req.technicianId, { lat, lng });
     res.json(entry);
   } catch (err) {
@@ -137,6 +142,16 @@ router.get('/status', async (req, res, next) => {
 // A page holds 1-100 entries and the offset is a whole number; anything else
 // falls back to the defaults. A date filter must be a real YYYY-MM-DD day: a
 // malformed one is refused here instead of failing the ::date cast in Postgres.
+const TECH_HISTORY_STRIP_FIELDS = [
+  'clock_in_lat', 'clock_in_lng', 'clock_out_lat', 'clock_out_lng',
+  'customer_first_name', 'customer_last_name', 'notes', 'approval_notes',
+];
+function sanitizeHistoryEntry(row) {
+  const copy = { ...row };
+  for (const key of TECH_HISTORY_STRIP_FIELDS) delete copy[key];
+  return copy;
+}
+
 const HISTORY_PAGE_MAX = 100;
 router.get('/history', async (req, res, next) => {
   try {
@@ -157,6 +172,9 @@ router.get('/history', async (req, res, next) => {
       // A 20-digit offset would overflow Postgres bigint: past a safe integer it falls back too.
       offset: Number.isSafeInteger(offset) && offset > 0 ? offset : 0,
     });
+    if (req.techRole !== 'admin' && Array.isArray(result?.entries)) {
+      return res.json({ ...result, entries: result.entries.map(sanitizeHistoryEntry) });
+    }
     res.json(result);
   } catch (err) {
     next(err);
@@ -169,6 +187,11 @@ router.get('/history', async (req, res, next) => {
 router.get('/weekly', async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
+    for (const [name, value] of Object.entries({ startDate, endDate })) {
+      if (value && !validDateOnly(value)) {
+        return res.status(400).json({ error: `${name} must be a valid YYYY-MM-DD date` });
+      }
+    }
     const summaries = await timeTracking.getWeeklySummaries({
       technicianId: req.technicianId,
       startDate,
@@ -190,7 +213,7 @@ router.get('/weekly', async (req, res, next) => {
 // no GPS, no customer and no pay rate. The week is the ET Monday that holds
 // weekStart (default this week); a future week is clamped to this one.
 // ---------------------------------------------------------------------------
-const OWNER_ONLY_WEEKLY_FIELDS = ['total_revenue', 'avg_rpmh', 'utilization_pct'];
+const OWNER_ONLY_WEEKLY_FIELDS = ['total_revenue', 'avg_rpmh', 'utilization_pct', 'approval_notes'];
 function withoutOwnerMoney(row) {
   const copy = { ...row };
   for (const key of OWNER_ONLY_WEEKLY_FIELDS) delete copy[key];
@@ -400,60 +423,65 @@ router.get('/pending-signoff', async (req, res, next) => {
       }
     }
 
-    // Find the OLDEST past week that still needs sign-off — not just
-    // last week. unlockWeek clears tech_signed_at on whichever week
-    // an admin reopens, which may be older than last week; restricting
-    // to lastWeekStart silently hides those re-sign prompts. Filter
-    // out approved + already-signed + zero-hour rows so we only
-    // surface real outstanding attestations.
-    const candidate = await db('time_weekly_summary')
+    // Find the OLDEST past week that is actually signable right now — never
+    // let an older disputed/blocked week starve newer signable weeks forever.
+    const candidates = await db('time_weekly_summary')
       .where({ technician_id: req.technicianId })
       .where('status', '!=', 'approved')
       .whereNull('tech_signed_at')
       .where('week_start', '<', thisMonday)
       .where('total_shift_minutes', '>', 0)
-      .orderBy('week_start', 'asc')
-      .first();
-    if (!candidate) return res.json({ weekly: null, weekStart: null });
+      .orderBy('week_start', 'asc');
+    if (!candidates.length) return res.json({ weekly: null, weekStart: null });
 
-    // Format the DATE column directly as YYYY-MM-DD — DON'T route
-    // through etDateString(new Date(...)) because that shifts the
-    // UTC-midnight Date back into the prior ET day.
-    const weekStartStr = dateColumnToYMD(candidate.week_start);
+    const stripOwnerFields = req.techRole !== 'admin';
+    let firstBlocked = null;
+    for (const candidate of candidates) {
+      // Format the DATE column directly as YYYY-MM-DD — DON'T route
+      // through etDateString(new Date(...)) because that shifts the
+      // UTC-midnight Date back into the prior ET day.
+      const weekStartStr = dateColumnToYMD(candidate.week_start);
 
-    // Refresh entries → dailies → weekly under the payroll week lock, then
-    // return a token for exactly the snapshot rendered by the tech.
-    const detail = await timesheetApproval.getWeekDetail(req.technicianId, weekStartStr);
-    const weekly = detail.weekly;
-    if (!weekly) return res.json({ weekly: null, weekStart: weekStartStr });
+      // Refresh entries → dailies → weekly under the payroll week lock, then
+      // return a token for exactly the snapshot rendered by the tech.
+      const detail = await timesheetApproval.getWeekDetail(req.technicianId, weekStartStr);
+      const weekly = detail.weekly;
+      if (!weekly) continue;
+      const safeWeekly = stripOwnerFields ? withoutOwnerMoney(weekly) : weekly;
 
-    // Recompute may have flipped this row's eligibility — re-check the
-    // gate. Approved (admin raced ahead), tech_signed_at set (concurrent
-    // sign), or total_shift_minutes now zero (admin voided everything)
-    // -> not pending anymore.
-    const hours = parseFloat(weekly.total_shift_minutes || 0);
-    const blockedReviewState = detail.entries.some(
-      entry => (entry.approval_status || 'pending') === 'disputed',
-    ) || detail.dailies.some(daily => ['disputed', 'rejected'].includes(daily.status));
-    if (
-      weekly.status === 'approved'
-      || weekly.tech_signed_at
-      || hours === 0
-      || blockedReviewState
-    ) {
+      // Recompute may have flipped this row's eligibility — re-check the
+      // gate. Approved (admin raced ahead), tech_signed_at set (concurrent
+      // sign), or total_shift_minutes now zero (admin voided everything)
+      // -> not pending anymore.
+      const hours = parseFloat(weekly.total_shift_minutes || 0);
+      const blockedReviewState = detail.entries.some(
+        entry => (entry.approval_status || 'pending') === 'disputed',
+      ) || detail.dailies.some(daily => ['disputed', 'rejected'].includes(daily.status));
+      if (
+        weekly.status === 'approved'
+        || weekly.tech_signed_at
+        || hours === 0
+        || blockedReviewState
+      ) {
+        if (!firstBlocked && blockedReviewState) {
+          firstBlocked = {
+            weekly: safeWeekly,
+            weekStart: weekStartStr,
+            pending: false,
+            reviewToken: detail.reviewToken,
+          };
+        }
+        continue;
+      }
       return res.json({
-        weekly,
+        weekly: safeWeekly,
         weekStart: weekStartStr,
-        pending: false,
+        pending: true,
         reviewToken: detail.reviewToken,
       });
     }
-    res.json({
-      weekly,
-      weekStart: weekStartStr,
-      pending: true,
-      reviewToken: detail.reviewToken,
-    });
+    if (firstBlocked) return res.json(firstBlocked);
+    return res.json({ weekly: null, weekStart: null });
   } catch (err) { next(err); }
 });
 
@@ -474,7 +502,10 @@ router.post('/sign-week', async (req, res, next) => {
       signature,
       reviewToken,
     });
-    res.json({ success: true, ...result });
+    const payload = req.techRole !== 'admin' && result?.weekly
+      ? { ...result, weekly: withoutOwnerMoney(result.weekly) }
+      : result;
+    res.json({ success: true, ...payload });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);

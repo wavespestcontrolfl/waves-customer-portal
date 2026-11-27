@@ -29,7 +29,7 @@ const {
 } = require('../services/staff-reset-token');
 const { employmentPatch } = require('../services/technician-eligibility');
 const { seedNewHireCapabilities } = require('../services/technician-capabilities');
-const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
+const { assertMayChangeFullAccessEmail, ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const staffMfa = require('../services/staff-mfa');
 const { noStore } = require('../middleware/no-store');
 const { loginMfaPreParserGuard } = require('../middleware/staff-mfa-guard');
@@ -848,6 +848,9 @@ async function register(req, res, next) {
     const staffRole = role || 'technician';
     if (!['admin', 'technician'].includes(staffRole)) {
       return res.status(400).json({ error: 'Role must be admin or technician' });
+    }
+    if (staffRole === 'admin' && !ibFullAccess(req)) {
+      return res.status(403).json({ error: 'Only the owner account can create an admin account.' });
     }
     const policyError = validateStaffPassword(password);
     if (policyError) return res.status(400).json({ error: policyError });

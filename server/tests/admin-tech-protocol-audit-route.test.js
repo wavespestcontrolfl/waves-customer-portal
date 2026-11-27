@@ -9,6 +9,11 @@ jest.mock('../middleware/admin-auth', () => ({
     if (!req.headers['x-test-auth']) return res.status(401).json({ error: 'Admin authentication required' });
     req.techRole = req.headers['x-test-role'] || 'admin';
     req.technicianId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    req.technician = {
+      id: req.technicianId,
+      role: req.techRole,
+      email: req.headers['x-test-email'] ?? 'contact@wavespestcontrol.com',
+    };
     return next();
   },
   requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
@@ -60,6 +65,12 @@ describe('/api/admin/tech-protocol-audits', () => {
     expect(res.headers.get('cache-control')).toBe('no-store');
     expect(await res.json()).toMatchObject({ month: '2026-04', sampleSize: 5 });
     expect(audit.getBoard).toHaveBeenCalledWith('2026-04');
+  });
+
+  test('PUT is owner-only (non-owner admin is 403 before saveMark)', async () => {
+    const res = await put({ result: 'match' }, { ...AUTH, 'x-test-email': 'other-admin@wavespestcontrol.com' });
+    expect(res.status).toBe(403);
+    expect(audit.saveMark).not.toHaveBeenCalled();
   });
 
   test('PUT saves the mark as the signed-in admin', async () => {

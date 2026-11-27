@@ -79,7 +79,7 @@ postgres('payroll minimum paid week', () => {
     await trx.raw('ROLLBACK TO SAVEPOINT attempt');
     return error;
   };
-  const api = async (method, path, { body, email, raw = false } = {}) => {
+  const api = async (method, path, { body, email = 'contact@wavespestcontrol.com', raw = false } = {}) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
       headers: { 'content-type': 'application/json', 'x-test-admin': ADMIN_ID, ...(email ? { 'x-test-email': email } : {}) },
