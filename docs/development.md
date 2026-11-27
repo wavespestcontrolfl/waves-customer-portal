@@ -33,11 +33,17 @@ Vite, debugger and control listener bind to loopback. Ports never silently move.
 Create another checkout with `npm run worktree:create -- task-slug [destination]` in isolated CI or single-user environments. This fetches origin/main, creates `feat/task-slug`, runs bare `npm ci` (`scripts/dev/worktree.js`), and assigns ports. On the owner's multi-session Mac, do **not** run `worktree:create` (it bypasses the install queue) — instead run:
 
 ```sh
-git fetch origin main
-git worktree add -b feat/<task-slug> <destination> origin/main
-cd <destination>
-~/.claude/bin/npm-ci-serial
-npm run worktree:setup
+slug="my-task"
+dest="../wt-$slug"
+git fetch origin main \
+  && git worktree add -b "feat/$slug" "$dest" origin/main \
+  && (
+    cd "$dest" \
+      && nvm use \
+      && node -e "require('./scripts/dev/runtime').checkRuntime(process.cwd())" \
+      && ~/.claude/bin/npm-ci-serial \
+      && npm run worktree:setup
+  )
 ```
 
 An interrupted install can be resumed in the new checkout with `~/.claude/bin/npm-ci-serial` on the owner's multi-session Mac (or `npm ci` in isolated CI/single-user machines); do not share `node_modules` between worktrees.
