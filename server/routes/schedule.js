@@ -225,6 +225,9 @@ router.get('/', async (req, res, next) => {
     const upcomingQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(upcomingQuery, scope);
+    // GATE_VISIT_HOLD: a held visit is not an upcoming appointment. The plan-coverage read (allProperties) keeps it: it is
+    // still a plan visit, and hiding it would make the plan look short.
+    if (!allProperties) require('../services/visit-hold').excludeHeld(upcomingQuery, 'scheduled_services');
     const listRows = await upcomingQuery
       .whereIn('scheduled_services.status', allProperties ? [...VISIT_LIST_STATUSES, ...VISIT_IN_PROGRESS_STATUSES] : VISIT_LIST_STATUSES)
       // A call-created follow-up (visit 2) is dispatch-owned until the office
@@ -839,8 +842,8 @@ router.get('/account-next', async (req, res, next) => {
       .select('id', 'profile_label', 'is_primary_profile', 'address_line1', 'address_line2', 'city', 'state', 'zip')
       .orderBy('is_primary_profile', 'desc')
       .orderBy('profile_label', 'asc');
-    const rows = await db('scheduled_services')
-      .whereIn('scheduled_services.customer_id', ids)
+    const rows = await require('../services/visit-hold').excludeHeld(db('scheduled_services')
+      .whereIn('scheduled_services.customer_id', ids), 'scheduled_services')
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
       .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
@@ -895,8 +898,8 @@ router.get('/properties-next', async (req, res, next) => {
     const cutoffDate = etDateString(addETDays(new Date(), value.days));
     const { properties: entries } = await accountSavedProperties(req);
     const ids = [...new Set(entries.map((e) => e.customerId))];
-    const rows = ids.length ? await db('scheduled_services')
-      .whereIn('scheduled_services.customer_id', ids)
+    const rows = ids.length ? await require('../services/visit-hold').excludeHeld(db('scheduled_services')
+      .whereIn('scheduled_services.customer_id', ids), 'scheduled_services')
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
       // Same dispatch-owned guard as GET / and GET /next.
       .where(customerVisibleBookingWhere)
@@ -977,6 +980,7 @@ router.get('/next', async (req, res, next) => {
     const nextQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(nextQuery, scope);
+    if (!allProperties) require('../services/visit-hold').excludeHeld(nextQuery, 'scheduled_services');
     const nextService = await nextQuery
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
       // Same dispatch-owned guard as the list above: a still-pending,

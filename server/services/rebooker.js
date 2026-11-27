@@ -1583,10 +1583,11 @@ async function loadNextVisitSweep(conn, serviceId) {
     .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
     .whereNotIn('status', ['completed', 'cancelled'])
     .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id');
+    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', ...require('./visit-hold').heldColumn());
   const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
   if (droppedIdx === -1) return null;
-  const swept = siblings.slice(droppedIdx);
+  // GATE_VISIT_HOLD: a held sibling is counted, never the next visit the move shifts (the writer classifies it the same way).
+  const swept = require('./visit-hold').markHeldSiblings(siblings.slice(droppedIdx), serviceId);
   const nextIdx = swept.findIndex((row, idx) => idx > 0 && RESCHEDULABLE_STATUSES.has(row.status));
   if (nextIdx === -1) return null;
   return { service, parent, swept, nextIdx, next: swept[nextIdx] };
@@ -2429,9 +2430,9 @@ class SmartRebooker {
         }
       }
       if (keptTechId && updates.window_start && occupancyGateEnd && !useArrivalWindows) {
-        const overlap = await trx('scheduled_services')
+        const overlap = await require('./visit-hold').excludeHeld(trx('scheduled_services')
           .where('scheduled_date', newDateStr)
-          .where('technician_id', keptTechId)
+          .where('technician_id', keptTechId), 'scheduled_services')
           // Visit members move together (moveVisitAsUnit passes them in
           // excludeServiceIds) — a chained sibling's OLD slot is not a
           // conflict for the shifted primary (codex #3609 r1).
@@ -4384,9 +4385,9 @@ class SmartRebooker {
               'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
               ['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],
             );
-            const overlap = useArrivalWindows ? null : await trx('scheduled_services')
+            const overlap = useArrivalWindows ? null : await require('./visit-hold').excludeHeld(trx('scheduled_services')
               .where('scheduled_date', date)
-              .where('technician_id', options.technicianId)
+              .where('technician_id', options.technicianId), 'scheduled_services')
               // Carried visit partners move with the anchor: their old slot is
               // not a clash for it (the plain whereNot when nothing is carried).
               [carry.partnerIds.length ? 'whereNotIn' : 'whereNot']('id', carry.partnerIds.length ? [sib.id, ...carry.partnerIds] : sib.id)
@@ -5124,7 +5125,7 @@ class SmartRebooker {
       .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
       .whereNotIn('status', TERMINAL)
       .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-      .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id', 'technician_id');
+      .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id', 'technician_id', ...require('./visit-hold').heldColumn());
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
     // Every caller applies this preview as a staff ('admin') move (dispatch
@@ -5133,7 +5134,8 @@ class SmartRebooker {
     const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
       service, parent, newDate, seriesDateStr, conn, closedDays: await loadSeriesClosedDays(conn, { initiatedBy: 'admin' }),
     });
-    const swept = siblings.slice(droppedIdx);
+    // GATE_VISIT_HOLD: the preview classifies a held sibling as immovable, as the writer does.
+    const swept = require('./visit-hold').markHeldSiblings(siblings.slice(droppedIdx), serviceId);
     // Staff surfaces move a live anchor (allowLive); every other live/skipped
     // row is counted-but-not-moved, exactly as the sweep does.
     const movable = swept.filter((row, idx) => RESCHEDULABLE_STATUSES.has(row.status)
@@ -5322,6 +5324,7 @@ module.exports = new SmartRebooker();
 // (same status/hold/window rules, narrowed to one technician_id).
 module.exports.probeMoveConflicts = probeMoveConflicts;
 module.exports.occupancyProbeEnd = occupancyProbeEnd;
+module.exports.loadNextVisitSweep = loadNextVisitSweep;
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;

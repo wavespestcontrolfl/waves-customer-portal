@@ -108,7 +108,7 @@ async function putVisitOnHold({ visitId, note, heldBy = null, scopeReq = null, n
   const cleaned = cleanNote(note);
   return conn.transaction(async (trx) => {
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
-      .first('id', 'status', 'held_at', 'customer_id', 'scheduled_date');
+      .first('id', 'status', 'held_at', 'customer_id', 'scheduled_date', 'reservation_expires_at');
     if (!row) throw holdError(404, 'not_found', 'Scheduled service not found');
     if (scopeReq) {
       const { technicianLiveVisitFilter } = require('./technician-visit-scope');
@@ -117,6 +117,11 @@ async function putVisitOnHold({ visitId, note, heldBy = null, scopeReq = null, n
       if (!owned) throw holdError(404, 'not_found', 'Scheduled service not found');
     }
     if (row.held_at) return { changed: false, visitId: row.id, heldAt: row.held_at };
+    // An unclaimed estimate slot reservation (no customer, a reservation expiry) is not a customer's visit: holding it
+    // would hand its reserved hour to another booking. A real address-only visit has no expiry and can be held.
+    if (!row.customer_id && row.reservation_expires_at) {
+      throw holdError(409, 'not_holdable', 'An unclaimed estimate reservation cannot be put on hold');
+    }
     if (!HOLDABLE_STATUSES.includes(String(row.status || '').toLowerCase())) {
       throw holdError(409, 'not_holdable', `A ${row.status || 'unknown'} visit cannot be put on hold`);
     }
@@ -151,21 +156,32 @@ async function closeHoldBell(visitId, reason, { now = new Date(), conn = db } = 
  */
 async function releaseVisitHold({ visitId, now = new Date(), reason = 'released', conn = db } = {}) {
   if (!visitHoldLive()) throw holdError(404, 'visit_hold_off', 'Visit hold is not enabled');
-  const pre = await conn('scheduled_services').where({ id: visitId })
-    .first('id', 'held_at', 'scheduled_date', 'window_start', 'window_end');
+  const cols = ['id', 'held_at', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id'];
+  const pre = await conn('scheduled_services').where({ id: visitId }).first(...cols);
   if (!pre) throw holdError(404, 'not_found', 'Scheduled service not found');
   if (!pre.held_at) return { changed: false, visitId: pre.id };
   const dateStr = dateOnlyString(pre.scheduled_date);
-  const checksSlot = !!(dateStr && dateStr >= etDateString(now) && pre.window_start && pre.window_end);
   const result = await conn.transaction(async (trx) => {
-    const occupancy = checksSlot ? require('./scheduling/occupancy') : null;
+    const occupancy = require('./scheduling/occupancy');
     // Rung 1 (the booking day lock) before the row lock, the order every booking writer takes.
-    if (checksSlot) await occupancy.acquireOccupancyLock(trx, dateStr);
-    const row = await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id', 'held_at');
+    if (dateStr) await occupancy.acquireOccupancyLock(trx, dateStr);
+    const row = await trx('scheduled_services').where({ id: visitId }).forUpdate().first(...cols);
     if (!row || !row.held_at) return { changed: false, visitId };
-    if (checksSlot) {
+    // The day lock was taken for the unlocked read's date: a visit moved or held again since is not the one checked.
+    const same = (a, b) => String(a ?? '') === String(b ?? '');
+    if (new Date(row.held_at).getTime() !== new Date(pre.held_at).getTime() || dateOnlyString(row.scheduled_date) !== dateStr
+      || !same(row.window_start, pre.window_start) || !same(row.window_end, pre.window_end)
+      || !same(row.estimated_duration_minutes, pre.estimated_duration_minutes) || !same(row.technician_id, pre.technician_id)) {
+      throw holdError(409, 'hold_changed', 'The visit changed while the hold was being released. Try again.');
+    }
+    // Same span booking gives the visit: a start with no end occupies its estimated duration.
+    if (dateStr >= etDateString(now) && row.window_start) {
+      let windowEnd;
+      try {
+        windowEnd = require('./rebooker').occupancyProbeEnd(row.window_start, row.window_end, row.estimated_duration_minutes);
+      } catch { windowEnd = '23:59'; }
       const clash = await occupancy.findConflictingVisits({
-        db: trx, date: dateStr, windowStart: pre.window_start, windowEnd: pre.window_end, excludeServiceIds: [visitId],
+        db: trx, date: dateStr, windowStart: row.window_start, windowEnd, excludeServiceIds: [visitId], technicianId: row.technician_id,
       });
       if (clash.length) throw holdError(409, 'SLOT_TAKEN', 'That time was booked while the visit was on hold. Reschedule the visit to release the hold.');
     }

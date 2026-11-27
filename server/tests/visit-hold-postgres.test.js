@@ -70,6 +70,18 @@ postgres('visit on hold on PostgreSQL', () => {
   }
   const row = (id) => trx('scheduled_services').where({ id }).first();
 
+  const seriesOf = async (heldDate, nextDate, { nextStatus = 'confirmed' } = {}) => {
+    const parent = randomUUID();
+    await trx('scheduled_services').insert({
+      id: parent, customer_id: customerId, scheduled_date: heldDate, service_type: 'Quarterly Pest Control', status: 'confirmed',
+      is_recurring: true, recurring_pattern: 'quarterly',
+    });
+    const next = await visit({
+      scheduled_date: nextDate, status: nextStatus, is_recurring: true, recurring_parent_id: parent, recurring_pattern: 'quarterly',
+    });
+    return { held: parent, next };
+  };
+
   describe('putVisitOnHold and releaseVisitHold', () => {
     test('a hold stamps the four columns, trims the note, and a second hold changes nothing', async () => {
       const id = await visit();
@@ -147,6 +159,53 @@ postgres('visit on hold on PostgreSQL', () => {
       expect(hold.heldColumn()).toEqual([]);
     });
 
+    test('release uses the booking span of a visit with no end time: a start plus its duration blocks an overlapping booking', async () => {
+      const date = ymdOffset(8);
+      const id = await visit({ scheduled_date: date, window_start: '09:00', window_end: null, estimated_duration_minutes: 120 });
+      await hold.putVisitOnHold({ visitId: id });
+      const other = await visit({ scheduled_date: date, window_start: '10:00', window_end: '11:00' });
+      await expect(hold.releaseVisitHold({ visitId: id })).rejects.toMatchObject({ status: 409, code: 'SLOT_TAKEN' });
+      await trx('scheduled_services').where({ id: other }).update({ status: 'cancelled' });
+      expect((await hold.releaseVisitHold({ visitId: id })).changed).toBe(true);
+    });
+
+    test('release refuses when the visit changed between the unlocked read and the lock', async () => {
+      const occupancy = require('../services/scheduling/occupancy');
+      const id = await visit({ scheduled_date: ymdOffset(8) });
+      await hold.putVisitOnHold({ visitId: id });
+      const real = occupancy.acquireOccupancyLock;
+      jest.spyOn(occupancy, 'acquireOccupancyLock').mockImplementation(async (...args) => {
+        await real(...args);
+        await trx('scheduled_services').where({ id }).update({ held_at: new Date(Date.now() + 1000), window_start: '13:00', window_end: '15:00' });
+      });
+      try {
+        await expect(hold.releaseVisitHold({ visitId: id })).rejects.toMatchObject({ status: 409, code: 'hold_changed' });
+      } finally { occupancy.acquireOccupancyLock.mockRestore(); }
+      expect((await row(id)).held_at).not.toBeNull();
+    });
+
+    test('with multi-technician confirm on, another technician\'s booking does not block the release', async () => {
+      const techA = randomUUID();
+      const techB = randomUUID();
+      await trx('technicians').insert([{ id: techA, name: 'Tech A' }, { id: techB, name: 'Tech B' }]);
+      const date = ymdOffset(8);
+      const id = await visit({ scheduled_date: date, technician_id: techA });
+      await hold.putVisitOnHold({ visitId: id });
+      await visit({ scheduled_date: date, technician_id: techB });
+      const prior = process.env.GATE_MULTI_TECH_CONFIRM;
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      try {
+        expect((await hold.releaseVisitHold({ visitId: id })).changed).toBe(true);
+      } finally { if (prior === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prior; }
+    });
+
+    test('an unclaimed estimate reservation cannot be held; an address-only visit can', async () => {
+      const reservation = await visit({ customer_id: null, reservation_expires_at: new Date(Date.now() + 3600000) });
+      await expect(hold.putVisitOnHold({ visitId: reservation })).rejects.toMatchObject({ status: 409, code: 'not_holdable' });
+      const addressOnly = await visit({ customer_id: null });
+      expect((await hold.putVisitOnHold({ visitId: addressOnly })).changed).toBe(true);
+    });
+
     test('the office list reads held visits oldest first', async () => {
       const a = await visit();
       const b = await visit();
@@ -195,6 +254,48 @@ postgres('visit on hold on PostgreSQL', () => {
   });
 
   describe('the mover backstop', () => {
+    test('the tracker never goes en route or on property for a held visit', async () => {
+      const { markEnRoute, markOnProperty } = require('../services/track-transitions');
+      const techId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Tech T' });
+      const id = await visit({ scheduled_date: ymdOffset(0), technician_id: techId });
+      await hold.putVisitOnHold({ visitId: id });
+      expect(await markEnRoute(id, { allowFutureDate: true })).toMatchObject({ ok: false, reason: 'visit_on_hold' });
+      expect(await markOnProperty(id, { allowFutureDate: true })).toMatchObject({ ok: false, reason: 'visit_on_hold' });
+      expect((await row(id)).track_state).toBe('scheduled');
+    });
+
+    test('a visit moving into a held visit\'s hour is not refused by the technician-overlap probe', async () => {
+      const SmartRebooker = require('../services/rebooker');
+      const techId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Tech T', employment_status: 'active', field_dispatchable: true, active: true });
+      const date = ymdOffset(10);
+      const heldId = await visit({ scheduled_date: date, technician_id: techId, window_start: '09:00', window_end: '11:00' });
+      await hold.putVisitOnHold({ visitId: heldId });
+      const moving = await visit({ scheduled_date: ymdOffset(6), technician_id: techId, window_start: '13:00', window_end: '15:00' });
+      await SmartRebooker.reschedule(moving, date, { start: '09:00', end: '11:00' }, 'admin', 'admin', { seriesPolicy: 'single' });
+      expect((await row(moving)).window_start).toMatch(/^09:00/);
+      expect((await row(heldId)).held_at).not.toBeNull();
+    });
+
+    test('a hold placed after the no-show scan, read under the row lock, is no customer no-show', async () => {
+      const missedAppointment = require('../services/workflows/missed-appointment');
+      const id = await visit({ scheduled_date: ymdOffset(0) });
+      const scanned = await row(id);
+      await hold.putVisitOnHold({ visitId: id });
+      expect(await missedAppointment.onSkip(id, 'no_show', trx, { scanned })).toEqual({ action: 'stale_candidate' });
+      expect(await trx('reschedule_log').where({ scheduled_service_id: id }).count('* as n').first()).toMatchObject({ n: '0' });
+    });
+
+    test('the next-visit preview skips a held sibling the writer would not move', async () => {
+      const { loadNextVisitSweep } = require('../services/rebooker');
+      const { held: parent, next: first } = await seriesOf(ymdOffset(20), ymdOffset(110));
+      const second = await visit({ scheduled_date: ymdOffset(200), is_recurring: true, recurring_parent_id: parent, recurring_pattern: 'quarterly' });
+      expect((await loadNextVisitSweep(trx, parent)).next.id).toBe(first);
+      await trx('scheduled_services').where({ id: first }).update({ held_at: new Date() });
+      expect((await loadNextVisitSweep(trx, parent)).next.id).toBe(second);
+    });
+
     test('the guard refuses an automatic move and writes nothing; a person\'s move is let through still held', async () => {
       const id = await visit();
       await hold.putVisitOnHold({ visitId: id, note: 'keep' });
@@ -306,17 +407,6 @@ postgres('visit on hold on PostgreSQL', () => {
   });
 
   describe('the daily sweep', () => {
-    const seriesOf = async (heldDate, nextDate, { nextStatus = 'confirmed' } = {}) => {
-      const parent = randomUUID();
-      await trx('scheduled_services').insert({
-        id: parent, customer_id: customerId, scheduled_date: heldDate, service_type: 'Quarterly Pest Control', status: 'confirmed',
-        is_recurring: true, recurring_pattern: 'quarterly',
-      });
-      const next = await visit({
-        scheduled_date: nextDate, status: nextStatus, is_recurring: true, recurring_parent_id: parent, recurring_pattern: 'quarterly',
-      });
-      return { held: parent, next };
-    };
 
     test('the next plan visit reaching its date closes the held visit as skipped: no make-up visit, no text, a note', async () => {
       const { held, next } = await seriesOf(ymdOffset(-20), ymdOffset(0));

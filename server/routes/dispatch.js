@@ -207,6 +207,8 @@ async function canonicalJobs({ date, techId, status, scope = null } = {}) {
   if (date) query.where('scheduled_services.scheduled_date', date);
   if (scope && isTechnicianRequest(scope)) technicianCurrentVisitFilter(scope, query);
   else if (techId) query.where('scheduled_services.technician_id', techId);
+  // GATE_VISIT_HOLD: a held visit is on no route (gate off: no clause).
+  require('../services/visit-hold').excludeHeld(query, 'scheduled_services');
 
   const rows = await query;
   return rows.filter((row) => matchesLegacyStatus(row, status)).map(toDispatchJob);
