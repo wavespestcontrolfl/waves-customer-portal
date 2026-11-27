@@ -93,7 +93,8 @@ function eligibleTargetDate(svc, today) {
  *   "Now at stop X of Y / You're stop Z" strip. Null when the count
  *   shouldn't render (gate off, no tech, not today, terminal visit,
  *   sibling already underway, active stop beyond the target, beyond the
- *   cap, or any error). With opts.readOnly (the public GET), a value that
+ *   cap, or any error). opts.peek: see the peek block below (no write,
+ *   read errors THROW). With opts.readOnly (the public GET), a value that
  *   is not yet the durable floor returns {pending: true} instead of
  *   writing — the caller's explicit POST runs the persisting path.
  */
@@ -291,6 +292,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
          COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_enroute AND NOT g.has_at)::int AS enroute_before,
          COUNT(*) FILTER (WHERE (g.has_at OR g.has_enroute OR g.has_done)
                             AND NOT (${G_PRECEDES}))::int AS progressed_beyond,
+         COUNT(*) FILTER (WHERE g.has_live
+                            AND (g.a_route_order, g.slot)
+                                = (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time)))::int AS tied,
          MIN(t.group_floor)::int AS group_floor
          FROM grp g, target t`,
       // Binding order mirrors the SQL order: the group_floor subquery's
@@ -354,6 +358,19 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     let clamped = raw;
     if (Number.isInteger(groupFloor)) clamped = Math.min(raw, groupFloor);
     if (clamped > STOPS_AHEAD_DISPLAY_CAP) return null;
+
+    // opts.peek (texting AI route status, owner 2026-11-26 "BUILD 1-6"): the
+    // same clamped figure the tracker would show right now, with NO write
+    // (a shadow draft or a send-time recheck must never move the floor a
+    // customer sees) and no {pending}. Stricter than the tracker: the
+    // target must have a real arrival window (a windowless stop sorts last
+    // by default, not by plan), and no live stop may share the target's
+    // route_order + window (the order between them is only created_at, so
+    // the count is not decided). Either case returns null.
+    if (opts.peek) {
+      if (svc.window_start == null || Number(agg?.tied) > 0) return null;
+      return { stopsAhead: clamped, atStop, headingToStop };
+    }
 
     // readOnly: the public track GET is contractually read-only
     // (AGENTS.md) — retries and prefetches must never mutate. It may
@@ -485,6 +502,8 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     }
     return null;
   } catch (err) {
+    // peek callers must tell "no count" from "could not read": they rethrow.
+    if (opts.peek) throw err;
     logger.warn(`[stops-ahead] compute failed for ${serviceId}: ${err.message}`);
     return null;
   }

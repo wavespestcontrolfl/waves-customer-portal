@@ -52,15 +52,15 @@ describe('version identity', () => {
   test('B1 off keeps 25_n / 26_n; on mints 27_n / 28_n following the scheduler gate (each with the e tag)', () => {
     const d = freshDrafter();
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers65_n+e');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers81_n+e');
     process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers66_n+e');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers82_n+e');
     process.env.GATE_SMS_PROMPT_B1 = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers68_n+e');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers84_n+e');
     delete process.env.GATE_SMS_OFFERS_SCHEDULER;
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers67_n+e');
-    expect(d.B1_PROMPT_VERSION).toBe('house_voice_v12_real_answers67_n');
-    expect(d.B1_NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers68_n');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers83_n+e');
+    expect(d.B1_PROMPT_VERSION).toBe('house_voice_v12_real_answers83_n');
+    expect(d.B1_NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers84_n');
   });
 
   test('the longest identity (every tag) fits the varchar(40) columns', () => {
@@ -70,7 +70,7 @@ describe('version identity', () => {
     for (const c of d.REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     process.env.GATE_SMS_VOICE_PROFILE_PIN = '3';
     const longest = d.currentPromptVersion();
-    expect(longest).toBe('house_voice_v12_real_answers68_n+bcelmv');
+    expect(longest).toBe('house_voice_v12_real_answers84_n+bcelmv');
     expect(longest.length).toBe(39);
     expect(longest.length).toBeLessThanOrEqual(40);
   });
@@ -83,9 +83,9 @@ describe('version identity', () => {
 
   test('the sealed exam contract: 27_n / 28_n need the same facts as 25_n, so frozen items stay compatible', () => {
     const { requiredFactMarkers, forbiddenFactMarkers } = require('../services/sms-sealed-eval');
-    for (const v of ['house_voice_v12_real_answers67_n', 'house_voice_v12_real_answers68_n+c']) {
-      expect(requiredFactMarkers(v)).toEqual(requiredFactMarkers('house_voice_v12_real_answers65_n'));
-      expect(forbiddenFactMarkers(v)).toEqual(forbiddenFactMarkers('house_voice_v12_real_answers65_n'));
+    for (const v of ['house_voice_v12_real_answers83_n', 'house_voice_v12_real_answers84_n+c']) {
+      expect(requiredFactMarkers(v)).toEqual(requiredFactMarkers('house_voice_v12_real_answers81_n'));
+      expect(forbiddenFactMarkers(v)).toEqual(forbiddenFactMarkers('house_voice_v12_real_answers81_n'));
     }
   });
 
@@ -95,8 +95,8 @@ describe('version identity', () => {
     on();
     const facts = d.buildFactsBlock(baseContext, { now: NOW, reserviceOpeningsBlock: '- Tuesday, June 16: 9:00 AM - 11:00 AM' });
     expect(facts).toContain('FREE RE-SERVICE OPENINGS (');
-    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers67_n')).toBe(true);
-    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers65_n')).toBe(true);
+    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers83_n')).toBe(true);
+    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers81_n')).toBe(true);
   });
 });
 
@@ -368,7 +368,7 @@ describe('generateGroundedDraft wiring (single pass, nothing is sent)', () => {
     const onRun = await draftFor(ctx, 'ok thanks');
     expect(onSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Pest Control' });
     expect(onRun.factsBlock).toContain('Tuesday, June 16: 9:00 AM - 11:00 AM');
-    expect(onRun.promptVersion).toBe('house_voice_v12_real_answers67_n');
+    expect(onRun.promptVersion).toBe('house_voice_v12_real_answers83_n');
   });
 
   test('a missed visit with a linked estimate for another service keeps the hand-off: no OPEN TIMES at all', async () => {

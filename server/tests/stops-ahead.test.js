@@ -39,7 +39,7 @@ function baseSvc(overrides = {}) {
 function makeDb({
   svcRow, siblings = [], countN = 0, beforeAll, othersAll, doneBefore = 0,
   atBefore = 0, enrouteBefore = 0, progressedBeyond = 0, groupFloor = null,
-  reReadFloor = null, rawFloor, rawError = null,
+  reReadFloor = null, rawFloor, rawError = null, tied = 0, countError = null,
 } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -62,6 +62,7 @@ function makeDb({
       return Promise.resolve({ rows });
     }
     if (/WITH target/.test(sql)) {
+      if (countError) return Promise.reject(countError);
       return Promise.resolve({
         rows: [{
           ahead: countN,
@@ -71,6 +72,7 @@ function makeDb({
           at_before: atBefore,
           enroute_before: enrouteBefore,
           progressed_beyond: progressedBeyond,
+          tied,
           group_floor: groupFloor,
         }],
       });
@@ -398,5 +400,36 @@ describe('isServiceDateToday', () => {
     expect(isServiceDateToday(null, TODAY)).toBe(false);
     expect(isServiceDateToday(undefined, TODAY)).toBe(false);
     expect(isServiceDateToday('not-a-date', TODAY)).toBe(false);
+  });
+});
+
+// opts.peek (texting AI route status, gap 4): the tracker's clamped figure with NO write, stricter on order.
+describe('computeStopsAhead peek', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_STOPS_AWAY = 'true';
+  });
+  afterAll(() => { delete process.env.GATE_STOPS_AWAY; });
+
+  test('returns the clamped count and the truck phase without writing the floor', async () => {
+    const db = makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 1, atBefore: 1 });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY, peek: true })).toEqual({ stopsAhead: 1, atStop: true, headingToStop: false });
+    expect(db.updateCalls()).toHaveLength(0);
+    expect(db.reReadCalls()).toHaveLength(0);
+    expect(db.countCall()[0]).toContain('AS tied');
+  });
+  test('a live stop tied on route position, or a target with no window, gives no count', async () => {
+    expect(await computeStopsAhead(makeDb({ svcRow: baseSvc(), countN: 1, tied: 1 }), 'svc-self', { today: TODAY, peek: true })).toBeNull();
+    expect(await computeStopsAhead(makeDb({ svcRow: baseSvc({ window_start: null }), countN: 1 }), 'svc-self', { today: TODAY, peek: true })).toBeNull();
+  });
+  test('above the cap is null as on the tracker; the persisting path ignores ties', async () => {
+    expect(await computeStopsAhead(makeDb({ svcRow: baseSvc(), countN: STOPS_AHEAD_DISPLAY_CAP + 1 }), 'svc-self', { today: TODAY, peek: true })).toBeNull();
+    const db = makeDb({ svcRow: baseSvc(), countN: 1, tied: 1 });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 1 });
+  });
+  test('a read failure throws under peek (the tracker path still returns null)', async () => {
+    const err = new Error('pool exhausted');
+    await expect(computeStopsAhead(makeDb({ svcRow: baseSvc(), countError: err }), 'svc-self', { today: TODAY, peek: true })).rejects.toThrow('pool exhausted');
+    expect(await computeStopsAhead(makeDb({ svcRow: baseSvc(), countError: err }), 'svc-self', { today: TODAY })).toBeNull();
   });
 });
