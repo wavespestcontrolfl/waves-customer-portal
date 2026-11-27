@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { buildPlanForService, customerBillingModeColumnExists } = require('./waveguard-plan-engine');
+const { savepointScope } = require('../utils/savepoint-read');
 const { etDateString, addETDays, validCalendarDate } = require('../utils/datetime-et');
 const { describeInventoryConversion } = require('./inventory-units');
 const { lawnPlanProgramApplies } = require('./lawn-completion-defaults');
@@ -112,7 +113,16 @@ function addPlanItem({ item, service, plan, customerName, ensureRow }) {
   return true;
 }
 
-async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, limit = 150, knex = db, startDate: rangeStart, endDate: rangeEnd } = {}) {
+// Extra narrowing a caller wants applied BEFORE the limit (the weekly buy list drops rescheduled, skipped and no-show
+// visits and estimate-slot holds; filtering them after the limit would let them push booked visits out of the window).
+// `excludeStatuses`: more statuses to leave out; `bookedOnly`: no estimate-slot hold (no customer with a reservation stamp).
+function narrowBooked(query, { excludeStatuses = [], bookedOnly = false } = {}) {
+  if (excludeStatuses.length) query.whereNotIn('ss.status', excludeStatuses);
+  if (bookedOnly) query.where((q) => q.whereNotNull('ss.customer_id').orWhereNull('ss.reservation_expires_at'));
+  return query;
+}
+
+async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, limit = 150, knex = db, startDate: rangeStart, endDate: rangeEnd, narrow } = {}) {
   const safeDays = forecastBound(days, { name: 'days', fallback: DEFAULT_FORECAST_DAYS, max: 90 });
   const safeLimit = forecastBound(limit, { name: 'limit', fallback: 150, max: 300 });
   const { startDate, endDate } = forecastRange(rangeStart, rangeEnd, safeDays);
@@ -148,7 +158,7 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
         });
     });
   }
-  const services = await servicesQuery
+  const services = await narrowBooked(servicesQuery, narrow)
     .select(
       'ss.id',
       'ss.customer_id',
@@ -197,7 +207,8 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
 
   for (const service of services) {
     try {
-      const plan = await buildPlanForService(service.id, { db: knex, billingModeColumnExists });
+      // A savepoint: a query error inside the plan must not abort the transaction the forecast runs in (the buy list's snapshot).
+      const plan = await savepointScope(knex, (k) => buildPlanForService(service.id, { db: k, billingModeColumnExists }));
       const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
       // Under the lawn completion gates the planner withholds EVERY product
       // when the assigned protocol version/window cannot be resolved

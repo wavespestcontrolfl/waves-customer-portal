@@ -3620,6 +3620,6 @@ Owner 2026-11-27: "once a week look at upcoming appts, and buy for the entire we
 
 **The spare container, in plain words.** The owner asked to keep one unopened container of the everyday pest liquids (CrossCheck, Taurus SC). The portal counts volume, not containers, so it cannot know a container is unopened. The rule is one container's worth. After the week's need, if less than one pack size of the liquid would remain (on hand + on order + what the list buys - the week's need), the list buys one more pack, once for the company. If a pack size is not on file, the list warns instead. It never tells a technician to check the shelf.
 
-**Cost estimate.** Each pack is costed with the catalog's landed cost (price + shipping, times tax). When the price row also carries a delivery or hazmat estimate, the line and the total say "plus shipping" and are not shown as fully priced.
+**Cost estimate.** Each pack is costed the way the Inventory price comparison costs a row: stated shipping and tax, the price-sync worker's landed unit price, a shipping estimate, or a vendor shipping rule. A row whose delivery cannot be turned into a pack cost is left unpriced, with a note. The sticker price is never shown as the full cost. A row with stated shipping plus a delivery or hazmat estimate says "plus shipping".
 
 **Revisit if:** the owner wants the list ordered for him (that is a new, spend-bearing decision), a stock count per technician or per truck replaces the one company count, or the unplanned visit types need their own product plans.

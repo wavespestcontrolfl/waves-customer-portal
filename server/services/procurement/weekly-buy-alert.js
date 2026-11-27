@@ -15,6 +15,7 @@
  *     check must not ring forever).
  * A person's Done on a still-standing list stays done unless the list grows.
  */
+const { createHash } = require('crypto');
 const { composeAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
 const { fitAction } = require('../admin-alert-names');
 const { buildWeeklyBuyList, UNASSIGNED } = require('./weekly-buy-list');
@@ -152,6 +153,9 @@ async function raiseOne({ group, list, io, notify }) {
   const row = await notify(CATEGORY, composed.headline, composed.why, {
     bell: true,
     dedupeKey: key,
+    // The writer compares the display text only; a change the text does not show (a shortage growing inside the rounding, a
+    // product swapped for another with the same name) is in the signature, so the signature's hash is the version.
+    dedupeVersion: createHash('sha256').update(signature).digest('hex').slice(0, 24),
     refreshOnDedupe: true,
     ringOnRefresh: () => grew,
     detail: detailFor(group, list),

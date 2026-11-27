@@ -26,7 +26,7 @@ const noMix = { matched: [], missing: [] };
 const plan = (over = {}) => ({
   id: 'p1', name: 'Synthetic Liquid', unit: 'fl_oz', onHand: 0, onOrder: 0, hold: false,
   picked: { row: { vendor_name: 'Synthetic Supply', quantity: '1 gal' }, vendorName: 'Synthetic Supply' },
-  pack: { pack: 128 }, countOrder: false, packLabel: '1 gal', price: 100, tax: 0, floorKey: null, ...over,
+  pack: { pack: 128 }, countOrder: false, packLabel: '1 gal', price: 100, packCents: 10000, plusShipping: false, floorKey: null, ...over,
 });
 const demand = (qty, unit = 'fl_oz', reasons = ['lawn_plan']) => ({ qty, unit, reasons: new Set(reasons) });
 const group = (entries, over = {}) => ({ demand: new Map(entries), firstAt: '2026-12-07', lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), extra: new Set(), lawnMismatch: new Set(), ...over });
@@ -267,7 +267,7 @@ describe('stock, packs and cost', () => {
     const at = (qty, over) => run(new Map([['a', group([['p1', demand(qty)]])]]), [plan(over)]).get('a').items[0];
     expect(at(129)).toMatchObject({ shortQty: 129, packs: 2, packLabel: '1 gal', estCostCents: 20000, vendorName: 'Synthetic Supply' });
     expect(at(128)).toMatchObject({ packs: 1, estCostCents: 10000 });
-    expect(at(10, { tax: 0.07 })).toMatchObject({ packs: 1, estCostCents: 10700 });
+    expect(at(10, { packCents: 10700 })).toMatchObject({ packs: 1, estCostCents: 10700 });
     expect(run(new Map([['a', group([['p1', demand(10)]])]]), [plan()]).get('a').estTotalCents).toBe(10000);
   });
 
@@ -323,7 +323,7 @@ describe('stock, packs and cost', () => {
   });
 
   test('no price on file: the shortage is listed with no packs and no cost, and the note says why', () => {
-    const out = run(new Map([['a', group([['p1', demand(40)]])]]), [plan({ picked: { row: null, vendorName: null }, pack: null, packLabel: null, price: null })]).get('a');
+    const out = run(new Map([['a', group([['p1', demand(40)]])]]), [plan({ picked: { row: null, vendorName: null }, pack: null, packLabel: null, price: null, packCents: null })]).get('a');
     expect(out.items[0]).toMatchObject({ shortQty: 40, packs: null, estCostCents: null, vendorName: null });
     expect(out.notes).toContain('Synthetic Liquid: no price on file.');
     expect(out.estTotalCents).toBeNull();
@@ -331,7 +331,7 @@ describe('stock, packs and cost', () => {
   });
 
   test('a priced line beside an unpriced one: the total is partial and the group says how many lines it leaves out', () => {
-    const unpriced = plan({ id: 'p2', name: 'Unpriced Liquid', picked: { row: null, vendorName: null }, pack: null, packLabel: null, price: null });
+    const unpriced = plan({ id: 'p2', name: 'Unpriced Liquid', picked: { row: null, vendorName: null }, pack: null, packLabel: null, price: null, packCents: null });
     const out = run(new Map([['a', group([['p1', demand(10)], ['p2', demand(10)]])]]), [plan(), unpriced]).get('a');
     expect(out).toMatchObject({ estTotalCents: 10000, unpricedLines: 1 });
     // a fertilizer hold is not an unpriced line to buy
@@ -339,13 +339,41 @@ describe('stock, packs and cost', () => {
     expect(held.unpricedLines).toBe(0);
   });
 
-  test('cost is the catalog landed cost per pack (price + shipping, times tax); a delivery or hazmat estimate marks the line "plus shipping"', () => {
-    const landed = run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ price: 90, shipping: 10, tax: 0.1 })]).get('a');
-    expect(landed.items[0]).toMatchObject({ estCostCents: 11000, plusShipping: false });
-    expect(landed).toMatchObject({ estTotalCents: 11000, shippingLines: 0 });
-    const shipped = run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ plusShipping: true })]).get('a');
-    expect(shipped.items[0]).toMatchObject({ estCostCents: 10000, plusShipping: true });
-    expect(shipped.shippingLines).toBe(1);
+  describe('the cost of a pack is resolved the way the Inventory price comparison resolves a row', () => {
+    const NOW = new Date('2026-12-09T12:00:00Z');
+    const packOf = (over) => toPlanProduct({
+      row: { id: 'p1', name: 'Synthetic Liquid', inventory_unit: 'fl_oz', inventory_on_hand: '0' }, now: NOW,
+      pricing: [{ product_id: 'p1', vendor_id: 'v', quantity: '1 gal', is_best_price: true, price: '90', price_amount: '90', ...over }],
+    });
+
+    test('stated shipping and tax: the catalog landed cost; a delivery or hazmat estimate on top reads "plus shipping"', () => {
+      expect(packOf({ shipping_cost: '10', tax_rate: '0.1' })).toMatchObject({ packCents: 11000, plusShipping: false });
+      expect(packOf({ shipping_cost: '10', hazmat_fee_estimate: '5' })).toMatchObject({ packCents: 10000, plusShipping: true });
+    });
+
+    test('a price-sync row with only a landed unit price (per ounce) costs the pack at that delivered price', () => {
+      const row = { landed_unit_price: '0.8', unit_normalized: 'oz', normalized_unit_price: '0.703125', source_type: 'price_report' };
+      expect(packOf(row)).toMatchObject({ packCents: 10240, plusShipping: false }); // 0.80 x 128 oz
+    });
+
+    test('delivery in a form that gives no pack cost: the line has no price, never the sticker', () => {
+      expect(packOf({ landed_unit_price: '0.8', unit_normalized: 'lot', source_type: 'price_report' }).packCents).toBeNull();
+      expect(packOf({ hazmat_fee_estimate: '5' }).packCents).toBeNull();
+      const list = run(new Map([['a', group([['p1', demand(10)]])]]), [{ ...packOf({ hazmat_fee_estimate: '5' }), id: 'p1' }]).get('a');
+      expect(list.items[0]).toMatchObject({ packs: 1, estCostCents: null });
+      expect(list).toMatchObject({ estTotalCents: null, unpricedLines: 1 });
+      expect(list.notes).toContain('Synthetic Liquid: the price row\'s delivery cost cannot be worked out, so the line has no price.');
+    });
+
+    test('a row with no delivery information is its sticker price', () => {
+      expect(packOf({}).packCents).toBe(9000);
+    });
+
+    test('a priced line that carries an estimate marks the group', () => {
+      const shipped = run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ plusShipping: true })]).get('a');
+      expect(shipped.items[0]).toMatchObject({ estCostCents: 10000, plusShipping: true });
+      expect(shipped.shippingLines).toBe(1);
+    });
   });
 
   test('an uncounted product is treated as none on hand, with a note; negative stock reads as none', () => {
@@ -456,7 +484,8 @@ describe('N/P fertilizer blackout', () => {
     const product = toPlanProduct({ row, pricing, now: new Date('2026-12-07T12:00:00Z') });
     expect(product.hold).toBe(false);
     const out = run(new Map([['a', group([['f1', demand(60, 'lb')]])]]), [{ ...product, id: 'f1' }]).get('a');
-    expect(out.items[0]).toMatchObject({ packs: 2, packLabel: '50 lb', estCostCents: 8000 });
+    // the comparison adds its freight estimate for a vendor it has no rule for: 40.00 + 40.00 per pack
+    expect(out.items[0]).toMatchObject({ packs: 2, packLabel: '50 lb', estCostCents: 16000 });
   });
 });
 
@@ -499,7 +528,7 @@ describe('buildWeeklyBuyList read wiring', () => {
       vendor_pricing: [[{ product_id: 'cross', vendor_id: 'v', vendor_name: 'Synthetic Supply', quantity: '1 gal', is_best_price: true, price: '90', price_amount: '90', tax_rate: null }]],
     });
     const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
-    expect(forecastModule.buildWaveGuardInventoryForecast).toHaveBeenCalledWith({ knex, startDate: '2026-12-09', endDate: '2026-12-12', limit: 300 });
+    expect(forecastModule.buildWaveGuardInventoryForecast).toHaveBeenCalledWith({ knex, startDate: '2026-12-09', endDate: '2026-12-12', limit: 300, narrow: { excludeStatuses: ['completed', 'cancelled', 'canceled', 'void', 'rescheduled', 'skipped', 'no_show'], bookedOnly: true } });
     expect(knex.calls[0].chain.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2026-12-09', '2026-12-12']);
     expect(list).toMatchObject({ weekStart: '2026-12-07', weekEnd: '2026-12-12', fromDate: '2026-12-09', unassigned: { technicianId: null, items: [] } });
     expect(list.warnings).toEqual([]);
@@ -507,8 +536,8 @@ describe('buildWeeklyBuyList read wiring', () => {
     expect(list.technicians[0]).toMatchObject({
       technicianId: 'a', technicianName: 'Alex Sample', supplyStore: 'Synthetic Supply North',
       // 15 short is one container; 5 + 128 - 20 leaves 113, under a full container, so the house liquid keeps one spare.
-      items: [{ productId: 'cross', needQty: 20, onHand: 5, shortQty: 15, packs: 2, estCostCents: 18000, vendorName: 'Synthetic Supply', reasons: ['lawn_plan', 'spare_floor'] }],
-      estTotalCents: 18000, notes: [], warnings: [],
+      items: [{ productId: 'cross', needQty: 20, onHand: 5, shortQty: 15, packs: 2, estCostCents: 21000, vendorName: 'Synthetic Supply', reasons: ['lawn_plan', 'spare_floor'] }], // 90.00 + the comparison's 15.00 estimate for an unknown vendor, per pack
+      estTotalCents: 21000, notes: [], warnings: [],
     });
   });
 

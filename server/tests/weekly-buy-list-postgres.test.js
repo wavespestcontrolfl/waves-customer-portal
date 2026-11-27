@@ -98,8 +98,9 @@ jest.setTimeout(60000);
     ]);
     const cross = tech.items.find((i) => i.name === 'LESCO CrossCheck Plus');
     // 0.01 gal on hand: the technician and the unassigned visit each buy a 2.5 gal pack; about 4.9 gal is left of
-    // the 5 gal bought, which is over one pack, so no spare is added.
-    expect(cross).toMatchObject({ unit: 'gal', packs: 1, packLabel: '2.5 gal', estCostCents: 10000, reasons: ['pest_mix'] });
+    // the 5 gal bought, which is over one pack, so no spare is added. 100.00 + the price comparison's 15.00 shipping
+    // estimate for a vendor it has no rule for.
+    expect(cross).toMatchObject({ unit: 'gal', packs: 1, packLabel: '2.5 gal', estCostCents: 11500, reasons: ['pest_mix'] });
     expect(list.unassigned.items.find((i) => i.name === 'LESCO CrossCheck Plus')).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
     expect(cross.needQty).toBeCloseTo(7.5 / 128, 4);
     // The pending row at one dollar is not eligible: the approved 2.5 gal row decides the pack and the price.
@@ -121,6 +122,24 @@ jest.setTimeout(60000);
     const alone = await buildWeeklyBuyList({ knex: mockConn, now: NOW });
     const inside = await mockConn.transaction((trx) => buildWeeklyBuyList({ knex: trx, now: NOW }));
     expect(inside.technicians[0].items).toEqual(alone.technicians[0].items);
+  });
+
+  test('a failing Taurus ledger read inside the snapshot is rolled back to its savepoint: the list still builds, with the warning', async () => {
+    // A same-named table in the throwaway schema shadows the real application history and has none of its columns: the read errors in PostgreSQL.
+    await mockConn.raw('CREATE TABLE ??.property_application_history (id int)', [schema]);
+    const [taurus] = await mockConn('products_catalog').insert({ id: randomUUID(), name: 'Taurus SC', active: true, inventory_unit: 'fl_oz', inventory_on_hand: 0 }).returning('id');
+    try {
+      const list = await buildWeeklyBuyList({ knex: mockConn, now: NOW });
+      const tech = list.technicians.find((t) => t.technicianId === techId);
+      expect(tech.warnings).toContain('Taurus SC yearly counts could not be read, so Taurus is left out of every pest visit this week.');
+      expect(tech.items.find((i) => i.name === 'LESCO CrossCheck Plus')).toBeTruthy(); // the reads after the failure still ran
+      // the same inside a transaction the caller holds
+      const inside = await mockConn.transaction((trx) => buildWeeklyBuyList({ knex: trx, now: NOW }));
+      expect(inside.technicians.find((t) => t.technicianId === techId).warnings).toEqual(tech.warnings);
+    } finally {
+      await mockConn('products_catalog').where({ id: taurus.id }).del();
+      await mockConn.raw('DROP TABLE ??.property_application_history', [schema]);
+    }
   });
 
   test('alerts are written on the connection the run was given: inside a caller\'s transaction they roll back with it', async () => {

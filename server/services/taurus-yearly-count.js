@@ -37,6 +37,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { savepointRead } = require('../utils/savepoint-read');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 
 // The concentration rule (the date of the 0.03% ruling, the house mix, units) lives in the shared module, so the
@@ -197,7 +198,12 @@ async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
   const visitYear = /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? Number(day.slice(0, 4)) : nowBounds.year;
   const years = visitYear === nowBounds.year ? [nowBounds] : [yearBoundsOf(visitYear), nowBounds];
   try {
-    const answers = await Promise.all(years.map((bounds) => yearAnswer(knex, visit, bounds)));
+    // One savepoint around the reads: a query error must not abort a transaction this runs in (the buy list's snapshot, a close-out).
+    const answers = await savepointRead(knex, async (k) => {
+      const out = [];
+      for (const bounds of years) out.push(await yearAnswer(k, visit, bounds));
+      return out;
+    });
     const shown = answers.find((a) => !a.eligible) || answers.find((a) => !a.eligibleHigh) || answers[0];
     return {
       ...shown,
@@ -248,20 +254,22 @@ async function projectTaurusEligibility(visits, { knex = db, now = new Date() } 
   const years = new Map(homes.map(({ bounds }) => [bounds.year, bounds]));
   const counts = new Map();
   try {
-    for (const bounds of years.values()) {
-      const result = await knex.raw(BATCH_LEDGER_SQL, {
-        pairs: JSON.stringify(pairs), yearStart: bounds.yearStart, nextYearStart: bounds.nextYearStart, namePattern: TAURUS_NAME_PATTERN,
-      });
-      const byHome = new Map();
-      for (const row of result.rows) {
-        const key = `${row.q_customer_id}|${row.q_property_id || ''}`;
-        byHome.set(key, [...(byHome.get(key) || []), row]);
+    await savepointRead(knex, async (k) => {
+      for (const bounds of years.values()) {
+        const result = await k.raw(BATCH_LEDGER_SQL, {
+          pairs: JSON.stringify(pairs), yearStart: bounds.yearStart, nextYearStart: bounds.nextYearStart, namePattern: TAURUS_NAME_PATTERN,
+        });
+        const byHome = new Map();
+        for (const row of result.rows) {
+          const key = `${row.q_customer_id}|${row.q_property_id || ''}`;
+          byHome.set(key, [...(byHome.get(key) || []), row]);
+        }
+        for (const { customer_id: customer, property_id: property } of pairs) {
+          const key = `${customer}|${property || ''}`;
+          counts.set(`${bounds.year}|${key}`, tallyApplications(byHome.get(key) || []));
+        }
       }
-      for (const { customer_id: customer, property_id: property } of pairs) {
-        const key = `${customer}|${property || ''}`;
-        counts.set(`${bounds.year}|${key}`, tallyApplications(byHome.get(key) || []));
-      }
-    }
+    });
   } catch (err) {
     // No driver message: it can echo SQL and bound values.
     logger.warn(`[taurus-yearly] projected counts unavailable: ${err?.code || err?.name || 'Error'}`);

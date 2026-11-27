@@ -220,16 +220,37 @@ function lineNotes(product, line) {
   if (product.hold && line.short > 0) out.push(`${product.name}: N/P fertilizer is held June 1 to Sept 30, so it is not bought.`);
   else if (line.short > 0 && line.packs == null) {
     out.push(`${product.name}: ${product.picked?.row ? (product.pack?.message || 'no pack size on the price row') : 'no price on file'}.`);
+  } else if (line.packs > 0 && product.price > 0 && product.packCents == null && !product.countOrder) {
+    out.push(`${product.name}: the price row's delivery cost cannot be worked out, so the line has no price.`);
   }
   return out;
 }
 
-// Cost of the packs: the catalog's own landed cost per pack (price + the row's shipping, times tax: calcLandedCost, as the
-// inventory price pages cost a row), times packs. A row that also carries a delivery or hazmat estimate (the catalog has no
-// landed-cost rule for those) is flagged "plus shipping": the line is never shown as fully priced.
+// Cost of the packs: the delivered cost of ONE pack, times packs. The delivered cost is resolved the way the Inventory price
+// comparison resolves a row (admin-inventory scoreVendorRows: stated shipping and tax, the price-sync worker's landed unit
+// price, a shipping estimate, a vendor shipping rule), so the list and the comparison never disagree. A row that carries
+// delivery in a form that gives no pack cost has NO cost here (the line is unpriced: the sticker price is never shown as the
+// full cost). A stated shipping + tax row is costed by calcLandedCost, as the comparison does for it; one that also has a
+// delivery or hazmat estimate on top reads "plus shipping".
+function packCostCents(row, price) {
+  if (!row || !(price > 0)) return { cents: null, plusShipping: false };
+  if (row.shipping_cost != null || row.tax_rate != null) {
+    return {
+      cents: Math.round(calcLandedCost(price, row.shipping_cost, row.tax_rate) * 100),
+      plusShipping: Number(row.shipping_estimate) > 0 || Number(row.hazmat_fee_estimate) > 0,
+    };
+  }
+  const { scoreVendorRows, quantityToOz } = require('../../routes/admin-inventory');
+  const scored = scoreVendorRows([{ ...row, price_amount: price }], {}).ranked[0];
+  const oz = quantityToOz(row.quantity);
+  if (scored.deliveredPerOz > 0 && oz > 0) return { cents: Math.round(scored.deliveredPerOz * oz * 100), plusShipping: false };
+  const carriesDelivery = ['landed_unit_price', 'shipping_estimate', 'hazmat_fee_estimate', 'rebate_estimate'].some((c) => row[c] != null);
+  return { cents: carriesDelivery ? null : Math.round(price * 100), plusShipping: false };
+}
+
 function costCents(product, packs) {
-  if (!(packs > 0) || !(product.price > 0) || product.countOrder) return null;
-  return Math.round(calcLandedCost(product.price, product.shipping, product.tax > 0 ? product.tax : 0) * 100) * packs;
+  if (!(packs > 0) || product.packCents == null || product.countOrder) return null;
+  return product.packCents * packs;
 }
 
 /**
@@ -354,6 +375,7 @@ function toPlanProduct({ row, pricing, now, floorKey = null, onOrder = 0 }) {
   const picked = pickPriceRow(pricing, row);
   const { pack, countOrder } = packFor(picked, unit);
   const price = Number(picked.row?.price_amount ?? picked.row?.price);
+  const cost = countOrder ? { cents: null, plusShipping: false } : packCostCents(picked.row, price);
   return {
     id: row.id, name: row.name, unit,
     onHand: row.inventory_on_hand == null || row.inventory_on_hand === '' ? null : Number(row.inventory_on_hand),
@@ -362,9 +384,7 @@ function toPlanProduct({ row, pricing, now, floorKey = null, onOrder = 0 }) {
     picked, pack, countOrder,
     packLabel: String(picked.row?.quantity || '').trim() || null,
     price: Number.isFinite(price) ? price : null,
-    tax: Number(picked.row?.tax_rate) || 0,
-    shipping: Number(picked.row?.shipping_cost) || 0,
-    plusShipping: Number(picked.row?.shipping_estimate) > 0 || Number(picked.row?.hazmat_fee_estimate) > 0,
+    packCents: cost.cents, plusShipping: cost.plusShipping,
     floorKey,
   };
 }
@@ -456,7 +476,9 @@ async function readCatalog(knex, { ids, mixRows, now }) {
       knex('vendor_pricing').leftJoin('vendors as pv', 'pv.id', 'vendor_pricing.vendor_id').whereIn('vendor_pricing.product_id', ids),
     ).select('vendor_pricing.product_id', 'vendor_pricing.vendor_id', 'vendor_pricing.quantity', 'vendor_pricing.is_best_price',
       'vendor_pricing.vendor_sku', 'vendor_pricing.price', 'vendor_pricing.price_amount', 'vendor_pricing.tax_rate',
-      'vendor_pricing.shipping_cost', 'vendor_pricing.shipping_estimate', 'vendor_pricing.hazmat_fee_estimate',
+      'vendor_pricing.shipping_cost', 'vendor_pricing.shipping_estimate', 'vendor_pricing.hazmat_fee_estimate', 'vendor_pricing.rebate_estimate',
+      'vendor_pricing.landed_unit_price', 'vendor_pricing.unit_normalized', 'vendor_pricing.normalized_unit_price', 'vendor_pricing.price_per_oz',
+      'vendor_pricing.source_type', 'vendor_pricing.vendor_product_url',
       'pv.name as vendor_name', 'pv.code as vendor_code')
     : [];
   const onOrderProblems = new Set();
@@ -534,7 +556,7 @@ async function readWeek(conn, { now, fromDate, weekEnd }) {
   const techs = new Map(techRows.map((t) => [String(t.id), { name: t.name, supplyStore: t.supply_store }]));
 
   const { buildWaveGuardInventoryForecast } = require('../waveguard-inventory-forecast');
-  const forecast = await buildWaveGuardInventoryForecast({ knex: conn, startDate: fromDate, endDate: weekEnd, limit: FORECAST_VISIT_LIMIT });
+  const forecast = await buildWaveGuardInventoryForecast({ knex: conn, startDate: fromDate, endDate: weekEnd, limit: FORECAST_VISIT_LIMIT, narrow: { excludeStatuses: FINISHED_STATUSES, bookedOnly: true } });
 
   const mixCandidates = await conn('products_catalog').where('active', true).orderBy('name').orderBy('id').select('id', 'name', 'inventory_unit');
   const mix = resolveHouseMix(mixCandidates);

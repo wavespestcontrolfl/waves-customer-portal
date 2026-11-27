@@ -167,6 +167,18 @@ test('non-program lanes are excluded in SQL before the limit when the column exi
   expect(visits.where.mock.invocationCallOrder.at(-1)).toBeLessThan(visits.limit.mock.invocationCallOrder[0]);
 });
 
+test('a caller\'s narrowing (the weekly buy list) is applied before the limit; without it nothing more is asked', async () => {
+  await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(visits.whereNotIn).toHaveBeenCalledTimes(1);
+  visits.whereNotIn.mockClear();
+  visits.where.mockClear();
+  await buildWaveGuardInventoryForecast({ days: 2, limit: 20, narrow: { excludeStatuses: ['rescheduled', 'skipped', 'no_show'], bookedOnly: true } });
+  expect(visits.whereNotIn).toHaveBeenCalledWith('ss.status', ['rescheduled', 'skipped', 'no_show']);
+  const narrowed = visits.whereNotIn.mock.invocationCallOrder.at(-1);
+  expect(narrowed).toBeLessThan(visits.limit.mock.invocationCallOrder.at(-1));
+  expect(visits.where.mock.invocationCallOrder.at(-1)).toBeLessThan(visits.limit.mock.invocationCallOrder.at(-1));
+});
+
 test('a legacy schema (no billing_mode column) adds no lane clause', async () => {
   customerBillingModeColumnExists.mockResolvedValue(false);
   await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });

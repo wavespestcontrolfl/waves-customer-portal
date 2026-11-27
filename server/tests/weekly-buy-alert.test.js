@@ -206,6 +206,21 @@ describe('a list-wide warning is never dropped', () => {
   });
 });
 
+describe('the writer is given a version of what the alert states, so a change the text does not show still refreshes', () => {
+  const versionOf = async (group) => {
+    const notify = notifier();
+    await runWeeklyBuyList({ list: listOf([group]), io: fakeIo(), notify });
+    return notify.mock.calls[0][3].dedupeVersion;
+  };
+
+  test('the same list has the same version; a shortage growing inside the rounding, or a product swapped for another with the same name, has another', async () => {
+    const base = await versionOf(entry());
+    expect(await versionOf(entry())).toBe(base);
+    expect(await versionOf(entry({ items: [item({ shortQty: 1.900004 })] }))).not.toBe(base);
+    expect(await versionOf(entry({ items: [item({ productId: 'p9' })] }))).not.toBe(base);
+  });
+});
+
 describe('a warning with nothing to buy is content on its own, and rings once', () => {
   const KEY = 'weekly-buy:tech-a:2026-12-07';
   const shelf = 'No pack size on file for Synthetic Liquid, so the spare cannot be worked out.';
