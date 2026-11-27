@@ -196,7 +196,7 @@ describe('the prompt rules (gate on only)', () => {
     expect(on).toContain('comes ONLY from a REPORT DELIVERY sentence');
     expect(on).toContain('Never write, spell, mask or guess an email address');
     expect(on).toContain('Warranty and guarantee terms are not in the facts');
-    expect(on).toContain('REPORT DELIVERY, VISIT STATUS & OPEN LOOPS');
+    expect(on).toContain('REPORT DELIVERY, PHOTO CHECK, VISIT STATUS & OPEN LOOPS');
     delete process.env[GATE];
     const off = freshDrafter().buildSystemPromptWithProfile('').system;
     expect(off).not.toContain('VISIT RESULTS');

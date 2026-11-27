@@ -30,6 +30,9 @@ const AMOUNT_BLOCK_NOTES = {
   payment_status_recheck_failed: 'The payment-status recheck for this scheduled reply could not be completed',
   report_delivery_changed: 'The service report delivery this scheduled reply states no longer matches the records',
   report_delivery_recheck_failed: 'The service report delivery recheck for this scheduled reply could not be completed',
+  photo_check_changed: 'The photo reading this scheduled reply states no longer matches the records',
+  photo_check_unverified: 'This scheduled reply describes a photo in words the photo check did not give',
+  photo_check_recheck_failed: 'The photo reading recheck for this scheduled reply could not be completed',
 };
 // The fire-time amount / Zelle / payment-status recheck for one claimed
 // scheduled reply (extracted from the send loop so the pre-screen and the

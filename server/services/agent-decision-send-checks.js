@@ -232,7 +232,7 @@ function blockReasonIsLabelInfrastructure(blockReason) {
   return Boolean(m) && isLabelRecheckInfrastructureFailure(m[1]);
 }
 // Codex round-64 P2: a BILLING recheck that could not read the billing / Stripe state says nothing about the message either.
-const BILLING_RECHECK_INFRASTRUCTURE_REASONS = new Set(['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed', 'report_delivery_recheck_failed']);
+const BILLING_RECHECK_INFRASTRUCTURE_REASONS = new Set(['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed', 'report_delivery_recheck_failed', 'photo_check_recheck_failed']);
 function blockReasonIsBillingInfrastructure(blockReason) {
   const m = /^amount no longer authorized \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && BILLING_RECHECK_INFRASTRUCTURE_REASONS.has(m[1]);

@@ -1056,3 +1056,58 @@ describe('outgoingAmountsStale - the REPORT DELIVERY sentences are rechecked at 
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
 });
+
+// PHOTO CHECK (texting AI gap 6): a body copying the photo checker's sentence is re-rendered from a fresh read of the customer's stored photo
+// readings at send. The readings are stubbed (sms-photo-fact.loadPhotoChecks); the sentences are the real renderer's.
+describe('outgoingAmountsStale - the PHOTO CHECK sentences are rechecked at send', () => {
+  const photoFact = require('../services/sms-photo-fact');
+  const ROACH = 'From your photo, it looks like a German cockroach. Your technician will confirm at the visit.';
+  const reading = (over = {}) => ({ smsLogId: 'log-1', assessmentId: 'a-1', identification: { slug: 'german-roach', confidence: 'high', category: 'insect', ...over } });
+  const billing = { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, invoiceStatuses: [], hasDepositActivity: false };
+  const live = (checks, { upcoming = [{ type: 'Quarterly Pest Control' }] } = {}) => {
+    jest.spyOn(photoFact, 'loadPhotoChecks').mockResolvedValue(checks);
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing, upcomingServices: upcoming });
+  };
+  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'what is this bug?', ...extra });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('an unchanged sentence passes and is not judged as a payment status', async () => {
+    live([reading()]);
+    await expect(run(`Thanks for the photo! ${ROACH}`)).resolves.toEqual({ stale: false });
+    expect(bodyNeedsPaymentRecheck(ROACH)).toBe(true);
+    expect(bodyNeedsBillingBoundaryCheck(ROACH)).toBe(false);
+  });
+
+  test('a reading that changed refuses as photo_check_changed (archived or rejected = gone, the visit cancelled, a lower confidence)', async () => {
+    live([]);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    live([reading()], { upcoming: [] });
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    live([reading({ confidence: 'low' })]);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    // an AI body that starts a photo sentence with its own species
+    live([reading()]);
+    await expect(run('From your photo, it looks like a Formosan termite. Your technician will confirm at the visit.')).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+  });
+
+  test('a failed read refuses as photo_check_recheck_failed (retryable); no customer fails closed', async () => {
+    live(null);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_recheck_failed' });
+    await expect(outgoingAmountsStale({ customerId: null, body: ROACH, promptVersion: V12 })).resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+    const { blockReasonIsBillingInfrastructure } = require('../services/agent-decision-send-checks');
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (photo_check_recheck_failed)')).toBe(true);
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (photo_check_changed)')).toBe(false);
+  });
+
+  test('an AI body that says what a photo shows in its own words is held; a staff edit keeps its own wording', async () => {
+    live([reading()]);
+    await expect(run('From the picture, those look like fire ants.')).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run(`${ROACH} The picture shows they are harmless roaches.`)).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run('From the picture, those look like fire ants.', { humanEditedBody: true })).resolves.toEqual({ stale: false });
+    // a staff edit that keeps a rendered sentence no longer live is held
+    live([]);
+    await expect(run(`Hi! ${ROACH}`, { humanEditedBody: true })).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    // plain photo wording with no identification passes without a read
+    await expect(run('Thanks for the photo! Your technician will take a look.')).resolves.toEqual({ stale: false });
+  });
+});

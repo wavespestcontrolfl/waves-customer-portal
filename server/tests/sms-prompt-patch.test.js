@@ -165,8 +165,8 @@ describe('the drafter prompt and its identity', () => {
     for (const name of ['GATE_SMS_AGENT_COMPLAINTS', 'GATE_SMS_AGENT_BILLING_DISPUTES', 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', 'GATE_SMS_AGENT_LEGAL']) setEnv(name, 'true');
     setEnv('GATE_SMS_VOICE_PROFILE_PIN', '4');
     const base = drafter.currentPromptVersionBase();
-    expect(base).toBe('house_voice_v12_real_answers78_n+bcelmv');
-    expect(base).toHaveLength(39);
+    expect(base).toBe('house_voice_v12_real_answers102_n+bcelmv');
+    expect(base).toHaveLength(40);
     patch.setActivePatchSnapshot(snapshot('C'));
     const live = drafter.currentPromptVersion();
     expect(live).toBe(`${base}C`);

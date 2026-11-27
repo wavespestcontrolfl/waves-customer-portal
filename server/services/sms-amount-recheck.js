@@ -18,6 +18,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const drafter = require('./sms-shadow-drafter');
 const paymentStatus = require('./payment-status-contract');
+const photoFact = require('./sms-photo-fact');
 
 // The amount forms and the payment-acknowledgement grammar are the
 // draft-time guard's own (one definition for both amount guards): every
@@ -198,7 +199,7 @@ const REPORT_SENTENCE_RE = new RegExp(`The service report for your [^\\n]{1,80}?
 const flatText = (text) => String(text || '').replace(/\s+/g, ' ').replace(/[\u2018\u2019]/g, "'");
 const claimsReportDelivery = (text) => flatText(text).includes(REPORT_SENTENCE_START);
 function bodyNeedsPaymentRecheck(body, options = {}) {
-  return claimsReportDelivery(body) || bodyNeedsMoneyRecheck(body, options);
+  return claimsReportDelivery(body) || photoFact.claimsPhotoCheck(body) || bodyNeedsMoneyRecheck(body, options);
 }
 async function reportDeliveryStale({ customerId, text, humanEditedBody = false, dbh = db }) {
   const flat = flatText(text);
@@ -218,6 +219,46 @@ async function reportDeliveryStale({ customerId, text, humanEditedBody = false, 
     logger.warn(`[sms-amount-recheck] report delivery recheck failed for customer ${customerId}: ${err.message}; blocking send`);
     return { stale: true, reason: 'report_delivery_recheck_failed' };
   }
+}
+
+// ---- PHOTO CHECK (texting AI gap 6) --------------------------------------------------------------------------------------------------
+// A body that copies a PHOTO CHECK sentence (sms-photo-fact.js: the photo checker's stored reading of a customer's photo text) is rechecked
+// at send: each such sentence must still be one a fresh read of this customer's photo readings renders (the assessment not archived or
+// relinked, its photo_triage draft not rejected, a visit still booked). Changed -> photo_check_changed; a read that failed ->
+// photo_check_recheck_failed (retryable). An AI body may say what a photo shows only through a live sentence: after the live sentences are
+// removed, a photo identification in its own words -> photo_check_unverified. A staff edit keeps its own wording: only a sentence of the
+// rendered forms is held to the live readings then.
+async function photoCheckStale({ customerId, text, humanEditedBody = false, aiBody = false, dbh = db }) {
+  const flat = flatText(text);
+  const claimed = photoFact.claimsPhotoCheck(flat);
+  if (!claimed) {
+    return aiBody && humanEditedBody !== true && photoFact.photoClaimInOwnWords(flat)
+      ? { stale: true, reason: 'photo_check_unverified' } : { stale: false, rest: String(text || '') };
+  }
+  if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
+  try {
+    const [checks, context] = await Promise.all([photoFact.loadPhotoChecks(customerId, { db: dbh }), loadCustomerContext(customerId, dbh)]);
+    if (!checks || !context) return { stale: true, reason: 'photo_check_recheck_failed' };
+    const live = [...new Set(checks.map((check) => photoFact.sentenceForContext(context, check)).filter(Boolean))];
+    // an AI body: every photo sentence it starts must be a live one, whole; a staff edit: only the rendered forms it carries
+    const forms = humanEditedBody === true ? photoFact.allRenderableSentences().filter((sentence) => flat.includes(sentence)) : null;
+    const rest = live.reduce((acc, sentence) => acc.split(sentence).join(' '), flat);
+    const unverified = forms ? forms.some((sentence) => !live.includes(sentence)) : photoFact.claimsPhotoCheck(rest);
+    if (unverified) return { stale: true, reason: 'photo_check_changed' };
+    if (aiBody && humanEditedBody !== true && photoFact.photoClaimInOwnWords(rest)) return { stale: true, reason: 'photo_check_unverified' };
+    return { stale: false, rest };
+  } catch (err) {
+    logger.warn(`[sms-amount-recheck] photo check recheck failed for customer ${customerId}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'photo_check_recheck_failed' };
+  }
+}
+
+// The copied fact sentences that are about no money (REPORT DELIVERY, PHOTO CHECK): each is rechecked against a fresh read and removed
+// before the money rules judge the rest. (an AI body = a prompt version on the decision, as for the Zelle rule)
+async function factSentencesStale({ customerId, body, promptVersion, humanEditedBody, dbh }) {
+  const report = await reportDeliveryStale({ customerId, text: body, humanEditedBody, dbh });
+  if (report.stale) return report;
+  return photoCheckStale({ customerId, text: report.rest, humanEditedBody, aiBody: Boolean(promptVersion), dbh });
 }
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
@@ -386,9 +427,9 @@ async function outgoingAmountsStale({
   // Owner ruling 2026-10-01: the body is a STAFF EDIT of the AI draft (callers compare it with the stored draft; auto-send never sets this).
   humanEditedBody = false,
 } = {}) {
-  const report = await reportDeliveryStale({ customerId, text: body, humanEditedBody, dbh });
-  if (report.stale) return report;
-  const text = report.rest;
+  const verified = await factSentencesStale({ customerId, body, promptVersion, humanEditedBody, dbh });
+  if (verified.stale) return verified;
+  const text = verified.rest;
   if (strictForVersion(promptVersion) && humanEditedBody !== true) {
     const verdict = await paymentStatusVerdict({ customerId, body: text, snapshot: paymentStatusSnapshot, inboundMessage, dbh });
     return verdict.reason ? { stale: true, reason: verdict.reason } : { stale: false, ...(verdict.zelle ? { zelle: verdict.zelle } : {}) };
@@ -410,4 +451,5 @@ module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible, liveZelleFacts,
   paymentStatusVerdict, paymentStatusSendBlockReason, bodyNeedsPaymentRecheck, bodyHasPaymentStatusVocabulary, bodyNeedsBillingBoundaryCheck,
   reportDeliveryStale,
+  photoCheckStale,
 };
