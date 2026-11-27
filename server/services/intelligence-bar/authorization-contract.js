@@ -183,6 +183,8 @@ CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
 CURATED_PREVIEW_TOOL_NAMES.add('compose_email');
 // set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
+// set_customer_service_contact: its card lines come from its own preview (service-contact-tools.js cardLines). It sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('set_customer_service_contact');
 // The Agent Review draft cards: their card lines come from their own preview (agent-review-tools.js cardLines).
 for (const name of ['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // resolve_dispatch_alert / unblock_sender: card lines come from their own previews (dispatch-alert-tools.js and
@@ -280,6 +282,7 @@ const ACTION_LABELS = {
   create_invoice: 'Create a draft invoice (sends nothing)',
   compose_email: 'Send a new email',
   set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
+  set_customer_service_contact: 'Add, change or remove a customer\'s contact (sends nothing)',
   approve_agent_review_draft: 'Send an Agent Review draft as written',
   revise_agent_review_draft: 'Send an edited Agent Review draft',
   ignore_agent_review_draft: 'Dismiss an Agent Review draft (sends nothing)',
@@ -1006,6 +1009,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // set_customer_bill_to: the customer, the payer, the invoices that move and stay, and that nothing is sent.
   if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
     for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // set_customer_service_contact: the change, every contact after it, who gets emails and texts, and that nothing is sent.
+  if (toolName === 'set_customer_service_contact' && preview?.preview === true) {
+    for (const line of require('./service-contact-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // The Agent Review draft cards: the exact text, the recipient (name and masked number) and the message it answers.
   if (['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft'].includes(toolName) && preview?.preview === true) {

@@ -222,6 +222,7 @@ const WRITE_TWO_STEP = [
   'create_invoice',
   'compose_email',
   'set_customer_bill_to',
+  'set_customer_service_contact',
   'approve_agent_review_draft',
   'revise_agent_review_draft',
   'ignore_agent_review_draft',
@@ -941,6 +942,11 @@ const UNCONFIRMED_CALLS = [
     ['unblock-sender-tools', 'executeUnblockSenderTool', 'unblock_sender', { blocked_id: '00000000-0000-0000-0000-00000000a903' }, {
       blocked_email_senders: [{ id: '00000000-0000-0000-0000-00000000a903', email_address: 'noreply@spam.example.invalid', domain: null, reason: 'spam_auto', blocked_count: 3, created_at: new Date('2026-10-01T12:00:00Z'), gmail_filter_id: 'filter-1' }],
     }],
+    // set_customer_service_contact's preview reads the customer only; it may not write without confirmed
+    // (intelligence-bar-service-contact.test.js covers the card itself).
+    ['service-contact-tools', 'executeServiceContactTool', 'set_customer_service_contact', { customer_id: '00000000-0000-0000-0000-00000000c281', action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+12025550177' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000c281', first_name: 'Pat', last_name: 'Tester', phone: '+12025550100', deleted_at: null }],
+    }],
     // link_customer_family / unlink_customer_family previews read both profiles and their families; they may not write
     // without confirmed (intelligence-bar-family-link.test.js covers the cards themselves).
     ['family-link-tools', 'executeFamilyLinkTool', 'link_customer_family', { customer_id: '00000000-0000-0000-0000-00000000a911', other_customer_id: '00000000-0000-0000-0000-00000000a912' }, {
@@ -1445,10 +1451,11 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // create_invoice (_sideEffects): its confirmed run creates a draft invoice (live smoke must not).
     // compose_email (_sideEffects): its confirmed run sends an email (live smoke must not).
     // set_customer_bill_to (_sideEffects): its confirmed run sets a customer's Bill-To payer.
+    // set_customer_service_contact (_sideEffects): its confirmed run saves a customer's contact slots.
     // The Agent Review draft cards (_sideEffects): their confirmed runs text the customer (approve, revise) or record the draft ignored.
     // resolve_dispatch_alert / unblock_sender (_sideEffects): their confirmed runs resolve an Action Queue card / remove a blocklist entry and its Gmail filter.
     // link_customer_family / unlink_customer_family (_sideEffects): their confirmed runs change a Same family link.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_estimate', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'link_customer_family', 'unlink_customer_family', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_estimate', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'set_customer_service_contact', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'link_customer_family', 'unlink_customer_family', 'propose_admin_edit']);
   });
 });
