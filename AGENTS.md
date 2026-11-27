@@ -66,6 +66,7 @@ For coding work read `CLAUDE.md` first and load only relevant skills. For an aud
 - **Admin OAuth pattern.** Admin auth is bearer-only (`localStorage.waves_admin_token`; no cookie/query fallback). Connect endpoints return consent URL as JSON for SPA navigation (bearer `res.redirect` 401s); callbacks validate one-time `state` nonce.
 - **`@waves/*` CJS workspace packages.** Client-imported packages join `optimizeDeps.include` + `build.commonjsOptions.include` in `client/vite.config.js`; SERVER-ONLY packages (e.g. `@waves/affiliate-registry`) must NOT be added and declare SERVER-ONLY in `package.json`.
 - **Company name in copy.** "Waves Pest Control", never "Waves Lawn & Pest". Texts and portal Messages say "Waves"; legal lines keep full name. Old-name mascot art stays.
+- **Unapproved paid spend or Twilio RCS.** Any PR adding or widening paid API/service calls, pricier models/SKUs (`server/config/models.js`), paid-key crons/backfills (`server/services/scheduler.js`), paid add-ons/infra, or spend-triggering gate flips without estimated $/day & $/mo spend and owner approval in the PR body is P1 (`CLAUDE.md` rule 23; silent bill spikes); Twilio RCS (`server/services/twilio.js`) is always P1 (owner-rejected).
 
 ## Implementation defaults
 
