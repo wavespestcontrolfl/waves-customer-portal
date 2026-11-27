@@ -24,6 +24,7 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
 import VendorCancellationDialog from "../../components/admin/VendorCancellationDialog";
+import AlreadyCountedDialog from "../../components/admin/AlreadyCountedDialog";
 import {
   ActionFeedback,
   Badge,
@@ -52,7 +53,13 @@ function adminFetch(path, options = {}) {
     },
     ...options,
   }).then((r) => {
-    if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
+    if (!r.ok) {
+      // The body is kept for callers that branch on the server's code (the Restock tab's
+      // "already counted" warning); the message stays the bare status the toasts show.
+      return r.json().catch(() => null).then((body) => {
+        throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status, code: body?.code, details: body });
+      });
+    }
     return r.json();
   });
 }
@@ -3259,6 +3266,8 @@ function RestockRequestsTab({
   const [receiveDrafts, setReceiveDrafts] = useState({});
   // The request whose "Record vendor cancellation" dialog is open.
   const [vendorCancelFor, setVendorCancelFor] = useState(null);
+  // { request, message }: Receive was refused because an invoice already added this stock.
+  const [alreadyCounted, setAlreadyCounted] = useState(null);
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
   // server presigns for 1 h; the cell drops the links a little before that
   // and offers Refresh, so a tab left open can always re-request fresh URLs.
@@ -3325,7 +3334,7 @@ function RestockRequestsTab({
     };
   }, [load, refreshId]);
 
-  async function runAction(request, action) {
+  async function runAction(request, action, { confirm = false, fingerprint = null } = {}) {
     setReceivingId(request.id);
     try {
       const draft = receiveDrafts[request.id] || {};
@@ -3339,19 +3348,32 @@ function RestockRequestsTab({
           quantity: draft.quantity || null,
           unit: draft.unit || null,
           note: draft.note || null,
+          ...(confirm ? { confirm: true } : {}),
+          ...(fingerprint ? { confirmFingerprint: fingerprint } : {}),
         }),
       });
-      if (action === "receive") {
-        showToast("Stock received.");
-      } else {
-        showToast(
-          action === "mark_ordered" ? "Marked ordered" : "Request cancelled",
-        );
-      }
+      setAlreadyCounted(null);
+      showToast(
+        {
+          receive: "Stock received.",
+          mark_ordered: "Marked ordered",
+          close_counted: "Closed. Stock was not changed.",
+        }[action] || "Request cancelled",
+      );
       await load();
       onUpdate && onUpdate();
     } catch (err) {
-      showToast(`Failed: ${err.message}`);
+      const said = err.details?.error || err.message;
+      if (err.code === "already_counted_by_receipt") {
+        setAlreadyCounted({ request, message: said, fingerprint: err.details?.receiptFingerprint });
+      } else if (err.code === "receipts_changed") {
+        // Every listed receipt was undone while the dialog was open: nothing is counted any more.
+        setAlreadyCounted(null);
+        showToast(said);
+        await load();
+      } else {
+        showToast(`Failed: ${err.message}`);
+      }
     } finally {
       setReceivingId("");
     }
@@ -3490,6 +3512,16 @@ function RestockRequestsTab({
             </TBody>
           </Table>
         </div>
+      )}
+      {alreadyCounted && (
+        <AlreadyCountedDialog
+          request={alreadyCounted.request}
+          message={alreadyCounted.message}
+          busy={receivingId === alreadyCounted.request.id}
+          onClose={() => setAlreadyCounted(null)}
+          onCloseCounted={() => runAction(alreadyCounted.request, "close_counted", { fingerprint: alreadyCounted.fingerprint })}
+          onReceiveAnyway={() => runAction(alreadyCounted.request, "receive", { confirm: true, fingerprint: alreadyCounted.fingerprint })}
+        />
       )}
       {vendorCancelFor && (
         <VendorCancellationDialog
@@ -3714,6 +3746,13 @@ function RestockActionCell({
             variant="primary"
           >
             Receive
+          </Button>
+          <Button
+            onClick={() => runAction(request, "close_counted")}
+            disabled={receivingId === request.id}
+            variant="secondary"
+          >
+            Close, already counted
           </Button>
           {lateOrderReceive || orderOut ? (
             <VendorCancelControls
