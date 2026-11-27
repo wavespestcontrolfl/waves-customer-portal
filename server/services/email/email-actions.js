@@ -1270,10 +1270,16 @@ const DRAFT_TONE_RULES = Object.freeze({
 // the broader isAutomatedSender so reply-enabled ticketing mailboxes like
 // notifications+ticket123@example.com keep getting service/complaint drafts.
 function resolveDraftReplyAddress(email) {
+  if (isGoogleLsaCallReceipt(email.from_address, email.subject)) return null;
   const ownAddress = ownMailboxAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
   if (ownMailboxAddress(email.from_address) === ownAddress) return null;
   const replyAddress = email.reply_to || email.from_address;
-  if (!replyAddress || ownMailboxAddress(replyAddress) === ownAddress || isNoReplyAddress(replyAddress)) return null;
+  if (!replyAddress
+    || ownMailboxAddress(replyAddress) === ownAddress
+    || isInternalEmailRecipient(replyAddress)
+    || isNoReplyAddress(replyAddress)) {
+    return null;
+  }
   return replyAddress;
 }
 

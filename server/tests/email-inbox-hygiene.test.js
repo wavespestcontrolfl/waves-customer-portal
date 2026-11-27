@@ -1069,6 +1069,38 @@ describe('reply drafts honor Reply-To', () => {
       '<ticket-123@helpdesk.example>'
     );
   });
+
+  test('skips drafting for Google LSA call receipts even with a distinct Reply-To, and refuses Reply-To pointing at internal Waves addresses', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb();
+    const lsaResult = await draftReplyForEmail({
+      id: 'e-lsa-stale',
+      gmail_id: 'g-lsa-stale',
+      gmail_thread_id: 't-lsa-stale',
+      from_address: 'localservices-noreply@google.com',
+      subject: 'New call from a potential customer',
+      body_text: 'A potential customer called you.',
+      label_ids: JSON.stringify(['INBOX']),
+      reply_to: 'reply-token@google.com',
+      received_at: '2026-11-27T17:44:20Z',
+      draft_gmail_id: 'pending',
+    });
+    const internalReplyResult = await draftReplyForEmail({
+      id: 'e-internal-reply',
+      gmail_id: 'g-internal-reply',
+      gmail_thread_id: 't-internal-reply',
+      from_address: 'relay@forms.example',
+      subject: 'Forwarded inquiry',
+      body_text: 'Please check this.',
+      label_ids: JSON.stringify(['INBOX']),
+      reply_to: 'events@wavespestcontrol.com',
+      received_at: '2026-11-27T17:44:20Z',
+      draft_gmail_id: null,
+    });
+    expect(lsaResult).toBeNull();
+    expect(internalReplyResult).toBeNull();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
 });
 
 describe('stripPlaceholderSignOff', () => {
