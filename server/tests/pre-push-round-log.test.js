@@ -201,6 +201,14 @@ describe('pre-push round log', () => {
     expect(strict.status).toBe(1);
   }, 240000);
 
+  test('one commit pushed to two branches counts a round for each branch', () => {
+    const both = { pushes: [['refs/heads/feature', sha, 'refs/heads/feature'], ['refs/heads/feature', sha, 'refs/heads/feature-copy']], env: { FAKE_CODEX_VERDICT: BLOCKING } };
+    for (let round = 1; round <= 3; round += 1) expect(runHook(both).status).toBe(1);
+    const fourth = runHook(both);
+    expect(fourth.stderr).toContain('round cap reached for feature (round 4) feature-copy (round 4)');
+    expect(fourth.status).toBe(0);
+  }, 240000);
+
   test('a push to main is never relaxed by the round cap', () => {
     const toMain = { pushes: [['refs/heads/feature', sha, 'refs/heads/main']], env: { FAKE_CODEX_VERDICT: BLOCKING } };
     for (let round = 1; round <= 4; round += 1) expect(runHook(toMain).status).toBe(1);

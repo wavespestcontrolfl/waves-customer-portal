@@ -1672,7 +1672,8 @@ echo "────────────────────────�
 # verdict on the head). Why: branches looped for 25-47 local rounds before
 # their PR opened; from 11-21 to 11-27, 1,400 of 2,598 audits were round 4
 # or later. The count comes from the round log (prior "audited" lines for
-# the same destination ref), so it is 0 when the log is off or unreadable,
+# the same destination ref, read from the line's refs list: one commit pushed
+# to two branches is one line naming both), so it is 0 when the log is off or unreadable,
 # and that keeps the old always-block behavior. main is never relaxed.
 # CODEX_REVIEW_BLOCK_ROUNDS=0 blocks on every round.
 prior_audited_rounds() {
@@ -1684,7 +1685,7 @@ prior_audited_rounds() {
   fi
   for f in "$dir"/codex-review-rounds-*.jsonl; do
     [ -f "$f" ] || continue
-    c="$(jq -r --arg r "$ref" 'select(.outcome == "audited" and .ref == $r) | 1' "$f" 2>/dev/null | wc -l | tr -d ' ')"
+    c="$(jq -r --arg r "$ref" 'select(.outcome == "audited" and any((.refs // [.ref])[]; . == $r)) | 1' "$f" 2>/dev/null | wc -l | tr -d ' ')"
     n=$((n + ${c:-0}))
   done
   echo "$n"
