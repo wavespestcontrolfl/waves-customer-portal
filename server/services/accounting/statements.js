@@ -567,12 +567,223 @@ function cashBasisReceiptWhere(q) {
         .orWhere((r) => r.where('e.source_type', 'reversal').whereIn('orig.source_type', ['refund', 'refund_reversal']))));
 }
 
+const PAYROLL_LIABILITY_CODES = [
+  SYSTEM_CODES.NET_PAY_CLEARING,
+  SYSTEM_CODES.PAYROLL_TAX_LIABILITIES,
+  SYSTEM_CODES.PAYROLL_BENEFITS_PAYABLE,
+];
+
+function addSignedExpense(sumsMap, accountId, signedCents) {
+  if (!accountId || !signedCents) return;
+  const prev = sumsMap.get(accountId) || { debitCents: 0, creditCents: 0 };
+  if (signedCents > 0) {
+    sumsMap.set(accountId, { debitCents: prev.debitCents + signedCents, creditCents: prev.creditCents });
+  } else {
+    sumsMap.set(accountId, { debitCents: prev.debitCents, creditCents: prev.creditCents + Math.abs(signedCents) });
+  }
+}
+
 /**
- * Cash-basis revenue helper: on cash basis, revenue is recognized when payments settle
+ * Pure: compute cumulative accrued payroll composition from payroll_run entries (and
+ * reversals) posted on or before `asOfDate` so cash-basis payroll disbursements map
+ * back to exact wage, employer payroll-tax, SIMPLE IRA, and HSA expense accounts.
+ */
+function buildPayrollProfileAsOf(payrollLines, asOfDate) {
+  if (!Array.isArray(payrollLines) || !payrollLines.length) return null;
+  const netByCode = new Map();
+  let matchedAny = false;
+  for (const r of payrollLines) {
+    const entryDay = dateCellText(r.entry_date);
+    if (asOfDate && entryDay && entryDay > asOfDate) continue;
+    matchedAny = true;
+    const netDr = Number(r.debit_cents) - Number(r.credit_cents);
+    netByCode.set(r.code, (netByCode.get(r.code) || 0) + netDr);
+  }
+  if (!matchedAny) return null;
+
+  const dr = (code) => Math.max(0, netByCode.get(code) || 0);
+  const cr = (code) => Math.max(0, -(netByCode.get(code) || 0));
+  return {
+    fieldGrossCents: dr(SYSTEM_CODES.COGS_FIELD_WAGES),
+    adminGrossCents: dr(SYSTEM_CODES.OPEX_OFFICE_WAGES),
+    fieldErTaxCents: dr(SYSTEM_CODES.COGS_FIELD_PAYROLL_TAX),
+    adminErTaxCents: dr(SYSTEM_CODES.OPEX_OFFICE_PAYROLL_TAX),
+    erSimpleCents: dr(SYSTEM_CODES.OPEX_RETIREMENT_SIMPLE),
+    erHsaCents: dr(SYSTEM_CODES.OPEX_EMPLOYEE_BENEFITS),
+    netPayLiabilityCents: cr(SYSTEM_CODES.NET_PAY_CLEARING),
+    taxLiabilityCents: cr(SYSTEM_CODES.PAYROLL_TAX_LIABILITIES),
+    benefitsLiabilityCents: cr(SYSTEM_CODES.PAYROLL_BENEFITS_PAYABLE),
+  };
+}
+
+function splitEmployeeWithholdingAcrossWages(withholdingCents, profile) {
+  if (withholdingCents <= 0) return [];
+  const fieldGross = profile?.fieldGrossCents || 0;
+  const adminGross = profile?.adminGrossCents || 0;
+  const totalGross = fieldGross + adminGross;
+  if (totalGross <= 0) return [{ accountCode: SYSTEM_CODES.COGS_FIELD_WAGES, weight: withholdingCents }];
+  const fieldPart = Math.round((withholdingCents * fieldGross) / totalGross);
+  const adminPart = withholdingCents - fieldPart;
+  const out = [];
+  if (fieldPart > 0) out.push({ accountCode: SYSTEM_CODES.COGS_FIELD_WAGES, weight: fieldPart });
+  if (adminPart > 0) out.push({ accountCode: SYSTEM_CODES.OPEX_OFFICE_WAGES, weight: adminPart });
+  return out;
+}
+
+function payrollExpenseWeightsForLiability(liabilityCode, profile, serviceLine) {
+  if (liabilityCode === SYSTEM_CODES.NET_PAY_CLEARING) {
+    if (serviceLine === 'admin') return [{ accountCode: SYSTEM_CODES.OPEX_OFFICE_WAGES, weight: 1 }];
+    if (serviceLine === 'field') return [{ accountCode: SYSTEM_CODES.COGS_FIELD_WAGES, weight: 1 }];
+    const out = [];
+    if (profile?.fieldGrossCents > 0) out.push({ accountCode: SYSTEM_CODES.COGS_FIELD_WAGES, weight: profile.fieldGrossCents });
+    if (profile?.adminGrossCents > 0) out.push({ accountCode: SYSTEM_CODES.OPEX_OFFICE_WAGES, weight: profile.adminGrossCents });
+    return out.length ? out : [{ accountCode: SYSTEM_CODES.COGS_FIELD_WAGES, weight: 1 }];
+  }
+
+  if (liabilityCode === SYSTEM_CODES.PAYROLL_TAX_LIABILITIES) {
+    if (!profile || profile.taxLiabilityCents <= 0) {
+      return [{ accountCode: SYSTEM_CODES.COGS_FIELD_PAYROLL_TAX, weight: 1 }];
+    }
+    const empTax = Math.max(0, profile.taxLiabilityCents - profile.fieldErTaxCents - profile.adminErTaxCents);
+    const out = [...splitEmployeeWithholdingAcrossWages(empTax, profile)];
+    if (profile.fieldErTaxCents > 0) out.push({ accountCode: SYSTEM_CODES.COGS_FIELD_PAYROLL_TAX, weight: profile.fieldErTaxCents });
+    if (profile.adminErTaxCents > 0) out.push({ accountCode: SYSTEM_CODES.OPEX_OFFICE_PAYROLL_TAX, weight: profile.adminErTaxCents });
+    return out.length ? out : [{ accountCode: SYSTEM_CODES.COGS_FIELD_PAYROLL_TAX, weight: 1 }];
+  }
+
+  if (!profile || profile.benefitsLiabilityCents <= 0) {
+    return [{ accountCode: SYSTEM_CODES.OPEX_EMPLOYEE_BENEFITS, weight: 1 }];
+  }
+  const empSimple = Math.max(0, profile.benefitsLiabilityCents - profile.erSimpleCents - profile.erHsaCents);
+  const out = [...splitEmployeeWithholdingAcrossWages(empSimple, profile)];
+  if (profile.erSimpleCents > 0) out.push({ accountCode: SYSTEM_CODES.OPEX_RETIREMENT_SIMPLE, weight: profile.erSimpleCents });
+  if (profile.erHsaCents > 0) out.push({ accountCode: SYSTEM_CODES.OPEX_EMPLOYEE_BENEFITS, weight: profile.erHsaCents });
+  return out.length ? out : [{ accountCode: SYSTEM_CODES.OPEX_EMPLOYEE_BENEFITS, weight: 1 }];
+}
+
+function allocateTotalByExpenseWeights(signedTotalCents, weights, expIdByCode) {
+  const result = new Map();
+  const signed = Math.trunc(Number(signedTotalCents) || 0);
+  if (signed === 0) return result;
+  const sign = signed >= 0 ? 1 : -1;
+  const absTotal = Math.abs(signed);
+  const resolved = (weights || [])
+    .map((w) => ({ accountId: expIdByCode.get(w.accountCode), weight: w.weight }))
+    .filter((w) => w.accountId && w.weight > 0);
+  if (!resolved.length) return result;
+
+  const weightSum = resolved.reduce((s, w) => s + w.weight, 0);
+  let allocated = 0;
+  for (let i = 0; i < resolved.length; i += 1) {
+    const part = i === resolved.length - 1
+      ? absTotal - allocated
+      : Math.round((absTotal * resolved[i].weight) / weightSum);
+    allocated += part;
+    if (part > 0) result.set(resolved[i].accountId, (result.get(resolved[i].accountId) || 0) + sign * part);
+  }
+  return result;
+}
+
+/**
+ * Pure: allocate a signed payroll disbursement (or reversal) against 2290/2200/2210
+ * into cash-basis payroll COGS/OpEx deductions cumulatively with zero rounding drift.
+ */
+function allocateCumulativePayrollSettlement(priorCumCents, signedDisbursementCents, liabilityCode, profile, serviceLine, expIdByCode) {
+  const prior = Math.trunc(Number(priorCumCents) || 0);
+  const delta = Math.trunc(Number(signedDisbursementCents) || 0);
+  if (delta === 0) return [];
+  const weights = payrollExpenseWeightsForLiability(liabilityCode, profile, serviceLine);
+  const before = allocateTotalByExpenseWeights(prior, weights, expIdByCode);
+  const after = allocateTotalByExpenseWeights(prior + delta, weights, expIdByCode);
+  const keys = new Set([...before.keys(), ...after.keys()]);
+  const out = [];
+  for (const accountId of keys) {
+    const diff = (after.get(accountId) || 0) - (before.get(accountId) || 0);
+    if (diff !== 0) out.push({ accountId, signedCents: diff });
+  }
+  return out;
+}
+
+function cashBasisPayrollSettlementWhere(q) {
+  q.where('e.source_type', 'payroll_remittance')
+    .orWhere((rev) => rev.where('e.source_type', 'reversal').where('orig.source_type', 'payroll_remittance'));
+}
+
+async function applyCashBasisPayrollDisbursements(conn, { from, to }, baseSums) {
+  const rows = await conn('gl_journal_lines as l')
+    .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+    .leftJoin('gl_journal_entries as orig', 'orig.id', 'e.reverses_entry_id')
+    .join('gl_accounts as a', 'a.id', 'l.account_id')
+    .where('e.status', 'posted')
+    .where('e.entry_date', '>=', from)
+    .where('e.entry_date', '<=', to)
+    .whereIn('a.code', PAYROLL_LIABILITY_CODES)
+    .where(cashBasisPayrollSettlementWhere)
+    .orderBy('e.entry_date', 'asc')
+    .orderBy('e.entry_number', 'asc')
+    .orderBy('l.line_order', 'asc')
+    .select(
+      conn.raw('e.entry_date::text as entry_date'),
+      'a.code as account_code',
+      'l.service_line',
+      'l.debit_cents',
+      'l.credit_cents',
+    );
+  if (!rows.length) return;
+
+  const [expAccounts, payrollLines, priorRows] = await Promise.all([
+    conn('gl_accounts').whereIn('account_type', ['cogs', 'expense']).select('id', 'code'),
+    conn('gl_journal_lines as l')
+      .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+      .leftJoin('gl_journal_entries as orig', 'orig.id', 'e.reverses_entry_id')
+      .join('gl_accounts as a', 'a.id', 'l.account_id')
+      .where('e.status', 'posted')
+      .where('e.entry_date', '<=', to)
+      .where((sub) => {
+        sub.where('e.source_type', 'payroll_run')
+          .orWhere((rev) => rev.where('e.source_type', 'reversal').where('orig.source_type', 'payroll_run'));
+      })
+      .select(conn.raw('e.entry_date::text as entry_date'), 'a.code', 'l.debit_cents', 'l.credit_cents'),
+    conn('gl_journal_lines as l')
+      .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+      .leftJoin('gl_journal_entries as orig', 'orig.id', 'e.reverses_entry_id')
+      .join('gl_accounts as a', 'a.id', 'l.account_id')
+      .where('e.status', 'posted')
+      .where('e.entry_date', '<', from)
+      .whereIn('a.code', PAYROLL_LIABILITY_CODES)
+      .where(cashBasisPayrollSettlementWhere)
+      .groupBy('a.code')
+      .select('a.code', conn.raw('COALESCE(SUM(l.debit_cents - l.credit_cents), 0)::bigint as net_cents')),
+  ]);
+
+  const expIdByCode = new Map(expAccounts.map((a) => [a.code, a.id]));
+  const cumByCode = new Map(priorRows.map((r) => [r.code, Number(r.net_cents)]));
+  const profileCache = new Map();
+
+  for (const row of rows) {
+    const signedCents = Number(row.debit_cents) - Number(row.credit_cents);
+    if (signedCents === 0) continue;
+    const settleDay = dateCellText(row.entry_date);
+    if (!profileCache.has(settleDay)) {
+      profileCache.set(settleDay, buildPayrollProfileAsOf(payrollLines, settleDay));
+    }
+    const profile = profileCache.get(settleDay);
+    const priorCum = cumByCode.get(row.account_code) || 0;
+    const allocs = allocateCumulativePayrollSettlement(
+      priorCum, signedCents, row.account_code, profile, row.service_line, expIdByCode,
+    );
+    cumByCode.set(row.account_code, priorCum + signedCents);
+    for (const alloc of allocs) {
+      addSignedExpense(baseSums, alloc.accountId, alloc.signedCents);
+    }
+  }
+}
+
+/**
+ * Cash-basis helper: on cash basis, revenue is recognized when payments settle
  * (clearing 1100 A/R or 2300 Unearned Revenue), EXCLUDING collected Florida sales tax
- * via date-effective cumulative invoice revenue/tax allocation (so later invoice edits
- * never drift historical locked months), and including signed payment reversals,
- * deposit refunds, and Stripe disputes/reinstatements on their posting dates.
+ * via date-effective cumulative invoice revenue/tax allocation, and payroll expenses
+ * are recognized when 2290/2200/2210 liabilities are actually disbursed.
  */
 async function queryCashBasisSums(conn, { from, to }) {
   const baseSums = await queryAccountSums(conn, { from, to, basis: 'cash', excludeClosing: true });
@@ -598,58 +809,59 @@ async function queryCashBasisSums(conn, { from, to }) {
       'l.credit_cents',
     );
 
-  if (!activityRows.length) return baseSums;
+  if (activityRows.length) {
+    const revAccounts = await conn('gl_accounts')
+      .where('account_type', 'revenue')
+      .select('id', 'code');
+    const revIdByCode = new Map(revAccounts.map((r) => [r.code, r.id]));
 
-  const revAccounts = await conn('gl_accounts')
-    .where('account_type', 'revenue')
-    .select('id', 'code');
-  const revIdByCode = new Map(revAccounts.map((r) => [r.code, r.id]));
+    const invoiceRefs = [
+      ...new Set(
+        activityRows
+          .filter((r) => r.account_code === SYSTEM_CODES.ACCOUNTS_RECEIVABLE && r.invoice_ref)
+          .map((r) => String(r.invoice_ref)),
+      ),
+    ];
 
-  const invoiceRefs = [
-    ...new Set(
-      activityRows
-        .filter((r) => r.account_code === SYSTEM_CODES.ACCOUNTS_RECEIVABLE && r.invoice_ref)
-        .map((r) => String(r.invoice_ref)),
-    ),
-  ];
+    const [{ linesByInvoice, fallbackProfiles }, priorReceiptRows] = await Promise.all([
+      loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, to),
+      invoiceRefs.length
+        ? conn('gl_journal_lines as l')
+          .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+          .leftJoin('gl_journal_entries as orig', 'orig.id', 'e.reverses_entry_id')
+          .join('gl_accounts as a', 'a.id', 'l.account_id')
+          .where('e.status', 'posted')
+          .where('e.entry_date', '<', from)
+          .where('a.code', SYSTEM_CODES.ACCOUNTS_RECEIVABLE)
+          .whereIn('l.invoice_ref', invoiceRefs)
+          .where(cashBasisReceiptWhere)
+          .groupBy('l.invoice_ref')
+          .select('l.invoice_ref', conn.raw('COALESCE(SUM(l.credit_cents - l.debit_cents), 0)::bigint as net_cents'))
+        : Promise.resolve([]),
+    ]);
 
-  const [{ linesByInvoice, fallbackProfiles }, priorReceiptRows] = await Promise.all([
-    loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, to),
-    invoiceRefs.length
-      ? conn('gl_journal_lines as l')
-        .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
-        .leftJoin('gl_journal_entries as orig', 'orig.id', 'e.reverses_entry_id')
-        .join('gl_accounts as a', 'a.id', 'l.account_id')
-        .where('e.status', 'posted')
-        .where('e.entry_date', '<', from)
-        .where('a.code', SYSTEM_CODES.ACCOUNTS_RECEIVABLE)
-        .whereIn('l.invoice_ref', invoiceRefs)
-        .where(cashBasisReceiptWhere)
-        .groupBy('l.invoice_ref')
-        .select('l.invoice_ref', conn.raw('COALESCE(SUM(l.credit_cents - l.debit_cents), 0)::bigint as net_cents'))
-      : Promise.resolve([]),
-  ]);
+    const cumByInvoice = new Map(priorReceiptRows.map((r) => [String(r.invoice_ref), Number(r.net_cents)]));
 
-  const cumByInvoice = new Map(priorReceiptRows.map((r) => [String(r.invoice_ref), Number(r.net_cents)]));
-
-  for (const row of activityRows) {
-    const signedCents = Number(row.credit_cents) - Number(row.debit_cents);
-    if (signedCents === 0) continue;
-    const invKey = row.account_code === SYSTEM_CODES.ACCOUNTS_RECEIVABLE && row.invoice_ref
-      ? String(row.invoice_ref)
-      : null;
-    const receiptDay = dateCellText(row.entry_date);
-    const profile = invKey
-      ? (buildInvoiceProfileAsOf(linesByInvoice.get(invKey), receiptDay) || fallbackProfiles.get(invKey) || null)
-      : null;
-    const priorCum = invKey ? (cumByInvoice.get(invKey) || 0) : 0;
-    const allocations = allocateCumulativeCashReceipt(priorCum, signedCents, profile, row.service_line, revIdByCode);
-    if (invKey) cumByInvoice.set(invKey, priorCum + signedCents);
-    for (const alloc of allocations) {
-      addSignedRevenue(baseSums, alloc.accountId, alloc.signedCents);
+    for (const row of activityRows) {
+      const signedCents = Number(row.credit_cents) - Number(row.debit_cents);
+      if (signedCents === 0) continue;
+      const invKey = row.account_code === SYSTEM_CODES.ACCOUNTS_RECEIVABLE && row.invoice_ref
+        ? String(row.invoice_ref)
+        : null;
+      const receiptDay = dateCellText(row.entry_date);
+      const profile = invKey
+        ? (buildInvoiceProfileAsOf(linesByInvoice.get(invKey), receiptDay) || fallbackProfiles.get(invKey) || null)
+        : null;
+      const priorCum = invKey ? (cumByInvoice.get(invKey) || 0) : 0;
+      const allocations = allocateCumulativeCashReceipt(priorCum, signedCents, profile, row.service_line, revIdByCode);
+      if (invKey) cumByInvoice.set(invKey, priorCum + signedCents);
+      for (const alloc of allocations) {
+        addSignedRevenue(baseSums, alloc.accountId, alloc.signedCents);
+      }
     }
   }
 
+  await applyCashBasisPayrollDisbursements(conn, { from, to }, baseSums);
   return baseSums;
 }
 
@@ -979,6 +1191,29 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
 }
 
 /**
+ * Pure: aggregate Executive Overview KPI totals across all accounts matching canonical
+ * balance-sheet subtypes (so custom checking, savings, credit card, A/R, or payroll
+ * liability accounts are always included alongside seeded system accounts).
+ */
+function summarizeBalanceSheetKpis(balanceSheet) {
+  const currentAssets = balanceSheet?.sections?.current_assets || [];
+  const currentLiabilities = balanceSheet?.sections?.current_liabilities || [];
+  const sumSubTypes = (items, subTypes) => items
+    .filter((i) => subTypes.has(i.sub_type))
+    .reduce((s, i) => s + (i.amount_cents || 0), 0);
+
+  return {
+    cash_total_cents: sumSubTypes(currentAssets, CASH_SUB_TYPES),
+    stripe_clearing_cents: sumSubTypes(currentAssets, new Set(['stripe_clearing'])),
+    accounts_receivable_cents: sumSubTypes(currentAssets, new Set(['ar'])),
+    credit_cards_cents: sumSubTypes(currentLiabilities, new Set(['credit_card'])),
+    sales_tax_payable_cents: sumSubTypes(currentLiabilities, new Set(['sales_tax_payable'])),
+    unearned_revenue_cents: sumSubTypes(currentLiabilities, new Set(['unearned_revenue'])),
+    payroll_liabilities_cents: sumSubTypes(currentLiabilities, new Set(['payroll_liability', 'net_pay_clearing'])),
+  };
+}
+
+/**
  * Executive Accounting Overview KPIs — single source of truth from GL.
  */
 async function getAccountingOverview({ conn = db } = {}) {
@@ -996,24 +1231,7 @@ async function getAccountingOverview({ conn = db } = {}) {
     findMissingSystemAccountCodes(conn),
   ]);
 
-  const byCode = new Map();
-  for (const list of [
-    balanceSheet.sections.current_assets,
-    balanceSheet.sections.fixed_assets,
-    balanceSheet.sections.current_liabilities,
-    balanceSheet.sections.long_term_liabilities,
-  ]) {
-    for (const item of list) byCode.set(item.code, item.amount_cents);
-  }
-
-  const totalCashCents = [
-    SYSTEM_CODES.CHECKING_PRIMARY,
-    SYSTEM_CODES.CHECKING_PAYROLL,
-    SYSTEM_CODES.SAVINGS_RESERVE,
-    SYSTEM_CODES.STRIPE_CLEARING,
-    SYSTEM_CODES.UNDEPOSITED_FUNDS,
-  ].reduce((s, code) => s + (byCode.get(code) || 0), 0);
-
+  const kpis = summarizeBalanceSheetKpis(balanceSheet);
   const lockedMonths = periods.filter((p) => p.status === 'locked').map((p) => p.period_month);
 
   return {
@@ -1021,15 +1239,7 @@ async function getAccountingOverview({ conn = db } = {}) {
     posted_entries: Number(entryCountRow?.count || 0),
     trial_balance_ok: trialBalance.balanced,
     balance_sheet_ok: balanceSheet.totals.balanced,
-    cash_total_cents: totalCashCents,
-    stripe_clearing_cents: byCode.get(SYSTEM_CODES.STRIPE_CLEARING) || 0,
-    accounts_receivable_cents: byCode.get(SYSTEM_CODES.ACCOUNTS_RECEIVABLE) || 0,
-    credit_cards_cents: byCode.get(SYSTEM_CODES.CREDIT_CARD_PRIMARY) || 0,
-    sales_tax_payable_cents: byCode.get(SYSTEM_CODES.SALES_TAX_PAYABLE) || 0,
-    unearned_revenue_cents: byCode.get(SYSTEM_CODES.UNEARNED_REVENUE) || 0,
-    payroll_liabilities_cents: (byCode.get(SYSTEM_CODES.PAYROLL_TAX_LIABILITIES) || 0)
-      + (byCode.get(SYSTEM_CODES.PAYROLL_BENEFITS_PAYABLE) || 0)
-      + (byCode.get(SYSTEM_CODES.NET_PAY_CLEARING) || 0),
+    ...kpis,
     mtd: pnlMtd.totals,
     ytd: pnlYtd.totals,
     locked_through: lockedMonths[0] || null,
@@ -1045,8 +1255,11 @@ module.exports = {
   allocateCashReceiptToRevenue,
   allocateCumulativeCashReceipt,
   buildInvoiceProfileAsOf,
+  buildPayrollProfileAsOf,
+  allocateCumulativePayrollSettlement,
   summarizeSalesTaxLines,
   summarize1099VendorLines,
+  summarizeBalanceSheetKpis,
   getTrialBalance,
   getProfitAndLoss,
   getBalanceSheet,

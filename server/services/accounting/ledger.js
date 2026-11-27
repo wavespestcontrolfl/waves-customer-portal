@@ -495,13 +495,23 @@ async function reverseJournalEntry(entryId, { reversalDate = null, reason = '', 
 }
 
 /**
- * Audited vendor-link backfill on an existing journal entry's unlinked P&L expense/COGS lines.
- * Never mutates dollar amounts, accounts, or reconciled balance-sheet lines.
+ * Audited vendor attribution update on an existing journal entry's unreconciled P&L
+ * expense/COGS lines. Never mutates dollar amounts, accounts, or reconciled lines.
+ * By default fills only NULL vendor_id lines; pass `allowReplace` / `allowClear`
+ * when reconciling corrected source expense vendors.
  */
-async function linkJournalEntryVendor(entryId, { vendorId, reason = 'Link vendor for 1099 tracking', actorId = null, requestMeta = {}, conn = db } = {}) {
+async function linkJournalEntryVendor(entryId, {
+  vendorId = null,
+  reason = 'Link vendor for 1099 tracking',
+  allowReplace = false,
+  allowClear = false,
+  actorId = null,
+  requestMeta = {},
+  conn = db,
+} = {}) {
   const validEntryId = assertOptionalUuid(entryId, 'entryId');
   const validVendorId = assertOptionalUuid(vendorId, 'vendorId');
-  if (!validEntryId || !validVendorId) {
+  if (!validEntryId || (!validVendorId && !allowClear)) {
     throw new AccountingError(400, 'entryId and vendorId are required');
   }
   const cleanReason = String(reason || '').trim().slice(0, 300) || 'Link vendor for 1099 tracking';
@@ -509,17 +519,27 @@ async function linkJournalEntryVendor(entryId, { vendorId, reason = 'Link vendor
   const run = async (trx) => {
     const entry = await trx('gl_journal_entries').where({ id: validEntryId }).first('id', 'entry_number', 'status');
     if (!entry) throw new AccountingError(404, 'Journal entry not found');
-    const vendor = await trx('gl_vendors').where({ id: validVendorId }).first('id', 'display_name', 'active');
-    if (!vendor) throw new AccountingError(404, 'Vendor not found');
-    if (!vendor.active) throw new AccountingError(409, `Vendor "${vendor.display_name}" is inactive`);
+    let vendor = null;
+    if (validVendorId) {
+      vendor = await trx('gl_vendors').where({ id: validVendorId }).first('id', 'display_name', 'active');
+      if (!vendor) throw new AccountingError(404, 'Vendor not found');
+      if (!vendor.active) throw new AccountingError(409, `Vendor "${vendor.display_name}" is inactive`);
+    }
 
-    const eligible = await trx('gl_journal_lines as l')
+    let q = trx('gl_journal_lines as l')
       .join('gl_accounts as a', 'a.id', 'l.account_id')
       .where('l.entry_id', validEntryId)
-      .whereNull('l.vendor_id')
       .whereNull('l.reconciliation_id')
-      .whereIn('a.account_type', ['cogs', 'expense'])
-      .select('l.id');
+      .whereIn('a.account_type', ['cogs', 'expense']);
+    if (validVendorId && allowReplace) {
+      q = q.whereRaw('(l.vendor_id IS NULL OR l.vendor_id <> ?)', [validVendorId]);
+    } else if (validVendorId) {
+      q = q.whereNull('l.vendor_id');
+    } else {
+      q = q.whereNotNull('l.vendor_id');
+    }
+
+    const eligible = await q.select('l.id', 'l.vendor_id as previous_vendor_id');
     const lineIds = eligible.map((r) => r.id);
     if (!lineIds.length) {
       return { entry: await loadEntryWithLines(trx, validEntryId), updatedLines: 0 };
@@ -527,7 +547,7 @@ async function linkJournalEntryVendor(entryId, { vendorId, reason = 'Link vendor
 
     await trx('gl_journal_lines')
       .whereIn('id', lineIds)
-      .update({ vendor_id: validVendorId });
+      .update({ vendor_id: validVendorId || null });
 
     await recordAuditEvent({
       actor_type: actorId ? 'technician' : 'system',
@@ -537,8 +557,9 @@ async function linkJournalEntryVendor(entryId, { vendorId, reason = 'Link vendor
       resource_id: validEntryId,
       metadata: {
         entry_number: Number(entry.entry_number),
-        vendor_id: validVendorId,
-        vendor_name: vendor.display_name,
+        previous_vendor_ids: [...new Set(eligible.map((r) => r.previous_vendor_id).filter(Boolean))],
+        vendor_id: validVendorId || null,
+        vendor_name: vendor ? vendor.display_name : null,
         updated_line_ids: lineIds,
         reason: cleanReason,
       },

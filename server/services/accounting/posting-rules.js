@@ -353,6 +353,63 @@ function buildRefundSplitLines({ sub, unearned, tax, total, cashAccount, isRever
   return lines;
 }
 
+function pushRefundPartLines(lines, { unearned, earned, tax, isReversal, meta }) {
+  const addLine = (accountCode, amt) => {
+    if (amt <= 0) return;
+    lines.push({
+      accountCode,
+      debitCents: isReversal ? 0 : amt,
+      creditCents: isReversal ? amt : 0,
+      ...meta,
+    });
+  };
+  addLine(SYSTEM_CODES.UNEARNED_REVENUE, unearned);
+  addLine(SYSTEM_CODES.REV_REFUNDS_ALLOWANCES, earned);
+  addLine(SYSTEM_CODES.SALES_TAX_PAYABLE, tax);
+}
+
+function buildRefundAllocationLines({ allocations, cashAccount, isReversal, fallbackMeta }) {
+  const lines = [];
+  let total = 0;
+  for (let i = 0; i < allocations.length; i += 1) {
+    const a = allocations[i];
+    const sub = posInt(a.subtotalCents ?? 0, `allocations[${i}].subtotalCents`);
+    const unearned = posInt(a.unearnedCents ?? 0, `allocations[${i}].unearnedCents`);
+    const tax = posInt(a.taxCents ?? 0, `allocations[${i}].taxCents`);
+    if (unearned > sub) throw new AccountingError(400, `allocations[${i}].unearnedCents cannot exceed subtotalCents`);
+    const partTotal = sub + tax;
+    if (partTotal <= 0) continue;
+    total += partTotal;
+    const meta = {
+      customerId: a.customerId ?? fallbackMeta.customerId ?? null,
+      serviceLine: a.serviceLine ?? fallbackMeta.serviceLine ?? null,
+      invoiceRef: a.invoiceId ? String(a.invoiceId) : (fallbackMeta.invoiceRef || null),
+    };
+    pushRefundPartLines(lines, { unearned, earned: sub - unearned, tax, isReversal, meta });
+  }
+  if (total <= 0) throw new AccountingError(400, 'Refund allocation total must be > 0');
+  const cashLine = {
+    accountCode: cashAccount,
+    debitCents: isReversal ? total : 0,
+    creditCents: isReversal ? 0 : total,
+    ...fallbackMeta,
+  };
+  return isReversal ? [cashLine, ...lines] : [...lines, cashLine];
+}
+
+function buildRefundLinesFromInput({ subtotalCents, unearnedCents, taxCents, allocations, cashAccount, isReversal, meta }) {
+  if (Array.isArray(allocations) && allocations.length > 0) {
+    return buildRefundAllocationLines({ allocations, cashAccount, isReversal, fallbackMeta: meta });
+  }
+  const sub = posInt(subtotalCents, 'subtotalCents');
+  const unearned = posInt(unearnedCents, 'unearnedCents');
+  const tax = posInt(taxCents, 'taxCents');
+  if (unearned > sub) throw new AccountingError(400, 'unearnedCents cannot exceed subtotalCents');
+  const total = sub + tax;
+  if (total <= 0) throw new AccountingError(400, isReversal ? 'Refund reversal total must be > 0' : 'Refund total must be > 0');
+  return buildRefundSplitLines({ sub, unearned, tax, total, cashAccount, isReversal, meta });
+}
+
 /**
  * 4. Customer Refund (reverses pass-through FL sales tax and releases 2300 Unearned Revenue
  *    for annual-prepay refunds before hitting 4090 Refunds & Allowances).
@@ -360,9 +417,10 @@ function buildRefundSplitLines({ sub, unearned, tax, total, cashAccount, isRever
 function buildRefundEntry({
   refundId,
   refundDate,
-  subtotalCents,
+  subtotalCents = 0,
   unearnedCents = 0,
   taxCents = 0,
+  allocations = null,
   method = 'stripe',
   customerId = null,
   serviceLine = null,
@@ -371,17 +429,13 @@ function buildRefundEntry({
   idempotencyKey = null,
   reason = 'Customer refund',
 }) {
-  const sub = posInt(subtotalCents, 'subtotalCents');
-  const unearned = posInt(unearnedCents, 'unearnedCents');
-  const tax = posInt(taxCents, 'taxCents');
-  if (unearned > sub) throw new AccountingError(400, 'unearnedCents cannot exceed subtotalCents');
-  const total = sub + tax;
-  if (total <= 0) throw new AccountingError(400, 'Refund total must be > 0');
-
   const cashAccount = String(method || 'stripe').toLowerCase() === 'stripe'
     ? SYSTEM_CODES.STRIPE_CLEARING
     : SYSTEM_CODES.CHECKING_PRIMARY;
   const meta = { customerId, serviceLine, invoiceRef: invoiceId ? String(invoiceId) : null };
+  const lines = buildRefundLinesFromInput({
+    subtotalCents, unearnedCents, taxCents, allocations, cashAccount, isReversal: false, meta,
+  });
 
   return {
     entryDate: refundDate,
@@ -392,7 +446,7 @@ function buildRefundEntry({
     idempotencyKey: idempotencyKey || `refund:${refundId}`,
     reference: reference || String(refundId),
     memo: reason,
-    lines: buildRefundSplitLines({ sub, unearned, tax, total, cashAccount, isReversal: false, meta }),
+    lines,
   };
 }
 
@@ -402,9 +456,10 @@ function buildRefundEntry({
 function buildRefundReversalEntry({
   txnId,
   reversalDate,
-  subtotalCents,
+  subtotalCents = 0,
   unearnedCents = 0,
   taxCents = 0,
+  allocations = null,
   method = 'stripe',
   customerId = null,
   serviceLine = null,
@@ -413,17 +468,13 @@ function buildRefundReversalEntry({
   idempotencyKey = null,
   reason = 'Refund reversed',
 }) {
-  const sub = posInt(subtotalCents, 'subtotalCents');
-  const unearned = posInt(unearnedCents, 'unearnedCents');
-  const tax = posInt(taxCents, 'taxCents');
-  if (unearned > sub) throw new AccountingError(400, 'unearnedCents cannot exceed subtotalCents');
-  const total = sub + tax;
-  if (total <= 0) throw new AccountingError(400, 'Refund reversal total must be > 0');
-
   const cashAccount = String(method || 'stripe').toLowerCase() === 'stripe'
     ? SYSTEM_CODES.STRIPE_CLEARING
     : SYSTEM_CODES.CHECKING_PRIMARY;
   const meta = { customerId, serviceLine, invoiceRef: invoiceId ? String(invoiceId) : null };
+  const lines = buildRefundLinesFromInput({
+    subtotalCents, unearnedCents, taxCents, allocations, cashAccount, isReversal: true, meta,
+  });
 
   return {
     entryDate: reversalDate,
@@ -434,7 +485,7 @@ function buildRefundReversalEntry({
     idempotencyKey: idempotencyKey || `refund-reversal:${txnId}`,
     reference: reference || String(txnId),
     memo: reason,
-    lines: buildRefundSplitLines({ sub, unearned, tax, total, cashAccount, isReversal: true, meta }),
+    lines,
   };
 }
 
@@ -780,7 +831,7 @@ function buildPayrollRunEntry(input = {}) {
   return {
     entryDate: input.payDate,
     entryType: 'operational',
-    basisScope: 'both',
+    basisScope: 'accrual_only',
     sourceType: 'payroll_run',
     sourceId: String(input.runId),
     idempotencyKey: `payroll-run:${input.runId}`,
@@ -802,6 +853,7 @@ function buildPayrollSettlementEntry({
   bankAccountId = null,
   bankAccountCode = SYSTEM_CODES.CHECKING_PAYROLL,
   bankTransactionId = null,
+  serviceLine = null,
   memo = null,
 }) {
   const amt = posInt(amountCents, 'amountCents');
@@ -824,7 +876,7 @@ function buildPayrollSettlementEntry({
     idempotencyKey: idempotencyKey || `payroll-settle:${kind}:${sourceId}`,
     memo: memo || `Payroll ${kind.replace('_', ' ')} settlement`,
     lines: [
-      { accountCode: liabilityCode, debitCents: amt, creditCents: 0 },
+      { accountCode: liabilityCode, debitCents: amt, creditCents: 0, serviceLine },
       { accountId: bankAccountId || null, accountCode: bankAccountId ? null : bankAccountCode, debitCents: 0, creditCents: amt, bankTransactionId },
     ],
   };

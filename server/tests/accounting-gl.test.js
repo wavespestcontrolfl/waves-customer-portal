@@ -40,6 +40,7 @@ const {
   AccountingError,
   getAccountRegister,
   postJournalEntry,
+  linkJournalEntryVendor,
   resolveOpeningBalanceItems,
 } = require('../services/accounting/ledger');
 const rules = require('../services/accounting/posting-rules');
@@ -51,8 +52,11 @@ const {
   allocateCashReceiptToRevenue,
   allocateCumulativeCashReceipt,
   buildInvoiceProfileAsOf,
+  buildPayrollProfileAsOf,
+  allocateCumulativePayrollSettlement,
   summarizeSalesTaxLines,
   summarize1099VendorLines,
+  summarizeBalanceSheetKpis,
 } = require('../services/accounting/statements');
 const {
   computeReconciliationMath,
@@ -72,6 +76,7 @@ const {
   computeIncrementalRefundTaxCents,
   computePrepayRefundUnearnedCents,
   allocateStatementPrincipalAcrossInvoices,
+  allocateStatementRefundAcrossInvoices,
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
@@ -1806,5 +1811,189 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     expect(preview.payroll_settlements.would_post).toBe(3);
     expect(preview.payroll_settlements.would_reverse).toBe(1);
     expect(preview.payroll_settlements.errors).toEqual([]);
+  });
+
+  test('Codex R3: payroll accruals are accrual-only and cash-basis recognizes exact payroll deductions on disbursement', () => {
+    const accounts = makeSyntheticAccounts();
+    const expIdByCode = new Map(accounts.filter((a) => ['cogs', 'expense'].includes(a.account_type)).map((a) => [a.code, a.id]));
+    const idFor = (code) => expIdByCode.get(code);
+
+    const runEntry = rules.buildPayrollRunEntry({
+      runId: 'run-cash-1',
+      payDate: '2026-11-06',
+      weekLabel: 'Week of 2026-10-26',
+      fieldGrossCents: 200000,
+      adminGrossCents: 100000,
+      fieldEmployerTaxCents: 15300,
+      adminEmployerTaxCents: 7650,
+      employeeTaxWithheldCents: 54000,
+      employeeSimpleDeferralCents: 9000,
+      employerSimpleCents: 9000,
+      employerHsaCents: 5000,
+      netPayCents: 237000,
+    });
+    expect(runEntry.basisScope).toBe('accrual_only');
+
+    const payrollLines = runEntry.lines.map((l) => ({
+      entry_date: runEntry.entryDate,
+      code: l.accountCode,
+      debit_cents: l.debitCents,
+      credit_cents: l.creditCents,
+    }));
+    const profile = buildPayrollProfileAsOf(payrollLines, '2026-11-15');
+    expect(profile.netPayLiabilityCents).toBe(237000);
+    expect(profile.taxLiabilityCents).toBe(76950);
+    expect(profile.benefitsLiabilityCents).toBe(23000);
+
+    // Sum cash-basis allocations across net pay (field + admin), two partial tax remittances, and benefits remittance
+    const cashTotals = new Map();
+    const applyAllocs = (allocs) => {
+      for (const a of allocs) cashTotals.set(a.accountId, (cashTotals.get(a.accountId) || 0) + a.signedCents);
+    };
+    // Net pay: $158,000 field + $79,000 admin = $237,000
+    applyAllocs(allocateCumulativePayrollSettlement(0, 158000, SYSTEM_CODES.NET_PAY_CLEARING, profile, 'field', expIdByCode));
+    applyAllocs(allocateCumulativePayrollSettlement(158000, 79000, SYSTEM_CODES.NET_PAY_CLEARING, profile, 'admin', expIdByCode));
+    // Two partial payroll tax deposits summing to $76,950
+    applyAllocs(allocateCumulativePayrollSettlement(0, 50000, SYSTEM_CODES.PAYROLL_TAX_LIABILITIES, profile, null, expIdByCode));
+    applyAllocs(allocateCumulativePayrollSettlement(50000, 26950, SYSTEM_CODES.PAYROLL_TAX_LIABILITIES, profile, null, expIdByCode));
+    // Full benefits deposit of $23,000
+    applyAllocs(allocateCumulativePayrollSettlement(0, 23000, SYSTEM_CODES.PAYROLL_BENEFITS_PAYABLE, profile, null, expIdByCode));
+
+    expect(cashTotals.get(idFor(SYSTEM_CODES.COGS_FIELD_WAGES))).toBe(200000);
+    expect(cashTotals.get(idFor(SYSTEM_CODES.OPEX_OFFICE_WAGES))).toBe(100000);
+    expect(cashTotals.get(idFor(SYSTEM_CODES.COGS_FIELD_PAYROLL_TAX))).toBe(15300);
+    expect(cashTotals.get(idFor(SYSTEM_CODES.OPEX_OFFICE_PAYROLL_TAX))).toBe(7650);
+    expect(cashTotals.get(idFor(SYSTEM_CODES.OPEX_RETIREMENT_SIMPLE))).toBe(9000);
+    expect(cashTotals.get(idFor(SYSTEM_CODES.OPEX_EMPLOYEE_BENEFITS))).toBe(5000);
+
+    // Returned net-pay settlement reverses exact cash-basis wage deduction
+    const revAllocs = allocateCumulativePayrollSettlement(237000, -158000, SYSTEM_CODES.NET_PAY_CLEARING, profile, 'field', expIdByCode);
+    expect(revAllocs).toEqual([{ accountId: idFor(SYSTEM_CODES.COGS_FIELD_WAGES), signedCents: -158000 }]);
+  });
+
+  test('Codex R3: statement refunds and reversals allocate cumulatively against child invoices and FL sales tax', () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    const children = [
+      { id: 'stmt-inv-1', customer_id: '00000000-0000-4000-8000-000000000201', subtotal: '100.00', discount_amount: '0', tax_amount: '7.00', total: '107.00', credit_applied: '0', service_type: 'commercial', property_type: 'commercial' },
+      { id: 'stmt-inv-2', customer_id: '00000000-0000-4000-8000-000000000202', subtotal: '100.00', discount_amount: '0', tax_amount: '0.00', total: '100.00', credit_applied: '0', service_type: 'pest', property_type: 'single_family' },
+    ];
+
+    // Full statement refund ($207) reverses exact $7 sales tax and $200 revenue allowance
+    const fullAllocs = allocateStatementRefundAcrossInvoices({ absCents: 20700, childInvoices: children });
+    expect(fullAllocs).toHaveLength(2);
+    const fullRefundJe = rules.buildRefundEntry({
+      refundId: 'stmt-ref-full',
+      refundDate: '2026-11-20',
+      allocations: fullAllocs,
+      method: 'stripe',
+    });
+    const fullSums = accumulateEntries(accounts, [
+      rules.buildInvoiceEntry({ invoiceId: 'stmt-inv-1', issueDate: '2026-11-01', subtotalCents: 10000, taxCents: 700, isCommercial: true }),
+      rules.buildInvoiceEntry({ invoiceId: 'stmt-inv-2', issueDate: '2026-11-01', subtotalCents: 10000, taxCents: 0, isCommercial: false }),
+      rules.buildPaymentEntry({
+        paymentId: 'stmt-pay-full',
+        paymentDate: '2026-11-05',
+        grossCents: 20700,
+        method: 'stripe',
+        arAllocations: allocateStatementPrincipalAcrossInvoices(20700, children),
+      }),
+      fullRefundJe,
+    ]);
+    expect(bal(fullSums, SYSTEM_CODES.SALES_TAX_PAYABLE)).toBe(0);
+    expect(bal(fullSums, SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(fullSums, SYSTEM_CODES.STRIPE_CLEARING)).toBe(0);
+    const pnl = computeProfitAndLoss(accounts, fullSums, { from: '2026-11-01', to: '2026-11-30' });
+    expect(pnl.totals.net_income_cents).toBe(0);
+
+    // Two partial refunds ($103.50 + $103.50) + bounced reversal ($103.50) track cumulative tax accurately
+    const part1 = allocateStatementRefundAcrossInvoices({ absCents: 10350, childInvoices: children, priorByInvoice: new Map() });
+    const priorAfter1 = new Map(part1.map((a) => [a.invoiceId, { grossCents: a.grossCents, taxCents: a.taxCents }]));
+    const part2 = allocateStatementRefundAcrossInvoices({ absCents: 10350, childInvoices: children, priorByInvoice: priorAfter1 });
+    const totalTaxReversed = [...part1, ...part2].reduce((s, a) => s + a.taxCents, 0);
+    expect(totalTaxReversed).toBe(700);
+
+    const priorAfter2 = new Map(part1.map((a, idx) => [a.invoiceId, { grossCents: a.grossCents + part2[idx].grossCents, taxCents: a.taxCents + part2[idx].taxCents }]));
+    const revAllocs = allocateStatementRefundAcrossInvoices({ absCents: 10350, childInvoices: children, priorByInvoice: priorAfter2, isReversal: true });
+    const revJe = rules.buildRefundReversalEntry({ txnId: 'stmt-ref-rev', reversalDate: '2026-11-25', allocations: revAllocs, method: 'stripe' });
+    expect(validateJournalEntryInput(revJe).totalCents).toBe(10350);
+    expect(revAllocs.reduce((s, a) => s + a.taxCents, 0)).toBe(350);
+  });
+
+  test('Codex R3: corrected expense vendors reconcile with audit trail and overview totals include custom cash/card accounts', async () => {
+    const entryId = '00000000-0000-4000-8000-00000000e001';
+    const vendorA = '00000000-0000-4000-8000-00000000a001';
+    const vendorB = '00000000-0000-4000-8000-00000000b002';
+    const audited = [];
+    const updated = [];
+
+    const makeVendorConn = () => {
+      const conn = (table) => {
+        const chain = {
+          join: () => chain,
+          leftJoin: () => chain,
+          where: () => chain,
+          whereIn: () => chain,
+          whereNull: () => chain,
+          whereNotNull: () => chain,
+          whereRaw: () => chain,
+          orderBy: () => chain,
+          first: () => {
+            if (table === 'gl_journal_entries') return Promise.resolve({ id: entryId, entry_number: 42, status: 'posted', entry_date: '2026-11-10' });
+            if (table === 'gl_vendors') return Promise.resolve({ id: vendorB, display_name: 'Vendor B LLC', active: true });
+            return Promise.resolve(null);
+          },
+          select: () => {
+            if (table === 'gl_journal_entries') return chain;
+            if (table === 'gl_journal_lines as l') return Promise.resolve([{ id: 'line-1', previous_vendor_id: vendorA }]);
+            return Promise.resolve([]);
+          },
+          update: (patch) => { updated.push({ table, patch }); return Promise.resolve(1); },
+          insert: (row) => { audited.push({ table, row }); return { returning: () => Promise.resolve([{ id: 'audit-v1' }]) }; },
+        };
+        return chain;
+      };
+      conn.raw = (sql) => sql;
+      conn.transaction = (cb) => cb(conn);
+      return conn;
+    };
+
+    const res = await linkJournalEntryVendor(entryId, {
+      vendorId: vendorB,
+      allowReplace: true,
+      reason: 'Vendor corrected from A to B',
+      conn: makeVendorConn(),
+    });
+    expect(res.updatedLines).toBe(1);
+    expect(updated[0].patch).toEqual({ vendor_id: vendorB });
+    expect(audited[0].row.metadata.previous_vendor_ids).toEqual([vendorA]);
+    expect(audited[0].row.metadata.vendor_id).toBe(vendorB);
+
+    // Overview KPIs include custom checking, savings, and credit card accounts by canonical sub_type
+    const customAccounts = [
+      ...makeSyntheticAccounts(),
+      { id: 'custom-chk', code: '1015', name: 'Secondary Checking', account_type: 'asset', sub_type: 'checking', normal_balance: 'debit', deductible_pct: 100, active: true },
+      { id: 'custom-sav', code: '1035', name: 'Treasury Savings', account_type: 'asset', sub_type: 'savings', normal_balance: 'debit', deductible_pct: 100, active: true },
+      { id: 'custom-cc', code: '2010', name: 'Amex Business Card', account_type: 'liability', sub_type: 'credit_card', normal_balance: 'credit', deductible_pct: 100, active: true },
+    ];
+    const primaryChkId = customAccounts.find((a) => a.code === SYSTEM_CODES.CHECKING_PRIMARY).id;
+    const ownerEqId = customAccounts.find((a) => a.code === SYSTEM_CODES.OWNER_EQUITY).id;
+    const bs = computeBalanceSheet(customAccounts, new Map([
+      [primaryChkId, { debitCents: 1000000, creditCents: 0 }],
+      ['custom-chk', { debitCents: 500000, creditCents: 0 }],
+      ['custom-sav', { debitCents: 300000, creditCents: 0 }],
+      ['custom-cc', { debitCents: 0, creditCents: 120000 }],
+      [ownerEqId, { debitCents: 0, creditCents: 1680000 }],
+    ]), { asOf: '2026-11-30' });
+    expect(bs.totals.balanced).toBe(true);
+    const kpis = summarizeBalanceSheetKpis(bs);
+    expect(kpis.cash_total_cents).toBe(1800000);
+    expect(kpis.credit_cards_cents).toBe(120000);
   });
 });

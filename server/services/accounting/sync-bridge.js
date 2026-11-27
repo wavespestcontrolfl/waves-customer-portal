@@ -1887,6 +1887,101 @@ async function handleDisputeOutflowRow({ row, absCents, amountCents, txnKey, ent
   });
 }
 
+/**
+ * Pure: allocate a payer-statement refund (or refund reversal) across its child invoices
+ * with cumulative per-child FL sales-tax allocation so statement refunds reverse the exact
+ * pass-through tax accrued on taxable commercial child invoices without over-reversing.
+ */
+function allocateStatementRefundAcrossInvoices({ absCents, childInvoices, priorByInvoice = new Map(), isReversal = false }) {
+  if (!Array.isArray(childInvoices) || !childInvoices.length || !(absCents > 0)) return null;
+  const weighted = childInvoices
+    .map((child) => {
+      const prior = priorByInvoice.get(String(child.id)) || { grossCents: 0, taxCents: 0, unearnedCents: 0 };
+      const due = Math.max(0, billedInvoicePrincipalCents(child) - safeNonNegCents(child.credit_applied));
+      const weight = isReversal ? (prior.grossCents > 0 ? prior.grossCents : 0) : due;
+      return { child, prior, due, weight };
+    });
+  const useFallbackDue = weighted.every((w) => w.weight <= 0);
+  const active = weighted
+    .map((w) => ({ ...w, effWeight: useFallbackDue ? w.due : w.weight }))
+    .filter((w) => w.effWeight > 0);
+  if (!active.length) return null;
+
+  const weightTotal = active.reduce((s, w) => s + w.effWeight, 0);
+  let remaining = absCents;
+  const allocations = [];
+  for (let i = 0; i < active.length; i += 1) {
+    const item = active[i];
+    const part = i === active.length - 1
+      ? remaining
+      : Math.min(remaining, Math.round((absCents * item.effWeight) / weightTotal));
+    remaining -= part;
+    if (part <= 0) continue;
+
+    const signedDelta = isReversal ? -part : part;
+    const taxCents = computeIncrementalRefundTaxCents(item.prior.grossCents, item.prior.taxCents, signedDelta, item.child, null);
+    const isCommercial = isCommercialProperty(item.child.property_type);
+    allocations.push({
+      invoiceId: item.child.id,
+      customerId: item.child.customer_id || null,
+      serviceLine: isCommercial ? 'commercial' : (item.child.service_type || 'pest'),
+      subtotalCents: part - taxCents,
+      unearnedCents: 0,
+      taxCents,
+      grossCents: part,
+    });
+  }
+  return allocations.length ? allocations : null;
+}
+
+function buildStatementOutflowRefundEntry({ allocations, amountCents, txnKey, expectedKey, entryDate, customerId, reason }) {
+  const common = {
+    allocations,
+    method: 'stripe',
+    customerId,
+    reference: txnKey,
+    reason,
+  };
+  return amountCents < 0
+    ? rules.buildRefundEntry({ ...common, refundId: txnKey, idempotencyKey: expectedKey, refundDate: entryDate })
+    : rules.buildRefundReversalEntry({ ...common, txnId: txnKey, idempotencyKey: expectedKey, reversalDate: entryDate });
+}
+
+function updateDryRunStatementRefundCache(cumRefundsByInvoice, allocations, isReversal) {
+  for (const a of allocations || []) {
+    const k = String(a.invoiceId);
+    const prev = cumRefundsByInvoice.get(k) || { grossCents: 0, taxCents: 0, unearnedCents: 0 };
+    const sign = isReversal ? -1 : 1;
+    cumRefundsByInvoice.set(k, {
+      grossCents: Math.max(0, prev.grossCents + sign * a.grossCents),
+      taxCents: Math.max(0, prev.taxCents + sign * a.taxCents),
+      unearnedCents: prev.unearnedCents || 0,
+    });
+  }
+}
+
+async function applyStatementOutflowRefund({ trx, stmtChildren, amountCents, absCents, txnKey, expectedKey, entryDate, customerId, reason, cumRefundsByInvoice, ctx }) {
+  const childIds = stmtChildren.map((c) => String(c.id));
+  const priorMap = ctx.dryRun
+    ? cumRefundsByInvoice
+    : await loadPriorRefundTotalsByInvoice(trx, childIds);
+  const allocations = allocateStatementRefundAcrossInvoices({
+    absCents,
+    childInvoices: stmtChildren,
+    priorByInvoice: priorMap,
+    isReversal: amountCents > 0,
+  });
+  if (!allocations) return { handled: false, posted: false };
+  const entry = buildStatementOutflowRefundEntry({
+    allocations, amountCents, txnKey, expectedKey, entryDate, customerId, reason,
+  });
+  const posted = await applyOutflowEntryAtomic(trx, txnKey, entry, entryDate, ctx);
+  if (posted && ctx.dryRun) {
+    updateDryRunStatementRefundCache(cumRefundsByInvoice, allocations, amountCents > 0);
+  }
+  return { handled: true, posted };
+}
+
 async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumRefundsByInvoice, ctx) {
   const amountCents = dollarsToCents(row.amount);
   const entryDate = timestampToEtDate(row.created_at_stripe);
@@ -1907,6 +2002,9 @@ async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumR
   }
 
   const linkedInv = resolveOutflowLinkedInvoice(row, invoiceMaps);
+  const stmtChildren = !linkedInv && row.payment_statement_id != null
+    ? stmtMap.get(String(row.payment_statement_id))
+    : null;
   if (!linkedInv && row.payment_statement_id == null) {
     const handled = await tryHandleUnlinkedDepositOutflow({
       row, absCents, amountCents, txnKey, entryDate, customerId, reason, depositMaps, ctx,
@@ -1916,13 +2014,22 @@ async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumR
 
   const expectedKey = amountCents < 0 ? `refund:spt:${txnKey}` : `refund-reversal:spt:${txnKey}`;
   const invKey = linkedInv ? String(linkedInv.id) : null;
-  const lockKey = invKey ? `gl-sync-refund-inv:${invKey}` : `gl-sync-outflow:${txnKey}`;
+  const lockKey = invKey
+    ? `gl-sync-refund-inv:${invKey}`
+    : (stmtChildren?.length ? `gl-sync-refund-stmt:${row.payment_statement_id}` : `gl-sync-outflow:${txnKey}`);
 
   await runWithOutflowLock(ctx.conn, lockKey, ctx.dryRun, async (trx) => {
     const existing = await trx('gl_journal_entries').where({ idempotency_key: expectedKey }).first('id');
     if (existing) {
       ctx.stats.refunds.skipped += 1;
       return false;
+    }
+
+    if (stmtChildren?.length) {
+      const stmtRes = await applyStatementOutflowRefund({
+        trx, stmtChildren, amountCents, absCents, txnKey, expectedKey, entryDate, customerId, reason, cumRefundsByInvoice, ctx,
+      });
+      if (stmtRes.handled) return stmtRes.posted;
     }
 
     let cum = { grossCents: 0, taxCents: 0, unearnedCents: 0 };
@@ -1985,7 +2092,8 @@ async function syncStripeRefundsAndOutflows(conn, from, to, ctx) {
     loadDepositsForOutflows(conn, customerIds),
     loadStatementChildInvoices(conn, statementIds),
   ]);
-  const resolvedInvIds = [...new Set([...invoiceMaps.byId.keys()])];
+  const stmtChildIds = [...stmtMap.values()].flat().map((c) => String(c.id));
+  const resolvedInvIds = [...new Set([...invoiceMaps.byId.keys(), ...stmtChildIds])];
   const cumRefundsByInvoice = ctx.dryRun
     ? await loadPriorRefundTotalsByInvoice(conn, resolvedInvIds)
     : new Map();
@@ -2009,7 +2117,7 @@ async function syncManualRefunds(conn, from, to, ctx) {
     )
     .select(
       'p.id', 'p.customer_id', 'p.amount', 'p.refund_amount', 'p.processor', 'p.payment_method_type',
-      'p.stripe_payment_intent_id', 'p.stripe_charge_id', 'p.metadata',
+      'p.stripe_payment_intent_id', 'p.stripe_charge_id', 'p.statement_id', 'p.metadata',
       conn.raw('p.payment_date::text as payment_date'), 'p.refunded_at',
       'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
     );
@@ -2017,8 +2125,11 @@ async function syncManualRefunds(conn, from, to, ctx) {
   const nonTestRows = rows.filter((r) => !isTestCustomerRow(r));
   if (!nonTestRows.length) return;
   const auditMarkers = await loadManualPaymentAuditMarkers(conn, nonTestRows.map((r) => r.id));
-  const { ids, pis } = collectPaymentInvoiceRefs(nonTestRows, auditMarkers);
-  const invoiceMaps = await loadInvoicesForLinks(conn, ids, pis);
+  const { ids, pis, statementIds } = collectPaymentInvoiceRefs(nonTestRows, auditMarkers);
+  const [invoiceMaps, stmtMap] = await Promise.all([
+    loadInvoicesForLinks(conn, ids, pis),
+    loadStatementChildInvoices(conn, statementIds),
+  ]);
 
   for (const pay of nonTestRows) {
     const cumRefundCents = safeNonNegCents(pay.refund_amount);
@@ -2027,7 +2138,10 @@ async function syncManualRefunds(conn, from, to, ctx) {
 
     const marker = auditMarkers.get(String(pay.id)) || null;
     const linkedInv = linkedInvoiceForPayment(pay, invoiceMaps, marker);
-    const lockKey = linkedInv ? `gl-sync-refund-inv:${linkedInv.id}` : `gl-sync-manual-refund:${pay.id}`;
+    const stmtChildren = !linkedInv && pay.statement_id != null ? stmtMap.get(String(pay.statement_id)) : null;
+    const lockKey = linkedInv
+      ? `gl-sync-refund-inv:${linkedInv.id}`
+      : (stmtChildren?.length ? `gl-sync-refund-stmt:${pay.statement_id}` : `gl-sync-manual-refund:${pay.id}`);
 
     const applyManualRefund = async (trx) => {
       const priorRow = await trx('gl_journal_lines as l')
@@ -2048,6 +2162,30 @@ async function syncManualRefunds(conn, from, to, ctx) {
         return;
       }
 
+      const method = resolvePaymentMethod(pay, linkedInv, marker);
+      if (stmtChildren?.length) {
+        const priorStmtMap = await loadPriorRefundTotalsByInvoice(trx, stmtChildren.map((c) => String(c.id)));
+        const allocations = allocateStatementRefundAcrossInvoices({
+          absCents: deltaCents,
+          childInvoices: stmtChildren,
+          priorByInvoice: priorStmtMap,
+          isReversal: false,
+        });
+        if (allocations) {
+          await postOrPreview(rules.buildRefundEntry({
+            refundId: `manual:${pay.id}:${cumRefundCents}`,
+            idempotencyKey: `refund:manual:${pay.id}:${cumRefundCents}`,
+            refundDate,
+            allocations,
+            method,
+            customerId: pay.customer_id,
+            reference: pay.id,
+            reason: `Manual statement refund (${method})`,
+          }), ctx, 'refunds', { connOverride: trx });
+          return;
+        }
+      }
+
       const cumTax = computeProratedRefundTaxCents(cumRefundCents, linkedInv, pay.amount);
       const prevTax = computeProratedRefundTaxCents(alreadyBooked, linkedInv, pay.amount);
       const deltaTax = Math.max(0, Math.min(deltaCents, cumTax - prevTax));
@@ -2059,7 +2197,6 @@ async function syncManualRefunds(conn, from, to, ctx) {
         subtotalCents,
         priorUnearnedCents,
       });
-      const method = resolvePaymentMethod(pay, linkedInv, marker);
       const serviceLine = isCommercialProperty(linkedInv?.property_type || pay.property_type)
         ? 'commercial'
         : (linkedInv?.service_type || null);
@@ -2363,36 +2500,47 @@ async function loadBookedExpenseState(conn, expenseId) {
   return { bookedByCode, entryCount: activeEntryIds.size, totalEntryCount: allEntryIds.size };
 }
 
-async function backfillExpenseVendorIfNeeded(exp, matchedVendor, trx, ctx) {
-  if (!matchedVendor) return;
+async function reconcileExpenseVendorAttribution(exp, matchedVendor, trx, ctx) {
+  const targetVendorId = matchedVendor ? matchedVendor.id : null;
   const existing = await trx('gl_journal_entries as e')
     .where({ 'e.source_type': 'expense', 'e.source_id': String(exp.id), 'e.status': 'posted' })
     .whereNull('e.reversed_by_entry_id')
     .select('e.id');
 
+  let changed = false;
   for (const row of existing) {
-    const unlinked = await trx('gl_journal_lines as l')
+    let q = trx('gl_journal_lines as l')
       .join('gl_accounts as a', 'a.id', 'l.account_id')
       .where('l.entry_id', row.id)
-      .whereNull('l.vendor_id')
       .whereNull('l.reconciliation_id')
-      .whereIn('a.account_type', ['cogs', 'expense'])
-      .first('l.id');
-    if (!unlinked) continue;
+      .whereIn('a.account_type', ['cogs', 'expense']);
+    if (targetVendorId) {
+      q = q.whereRaw('(l.vendor_id IS NULL OR l.vendor_id <> ?)', [targetVendorId]);
+    } else {
+      q = q.whereNotNull('l.vendor_id');
+    }
+    const mismatched = await q.first('l.id');
+    if (!mismatched) continue;
 
+    changed = true;
     if (ctx.dryRun) {
       ctx.stats.expenses.would_link_vendors += 1;
     } else {
-      await linkJournalEntryVendor(row.id, {
-        vendorId: matchedVendor.id,
-        reason: 'Subledger sync matched newly registered vendor',
+      const res = await linkJournalEntryVendor(row.id, {
+        vendorId: targetVendorId,
+        allowReplace: true,
+        allowClear: true,
+        reason: targetVendorId
+          ? 'Subledger sync reconciled expense vendor attribution'
+          : 'Subledger sync cleared unregistered expense vendor attribution',
         actorId: ctx.actorId,
         requestMeta: ctx.requestMeta,
         conn: trx,
       });
-      ctx.stats.expenses.linked_vendors += 1;
+      if (res.updatedLines > 0) ctx.stats.expenses.linked_vendors += 1;
     }
   }
+  return changed;
 }
 
 function latestAdjustmentDate(entryDate, timestamps) {
@@ -2442,7 +2590,7 @@ async function syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, 
       return;
     }
 
-    await backfillExpenseVendorIfNeeded(exp, matchedVendor, trx, ctx);
+    const vendorChanged = await reconcileExpenseVendorAttribution(exp, matchedVendor, trx, ctx);
     const adjEntry = buildDeltaEntry({
       sourceType: 'expense',
       sourceId: exp.id,
@@ -2458,7 +2606,7 @@ async function syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, 
       accountsById: ctx.caches.accountsById,
     });
     if (!adjEntry) {
-      ctx.stats.expenses.skipped += 1;
+      if (!vendorChanged) ctx.stats.expenses.skipped += 1;
       return;
     }
     await postOrPreview(adjEntry, ctx, 'expenses', { isAdjustment: true, connOverride: trx });
@@ -2716,63 +2864,7 @@ async function applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx)
   }
 }
 
-async function syncMercuryPayrollPayments(conn, from, to, ctx, plaidGlLookup, bankCaps) {
-  if (!(await conn.schema.hasTable('payroll_payments')) || !(await conn.schema.hasTable('payroll_checks'))) return;
-
-  let q = conn('payroll_payments as pp')
-    .join('payroll_checks as pc', 'pc.id', 'pp.check_id')
-    .where('pp.state', 'sent')
-    .where('pc.status', 'finalized')
-    .whereRaw(
-      "COALESCE(pp.posted_on, DATE(pp.resolved_at AT TIME ZONE 'America/New_York'), DATE(pp.updated_at AT TIME ZONE 'America/New_York')) BETWEEN ?::date AND ?::date",
-      [from, to],
-    );
-  const cols = [
-    'pp.id', 'pp.check_id', 'pp.amount_cents',
-    conn.raw('pp.posted_on::text as posted_on'), 'pp.resolved_at', 'pp.updated_at',
-    'pc.employee_name',
-  ];
-  if (bankCaps.hasCheckMatch) {
-    q = q.leftJoin('bank_transactions as bt', 'bt.matched_payroll_check_id', 'pp.check_id');
-    cols.push('bt.id as bt_id', 'bt.account_label as bt_account_label', 'bt.account_type as bt_account_type');
-    if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id as bt_plaid_account_id');
-  }
-  const sentRows = await q.select(...cols);
-
-  for (const pp of sentRows) {
-    const settlementDate = dateCellText(pp.posted_on) || timestampToEtDate(pp.resolved_at || pp.updated_at);
-    const amountCents = intCents(pp.amount_cents);
-    if (!settlementDate || amountCents <= 0) continue;
-
-    const btRow = pp.bt_id
-      ? { id: pp.bt_id, account_label: pp.bt_account_label, account_type: pp.bt_account_type, plaid_account_id: pp.bt_plaid_account_id }
-      : null;
-    const bankAcct = resolveBankTxnGlAccount(btRow, plaidGlLookup, SYSTEM_CODES.CHECKING_PAYROLL);
-    const entry = rules.buildPayrollSettlementEntry({
-      sourceId: `pp:${pp.id}`,
-      idempotencyKey: `payroll-settle:net_pay:pp:${pp.id}`,
-      settlementDate,
-      kind: 'net_pay',
-      amountCents,
-      bankAccountId: bankAcct.accountId,
-      bankAccountCode: bankAcct.accountCode,
-      bankTransactionId: pp.bt_id || null,
-      memo: `Payroll net pay settled via Mercury${pp.employee_name ? ` — ${pp.employee_name}` : ''}`,
-    });
-
-    if (ctx.dryRun) {
-      await applyMercurySettlementAtomic(ctx.conn, pp, entry, settlementDate, ctx);
-    } else {
-      try {
-        await withEntitySyncLock(ctx.conn, `gl-sync-payroll-check:${pp.check_id}`, (trx) => (
-          applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx)
-        ));
-      } catch (err) {
-        if (err?.code !== 'ABORT_SETTLEMENT_REPLACEMENT') throw err;
-      }
-    }
-  }
-
+async function reconcileRevokedMercuryPayrollPayments(conn, from, to, ctx) {
   const revokedRows = await conn('gl_journal_entries as e')
     .join('payroll_payments as pp', conn.raw("e.idempotency_key = 'payroll-settle:net_pay:pp:' || pp.id::text"))
     .leftJoin('payroll_checks as pc', 'pc.id', 'pp.check_id')
@@ -2798,12 +2890,76 @@ async function syncMercuryPayrollPayments(conn, from, to, ctx, plaidGlLookup, ba
   }
 }
 
+async function syncMercuryPayrollPayments(conn, from, to, ctx, plaidGlLookup, bankCaps) {
+  if (!(await conn.schema.hasTable('payroll_payments')) || !(await conn.schema.hasTable('payroll_checks'))) return;
+
+  let q = conn('payroll_payments as pp')
+    .join('payroll_checks as pc', 'pc.id', 'pp.check_id')
+    .leftJoin('technicians as t', 't.id', 'pc.technician_id')
+    .where('pp.state', 'sent')
+    .where('pc.status', 'finalized')
+    .whereRaw(
+      "COALESCE(pp.posted_on, DATE(pp.resolved_at AT TIME ZONE 'America/New_York'), DATE(pp.updated_at AT TIME ZONE 'America/New_York')) BETWEEN ?::date AND ?::date",
+      [from, to],
+    );
+  const cols = [
+    'pp.id', 'pp.check_id', 'pp.amount_cents',
+    conn.raw('pp.posted_on::text as posted_on'), 'pp.resolved_at', 'pp.updated_at',
+    'pc.employee_name', 't.role as employee_role',
+  ];
+  if (bankCaps.hasCheckMatch) {
+    q = q.leftJoin('bank_transactions as bt', 'bt.matched_payroll_check_id', 'pp.check_id');
+    cols.push('bt.id as bt_id', 'bt.account_label as bt_account_label', 'bt.account_type as bt_account_type');
+    if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id as bt_plaid_account_id');
+  }
+  const sentRows = await q.select(...cols);
+
+  for (const pp of sentRows) {
+    const settlementDate = dateCellText(pp.posted_on) || timestampToEtDate(pp.resolved_at || pp.updated_at);
+    const amountCents = intCents(pp.amount_cents);
+    if (!settlementDate || amountCents <= 0) continue;
+
+    const btRow = pp.bt_id
+      ? { id: pp.bt_id, account_label: pp.bt_account_label, account_type: pp.bt_account_type, plaid_account_id: pp.bt_plaid_account_id }
+      : null;
+    const bankAcct = resolveBankTxnGlAccount(btRow, plaidGlLookup, SYSTEM_CODES.CHECKING_PAYROLL);
+    const serviceLine = String(pp.employee_role || '').toLowerCase() === 'admin' ? 'admin' : 'field';
+    const entry = rules.buildPayrollSettlementEntry({
+      sourceId: `pp:${pp.id}`,
+      idempotencyKey: `payroll-settle:net_pay:pp:${pp.id}`,
+      settlementDate,
+      kind: 'net_pay',
+      amountCents,
+      bankAccountId: bankAcct.accountId,
+      bankAccountCode: bankAcct.accountCode,
+      bankTransactionId: pp.bt_id || null,
+      serviceLine,
+      memo: `Payroll net pay settled via Mercury${pp.employee_name ? ` — ${pp.employee_name}` : ''}`,
+    });
+
+    if (ctx.dryRun) {
+      await applyMercurySettlementAtomic(ctx.conn, pp, entry, settlementDate, ctx);
+    } else {
+      try {
+        await withEntitySyncLock(ctx.conn, `gl-sync-payroll-check:${pp.check_id}`, (trx) => (
+          applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx)
+        ));
+      } catch (err) {
+        if (err?.code !== 'ABORT_SETTLEMENT_REPLACEMENT') throw err;
+      }
+    }
+  }
+
+  await reconcileRevokedMercuryPayrollPayments(conn, from, to, ctx);
+}
+
 async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, bankCaps) {
   if (!bankCaps.hasCheckMatch || !(await conn.schema.hasTable('payroll_checks'))) return;
   const hasPayrollPayments = await conn.schema.hasTable('payroll_payments');
 
   let q = conn('bank_transactions as bt')
     .join('payroll_checks as pc', 'pc.id', 'bt.matched_payroll_check_id')
+    .leftJoin('technicians as t', 't.id', 'pc.technician_id')
     .whereNotNull('bt.matched_payroll_check_id')
     .where({ 'bt.direction': 'debit', 'pc.status': 'finalized' })
     .where((win) => {
@@ -2819,7 +2975,7 @@ async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, 
   }
   const cols = [
     'bt.id', conn.raw('bt.txn_date::text as txn_date'), 'bt.amount', 'bt.description',
-    'bt.account_label', 'bt.account_type', 'bt.matched_payroll_check_id', 'pc.employee_name',
+    'bt.account_label', 'bt.account_type', 'bt.matched_payroll_check_id', 'pc.employee_name', 't.role as employee_role',
   ];
   if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id');
   const rows = await q.select(...cols);
@@ -2830,6 +2986,7 @@ async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, 
     if (!settlementDate || !amountCents || amountCents <= 0) continue;
 
     const bankAcct = resolveBankTxnGlAccount(bt, plaidGlLookup, SYSTEM_CODES.CHECKING_PAYROLL);
+    const serviceLine = String(bt.employee_role || '').toLowerCase() === 'admin' ? 'admin' : 'field';
     const entry = rules.buildPayrollSettlementEntry({
       sourceId: `bt-check:${bt.id}`,
       idempotencyKey: `payroll-settle:net_pay:bt:${bt.id}`,
@@ -2839,6 +2996,7 @@ async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, 
       bankAccountId: bankAcct.accountId,
       bankAccountCode: bankAcct.accountCode,
       bankTransactionId: bt.id,
+      serviceLine,
       memo: `Payroll net pay cleared bank${bt.employee_name ? ` — ${bt.employee_name}` : ''}`,
     });
 
@@ -3057,6 +3215,7 @@ module.exports = {
   computeIncrementalRefundTaxCents,
   computePrepayRefundUnearnedCents,
   allocateStatementPrincipalAcrossInvoices,
+  allocateStatementRefundAcrossInvoices,
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
