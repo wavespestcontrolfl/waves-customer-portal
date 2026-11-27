@@ -17,7 +17,10 @@ const tiers = ['standard', 'enhanced', 'premium'];
 const cases = [];
 
 function add(label, property, options) {
-  const r = priceLawnCare(property, options);
+  // The fixture is the grid of a quote saved before the one lawn price lane (2026-11-26): each grass's own rows. The golden
+  // master test pins new quotes against it (a new bermuda or zoysia plan = the St. Augustine case of the same size and tier).
+  // includeHiddenTiers matches how the test reads the 6x anchor cells.
+  const r = priceLawnCare(property, { ...options, includeHiddenTiers: true, legacyLawnOneLane: true });
   cases.push({
     label,
     in: { property, options },

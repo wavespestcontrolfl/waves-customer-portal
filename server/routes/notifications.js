@@ -1242,6 +1242,96 @@ router.put('/preferences', async (req, res, next) => {
   }
 });
 
+// People a caller named for the visit texts (owner 2026-11-24 PM, 2026-11-27 "yes"): the account holder sees them per
+// profile, can stop or restart each one, and can give one app access by moving them into an on-location contact
+// (the client fills the contacts editor; the existing save and its consent tick do the rest). Holder only: a contact
+// session never reaches these routes (CONTACT_SESSION_ROUTES) and is refused here as well.
+async function reminderContactProfile(req, res) {
+  if (req.contactSession) {
+    res.status(403).json({ error: 'Account holder only', code: 'ACCOUNT_HOLDER_ONLY' });
+    return null;
+  }
+  if (!(await profileOnAccount(req, req.params.customerId))) {
+    res.status(403).json({ error: 'Property is not available for this account' });
+    return null;
+  }
+  return req.params.customerId;
+}
+
+// The profile is an active, undeleted row whose OWN account is the signed-in account (COALESCE(account_id, id)), not
+// only a row whose id equals the account id: a primary profile moved to another account is refused. `lock`: take the
+// customers row lock (the lock a merge takes) in the caller's transaction; 'share' takes a shared lock (for a read).
+async function profileOnAccount(req, customerId, { conn = db, lock = false } = {}) {
+  const accountId = req.accountId || req.customer?.account_id || req.customerId;
+  const selfId = req.customerId;
+  if (!accountId || !customerId || !selfId) return false;
+  // Both rows, in id order (a stable lock order): the target profile, and the signed-in profile itself, which must
+  // still be on the account the session names (a profile moved away after sign-in reaches nothing).
+  const key = (v) => String(v).toLowerCase();
+  const ids = [...new Set([key(customerId), key(selfId)])].sort();
+  const q = conn('customers').whereIn('id', ids).orderBy('id', 'asc')
+    .select('id', 'active', 'deleted_at', conn.raw('COALESCE(account_id, id) AS owner_account'));
+  if (lock === 'share') q.forShare(); else if (lock) q.forUpdate();
+  const rows = await q;
+  const byId = new Map(rows.map((r) => [key(r.id), r]));
+  // Both rows active, undeleted and on the session's account (staff turning off the signed-in profile ends its reach).
+  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && key(r.owner_account) === key(accountId);
+  return onAccount(byId.get(key(customerId))) && onAccount(byId.get(key(selfId)));
+}
+
+const UUID_PARAM = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Both ids are uuids (a bad one is a 400, never a database error).
+function reminderParamsValid(params) {
+  return UUID_PARAM.test(String(params.customerId || '')) && (params.reminderId === undefined || UUID_PARAM.test(String(params.reminderId)));
+}
+
+router.get('/reminder-contacts/:customerId', async (req, res, next) => {
+  try {
+    if (!reminderParamsValid(req.params)) return res.status(400).json({ error: 'Invalid request' });
+    const customerId = await reminderContactProfile(req, res);
+    if (!customerId) return undefined;
+    const VisitRecipient = require('../services/call-visit-recipient');
+    // The list is read in one transaction under a shared lock on the profile row, after the account is checked again
+    // there: a profile moved to another account meanwhile never shows its people to the former account.
+    const list = await db.transaction(async (trx) => {
+      if (!(await profileOnAccount(req, customerId, { conn: trx, lock: 'share' }))) return null;
+      return VisitRecipient.listReminderContacts(customerId, { conn: trx });
+    });
+    if (!list) return res.status(403).json({ error: 'Property is not available for this account' });
+    res.json({ reminderContacts: list });
+  } catch (err) {
+    next(err);
+  }
+  return undefined;
+});
+
+// Stop or restart one person's visit texts (literal paths, so the public-route scanner can prove each one).
+function reminderStopHandler(stopped) {
+  return async (req, res, next) => {
+    try {
+      if (!reminderParamsValid(req.params)) return res.status(400).json({ error: 'Invalid request' });
+      const customerId = await reminderContactProfile(req, res);
+      if (!customerId) return undefined;
+      const VisitRecipient = require('../services/call-visit-recipient');
+      // The write runs under the profile's customers row lock (the lock a merge takes), after the account is checked
+      // again in the same transaction: a merge that retires the profile meanwhile cannot let this write reach the
+      // account that took it over.
+      const entry = await db.transaction(async (trx) => {
+        if (!(await profileOnAccount(req, customerId, { conn: trx, lock: true }))) return 'gone';
+        return VisitRecipient.setReminderContactStopped({ customerId, id: req.params.reminderId, stopped, by: 'customer', conn: trx });
+      });
+      if (entry === 'gone') return res.status(403).json({ error: 'Property is not available for this account' });
+      if (!entry) return res.status(404).json({ error: 'Not found' });
+      res.json({ reminderContact: entry });
+    } catch (err) {
+        next(err);
+    }
+    return undefined;
+  };
+}
+router.post('/reminder-contacts/:customerId/:reminderId/stop', reminderStopHandler(true));
+router.post('/reminder-contacts/:customerId/:reminderId/restart', reminderStopHandler(false));
+
 router.put('/property-preferences/:customerId', async (req, res, next) => {
   try {
     const ids = await accountPropertyIds(req);

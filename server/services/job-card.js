@@ -56,7 +56,7 @@ const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
-const { labelUseRate, labelRateCarrier, labelRateHoldText } = require('../utils/protocol-label-rate');
+const { labelUseRate, labelRateCarrier, labelRateHoldText, perGallonRate } = require('../utils/protocol-label-rate');
 const spreaderSettings = require('./spreader-settings');
 
 // Office fallback when a property has no coordinates — the same point the
@@ -2422,17 +2422,20 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   const serviceRows = noTankAmount || !protocolLine?.conflictLines ? [] : conflictAmounts(protocolLine.conflictLines, labelPerGallon, volume, rigCtx);
   // The dose mode is chosen once; the amount, its own warnings and the response shape all follow from it.
   const doseMode = noTankAmount ? 'none' : (serviceRows.some((row) => row.amount != null) ? 'byService' : 'single');
+  // Each service's own conditions ("if needed", target, restriction) by name. They ride with the dose even when no row has a number
+  // of its own (two services that differ only in conditions, both on the catalog dose): the conditions are never lost.
+  const serviceWarnings = serviceRows.flatMap((row) => row.warnings.map((w) => `${row.service}: ${w}`));
   const { mix, warnings: doseWarnings } = {
-    none: () => ({ mix: { amount: null, unit: governedRate?.rateUnit || rateUnit || null, ratePerGallon: null, reason: protocolLine?.governed ? AREA_ADDON_NO_TANK : NOT_TANK_MIX }, warnings: [] }),
+    none: () => ({ mix: { amount: null, unit: governedRate?.rateUnit || rateUnit || null, ratePerGallon: null, reason: protocolLine?.governed ? AREA_ADDON_NO_TANK : NOT_TANK_MIX }, warnings: conditionWarnings(protocolLine) }),
     byService: () => ({
       mix: { amount: null, unit: perGallon?.unit || rateUnit || null, gallons: volume, ratePerGallon: null, reason: 'Each service on this visit has its own amount, see below', serviceAmounts: serviceRows.map(({ warnings: _w, ...row }) => row) },
-      warnings: serviceRows.flatMap((row) => row.warnings.map((w) => `${row.service}: ${w}`)),
+      warnings: serviceWarnings,
     }),
     single: () => {
       const dose = perGallon ? perGallonDose({ band: perGallon, volume, lineCarrier, ...rigCtx }) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume });
       // At another spray volume the tank covers the rig's own area, and the card's volume would cover another: both are said, neither read as the other's.
       const coverage = dose.labelCoversSqft ? `${rigCtx.rigName} sprays ${fmtGal(dose.rigSprayGalPer1000)} gal per 1,000 sq ft, so this tank covers ${dose.coversSqft.toLocaleString('en-US')} sq ft. At the card's ${fmtGal(dose.sprayVolumeGalPer1000)} gal per 1,000 sq ft the same tank would cover ${dose.labelCoversSqft.toLocaleString('en-US')} sq ft` : null;
-      return { mix: { ...dose, ratePerGallon: dose.amount != null ? perGallon : null }, warnings: [rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage].filter(Boolean) };
+      return { mix: { ...dose, ratePerGallon: dose.amount != null ? perGallon : null }, warnings: [rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, areaCapWarning({ band: perGallon, line: protocolLine, ...rigCtx }), ...serviceWarnings].filter(Boolean) };
     },
   }[doseMode]();
   const warnings = [...mixWarnings({ svc, protocolLine, treatment, primaryIsLawn, lawnAddon, planWide, productBlocks, product, tankMixable, sprayCheck, labelPerGallon, governedRows }), ...doseWarnings];
@@ -2484,6 +2487,19 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
   return { ...dose, labelCoversSqft: dose.coversSqft, coversSqft: Math.round((Number(volume) / rigCarrier) * 1000), rigSprayGalPer1000: rigCarrier };
 }
 
+// One service's own conditions: "if needed", the target and restriction it covers (the line's own words), a label hold.
+const lineConditions = (line) => [
+  line.conditional && `Listed as "if needed" on ${line.name} — confirm the call before mixing`,
+  line.conditional && line.useText && `Applies to: ${line.useText}`,
+  line.labelHold,
+].filter(Boolean);
+
+// Every service's conditions by service name, whether or not a tank amount can be worked out (a granular or an area add-on has no
+// tank dose, but each service's target and restriction still ride beside it).
+function conditionWarnings(protocolLine) {
+  return (protocolLine?.conflictLines || []).flatMap((line) => lineConditions(line).map((w) => `${line.name}: ${w}`));
+}
+
 // The amount for each service that names the product at its own rate (owner 2026-11-26). A service whose rate passes the label
 // check uses it; one that does not ("see its card") falls back to the label band, so each row still has a number when one exists.
 function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
@@ -2496,7 +2512,7 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     const lineCarrier = used ? lineCarrierOf(band, line) : null;
     const rigWarning = rigVolumeWarning({ lineCarrier, ...rigCtx });
     // The row's own conditions ride with it whether or not a number can be worked out for it.
-    const warning = [line.conditional && `Listed as "if needed" on ${line.name} — confirm the call before mixing`, line.conditional && line.useText && `Applies to: ${line.useText}`, line.labelHold, rigWarning].filter(Boolean);
+    const warning = [...lineConditions(line), rigWarning, areaCapWarning({ band: used, line, ...rigCtx })].filter(Boolean);
     if (!used) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: warning, ...(line.conditional ? { conditional: true } : {}) };
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier });
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
@@ -2619,23 +2635,15 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   };
   // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
   // narrowed by the label band, as before.
-  const conflictLinesOf = (list) => {
-    const rates = new Set(list.map((h) => JSON.stringify(rateOf(h))));
-    // Services that share a concentration still keep their own conditions: a selected line beside an "if needed" one, or a different
-    // stated spray volume, is a row each (owner 2026-11-26).
-    const mixed = list.length > 1 && list.some((h) => h.hit.selected === false) && list.some((h) => h.hit.selected !== false);
-    const volumes = new Set(list.map((h) => statedVolumeOf(h.hit) || h.hit.labelCarrierGalPer1000 || 0));
-    // Several "if needed" services that differ in target or restriction keep one row each, even at one concentration.
-    const conditionalUses = list.filter((h) => h.hit.selected === false);
-    const usesDiffer = conditionalUses.length > 1 && new Set(conditionalUses.map((h) => String(h.hit.raw || '').replace(/\s+/g, ' ').trim())).size > 1;
-    return (rates.size > 1 || mixed || volumes.size > 1 || usesDiffer) && list.length > 1 && list.some((h) => h.hit.labelUseRate || h.hit.declaredRate || rateOf(h)) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
-  };
+  const conflictLinesOf = (list) => (servicesConflict(list, { rateOf, statedVolumeOf }) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {});
   const lineOf = (h) => {
     const stated = h.hit.labelCarrierGalPer1000 ? null : statedVolumeOf(h.hit);
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
       // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
       explicitDilution: lineRateIsDilution(h.hit.raw, h.hit.selected === false),
+      // The line's own per-area limit for one spray (Acelepryn: no more than 0.37 fl oz per 1,000 sq ft), checked against the rig's volume.
+      ...areaCapOf(h.hit.raw),
       ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
       ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
       ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
@@ -2687,6 +2695,52 @@ function protocolBand(label, protocolLine) {
   return sameUnit && protocolLine.rate.hi <= label.hi ? protocolLine.rate : null;
 }
 
+// Whether the services that name one product disagree enough to keep a row each. A rate, a stated spray volume, or a
+// selected line beside an "if needed" one, or "if needed" lines with different targets or restrictions, each make a row
+// (owner 2026-11-26). Only a card that states its own tank rate or spray volume, or a line with a condition, can disagree:
+// other products' lines keep the first card's rate narrowed by the label band. Two services that differ only in their
+// conditions (neither states a rate, both fall back to the catalog dose) still keep each condition: a row each.
+function servicesConflict(list, { rateOf, statedVolumeOf }) {
+  if (list.length < 2) return false;
+  const rates = new Set(list.map((h) => JSON.stringify(rateOf(h))));
+  const mixed = list.some((h) => h.hit.selected === false) && list.some((h) => h.hit.selected !== false);
+  const volumes = new Set(list.map((h) => statedVolumeOf(h.hit) || h.hit.labelCarrierGalPer1000 || 0));
+  // Several "if needed" services that differ in target or restriction keep one row each, even at one concentration.
+  const conditionalUses = list.filter((h) => h.hit.selected === false);
+  const usesDiffer = conditionalUses.length > 1 && new Set(conditionalUses.map((h) => String(h.hit.raw || '').replace(/\s+/g, ' ').trim())).size > 1;
+  const conditionsDiffer = mixed || usesDiffer;
+  const statesRate = list.some((h) => h.hit.labelUseRate || h.hit.declaredRate || rateOf(h));
+  return (rates.size > 1 || conditionsDiffer || volumes.size > 1) && (statesRate || conditionsDiffer);
+}
+
+// The per-area limit a line states for ONE spray ("no more than 0.37 fl oz per 1,000 sq ft in one spray"), or {}.
+const AREA_CAP_RE = /\bno more than (\d+(?:\.\d+)?)\s*([a-z]+(?:\s[a-z]+)?)\s*per\s*1,?000\s*sq\.?\s*ft\.?\s*in one (?:spray|application)/i;
+function areaCapOf(raw) {
+  const m = AREA_CAP_RE.exec(String(raw || ''));
+  return m && Number(m[1]) > 0 ? { areaCap: { amount: Number(m[1]), unit: m[2].toLowerCase() } } : {};
+}
+
+// The warning when a per-gallon range, at the rig's own spray volume, would put down more per 1,000 sq ft than the line's
+// one-spray label limit (Acelepryn's 2-16 fl oz per 100 gal at 5 gal per 1,000 sq ft is 0.1-0.8 against 0.37). The amount still
+// shows (owner 2026-11-26: warned, never blocked). `rigCarrier` is the volume of the picked or assigned rig only (never an unassigned
+// calibration or the protocol default). Null with no band, no stated limit, no named rig volume or another unit.
+function areaCapWarning({ band, line, rigName, rigCarrier }) {
+  const cap = line?.areaCap;
+  const carrier = Number(rigCarrier);
+  const unitKey = (unit) => String(unit || '').toLowerCase().replace(/[_\s]+/g, ' ').trim();
+  if (!band || !cap || !(carrier > 0) || unitKey(band.unit) !== unitKey(cap.unit)) return null;
+  const round = (v) => Math.round(v * 10000) / 10000;
+  const lo = round(band.lo * carrier);
+  const hi = round(band.hi * carrier);
+  if (!(hi > cap.amount + 1e-9)) return null;
+  const unit = unitKey(band.unit);
+  return `${rigName || 'This rig'} sprays ${fmtGal(carrier)} gal per 1,000 sq ft, so this range puts down ${lo === hi ? lo : `${lo}-${hi}`} ${unit} per 1,000 sq ft. The label allows no more than ${cap.amount} ${unit} per 1,000 sq ft in one spray. Use a lower rate or less water per 1,000 sq ft`;
+}
+
+// What the hold says of a service whose line passes no rate: "see its card" when it states one that fails the label check or is
+// refused; otherwise only its condition tells it apart from the other service (its own rows below carry the full condition text).
+const noRateText = (line) => (line.rate || line.declared || line.labelUse ? 'see its card' : (line.conditional ? 'if needed' : 'booked'));
+
 // The hold for a product two services on one visit select at different rates: each service's rate where it passes protocolBand
 // against the verified label band (the check a single dose gets), else "see its card".
 function conflictText(product, label, conflictLines) {
@@ -2696,7 +2750,7 @@ function conflictText(product, label, conflictLines) {
   const volumeText = (line) => (line.labelUse && Number(line.carrier) > 0 ? ` at ${fmtGal(line.carrier)} gal per 1,000 sq ft` : '');
   const each = conflictLines.map((line) => {
     const band = protocolBand(label, line);
-    return `${line.name} ${band ? `${rateText(band)}${volumeText(line)}` : 'see its card'}`;
+    return `${line.name} ${band ? `${rateText(band)}${volumeText(line)}` : noRateText(line)}`;
   });
   // Each service has its own row below with its amount and conditions ("if needed", target, spray volume).
   return `${product.name} is on more than one service on this visit, each with its own rate or conditions: ${each.join('; ')}`;
@@ -2710,15 +2764,6 @@ function narrowBand(label, line) {
   return lo <= hi ? { lo, hi, unit: label.unit } : null;
 }
 
-function perGallonRate(product) {
-  const m = String(product.default_unit || '').trim().toLowerCase().match(/^([a-z_]+)\/gal$/);
-  const r = String(product.default_rate || '').trim().match(/^(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?$/);
-  if (!m || !r) return null;
-  const lo = Number(r[1]);
-  const hi = r[2] != null ? Number(r[2]) : lo;
-  if (!(lo > 0)) return null;
-  return { lo, hi: hi > lo ? hi : lo, unit: m[1] };
-}
 
 // `carrierGalPer1000`: the spray volume a card's label rate is stated over, when it has one. The answer then names it
 // (sprayVolumeGalPer1000) and the area the tank covers at that volume, so the amount is tied to a treated area. (A named rig at
