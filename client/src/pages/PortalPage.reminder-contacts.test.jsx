@@ -124,7 +124,7 @@ describe('Also gets visit texts (named on a call)', () => {
     expect(screen.getByLabelText('Email address')).toHaveValue('');
     expect(consent).not.toBeChecked();
     expect(consent).toHaveFocus();
-    expect(screen.getByText('Check the box and tap Save to give them app access.')).toBeInTheDocument();
+    expect(screen.getByText('Check the box above and tap Save to give them app access.')).toBeInTheDocument();
     expect(api.updatePropertyNotificationPrefs).not.toHaveBeenCalled();
   });
 
@@ -143,7 +143,7 @@ describe('Also gets visit texts (named on a call)', () => {
     fireEvent.click(within(section).getByRole('button', { name: 'Give app access' }));
     expect(showCustomerAlert).toHaveBeenCalledWith('All 3 contact spots are in use. Remove one first.');
     expect(screen.getAllByLabelText('First name').map((el) => el.value)).toEqual(['First1', 'First2', 'First3']);
-    expect(screen.queryByText('Check the box and tap Save to give them app access.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Check the box above and tap Save to give them app access.')).not.toBeInTheDocument();
   });
 
   it('shows Has app access instead of the button when the person already has it', async () => {
