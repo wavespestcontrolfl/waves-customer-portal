@@ -1007,7 +1007,7 @@ router.get('/', async (req, res, next) => {
     if (attachableOnly) whereEstimateAttachable(countQuery);
     const { count } = await countQuery.count('* as count').first();
 
-    const leads = await query
+    let leads = await query
       .orderBy(sortCol, order === 'asc' ? 'asc' : 'desc')
       // Source labels are often shared. Received time makes equal labels
       // useful and stable before the UUID tie-breaker.
@@ -1016,8 +1016,9 @@ router.get('/', async (req, res, next) => {
       .limit(lim)
       .offset((pg - 1) * lim);
 
+    leads = withEstimatePreview(leads);
     res.json({
-      leads: withEstimatePreview(withSourceEvidence(await withServiceDisplay(leads))),
+      leads: withSourceEvidence(await withServiceDisplay(leads)),
       total: parseInt(count, 10),
       page: pg,
       limit: lim,

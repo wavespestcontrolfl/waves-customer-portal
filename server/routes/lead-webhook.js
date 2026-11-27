@@ -946,8 +946,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (attached) {
         leadRecord = attached;
         attachedCallLead = true;
-        await linkLeadToDraftEstimate(leadRecord, linkableLeadEstimateId());
       }
+      await linkLeadToDraftEstimate(leadRecord, linkableLeadEstimateId());
 
       if (!leadRecord) {
         // The readiness gate already decided whether this submission states
