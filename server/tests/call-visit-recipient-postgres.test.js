@@ -501,7 +501,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await record({}, entry({ first_name: 'Robert' }));
         const list = await listed();
         expect(list).toHaveLength(1);
-        expect(list[0]).toMatchObject({ phone_key: BOB.slice(-10), phone_e164: BOB, first_name: 'Bob', call_log_id: callLogId, stopped_at: null, consent_version: 'owner-ruling-2026-11-24-every-visit' });
+        expect(list[0]).toMatchObject({ phone_key: BOB.slice(-10), phone_e164: BOB, first_name: 'Bob', call_log_id: callLogId, consent_version: 'owner-ruling-2026-11-24-every-visit' });
       });
 
       test('Bob gets the texts of ANOTHER visit of the same customer, once, through a copied visit row', async () => {
@@ -534,17 +534,6 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         }
       });
 
-      test('a stop is sticky: it blocks every visit, rows already copied included, and a later call does not clear it', async () => {
-        await VisitRecipient.materializeForVisit(otherVisitId);
-        expect(await otherRows()).toHaveLength(1);
-        await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ stopped_at: db.fn.now(), stop_source: 'staff' });
-        await record({}, entry({ first_name: 'Bob' }));
-        expect((await listed())[0].stopped_at).not.toBeNull();
-        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
-        await notify('reminder_72h');
-        expect(sendCustomerMessage).not.toHaveBeenCalled();
-        expect(await VisitRecipient.contactsForVisit(visitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
-      });
 
       test('"just this visit" records the visit only and puts nobody on the list; it never narrows a listed person', async () => {
         // Bob is listed (every visit) by the beforeEach call; a "just this visit" person joins the visit only
@@ -554,7 +543,6 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await record({}, entry({ appointment_texts_scope: 'this_visit' }));
         const list = await listed();
         expect(list.map((row) => row.phone_key)).toEqual([BOB.slice(-10)]);
-        expect(list[0].stopped_at).toBeNull();
       });
 
       test('once a visit has the person, no reprocess and no second call about that visit lists them; a call about another visit can', async () => {
@@ -607,31 +595,23 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toHaveLength(1);
       });
 
-      test('a customer merge folds a shared number: the winner keeps one row and a stop on either side stands', async () => {
+      test('a customer merge folds a shared number into one winner row; the loser\'s other numbers move', async () => {
         const { UNIQUE_COLLISION_HANDLERS } = require('../services/customer-dedupe')._test;
         const [{ id: loserId }] = await db('customers').insert({ first_name: 'Phyl', last_name: 'Roe', phone: phone(45) }).returning('id');
         try {
           const base = { phone_e164: BOB, phone_key: BOB.slice(-10), consent_version: 'x' };
           await db('customer_reminder_contacts').insert([
-            { ...base, customer_id: loserId, stopped_at: new Date('2026-11-20T12:00:00Z'), stop_source: 'portal' },
+            { ...base, customer_id: loserId },
             { ...base, customer_id: loserId, phone_e164: phone(46), phone_key: phone(46).slice(-10) },
           ]);
           await UNIQUE_COLLISION_HANDLERS.customer_reminder_contacts(db, 'customer_reminder_contacts', 'customer_id', customerId, loserId);
-          const winner = await listed();
-          expect(winner.map((r) => r.phone_key).sort()).toEqual([BOB.slice(-10), phone(46).slice(-10)].sort());
-          expect(winner.find((r) => r.phone_key === BOB.slice(-10))).toMatchObject({ stop_source: 'portal' });
-          expect(winner.find((r) => r.phone_key === BOB.slice(-10)).stopped_at).not.toBeNull();
+          expect((await listed()).map((r) => r.phone_key).sort()).toEqual([BOB.slice(-10), phone(46).slice(-10)].sort());
           expect(await db('customer_reminder_contacts').where({ customer_id: loserId })).toHaveLength(0);
         } finally {
           await db('customers').where({ id: loserId }).del();
         }
       });
 
-      test('a stopped person is never copied onto a new visit', async () => {
-        await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ stopped_at: db.fn.now(), stop_source: 'portal' });
-        await VisitRecipient.materializeForVisit(otherVisitId);
-        expect(await otherRows()).toHaveLength(0);
-      });
     });
 
     test('an existing decline is honored by every sender: a recipient_optin decline, STOP or suppression, and his own text choices', async () => {

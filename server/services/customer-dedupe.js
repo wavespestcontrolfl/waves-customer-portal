@@ -2276,32 +2276,11 @@ async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
   return discarded.length;
 }
 
-// customer_reminder_contacts: UNIQUE (customer_id, phone_key), the customer's every-visit list of people a call named
-// (call-visit-recipient.js). Both duplicates listing the same number is one person listed twice: the winner keeps its
-// row, a STOP on either side stands (the earlier stop is kept), and the loser's copy is deleted. Numbers the winner does
-// not list move across whole. The undo refuses after a fold, as after every collision handler.
-async function foldReminderContacts(trx, table, column, winnerId, loserId) {
-  const loserRows = await trx(table).where(column, loserId).select('*');
-  let moved = 0;
-  let folded = 0;
-  for (const row of loserRows) {
-    const existing = await trx(table).where({ [column]: winnerId, phone_key: row.phone_key }).first();
-    if (!existing) {
-      await trx(table).where({ id: row.id }).update({ [column]: winnerId });
-      moved += 1;
-      continue;
-    }
-    const stops = [existing, row].filter((r) => r.stopped_at).sort((a, b) => new Date(a.stopped_at) - new Date(b.stopped_at));
-    if (stops.length) await trx(table).where({ id: existing.id }).update({ stopped_at: stops[0].stopped_at, stop_source: stops[0].stop_source });
-    await trx(table).where({ id: row.id }).del();
-    folded += 1;
-  }
-  return `moved ${moved}, folded ${folded} row(s) into the winner's (a stop on either side stands)`;
-}
-
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
-  customer_reminder_contacts: foldReminderContacts,
+  // UNIQUE(customer_id, phone_key): the every-visit list of people a call named (call-visit-recipient.js). Both duplicates
+  // listing the same number is the same grant twice; the loser's copy drops. The row carries no stop of its own.
+  customer_reminder_contacts: repointRowwiseDropCollisions,
   service_contact_notification_prefs: foldContactNotificationPrefs,
   notification_prefs: mergeSingletonPrefRow,
   property_preferences: mergeSingletonPrefRow,
@@ -7758,6 +7737,11 @@ async function predictCollisionFolds(database, winner, loser) {
   const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
   const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && r.channel != null && r.our_endpoint_id != null && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
   if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
+  // The every-visit list: a number both records list folds into one row (a count only, never the number).
+  const reminderRows = await read('customer_reminder_contacts', ['customer_id', 'phone_key']);
+  const winnerReminderKeys = new Set(reminderRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.phone_key));
+  const sharedReminders = new Set(reminderRows.filter((r) => String(r.customer_id) === String(loserId) && winnerReminderKeys.has(r.phone_key)).map((r) => r.phone_key)).size;
+  if (sharedReminders) details.customer_reminder_contacts = { shared_numbers: sharedReminders };
   return { tables: Object.keys(details).sort(), details };
 }
 

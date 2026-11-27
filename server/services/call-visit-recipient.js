@@ -4,10 +4,10 @@
  *
  * EVERY VISIT: a person recorded from a call also goes on the customer's list (customer_reminder_contacts). Before any
  * visit's text goes out, materializeForVisit copies that list onto the visit as ordinary visit rows, so everything below
- * applies to them unchanged. A stop on the list (stopped_at) is sticky and blocks every visit row for that number; a call
- * never clears it. A caller who limits the texts to the booked visit ("just this visit": the extraction's
- * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. Staff and the
- * customer's portal set and clear stopped_at in a follow-up change (the list page); the gate stays off until it ships.
+ * applies to them unchanged; a copy stands only while the customer still lists the person. Every existing stop route
+ * (STOP, suppression, opt-in decline, own choices, a "no texts" call) is read at each send, as for every row. A caller who limits the texts to the booked visit ("just this visit": the extraction's
+ * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. The staff and portal
+ * list, with its own sticky stop, is a follow-up change; the gate stays off until it ships.
  * The rest of this header describes the per-visit rows.
  *
  * A caller who books a visit and gives another person's number to be texted ("my husband Bob will
@@ -198,8 +198,7 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       // CREATES this visit's row for the number may list them: a reprocess of any call, or a second call about the same visit,
       // finds the row and lists nobody, so no replay order can widen a "just this visit" answer (the cost: a later call that
       // says "always" about a visit that already has the person adds nothing; a call about another visit does). ON CONFLICT DO
-      // NOTHING, so a call never changes a listed person, never narrows one ("just this visit" removes nobody) and never clears
-      // a stop (stopped_at); a stopped person is refused at every send (declinedByRecipient).
+      // NOTHING, so a call never changes a listed person and never narrows one ("just this visit" removes nobody).
       if (!entry.thisVisitOnly) {
         await trx.raw(
           `INSERT INTO ${REMINDER_TABLE} (customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
@@ -242,7 +241,7 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
  * Copy the customer's every-visit people onto this visit, so the visit's own rows drive the send exactly as a call-recorded
  * row does. One statement: the visit's CURRENT customer and live status are read in the same INSERT ... SELECT that writes,
  * so a visit moved to another customer gets that customer's people, never the old one's. A person already on the visit for
- * this customer is left alone; a row for the number bound to anyone else is replaced; a stopped person is never copied. Serialized with recordForVisit by the same
+ * this customer is left alone; a row for the number bound to anyone else is replaced. Serialized with recordForVisit by the same
  * per-visit advisory lock. Throws on a database error (the sender treats it like an unreadable recipient list).
  */
 async function materializeForVisit(scheduledServiceId, conn = db) {
@@ -261,14 +260,14 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
         USING scheduled_services s
         WHERE s.id = ? AND s.customer_id = ? AND r.scheduled_service_id = s.id
           AND r.customer_id IS DISTINCT FROM s.customer_id
-          AND r.phone_key IN (SELECT c.phone_key FROM ${REMINDER_TABLE} c WHERE c.customer_id = s.customer_id AND c.stopped_at IS NULL)`,
+          AND r.phone_key IN (SELECT c.phone_key FROM ${REMINDER_TABLE} c WHERE c.customer_id = s.customer_id)`,
       [scheduledServiceId, owner],
     );
     await trx.raw(
       `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
        SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id
          FROM scheduled_services s
-         JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id AND c.stopped_at IS NULL
+         JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id
         WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${LIVE_STATUSES.map(() => '?').join(', ')})
        ON CONFLICT (scheduled_service_id, phone_key) DO NOTHING`,
       [REMINDER_SOURCE, scheduledServiceId, owner, ...LIVE_STATUSES],
@@ -282,9 +281,9 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
   });
 }
 
-// The customer lists the number for every visit right now (a row, not stopped).
+// The customer lists the number for every visit right now.
 async function listedNow(customerId, phoneKey, conn) {
-  return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).whereNull('stopped_at').first('id'));
+  return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).first('id'));
 }
 
 /**
@@ -301,9 +300,6 @@ async function declinedByRecipient({ customerId, phoneKey, phoneE164, purpose, c
   if (!prefs.contactAllows(await prefs.getContactPrefRow(customerId, phoneE164, { dbh: conn, failClosed: true }), KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, 'sms')) return true;
   const optin = await conn('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, status: 'declined' }).first('status');
   if (optin) return true;
-  // A stop on the customer's every-visit list is sticky and covers every visit row for that number, copied or call-recorded.
-  const stopped = await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).whereNotNull('stopped_at').first('id');
-  if (stopped) return true;
   return suppressedNumber(phoneKey, conn);
 }
 // The send layer's own prefsColumn per purpose: the person's "do not send me this notice" choice is read from it.

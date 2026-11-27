@@ -8,9 +8,10 @@
  * onto that visit as a visit_text_recipients row (ON CONFLICT DO NOTHING), and every existing send, claim, recheck,
  * replay and tracker rule then applies to that row unchanged.
  *
- * A stop is sticky: `stopped_at` set means the person gets nothing for this customer, on any visit, including rows
- * already copied. A call never clears it (a call insert is ON CONFLICT DO NOTHING); only staff or the customer's
- * portal will. No other table reads this one: no login, no review ask, no bill, no consent stamp.
+ * A call never changes a listed person (ON CONFLICT DO NOTHING). Stops come from the existing routes, read at every
+ * send (STOP, suppression, an opt-in decline, the person's own choices, a "no texts" call); the staff and portal list
+ * with its own sticky stop is a follow-up change, and the gate stays off until it ships. No other table reads this
+ * one: no login, no review ask, no bill, no consent stamp.
  */
 exports.up = async function up(knex) {
   if (await knex.schema.hasTable('customer_reminder_contacts')) return;
@@ -29,25 +30,16 @@ exports.up = async function up(knex) {
     // The call the person was named on. Audit only.
     t.uuid('call_log_id').references('id').inTable('call_log').onDelete('SET NULL');
     t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
-    t.timestamp('stopped_at', { useTz: true });
-    t.string('stop_source', 40);
 
     t.unique(['customer_id', 'phone_key'], 'uq_customer_reminder_contacts_customer_phone');
   });
 };
 
-// A recorded stop is the only record that a person asked not to be texted: never drop it. Rolling back with any stop on file
-// refuses; turn GATE_CALL_GIVEN_VISIT_TEXTS off first and carry the stops forward by hand.
+// The list's copies go with it (the older per-visit code must not honor a person on visits the caller never named them
+// for); rows a call recorded directly stay.
 exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('customer_reminder_contacts'))) return;
-  // Held through the drop (the migration runs in one transaction): no stop can be written between the check and the drop.
-  await knex.raw('LOCK TABLE customer_reminder_contacts IN ACCESS EXCLUSIVE MODE');
-  const stop = await knex('customer_reminder_contacts').whereNotNull('stopped_at').first('id');
-  if (stop) throw new Error('customer_reminder_contacts holds recorded stops; refusing to drop them (turn GATE_CALL_GIVEN_VISIT_TEXTS off and keep the stops first)');
-  // The list's copies go with it (the older per-visit code must not honor a person on visits the caller never named them
-  // for); rows a call recorded directly stay.
   if (await knex.schema.hasTable('visit_text_recipients')) {
     await knex('visit_text_recipients').where({ source: 'customer_reminder_contact' }).del();
   }
-  await knex.schema.dropTable('customer_reminder_contacts');
+  await knex.schema.dropTableIfExists('customer_reminder_contacts');
 };
