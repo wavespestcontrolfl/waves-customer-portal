@@ -1037,10 +1037,10 @@ const TRENCHING_PRODUCT_DEFAULTS = Object.freeze(Object.fromEntries(
     .map((key) => {
       const product = constants.SPECIALTY.trenching.products[key];
       return [key, Object.freeze({
-        label: product.label,
+        ...product,
         containerCost: Number(product.containerCost),
         containerOz: Number(product.containerOz),
-        catalogProductName: product.catalogProductName,
+        ...(Array.isArray(product.warnings) ? { warnings: Object.freeze([...product.warnings]) } : {}),
       })];
     }),
 ));
@@ -1088,13 +1088,9 @@ function stageTrenchingCatalogState(ot = null) {
   const trenchingProducts = (ot && (ot.products || ot.product_costs)) || {};
   const products = {};
   for (const [key, defaults] of Object.entries(TRENCHING_PRODUCT_DEFAULTS)) {
-    const live = constants.SPECIALTY.trenching?.products?.[key] || {};
     const staged = {
-      ...live,
-      label: defaults.label,
-      containerCost: defaults.containerCost,
-      containerOz: defaults.containerOz,
-      catalogProductName: defaults.catalogProductName,
+      ...defaults,
+      ...(Array.isArray(defaults.warnings) ? { warnings: [...defaults.warnings] } : {}),
     };
     delete staged.configuredContainerCost;
     delete staged.configuredContainerOz;
