@@ -232,9 +232,9 @@ describe('textWindowStart (owner 2026-11-27: since the last visit, or 7 days bac
     expect((await textWindowStart(lastVisitDb('2026-10-10', { visitLast: '2026-10-25' }), svc)).toISOString()).toBe('2026-10-25T04:00:00.000Z');
     expect((await textWindowStart(lastVisitDb('2026-10-25', { visitLast: '2026-10-10' }), svc)).toISOString()).toBe('2026-10-25T04:00:00.000Z');
   });
-  test('one failed read uses the other; both failed keeps the 7-day start', async () => {
-    expect((await textWindowStart(lastVisitDb('2026-10-20', { failVisits: true }), svc)).toISOString()).toBe('2026-10-20T04:00:00.000Z');
-    expect((await textWindowStart(lastVisitDb(null, { fail: true, visitLast: '2026-10-20' }), svc)).toISOString()).toBe('2026-10-20T04:00:00.000Z');
+  test('either read failing keeps the 7-day start', async () => {
+    expect((await textWindowStart(lastVisitDb('2026-10-20', { failVisits: true }), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
+    expect((await textWindowStart(lastVisitDb(null, { fail: true, visitLast: '2026-10-20' }), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
     expect((await textWindowStart(lastVisitDb(null, { fail: true, failVisits: true }), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
   });
   test('never reaches more than 120 days back', async () => {

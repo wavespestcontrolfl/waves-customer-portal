@@ -238,11 +238,14 @@ async function textWindowStart(db, svc) {
   const noon = parseETDateTime(`${day}T12:00`);
   const floor = parseETDateTime(`${etDateString(addETDays(noon, -MAX_WINDOW_DAYS))}T00:00`);
   // Two sources: a completed record, and a completed appointment (one can exist without the other). The later day wins.
+  // Either read failing keeps the 7-day start: a partial answer could name an older day and widen the window.
+  let failed = false;
   const lastOf = async (read) => {
     try {
       const row = await read();
       return row?.last ? dateOnlyString(row.last) : null;
     } catch {
+      failed = true;
       return null;
     }
   };
@@ -258,6 +261,7 @@ async function textWindowStart(db, svc) {
     .where('scheduled_date', '<', day)
     .max('scheduled_date as last')
     .first());
+  if (failed) return sevenDay;
   const last = [fromRecords, fromVisits].filter(Boolean).sort().pop() || null;
   if (!last) return sevenDay;
   const lastStart = parseETDateTime(`${last}T00:00`);
