@@ -251,6 +251,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | PUT | `/api/admin/schedule/:id/status` | admin-schedule |
 | GET | `/api/admin/schedule/:id/visit-brief` | admin-schedule |
 | GET | `/api/admin/schedule/:id/visit-prep-photos` | admin-schedule |
+| GET | `/api/admin/schedule/:id/visit-texts` | admin-schedule |
 | GET | `/api/admin/schedule/:id/wdo-brief` | admin-schedule |
 | GET | `/api/admin/schedule/:serviceId/property-areas` | admin-property-service-areas#serviceRouter |
 | PUT | `/api/admin/schedule/:serviceId/property-areas` | admin-property-service-areas#serviceRouter |

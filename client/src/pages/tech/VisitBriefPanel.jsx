@@ -51,6 +51,7 @@ import {
 } from './visitBrief';
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
 import PropertyFertilizerMap from '../../components/tech/PropertyFertilizerMap';
+import VisitTextsSection from './VisitTextsSection';
 import { detectServiceCategory } from '../../lib/service-colors';
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
@@ -1429,6 +1430,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         request={request}
         onRefresh={onRetry}
       />
+
+      {byService[service.id]?.brief?.visitTexts === true && <VisitTextsSection serviceId={service.id} request={request} />}
 
       {memberBits.map((m) => (m.wdo ? (
         <div key={`wdo-${m.service.id}`}>

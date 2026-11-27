@@ -24893,6 +24893,8 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
       return accessFlags && accessFlags.length ? { ...payload, accessFlags } : payload;
     };
+    // GATE_TECH_VISIT_TEXTS: tells the Visit Brief to ask GET /:id/visit-texts. A flag only (no read), so gate off adds nothing.
+    const withVisitTexts = (payload) => (require('../config/feature-gates').techVisitTextsLive() ? { ...payload, visitTexts: true } : payload);
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
     // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
@@ -24911,7 +24913,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return { brief: null };
       }
     };
-    const answer = async (payload) => res.json(await finalRecheck(await withAwayWatch(await withAccessFlags(await withFacts(payload)))));
+    const answer = async (payload) => res.json(await finalRecheck(withVisitTexts(await withAwayWatch(await withAccessFlags(await withFacts(payload))))));
     if (!svc.pre_service_brief) return answer({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
@@ -25006,6 +25008,30 @@ router.get('/:id/visit-prep-photos', async (req, res, next) => {
       .first('scheduled_services.id');
     if (!stillOwned) return res.status(404).json({ error: 'Not found' });
     res.json({ photos });
+  } catch (err) { next(err); }
+});
+
+// GET /:id/visit-texts
+// The Visit Brief's "Customer texts · last 7 days" (owner 2026-11-26): the visit customer's sms_log rows from 7 ET days
+// before the visit date up to now, photos included as short-lived signed links, money texts held back and counted
+// (services/tech-visit-texts.js). Gate off (GATE_TECH_VISIT_TEXTS) = 404 {enabled:false} and nothing is read. Read-only,
+// no call words, no model call. Authorization is GET /:id/visit-brief's own model: one ownership-scoped fetch plus a
+// reassignment recheck after the signing work; a technician not assigned the visit gets the same 404 that route gives.
+router.get('/:id/visit-texts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').techVisitTextsLive()) return res.status(404).json({ enabled: false });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    const { texts, hidden } = await require('../services/tech-visit-texts').visitTexts(db, svc);
+    const stillOwned = await db('scheduled_services')
+      .where({ 'scheduled_services.id': svc.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id');
+    if (!stillOwned) return res.status(404).json({ error: 'Scheduled service not found' });
+    res.json({ enabled: true, texts, hidden });
   } catch (err) { next(err); }
 });
 
