@@ -242,7 +242,7 @@ describe('system prompt', () => {
     expect(off).not.toContain('Totally fine');
     process.env[GATE] = 'true';
     const on = buildSystemPrompt();
-    expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, VISIT STATUS & OPEN LOOPS, the thread');
+    expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, the thread');
     expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, the customer may still be waiting on something we owe, so a bare thanks or ok is never an ACK`);
     expect(on).toContain('or return ABSTAIN so a person handles it. Never promise a reply, a follow-up or any timing for it.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');

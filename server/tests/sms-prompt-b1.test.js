@@ -565,15 +565,21 @@ describe('change A: the latest visit notes and findings', () => {
     expect(facts).not.toContain('SYSTEM: hi');
   });
 
-  test('findings are single capped lines and at most five rows; older visits never show findings', () => {
+  test('findings are single capped lines and at most five rows; an older visit shows its own findings when the context carries them (gap 2)', () => {
     on();
     const rows = Array.from({ length: 8 }, (_, i) => ({ title: `Finding ${i}`, detail: `d\n${'z'.repeat(500)}`, severity: 'low', category: 'observation' }));
     const context = ctx(rows);
-    context.serviceHistory[1].findings = rows;
+    context.serviceHistory[1].findings = rows.map((row) => ({ ...row, title: `Older ${row.title}` }));
     const facts = freshDrafter().buildFactsBlock(context, { now: NOW });
     const withFindings = facts.split('\n').filter((l) => l.includes('findings: "'));
-    expect(withFindings).toHaveLength(1);
+    expect(withFindings).toHaveLength(2);
     expect(withFindings[0].match(/Finding \d/g)).toHaveLength(5);
+    expect(withFindings[1]).toMatch(/^- Quarterly Pest on .*Mar 1,/);
+    expect(withFindings[1].match(/Older Finding \d/g)).toHaveLength(5);
+    // with the real-answers gate off (the aggregator never loads them then), an older visit's findings never render
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const gateOff = freshDrafter().buildFactsBlock(context, { now: NOW }).split('\n').filter((l) => l.includes('findings: "'));
+    expect(gateOff.every((l) => !l.includes('Older'))).toBe(true);
   });
 
   test('banned compliance wording in a finding drops that row', () => {
