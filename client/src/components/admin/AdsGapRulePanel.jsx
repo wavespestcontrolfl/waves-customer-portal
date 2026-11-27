@@ -374,7 +374,7 @@ export default function AdsGapRulePanel() {
               </div>
             )}
             {data.campaigns.map((c) => (
-              <CampaignHold key={c.id} campaign={c} onChanged={load} />
+              <CampaignHold key={c.id} campaign={c} onChanged={load} releaseOnly={Boolean(c.release_only)} />
             ))}
           </div>
         )}

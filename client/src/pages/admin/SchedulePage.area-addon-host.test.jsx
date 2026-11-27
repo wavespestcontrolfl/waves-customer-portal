@@ -190,15 +190,23 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
     expect(pageSource).toContain("(p) => !p.areaAddOnKey && !treatmentPlanProductIds.includes(String(p.productId)),");
   });
 
-  it("the completion asks for an add-on row's rate, unit and treated square feet before it submits; an incomplete visit skips only the ordinary row checks", () => {
+  it("chemical add-on missing products/actuals warn in AreaAddOnFields without blocking submission, while ordinary product treated-area checks remain (owner 2026-11-26)", async () => {
     const call = pageSource.indexOf("completionProductRowProblem(service, selectedProducts, typeFor)");
     expect(call).toBeGreaterThan(0);
-    expect(pageSource.slice(call - 80, call)).toContain("isIncompleteVisit ? addOnActualsProblem(service, selectedProducts) :");
+    expect(pageSource.slice(call - 80, call)).toContain("isIncompleteVisit ? null :");
     expect(pageSource.indexOf("setSubmitting(true);", call) - call).toBeLessThan(300);
-    // the one helper: the method's treated-area rule first (unchanged sentence), then the add-on row's actuals
     const helper = pageSource.slice(pageSource.indexOf("function completionProductRowProblem("), pageSource.indexOf("function productApplicationMethod("));
     expect(helper).toContain("`Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.`");
-    expect(helper).toContain("addOnActualsProblem(service, rows)");
+    expect(helper).not.toContain("addOnActualsProblem(service, rows)");
+    expect(helper).not.toContain("addOnRecordMissingProblem(service, rows)");
+
+    // Non-blocking warning renders in AreaAddOnFields when chemical add-on has no product recorded.
+    await mountTs();
+    expect(screen.getByTestId("area-addon-warnings")).toHaveTextContent(/no product is recorded/i);
+    expect(screen.getByTestId("area-addon-warnings")).toHaveTextContent(/Warning only/i);
+    // Tree & Shrub closeout warnings no longer disable or block submission.
+    expect(pageSource).not.toContain("if (treeShrubCompletionBlocked)");
+    expect(pageSource).not.toContain("Tree/Shrub Closeout Required");
   });
 
   it("the completion body sends both rows: the host's untagged, the add-on's tagged (one row each, never merged)", () => {

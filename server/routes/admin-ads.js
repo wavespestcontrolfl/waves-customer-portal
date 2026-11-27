@@ -522,17 +522,21 @@ router.get('/gap-rule', async (req, res, next) => {
         total_stops: ev.total_stops,
       },
       decision: { mode: ev.decision, reason: gapDecisionText(ev.decision, ev, ev.settings) },
-      campaigns: campaigns.map((c) => {
-        const hold = BudgetManager.activeBudgetHold(c.metadata, today);
-        return {
-          id: c.id,
-          campaign_name: c.campaign_name,
-          budget_mode: c.budget_mode,
-          daily_budget_current: c.daily_budget_current,
-          daily_budget_base: c.daily_budget_base,
-          hold: hold ? { mode: hold.mode, until: hold.until, set_at: hold.set_at || null, set_by: hold.set_by || null } : null,
-        };
-      }),
+      campaigns: campaigns
+        .filter((c) => BudgetManager.isCapacityEligibleCampaign(c) || Boolean(BudgetManager.activeBudgetHold(c.metadata, today)))
+        .map((c) => {
+          const hold = BudgetManager.activeBudgetHold(c.metadata, today);
+          const releaseOnly = !BudgetManager.isCapacityEligibleCampaign(c);
+          return {
+            id: c.id,
+            campaign_name: c.campaign_name,
+            budget_mode: c.budget_mode,
+            daily_budget_current: c.daily_budget_current,
+            daily_budget_base: c.daily_budget_base,
+            hold: hold ? { mode: hold.mode, until: hold.until, set_at: hold.set_at || null, set_by: hold.set_by || null } : null,
+            ...(releaseOnly ? { release_only: true } : {}),
+          };
+        }),
       last_run: lastRun,
     });
   } catch (err) { next(err); }
@@ -599,6 +603,9 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
     if (campaign.status !== 'active') {
       return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is ${campaign.status || 'not active'} — re-enable it before holding its budget.` });
     }
+    if (!getBudgetManager().isCapacityEligibleCampaign(campaign)) {
+      return res.status(400).json({ error: `Timed holds only apply to non-branded Google Search campaigns managed by the automatic budget rule ("${campaign.campaign_name}" is not eligible).` });
+    }
 
     const hold = {
       mode,
@@ -627,28 +634,49 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
 // operator is never trapped by a hold the cron still honors; otherwise 404 gap_rule_off.
 router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
   try {
+    const BudgetManager = getBudgetManager();
     const mode = gapRuleMode();
+    const existing = UUID_RE.test(req.params.id)
+      ? await db('ad_campaigns').where({ id: req.params.id }).first()
+      : null;
     if (mode === 'off') {
-      const existing = UUID_RE.test(req.params.id)
-        ? await db('ad_campaigns').where({ id: req.params.id }).first()
-        : null;
-      const activeHold = existing && getBudgetManager().activeBudgetHold(existing.metadata, etDateString(new Date()));
+      const activeHold = existing && BudgetManager.activeBudgetHold(existing.metadata, etDateString(new Date()));
       if (!activeHold) return res.status(404).json({ error: 'gap_rule_off' });
     }
+    if (!existing) return res.status(404).json({ error: 'Campaign not found' });
     // When a hold existed, the same metadata write leaves a release record
     // (budget_hold_cleared) so "who lifted it and when" survives. No ad_budget_log
-    // row: a no-change row would trip assertNoChangeSince and the advisor's
-    // recent-change checks. With no hold there is nothing to record.
+    // row on capacity-eligible campaigns: a no-change row would trip assertNoChangeSince
+    // and the advisor's recent-change checks. For a non-eligible campaign (e.g. branded
+    // Search with a legacy throttled hold), the 2-hour cron will never restore it, so
+    // atomically restore 'base' mode and clear the hold under the row lock.
     const clearedAt = new Date().toISOString();
     const clearedBy = req.technicianId || null;
-    const updated = UUID_RE.test(req.params.id)
-      ? await updateCampaignMetadata(req.params.id, (meta) => {
-        const { budget_hold: removed, ...rest } = meta;
-        if (!removed) return rest;
-        // Replaces any older budget_hold_cleared.
-        return { ...rest, budget_hold_cleared: { at: clearedAt, by: clearedBy, mode: removed.mode || null, until: removed.until || null } };
-      })
-      : null;
+    const existingMeta = metadataObject(existing.metadata);
+    const hasStoredHold = Boolean(existingMeta.budget_hold);
+    if (hasStoredHold && !BudgetManager.isCapacityEligibleCampaign(existing)
+      && existing.platform === 'google_ads' && existing.status === 'active'
+      && existing.budget_mode !== 'base') {
+      const applied = await applyLive(
+        () => BudgetManager.setMode(
+          existing.id,
+          'base',
+          'Hold cleared on non-automated campaign — restored to base budget',
+          { requireLivePush: true, requireActive: true, trigger: 'manual', clearHold: { at: clearedAt, by: clearedBy } },
+        ),
+        res,
+      );
+      if (applied === APPLY_FAILED) return undefined;
+      const restored = await db('ad_campaigns').where({ id: existing.id }).first();
+      if (!restored) return res.status(404).json({ error: 'Campaign not found' });
+      return res.json({ campaign: restored, hold: null });
+    }
+    const updated = await updateCampaignMetadata(existing.id, (meta) => {
+      const { budget_hold: removed, ...rest } = meta;
+      if (!removed) return rest;
+      // Replaces any older budget_hold_cleared.
+      return { ...rest, budget_hold_cleared: { at: clearedAt, by: clearedBy, mode: removed.mode || null, until: removed.until || null } };
+    });
     if (!updated) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ campaign: updated, hold: null });
   } catch (err) { next(err); }
@@ -1107,6 +1135,10 @@ async function applyLive(fn, res) {
     }
     if (err.code === 'mode_conflict' || err.code === 'recent_change') {
       res.status(409).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (err.code === 'hold_not_eligible') {
+      res.status(400).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
     if (['campaign_inactive', 'mode_noop', 'budget_noop', 'budget_out_of_bounds', 'budget_unbounded', 'budget_direction_invalid', 'budget_cap_exceeded'].includes(err.code)) {

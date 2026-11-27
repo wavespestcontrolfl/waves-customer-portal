@@ -514,6 +514,7 @@ describe("completionResumeOwedError", () => {
       "membership_dues_coverage_unverified",
       "proposal_terms_unread",
       "held_payment_lookup_failed",
+      "chemical_addon_billing_alert_failed",
     ]) {
       expect(completionResumeOwedError({ status: 503, code })).toBe(true);
     }

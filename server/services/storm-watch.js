@@ -332,10 +332,11 @@ async function sweep(now = new Date(), { readFawn } = {}) {
       } catch (err) {
         logger.error(`[storm-watch] notification insert failed for job ${job.id}: ${err.message}`);
       }
-    } else if (signal.advisories.length > 0) {
+    }
+    if (signal.advisories.length > 0) {
       // Heat / wind advisories are alert-only safety banners — NEVER a rain-out reschedule prompt.
-      // Dedupe per hazard category so both Heat Advisory and Wind Advisory notify independently
-      // (either combined in one card when both are active, or separately if the second arrives later).
+      // Evaluated independently of storm nudges so a simultaneous heat/wind advisory is not hidden
+      // behind a storm card, and deduped per hazard category.
       const sentCategories = await sentAdvisoryCategoriesToday(job.id, job.technician_id, todayStr);
       const unseenAdvisories = sentCategories.has('__legacy__')
         ? []

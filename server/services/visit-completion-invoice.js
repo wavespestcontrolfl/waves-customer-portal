@@ -13,6 +13,16 @@ const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane'
 const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cost-visit-types');
 const { parkSetupFeeStampForOffice, isPlanApplicationRow } = require('./setup-fee-obligation');
 const { acquireEstimateDepositLedgerLock, pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
+const { APPLICATION_REQUIRED_CODE } = require('./area-addon-governed-rate');
+
+function memberHasUnrecordedChemicalAddOn(member) {
+  let notes = member?.record_notes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  const findings = Array.isArray(notes?.lawnWarningFindings) ? notes.lawnWarningFindings : [];
+  return findings.some((f) => f && f.code === APPLICATION_REQUIRED_CODE);
+}
 
 function office(reason, serviceId = null, extra = null) {
   return { state: 'office_required', reason, serviceId, invoiceId: null, ...(extra || {}) };
@@ -65,6 +75,11 @@ async function memberBillingEligibility(member, customer, trx, payerSeen = null)
       || ['inspection_only', 'customer_declined'].includes(notes.visitOutcome)) return { lineItems: [] };
   if (member.record_status !== 'completed') return office('record_not_completed', member.id);
   if (notes.oneTimeRecapOnly) return { lineItems: [] };
+  // A performed member with an unrecorded chemical area add-on cannot auto-bill
+  // or adopt a combined invoice until the office confirms application with the tech.
+  if (memberHasUnrecordedChemicalAddOn(member)) {
+    return office('unrecorded_chemical_addon', member.id);
+  }
   // Billing Recovery "Billed elsewhere": another live invoice already bills
   // this member. The combined invoice links only its first member, so every
   // member is checked here, under the mint locks the packet mint holds.
@@ -131,6 +146,7 @@ async function buildMemberLines(member, customer, trx, checkedEligibility = unde
     hasVisitPrice: price > 0, waveguardTier: customer.waveguard_tier,
     serviceType: member.service_type, isCallback: member.is_callback,
     backfillMintRequired: notes.backfillMintRequired === true,
+    unrecordedChemicalAddOnHold: memberHasUnrecordedChemicalAddOn(member),
     autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
   });
   if (isAlwaysFreeServiceType(member.service_type) || (member.is_callback && !eligible)) return { lineItems: [] };
@@ -661,4 +677,8 @@ async function createVisitCompletionInvoice(packetId, database = db) {
   return database.isTransaction ? run(database) : database.transaction(run);
 }
 
-module.exports = { createVisitCompletionInvoice, deferredSetupClaimStillQueued };
+module.exports = {
+  createVisitCompletionInvoice,
+  deferredSetupClaimStillQueued,
+  _test: { memberBillingEligibility, memberHasUnrecordedChemicalAddOn },
+};

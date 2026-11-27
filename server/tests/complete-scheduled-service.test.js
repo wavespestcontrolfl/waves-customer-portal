@@ -1198,9 +1198,17 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     expect(shouldAutoInvoiceCompletion({ ...base, unrecordedChemicalAddOnHold: true })).toBe(false);
   });
 
-  test('completionInvoiceGateInput wires unrecordedChemicalAddOnHold resume-safely, holds unpaid pre-minted invoices, and fails closed if billing alert cannot be saved (P0-1 + P1-1)', () => {
+  test('completionInvoiceGateInput wires unrecordedChemicalAddOnHold resume-safely, holds unpaid existing & pre-minted invoices BEFORE exposure, routes annual-prepay to office review, and fails closed if billing alert cannot be saved (P0-1 + P0-2 + P1-1)', () => {
     const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
-    expect(source).toContain('const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))');
+    const holdDeclAt = source.indexOf('const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))');
+    const existingAssignAt = source.indexOf('if (existingCompletionInvoice) {');
+    const existingHoldAt = source.indexOf('if (holdExistingUnpaid) {', existingAssignAt);
+    const existingInvoiceAssignAt = source.indexOf('invoice = existingCompletionInvoice;', existingAssignAt);
+    expect(holdDeclAt).toBeGreaterThan(-1);
+    expect(existingAssignAt).toBeGreaterThan(holdDeclAt);
+    expect(existingHoldAt).toBeGreaterThan(existingAssignAt);
+    expect(existingInvoiceAssignAt).toBeGreaterThan(existingHoldAt);
+
     expect(source).toContain('dedupeKey: `unrecorded_chemical_addon_billing:${svc.id}`');
     expect(source).toContain("code: 'chemical_addon_billing_alert_failed'");
     expect(source).toContain('if (unpaidPreMintedOnChemicalHold) {');
@@ -1210,5 +1218,80 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     expect(preMintAt).toBeGreaterThan(-1);
     expect(holdAt).toBeGreaterThan(preMintAt);
     expect(creditAt).toBeGreaterThan(holdAt);
+
+    // Annual-prepay covered visits pass unrecordedChemicalAddOnHold + heldExistingInvoice into reconcileCoveredVisitInvoice.
+    const coveredCallAt = source.indexOf('const covered = await reconcileCoveredVisitInvoice({');
+    expect(coveredCallAt).toBeGreaterThan(-1);
+    const coveredCallSlice = source.slice(coveredCallAt, coveredCallAt + 500);
+    expect(coveredCallSlice).toContain('unrecordedChemicalAddOnHold');
+    expect(coveredCallSlice).toContain('heldExistingInvoice');
+
+    const annualSource = require('fs').readFileSync(require.resolve('../services/annual-prepay-addon-billing'), 'utf8');
+    expect(annualSource).toContain('if (this.ctx.unrecordedChemicalAddOnHold) {');
+    const billFnAt = annualSource.indexOf('async bill() {');
+    const chemHoldInBillAt = annualSource.indexOf('if (this.ctx.unrecordedChemicalAddOnHold) {', billFnAt);
+    const mintCallAt = annualSource.indexOf('await this.mint(read);', billFnAt);
+    expect(chemHoldInBillAt).toBeGreaterThan(billFnAt);
+    expect(mintCallAt).toBeGreaterThan(chemHoldInBillAt);
+
+    // Tree & Shrub photo gate preserves retry throws on actual upload failures, warns without rollback when 0 failed.
+    const tsPhotoAt = source.indexOf('if (treeShrubPhotoGateRequired && uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {');
+    expect(tsPhotoAt).toBeGreaterThan(-1);
+    expect(source.slice(tsPhotoAt, tsPhotoAt + 400)).toContain('if (completionPhotoUploadResult.failed > 0) {');
+  });
+
+  test('grouped visit packet billing sends unrecorded chemical add-on members to office review instead of minting or adopting (P0-3)', async () => {
+    const { _test } = require('../services/visit-completion-invoice');
+    const member = {
+      id: 'svc-addon-1',
+      record_status: 'completed',
+      record_notes: {
+        lawnWarningFindings: [{
+          code: 'area_addon_application_required',
+          limitType: 'area_addon_application_required',
+          productName: 'area_addon_bed_pre_emergent',
+          message: 'No product recorded',
+        }],
+      },
+    };
+    expect(_test.memberHasUnrecordedChemicalAddOn(member)).toBe(true);
+    const eligibility = await _test.memberBillingEligibility(member, { id: 'cust-1' }, {});
+    expect(eligibility).toEqual({
+      state: 'office_required',
+      reason: 'unrecorded_chemical_addon',
+      serviceId: 'svc-addon-1',
+      invoiceId: null,
+    });
+  });
+
+  test('Bermuda pair, area, and limit warnings have distinct codes, limitTypes, accurate copy, and distinct dedupe keys (P1-4)', () => {
+    const {
+      bermudaStepFinding,
+      bermudaPairFinding,
+      bermudaAreaFinding,
+      limitFindingDedupeKey,
+    } = require('../services/complete-scheduled-service');
+    const pair = bermudaPairFinding('Recognition and Fusilade II go on together.');
+    const area = bermudaAreaFinding('Enter treated square feet.');
+    const limit = bermudaStepFinding('3 steps in 12 months exceeded.');
+
+    expect(pair.limitType).toBe('bermuda_pair_missing');
+    expect(pair.code).toBe('bermuda_pair_warning');
+    expect(pair.message).not.toMatch(/past its limit/i);
+
+    expect(area.limitType).toBe('bermuda_area_missing');
+    expect(area.code).toBe('bermuda_area_warning');
+    expect(area.message).not.toMatch(/past its limit/i);
+
+    expect(limit.limitType).toBe('bermuda_step_limit');
+    expect(limit.code).toBe('application_limit_exceeded');
+
+    const record = { id: 'rec-bermuda-1' };
+    const keys = new Set([
+      limitFindingDedupeKey(record, pair),
+      limitFindingDedupeKey(record, area),
+      limitFindingDedupeKey(record, limit),
+    ]);
+    expect(keys.size).toBe(3);
   });
 });

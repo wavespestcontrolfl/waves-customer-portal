@@ -2502,9 +2502,12 @@ function savedLawnWarningFindings(record) {
   return Array.isArray(notes?.lawnWarningFindings) ? notes.lawnWarningFindings : [];
 }
 
-// The two completion warnings that used to refuse the closeout (owner 2026-11-26): oxadiazon on a home lawn, and a bermuda removal
-// step past its yearly or 42-day limit. Each is the application-limit finding shape, so it takes the same advisory line and office alert.
+// The completion warnings that used to refuse the closeout (owner 2026-11-26): oxadiazon on a home lawn,
+// bermuda removal pair / area / limit checks, and chemical area add-on actuals / missing applications.
+// Each has its own limitType, accurate office alert copy, and distinct deduplication key.
 const BERMUDA_STEP_LIMIT_TYPE = 'bermuda_step_limit';
+const BERMUDA_PAIR_TYPE = 'bermuda_pair_missing';
+const BERMUDA_AREA_TYPE = 'bermuda_area_missing';
 const bermudaStepFinding = (message) => ({
   code: 'application_limit_exceeded',
   limitType: BERMUDA_STEP_LIMIT_TYPE,
@@ -2512,28 +2515,62 @@ const bermudaStepFinding = (message) => ({
   reason: message,
   message: `Bermuda removal went past its limit: ${message} The visit was recorded and the office was told.`,
 });
+const bermudaPairFinding = (message) => ({
+  code: 'bermuda_pair_warning',
+  limitType: BERMUDA_PAIR_TYPE,
+  productName: 'Bermuda removal',
+  reason: message,
+  message: `Bermuda removal pair check warning: ${message} The visit was recorded and the office was told.`,
+});
+const bermudaAreaFinding = (message) => ({
+  code: 'bermuda_area_warning',
+  limitType: BERMUDA_AREA_TYPE,
+  productName: 'Bermuda removal',
+  reason: message,
+  message: `Bermuda removal treated area warning: ${message} The visit was recorded and the office was told.`,
+});
+const FINDING_ACTION = {
+  [BERMUDA_PAIR_TYPE]: () => 'review Bermuda removal product pairing',
+  [BERMUDA_AREA_TYPE]: () => 'review Bermuda removal treated area',
+  [areaAddOnGovernedRate.ACTUALS_CODE]: () => 'review area add-on actuals',
+  [areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE]: () => 'review unrecorded chemical add-on',
+};
 FINDING_WHY[lawnProhibited.LIMIT_TYPE] = (name) => `${name} was recorded on a home lawn, and its label prohibits residential use.`;
 FINDING_WHY[BERMUDA_STEP_LIMIT_TYPE] = () => 'Bermuda removal was recorded past its yearly or 42-day limit.';
+FINDING_WHY[BERMUDA_PAIR_TYPE] = () => 'Bermuda removal was recorded without both required paired products.';
+FINDING_WHY[BERMUDA_AREA_TYPE] = () => 'Bermuda removal was recorded without its required treated area.';
+FINDING_WHY[areaAddOnGovernedRate.ACTUALS_CODE] = (name) => `${name} add-on was recorded with incomplete application actuals.`;
+FINDING_WHY[areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE] = (name) => `${name} chemical add-on completed with no recorded product application.`;
 FINDING_DETAIL[lawnProhibited.LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit at a residential property. The label prohibits residential use: oxadiazon is not for use on home lawns. The visit was recorded. Review it with the technician and report it if needed.`;
 FINDING_DETAIL[BERMUDA_STEP_LIMIT_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit past its limit: ${f.reason} The visit was recorded. Review it and report it if needed.`;
+FINDING_DETAIL[BERMUDA_PAIR_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit without both paired products: ${f.reason} The visit was recorded. Review it with the technician.`;
+FINDING_DETAIL[BERMUDA_AREA_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit without its required treated area: ${f.reason} The visit was recorded. Review it with the technician.`;
+FINDING_DETAIL[areaAddOnGovernedRate.ACTUALS_CODE] = (fullName, f, svc) => `Area add-on (${fullName}) on a ${svc.service_type || 'service'} visit was recorded with incomplete application actuals: ${f.message || f.reason || 'missing rate or treated area'}. Review it with the technician.`;
+FINDING_DETAIL[areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE] = (fullName, f, svc) => `Chemical area add-on (${fullName}) on a ${svc.service_type || 'service'} visit completed with no recorded product application: ${f.message || f.reason || 'no product recorded'}. Automatic invoicing was held for office review.`;
 
-// A product the catalog could not name (a free-text oxadiazon entry) keys on its name, so two of them do not share one alert.
-const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || (finding.limitType === lawnProhibited.LIMIT_TYPE && finding.productName) || 'all'}:${finding.limitType || 'all'}`;
+// A product the catalog could not name (a free-text oxadiazon entry or area add-on key) keys on its name, so distinct warnings do not share one alert.
+const NAME_KEYED_LIMIT_TYPES = new Set([
+  lawnProhibited.LIMIT_TYPE,
+  areaAddOnGovernedRate.ACTUALS_CODE,
+  areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE,
+]);
+const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || (NAME_KEYED_LIMIT_TYPES.has(finding.limitType) && finding.productName) || 'all'}:${finding.limitType || 'all'}`;
 
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   const { raiseAdminAlert } = require('../services/admin-alert-compose');
   for (const finding of findings) {
     try {
       const over = finding.code === 'application_limit_exceeded';
+      const customAdvisory = !over && Boolean(FINDING_DETAIL[finding.limitType] && FINDING_WHY[finding.limitType]);
       const unchecked = tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType);
       const nutriRootReview = finding.limitType === tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE;
       const fullName = finding.productName || 'a product';
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
-      const fullText = over
+      const fullText = (over || customAdvisory)
         ? (FINDING_DETAIL[finding.limitType] || FINDING_DETAIL.annual_max_apps)(fullName, finding, svc)
         : 'A visit was recorded, but its product limits could not be checked. Review the products applied.';
-      const why = !over ? 'A visit was recorded, but its product limits could not be checked.'
+      const why = (!over && !customAdvisory) ? 'A visit was recorded, but its product limits could not be checked.'
         : (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding);
       const dedupeKey = limitFindingDedupeKey(record, finding);
       // A catalog name the alert rules refuse (a bracket tag, a code) falls back to plain words; the detail keeps it whole.
@@ -2541,16 +2578,19 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
         ? stockAlertWords(fullName, (n) => ({ action: `review ${n} label use`, why: FINDING_WHY[lawnProhibited.LIMIT_TYPE](n) }),
           { action: 'review a product label use', why: 'A product was recorded on a home lawn, and its label prohibits residential use.' })
         : null;
+      const customAction = customAdvisory && FINDING_ACTION[finding.limitType]
+        ? FINDING_ACTION[finding.limitType](name, finding)
+        : null;
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: labelWords ? labelWords.action : unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: labelWords ? labelWords.action : customAction ? customAction : unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
         why: labelWords ? labelWords.why : why,
         severity: 'needs-you',
         who: 'person',
         link: `/admin/customers?customerId=${svc.customer_id}`,
         subject: { type: 'visit', id: String(svc.id) },
         // A limit that could not be checked is done when it is checked, not when an overage is reviewed.
-        doneWhen: over && !unchecked ? 'limit_overage_reviewed' : 'limits_checked',
+        doneWhen: customAdvisory ? 'application_warning_reviewed' : over && !unchecked ? 'limit_overage_reviewed' : 'limits_checked',
       }, {
         bell: true,
         dedupeKey,
@@ -5698,11 +5738,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // Bermuda removal pair, area, and limit checks warn on the visit and alert the office without hard-400 blocking.
       if (bermudaPairMessage) {
         logger.warn(`[dispatch] non-blocking bermuda pair warning for ${svc.id}: ${bermudaPairMessage}`);
-        lawnWarningFindings.push(bermudaStepFinding(bermudaPairMessage));
+        lawnWarningFindings.push(bermudaPairFinding(bermudaPairMessage));
       }
       if (bermudaAreaMessage) {
         logger.warn(`[dispatch] non-blocking bermuda area warning for ${svc.id}: ${bermudaAreaMessage}`);
-        lawnWarningFindings.push(bermudaStepFinding(bermudaAreaMessage));
+        lawnWarningFindings.push(bermudaAreaFinding(bermudaAreaMessage));
       }
       if (bermudaLimitMessage) {
         logger.warn(`[dispatch] non-blocking bermuda limit warning for ${svc.id}: ${bermudaLimitMessage}`);
@@ -9378,10 +9418,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const uniqueCompletionPhotosUploaded = completionPhotoUploadResult.uniqueUploaded
             ?? completionPhotoUploadResult.uploaded;
           if (treeShrubPhotoGateRequired && uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
-            throw treeShrubPhotoUploadRequiredError(
-              completionPhotoUploadResult,
-              TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
-            );
+            if (completionPhotoUploadResult.failed > 0) {
+              // Actual photo upload failure (e.g. storage outage or corrupt image):
+              // preserve the retryable refusal so submitted photos are never silently dropped.
+              throw treeShrubPhotoUploadRequiredError(
+                completionPhotoUploadResult,
+                TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
+              );
+            }
+            // Fewer than 2 photos submitted with no upload failure: warn, never block (owner 2026-11-26).
+            logger.warn(`[dispatch] non-blocking Tree/Shrub photo count warning for ${svc.id}: ${uniqueCompletionPhotosUploaded}/${TREE_SHRUB_MIN_CLOSEOUT_PHOTOS} photos uploaded`);
+            if (!treeShrubCloseoutWarnings.some((w) => w?.code === 'tree_shrub_photos_required')) {
+              treeShrubCloseoutWarnings.push({
+                code: 'tree_shrub_photos_required',
+                message: `At least ${TREE_SHRUB_MIN_CLOSEOUT_PHOTOS} Tree/Shrub closeout photos are recommended (${uniqueCompletionPhotosUploaded} uploaded).`,
+                advisory: true,
+              });
+            }
           }
           // Away Watch counts every photo this closeout attaches, not only the body's: the visit photos staged
           // from Tech Home or the pest sheet (promoted above) and the linked lawn assessment's photos count too,
@@ -9399,6 +9452,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           completionPhotosUploadedBeforeCommit = true;
           const photoNotes = {
             ...parseJsonObject(record.structured_notes),
+            ...(treeShrubCloseoutWarnings.length ? { treeShrubCloseoutWarnings } : {}),
             completionPhotos: {
               uploaded: completionPhotoUploadResult.uploaded,
               uniqueUploaded: uniqueCompletionPhotosUploaded,
@@ -11078,6 +11132,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
       } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     }
+    // Chemical add-on completed without a recorded application (non-blocking warning):
+    // hoisted BEFORE existing/pre-minted invoice lookups assign `invoice`, `payUrl`,
+    // or `invoiceCreated` so unpaid invoices are never exposed to account credit,
+    // autopay, card-hold capture, or pay-link SMS before office review.
+    const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))
+      .some((f) => f && f.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE);
     let existingCompletionInvoice = null;
     // GATE_REPORT_AFTER_PAY: the payment this visit is held on, as its
     // payment's closeout recorded it (linkReportAfterPayHold; null with the
@@ -11288,22 +11348,31 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
         }
         if (existingCompletionInvoice) {
-          invoice = existingCompletionInvoice;
-          if (!recapReviewOnly) {
-            payUrl = existingCompletionInvoice.token
-              ? await shortenOrPassthrough(
-                  `${publicPortalUrl()}/pay/${existingCompletionInvoice.token}`,
-                  {
-                    kind: 'invoice',
-                    entityType: 'invoices',
-                    entityId: existingCompletionInvoice.id,
-                    customerId: existingCompletionInvoice.customer_id,
-                    codePrefix: invoiceShortCodePrefix(existingCompletionInvoice),
-                  }
-                )
-              : null;
-            if (['paid', 'prepaid'].includes(existingCompletionInvoice.status)) alreadyPaid = true;
-            else invoiceCreated = true;
+          const existingIsPaid = ['paid', 'prepaid'].includes(existingCompletionInvoice.status);
+          const holdExistingUnpaid = !packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly && !existingIsPaid;
+          if (holdExistingUnpaid) {
+            // Unverified chemical add-on hold: keep existingCompletionInvoice for
+            // dedupe and office alert context, but do NOT expose it to account credit,
+            // autopay, card-hold capture, or pay-link delivery until office review.
+            logger.warn(`[dispatch] visit ${svc.id}: held collection/delivery on existing unpaid invoice ${existingCompletionInvoice.id} pending chemical add-on billing review`);
+          } else {
+            invoice = existingCompletionInvoice;
+            if (!recapReviewOnly) {
+              payUrl = existingCompletionInvoice.token
+                ? await shortenOrPassthrough(
+                    `${publicPortalUrl()}/pay/${existingCompletionInvoice.token}`,
+                    {
+                      kind: 'invoice',
+                      entityType: 'invoices',
+                      entityId: existingCompletionInvoice.id,
+                      customerId: existingCompletionInvoice.customer_id,
+                      codePrefix: invoiceShortCodePrefix(existingCompletionInvoice),
+                    }
+                  )
+                : null;
+              if (existingIsPaid) alreadyPaid = true;
+              else invoiceCreated = true;
+            }
           }
         }
       } catch (e) { invoiceLookupFailed ||= true; /* non-blocking — same flag as the direct-suppressor catch above */ }
@@ -11683,8 +11752,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Default OFF = behaviour identical to before.
     // Hoisted so the terminal-invoice alert below can re-ask the SAME gate
     // with only the terminal flag cleared (deciding-reason check).
-    const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))
-      .some((f) => f && f.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE);
     const unpaidPreMintedOnChemicalHold = !packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly
       && Boolean(preMintedInvoice && !['paid', 'prepaid'].includes(preMintedInvoice.status));
     const unpaidExistingOnChemicalHold = unpaidPreMintedOnChemicalHold
@@ -11746,10 +11813,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       annualPrepayCovered,
     };
     const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
+    // Annual-prepay covered visits route their add-on billing hold and held-invoice
+    // office alert through reconcileCoveredVisitInvoice below; all other visits raise
+    // the fail-closed billing review alert here.
     const chemicalAddOnBillingHoldApplies = !packetEffects && unrecordedChemicalAddOnHold
-      && !recapReviewOnly && !alreadyPaid && !prepaidCovered && !autopayCoversVisit
-      && (unpaidExistingOnChemicalHold
-        || (!shouldInvoice && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })));
+      && !recapReviewOnly && !alreadyPaid && !autopayCoversVisit
+      && ((unpaidExistingOnChemicalHold && !annualPrepayCovered)
+        || (!prepaidCovered && !shouldInvoice && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })));
     if (chemicalAddOnBillingHoldApplies) {
       logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — ${unpaidExistingOnChemicalHold ? 'collection on existing unpaid invoice' : 'automatic invoicing'} held for office billing review`);
       // This billing alert is the ONLY durable office work item for a held bill,
@@ -13932,6 +14002,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Unverified chemical add-on hold: keep the pre-minted unpaid invoice
         // linked to the service_record, but withhold credit application,
         // autopay collection, and pay-link delivery until office review.
+        invoice = null;
+        payUrl = null;
+        invoiceCreated = false;
         logger.warn(`[dispatch] visit ${svc.id}: held collection/delivery on pre-minted invoice ${preMintedInvoice.id} pending chemical add-on billing review`);
       } else {
         preMintedInvoice = await applyPrepaidCreditToInvoice(preMintedInvoice);
@@ -14000,6 +14073,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // (GATE_SERIES_PRICE_GUARDS; off = the two log lines above only).
     // Non-blocking: the closeout is already committed.
     if (!packetEffects && !recapReviewOnly && !systemQuietCloseout && !isBackfillCompletion
+      && !chemicalAddOnBillingHoldApplies
       && SeriesPriceGuards.seriesPriceGuardsLive()
       && SeriesPriceGuards.unbilledCompletionAlertDue({
         visitPerformed, isCallback: svc.is_callback, serviceType: svc.service_type, reviewedVisitPrice,
@@ -14023,6 +14097,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const covered = await reconcileCoveredVisitInvoice({
         svc, record, invoice, payUrl, alreadyPaid, invoiceCreated,
         issuedInvoiceCloseout, recapReviewOnly, visitPerformed, terminalCompletionInvoice, packetEffects, invoiceLookupFailed,
+        unrecordedChemicalAddOnHold,
+        heldExistingInvoice: unpaidExistingOnChemicalHold ? (preMintedInvoice || existingCompletionInvoice) : null,
         quietBackfill: isBackfillCompletion,
         serviceDate: serviceDateOnly(record?.service_date),
         portalUrl,
@@ -17182,4 +17258,8 @@ module.exports.exceedsVisitLimit = exceedsVisitLimit;
 module.exports.deductionAdvisoryMessages = deductionAdvisoryMessages;
 module.exports.isOverVisitLimitLine = (line) => OVER_VISIT_LIMIT_LINES.has(line);
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
+module.exports.bermudaStepFinding = bermudaStepFinding;
+module.exports.bermudaPairFinding = bermudaPairFinding;
+module.exports.bermudaAreaFinding = bermudaAreaFinding;
+module.exports.limitFindingDedupeKey = limitFindingDedupeKey;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

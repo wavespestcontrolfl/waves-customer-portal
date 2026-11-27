@@ -385,4 +385,23 @@ describe('storm-watch sweep', () => {
     expect(secondInsert.mock.calls[0][0].message).toContain('Wind Advisory');
     expect(secondInsert.mock.calls[0][0].message).not.toContain('Heat Advisory');
   });
+
+  test('P1-6: simultaneous storm nudge and Heat/Wind advisory both deliver in the same sweep without suppressing the safety card', async () => {
+    const { notifInsert } = wireDb({ stops: [stop()] });
+    getHourlyRainOutlook.mockResolvedValue([{
+      startTime: new Date(NOON_ET.getTime() + 30 * 60_000).toISOString(),
+      rainChance: 80, hasThunder: true, shortForecast: 'Thunderstorms',
+    }]);
+    getNwsActiveAlerts.mockResolvedValue([{
+      event: 'Heat Advisory', category: 'heat_advisory', moveTrigger: false,
+      onset: new Date(NOON_ET.getTime() - 3600_000).toISOString(),
+      expires: new Date(NOON_ET.getTime() + 4 * 3600_000).toISOString(),
+    }]);
+
+    const res = await StormWatch.sweep(NOON_ET);
+    expect(res).toEqual({ checked: 1, alerted: 1, advisories: 1 });
+    expect(notifInsert).toHaveBeenCalledTimes(2);
+    expect(notifInsert.mock.calls.map((c) => c[0].type)).toEqual(['storm_watch_alert', 'weather_safety_advisory']);
+    expect(notifInsert.mock.calls[1][0].message).toContain('Heat Advisory');
+  });
 });

@@ -842,6 +842,42 @@ describe('in-lock rechecks (requireLivePush)', () => {
     jest.restoreAllMocks();
   });
 
+  test('setMode rejects placing a timed hold on branded Search under FOR UPDATE lock, and adjustBudgets releases an expired branded hold back to base (P1-5)', async () => {
+    const branded = { ...baseCampaign(), is_branded: true, budget_mode: 'stop', daily_budget_current: '0.40' };
+    campaignFirstRow = branded;
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setMode('c-1', 'stop', 'Hold: stop', {
+      requireLivePush: true,
+      requireActive: true,
+      hold: { mode: 'stop', until: '2099-01-01' },
+    })).rejects.toMatchObject({ code: 'hold_not_eligible' });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+
+    // Expired hold on a throttled branded Search campaign is restored to base automatically.
+    const expiredBranded = {
+      ...branded,
+      metadata: { budget_hold: { mode: 'stop', until: '2020-01-01' }, keep: true },
+    };
+    campaignRows = [expiredBranded];
+    campaignFirstRow = expiredBranded;
+    mockIsEnabled.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+
+    await BudgetManager.adjustBudgets();
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
+    expect(mockCampaignUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      budget_mode: 'base',
+      daily_budget_current: 40,
+    }));
+    const savedMeta = JSON.parse(mockCampaignUpdate.mock.calls[0][0].metadata);
+    expect(savedMeta.budget_hold).toBeUndefined();
+    expect(savedMeta.keep).toBe(true);
+    expect(savedMeta.budget_hold_cleared).toMatchObject({ by: 'system:expired_hold', mode: 'stop', until: '2020-01-01' });
+    jest.restoreAllMocks();
+  });
+
   test('setBudget requireBoundFactor: target == locked base == current throws budget_noop', async () => {
     campaignFirstRow = baseCampaign(); // base 40, current 40 (strings parse to 40)
     mockIsConfigured.mockReturnValue(true);

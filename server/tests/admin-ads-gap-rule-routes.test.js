@@ -105,7 +105,7 @@ beforeEach(() => {
   jest.restoreAllMocks();
   mockGapMode = 'shadow';
   campaignRow = {
-    id: CAMPAIGN_ID, campaign_name: 'Waves Pest Control - GBP Search', platform: 'google_ads', status: 'active',
+    id: CAMPAIGN_ID, campaign_name: 'Waves Pest Control - GBP Search', platform: 'google_ads', campaign_type: 'SEARCH', status: 'active',
     budget_mode: 'stop', daily_budget_current: '0.05', daily_budget_base: '5', metadata: { keep: 'me' },
   };
   targetsRow = { id: 't1', metadata: { other: 'keep' } };
@@ -282,6 +282,48 @@ describe('POST /campaigns/:id/hold', () => {
     campaignRow = { id: CAMPAIGN_ID, platform: 'facebook', status: 'active', metadata: null };
     expect((await call('POST', `/campaigns/${CAMPAIGN_ID}/hold`, { mode: 'base', until: inDays(1) })).status).toBe(400);
     expect(BudgetManager.setMode).not.toHaveBeenCalled();
+  });
+
+  test('400 for branded Search or non-Search campaigns, while legacy active holds stay release-only and DELETE restores base (P1-5)', async () => {
+    // Branded Search rejected for new timed holds
+    campaignRow = { ...campaignRow, is_branded: true };
+    const brandedPost = await call('POST', `/campaigns/${CAMPAIGN_ID}/hold`, { mode: 'stop', until: inDays(3) });
+    expect(brandedPost.status).toBe(400);
+    expect(brandedPost.body.error).toMatch(/non-branded Google Search/);
+    expect(BudgetManager.setMode).not.toHaveBeenCalled();
+
+    // Non-Search rejected for new timed holds
+    campaignRow = { ...campaignRow, is_branded: false, campaign_type: 'PERFORMANCE_MAX' };
+    const pmaxPost = await call('POST', `/campaigns/${CAMPAIGN_ID}/hold`, { mode: 'stop', until: inDays(3) });
+    expect(pmaxPost.status).toBe(400);
+    expect(BudgetManager.setMode).not.toHaveBeenCalled();
+
+    // Existing active hold on a throttled branded Search campaign stays visible as release_only
+    // and DELETE atomically restores 'base' mode via setMode(..., { clearHold }) so it never stays stuck at 1%.
+    campaignRow = {
+      ...campaignRow,
+      campaign_type: 'SEARCH',
+      is_branded: true,
+      budget_mode: 'stop',
+      metadata: { keep: 'me', budget_hold: { mode: 'stop', until: inDays(3) } },
+    };
+    const getRes = await call('GET', '/gap-rule');
+    expect(getRes.status).toBe(200);
+    expect(getRes.body.campaigns).toEqual([expect.objectContaining({ id: CAMPAIGN_ID, release_only: true })]);
+
+    const delRes = await call('DELETE', `/campaigns/${CAMPAIGN_ID}/hold`);
+    expect(delRes.status).toBe(200);
+    expect(BudgetManager.setMode).toHaveBeenCalledWith(
+      CAMPAIGN_ID,
+      'base',
+      expect.stringMatching(/restored to base/i),
+      expect.objectContaining({
+        requireLivePush: true,
+        requireActive: true,
+        trigger: 'manual',
+        clearHold: expect.objectContaining({ by: 'admin-1', at: expect.any(String) }),
+      }),
+    );
   });
 });
 
