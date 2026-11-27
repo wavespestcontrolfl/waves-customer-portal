@@ -982,6 +982,14 @@ function queryActiveCustomerByPhone(rawDigits) {
     });
 }
 
+async function findExistingCustomerForPhoneConfirm(phoneDigits, customerId) {
+  if (customerId) {
+    const matched = await queryActiveCustomerByPhone(phoneDigits).where('id', customerId).first();
+    if (matched) return matched;
+  }
+  return queryActiveCustomerByPhone(phoneDigits).first();
+}
+
 function invalidateEstimateSlotCaches() {
   try {
     require('../services/estimate-slot-availability').invalidateAllEstimates();
@@ -998,18 +1006,15 @@ router.get('/customer-lookup', async (req, res, next) => {
 
     if (phone) {
       const digits = normalizeUsPhoneLast10(phone);
-      if (!digits) return res.json({ customer: null });
+      if (!digits || !address) return res.json({ customer: null });
 
-      customer = await queryActiveCustomerByPhone(digits).select(phoneCustomerFields).first();
       // SECURITY: never disclose a customer's PII (name/email/address) on a
       // phone number alone — that lets anyone enumerate identities from a
-      // number they merely possess. Require a matching address before
-      // disclosing. The booking funnel always collects the address (step 1)
-      // before the phone step, so legitimate returning-customer autofill is
-      // unaffected; only the address-less enumeration path is closed.
-      if (customer && !(address && addressMatchesCustomer(customer, address, zip, unit))) {
-        customer = null;
-      }
+      // number they merely possess. Match the submitted address across all
+      // active profiles sharing this US phone (e.g. a legacy 10-digit row and
+      // an E.164 row) so an unmatched sibling never hides the real property.
+      const candidates = await queryActiveCustomerByPhone(digits).select(phoneCustomerFields).limit(25);
+      customer = (candidates || []).find((row) => addressMatchesCustomer(row, address, zip, unit)) || null;
       // address_line2 is needed ABOVE for the unit-aware match but must not
       // be disclosed: a blank submitted unit stays compatible by design, so
       // phone + street knowledge would otherwise read back the apartment
@@ -3194,7 +3199,7 @@ async function createSelfBooking(payload = {}) {
       }
     }
     if (!custId && phoneDigits) {
-      const existing = await queryActiveCustomerByPhone(phoneDigits).first();
+      const existing = await findExistingCustomerForPhoneConfirm(phoneDigits, customer_id);
       if (existing) {
         if (!customer_id) {
           // NOTE: a new_customer double-submit retry lands here (the first

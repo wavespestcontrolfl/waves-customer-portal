@@ -476,7 +476,10 @@ export default function SlotPicker({
   const onPickDate = async (date) => {
     const requestId = latestPickedRequestRef.current + 1;
     latestPickedRequestRef.current = requestId;
-    if (searchData) setSearchResetKey((k) => k + 1);
+    // Always reset the search widget on a date pick so a pending AI search
+    // (whose response is now ignored) cannot leave its input/button stuck on
+    // "Checking the route map…".
+    setSearchResetKey((k) => k + 1);
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);

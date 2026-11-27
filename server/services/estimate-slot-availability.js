@@ -114,6 +114,7 @@ const MAX_SLOT_HORIZON_DAYS = 90;
 // ---------- in-memory caches ----------
 
 const wrapperCache = new Map();      // key: `${estimateId}:${hourOfDay}` → { result, expiresAt }
+let wrapperCacheGeneration = 0;      // bumped on every invalidation so in-flight reads cannot refill stale occupancy
 const WRAPPER_TTL_MS = 5 * 60 * 1000;
 
 const geocodeCache = new Map();      // key: normalized address → { coords, expiresAt }
@@ -2429,9 +2430,15 @@ function cachePolicyDimensions(makeRoomOffer) {
   return dims;
 }
 
+function canStoreInWrapperCache({ funnelDays, skipResultCache, bypassCache, routeDayPolicyKey, cacheGenerationAtStart }) {
+  return funnelDays == null && !skipResultCache && !bypassCache && routeDayPolicyKey != null
+    && wrapperCacheGeneration === cacheGenerationAtStart;
+}
+
 // ---------- main ----------
 
 async function getAvailableSlots(estimateId, userOpts = {}) {
+  const cacheGenerationAtStart = wrapperCacheGeneration;
   // Self-serve notice window (owner ruling 2026-09-23) is the live default
   // lead — read at call time so a SELF_SERVE_NOTICE_HOURS flip needs no
   // redeploy — overridable by an explicit userOpts.minimumLeadMinutes
@@ -2967,7 +2974,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // cluster-day slot stays invisible until TTL expiry. Funneled-zone
   // estimates are a small slice of traffic; recomputing beats versioning
   // the cache by schedule state. Non-funneled results keep today's caching.
-  if (funnelDays == null && !skipResultCache && !bypassCache && routeDayPolicyKey != null) {
+  if (canStoreInWrapperCache({ funnelDays, skipResultCache, bypassCache, routeDayPolicyKey, cacheGenerationAtStart })) {
     wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
   }
   return result;
@@ -3160,6 +3167,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
 // estimate (across all hour buckets — the key shape is `${estimateId}:${hour}`).
 function invalidateEstimate(estimateId) {
   if (!estimateId) return 0;
+  wrapperCacheGeneration += 1;
   const prefix = `${estimateId}:`;
   let dropped = 0;
   for (const k of wrapperCache.keys()) {
@@ -3172,6 +3180,7 @@ function invalidateEstimate(estimateId) {
 // so EVERY estimate's cached slot list may now offer a wrong date. The cache
 // is small (5-min TTL) and recomputes lazily; correctness beats warmth.
 function invalidateAllEstimates() {
+  wrapperCacheGeneration += 1;
   const dropped = wrapperCache.size;
   wrapperCache.clear();
   return dropped;
@@ -3237,7 +3246,7 @@ module.exports = {
     applyLineOfferRule,
     lineOfferRankingFor,
     heldVisitLines,
-    clearCaches() { wrapperCache.clear(); geocodeCache.clear(); require('./scheduling/expected-service-minutes').clearExpectedServiceMinutesCache(); },
+    clearCaches() { wrapperCacheGeneration += 1; wrapperCache.clear(); geocodeCache.clear(); require('./scheduling/expected-service-minutes').clearExpectedServiceMinutesCache(); },
     stopDatesInRange,
     makeRoomAdmit,
     makeRoomPlacement,

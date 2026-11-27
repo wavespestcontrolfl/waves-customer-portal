@@ -35,10 +35,12 @@ describe('fallbackParse', () => {
     expect(fallbackParse('tuesday', tuesday)).toMatchObject({ dateFrom: '2026-11-10' });
   });
 
-  it('leaves "next weekend" and "next week" on their own rule', () => {
+  it('resolves "next weekend" and "next week" consistently (upcoming Mon–Sun for next week)', () => {
     const friday = new Date('2026-11-06T17:00:00Z');
     expect(fallbackParse('next weekend', friday)).toMatchObject({ dateFrom: '2026-11-14', dateTo: '2026-11-15' });
-    expect(fallbackParse('next week', friday)).toMatchObject({ dateFrom: '2026-11-16' });
+    expect(fallbackParse('next week', friday)).toMatchObject({ dateFrom: '2026-11-09', dateTo: '2026-11-15' });
+    const monday = new Date('2026-11-09T17:00:00Z');
+    expect(fallbackParse('next week', monday)).toMatchObject({ dateFrom: '2026-11-16', dateTo: '2026-11-22' });
   });
 
   it('treats "this weekend" on a Sunday as just today', () => {
@@ -161,9 +163,12 @@ describe('parseWhen fast deterministic path and interactive AI policy', () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it('fallbackParse does not return Friday for "Can\'t do Friday"', () => {
+  it('fallbackParse does not return excluded days for "Can\'t do Friday" or "any day except 12/3"', () => {
     const nov27 = new Date('2026-11-27T17:00:00Z');
     expect(fallbackParse("Can't do Friday", nov27)).toMatchObject({
+      dateFrom: null, dateTo: null, understood: false,
+    });
+    expect(fallbackParse('any day except 12/3', nov27)).toMatchObject({
       dateFrom: null, dateTo: null, understood: false,
     });
   });

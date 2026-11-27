@@ -306,4 +306,30 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
       else process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = prevGrace;
     }
   });
+
+  test('an in-flight availability read that spans a cache flush does not refill the cache with stale occupancy', async () => {
+    findAvailableSlots.mockImplementationOnce(async () => {
+      // A booking/hold commits and flushes caches while this read is already in flight.
+      estimateSlotAvailability.invalidateAllEstimates();
+      return {
+        slots: [{ date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 4, stops_that_day: 2 }],
+        evaluated: 1,
+        total_feasible: 1,
+      };
+    });
+
+    const first = await getAvailableSlots('est-rain-1', OPTS);
+    expect(first.metadata.cacheHit).toBe(false);
+
+    // Next read MUST recompute instead of hitting a stale entry written by the old generation.
+    findAvailableSlots.mockResolvedValueOnce({
+      slots: [{ date: '2027-05-20', start_time: '11:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 4, stops_that_day: 2 }],
+      evaluated: 1,
+      total_feasible: 1,
+    });
+    const next = await getAvailableSlots('est-rain-1', OPTS);
+    expect(next.metadata.cacheHit).toBe(false);
+    expect(findAvailableSlots).toHaveBeenCalledTimes(2);
+    expect(next.calendarSlots.find((s) => s.routeOptimal)?.windowStart).toBe('11:00');
+  });
 });

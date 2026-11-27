@@ -39,6 +39,7 @@ const MONTHS = {
 
 const MONTH_PATTERN = 'january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec';
 const WEEKDAY_PATTERN = 'sunday|sun|monday|mon|tuesday|tues|tue|wednesday|weds|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat';
+const NEGATION_CONSTRAINT_RE = /\b(?:except|not|no|other than|besides|can'?t(?:\s+do)?|cannot(?:\s+do)?|don'?t(?:\s+want)?)\b/;
 const FAST_TOD_PREFIX_RE = /^(?:(?:in\s+the\s+)?(?:morning|mornings|afternoon|afternoons|evening|evenings)|any\s*time|anything|sometime|on|for|in)\s+/i;
 const FAST_TOD_SUFFIX_RE = /\s+(?:(?:in\s+the\s+)?(?:morning|mornings|afternoon|afternoons|evening|evenings)|any\s*time|please)$/i;
 // Strict whole-string date grammars for the instant $0 deterministic fast path.
@@ -201,11 +202,14 @@ function fallbackParse(query, now) {
   }
 
   // Explicit calendar date ("Dec 3", "December 3rd", "12/3", "2026-12-03")
-  // runs BEFORE bare month matching so "Dec 3" resolves to Dec 3 (not Dec 1–31)
-  // and impossible dates like "Feb 30" stop here instead of matching all of Feb.
+  // runs BEFORE bare month matching so "Dec 3" resolves to Dec 3 (not Dec 1–31),
+  // impossible dates like "Feb 30" stop instead of matching all of Feb, and
+  // negated constraints like "any day except 12/3" never pick the excluded day.
   const explicitDate = parseExplicitDate(q, now);
   if (explicitDate) {
-    return explicitDate.date ? single(explicitDate.date) : { dateFrom: null, dateTo: null, timeOfDay, understood: false };
+    return explicitDate.date && !NEGATION_CONSTRAINT_RE.test(q)
+      ? single(explicitDate.date)
+      : { dateFrom: null, dateTo: null, timeOfDay, understood: false };
   }
 
   // Explicit weekday ("next tuesday", "on friday", "thursday") — never match a
@@ -222,9 +226,9 @@ function fallbackParse(query, now) {
   const monthRange = parseMonthRange(q, now);
   if (monthRange) return range(monthRange.dateFrom, monthRange.dateTo);
 
-  // Relative weeks
+  // Relative weeks ("next week" = upcoming Monday through Sunday, matching buildSystemPrompt)
   if (/\bnext\s+week\b/.test(q)) {
-    const mon = nextWeekday(now, 1, true);
+    const mon = weekdayFrom(now, 1, true);
     return range(mon, shiftEtDate(mon, 6));
   }
   if (/\bthis\s+week\b/.test(q)) {

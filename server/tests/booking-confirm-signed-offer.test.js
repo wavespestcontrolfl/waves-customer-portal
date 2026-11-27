@@ -1882,7 +1882,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       });
     });
 
-    test('GET /api/booking/customer-lookup accepts +1 E.164 phone with exact US match and rejects non-US numbers', async () => {
+    test('GET /api/booking/customer-lookup accepts +1 E.164 phone, matches property across shared-phone rows, and rejects non-US numbers', async () => {
       const bookingRouter = require('../routes/booking');
       const layer = bookingRouter.stack.find((l) => l.route?.path === '/customer-lookup' && l.route.methods.get);
       const handler = layer.route.stack[layer.route.stack.length - 1].handle;
@@ -1894,18 +1894,32 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
             where: jest.fn().mockReturnThis(),
             andWhere: jest.fn().mockReturnThis(),
             select: jest.fn().mockReturnThis(),
-            first: jest.fn().mockResolvedValue({
-              id: 'cust-e164',
-              first_name: 'Pat',
-              last_name: 'Lee',
-              email: 'pat@example.com',
-              phone: '9415551234',
-              address_line1: '123 Main St',
-              address_line2: null,
-              city: 'Sarasota',
-              state: 'FL',
-              zip: '34231',
-            }),
+            limit: jest.fn().mockResolvedValue([
+              {
+                id: 'cust-other-addr',
+                first_name: 'Pat',
+                last_name: 'Lee',
+                email: 'old@example.com',
+                phone: '+19415551234',
+                address_line1: '999 Oak Ave',
+                address_line2: null,
+                city: 'Sarasota',
+                state: 'FL',
+                zip: '34231',
+              },
+              {
+                id: 'cust-e164',
+                first_name: 'Pat',
+                last_name: 'Lee',
+                email: 'pat@example.com',
+                phone: '9415551234',
+                address_line1: '123 Main St',
+                address_line2: null,
+                city: 'Sarasota',
+                state: 'FL',
+                zip: '34231',
+              },
+            ]),
           };
           return q;
         }
@@ -1915,7 +1929,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       const req = { query: { phone: '+19415551234', address: '123 Main St', zip: '34231' } };
       const res = { json: jest.fn((payload) => { body = payload; return res; }) };
       await handler(req, res, jest.fn((err) => { if (err) throw err; }));
-      expect(body.customer).toMatchObject({ id: 'cust-e164', first_name: 'Pat' });
+      expect(body.customer).toMatchObject({ id: 'cust-e164', first_name: 'Pat', email: 'pat@example.com' });
       expect(whereRawCalls).toContainEqual({
         sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)",
         bindings: ['9415551234', '19415551234'],

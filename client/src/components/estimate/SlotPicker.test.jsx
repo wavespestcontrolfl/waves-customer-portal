@@ -960,6 +960,10 @@ describe('SlotPicker Phase 1 — full calendarSlots, AI search race/reset, and l
     fireEvent.click(searchBtnBefore);
     fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: pickedYmd } });
     await screen.findByText(dayLabel(pickedYmd));
+    // Even while the first AI search is still in flight (searchData === null),
+    // picking a date immediately remounts the search widget so it cannot stay disabled.
+    const mountAfterPick = screen.getByRole('button', { name: 'run-date-search' }).getAttribute('data-search-mount');
+    expect(Number(mountAfterPick)).toBeGreaterThan(Number(mountBefore));
 
     // Now the stale AI search returns: it must NOT overwrite the picked day.
     await act(async () => {
