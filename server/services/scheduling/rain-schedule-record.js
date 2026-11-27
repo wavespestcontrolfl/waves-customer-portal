@@ -247,36 +247,30 @@ function baseOf(row) {
 async function proposeFor(row, ctx) {
   const { day, read, open, taken } = ctx;
   const base = baseOf(row);
-  if (['no_point', 'no_forecast', 'error'].includes(row.reason)) {
-    return { ...base, decision: 'none', reason: row.reason === 'no_forecast' ? 'unread_forecast' : row.reason };
+  const earlyReason = { no_point: 'no_point', no_forecast: 'unread_forecast', error: 'error' }[row.reason];
+  if (earlyReason) return { ...base, decision: 'none', reason: earlyReason };
+  Object.assign(base, Object.fromEntries([
+    ['advisories', row.advisories],
+    ['storm_hazard', row.stormLabel],
+    ['severe_alerts', row.severeAlerts],
+  ].filter(([, v]) => (Array.isArray(v) ? v.length > 0 : Boolean(v)))));
+  // ONE forecast snapshot for this visit's whole decision AND its verdict: the reader keeps one read per visit point for the
+  // run, so rain-pass's wet verdict and these alternatives judge the same hours.
+  const hourly = row.visit.point ? await read(row.visit.point.lat, row.visit.point.lng) : null;
+  if (Array.isArray(hourly)) {
+    base.span_chances = workHours.spanChances(hourly, day, base.span[0], base.span[1], RAIN_AFTER_HOURS);
   }
   if (!row.wet) {
     // A visit the forecast reads dry is stored too, as none/forecast_dry: a rain the forecast missed scores as a miss.
     // Only a span read in full is dry; an hour with no reading is unread. The peak is kept for the replay.
     if (row.peak != null) base.peak = row.peak;
-    if (row.advisories?.length) base.advisories = row.advisories;
-    // The hours behind that verdict: the run's one snapshot of the visit's point (the same read rain-pass judged), as read.
-    const seen = row.visit.point ? await read(row.visit.point.lat, row.visit.point.lng) : null;
-    if (Array.isArray(seen)) base.span_chances = workHours.spanChances(seen, day, base.span[0], base.span[1], RAIN_AFTER_HOURS);
     return { ...base, decision: 'none', reason: row.dry === true ? 'forecast_dry' : 'unread_forecast' };
   }
   base.peak = row.peak;
-  if (row.stormLabel) base.storm_hazard = row.stormLabel;
-  if (row.severeAlerts?.length) base.severe_alerts = row.severeAlerts;
-  if (row.advisories?.length) base.advisories = row.advisories;
+  if (Array.isArray(hourly)) base.day_chances = workHours.dayChances(hourly, day, RAIN_AFTER_HOURS);
   const { reach } = row.visit;
   const length = reach.endMin - reach.startMin;
-  // ONE forecast snapshot for this visit's whole decision AND its verdict: the reader keeps one read per visit point for the
-  // run, so rain-pass's wet verdict and these alternatives judge the same hours.
-  const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   const alerts = ctx.readAlerts && row.visit.point ? await ctx.readAlerts(row.visit.point.lat, row.visit.point.lng) : [];
-  // The hours this decision used, raw: the visit's span plus its drying hours (compact, from the hour its work starts).
-  if (Array.isArray(hourly)) {
-    base.span_chances = workHours.spanChances(hourly, day, base.span[0], base.span[1], RAIN_AFTER_HOURS);
-    // Every same-day hour a later slot could use (work hours plus drying after close, from 8 AM): a reorder's own span
-    // and the hours that rejected the others are all inside it, so the reorder can be replayed.
-    base.day_chances = workHours.dayChances(hourly, day, RAIN_AFTER_HOURS);
-  }
   // A hour already taken by an earlier proposal is never offered, over the cap or not.
   const own = await reorderStart(row, ctx, hourly, alerts);
   if (own != null) {
@@ -289,9 +283,10 @@ async function proposeFor(row, ctx) {
   // then the office call list, whatever the rest of the day reads (the 'wholly wet day' gate of plan v2 is gone). The point's
   // own hours are the snapshot read above. The move is checked against the accepted targets before the cap is named: a stop
   // over the cap is `cap` only when a valid move exists, else it keeps its true reason.
-  if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   // A later hour with no reading could still have been dry: unread, never a move or a call.
-  if (laterHourUnread(row, hourly, ctx, alerts)) return { ...base, decision: 'none', reason: 'unread_forecast' };
+  if (!Array.isArray(hourly) || laterHourUnread(row, hourly, ctx, alerts)) {
+    return { ...base, decision: 'none', reason: 'unread_forecast' };
+  }
   const { target, unread, exhausted, date } = await dryDayFor(row, hourly, ctx, alerts);
   // A scan with no work day in it is unresolved, never a call list: the day is not frozen on it (see planDay).
   if (exhausted) return { ...base, decision: 'none', reason: 'no_work_day_in_scan' };

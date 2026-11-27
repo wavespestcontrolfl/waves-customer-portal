@@ -1378,15 +1378,15 @@ router.post('/:token/confirm', async (req, res, next) => {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
     if (await rejectIfInvoiceCollectionPending(invoice, res, { recordExistingPayment: true })) return;
-    if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
+    if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status).toLowerCase())) {
       try {
         assertInvoiceCollectible(invoice);
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }
     }
-    if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
-    if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
+    const settledError = { paid: 'Invoice already paid', prepaid: 'Invoice is already prepaid' }[invoice.status];
+    if (settledError) return res.status(400).json({ error: settledError });
     // UNCONDITIONAL (codex r25 P1): the assertion above runs only for the
     // terminal statuses, and a withdrawn invoice is by construction not one of
     // them — it keeps `sent`/`viewed`/`overdue` so the homeowner's existing

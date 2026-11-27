@@ -103,7 +103,7 @@ function countyMeasurements(lookup) {
   if (!SINGLE_FAMILY_LABEL.test(String(propertyRecord.propertyType || '').trim())) return null;
   const facts = resolvePropertyFacts({ extraction: null, propertyRecord, customer: null, isCommercial: false });
   if (facts.newConstruction) return null;
-  if (facts.home?.source !== SQFT_SOURCES.COUNTY_ASSESSED || facts.lot?.source !== SQFT_SOURCES.COUNTY_ASSESSED) return null;
+  if ([facts.home, facts.lot].some((f) => f?.source !== SQFT_SOURCES.COUNTY_ASSESSED)) return null;
   const homeSqFt = Math.round(Number(facts.home.value));
   const lotSqFt = Math.round(Number(facts.lot.value));
   if (!inRange(homeSqFt, HOME_SQFT_RANGE) || !inRange(lotSqFt, LOT_SQFT_RANGE)) return null;

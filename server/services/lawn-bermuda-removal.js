@@ -552,7 +552,7 @@ const LOCK_NAMESPACE = 'bermuda-removal-step';
 async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return;
   const { recognition, fusilade, unconfigured } = await submittedStepProducts(trx, products);
-  if (!recognition && !fusilade) return;
+  if (![recognition, fusilade].some(Boolean)) return;
   // Eligibility decides only whether the PAIR rule and the Fusilade II cap apply. A recorded
   // Recognition is capped on any visit of any month, whatever the account says NOW (a switch
   // turned off, an estimate archived, a cultivar changed mid-completion): every Recognition
@@ -563,8 +563,9 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   // Return missing-pair, unconfigured-limits, and cap findings as non-blocking warnings inside the
   // locked transaction rather than rolling back completion. Always run the locked cap check even
   // when the product pair is incomplete so a third spray with one product missing records both.
-  const inconsistent = !!stepVisit && !unconfigured && !(await stepConfigured(trx, stepVisit));
-  if (stepVisit && inconsistent) return [{ kind: 'config', message: NOT_CONFIGURED_MESSAGE }];
+  if (stepVisit && !unconfigured && !(await stepConfigured(trx, stepVisit))) {
+    return [{ kind: 'config', message: NOT_CONFIGURED_MESSAGE }];
+  }
   const findings = [];
   const pairProblem = stepVisit ? pairMessage({ recognition, fusilade, unconfigured }) : null;
   if (pairProblem) {

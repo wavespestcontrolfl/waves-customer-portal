@@ -2543,6 +2543,7 @@ const FINDING_ACTION = {
   [BERMUDA_CONFIG_TYPE]: () => 'verify Bermuda removal limits configuration',
   [areaAddOnGovernedRate.ACTUALS_CODE]: () => 'review area add-on actuals',
   [areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE]: () => 'review unrecorded chemical add-on',
+  [tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE]: () => 'review NutriRoot application',
 };
 FINDING_WHY[lawnProhibited.LIMIT_TYPE] = (name) => `${name} was recorded on a home lawn, and its label prohibits residential use.`;
 FINDING_WHY[BERMUDA_STEP_LIMIT_TYPE] = () => 'Bermuda removal was recorded past its yearly or 42-day limit.';
@@ -2573,35 +2574,43 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
     try {
       const over = finding.code === 'application_limit_exceeded';
       const customAdvisory = !over && Boolean(FINDING_DETAIL[finding.limitType] && FINDING_WHY[finding.limitType]);
+      const known = over || customAdvisory;
       const unchecked = tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType);
-      const nutriRootReview = finding.limitType === tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE;
       const fullName = finding.productName || 'a product';
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
-      const fullText = (over || customAdvisory)
-        ? (FINDING_DETAIL[finding.limitType] || FINDING_DETAIL.annual_max_apps)(fullName, finding, svc)
-        : 'A visit was recorded, but its product limits could not be checked. Review the products applied.';
-      const why = (!over && !customAdvisory) ? 'A visit was recorded, but its product limits could not be checked.'
-        : (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding);
+      const [fullText, why] = known
+        ? [
+            (FINDING_DETAIL[finding.limitType] || FINDING_DETAIL.annual_max_apps)(fullName, finding, svc),
+            (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding),
+          ]
+        : [
+            'A visit was recorded, but its product limits could not be checked. Review the products applied.',
+            'A visit was recorded, but its product limits could not be checked.',
+          ];
       const dedupeKey = limitFindingDedupeKey(record, finding);
       // A catalog name the alert rules refuse (a bracket tag, a code) falls back to plain words; the detail keeps it whole.
-      const labelWords = finding.limitType === lawnProhibited.LIMIT_TYPE
+      const fallbackAction = FINDING_ACTION[finding.limitType]?.(name, finding)
+        || (unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked`
+          : over ? `review ${name} over its limit` : 'review product limits not checked');
+      const words = finding.limitType === lawnProhibited.LIMIT_TYPE
         ? stockAlertWords(fullName, (n) => ({ action: `review ${n} label use`, why: FINDING_WHY[lawnProhibited.LIMIT_TYPE](n) }),
           { action: 'review a product label use', why: 'A product was recorded on a home lawn, and its label prohibits residential use.' })
-        : null;
-      const customAction = customAdvisory && FINDING_ACTION[finding.limitType]
-        ? FINDING_ACTION[finding.limitType](name, finding)
-        : null;
+        : { action: fallbackAction, why };
+      const doneWhen = finding.limitType === BERMUDA_CONFIG_TYPE
+        ? 'limits_checked'
+        : customAdvisory ? 'application_warning_reviewed'
+          : (over && !unchecked) ? 'limit_overage_reviewed' : 'limits_checked';
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: labelWords ? labelWords.action : customAction ? customAction : unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
-        why: labelWords ? labelWords.why : why,
+        action: words.action,
+        why: words.why,
         severity: 'needs-you',
         who: 'person',
         link: `/admin/customers?customerId=${svc.customer_id}`,
         subject: { type: 'visit', id: String(svc.id) },
         // A limit that could not be checked is done when it is checked, not when an overage is reviewed.
-        doneWhen: finding.limitType === BERMUDA_CONFIG_TYPE ? 'limits_checked' : customAdvisory ? 'application_warning_reviewed' : over && !unchecked ? 'limit_overage_reviewed' : 'limits_checked',
+        doneWhen,
       }, {
         bell: true,
         dedupeKey,

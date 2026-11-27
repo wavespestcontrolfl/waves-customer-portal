@@ -330,7 +330,7 @@ async function judgeStop(visit, ctx) {
   // The service the notice names: the one that needs dry weather, which on a
   // shared stop or a visit with add-ons is not always the visit's own.
   const outdoor = services.find((service) => rainClassOf(service) === 'outdoor');
-  const work = String((outdoor && outdoor.name) ?? outdoor ?? visit.service_type ?? 'visit');
+  const work = String([outdoor?.name, outdoor, visit.service_type, 'visit'].find((v) => v != null));
   const { reach } = visit;
   // `deps.catalogGate` (null = always use the catalog) and `deps.leadMinutes` are for the schedule rain record, which judges rain for every visit and has no notice to lead.
   const earliestMin = date === today ? nowMin + (deps.leadMinutes ?? LEAD_MINUTES) : 0;
@@ -342,21 +342,26 @@ async function judgeStop(visit, ctx) {
   const storm = spanStorm(hourly, date, reach.startMin, reach.endMin, alerts);
   const { peak, complete } = storm;
   const advisoryFields = storm.advisories.length ? { advisories: storm.advisories.map((a) => ({ event: a.event, category: a.category })) } : {};
-  if (peak == null && !storm.wetByStorm) return { wet: false, reason: 'no_forecast', ...advisoryFields };
   // `dry` only when every hour was read: a missing hour is not a dry one.
   // Heat/wind advisories stay informational only (never set wet: true).
-  if ((peak == null || peak < MOVE_PCT) && !storm.wetByStorm) return { wet: false, reason: 'not_wet', peak, dry: complete, ...advisoryFields };
+  if (!storm.wetByStorm) {
+    if (peak == null) return { wet: false, reason: 'no_forecast', ...advisoryFields };
+    if (peak < MOVE_PCT) return { wet: false, reason: 'not_wet', peak, dry: complete, ...advisoryFields };
+  }
   const isFree = (startMin, endMin) => !occupancy.conflicts(visit, date, startMin, endMin);
   const proposal = dryStart({ hourly, alerts, date, reach, isFree, earliestMin, dayStartMin: day.startMin, dayEndMin: day.endMin });
+  const optionalStorm = Object.fromEntries([
+    ['stormLabel', storm.stormLabel],
+    ['hasThunder', storm.hasThunder],
+    ['severeAlerts', storm.severeAlerts.length ? storm.severeAlerts.map((a) => a.event) : null],
+  ].filter(([, v]) => Boolean(v)));
   return {
     wet: true,
     reason: storm.wetByStorm && !(peak >= MOVE_PCT) ? 'storm' : 'wet',
     peak,
     work,
     proposal: proposal == null ? null : toHHMM(proposal),
-    ...(storm.stormLabel ? { stormLabel: storm.stormLabel } : {}),
-    ...(storm.hasThunder ? { hasThunder: true } : {}),
-    ...(storm.severeAlerts.length ? { severeAlerts: storm.severeAlerts.map((a) => a.event) } : {}),
+    ...optionalStorm,
     ...advisoryFields,
   };
 }
@@ -450,10 +455,22 @@ async function sendNotice(row, { db, deps, reopen = null, now = new Date() }) {
   const spokenDay = at.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).replace(',', '');
   const service = String(row.work || visit.service_type || 'visit').replace(/\s+/g, ' ').trim();
   const dry = proposal ? `; ${formatETTime(parseETDateTime(`${date}T${proposal}`))} is dry and open` : '; no dry open hour that day';
-  const weatherDesc = row.stormLabel
-    ? `${row.stormLabel}${peak != null ? ` (${peak}% rain)` : ''}`
-    : `${peak}% rain`;
+  const [weatherDesc, weatherDetail] = row.stormLabel
+    ? [
+        `${row.stormLabel}${peak != null ? ` (${peak}% rain)` : ''}`,
+        `Forecast / NWS alert: ${row.stormLabel}${peak != null ? ` (${peak}% hourly rain chance)` : ''} across the visit span through ${RAIN_AFTER_HOURS} hours after it ends. `,
+      ]
+    : [
+        `${peak}% rain`,
+        `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `,
+      ];
   const tail = ` ${spokenDay} ${formatETTime(at)} has ${weatherDesc}${dry}.`;
+  const stormMeta = Object.fromEntries([
+    ['storm_hazard', row.stormLabel],
+    ['severe_alerts', row.severeAlerts?.length ? row.severeAlerts : null],
+    ['has_thunder', row.hasThunder],
+    ['rang_on', reopen ? etDateString(now) : null],
+  ].filter(([, v]) => Boolean(v)));
   return (deps.raiseAdminAlert || raiseAdminAlert)(
     'schedule',
     {
@@ -485,19 +502,16 @@ async function sendNotice(row, { db, deps, reopen = null, now = new Date() }) {
       bellDefault: true,
       ...(reopen ? { dedupeVersion: reopen } : {}),
       detail: `${name || 'A customer'}: ${service} on ${date} at ${start}. `
-        + (row.stormLabel
-          ? `Forecast / NWS alert: ${row.stormLabel}${peak != null ? ` (${peak}% hourly rain chance)` : ''} across the visit span through ${RAIN_AFTER_HOURS} hours after it ends. `
-          : `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `)
+        + weatherDetail
         + (proposal ? `${proposal} that day reads below ${DRY_PCT}% and no other stop is in it. ` : `No hour that day is both below ${DRY_PCT}% and open. `)
         + 'Nothing was moved and the customer was not contacted. Move it with Quick Move.',
-      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false,
-        ...(row.stormLabel ? { storm_hazard: row.stormLabel } : {}),
-        ...(row.severeAlerts?.length ? { severe_alerts: row.severeAlerts } : {}),
-        ...(row.hasThunder ? { has_thunder: true } : {}),
+      metadata: {
+        scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false,
         // The central test-account suppression reads the customer from here.
         customerId: visit.customer_id,
-        // Only a call that can ring stamps the day; a quiet rewrite keeps the row's own.
-        ...(reopen ? { rang_on: etDateString(now) } : {}) },
+        // Only a call that can ring stamps rang_on; a quiet rewrite keeps the row's own.
+        ...stormMeta,
+      },
     },
   );
 }

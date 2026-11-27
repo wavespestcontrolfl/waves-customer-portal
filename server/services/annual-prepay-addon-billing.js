@@ -447,20 +447,21 @@ class CoveredVisitCloseout {
       || listed.some((inv) => inv.status === 'void' && classifyCoveredVisitInvoice(inv, addons).otherCharges);
     const listing = listed.map((inv) => `${invoiceLabel(inv)} (${inv.status})`).join(', ');
     const invoiceIds = listed.map((inv) => inv.id);
+    const chemHold = Boolean(this.ctx.unrecordedChemicalAddOnHold);
     if (voidedCharges) {
       await this.alert(`its invoices (${listing}) include a voided one that charged more than the covered visit; re-bill whatever it charged besides the covered visit that no other invoice covers`, { invoiceIds });
-    } else if ((this.billable && addons.owed) || outcome.kind === 'kept' || (this.billable && this.ctx.unrecordedChemicalAddOnHold && this.ctx.heldExistingInvoice)) {
+    } else if (outcome.kind === 'kept' || (this.billable && (addons.owed || (chemHold && this.ctx.heldExistingInvoice)))) {
       // Owed add-ons beside an existing invoice, an office bill for just
       // the add-ons kept as the office made it, or an existing open invoice
       // withheld under an unrecorded chemical add-on hold: the office reviews
       // it; the completion never collects it.
-      const one = listed.length === 1;
-      const chemNote = this.ctx.unrecordedChemicalAddOnHold
-        ? ' (a chemical area add-on had no recorded product application — confirm with the technician before billing)'
-        : '';
-      await this.alert(`the visit already has ${one ? 'invoice' : 'invoices'} ${listing} and the completion collected none${chemNote}; check ${one ? 'it' : 'them'} against the add-ons as they stand now — bill what is missing, adjust what changed, and send`, {
+      const [noun, pronoun] = listed.length === 1 ? ['invoice', 'it'] : ['invoices', 'them'];
+      const [chemNote, extra] = chemHold
+        ? [' (a chemical area add-on had no recorded product application — confirm with the technician before billing)', { reasonCode: 'area_addon_application_required' }]
+        : ['', {}];
+      await this.alert(`the visit already has ${noun} ${listing} and the completion collected none${chemNote}; check ${pronoun} against the add-ons as they stand now — bill what is missing, adjust what changed, and send`, {
         invoiceIds,
-        ...(this.ctx.unrecordedChemicalAddOnHold ? { reasonCode: 'area_addon_application_required' } : {}),
+        ...extra,
       });
     }
   }

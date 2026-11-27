@@ -612,8 +612,11 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars, { requireDir
         err.code = 'budget_direction_invalid';
         throw err;
       }
-      if ((requireDirection === 'decrease' && dailyBudgetDollars >= previousDailyBudget)
-        || (requireDirection === 'increase' && dailyBudgetDollars <= previousDailyBudget)) {
+      const wrongDirection = {
+        decrease: (next, prev) => next >= prev,
+        increase: (next, prev) => next <= prev,
+      }[requireDirection];
+      if (wrongDirection?.(dailyBudgetDollars, previousDailyBudget)) {
         const err = new Error(`Refusing ${requireDirection}_budget to $${dailyBudgetDollars}/day because live Google Ads budget is currently $${previousDailyBudget}/day.`);
         err.code = 'budget_direction_invalid';
         throw err;
