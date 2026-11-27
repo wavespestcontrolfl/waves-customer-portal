@@ -98,17 +98,16 @@ function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayloa
   if (canonicalEventType === 'trip-data') {
     return pointFromSource(pickLatestSample(payload));
   }
-  // A trip-end is where the truck stopped: its end point wins over any start point the
-  // payload also carries (the arrival detector stamps this point with the end time).
+  // A trip-end is where the truck stopped, and the arrival detector stamps this point with the
+  // end time: never the departure (start / connect) point. With no end position the receiver
+  // falls back to the truck's fresh last location (engineOffPoint).
   if (canonicalEventType === 'trip-end') {
     return (
       pointFromSource(payload) ||
       pointFromSource(payload.location) ||
       pointFromSource(payload.position) ||
       pointFromSource(payload.end) ||
-      pointFromSource(payload.disconnect) ||
-      pointFromSource(payload.connect) ||
-      pointFromSource(payload.start)
+      pointFromSource(payload.disconnect)
     );
   }
   return (

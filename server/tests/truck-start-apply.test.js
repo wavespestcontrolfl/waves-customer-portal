@@ -115,11 +115,13 @@ describe('decideDay', () => {
     expect(needsBell(result.action, result.detail)).toBe(true);
   });
 
-  test('a move back of 30 minutes or less rings no bell', () => {
-    expect(needsBell('moved_earlier', { minutes_moved: 30 })).toBe(false);
-    expect(needsBell('moved_earlier', { minutes_moved: 11 })).toBe(false);
+  test('the 30-minute line is judged on exact times', () => {
+    const move = (ms) => ({ original_clock_in: new Date(NOW.getTime() + ms).toISOString(), clock_in: NOW.toISOString() });
+    expect(needsBell('moved_earlier', move(30 * MIN))).toBe(false);
+    expect(needsBell('moved_earlier', move(30 * MIN + 100))).toBe(true);
+    expect(needsBell('moved_earlier', move(11 * MIN))).toBe(false);
     expect(needsBell('moved_earlier', {})).toBe(false);
-    expect(needsBell('clocked_in', { minutes_moved: 300 })).toBe(false);
+    expect(needsBell('clocked_in', move(300 * MIN))).toBe(false);
   });
 
   test('case B on a closed shift moves it too', () => {
@@ -225,7 +227,7 @@ describe('the owner bell passes the admin notification rules', () => {
     ['needs_review', { reason: 'several_shifts' }],
     ['needs_review', { reason: 'week_closed' }],
     ['needs_review', { reason: 'something_new' }],
-    ['moved_earlier', { minutes_moved: 123, shift_id: 's1' }],
+    ['moved_earlier', { minutes_moved: 123, shift_id: 's1', original_clock_in: at(120).toISOString(), clock_in: at(-3).toISOString() }],
   ])('%s %j composes without a violation', async (action, detail) => {
     process.env.GATE_TRUCK_CLOCK_IN = 'start';
     const raised = [];

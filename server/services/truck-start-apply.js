@@ -160,8 +160,9 @@ function decideDay({ entries, eventAt, now }) {
   return { action: 'ok_within_tolerance', detail, shift };
 }
 
+// Exact times, never the rounded minutes_moved (30 min + 100 ms is over the line).
 const isBigMove = (action, detail) => action === 'moved_earlier'
-  && Number(detail?.minutes_moved) * MIN > BIG_MOVE_BELL_MS;
+  && Date.parse(detail?.original_clock_in) - Date.parse(detail?.clock_in) > BIG_MOVE_BELL_MS;
 const needsBell = (action, detail) => action === 'flag_early_tap' || action === 'needs_review'
   || isBigMove(action, detail);
 

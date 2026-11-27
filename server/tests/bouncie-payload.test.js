@@ -99,14 +99,15 @@ describe('Bouncie payload normalization', () => {
     expect(tripIdentity({ eventType: 'tripStart', imei: 'imei-1' })).toBeNull();
     expect(tripIdentity()).toBeNull();
   });
-  test('a trip-end reads its end point before its start point', () => {
+  test('a trip-end reads its end point and never its departure point', () => {
     const payload = {
       eventType: 'tripEnd',
       start: { lat: 27.1, lon: -82.1, timestamp: '2026-11-25T12:00:00.000Z' },
       end: { lat: 27.5, lon: -82.5, timestamp: '2026-11-25T12:20:00.000Z' },
     };
     expect(pointFromPayload(payload, 'trip-end')).toMatchObject({ lat: 27.5, lng: -82.5, reported_at: '2026-11-25T12:20:00.000Z' });
-    expect(pointFromPayload({ eventType: 'tripEnd', start: payload.start }, 'trip-end')).toMatchObject({ lat: 27.1 });
+    expect(pointFromPayload({ eventType: 'tripEnd', start: payload.start, end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
+    expect(pointFromPayload({ eventType: 'tripEnd', connect: { lat: 27.1, lon: -82.1 } }, 'trip-end')).toBeNull();
     expect(pointFromPayload({ eventType: 'tripEnd', end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
   });
 });
