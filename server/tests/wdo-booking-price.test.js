@@ -184,6 +184,13 @@ describe('a blank WDO line books at the table price of the home', () => {
     const OFFICE = { ...HOME, property_type: 'commercial' };
     wireDb({ customers: OFFICE, customer_properties: rows([AT_HOME]) });
     expect((await bookBlankWdo({ customer: OFFICE })).finalPrice).toBe(250);
+    // The one active property is the customer's own street under another town name of its ZIP: the same home by the
+    // address key, so it is priced, and its own records count.
+    const AT_HOME_ALIAS = { ...AT_HOME, city: 'Lakewood Ranch' };
+    wireDb({ customers: HOME, customer_properties: rows([AT_HOME_ALIAS]) });
+    expect((await bookBlankWdo()).finalPrice).toBe(275);
+    wireDb({ customers: HOME, customer_properties: rows([{ ...AT_HOME_ALIAS, occupancy_type: 'commercial' }]) });
+    expect((await bookBlankWdo()).finalPrice).toBe(250);
     // The one active property is a rental at another address. The save stamps the visit with it but no street, so
     // dispatch shows the customer's own address: two homes, so the catalog price stands and no record is read.
     lookup.mockClear();

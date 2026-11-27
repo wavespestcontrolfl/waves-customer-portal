@@ -41,78 +41,44 @@ function noTablePrice(who, reason) {
   return null;
 }
 
-// A service address ({ line1, line2, city, state, zip }, the shape a visit is stamped with) as the lookup's address text,
-// through the one builder the customer's own address goes through.
-function serviceAddressText(address) {
+// The home the visit is booked at, as the lookup's address text, or why no table price applies. The home is the address
+// dispatch shows the visit at (COALESCE(service_address_line1, customers.address_line1)): the service address the visit is
+// stamped with (a phone booking's, from the call; a new caller's, who has no customer yet), else the saved property named
+// (the save stamps its street), else the customer's own address (the save stamps no street).
+//   The saved records are the shared rule's (customerAtBookingProperty, the rule the one-time pest price reads the booked
+//   home by): the property the visit is stamped with, else the primary. They describe the home only when they are at its
+//   address, by the address key (one ZIP carries several town names), and the home is then read at their own spelling. A
+//   property the visit is stamped with at another address is two homes, one priced and one shown: the home cannot be told
+//   (pre-push audit P0). Any other address is described by the account's own records only: its tier anywhere, its own type
+//   at the customer's own address.
+async function bookedHome({ customer, propertyId, serviceAddress, conn }) {
   const { addressForCustomer } = require('./customer-pricing-ai');
-  return addressForCustomer({
-    address_line1: address.line1, address_line2: address.line2, city: address.city, state: address.state, zip: address.zip,
-  });
-}
-
-// The home the visit is booked at, as the lookup's address text, or why no table price applies.
-//   A saved property, or none (the customer's own home): customerAtBookingProperty, the rule the one-time pest price reads
-//   the booked home by. It also says when the stored records call the place commercial.
-//   A service address with no saved property (a phone booking at an address the call gave, a new caller with no customer
-//   yet): that address as written. With a saved property (a phone booking whose address key-matched it): the property must
-//   still be at that address. `customerAddress`: a linked estimate quoted the customer's own address, so no other
-//   property stands in for it.
-async function bookedHome({ customer, customerId, propertyId, serviceAddress, customerAddress = false, conn }) {
-  const row = customer || (customerId ? await conn('customers').where({ id: customerId }).first() : null);
-  const serviceRow = serviceAddress?.line1
-    ? { address_line1: serviceAddress.line1, address_line2: serviceAddress.line2 || null, city: serviceAddress.city, zip: serviceAddress.zip }
-    : null;
-  const written = !propertyId && serviceRow ? serviceAddressText(serviceAddress) : null;
-  if (!row) return written ? { address: written } : { refusal: 'no customer and no service address' };
+  const written = serviceAddress?.line1 ? {
+    address_line1: serviceAddress.line1, address_line2: serviceAddress.line2, city: serviceAddress.city, state: serviceAddress.state, zip: serviceAddress.zip,
+  } : null;
+  if (!customer) return written ? { address: addressForCustomer(written) } : { refusal: 'no customer and no service address' };
   const { customerAtBookingProperty } = require('./one-time-pest-booking-price');
-  const { addressForCustomer } = require('./customer-pricing-ai');
-  const { addressKey } = require('./customer-properties');
+  const { addressKey, streetKey } = require('./customer-properties');
   const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
-  // No property named: a booking stamps the customer's sole active property when there is exactly one
-  // (customer-properties soleActivePropertyId), so that property's own records count, even one not marked primary
-  // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row.
-  const activeRows = propertyId || written ? null : await conn('customer_properties').where({ customer_id: row.id, active: true }).select('id');
-  const soleActive = Array.isArray(activeRows) && activeRows.length === 1 ? activeRows[0].id : null;
-  let at = await customerAtBookingProperty(row, propertyId || soleActive, conn);
+  // Nothing named and no address written: the save stamps the customer's sole active property when there is exactly one
+  // (customer-properties soleActivePropertyId), even one not marked primary (pre-push audit P0). Read only here: the
+  // stamp's own read can add a missing primary row.
+  const active = propertyId || written ? [] : await conn('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
+  const stampedProperty = propertyId || (active.length === 1 ? active[0].id : null);
+  const at = await customerAtBookingProperty(customer, stampedProperty, conn);
   if (!at) return { refusal: 'the booking property is not an active property of this customer' };
-  // No property named and no address written: the save stamps no street, so dispatch shows the visit at the customer's
-  // own address (COALESCE(service_address_line1, customers.address_line1)). A linked estimate that quoted the customer's
-  // own address names the same home. A sole active property at another address is the one the save stamps the visit
-  // with: the price would read one home and dispatch would show another, so the home cannot be told (pre-push audit P0).
-  // With no sole property the save stamps none: a primary property saved at another address does not stand in for the
-  // customer's own address, and only the account's own records can call it commercial (pre-push audit P0).
-  if ((customerAddress || (!propertyId && !written)) && at.otherProperty) {
-    if (soleActive) return { refusal: 'the visit is stamped with the customer\'s one property, at another address than the customer\'s own' };
-    at = {
-      customer: row,
-      otherProperty: false,
-      commercial: [row.waveguard_tier, row.property_type].some((type) => normalizePropertyType(type) === 'commercial'),
-    };
+  const shown = written || (propertyId ? at.customer : customer);
+  const recordsAtHome = addressKey(shown) === addressKey(at.customer);
+  if (stampedProperty && !recordsAtHome) return { refusal: 'the visit is stamped with a saved property at another address than the one dispatch shows' };
+  const home = recordsAtHome ? at.customer : shown;
+  const isCommercial = (type) => normalizePropertyType(type) === 'commercial';
+  if ((recordsAtHome ? at.commercial : isCommercial(customer.waveguard_tier))
+    || (addressKey(home) === addressKey(customer) && isCommercial(customer.property_type))) {
+    return { refusal: 'the stored records call this a commercial property' };
   }
-  // A saved property named with the address the visit is stamped with (a phone booking: the call's address, linked to the
-  // property whose address key it matched, resolveCallBookingPropertyLinkage). The property must still have that address
-  // now, by the same key (one ZIP carries several town names), or the visit would be stamped with one home and priced at
-  // another (pre-push audit P0).
-  if (propertyId && serviceRow) {
-    const property = await conn('customer_properties').where({ id: propertyId, customer_id: row.id, active: true }).first('address_line1', 'address_line2', 'city', 'zip');
-    if (!property || addressKey(property) !== addressKey(serviceRow)) return { refusal: 'the saved property no longer has the address the visit is stamped with' };
-  }
-  // A written address that is not the customer's home, by the same address key (one ZIP carries several town names), is
-  // read on its own record: only the account's own tier calls it commercial, never the home's records. The home under
-  // another town name is the home: its own records, read at its own address (pre-push audit P0).
-  const writtenElsewhere = !!written && addressKey(serviceRow) !== addressKey(at.customer);
-  // At the customer's own address the account's own type describes the same home: also when the property saved there is
-  // not marked primary (the shared rule reads it only beside a primary property), and when a call names that address
-  // while the primary property is saved elsewhere (pre-push audit P0).
-  const atOwnAddress = writtenElsewhere ? addressKey(serviceRow) === addressKey(row) : !at.otherProperty;
-  const commercial = (writtenElsewhere ? normalizePropertyType(row.waveguard_tier) === 'commercial' : at.commercial)
-    || (atOwnAddress && normalizePropertyType(row.property_type) === 'commercial');
-  if (commercial) return { refusal: 'the stored records call this a commercial property' };
-  // No street: the lookup would miss and the engine would quote its smallest home. The home cannot be told (pre-push audit
-  // P0).
-  const street = writtenElsewhere ? serviceRow.address_line1 : at.customer.address_line1;
-  if (!String(street || '').trim()) return { refusal: 'the home has no street address on record' };
-  return { address: writtenElsewhere ? written : addressForCustomer(at.customer) };
+  // No street: the lookup would miss and the engine would quote its smallest home (pre-push audit P0).
+  if (!streetKey(home.address_line1)) return { refusal: 'the home has no street address on record' };
+  return { address: addressForCustomer(home) };
 }
 
 // The engine's WDO line for a home's property record, as the estimate tool prices a looked-up home nobody has typed over.
@@ -159,7 +125,8 @@ function staffNoteFor(line) {
  *
  *   customer / customerId  the customer the visit is for (the row, or its id); none for a new caller booked by address
  *   propertyId             the saved property the visit is booked at; none = the customer's own home
- *   serviceAddress         { line1, line2, city, state, zip } the visit is stamped with, used when no saved property is named
+ *   serviceAddress         { line1, line2, city, state, zip } the visit is stamped with (a phone booking's, a new caller's);
+ *                          with a saved property named, that property must still be at it
  *   conn                   reads the customer and property rows. The property record itself is read on the shared pool, so
  *                          call this BEFORE a booking transaction opens, never inside one.
  */
@@ -167,13 +134,14 @@ function staffNoteFor(line) {
 // response or a log line with it (wdoTableStillApplies).
 const pricedHomes = new WeakMap();
 
-async function wdoBookingPrice({ customer = null, customerId = null, propertyId = null, serviceAddress = null, customerAddress = false, conn = db } = {}) {
+async function wdoBookingPrice({ customer, customerId, propertyId, serviceAddress, conn = db } = {}) {
   const who = `customer ${customer?.id || customerId || 'none (booked by address)'}`;
   try {
-    const home = await bookedHome({ customer, customerId, propertyId, serviceAddress, customerAddress, conn });
+    const row = customer || (customerId ? await conn('customers').where({ id: customerId }).first() : null);
+    const home = await bookedHome({ customer: row, propertyId, serviceAddress, conn });
     if (home.refusal) return noTablePrice(who, home.refusal);
     const { strictCacheOnlyPropertyLookup } = require('./service-report/start-offer-lookup');
-    const lookup = home.address ? await strictCacheOnlyPropertyLookup(home.address) : null;
+    const lookup = await strictCacheOnlyPropertyLookup(home.address);
     const line = wdoLineFor(lookup?.enriched);
     const price = Number(line?.price);
     if (!Number.isFinite(price) || price <= 0) return noTablePrice(who, 'the engine has no table price for this property');
@@ -192,9 +160,9 @@ async function wdoBookingPrice({ customer = null, customerId = null, propertyId 
  * rather than book that home's price (pre-push audit P0). Reads the customer's property rows on `conn`, never the
  * property record. No answer (null: the catalog price) always holds.
  */
-async function wdoTableStillApplies(table, { customer, propertyId = null, customerAddress = false, conn }) {
+async function wdoTableStillApplies(table, { customer, propertyId, conn }) {
   if (!table) return true;
-  const home = await bookedHome({ customer, propertyId, customerAddress, conn });
+  const home = await bookedHome({ customer, propertyId, conn });
   return !home.refusal && pricedHomes.has(table) && pricedHomes.get(table) === home.address;
 }
 

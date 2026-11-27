@@ -3167,7 +3167,7 @@ const bookingLineIsServerPriced = (service) => SERVER_PRICED_LINE_KEYS.has(servi
 async function wdoTableForBooking({ customer, propertyId = null, estimateId = null }) {
   try {
     const home = await bookedHomeProperty({ customerId: customer.id, propertyId, estimateId });
-    return home.unsure ? null : await wdoBookingPrice({ customer, propertyId: home.propertyId || null, customerAddress: home.customerAddress === true });
+    return home.unsure ? null : await wdoBookingPrice({ customer, propertyId: home.propertyId || null });
   } catch (err) {
     logger.warn(`[schedule] WDO table price unread for customer ${customer.id} (${err.code || err.name || 'error'}); the catalog price stands`);
     return null;
@@ -3191,7 +3191,7 @@ async function assertWdoTableHomeUnchanged(table, { customerId, propertyId = nul
   const stillApplies = (at) => wdoTableStillApplies(table, { customer, conn: trx, ...at });
   // A linked estimate's home must also be the property the visit is stamped with, when one is (pre-push audit P0).
   if (customer
-    && await stillApplies({ propertyId: home.propertyId || null, customerAddress: home.customerAddress === true })
+    && await stillApplies({ propertyId: home.propertyId || null })
     && (!estimateId || !propertyId || await stillApplies({ propertyId }))) return;
   throw Object.assign(
     httpError(409, 'The home for this visit changed while saving, so its WDO price may be different. This visit was not booked. Check the price and save again.'),
@@ -3254,9 +3254,8 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
 // Which property does a booking price, for the one-time pest hint and the WDO table price? The create path's own rule
 // (callBookingGuardPropertyId: the chosen property, else the linked estimate's property_id, else none = the customer's
 // primary), plus one more case it cannot settle: a linked estimate with NO property_id that quotes an address. That address
-// is the primary only when it matches (estimateQuotesCustomerAddress, answered with customerAddress: true, so a price reads
-// the customer's own home and never falls back to a lone other property); otherwise it must name exactly ONE of the
-// customer's saved properties. { unsure: true } when the home cannot be told: the hint shows nothing and the WDO line keeps its catalog
+// is the primary only when it matches (estimateQuotesCustomerAddress); otherwise it must name exactly ONE of the customer's
+// saved properties. { unsure: true } when the home cannot be told: the hint shows nothing and the WDO line keeps its catalog
 // price, never a guess. Reads on `conn`: a save's transaction reads it again there (assertWdoTableHomeUnchanged).
 async function bookedHomeProperty({ customerId, propertyId, estimateId, conn = db }) {
   const chosen = await callBookingGuardPropertyId(conn, {
@@ -3269,8 +3268,7 @@ async function bookedHomeProperty({ customerId, propertyId, estimateId, conn = d
   if (estimate.customer_id && String(estimate.customer_id) !== String(customerId)) return { unsure: true };
   const { estimateQuotesCustomerAddress } = require('../services/estimate-property-linkage');
   const customer = await conn('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
-  if (!customer) return { propertyId: null };
-  if (estimateQuotesCustomerAddress(estimate.address, customer)) return { propertyId: null, customerAddress: true };
+  if (!customer || estimateQuotesCustomerAddress(estimate.address, customer)) return { propertyId: null };
   const saved = await conn('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'address_line1', 'address_line2', 'city', 'zip');
   const matches = (Array.isArray(saved) ? saved : []).filter((row) => estimateQuotesCustomerAddress(estimate.address, row));
   return matches.length === 1 ? { propertyId: matches[0].id } : { unsure: true };
