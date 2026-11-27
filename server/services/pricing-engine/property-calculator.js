@@ -733,10 +733,9 @@ function calculatePropertyProfile(input) {
     constructionMaterial: input.constructionMaterial || null,
     foundationType: input.foundationType || null,
     // Lookup trust verdicts (false = weak evidence; for the home size, a wrong-premise lookup's size), read by the WDO price only.
-    // Absent = no verdict.
-    constructionTrusted: typeof input.constructionTrusted === 'boolean' ? input.constructionTrusted : undefined,
-    foundationTrusted: typeof input.foundationTrusted === 'boolean' ? input.foundationTrusted : undefined,
-    homeSizeTrusted: typeof input.homeSizeTrusted === 'boolean' ? input.homeSizeTrusted : undefined,
+    // Only a boolean is a verdict; anything else is left off (no verdict).
+    ...Object.fromEntries(['constructionTrusted', 'foundationTrusted', 'homeSizeTrusted']
+      .filter((key) => typeof input[key] === 'boolean').map((key) => [key, input[key]])),
     roofType: input.roofType || null,
     nearWater: input.nearWater || (features.nearWater ? 'CLOSE' : 'NONE'),
     waterDistance: input.waterDistance || null,
