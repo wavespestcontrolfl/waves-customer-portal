@@ -187,15 +187,24 @@ describe('windowStart', () => {
 });
 
 // service_records stub for the last-visit read: records the predicates and returns { last } (or throws).
-function lastVisitDb(last, { fail = false } = {}) {
-  const seen = { where: [], raw: [] };
-  const q = {
-    where: (...a) => { seen.where.push(a); return q; },
-    whereRaw: (sql) => { seen.raw.push(sql); return q; },
-    max: () => q,
-    first: async () => { if (fail) throw new Error('read failed'); return { last }; },
+function lastVisitDb(last, { fail = false, visitLast = null, failVisits = false } = {}) {
+  const seen = { where: [], raw: [], tables: [], visitWhere: [] };
+  const db = (table) => {
+    seen.tables.push(table);
+    if (table === 'service_records') seen.table = table;
+    const isVisits = table === 'scheduled_services';
+    const q = {
+      where: (...a) => { (isVisits ? seen.visitWhere : seen.where).push(a); return q; },
+      whereRaw: (sql) => { seen.raw.push(sql); return q; },
+      max: () => q,
+      first: async () => {
+        if (isVisits) { if (failVisits) throw new Error('read failed'); return { last: visitLast }; }
+        if (fail) throw new Error('read failed');
+        return { last };
+      },
+    };
+    return q;
   };
-  const db = (table) => { seen.table = table; return q; };
   db.seen = seen;
   return db;
 }
@@ -215,6 +224,18 @@ describe('textWindowStart (owner 2026-11-27: since the last visit, or 7 days bac
   test('no earlier visit, or a failed read, keeps the 7-day start', async () => {
     expect((await textWindowStart(lastVisitDb(null), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
     expect((await textWindowStart(lastVisitDb('2026-10-01', { fail: true }), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
+  });
+  test('a completed appointment with no record counts; the later of the two days wins', async () => {
+    const db = lastVisitDb(null, { visitLast: '2026-10-25' });
+    expect((await textWindowStart(db, svc)).toISOString()).toBe('2026-10-25T04:00:00.000Z');
+    expect(db.seen.visitWhere).toEqual(expect.arrayContaining([['customer_id', 'cust-1'], ['status', 'completed'], ['scheduled_date', '<', '2026-11-26']]));
+    expect((await textWindowStart(lastVisitDb('2026-10-10', { visitLast: '2026-10-25' }), svc)).toISOString()).toBe('2026-10-25T04:00:00.000Z');
+    expect((await textWindowStart(lastVisitDb('2026-10-25', { visitLast: '2026-10-10' }), svc)).toISOString()).toBe('2026-10-25T04:00:00.000Z');
+  });
+  test('one failed read uses the other; both failed keeps the 7-day start', async () => {
+    expect((await textWindowStart(lastVisitDb('2026-10-20', { failVisits: true }), svc)).toISOString()).toBe('2026-10-20T04:00:00.000Z');
+    expect((await textWindowStart(lastVisitDb(null, { fail: true, visitLast: '2026-10-20' }), svc)).toISOString()).toBe('2026-10-20T04:00:00.000Z');
+    expect((await textWindowStart(lastVisitDb(null, { fail: true, failVisits: true }), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
   });
   test('never reaches more than 120 days back', async () => {
     expect((await textWindowStart(lastVisitDb('2025-06-01'), svc)).toISOString()).toBe('2026-07-29T04:00:00.000Z');

@@ -228,8 +228,8 @@ function windowStart(scheduledDate) {
   return parseETDateTime(`${etDateString(addETDays(noon, -WINDOW_DAYS))}T00:00`);
 }
 
-// Where the texts start (owner 2026-11-27): ET midnight of the customer's last completed visit before the viewed day, or the
-// 7-day start when that is earlier, never earlier than MAX_WINDOW_DAYS before the visit. A record of the viewed day is not "the
+// Where the texts start (owner 2026-11-27): ET midnight of the customer's last completed visit before the viewed day (a
+// completed record or a completed appointment, the later of the two), or the 7-day start when that is earlier, never earlier than MAX_WINDOW_DAYS before the visit. A record of the viewed day is not "the
 // last visit". No earlier visit, or a failed read, keeps the 7-day start.
 async function textWindowStart(db, svc) {
   const sevenDay = windowStart(svc.scheduled_date);
@@ -237,18 +237,28 @@ async function textWindowStart(db, svc) {
   const day = dateOnlyString(svc.scheduled_date);
   const noon = parseETDateTime(`${day}T12:00`);
   const floor = parseETDateTime(`${etDateString(addETDays(noon, -MAX_WINDOW_DAYS))}T00:00`);
-  let last = null;
-  try {
-    const row = await db('service_records')
-      .where('customer_id', svc.customer_id)
-      .whereRaw("COALESCE(status, 'completed') = 'completed'")
-      .where('service_date', '<', day)
-      .max('service_date as last')
-      .first();
-    last = row?.last ? dateOnlyString(row.last) : null;
-  } catch {
-    last = null;
-  }
+  // Two sources: a completed record, and a completed appointment (one can exist without the other). The later day wins.
+  const lastOf = async (read) => {
+    try {
+      const row = await read();
+      return row?.last ? dateOnlyString(row.last) : null;
+    } catch {
+      return null;
+    }
+  };
+  const fromRecords = await lastOf(() => db('service_records')
+    .where('customer_id', svc.customer_id)
+    .whereRaw("COALESCE(status, 'completed') = 'completed'")
+    .where('service_date', '<', day)
+    .max('service_date as last')
+    .first());
+  const fromVisits = await lastOf(() => db('scheduled_services')
+    .where('customer_id', svc.customer_id)
+    .where('status', 'completed')
+    .where('scheduled_date', '<', day)
+    .max('scheduled_date as last')
+    .first());
+  const last = [fromRecords, fromVisits].filter(Boolean).sort().pop() || null;
   if (!last) return sevenDay;
   const lastStart = parseETDateTime(`${last}T00:00`);
   if (!(lastStart < sevenDay)) return sevenDay;
