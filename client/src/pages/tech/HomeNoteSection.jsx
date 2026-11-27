@@ -38,14 +38,16 @@ export function homeNoteFor(services, byService) {
 }
 // The customer a stop member is for NOW (the schedule's own row). A brief kept from before a merge or undo can still carry the
 // old customer's note under the same visit id; when the two differ the note is not shown and any draft is dropped.
+// undefined = the row has no customer field at all (unknown, cannot compare); null = the row says the visit has NO customer
+// (it lost it); otherwise the customer id.
 const memberCustomerId = (services, id) => {
   const member = services.find((m) => m.id === id);
-  return (member && (member.customer_id || member.customerId)) || null;
+  const fields = ['customer_id', 'customerId'].filter((key) => member && key in member);
+  if (!fields.length) return undefined;
+  return fields.map((key) => member[key]).find((value) => value) || null;
 };
-const carriedForOtherCustomer = (services, picked) => {
-  const now = picked && memberCustomerId(services, picked.id);
-  return Boolean(now && picked.customerId && now !== picked.customerId);
-};
+const customerDiffers = (now, carriedId) => now !== undefined && now !== (carriedId || null);
+const carriedForOtherCustomer = (services, picked) => Boolean(picked) && customerDiffers(memberCustomerId(services, picked.id), picked.customerId);
 // What the Visit Brief answer offers for this stop: the carried note, unless it is for another customer than the row's now.
 const briefView = (services, byService) => {
   const carried = services ? homeNoteFor(services, byService) : null;
@@ -54,10 +56,7 @@ const briefView = (services, byService) => {
 };
 // The member row the edit started on now belongs to another customer (a merge or undo moved the visit): this holds even when
 // the refreshed brief carries no note at all, so the check reads the schedule row, not the brief.
-const pinnedMemberMoved = (services, pin) => {
-  const now = services && pin && pin.memberId && memberCustomerId(services, pin.memberId);
-  return Boolean(now && pin.customerId && now !== pin.customerId);
-};
+const pinnedMemberMoved = (services, pin) => Boolean(services && pin && pin.memberId) && customerDiffers(memberCustomerId(services, pin.memberId), pin.customerId);
 const livePinOf = (pin, stopKey, blocked) => (pin && pin.stopKey === stopKey && !blocked ? pin : null);
 const visitNotePath = (id) => `/admin/schedule/${id}/home-note`;
 

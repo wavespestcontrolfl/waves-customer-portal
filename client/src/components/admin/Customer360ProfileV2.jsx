@@ -8219,7 +8219,6 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
     return (
       <>
         <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} sodInfo={sodInfo} awayWatchEnabled={awayWatchEnabled} />
-        {isAdmin && <HomeNoteSection request={adminFetch} path={`/admin/customers/${customerId}/home-note`} />}
         {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
         {isAdmin && <CustomerAccessCodesBlock customerId={customerId} />}
       </>
@@ -8378,6 +8377,8 @@ function CustomerProfileProperty({
             awayWatchEnabled={awayWatchEnabled}
             onSaved={handlePropertyChanged}
           />
+          {/* Outside the Access & Preferences read/edit switch, so opening or closing that editor keeps a note draft. */}
+          {isAdmin && <HomeNoteSection request={adminFetch} path={`/admin/customers/${customerId}/home-note`} />}
         </div>{" "}
       </div>{" "}
     </div>

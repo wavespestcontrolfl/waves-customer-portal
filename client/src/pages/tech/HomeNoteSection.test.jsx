@@ -282,4 +282,19 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
     render(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={[{ id: 'b' }]} byService={answered({ ...NOTE, updatedByFirstName: null })} />);
     expect(screen.getByText('Updated Nov 26, 2026')).toBeInTheDocument();
   });
+
+  it('an explicit null customer on the schedule row (the visit lost its customer) hides the note and drops the draft; an absent field is only unknown', () => {
+    const request = vi.fn(async () => ({}));
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: CUSTOMER }]} byService={answered(NOTE)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'draft' } });
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: null }]} byService={answered(NOTE)} />);
+    expect(screen.queryByText(NOTE.body)).toBeNull();
+    expect(screen.queryByLabelText('About this home')).toBeNull();
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customerId: null }]} byService={answered(NOTE)} />);
+    expect(screen.queryByText(NOTE.body)).toBeNull();
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b' }]} byService={answered(NOTE)} />);
+    expect(screen.getByText(NOTE.body)).toBeInTheDocument();
+    expect(screen.queryByLabelText('About this home')).toBeNull();
+  });
 });

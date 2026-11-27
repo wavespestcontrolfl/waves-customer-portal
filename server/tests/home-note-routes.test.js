@@ -118,6 +118,24 @@ describe('visit routes', () => {
     });
   });
 
+  test('PUT refuses a visit outside the technician\'s scope BEFORE taking the customer lock, and keeps the locked recheck', async () => {
+    stubDb({ ownsVisit: [false] });
+    await withServer(async (base) => {
+      const res = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'x' } });
+      expect(res.status).toBe(403);
+      expect(db.mock.calls.filter(([table]) => table === 'customers')).toHaveLength(0);
+      expect(mockSave).not.toHaveBeenCalled();
+    });
+    // In scope at the first lookup but lost by the locked recheck: still refused, nothing saved.
+    stubDb({ ownsVisit: [true, false] });
+    mockSave.mockClear();
+    await withServer(async (base) => {
+      const res = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'x' } });
+      expect(res.status).toBe(403);
+      expect(mockSave).not.toHaveBeenCalled();
+    });
+  });
+
   test('an admin reaches any visit, records as admin, and gets 404 for a visit that does not exist', async () => {
     stubDb();
     await withServer(async (base) => {

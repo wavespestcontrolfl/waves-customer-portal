@@ -24999,10 +24999,19 @@ router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, a
     if (!isHomeNoteVisitId(req.params.id)) return res.status(404).json({ error: 'Scheduled service not found' });
     const out = await db.transaction(async (trx) => {
       // Same lock order as a customer merge: the customer first, then the visit (the merge locks customers, then repoints visits).
-      const peek = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
-      if (peek && peek.customer_id) await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forShare().first('id');
+      // The same scope as the visit-brief read: a visit that is not this technician's is refused here, before any customer lock.
+      const peek = await trx('scheduled_services')
+        .where({ 'scheduled_services.id': req.params.id })
+        .modify((q) => technicianCurrentVisitFilter(req, q))
+        .first('scheduled_services.customer_id');
+      if (!peek) {
+        throw isTechnicianRequest(req)
+          ? Object.assign(new Error('Not assigned to this service'), { status: 403, code: 'service_not_assigned' })
+          : Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });
+      }
+      if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forShare().first('id');
       const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id'], { allowCompleted: true });
-      if (peek && String(peek.customer_id || '') !== String(svc.customer_id || '')) {
+      if (String(peek.customer_id || '') !== String(svc.customer_id || '')) {
         return { status: 409, error: 'This visit now belongs to another customer. Reload it.', code: 'customer_changed' };
       }
       return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
