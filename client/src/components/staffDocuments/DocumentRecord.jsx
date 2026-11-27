@@ -207,8 +207,11 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
   const state = computeRecordState({ rendered, answers, owner, selfId, canWrite, record, records });
 
   function selectRecord(next) {
-    const isAssignedDraft = Boolean(state.isSignatureForm && next && !next.completed_at && next.created_by !== selfId);
-    const loadedAnswers = isAssignedDraft ? clearSignerAnswers(rendered.metadata.fields, next.answers) : (next?.answers || {});
+    const untouchedAssignedDraft = Boolean(
+      state.isSignatureForm && next && !next.completed_at
+      && next.created_by && next.created_by !== selfId && next.updated_at === next.created_at,
+    );
+    const loadedAnswers = untouchedAssignedDraft ? clearSignerAnswers(rendered.metadata.fields, next.answers) : (next?.answers || {});
     setRecord(next); setAnswers(loadedAnswers); setSteps(next?.completed_steps || []);
     setOwner(next?.owner_id || selfId); setDue(etDatetimeLocalValue(next?.due_at || new Date(Date.now() + 86400000)));
   }
@@ -246,7 +249,7 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
     <fieldset disabled={busy || state.locked} style={{ border: 0, padding: 0, minWidth: 0 }}>
       <RecordMetaControls visible={manage || !state.isSignatureForm} assignable={assignable} owner={owner} setOwner={setOwner} due={due} setDue={setDue} />
       <ProcedureSteps kind={rendered.kind} sections={rendered.sections} steps={steps} setSteps={setSteps} />
-      <RecordFields fields={rendered.metadata.fields} answers={answers} setAnswers={setAnswers} assigningOther={state.isSignatureForm && owner !== selfId} />
+      <RecordFields fields={rendered.metadata.fields} answers={answers} setAnswers={setAnswers} assigningOther={!state.locked && state.isSignatureForm && owner !== selfId} />
       {state.isSignatureForm && !state.locked && state.signedName.trim() && !state.signatureReady && <p style={{ color: '#991B1B', fontSize: 14, marginTop: -8 }}>Enter both your first and last name to sign.</p>}
       <PrefillNote hidden={state.locked || Boolean(record)} fields={rendered.metadata.fields} prefilled={prefilled} answers={answers} />
       <RecordActions locked={state.locked} isSignatureForm={state.isSignatureForm} manage={manage} record={record} canSignNow={state.canSignNow} owner={owner} selfId={selfId} onSave={save} />

@@ -196,3 +196,17 @@ test('opening an admin-assigned draft clears prefilled signature and consent fie
   expect(screen.getByLabelText('I agree *')).not.toBeChecked();
   expect(screen.getByRole('button', { name: 'Sign and submit agreement' })).toBeDisabled();
 });
+
+test('an admin viewing another employee\'s completed agreement sees the saved signature and consent', () => {
+  const signed = {
+    id: 'rec-done', owner_id: 'hire', created_by: 'hire',
+    answers: { vehicle: 'Truck 7', agree: true, 'signed-name': 'Sample Hire' },
+    completed_steps: [], created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:05:00Z',
+    due_at: '2026-11-02T12:00:00Z', completed_at: '2026-11-01T12:05:00Z',
+  };
+  render(<DocumentRecord detail={detail({ records: [signed] })} people={people} selfId="me" manage canWrite onSaved={() => {}} />);
+  fireEvent.change(screen.getByLabelText('Saved records'), { target: { value: 'rec-done' } });
+  expect(screen.getByLabelText('Typed name *')).toHaveValue('Sample Hire');
+  expect(screen.getByLabelText('I agree *')).toBeChecked();
+  expect(screen.getByText(/Signed by Sample Hire/)).toBeInTheDocument();
+});
