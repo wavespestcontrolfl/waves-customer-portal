@@ -533,15 +533,16 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
 // (the order between them is only created_at, so the count is not decided).
 // The count statement must also still find exactly one target row with no
 // sibling line advanced (same snapshot as the count). And the figure is the
-// REAL count: a same-day floor below it (a reorder added a stop ahead after
+// REAL count: a same-day floor BELOW it (a reorder added a stop ahead after
 // the customer saw a lower number) means the tracker shows a number that is
-// no longer true, so there is no sentence at all. When in doubt, null.
+// no longer true, so there is no sentence at all. A floor above it is fine
+// (the tech finished a stop since the tracker last saved). When in doubt, null.
 async function peekStopsAhead(db, serviceId, { today = etDateString() } = {}) {
   if (!gateEnvValue('GATE_STOPS_AWAY')) return null;
   const counted = await countStopsAhead(db, serviceId, today);
   if (!counted || counted.svc.window_start == null || counted.tied !== 0) return null;
   if (counted.targetRows !== 1 || counted.siblingAdvanced !== 0) return null;
-  if (Number.isInteger(counted.groupFloor) && counted.groupFloor !== counted.raw) return null;
+  if (Number.isInteger(counted.groupFloor) && counted.groupFloor < counted.raw) return null;
   return { stopsAhead: counted.raw, atStop: counted.atStop, headingToStop: counted.headingToStop };
 }
 

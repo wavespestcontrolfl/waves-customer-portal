@@ -25,7 +25,8 @@ const logger = require('./logger');
 // Any wording that states the visit's place on the route: how many stops / visits / jobs come first, that the
 // visit is next or first, or where it sits in line. Deliberately broad (when in doubt it is a claim): route
 // wording the facts did not give is refused at draft and at send. Matched on folded text (lowercase, ASCII).
-const ROUTE_UNIT = '(?:stops?|visits?|jobs?|appointments?|homes?|houses?|customers?|calls?)';
+// No "call": "Please call before your appointment" is a callback instruction, not a stop.
+const ROUTE_UNIT = '(?:stops?|visits?|jobs?|appointments?|homes?|houses?|customers?)';
 const STOP_COUNT_WORDING_RE = new RegExp([
   'next\\s+stops?',
   `${ROUTE_UNIT}\\s+(?:before|ahead\\s+of|until|left\\s+before|in\\s+front\\s+of)\\s+(?:yours|you|your)`,
@@ -101,7 +102,7 @@ function routeStatusDraftViolation(reply, factsBlock) {
   return "the reply says how many stops come before the customer's visit without copying TODAY's ROUTE STATUS sentence word for word — copy that exact sentence, or say nothing about stops";
 }
 
-// Snapshot entries usable at send time: [{ scheduledServiceId, scheduledServiceIds, sentence }].
+// Snapshot entries usable at send time: [{ scheduledServiceId, scheduledServiceIds, sentence, stop }].
 function usableRouteStatusEntries(routeStatus) {
   return Array.isArray(routeStatus)
     ? routeStatus.filter((e) => e && e.scheduledServiceId != null && typeof e.sentence === 'string' && e.sentence.trim())
@@ -124,12 +125,32 @@ function dateKey(value) {
   const { dateOnlyString } = require('../utils/date-only');
   return dateOnlyString(value);
 }
+// The stop identity a route sentence was drafted for (technician, customer, day, slot), persisted with it.
+function stopIdentity(row, customerId) {
+  return { technicianId: row.technician_id ?? null, customerId: customerId ?? row.customer_id ?? null, date: dateKey(row.scheduled_date), windowStart: row.window_start ?? null };
+}
+const identityRow = (stop) => ({ technician_id: stop.technicianId, customer_id: stop.customerId, scheduled_date: stop.date, window_start: stop.windowStart });
+
+// How many physical stops (technician + arrival slot) the customer still has open on that day. A sentence is
+// given only when there is exactly ONE: with two (a pest and a lawn visit), a reply cannot be bound to the
+// stop the sentence is about. THROWS on a read failure.
+async function openStopsOnDay(dbh, customerId, day) {
+  const rows = await dbh('scheduled_services').where('customer_id', customerId).where('scheduled_date', day)
+    .whereNotIn('status', LINE_GONE_STATUSES).select('technician_id', 'window_start');
+  return new Set((rows || []).map((r) => `${r.technician_id ?? ''}:${r.window_start ?? ''}`)).size;
+}
+
+// Send time: every listed line still exists, is open, and is still the SAME stop the sentence was drafted for
+// (the persisted identity, so a stop that moved whole, or a one-line stop, is caught too); and the customer
+// still has exactly one open stop that day. THROWS on a read failure.
 async function stopMembersIntact(dbh, entry) {
+  if (!entry.stop) return false;
   const ids = [...new Set([entry.scheduledServiceId, ...(Array.isArray(entry.scheduledServiceIds) ? entry.scheduledServiceIds : [])].filter((id) => id != null).map(String))];
   const rows = await dbh('scheduled_services').whereIn('id', ids).select('id', 'technician_id', 'customer_id', 'scheduled_date', 'window_start', 'status');
   if (!Array.isArray(rows) || rows.length !== ids.length) return false;
-  const rep = rows.find((r) => String(r.id) === String(entry.scheduledServiceId));
-  return Boolean(rep) && rows.every((r) => !LINE_GONE_STATUSES.includes(r.status) && sameStop(r, rep));
+  const drafted = identityRow(entry.stop);
+  if (!rows.every((r) => !LINE_GONE_STATUSES.includes(r.status) && sameStop(r, drafted))) return false;
+  return (await openStopsOnDay(dbh, entry.stop.customerId, entry.stop.date)) === 1;
 }
 
 // null when the outgoing body may go out as far as the route status goes, else a reason string.
@@ -170,4 +191,6 @@ module.exports = {
   routeStatusSentencesInFacts,
   routeStatusBlockReason,
   mentionsStopCount,
+  stopIdentity,
+  openStopsOnDay,
 };

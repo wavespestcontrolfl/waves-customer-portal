@@ -430,6 +430,8 @@ describe('peekStopsAhead', () => {
   test('a floor below the real count (a stop was added ahead) gives no count, never the lower number', async () => {
     expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 0 }), 'svc-self', { today: TODAY })).toBeNull();
     expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 1, groupFloor: null }), 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 1 });
+    // a floor ABOVE the live count: the tech finished a stop since the tracker last saved; the count may fall
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 3 }), 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 2 });
   });
   test('the count statement lost its target, or a sibling advanced in that snapshot: no "next stop" from all-zero counts', async () => {
     expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 0, targetRows: 0 }), 'svc-self', { today: TODAY })).toBeNull();

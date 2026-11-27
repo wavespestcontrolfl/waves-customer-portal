@@ -3691,7 +3691,7 @@ function buildLiveEtaSnapshot(context) {
   if (!Array.isArray(context?.routeStatusGroups)) return entries.length ? { entries } : null;
   const routeStatus = context.routeStatusGroups
     .filter((g) => g && g.scheduledServiceId != null && typeof g.sentence === 'string' && g.sentence)
-    .map((g) => ({ scheduledServiceId: g.scheduledServiceId, scheduledServiceIds: (g.scheduledServiceIds || []).filter((id) => id != null), sentence: g.sentence }));
+    .map((g) => ({ scheduledServiceId: g.scheduledServiceId, scheduledServiceIds: (g.scheduledServiceIds || []).filter((id) => id != null), sentence: g.sentence, ...(g.stop ? { stop: g.stop } : {}) }));
   return { entries, routeStatus };
 }
 

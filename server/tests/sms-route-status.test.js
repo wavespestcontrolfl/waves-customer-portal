@@ -5,6 +5,12 @@
  */
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/stops-ahead', () => ({ peekStopsAhead: jest.fn() }));
+// The root pool, as context-aggregator's drafting read sees it: the open stops the customer has today.
+const mockTodayStops = { rows: [{ technician_id: 't1', window_start: '10:00:00' }], fail: false };
+jest.mock('../models/db', () => jest.fn(() => {
+  const q = { where: () => q, whereNotIn: () => q, select: () => (mockTodayStops.fail ? Promise.reject(new Error('down')) : Promise.resolve(mockTodayStops.rows)) };
+  return q;
+}));
 
 const { peekStopsAhead } = require('../services/stops-ahead');
 const routeStatus = require('../services/sms-route-status');
@@ -12,12 +18,15 @@ const { etaClaimBlockReason, isEtaInfrastructureFailure } = require('../services
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
 const TWO = 'Your technician has 2 stops before yours today.';
-const snap = (sentence = TWO, id = 'svc-1', ids = [id]) => [{ scheduledServiceId: id, scheduledServiceIds: ids, sentence }];
-// The stop's lines as the send-time member read sees them (knex-shaped: dbh(table).whereIn().select()).
+const STOP = { technicianId: 't1', customerId: 'c1', date: '2026-11-26', windowStart: '10:00:00' };
+const snap = (sentence = TWO, id = 'svc-1', ids = [id], stop = STOP) => [{ scheduledServiceId: id, scheduledServiceIds: ids, sentence, stop }];
+// The send-time reads (knex-shaped): the stop's own lines (whereIn) and the customer's open stops that day (where chain).
 const ROW = (id, o = {}) => ({ id, technician_id: 't1', customer_id: 'c1', scheduled_date: '2026-11-26', window_start: '10:00:00', status: 'confirmed', ...o });
-const rowsDb = (rows = [ROW('svc-1')], { fail = false } = {}) => jest.fn(() => ({
-  whereIn: () => ({ select: () => (fail ? Promise.reject(new Error('read down')) : Promise.resolve(rows)) }),
-}));
+const rowsDb = (rows = [ROW('svc-1')], { fail = false, dayRows = rows } = {}) => jest.fn(() => {
+  const read = (out) => (fail ? Promise.reject(new Error('read down')) : Promise.resolve(out));
+  const day = { where: () => day, whereNotIn: () => day, select: () => read(dayRows) };
+  return { whereIn: () => ({ select: () => read(rows) }), where: () => day };
+});
 
 afterEach(() => {
   delete process.env[GATE];
@@ -60,7 +69,7 @@ describe('routeStatusDraftViolation', () => {
     expect(routeStatus.routeStatusDraftViolation('He has two more visits before you.', facts)).toMatch(/ROUTE STATUS/);
   });
   test('ordinary scheduling copy is not route wording', () => {
-    for (const reply of ['Your next visit is Tuesday.', 'See you next week!', 'We will call you first thing.', 'Your visit is after lunch.', 'Are you available next Tuesday?', 'You have 2 visits left this year.', 'You have 3 visits to go on your plan.']) {
+    for (const reply of ['Please call before your appointment.', 'Call before your visit if the gate is locked.', 'Your next visit is Tuesday.', 'See you next week!', 'We will call you first thing.', 'Your visit is after lunch.', 'Are you available next Tuesday?', 'You have 2 visits left this year.', 'You have 3 visits to go on your plan.']) {
       expect(routeStatus.routeStatusDraftViolation(reply, '')).toBeNull();
     }
   });
@@ -109,6 +118,18 @@ describe('routeStatusBlockReason (send time)', () => {
     expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: two }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1')]) })).toBe('route_status_changed');
     expect(peekStopsAhead).not.toHaveBeenCalled();
     expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: two }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1'), ROW('svc-2')]) })).toBeNull();
+  });
+  test('a one-line stop moved whole (other technician or window) is stale even when the count still matches', async () => {
+    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1', { technician_id: 't2' })]) })).toBe('route_status_changed');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1', { window_start: '13:00:00' })]) })).toBe('route_status_changed');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap(TWO, 'svc-1', ['svc-1'], null) }, outgoingBody: TWO, dbh: rowsDb() })).toBe('route_status_changed');
+    expect(peekStopsAhead).not.toHaveBeenCalled();
+  });
+  test('a second open stop for the customer that day (pest + lawn) makes the sentence stale', async () => {
+    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+    const dbh = rowsDb([ROW('svc-1')], { dayRows: [ROW('svc-1'), ROW('svc-7', { window_start: '14:00:00' })] });
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh })).toBe('route_status_changed');
   });
   test('an unreadable stop member read refuses as retryable', async () => {
     expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb([], { fail: true }) })).toBe('route_status_recheck_failed');
@@ -176,14 +197,25 @@ describe('context-aggregator loadRouteStatusFacts', () => {
       { id: 'd', technician_id: 't1', scheduled_date: TODAY, window_start: '14:00:00', status: 'en_route', track_state: 'en_route' },
       { id: 'e', technician_id: 't1', scheduled_date: '2099-01-01', window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' },
     ];
-    const out = await loadRouteStatusFacts(rows, TODAY);
+    const out = await loadRouteStatusFacts(rows, 'c1', TODAY);
     expect(peekStopsAhead).toHaveBeenCalledTimes(1);
     expect(out.perRow).toEqual([TWO, TWO, null, null, null]);
-    expect(out.groups).toEqual([{ scheduledServiceId: 'a', scheduledServiceIds: ['a', 'b'], sentence: TWO }]);
+    expect(out.groups).toEqual([{ scheduledServiceId: 'a', scheduledServiceIds: ['a', 'b'], sentence: TWO, stop: { technicianId: 't1', customerId: 'c1', date: TODAY, windowStart: '10:00:00' } }]);
+  });
+  test('more than one open physical stop today, or a failed stop count read: no sentence for any visit', async () => {
+    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+    const row = { id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' };
+    mockTodayStops.rows = [{ technician_id: 't1', window_start: '10:00:00' }, { technician_id: 't2', window_start: '14:00:00' }];
+    expect(await loadRouteStatusFacts([row], 'c1', TODAY)).toEqual({ perRow: [null], groups: [] });
+    mockTodayStops.rows = [{ technician_id: 't1', window_start: '10:00:00' }];
+    mockTodayStops.fail = true;
+    expect(await loadRouteStatusFacts([row], 'c1', TODAY)).toEqual({ perRow: [null], groups: [] });
+    mockTodayStops.fail = false;
+    expect(peekStopsAhead).not.toHaveBeenCalled();
   });
   test('a failed read is no sentence and no snapshot group', async () => {
     peekStopsAhead.mockRejectedValue(new Error('down'));
-    const out = await loadRouteStatusFacts([{ id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' }], TODAY);
+    const out = await loadRouteStatusFacts([{ id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' }], 'c1', TODAY);
     expect(out).toEqual({ perRow: [null], groups: [] });
   });
 });
