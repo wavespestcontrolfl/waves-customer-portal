@@ -5531,8 +5531,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       onCreated?.({ id: result?.id, scheduledDate });
       onChange?.({ id: result?.id, scheduledDate });
     } catch (err) {
-      if (modalMountedRef.current) rereadWdoIfPriceChanged(err);
-      if (modalMountedRef.current) setNewCallerError(err?.message || 'The visit was not booked. Try again.');
+      if (modalMountedRef.current) {
+        rereadWdoIfPriceChanged(err);
+        setNewCallerError(err?.message || 'The visit was not booked. Try again.');
+      }
     } finally {
       if (modalMountedRef.current) setNewCallerSubmitting(false);
     }
