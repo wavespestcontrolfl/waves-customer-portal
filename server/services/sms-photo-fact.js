@@ -17,13 +17,13 @@
 // A low-confidence or unmatched read, an archived or relinked assessment, a photo_triage draft the owner rejected, or a triage that has not
 // finished yet: no sentence (a person answers). A read that FAILED is null, never a guess.
 //
-// The send boundary (sms-amount-recheck.photoCheckStale) re-renders the customer's sentences from a fresh read: a copied sentence that is no
-// longer rendered (the assessment archived or relinked, the draft rejected, the visit gone) refuses the send.
+// The send boundary (sms-amount-recheck.photoCheckStale) re-renders the sentence of the inbound text the decision answers from a fresh read:
+// a copied sentence that is no longer rendered (the assessment archived or relinked, the draft rejected, the visit gone) refuses the send.
 
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 
-// How far back a photo text's stored reading may answer (the drafter reads its own inbound's; the send recheck reads the window).
+// How far back an unbound read looks (the drafter and the send recheck always bind to one inbound text).
 const PHOTO_CHECK_LOOKBACK_DAYS = 14;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const USABLE_STATUSES = new Set(['analyzed', 'sent']);
@@ -102,7 +102,7 @@ function allRenderableSentences() {
 
 /**
  * The stored photo-checker readings for this customer's inbound photo texts: [{ smsLogId, assessmentId, identification }], newest first.
- * `smsLogId` narrows to that one inbound text (the drafter); without it, the last PHOTO_CHECK_LOOKBACK_DAYS (the send recheck).
+ * `smsLogId` narrows to that one inbound text (the drafter and the send recheck); without it, the last PHOTO_CHECK_LOOKBACK_DAYS.
  * Only a pest assessment the checker ran (source auto_triage) on this customer's text, still linked to this customer, not archived, whose
  * photo_triage draft the owner did not reject. [] when there is none (or the checker has not finished); null when the read failed.
  */

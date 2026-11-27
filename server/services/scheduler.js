@@ -33,6 +33,7 @@ const AMOUNT_BLOCK_NOTES = {
   photo_check_changed: 'The photo reading this scheduled reply states no longer matches the records',
   photo_check_unverified: 'This scheduled reply describes a photo in words the photo check did not give',
   photo_check_recheck_failed: 'The photo reading recheck for this scheduled reply could not be completed',
+  photo_check_no_inbound: 'This scheduled reply states a photo reading but the text it answers is not known',
 };
 // The fire-time amount / Zelle / payment-status recheck for one claimed
 // scheduled reply (extracted from the send loop so the pre-screen and the
@@ -41,7 +42,7 @@ const AMOUNT_BLOCK_NOTES = {
 async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
   const recheck = require('./sms-amount-recheck');
   const { parseInputSnapshot, bodyIsStaffEdited } = require('./agent-decision-send-checks');
-  const loadDecision = () => db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id', 'suggested_message');
+  const loadDecision = () => db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id', 'suggested_message', 'sms_log_id');
   const pre = await prescreenScheduledSmsRecheck({ msg, claimMeta, recheck, bodyIsStaffEdited, loadDecision });
   if (pre.failed) return { stale: true, reason: 'amount_recheck_failed' };
   if (!pre.needs) return { stale: false, reason: null };
@@ -112,6 +113,8 @@ function scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot, staffEdited
     inboundMessage: snapshot?.sms?.body || null,
     // The payment-status sentences the draft copied: the only status wording this body may carry, each re-rendered from live data.
     paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    // The customer's inbound text the decision answers: a copied PHOTO CHECK sentence is rechecked against THAT text's photo reading.
+    inboundSmsLogId: decision?.sms_log_id || null,
     // A human edit trusts only the OWED-amount half, never a Zelle offer or a payment status (round-4 finding 3).
     trustOwedAmounts: claimMeta.human_authored === true,
     humanEditedBody: staffEdited,

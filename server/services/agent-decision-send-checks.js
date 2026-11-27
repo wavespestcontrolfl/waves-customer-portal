@@ -134,6 +134,8 @@ async function amountsBlock({ decision, outgoingBody }) {
     zelleInvoiceId: snapshot?.zelle_invoice_id || null,
     inboundMessage: resolveInboundMessage(decision),
     paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    // the inbound text this decision answers: a copied PHOTO CHECK sentence is rechecked against that text's own photo reading
+    inboundSmsLogId: decision.sms_log_id || null,
     humanEditedBody: staffEdited,
     // A pre-v12 decision reaches here ONLY for its Zelle claim (above): its amount rules stay untouched.
     trustOwedAmounts: !realAnswers,

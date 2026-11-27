@@ -1068,8 +1068,18 @@ describe('outgoingAmountsStale - the PHOTO CHECK sentences are rechecked at send
     jest.spyOn(photoFact, 'loadPhotoChecks').mockResolvedValue(checks);
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing, upcomingServices: upcoming });
   };
-  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'what is this bug?', ...extra });
+  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'what is this bug?', inboundSmsLogId: 'log-1', ...extra });
   afterEach(() => jest.restoreAllMocks());
+
+  test("the recheck reads only the reading of the decision's own inbound text; with none to bind to it fails closed", async () => {
+    live([reading()]);
+    await run(ROACH);
+    expect(photoFact.loadPhotoChecks).toHaveBeenCalledWith('c1', expect.objectContaining({ smsLogId: 'log-1' }));
+    // another photo text's reading (the loader returns nothing for this inbound) does not authorize the sentence
+    photoFact.loadPhotoChecks.mockImplementation(async (_c, { smsLogId }) => (smsLogId === 'log-2' ? [reading({ smsLogId: 'log-2' })] : []));
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    await expect(run(ROACH, { inboundSmsLogId: null })).resolves.toEqual({ stale: true, reason: 'photo_check_no_inbound' });
+  });
 
   test('an unchanged sentence passes and is not judged as a payment status', async () => {
     live([reading()]);
