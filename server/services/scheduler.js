@@ -2566,6 +2566,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY INVENTORY COST-SPIKE & MARGIN WATCHDOG (gated: cronJobs AND GATE_INVENTORY_MARGIN_WATCHDOG)
+  // Read-only one-way alert for >10% approved vendor cost spikes, <35% modeled
+  // service gross margins, and missing/broken material COGS mappings. Never
+  // mutates retail prices. Daily 6:35am ET (after the 6:00am price scan).
+  // =========================================================================
+  cron.schedule('35 6 * * *', async () => {
+    if (!require('../config/feature-gates').inventoryMarginWatchdogLive?.()) return;
+    logger.info('Running: Daily inventory cost-spike & margin watchdog');
+    try {
+      await runExclusive('inventory-margin-watchdog', async () => {
+        const { runInventoryMarginWatchdog } = require('./inventory-margin-watchdog');
+        const result = await runInventoryMarginWatchdog();
+        logger.info(`[inventory-margin-watchdog] cron run: alerted=${!!result.alerted} spikes=${result.spikes?.length || 0} lowMargins=${result.lowMargins?.length || 0} missingCogs=${result.missingCogs?.length || 0}`);
+      });
+    } catch (err) {
+      logger.error(`Daily inventory margin watchdog failed: ${err.code || err.name || 'ERROR'}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY IRRIGATION RECOMMENDATION EMAIL (gated: cronJobs AND irrigationWeeklyEmail)
   // Monday 7:00am ET — emails lawn-care customers who entered weekly irrigation
   // inches in the portal a "cut back" / "add water" / "you're on track"
