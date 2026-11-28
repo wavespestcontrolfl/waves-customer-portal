@@ -247,6 +247,19 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     expect(baitAtLimit.json.quote_required).toBeFalsy();
   });
 
+  test('a home at or below 5,500 sq ft with no posted lot (e.g. 5,200 sq ft -> 20,800 synthetic lot) returns 200 with prices for recurring and one-time pest', async () => {
+    const recurring = await calculate(5200, 1, { pest: { frequency: 'quarterly' } }, null);
+    expect(recurring.status).toBe(200);
+    expect(recurring.json.quote_required).toBeFalsy();
+    expect(recurring.json.per_application).toBeGreaterThan(0);
+    expect(storedEngineInput().lotSqFt).toBe(20800);
+
+    const oneTime = await calculate(5200, 1, { oneTimePest: {} }, null);
+    expect(oneTime.status).toBe(200);
+    expect(oneTime.json.quote_required).toBeFalsy();
+    expect(oneTime.json.onetime_total || oneTime.json.one_time_total || oneTime.json.per_application).toBeGreaterThan(0);
+  });
+
   test('a quote WITHOUT pest above the ceiling goes to the team too and stores the real size, so pest added later is priced from it', async () => {
     const baitOnly = await calculate(24000, 2, { rodentBait: {} });
     expect(baitOnly.status).toBe(202);
