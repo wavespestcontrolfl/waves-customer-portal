@@ -8,12 +8,12 @@
  * `processPhoneOnlyLeadSmsDrip()` returns immediately with zero queries and zero sends.
  *
  * Audience: unquoted open residential leads (`status IN ('new', 'contacted')`, `is_commercial IS NOT TRUE`)
- * with a phone number, NO email address, explicit promotional SMS opt-in bound to that exact destination
- * phone (canonical E.164 equality + complete `phoneMatchDigits`, explicit `'sms'` or `'both'`
- * `marketing_channel` — null/blank defaults to email — or explicit web-form `marketing_sms_opt_in === true`
- * bound to submitted phone), no explicit marketing opt-out, no linked/created/sent estimate (including
+ * with a phone number, NO email address, explicit stored promotional SMS opt-in bound to that exact destination
+ * phone (`customers` + `notification_prefs`: canonical E.164 equality + complete `phoneMatchDigits`,
+ * `marketing_offers === true`, explicit `'sms'` or `'both'` `marketing_channel` — null/blank defaults to email),
+ * no explicit marketing opt-out across linked/matching customers, no linked/created/sent estimate (including
  * phone-matched customers and standalone `customer_phone` estimates), no booked visit, not a paying
- * customer, and no prior SMS engagement (including Leads-page `lead_outreach`).
+ * customer, and no prior SMS engagement (including Leads-page `lead_outreach` and Lead Response Agent `lead_response`).
  *
  * Durability & safety:
  *   - Durable pre-dispatch claim in `new_lead_phone_drip_sends (lead_id, step)` before calling Twilio
@@ -41,16 +41,15 @@ const STEP_2_ACTIVITY = 'phone_drip_sms_step_2';
 const DRIP_ENTRY_POINT = 'new_lead_phone_sms_drip';
 const DRIP_PURPOSE = 'lead_promotional_followup';
 const UNQUOTED_OPEN_STATUSES = Object.freeze(['new', 'contacted']);
-const CONSENTED_WEB_LEAD_TYPES = new Set(['form_submission', 'quote_wizard', 'website_chat']);
 const QUIET_START_HOUR_ET = 8;
 const QUIET_END_HOUR_ET = 20;
 const HOUR_MS = 3600 * 1000;
-const ENGAGEMENT_OUTBOUND_TYPES = [...HUMAN_REPLY_TYPES, 'lead_outreach', 'ai_autosent', 'ai_gratitude'];
+const ENGAGEMENT_OUTBOUND_TYPES = [...HUMAN_REPLY_TYPES, 'lead_outreach', 'lead_response', 'ai_autosent', 'ai_gratitude'];
 
 const LEAD_SELECT_COLS = Object.freeze([
   'id', 'first_name', 'phone', 'email', 'customer_id', 'estimate_id',
   'converted_at', 'is_commercial', 'is_residential', 'status', 'deleted_at', 'created_at',
-  'twilio_call_sid', 'twilio_message_sid', 'lead_type', 'extracted_data',
+  'twilio_call_sid', 'twilio_message_sid', 'lead_type',
 ]);
 
 function firstNameOrDefault(lead) {
@@ -126,15 +125,9 @@ function pickDueStep(lead, sentClaims, now = new Date()) {
   return ageHours >= 120 && ageHours <= 168 && sinceStep1Hours >= 48 ? 2 : null;
 }
 
-function parseExtractedData(raw) {
-  if (!raw) return {};
-  if (typeof raw === 'object') return raw;
-  try { return JSON.parse(raw) || {}; } catch { return {}; }
-}
-
 /**
  * Loads all active customer/notification_prefs rows linked by `lead.customer_id` OR matching
- * the lead's exact destination phone identity, evaluates promotional SMS consent, and returns
+ * the lead's exact destination phone identity, evaluates stored promotional SMS consent, and returns
  * `{ consentBasis, consentingCustomerId, matchedCustomerIds }`.
  */
 async function resolveLeadPromotionalConsent(conn, lead, matchDigitsInput = null) {
@@ -172,20 +165,6 @@ async function resolveLeadPromotionalConsent(conn, lead, matchDigitsInput = null
     return {
       consentBasis: { status: 'opted_in', source: 'customer_notification_prefs', phoneBound: true },
       consentingCustomerId: matchedOptedInCustomer.id,
-      matchedCustomerIds,
-    };
-  }
-
-  const extracted = parseExtractedData(lead.extracted_data);
-  const webPromoOptIn = CONSENTED_WEB_LEAD_TYPES.has(lead.lead_type) && extracted.marketing_sms_opt_in === true;
-  const submittedPhone = extracted.sms_consent_phone || extracted.submitted_phone || extracted.phone || null;
-  if (webPromoOptIn && submittedPhone && phonesShareIdentity(submittedPhone, leadE164)) {
-    const linkedMatchingCustomer = rows.find((r) => (
-      lead.customer_id && String(r.id) === String(lead.customer_id) && phonesShareIdentity(r.phone, leadE164)
-    ));
-    return {
-      consentBasis: { status: 'opted_in', source: 'web_form_sms_opt_in', phoneBound: true },
-      consentingCustomerId: linkedMatchingCustomer?.id || null,
       matchedCustomerIds,
     };
   }
@@ -355,24 +334,34 @@ function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock }) {
       return { ok: false, code: 'OUTSIDE_DRIP_SEND_HOURS', reason: 'Outside 8 AM–8 PM ET drip send hours at handoff', retryable: true };
     }
     const conn = dbi || database || dbh;
-    const freshLead = await conn('leads').where({ id: leadId }).first(...LEAD_SELECT_COLS);
-    if (!isEligibleUnquotedLeadRow(freshLead)) {
-      return { ok: false, code: 'LEAD_DRIP_INELIGIBLE', reason: 'Lead is no longer an open unquoted phone-only residential lead' };
+    try {
+      const freshLead = await conn('leads').where({ id: leadId }).first(...LEAD_SELECT_COLS);
+      if (!isEligibleUnquotedLeadRow(freshLead)) {
+        return { ok: false, code: 'LEAD_DRIP_INELIGIBLE', reason: 'Lead is no longer an open unquoted phone-only residential lead' };
+      }
+      if (!phonesShareIdentity(freshLead.phone, expectedPhone)) {
+        return { ok: false, code: 'LEAD_PHONE_CHANGED', reason: 'Lead phone number changed before SMS handoff' };
+      }
+      const check = await leadShouldStop(conn, freshLead);
+      if (check.stop) {
+        return { ok: false, code: `LEAD_DRIP_STOP_${check.stop.toUpperCase()}`, reason: `Lead stopped at handoff (${check.stop})` };
+      }
+      const existingClaim = await conn('new_lead_phone_drip_sends')
+        .where({ lead_id: leadId, step })
+        .first('status');
+      if (existingClaim && existingClaim.status !== 'claimed') {
+        return { ok: false, code: 'LEAD_DRIP_ALREADY_SENT', reason: 'Drip step already settled' };
+      }
+      return { ok: true };
+    } catch (err) {
+      logger.warn(`[new-lead-phone-sms-drip] handoff pre-send check read failed for lead ${leadId}: ${err?.code || err?.name || 'error'}`);
+      return {
+        ok: false,
+        code: 'LEAD_DRIP_HANDOFF_READ_FAILED',
+        reason: 'Transient DB error during lead drip handoff check',
+        retryable: true,
+      };
     }
-    if (!phonesShareIdentity(freshLead.phone, expectedPhone)) {
-      return { ok: false, code: 'LEAD_PHONE_CHANGED', reason: 'Lead phone number changed before SMS handoff' };
-    }
-    const check = await leadShouldStop(conn, freshLead);
-    if (check.stop) {
-      return { ok: false, code: `LEAD_DRIP_STOP_${check.stop.toUpperCase()}`, reason: `Lead stopped at handoff (${check.stop})` };
-    }
-    const existingClaim = await conn('new_lead_phone_drip_sends')
-      .where({ lead_id: leadId, step })
-      .first('status');
-    if (existingClaim && existingClaim.status !== 'claimed') {
-      return { ok: false, code: 'LEAD_DRIP_ALREADY_SENT', reason: 'Drip step already settled' };
-    }
-    return { ok: true };
   };
 }
 
@@ -385,10 +374,9 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender }) {
   if (!step) return 'skip';
 
   const { stop, consentBasis, consentingCustomerId, matchedCustomerIds } = await leadShouldStop(dbh, lead);
-  if (stop) return 'stopped';
+  if (stop || !consentingCustomerId) return 'stopped';
 
   const destinationPhone = canonicalE164(lead.phone);
-  const effectiveCustomerId = consentingCustomerId || undefined;
   const activityType = step === 1 ? STEP_1_ACTIVITY : STEP_2_ACTIVITY;
   const deliveryKey = `${DRIP_ENTRY_POINT}:${lead.id}:step_${step}`;
   const claimId = await claimLeadDripStep(dbh, { leadId: lead.id, step, destinationPhone, deliveryKey });
@@ -402,9 +390,9 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender }) {
       channel: 'sms',
       audience: 'lead',
       purpose: DRIP_PURPOSE,
-      customerId: effectiveCustomerId,
+      customerId: consentingCustomerId,
       leadId: lead.id,
-      identityTrustLevel: 'phone_provided_unverified',
+      identityTrustLevel: 'phone_matches_customer',
       consentBasis,
       entryPoint: DRIP_ENTRY_POINT,
       metadata: { original_message_type: activityType, lead_id: lead.id, drip_step: step, delivery_key: deliveryKey },
