@@ -111,13 +111,17 @@ function stripQuotedAndSignature(bodyText) {
 function emailPlainText(row) {
   const text = String(row?.body_text || '');
   const html = String(row?.body_html || '');
-  // When both parts exist and the HTML carries explicit quote containers that
-  // became '>' markers in text/plain, stripQuotedAndSignature would cut at the
-  // first '>' and discard any reply written below or between quotes. Strip
-  // quote and signature nodes structurally from HTML so sibling replies survive
-  // without leaking signature boilerplate.
-  if (html.trim() && /<blockquote\b|(?:gmail_quote|yahoo_quoted)/i.test(html) && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
-    return require('../../utils/html-to-plain-text').htmlToPlainText(html, { stripQuotes: true, stripSignatures: true });
+  // When both parts exist and text/plain has '>' quote markers, ask the HTML
+  // parser to remove recognized quote/signature containers (plus any adjacent
+  // attribution line) using one shared predicate — only using HTML output when
+  // a real quote container was present so bottom/inline replies survive.
+  if (html.trim() && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
+    const parsed = require('../../utils/html-to-plain-text').htmlToPlainTextWithMeta(html, {
+      stripQuotes: true,
+      stripSignatures: true,
+      attributionPatterns: HISTORY_HEADERS,
+    });
+    if (parsed.hasQuoteContainer) return parsed.text;
   }
   if (text.trim()) return text;
   return html.trim() ? require('../newsletter-proof').htmlReplyToText(html) : '';
