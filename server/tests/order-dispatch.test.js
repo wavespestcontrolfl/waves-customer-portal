@@ -1914,6 +1914,10 @@ describe('DB-backed history-total auto-order policy (Sticker Mule)', () => {
     const lookupFail = await run(historyAdapter({ bindingQuote: jest.fn(async () => { throw new Error('HTTP 502'); }) }));
     expect(lookupFail).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
 
+    // 2b) Vendor reports an outstanding order that belongs to competing Product A -> vendor_sku_order_live, not vendor_order_outstanding.
+    const vendorOut = await run(historyAdapter({ bindingQuote: jest.fn(async () => ({ cents: 31400, outstanding: { number: 'SM-A-1', why: 'coming' } })) }));
+    expect(vendorOut).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+
     // 3) Duplicate mapping with monthly cap exceeded -> duplicate_sku_mapping, not over_monthly_cap.
     mockState.liveSkuOrder = null;
     mockState.monthly = 40000;
@@ -1951,6 +1955,22 @@ describe('DB-backed history-total auto-order policy (Sticker Mule)', () => {
     mockState.otherVendorProducts = [];
     expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
       .toEqual({ settled: true });
+  });
+
+  test('unclaimed request handoff stands down in both sweep and dispatcher when another product holds a live order for the same SKU', async () => {
+    const dbFn = require('../models/db');
+    mockState.requestLedger = null;
+    mockState.liveSkuOrder = { id: 'ledger-a', restock_request_id: 'req-a', status: 'placing', external_order_number: null, product_name: 'Product A' };
+
+    // Sweep handoff (settleRequestLedgerBells with preserveOutstanding: true) preserves/withholds manual bell.
+    expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
+      .toEqual({ preserved: 'vendor_sku_order_live' });
+
+    // Dispatcher handoff (vendor gate closed) stands down with autoOrderLive and rings no manual bell.
+    process.env.GATE_AUTO_ORDER_STICKERMULE = 'false';
+    const r = await run(historyAdapter());
+    expect(r).toMatchObject({ skipped: 'vendor_gated', autoOrderLive: true });
+    expect(notify).not.toHaveBeenCalled();
   });
 
   test('settleRequestLedgerBells rewrites landedAfterReceive cap-alert wording after the second receipt clears landedAfterReceive', async () => {

@@ -482,12 +482,30 @@ async function rewriteCapAlertOnReceipt(trx, { row, requestId, ev }) {
   });
 }
 
+async function hasLiveSkuOrderForRequest(conn, requestId, requestRow = null) {
+  const req = requestRow || await conn('product_restock_requests').where({ id: requestId }).first('product_id', 'metadata');
+  if (!req?.product_id) return false;
+  const m = meta(req.metadata);
+  if (!m.vendorId) return false;
+  const vendor = await conn('vendors').where({ id: m.vendorId }).first('id', 'name', 'code');
+  const adapterKey = adapterKeyFor(vendor);
+  if (adapterKey !== 'stickermule') return false;
+  const pricing = await require('./auto-reorder').vendorPricingFor(conn, req.product_id, vendor.id);
+  const vendorSku = String(pricing?.vendor_sku || m.vendorSku || '').trim();
+  if (!vendorSku) return false;
+  const live = await liveSkuOrderRefusal(conn, { adapterKey, vendorSku, vendorName: vendor.name, excludeLedgerId: null });
+  return !!live;
+}
+
 async function settleRequestLedgerBells(trx, requestId, { preserveOutstanding = false } = {}) {
   const row = await trx('vendor_orders')
     .where({ restock_request_id: requestId })
     .forUpdate()
     .first('id', 'status', 'placed_at', 'evidence', 'vendor_id', 'external_order_number', 'adapter', 'request_payload');
-  if (!row) return { settled: false };
+  if (!row) {
+    if (preserveOutstanding && await hasLiveSkuOrderForRequest(trx, requestId)) return { preserved: 'vendor_sku_order_live' };
+    return { settled: false };
+  }
   const ev = meta(row.evidence);
   const preserved = preserveOutstanding ? await preservedPreSubmitWarning(trx, row, ev) : null;
   if (preserved) return { preserved };
@@ -1311,6 +1329,8 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
     };
   }
   if (bq?.outstanding) {
+    const conflict = await parkHistoryConflict(conn, { adapter, ctx, vendor, vendorSku });
+    if (conflict) return conflict;
     return {
       parked: await park(conn, {
         ...ctx,
@@ -1647,17 +1667,17 @@ async function endedNeed(trx, { ledger, fresh, product, vendor }) {
 // Cross-product SKU exclusion inside CAPS_LOCK_KEY: if another product mapped to the same
 // (adapter, vendorSku) already holds a post-authorized placing claim or unreconciled order,
 // refuse unsent so two catalog rows sharing one Sticker Mule SKU can never double-order it.
-async function liveSkuOrderRefusal(trx, { adapterKey, vendorSku, vendorName, excludeLedgerId }) {
-  const skuLive = await trx('vendor_orders as vo')
+async function liveSkuOrderRefusal(trx, { adapterKey, vendorSku, vendorName, excludeLedgerId = null }) {
+  const q = trx('vendor_orders as vo')
     .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
     .where('vo.adapter', adapterKey)
-    .whereNot('vo.id', excludeLedgerId)
     .whereRaw("vo.request_payload->>'vendorSku' = ?", [String(vendorSku)])
     .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .whereRaw(RECEIVED_SETTLES_SQL)
-    .whereRaw(`(${maybePlacedSql('vo')} OR (vo.status = 'placing' AND NULLIF(vo.evidence->>'postAuthorizedAt', '') IS NOT NULL))`)
-    .first('vo.id', 'vo.restock_request_id', 'vo.status', 'vo.external_order_number', 'pc.name as product_name');
+    .whereRaw(`(${maybePlacedSql('vo')} OR (vo.status = 'placing' AND NULLIF(vo.evidence->>'postAuthorizedAt', '') IS NOT NULL))`);
+  if (excludeLedgerId) q.whereNot('vo.id', excludeLedgerId);
+  const skuLive = await q.first('vo.id', 'vo.restock_request_id', 'vo.status', 'vo.external_order_number', 'pc.name as product_name');
   if (!skuLive) return null;
   const num = skuLive.external_order_number ? String(skuLive.external_order_number) : null;
   const other = skuLive.product_name ? `${skuLive.product_name} (request ${skuLive.restock_request_id})` : `request ${skuLive.restock_request_id}`;
@@ -1852,7 +1872,7 @@ async function bellUndispatchable(conn, requestId, notify, now = new Date()) {
   // ambiguous / stale park, or a late order on a received sibling): the
   // ledger bell says do-not-reorder; a gate closed since must not hand the
   // office an "order manually" bell beside it (hook r27 P0/P1).
-  if (await findLiveAutoOrder(conn, request.product_id)) return { autoOrderLive: true };
+  if (await findLiveAutoOrder(conn, request.product_id) || await hasLiveSkuOrderForRequest(conn, requestId, request)) return { autoOrderLive: true };
   const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
   const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand', ...FERTILIZER_COLUMNS);
   if (!product) return { bellLost: true };
@@ -1875,7 +1895,7 @@ async function bellUndispatchable(conn, requestId, notify, now = new Date()) {
   }
   // Another pod claimed it meanwhile (rolling gate change): its claim
   // retired a bell that did not exist yet — retire this one (Codex r29 P1).
-  if (await findLiveAutoOrder(conn, request.product_id)) {
+  if (await findLiveAutoOrder(conn, request.product_id) || await hasLiveSkuOrderForRequest(conn, requestId, request)) {
     await retireRequestBell(conn, requestId);
     return { autoOrderLive: true };
   }
