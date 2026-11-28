@@ -394,4 +394,30 @@ describe('lead texts carry no sign-off', () => {
     const sendTool = LEAD_RESPONSE_AGENT_CONFIG.tools.find(t => t.name === 'send_lead_response');
     expect(sendTool.input_schema.properties.message.description).not.toMatch(/signed as/i);
   });
+
+  test('the agent prompt allows stating exact prices with units from an already-sent estimate while routing unquoted new work', () => {
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).not.toMatch(/Never quote exact prices — route to an estimate flow instead/);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/check_existing_estimates/);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/both the customer-facing amount and unit/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/never a monthly average as an application price/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/share viewUrl only when check_existing_estimates returns a non-null viewUrl/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/queue_for_adam/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/never quote exact prices for unquoted NEW work/i);
+  });
+
+  test('send_lead_response blocks and queues for review when a draft quotes an unverified price', async () => {
+    const res = await executeLeadTool(
+      'send_lead_response',
+      { message: 'Hello Pat! Your Pest Control plan is $149 per month.' },
+      context,
+    );
+    expect(res).toMatchObject({
+      sent: false,
+      blocked: true,
+      queuedForReview: true,
+      code: 'UNVERIFIED_PRICE_IN_MESSAGE',
+    });
+    expect(mockMessage).not.toHaveBeenCalled();
+    expect(mockPipeline).not.toHaveBeenCalled();
+  });
 });
