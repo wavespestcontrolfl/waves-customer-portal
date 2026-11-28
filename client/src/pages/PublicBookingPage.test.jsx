@@ -49,6 +49,7 @@ vi.mock('../hooks/useAuth', () => ({
 // confirm rode without breaking the walk.
 const apiMock = vi.hoisted(() => ({
   token: 'ambient-token',
+  ensureFreshToken: vi.fn(async () => 'valid'),
   fetchRaw: vi.fn((url, opts) => globalThis.fetch(url, opts)),
 }));
 vi.mock('../utils/api', () => ({ api: apiMock, default: apiMock }));
@@ -409,6 +410,7 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
       const captureRaw = apiMock.fetchRaw.mock.calls.filter(([url]) => String(url).includes('/booking/capture-intent'));
       expect(captureRaw).toHaveLength(1);
     });
+    expect(apiMock.ensureFreshToken).toHaveBeenCalledTimes(1);
 
     cleanup();
     apiMock.fetchRaw.mockClear();
