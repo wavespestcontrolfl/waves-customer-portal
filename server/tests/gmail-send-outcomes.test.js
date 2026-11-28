@@ -214,4 +214,10 @@ test('emailPlainText preserves a staff reply below an attributed quote container
     body_html: '<table><tr><td class="gmail_quote">Old table request</td></tr></table>',
   }));
   expect(quotedTableCell).toBe('');
+
+  const textQuotedHtmlUnquoted = stripQuotedAndSignature(emailPlainText({
+    body_text: 'Hi\n> Please cancel my service\n> > older quote',
+    body_html: '<p>Hi</p><p>Please cancel my service</p><blockquote>older quote</blockquote>',
+  }));
+  expect(textQuotedHtmlUnquoted).toBe('Hi');
 });

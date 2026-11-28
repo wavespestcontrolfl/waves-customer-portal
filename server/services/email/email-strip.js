@@ -103,6 +103,38 @@ function stripQuotedAndSignature(bodyText) {
   return text.trim();
 }
 
+function normalizeCompare(s) {
+  return String(s || '')
+    .replace(/\s*\((?:https?:\/\/|mailto:)[^)\s]+\)/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function unquotedPlainParagraphs(text) {
+  const decoded = decodeEntities(text).replace(/\r\n?/g, '\n');
+  const set = new Set();
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    const joined = normalizeCompare(run.join(' '));
+    if (joined) set.add(joined);
+    run = [];
+  };
+  for (const rawLine of decoded.split('\n')) {
+    const trimmed = rawLine.trim();
+    if (/^[ \t]*--[ \t]*$/.test(rawLine) || /\*?\s*Office:\s*\(941\)/i.test(rawLine)) break;
+    if (!trimmed || /^[ \t]*>/.test(rawLine) || SENT_FROM.test(rawLine) || HISTORY_HEADERS.some((re) => re.test(trimmed))) {
+      flush();
+      continue;
+    }
+    const lineNorm = normalizeCompare(trimmed);
+    if (lineNorm) set.add(lineNorm);
+    run.push(trimmed);
+  }
+  flush();
+  return set;
+}
+
 // The text of an email row: body_text, or its HTML converted when
 // body_text is empty. Portal sends (admin Email tab, Intelligence Bar) are
 // text/html-only, so Gmail sync stores them in body_html with body_text
@@ -113,8 +145,9 @@ function emailPlainText(row) {
   const html = String(row?.body_html || '');
   // When both parts exist and text/plain has '>' quote markers, ask the HTML
   // parser to remove recognized quote/signature containers (plus any adjacent
-  // attribution line) using one shared predicate — only using HTML output when
-  // a real quote container was present so bottom/inline replies survive.
+  // attribution line) using one shared predicate, and keep ONLY paragraphs the
+  // plain-text part also identifies as unquoted so bottom/inline replies survive
+  // while quoted history in either MIME part is excluded.
   if (html.trim() && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
     try {
       const parsed = require('../../utils/html-to-plain-text').htmlToPlainTextWithMeta(html, {
@@ -124,13 +157,18 @@ function emailPlainText(row) {
         attributionPatterns: HISTORY_HEADERS,
       });
       if (parsed.hasQuoteContainer) {
-        if (!parsed.text) return text;
+        const unquoted = unquotedPlainParagraphs(text);
+        const confirmed = parsed.text
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line && unquoted.has(normalizeCompare(line)));
         const plainPrefix = stripQuotedAndSignature(text);
-        const norm = (s) => s.replace(/\s*\((?:https?:\/\/|mailto:)[^)\s]+\)/gi, '').replace(/\s+/g, ' ').trim();
-        if (plainPrefix && !norm(parsed.text).includes(norm(plainPrefix))) {
-          return `${plainPrefix}\n${parsed.text}`;
+        if (!confirmed.length) return plainPrefix;
+        const confirmedText = confirmed.join('\n');
+        if (plainPrefix && !normalizeCompare(confirmedText).includes(normalizeCompare(plainPrefix))) {
+          return `${plainPrefix}\n${confirmedText}`;
         }
-        return parsed.text;
+        return confirmedText;
       }
     } catch {
       // Fall back to the existing plain-text part on pathological HTML.
