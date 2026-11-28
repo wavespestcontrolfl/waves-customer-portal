@@ -34,7 +34,7 @@ const { isEnabled } = require('../config/feature-gates');
 
 const ALERT_TYPE = 'visit_not_closed_out';
 const ALERT_SOURCE = 'missed_appointment_check';
-const RESOLUTIONS = Object.freeze(['rebooked', 'completed', 'dismissed', 'handled', 'not_a_miss']);
+const RESOLUTIONS = Object.freeze(['rebooked', 'completed', 'dismissed', 'handled', 'not_a_miss', 'held']);
 // The status a visit moves TO → how its flagged rows settle. A person marking
 // no_show is a confirmed miss that still needs rebooking: not a resolution.
 const RESOLUTION_BY_STATUS = Object.freeze({ completed: 'completed', cancelled: 'dismissed', skipped: 'dismissed' });

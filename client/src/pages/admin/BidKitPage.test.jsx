@@ -735,3 +735,31 @@ it("the facts sheet reads its data again when the Eastern day turns", async () =
     vi.useRealTimers();
   }
 });
+
+it("prompts before switching to Facts sheet or another item editor when an editor has unsaved changes", async () => {
+  route({
+    "GET /admin/bid-kit/": () => reply(payload()),
+    "GET /admin/bid-kit/facts-sheet": () => reply({ today: TODAY, facts: [], documents: [] }),
+  });
+  const confirmSpy = vi.spyOn(window, "confirm")
+    .mockReturnValueOnce(false)
+    .mockReturnValueOnce(false)
+    .mockReturnValueOnce(true);
+  renderPage();
+  await screen.findByText("FDACS business license copy");
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Source document"), { target: { value: "Unsaved draft source" } });
+
+  fireEvent.click(within(rowFor("W-9")).getByRole("button", { name: "Edit" }));
+  expect(confirmSpy).toHaveBeenCalledTimes(1);
+  expect(screen.getByLabelText("Source document")).toHaveValue("Unsaved draft source");
+
+  fireEvent.click(screen.getByRole("button", { name: /facts sheet/i }));
+  expect(confirmSpy).toHaveBeenCalledTimes(2);
+  expect(screen.getByLabelText("Source document")).toHaveValue("Unsaved draft source");
+
+  fireEvent.click(screen.getByRole("button", { name: /facts sheet/i }));
+  expect(confirmSpy).toHaveBeenCalledTimes(3);
+  expect(await screen.findByText("Company facts")).toBeInTheDocument();
+  confirmSpy.mockRestore();
+});
