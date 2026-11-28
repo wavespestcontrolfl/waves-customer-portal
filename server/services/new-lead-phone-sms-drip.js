@@ -224,16 +224,27 @@ async function hasCustomerConversion(conn, customerIds) {
   return null;
 }
 
-async function hasOverlappingPhoneDrip(conn, leadId, leadE164, matchDigits) {
-  const rows = await conn('new_lead_phone_drip_sends')
-    .whereNot('lead_id', leadId)
-    .whereIn('status', ['claimed', 'sent', 'uncertain'])
-    .whereRaw("REGEXP_REPLACE(COALESCE(destination_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits])
-    .select('id', 'destination_phone');
+async function hasOverlappingPhoneDrip(conn, leadId, leadE164, matchDigits, now = new Date()) {
+  const activeWindowStart = new Date(now.getTime() - 168 * HOUR_MS);
+  const rows = await conn('new_lead_phone_drip_sends as s')
+    .leftJoin('leads as l', 'l.id', 's.lead_id')
+    .whereNot('s.lead_id', leadId)
+    .whereIn('s.status', ['claimed', 'sent', 'uncertain'])
+    .whereRaw("REGEXP_REPLACE(COALESCE(s.destination_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits])
+    .where((q) => {
+      q.whereIn('s.status', ['claimed', 'uncertain'])
+        .orWhere((openLead) => openLead
+          .whereNull('l.deleted_at')
+          .whereNull('l.converted_at')
+          .whereNull('l.estimate_id')
+          .whereIn('l.status', UNQUOTED_OPEN_STATUSES)
+          .where('l.created_at', '>=', activeWindowStart));
+    })
+    .select('s.id', 's.destination_phone');
   return (Array.isArray(rows) ? rows : []).some((r) => phonesShareIdentity(r.destination_phone, leadE164));
 }
 
-async function leadShouldStop(conn, lead, { checkCallVetoes = callVetoesForNumber } = {}) {
+async function leadShouldStop(conn, lead, { now = new Date(), checkCallVetoes = callVetoesForNumber } = {}) {
   const leadE164 = canonicalE164(lead?.phone);
   const matchDigits = phoneMatchDigits(lead?.phone);
   if (!leadE164 || !matchDigits.length) {
@@ -254,7 +265,7 @@ async function leadShouldStop(conn, lead, { checkCallVetoes = callVetoesForNumbe
     return { stop: converted, consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
   }
 
-  if (await hasOverlappingPhoneDrip(conn, lead.id, leadE164, matchDigits)) {
+  if (await hasOverlappingPhoneDrip(conn, lead.id, leadE164, matchDigits, now)) {
     return { stop: 'phone_already_in_drip', consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
   }
 
@@ -350,10 +361,12 @@ function buildPhoneDripHandoff(dbh, { customerIds = [], phone }) {
   });
 }
 
-function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock, checkCallVetoes }) {
+function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock, checkCallVetoes, lockedCustomerIds = [] }) {
   const nowFn = clock || (() => new Date());
+  const lockedSet = new Set((lockedCustomerIds || []).filter(Boolean).map(String));
   return async ({ dbi, database } = {}) => {
-    if (!isWithinSendHoursET(nowFn())) {
+    const now = nowFn();
+    if (!isWithinSendHoursET(now)) {
       return { ok: false, code: 'OUTSIDE_DRIP_SEND_HOURS', reason: 'Outside 8 AM–8 PM ET drip send hours at handoff', retryable: true };
     }
     const conn = dbi || database || dbh;
@@ -367,9 +380,17 @@ function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock, che
       if (!phonesShareIdentity(freshLead.phone, expectedPhone)) {
         return { ok: false, code: 'LEAD_PHONE_CHANGED', reason: 'Lead phone number changed before SMS handoff' };
       }
-      const check = await leadShouldStop(conn, freshLead, checkCallVetoes ? { checkCallVetoes } : {});
+      const check = await leadShouldStop(conn, freshLead, { now, ...(checkCallVetoes ? { checkCallVetoes } : {}) });
       if (check.stop) {
         return { ok: false, code: `LEAD_DRIP_STOP_${check.stop.toUpperCase()}`, reason: `Lead stopped at handoff (${check.stop})` };
+      }
+      if ((check.matchedCustomerIds || []).some((cid) => !lockedSet.has(String(cid)))) {
+        return {
+          ok: false,
+          code: 'LEAD_DRIP_LOCK_SET_CHANGED',
+          reason: 'Matched customer set changed before SMS handoff',
+          retryable: true,
+        };
       }
       const existingClaim = await conn('new_lead_phone_drip_sends')
         .where({ lead_id: leadId, step })
@@ -401,7 +422,7 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVet
   const { stop, consentBasis, consentingCustomerId, matchedCustomerIds } = await leadShouldStop(
     dbh,
     lead,
-    checkCallVetoes ? { checkCallVetoes } : {},
+    { now, ...(checkCallVetoes ? { checkCallVetoes } : {}) },
   );
   if (stop || !consentingCustomerId) return 'stopped';
 
@@ -427,7 +448,13 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVet
       metadata: { original_message_type: activityType, lead_id: lead.id, drip_step: step, delivery_key: deliveryKey },
       withSmsHandoff: buildPhoneDripHandoff(dbh, { customerIds: matchedCustomerIds, phone: destinationPhone }),
       providerPreSendCheck: buildHandoffPreSendCheck({
-        dbh, leadId: lead.id, expectedPhone: destinationPhone, step, clock, checkCallVetoes,
+        dbh,
+        leadId: lead.id,
+        expectedPhone: destinationPhone,
+        step,
+        clock,
+        checkCallVetoes,
+        lockedCustomerIds: matchedCustomerIds,
       }),
     });
   } catch (err) {
@@ -441,7 +468,7 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender, checkCallVet
     return 'sent';
   }
   if (result?.deliveryOutcome === 'not_sent') {
-    const retryable = result?.retryable === true;
+    const retryable = result?.retryable === true || result?.code === 'CONSENT_LOOKUP_FAILED';
     await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: retryable ? 'release' : 'stopped' });
     return retryable ? 'deferred' : 'stopped';
   }
