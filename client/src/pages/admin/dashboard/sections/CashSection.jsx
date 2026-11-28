@@ -33,6 +33,19 @@ function PrepaidAndDraftsTile({ staleDrafts, buyerView }) {
   return <KpiTile label={label} value={value} sub={sub} alert={hasDrafts} />;
 }
 
+function CashRunwaySection({ cashForecast, forbidden, pending, onRetry }) {
+  if (forbidden) return null;
+  return (
+    <div className="mb-5">
+      <ChartCard title="Cash forecast & runway" sub="live bank pool & 13-week lowest projected balance">
+        <DashboardFeed value={cashForecast} pending={pending} label="cash forecast" onRetry={onRetry}>
+          <CashRunwayCard data={cashForecast} />
+        </DashboardFeed>
+      </ChartCard>
+    </div>
+  );
+}
+
 // CASH — are we collecting what we earned? Collections, AR aging, and the
 // autopay/billing machinery that turns MRR into money.
 export default function CashSection({
@@ -115,15 +128,12 @@ export default function CashSection({
       </div>
 
       {/* 13-week Cash Forecast summary — owner-only (hidden on 403 for non-owner admins) */}
-      {!cashForecastForbidden && (
-        <div className="mb-5">
-          <ChartCard title="Cash forecast & runway" sub="live bank pool & 13-week lowest projected balance">
-            <DashboardFeed value={cashForecast} pending={pending.cashForecast} label="cash forecast" onRetry={onRetry}>
-              <CashRunwayCard data={cashForecast} />
-            </DashboardFeed>
-          </ChartCard>
-        </div>
-      )}
+      <CashRunwaySection
+        cashForecast={cashForecast}
+        forbidden={cashForecastForbidden}
+        pending={pending.cashForecast}
+        onRetry={onRetry}
+      />
 
       {/* AR aging — the 90+ buckets are the only place alert-fg */}
       <div className="mb-5">
