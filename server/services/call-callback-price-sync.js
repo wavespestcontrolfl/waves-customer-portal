@@ -29,6 +29,7 @@ const {
   isReServiceCatalogRow,
   findServiceByName,
   hasMultipleServicesOrProperties,
+  callBookingDateOnly,
 } = require('./call-booking-catalog');
 const { resolveCallAgreedPrice } = require('../utils/call-agreed-price');
 const { normalizeServiceKey } = require('../config/recurring-pest-programs');
@@ -149,6 +150,8 @@ function requestedMatchesVisitExactly(requestedName, visitRow, catalogRows = [])
   return Boolean(resolved && String(resolved.id) === String(visitRow.service_id));
 }
 
+const SEPARATE_FROM_PRIOR_VISIT_RE = /\b(?:separate\s+from|not\s+(?:for|part\s+of|including)|different\s+from|in\s+addition\s+to|aside\s+from|other\s+than|unrelated\s+to)\b[^.!?\n]{0,40}\b(?:price|quote|rate|total|cost|visit|appointment|booking|service)\b/i;
+
 function hasExplicitPriorVisitLink(v2Extraction, transcription) {
   const sr = v2Extraction?.service_request || {};
   const contextText = [
@@ -157,7 +160,9 @@ function hasExplicitPriorVisitLink(v2Extraction, transcription) {
     v2Extraction?.scheduling?.scheduling_notes_raw,
     transcription,
   ].filter(Boolean).join('\n');
-  return EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE.test(contextText);
+  if (!contextText) return false;
+  const clauses = contextText.split(/[.!?\n;]+/).map((s) => s.trim()).filter(Boolean);
+  return clauses.some((clause) => EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE.test(clause) && !SEPARATE_FROM_PRIOR_VISIT_RE.test(clause));
 }
 
 function callbackMatchesVisitService(v2Extraction, visitRow, transcription = '', { customer = null, catalogRows = [] } = {}) {
@@ -174,7 +179,8 @@ function isVisitRowEligibleForPricing(row, { customerId = null, minDate = null }
   if (!row || row.estimated_price != null) return false;
   if (!CALL_BOOKED_SOURCE_ACTIONS.has(row.source_action)) return false;
   if (customerId && String(row.customer_id) !== String(customerId)) return false;
-  if (minDate && row.scheduled_date && String(row.scheduled_date).slice(0, 10) < minDate) return false;
+  const visitDate = callBookingDateOnly(row.scheduled_date);
+  if (minDate && visitDate && visitDate < minDate) return false;
   if (!['pending', 'confirmed'].includes(row.status)) return false;
   if (row.is_callback || row.followup_included || row.is_recurring || row.recurring_parent_id) return false;
   if (row.svc_billing_type !== 'one_time') return false;
@@ -286,7 +292,7 @@ async function propagateCallbackPriceToRecentVisit({
       .leftJoin('customer_properties as cp', 'ss.property_id', 'cp.id')
       .leftJoin('call_log as cl', 'ss.source_call_log_id', 'cl.id')
       .where('ss.customer_id', customerId)
-      .whereIn('ss.status', ['pending', 'confirmed'])
+      .whereIn('ss.status', ['pending', 'confirmed', 'rescheduled'])
       .where('ss.scheduled_date', '>=', todayET)
       .whereRaw('COALESCE(cl.created_at, ss.created_at) >= ?', [windowStartAt])
       .whereRaw('COALESCE(cl.created_at, ss.created_at) <= ?', [callAt])
@@ -335,12 +341,13 @@ async function propagateCallbackPriceToRecentVisit({
 }
 
 async function syncCallbackPriceIfEligible({
-  scheduledServiceId, appointmentResult, extracted, procToken, customerId, isOutbound, conn, call, v2Extraction, v2ApprovedExtraction, v2CanonicalExtraction, transcription, callSid,
+  scheduledServiceId, appointmentResult, extracted, procToken, customerId, isOutbound, conn, call, v2Extraction, v2ApprovedExtraction, transcription, callSid,
 }) {
   if (scheduledServiceId || appointmentResult?.scheduledServiceId || !customerId || isOutbound) {
     return { updated: false, reason: 'not_eligible' };
   }
-  const effectiveV2 = v2Extraction || v2ApprovedExtraction || v2CanonicalExtraction;
+  const effectiveV2 = v2Extraction || v2ApprovedExtraction;
+  if (!effectiveV2) return { updated: false, reason: 'no_live_v2_extraction' };
   try {
     return await propagateCallbackPriceToRecentVisit({
       conn,

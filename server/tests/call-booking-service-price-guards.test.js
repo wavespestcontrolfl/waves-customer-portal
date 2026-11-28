@@ -244,6 +244,21 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       v2Extraction: { scheduling: { status: 'confirmed', follow_up_mentioned: true, follow_up_start_at: null } },
       transcription: 'Agent: Normally it includes a second visit in two weeks.\nCaller: No second visit, just do the one treatment.',
     })).toBe(true);
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true },
+      catalogRow: SERVICES[1],
+      parentDate: '2026-11-29',
+      parentWindowStart: '16:00',
+      v2Extraction: { scheduling: { status: 'confirmed', follow_up_mentioned: true, follow_up_start_at: null } },
+      transcription: 'Agent: Normally it includes a second visit.\nCaller: No second visit, just do the one treatment.',
+    })).toBeNull();
+
+    // Negated one-time ("I do not want a one-time treatment") never downgrades a recurring service
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Monthly Pest Control Service' },
+      services: SERVICES,
+      transcription: 'Caller: I do not want a one-time treatment.',
+    })?.service_key).toBe('pest_general_monthly');
   });
 
   test('competitor monthly service ("monthly with them") never converts One-Time Pest, while pivot or separate-sentence monthly request promotes', () => {
@@ -542,6 +557,47 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
         },
       },
     })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
+
+    // Explicit separation from prior visit ("separate from the price for the booked visit") is rejected
+    selectChain.select.mockResolvedValueOnce([pestVisit]);
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-separate', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      transcription: 'Caller: That $199 is separate from the price for the booked visit.',
+      v2Extraction: {
+        scheduling: { status: 'none' },
+        service_request: {
+          specific_service_name: 'One-Time Pest',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
+
+    // Shadow-only v2CanonicalExtraction never propagates callback price
+    expect(await syncCallbackPriceIfEligible({
+      appointmentResult: { service: null, dateTime: null, scheduleCreated: false, smsSent: false, skippedReason: 'v2_routing_blocked' },
+      extracted: { appointment_confirmed: false },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      isOutbound: false,
+      conn,
+      call: { id: 'call-shadow', created_at: new Date('2026-11-28T15:30:00Z') },
+      transcription: 'Caller: Confirming the price for the earlier visit is $199.',
+      v2ApprovedExtraction: null,
+      v2CanonicalExtraction: {
+        scheduling: { status: 'none' },
+        service_request: {
+          specific_service_name: 'One-Time Pest',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'no_live_v2_extraction' });
 
     // Unnamed pest_general quote must NOT match a Lawn Pest Knockdown visit
     selectChain.select.mockResolvedValueOnce([{

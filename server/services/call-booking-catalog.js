@@ -384,6 +384,7 @@ const NEGATED_SINGLE_TREATMENT_RE = /\b(?:not|isn['’]?t|won['’]?t\s+be)\s+(?
 const WDO_CLAUSE_REFUSAL_RE = /\b(?:(?:don['’]?t|do\s+not|didn['’]?t|did\s+not|doesn['’]?t|does\s+not|won['’]?t|will\s+not)\s+(?:want|need|require|get|do|order|book|schedule)|declin(?:e[ds]?|ing)|refus(?:e[ds]?|ing)|skip(?:p(?:ed|ing))?|without|rather\s+not|instead\s+of|no\s+need\s+for|not\s+looking\s+for|no|not)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|paperwork|certificate|service))?|termite\s+(?:letter|clearance(?:\s+letter)?|report|form)|wood[- ]destroying[- ]organism\s+(?:inspection|report|form|letter))\b/i;
 const WDO_CLAUSE_AFFIRM_RE = /\b(?:need|want|would\s+like|require[sd]?|book|schedule|order(?:ing)?|get(?:ting)?|do(?:ing)?)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|certificate))?|termite\s+(?:letter|clearance(?:\s+letter)?))\b/i;
 const ONE_TIME_ONLY_INTENT_RE = /\b(?:(?:just|only)\s+(?:want(?:ed)?|need(?:ed)?|looking\s+for|do(?:ing)?)?\s*(?:a|the|this)?\s*one[- ]?time(?:\s+(?:treatment|service|visit|spray|job))?|one[- ]?time\s+(?:only|treatment|service|visit)|(?:just|only)\s+once|no\s+(?:ongoing|recurring|monthly|quarterly|plan|package|membership)|(?:don['’]?t|do\s+not|not)\s+(?:want(?:ing)?|need(?:ing)?|looking\s+for|interested\s+in)\s+(?:a\s+|an\s+)?(?:ongoing|recurring|monthly|quarterly|plan|package|membership|subscription))\b/i;
+const NEGATED_ONE_TIME_RE = /\b(?:not|no|never|without|rather\s+than|instead\s+of|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not|won['’]?t|will\s+not)\s+(?:want(?:ing)?|need(?:ing)?|looking\s+for))\s+(?:just\s+)?(?:a\s+|the\s+|this\s+)?one[- ]?time(?:\s+(?:treatment|service|visit|spray|job))?\b/gi;
 
 function v2PriceEntries(v2Extraction) {
   const sr = v2Extraction?.service_request;
@@ -810,7 +811,9 @@ function hasExplicitOneTimeOnlyIntent({ extracted = {}, v2Extraction = null, tra
   if (sr?.service_intent === 'recurring_membership_inquiry' || sr?.billing_choice) return false;
   const callerText = transcription ? callerOnlyText(transcription) : '';
   const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
-  if (!combined || !ONE_TIME_ONLY_INTENT_RE.test(combined)) return false;
+  if (!combined) return false;
+  const sanitized = combined.replace(NEGATED_ONE_TIME_RE, ' ');
+  if (!ONE_TIME_ONLY_INTENT_RE.test(sanitized)) return false;
   return !recurringIntentEvidence(transcription || combined);
 }
 
@@ -852,19 +855,26 @@ function resolvePackageVisitCountChoice(combined) {
   return finalChoice;
 }
 
+function hasExplicitFollowUpRefusal({ extracted = {}, v2Extraction = null, transcription = '' } = {}) {
+  if (followUpDateScheduled(extracted, v2Extraction)) return false;
+  const callerText = transcription ? callerOnlyText(transcription) : '';
+  const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
+  if (!combined || NEGATED_SINGLE_TREATMENT_RE.test(combined)) return false;
+  return resolvePackageVisitCountChoice(combined) === 'single' && FOLLOWUP_OMITTED_RE.test(combined);
+}
+
 function isDiscountedSinglePackageTreatment({
   catalogRow, extracted = {}, v2Extraction = null, transcription = '', resolvedPrice = null,
 } = {}) {
   const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
   if (!isPackageFollowUpServiceKey(catalogRow?.service_key)) return false;
   if (followUpDateScheduled(extracted, v2Extraction)) return false;
+  if (hasExplicitFollowUpRefusal({ extracted, v2Extraction, transcription })) return true;
+  if (followUpExplicitlyDiscussed(extracted, v2Extraction)) return false;
   const callerText = transcription ? callerOnlyText(transcription) : '';
   const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
   if (NEGATED_SINGLE_TREATMENT_RE.test(combined)) return false;
-  const choice = resolvePackageVisitCountChoice(combined);
-  if (choice !== 'single') return false;
-  if (FOLLOWUP_OMITTED_RE.test(combined)) return true;
-  if (followUpExplicitlyDiscussed(extracted, v2Extraction)) return false;
+  if (resolvePackageVisitCountChoice(combined) !== 'single') return false;
   const listPrice = Number(catalogRow?.base_price);
   const price = resolvedPrice != null ? Number(resolvedPrice) : agreedOneTimeVisitPrice(extracted, v2Extraction);
   return Number.isFinite(listPrice) && listPrice > 0 && Number.isFinite(price) && price > 0
@@ -1057,12 +1067,10 @@ function hasExplicitCurrencyEvidence(rawSource, evidence) {
   return rawHasDollar || /\$|\b(?:dollars?|bucks)\b/i.test(evidence);
 }
 
-function withinCatalogHundredRange(scaled, catalogRow, evidence = '') {
+function withinCatalogHundredRange(scaled, catalogRow) {
   if (scaled < 100 || scaled > 1999) return false;
   const base = Number(catalogRow?.base_price);
-  if (!Number.isFinite(base) || base < 100) return false;
-  if (Math.abs(scaled - base) < 0.005) return true;
-  return /\bhundred\b/i.test(String(evidence || '')) && Math.abs(scaled - base) <= base * 0.30;
+  return Number.isFinite(base) && base >= 100 && Math.abs(scaled - base) < 0.005;
 }
 
 function isFinalAcceptedStaffSttQuote(v2Extraction, entry) {
@@ -1256,11 +1264,14 @@ function followUpEligibility(extracted, catalogRow, stated, v2Extraction, transc
   const discountedSingle = isDiscountedSinglePackageTreatment({
     catalogRow, extracted, v2Extraction, transcription, resolvedPrice,
   });
+  const explicitlyRefused = hasExplicitFollowUpRefusal({ extracted, v2Extraction, transcription });
   const packageRow = !suppressForExistingFollowUp
     && !discountedSingle
+    && !explicitlyRefused
     && packageFollowupAutobookLive()
     && isPackageFollowUpServiceKey(catalogRow?.service_key);
   const mentionCounts = extracted.follow_up_visit_mentioned === true
+    && !explicitlyRefused
     && !suppressForExistingFollowUp
     && !(stated.nonFutureDate && catalogRow?.requires_follow_up !== true);
   return { discussed: mentionCounts || Boolean(stated.futureDate), packageRow };
