@@ -210,6 +210,7 @@ async function loadFreshTechFeedState(conn, req, candidates) {
       .whereIn('scheduled_services.id', ids)
       .where('scheduled_services.technician_id', req.technicianId)
       .whereNotIn('scheduled_services.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+      .modify((q) => require('./visit-hold').excludeHeld(q, 'scheduled_services'))
       .select(
         'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
         'scheduled_services.status', 'scheduled_services.scheduled_date',
@@ -355,6 +356,9 @@ function stripAccessCodePrefs(prefs, knownCodes = null) {
   if (typeof copy.pet_details === 'string') {
     copy.pet_details = redactFreeTextAccessCodes(copy.pet_details, codes);
   }
+  if (typeof copy.chemical_sensitivity_details === 'string') {
+    copy.chemical_sensitivity_details = redactFreeTextAccessCodes(copy.chemical_sensitivity_details, codes);
+  }
   return copy;
 }
 
@@ -391,6 +395,7 @@ function stripAccessCodesFromBriefBlock(access, knownCodes = null) {
     specialInstructions: null,
     ...(typeof access.petsSecuredPlan === 'string' ? { petsSecuredPlan: redactFreeTextAccessCodes(access.petsSecuredPlan, codes) } : {}),
     ...(typeof access.pets === 'string' ? { pets: redactFreeTextAccessCodes(access.pets, codes) } : {}),
+    ...(typeof access.chemicalSensitivities === 'string' ? { chemicalSensitivities: redactFreeTextAccessCodes(access.chemicalSensitivities, codes) } : {}),
     alerts: nextAlerts,
   };
 }

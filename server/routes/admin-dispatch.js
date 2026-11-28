@@ -36,6 +36,7 @@ const {
   loadActiveHomesByCustomerIds,
   loadTechPrimaryAccessIds,
   recheckTechFeedAccessRows,
+  collectStoredAccessCodes,
   redactFreeTextAccessCodes,
   stripAccessCodePrefs,
 } = require('../services/technician-visit-scope');
@@ -1685,14 +1686,15 @@ router.get('/:date?', async (req, res, next) => {
 
       // Build property notes — technicians receive raw entry codes only for
       // non-ended visits in [yesterday..tomorrow] ET at the matching home.
+      const knownCodes = isTechnicianRequest(req) ? collectStoredAccessCodes(prefs, s) : null;
       const allowTechVisitWindow = technicianMayReadVisitAccessCodes(req, s);
       const allowTechPrimaryPrefs = !isTechnicianRequest(req) || (allowTechVisitWindow && techPrimaryAllowedIds.has(s.id));
-      const alertPrefs = allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs);
-      const alerts = buildDispatchPropertyAlerts(alertPrefs, s.notes, { redactNotes: !allowTechVisitWindow });
-      const rowNotes = allowTechVisitWindow ? (s.notes || '') : (redactFreeTextAccessCodes(s.notes || '') || '');
-      const rowLastNotes = isTechnicianRequest(req)
-        ? redactFreeTextAccessCodes(previewText(lastService?.technician_notes))
-        : previewText(lastService?.technician_notes);
+      const alertPrefs = allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs, knownCodes);
+      const alerts = buildDispatchPropertyAlerts(alertPrefs, s.notes, { redactNotes: !allowTechVisitWindow, knownCodes });
+      const rowNotes = allowTechVisitWindow ? (s.notes || '') : (redactFreeTextAccessCodes(s.notes || '', knownCodes) || '');
+      const rowLastNotes = previewText(
+        isTechnicianRequest(req) ? redactFreeTextAccessCodes(lastService?.technician_notes, knownCodes) : lastService?.technician_notes,
+      );
 
       const row = {
         id: s.id,
@@ -1799,9 +1801,9 @@ router.get('/:date?', async (req, res, next) => {
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: lastLineService?.service_date || null,
         lastLineServiceType: lastLineService?.service_type || null,
-        lastLineServiceNotes: isTechnicianRequest(req)
-          ? redactFreeTextAccessCodes(previewText(lastLineService?.technician_notes))
-          : previewText(lastLineService?.technician_notes),
+        lastLineServiceNotes: previewText(
+          isTechnicianRequest(req) ? redactFreeTextAccessCodes(lastLineService?.technician_notes, knownCodes) : lastLineService?.technician_notes,
+        ),
         actualStartTime: s.actual_start_time,
         actualEndTime: s.actual_end_time,
         serviceTimeMinutes: s.service_time_minutes,
@@ -1814,7 +1816,7 @@ router.get('/:date?', async (req, res, next) => {
         statusLog: statusLog.map(l => ({
           status: l.status,
           at: l.at,
-          notes: allowTechVisitWindow ? (l.notes || null) : (redactFreeTextAccessCodes(l.notes) || null),
+          notes: allowTechVisitWindow ? (l.notes || null) : (redactFreeTextAccessCodes(l.notes, knownCodes) || null),
         })),
       };
       if (isTechnicianRequest(req)) {
@@ -1826,14 +1828,15 @@ router.get('/:date?', async (req, res, next) => {
     }));
 
     const droppedIds = await recheckTechFeedAccessRows(db, req, techRecheckCandidates, (candidate, { lostWindow }) => {
-      const safeNotes = lostWindow ? redactFreeTextAccessCodes(candidate.visit.notes || '') : candidate.visit.notes;
-      candidate.row.propertyAlerts = buildDispatchPropertyAlerts(stripAccessCodePrefs(candidate.prefs), safeNotes, { redactNotes: lostWindow });
+      const knownCodes = collectStoredAccessCodes(candidate.prefs, candidate.visit);
+      const safeNotes = lostWindow ? redactFreeTextAccessCodes(candidate.visit.notes || '', knownCodes) : candidate.visit.notes;
+      candidate.row.propertyAlerts = buildDispatchPropertyAlerts(stripAccessCodePrefs(candidate.prefs, knownCodes), safeNotes, { redactNotes: lostWindow, knownCodes });
       if (lostWindow) {
         candidate.row.notes = safeNotes || '';
-        candidate.row.lastServiceNotes = redactFreeTextAccessCodes(candidate.row.lastServiceNotes);
-        candidate.row.lastLineServiceNotes = redactFreeTextAccessCodes(candidate.row.lastLineServiceNotes);
+        candidate.row.lastServiceNotes = redactFreeTextAccessCodes(candidate.row.lastServiceNotes, knownCodes);
+        candidate.row.lastLineServiceNotes = redactFreeTextAccessCodes(candidate.row.lastLineServiceNotes, knownCodes);
         if (Array.isArray(candidate.row.statusLog)) {
-          candidate.row.statusLog = candidate.row.statusLog.map((l) => ({ ...l, notes: redactFreeTextAccessCodes(l.notes) || null }));
+          candidate.row.statusLog = candidate.row.statusLog.map((l) => ({ ...l, notes: redactFreeTextAccessCodes(l.notes, knownCodes) || null }));
         }
       }
     });

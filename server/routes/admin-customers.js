@@ -329,6 +329,9 @@ function techSafe360Payload(payload, { technicianId = null } = {}) {
     if (typeof out.preferences.pet_details === 'string') {
       out.preferences.pet_details = redactFreeTextAccessCodes(out.preferences.pet_details, knownCodes);
     }
+    if (typeof out.preferences.chemical_sensitivity_details === 'string') {
+      out.preferences.chemical_sensitivity_details = redactFreeTextAccessCodes(out.preferences.chemical_sensitivity_details, knownCodes);
+    }
   }
   out.services = (payload.services || []).map((r) => techSafeServiceRecord(r, knownCodes));
   const ownOnly = (rows) => (technicianId

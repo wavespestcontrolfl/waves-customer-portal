@@ -460,12 +460,12 @@ const {
   stripAccessCodesFromBriefBlock,
 } = require('../services/technician-visit-scope');
 
-function redactTechFeedText(allowWindow, text) {
-  return allowWindow ? text : redactFreeTextAccessCodes(text);
+function redactTechFeedText(allowWindow, text, knownCodes = null) {
+  return allowWindow ? text : redactFreeTextAccessCodes(text, knownCodes);
 }
 
-function redactTechHistoryText(req, text) {
-  return isTechnicianRequest(req) ? redactFreeTextAccessCodes(text) : text;
+function redactTechHistoryText(req, text, knownCodes = null) {
+  return isTechnicianRequest(req) ? redactFreeTextAccessCodes(text, knownCodes) : text;
 }
 
 function pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds) {
@@ -7152,6 +7152,7 @@ router.get('/', async (req, res, next) => {
       // eligibility AND a primary-home match; neighborhoodGateByVisit is
       // already scoped to the visit's own property_id so secondary homes keep
       // their own neighborhood gate entry while inside the visit window.
+      const knownCodes = isTechnicianRequest(req) ? collectStoredAccessCodes(prefs, s) : null;
       const allowTechVisitWindow = technicianMayReadVisitAccessCodes(req, s);
       const allowTechPrimaryPrefs = !isTechnicianRequest(req) || (allowTechVisitWindow && techPrimaryAllowedIds.has(s.id));
       const allowTechNeighborhood = !isTechnicianRequest(req)
@@ -7159,8 +7160,8 @@ router.get('/', async (req, res, next) => {
       const rowNeighborhoodGate = allowTechNeighborhood ? (neighborhoodGateByVisit.get(s.id) || null) : null;
       const rowNeighborhoodActions = allowTechNeighborhood && gateActionVisits.has(s.id);
       const alerts = compilePropertyAlerts({
-        prefs: allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs),
-        notes: redactTechFeedText(allowTechVisitWindow, cleanedNotes),
+        prefs: allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs, knownCodes),
+        notes: redactTechFeedText(allowTechVisitWindow, cleanedNotes, knownCodes),
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
@@ -7465,12 +7466,12 @@ router.get('/', async (req, res, next) => {
         // scheduler-audit filter is for scheduled_services.notes (where ops
         // sessions write audit trails), and would false-positive on genuine
         // tech prose like "No SMS sent because the phone is disconnected".
-        lastServiceNotes: redactTechHistoryText(req, previewText(lastService?.technician_notes)),
+        lastServiceNotes: previewText(redactTechHistoryText(req, lastService?.technician_notes, knownCodes)),
         // Line-scoped last visit for the service dashboards (Protocol panel):
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: safeDate(lastLineService?.service_date),
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
-        lastLineServiceNotes: redactTechHistoryText(req, previewText(lastLineService?.technician_notes)),
+        lastLineServiceNotes: previewText(redactTechHistoryText(req, lastLineService?.technician_notes, knownCodes)),
         checkOutTime: s.check_out_time,
         // With checkInTime/checkOutTime: the drive line finds where the tech is now.
         enRouteAt: s.en_route_at || null,
@@ -25256,11 +25257,18 @@ router.get('/:id/home-note', async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first(HOME_NOTE_VISIT_COLUMNS);
     if (!stillOwned) return homeNoteVisitRefusal(req, res);
-    if (isTechnicianRequest(req) && typeof out?.note?.body === 'string') {
+    if (isTechnicianRequest(req)) {
       const mayReadCodes = technicianMayReadVisitAccessCodes(req, stillOwned)
         && await sameHomeForTechVisitPrefs(db, req.technicianId, stillOwned.customer_id, stillOwned);
       if (!mayReadCodes) {
-        out.note = { ...out.note, body: redactFreeTextAccessCodes(out.note.body) };
+        out.editable = false;
+        if (typeof out?.note?.body === 'string') {
+          const prefs = stillOwned.customer_id
+            ? await db('property_preferences').where({ customer_id: stillOwned.customer_id }).first().catch(() => null)
+            : null;
+          const knownCodes = collectStoredAccessCodes(prefs, stillOwned);
+          out.note = { ...out.note, body: redactFreeTextAccessCodes(out.note.body, knownCodes) };
+        }
       }
     }
     HomeNote.sendHomeNote(res, out);
@@ -25285,9 +25293,24 @@ router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, a
           : Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });
       }
       if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forShare().first('id');
-      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id'], { allowCompleted: true });
+      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, [
+        'id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'property_id',
+        'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+        'source_estimate_id',
+      ], { allowCompleted: true });
       if (String(peek.customer_id || '') !== String(svc.customer_id || '')) {
         return { status: 409, error: 'This visit now belongs to another customer. Reload it.', code: 'customer_changed' };
+      }
+      if (isTechnicianRequest(req)) {
+        const mayReadCodes = technicianMayReadVisitAccessCodes(req, svc)
+          && await sameHomeForTechVisitPrefs(trx, req.technicianId, svc.customer_id, svc);
+        if (!mayReadCodes) {
+          return {
+            status: 403,
+            error: 'Home notes are read-only outside the active visit window at the matching service address.',
+            code: 'home_note_read_only',
+          };
+        }
       }
       return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
     });
