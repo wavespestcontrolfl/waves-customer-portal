@@ -686,7 +686,12 @@ function serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoic
     return serializeAdminCheckoutInvoice(checkoutInvoice, checkoutInvoicePrepaidApplied);
   }
   if (!checkoutInvoice || dateOnly(s.scheduled_date) !== etDateString()) {
-    return { ...EMPTY_CHECKOUT_INVOICE_FIELDS };
+    return {
+      ...EMPTY_CHECKOUT_INVOICE_FIELDS,
+      ...(dateOnly(s.scheduled_date) === etDateString()
+        ? { checkoutInvoicePrepaidApplied: Boolean(checkoutInvoicePrepaidApplied) }
+        : {}),
+    };
   }
   const netDue = Math.max(0, Math.round((Number(checkoutInvoice.total || 0) - Number(checkoutInvoice.credit_applied || 0) - Number(checkoutInvoice.amount_paid || 0)) * 100) / 100);
   return {
@@ -750,10 +755,6 @@ function stripTechOwnerOnlyMoney(req, rows) {
           prediction: { ...row.billingLane.prediction, amount: null, grossAmount: null },
         };
       }
-    }
-    if (dateOnly(row.scheduledDate) !== today) {
-      delete row.estimatedPrice;
-      delete row.primaryLinePrice;
     }
   }
 }
@@ -5943,6 +5944,7 @@ function mapAddonRow(row, { forTech = false } = {}) {
     serviceKey: row.service_key_snapshot || null,
     serviceCategory: row.service_category_snapshot || null,
     estimatedDuration: row.estimated_duration_minutes ?? null,
+    hasBillablePrice: Number(row.estimated_price ?? row.base_price ?? 0) > 0,
     ...(forTech ? {} : {
       excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
       basePrice: row.base_price != null ? Number(row.base_price) : null,
@@ -31157,6 +31159,7 @@ module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionCo
 // Test surface for the technician money strip on the day and week feeds.
 module.exports.stripTechOwnerOnlyMoney = stripTechOwnerOnlyMoney;
 module.exports.serializeCheckoutInvoiceForFeed = serializeCheckoutInvoiceForFeed;
+module.exports.mapAddonRow = mapAddonRow;
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;

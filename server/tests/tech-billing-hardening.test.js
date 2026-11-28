@@ -335,5 +335,20 @@ describe('P1-T4 & P2-T1: admin-schedule tech billing & dispatch-admin boundaries
     expect(futureOut.checkoutInvoiceId).toBeNull();
     expect(futureOut.checkoutInvoiceTotal).toBeNull();
     expect(futureOut.checkoutInvoicePrepaidApplied).toBe(false);
+
+    const todayNoInvoicePrepaid = serializeCheckoutInvoiceForFeed(techReq, { scheduled_date: today }, null, true);
+    expect(todayNoInvoicePrepaid.checkoutInvoiceId).toBeNull();
+    expect(todayNoInvoicePrepaid.checkoutInvoicePrepaidApplied).toBe(true);
+  });
+
+  test('mapAddonRow omits prices for technicians while preserving hasBillablePrice boolean for WDO fee seeding', () => {
+    const { mapAddonRow } = require('../routes/admin-schedule');
+    const techAddon = mapAddonRow({ id: 'a1', service_name: 'Carpenter Ants', estimated_price: 80, base_price: 80 }, { forTech: true });
+    expect(techAddon.hasBillablePrice).toBe(true);
+    expect(techAddon.estimatedPrice).toBeUndefined();
+    expect(techAddon.basePrice).toBeUndefined();
+
+    const freeAddon = mapAddonRow({ id: 'a2', service_name: 'Free Check', estimated_price: 0, base_price: 0 }, { forTech: true });
+    expect(freeAddon.hasBillablePrice).toBe(false);
   });
 });

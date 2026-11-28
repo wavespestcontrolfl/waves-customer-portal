@@ -230,7 +230,7 @@ function formatStructureType(customer) {
 // we seed nothing and the tech enters the fee.
 export function wdoFeeSeedFromVisit(service) {
   const addons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
-  const hasBillableAddon = addons.some((a) => Number(a?.estimatedPrice ?? a?.basePrice ?? a?.price ?? 0) > 0);
+  const hasBillableAddon = addons.some((a) => a?.hasBillablePrice === true || Number(a?.estimatedPrice ?? a?.basePrice ?? a?.price ?? 0) > 0);
   if (hasBillableAddon) return '';
   return service?.estimatedPrice ?? '';
 }
