@@ -201,7 +201,19 @@ test('emailPlainText preserves a staff reply below an attributed quote container
     body_text: 'Please reschedule to Thursday.\n> Old thread\nThanks',
     body_html: '<div class="gmail_quote"><p>Please reschedule to Thursday.</p><blockquote>Old thread</blockquote></div><p>Thanks</p>',
   }));
-  expect(wrappedWithTrailing).toBe('Please reschedule to Thursday.\nThanks');
+  expect(wrappedWithTrailing).toBe('Please reschedule to Thursday.');
+
+  const shortRefusalPrefix = stripQuotedAndSignature(emailPlainText({
+    body_text: 'No\n> Old thread\nNovember is fine.',
+    body_html: '<div class="gmail_quote"><p>No</p><blockquote>Old thread</blockquote></div><p>November is fine.</p>',
+  }));
+  expect(shortRefusalPrefix).toBe('No');
+
+  const attributedHistory = stripQuotedAndSignature(emailPlainText({
+    body_text: 'Thanks\nOn Nov 28, Pat wrote:\nCancel my visit.\n> older quote',
+    body_html: '<p>Thanks</p><p>On Nov 28, Pat wrote:</p><p>Cancel my visit.</p><blockquote>older quote</blockquote>',
+  }));
+  expect(attributedHistory).toBe('Thanks');
 
   const linkedReply = stripQuotedAndSignature(emailPlainText({
     body_text: 'Check the estimate (https://portal.wavespestcontrol.com/e/1) here.\n> Old thread',

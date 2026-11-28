@@ -103,6 +103,12 @@ function stripQuotedAndSignature(bodyText) {
   return text.trim();
 }
 
+const HARD_CUT_PATTERNS = [
+  ...HISTORY_HEADERS.slice(1),
+  /\*?\s*Office:\s*\(941\)/i,
+  /^[ \t]*--[ \t]*$/m,
+];
+
 function normalizeCompare(s) {
   return String(s || '')
     .replace(/\s*\((?:https?:\/\/|mailto:)[^)\s]+\)/gi, '')
@@ -110,36 +116,62 @@ function normalizeCompare(s) {
     .trim();
 }
 
-const FORWARD_OR_OUTLOOK_BOUNDARIES = HISTORY_HEADERS.slice(1);
+function sliceBeforeHardCut(decoded) {
+  const indices = HARD_CUT_PATTERNS
+    .map((re) => {
+      const m = re.exec(decoded);
+      return m ? m.index : null;
+    })
+    .filter((i) => i != null);
+  return indices.length ? decoded.slice(0, Math.min(...indices)) : decoded;
+}
 
-function unquotedPlainParagraphs(text) {
-  const decoded = decodeEntities(text).replace(/\r\n?/g, '\n');
-  const byNorm = new Map();
-  let run = [];
-  const flush = () => {
-    if (!run.length) return;
-    const joinedRaw = run.join(' ');
+function addCleanRun(byNorm, rawRun) {
+  const cleaned = stripQuotedAndSignature(rawRun.join('\n'));
+  if (!cleaned) return;
+  for (const para of cleaned.split(/\n{2,}/)) {
+    const joinedRaw = para.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
     const joinedNorm = normalizeCompare(joinedRaw);
     if (joinedNorm && !byNorm.has(joinedNorm)) byNorm.set(joinedNorm, joinedRaw);
-    run = [];
-  };
-  for (const rawLine of decoded.split('\n')) {
-    const trimmed = rawLine.trim();
-    if (
-      /^[ \t]*--[ \t]*$/.test(rawLine)
-      || /\*?\s*Office:\s*\(941\)/i.test(rawLine)
-      || FORWARD_OR_OUTLOOK_BOUNDARIES.some((re) => re.test(trimmed))
-    ) break;
-    if (!trimmed || /^[ \t]*>/.test(rawLine) || SENT_FROM.test(rawLine) || HISTORY_HEADERS[0].test(trimmed)) {
-      flush();
-      continue;
+    for (const line of para.split('\n')) {
+      const trimmed = line.trim();
+      const lineNorm = normalizeCompare(trimmed);
+      if (lineNorm && !byNorm.has(lineNorm)) byNorm.set(lineNorm, trimmed);
     }
-    const lineNorm = normalizeCompare(trimmed);
-    if (lineNorm && !byNorm.has(lineNorm)) byNorm.set(lineNorm, trimmed);
-    run.push(trimmed);
   }
-  flush();
+}
+
+function unquotedAfterQuoteParagraphs(text) {
+  const preCut = sliceBeforeHardCut(decodeEntities(text).replace(/\r\n?/g, '\n'));
+  const byNorm = new Map();
+  let sawQuote = false;
+  let run = [];
+  for (const line of preCut.split('\n')) {
+    if (/^[ \t]*>/.test(line)) {
+      if (run.length) { addCleanRun(byNorm, run); run = []; }
+      sawQuote = true;
+    } else if (sawQuote) {
+      run.push(line);
+    }
+  }
+  if (run.length) addCleanRun(byNorm, run);
   return byNorm;
+}
+
+function recoverBottomPostedReply(text, html) {
+  const parsed = require('../../utils/html-to-plain-text').htmlToPlainTextWithMeta(html, {
+    stripQuotes: true,
+    stripSignatures: true,
+    includeLinkUrls: false,
+    attributionPatterns: HISTORY_HEADERS,
+  });
+  if (!parsed.hasQuoteContainer || !parsed.text) return null;
+  const unquoted = unquotedAfterQuoteParagraphs(text);
+  const confirmed = parsed.text
+    .split('\n')
+    .map((line) => unquoted.get(normalizeCompare(line)))
+    .filter(Boolean);
+  return confirmed.length ? confirmed.join('\n') : null;
 }
 
 // The text of an email row: body_text, or its HTML converted when
@@ -150,35 +182,13 @@ function unquotedPlainParagraphs(text) {
 function emailPlainText(row) {
   const text = String(row?.body_text || '');
   const html = String(row?.body_html || '');
-  // When both parts exist and text/plain has '>' quote markers, ask the HTML
-  // parser to remove recognized quote/signature containers (plus any adjacent
-  // attribution line) using one shared predicate, and keep ONLY paragraphs the
-  // plain-text part also identifies as unquoted (returning the matched plain
-  // paragraph to preserve URLs) so bottom/inline replies survive while quoted
-  // or forwarded history in either MIME part is excluded.
-  if (html.trim() && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
+  // Only when body_text has no unquoted prefix above its '>' quotes (a
+  // bottom-posted reply like "<blockquote>Q</blockquote><p>Answer</p>") recover
+  // paragraphs that are unquoted in BOTH body_html and post-quote body_text.
+  if (text.trim() && html.trim() && /^[ \t]*>/m.test(text) && !stripQuotedAndSignature(text)) {
     try {
-      const parsed = require('../../utils/html-to-plain-text').htmlToPlainTextWithMeta(html, {
-        stripQuotes: true,
-        stripSignatures: true,
-        includeLinkUrls: false,
-        attributionPatterns: HISTORY_HEADERS,
-      });
-      if (parsed.hasQuoteContainer) {
-        const unquoted = unquotedPlainParagraphs(text);
-        const confirmed = [];
-        for (const line of parsed.text.split('\n')) {
-          const matched = unquoted.get(normalizeCompare(line));
-          if (matched) confirmed.push(matched);
-        }
-        const plainPrefix = stripQuotedAndSignature(text);
-        if (!confirmed.length) return plainPrefix;
-        const confirmedText = confirmed.join('\n');
-        if (plainPrefix && !normalizeCompare(confirmedText).includes(normalizeCompare(plainPrefix))) {
-          return `${plainPrefix}\n${confirmedText}`;
-        }
-        return confirmedText;
-      }
+      const recovered = recoverBottomPostedReply(text, html);
+      if (recovered) return recovered;
     } catch {
       // Fall back to the existing plain-text part on pathological HTML.
     }
