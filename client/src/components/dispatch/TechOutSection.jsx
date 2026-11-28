@@ -54,9 +54,14 @@ function postErrorMessage(errCode) {
   return null;
 }
 
+function stopWord(count) {
+  return count === 1 ? 'stop' : 'stops';
+}
+
 export default function TechOutSection({ techId, techName, onChanged }) {
-  // 'loading' | 'off' | 'ready'
+  // 'loading' | 'off' | 'error' | 'ready'
   const [phase, setPhase] = useState('loading');
+  const [loadError, setLoadError] = useState(null);
   const [absence, setAbsence] = useState(null);
   // GATE_TECH_OUT_AUTO_MOVE, read off every status GET (see fetchStatus) —
   // shows/hides the "Auto-assign parked stops" action without a second
@@ -125,13 +130,15 @@ export default function TechOutSection({ techId, techName, onChanged }) {
       }
       setAbsence(data.absence || null);
       setAutoMoveEnabled(!!data.auto_move_enabled);
+      setLoadError(null);
       setPhase('ready');
-    } catch {
-      // No error UI is specified for the status GET itself — treat a
-      // failed read the same as "feature not usable right now".
+    } catch (err) {
+      // Transient GET error: show an error banner with Retry rather than
+      // silently hiding the Tech Out controls as if the feature were off (P2).
       if (fetchSeqRef.current !== seq) return;
-      setPhase('off');
       setAbsence(null);
+      setLoadError(err?.message || 'Could not load availability');
+      setPhase('error');
     }
   }, []);
 
@@ -370,10 +377,29 @@ export default function TechOutSection({ techId, techName, onChanged }) {
     }
   }
 
+  if (phase === 'error') {
+    return (
+      <Card className="p-4 mb-4">
+        <div className="text-14 font-medium text-ink-primary mb-2">Availability</div>
+        <div role="alert" className="text-14 text-alert-fg mb-3">
+          Failed to load tech-out status: {loadError}
+        </div>
+        <Button
+          variant="secondary"
+          onClick={() => {
+            setPhase('loading');
+            setLoadError(null);
+            fetchStatus(techId);
+          }}
+        >
+          Retry
+        </Button>
+      </Card>
+    );
+  }
   if (phase !== 'ready') return null;
 
   if (absence) {
-    const redistribution = absence.redistribution || {};
     // Park-only foundation (Codex r4 + r5 on PR #4678): a mark-out parks
     // EVERY open stop as a "Needs a decision" alert; PR B (GATE_TECH_OUT_
     // AUTO_MOVE) adds the "Auto-assign parked stops" action below, still
@@ -383,9 +409,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
     // mark-out snapshot, which never reflected a card resolved by hand or
     // by a prior auto-assign run. Falls back to the snapshot's own count
     // only for a stale/cached response shape that predates that field.
-    const parkedCount = absence.parked_open_count != null
-      ? absence.parked_open_count
-      : (redistribution.parked || []).length;
+    const parkedCount = absence.parked_open_count ?? absence.redistribution?.parked?.length ?? 0;
     return (
       <Card className="p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
@@ -394,7 +418,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
           </Badge>
         </div>
         <div className="text-14 text-ink-primary mb-3">
-          {parkedCount} stop{parkedCount === 1 ? '' : 's'} parked in the Action Queue — decide who to move
+          {parkedCount} {stopWord(parkedCount)} parked in the Action Queue — decide who to move
         </div>
         <div className="text-14 text-ink-tertiary mb-3">
           Parked stops are in the Action Queue as &quot;Needs a decision&quot;.
@@ -409,7 +433,7 @@ export default function TechOutSection({ techId, techName, onChanged }) {
                 {/* Moved only: the live parked count above is the authoritative
                     remainder — it counts every stop of a grouped visit, which a
                     per-card tally here would undercount (Codex r4 P2). */}
-                Moved {autoAssignResult.moved} {autoAssignResult.moved === 1 ? 'stop' : 'stops'} automatically.
+                Moved {autoAssignResult.moved} {stopWord(autoAssignResult.moved)} automatically.
                 {autoAssignResult.failed > 0 && ` ${autoAssignResult.failed} couldn't be processed — try again.`}
               </div>
             )}

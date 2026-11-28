@@ -232,10 +232,16 @@ async function writeCapabilities(conn, technicianId, entries, actorId) {
  *   An unreadable catalog falls to the name.
  */
 async function categoriesForServices(conn, rows) {
-  const byName = rows.map((row) => classifyServiceCategory(row.service_type));
+  const typeOf = (row) => (typeof row === 'string'
+    ? row
+    : (row?.service_type || row?.serviceType || row?.service_name || row?.serviceName || row?.name || ''));
+  const byName = rows.map((row) => classifyServiceCategory(typeOf(row)));
   if (!jobTypeChecksLive()) return byName;
-  const keyOf = (row) => String(row.service_key || row.service_key_snapshot || '').trim() || null;
-  const idOf = (row) => (typeof row.service_id === 'string' && UUID_RE.test(row.service_id) ? row.service_id : null);
+  const keyOf = (row) => String(row?.service_key || row?.serviceKey || row?.service_key_snapshot || '').trim() || null;
+  const idOf = (row) => {
+    const id = row?.service_id || row?.serviceId;
+    return typeof id === 'string' && UUID_RE.test(id) ? id : null;
+  };
   const ids = [...new Set(rows.map(idOf).filter(Boolean))];
   const keys = [...new Set(rows.map(keyOf).filter(Boolean))];
   if (!ids.length && !keys.length) return byName;

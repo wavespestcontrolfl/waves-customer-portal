@@ -964,20 +964,17 @@ function occupiedHoldFilter(includeClaimedReservations, column) {
  * side's rule), for a read that must never show booked time as free (the
  * day-replan route check). Unset keeps the hold-timestamp filter.
  */
-async function listOccupiedWindows({
-  db = defaultDb,
+async function queryOccupiedWindowRows({
+  db,
   dateFrom,
   dateTo,
-  excludeServiceIds = [],
-  excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
-  withCoords = false,
+  excludeIds,
+  excludeStatuses,
+  withCoords,
   includeClaimedReservations,
-} = {}) {
-  if (!dateFrom || !dateTo) return [];
-  const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
-
-  let rows;
-  if (withCoords) {
+  noCustomerReads,
+}) {
+  if (withCoords && !noCustomerReads) {
     const query = db('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
@@ -986,18 +983,36 @@ async function listOccupiedWindows({
       .whereNotNull('scheduled_services.window_start');
     excludeHeld(query, 'scheduled_services');
     if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
-    rows = await query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db));
-  } else {
-    const query = db('scheduled_services')
-      .whereBetween('scheduled_date', [dateFrom, dateTo])
-      .whereNotIn('status', excludeStatuses)
-      .where(occupiedHoldFilter(includeClaimedReservations, 'reservation_expires_at'))
-      // Windowless placeholder rows are inert to conflicts (see header).
-      .whereNotNull('window_start');
-    excludeHeld(query, 'scheduled_services');
-    if (excludeIds.length) query.whereNotIn('id', excludeIds);
-    rows = await query.select(CONFLICT_COLUMNS);
+    return query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db));
   }
+  const query = db('scheduled_services')
+    .whereBetween('scheduled_date', [dateFrom, dateTo])
+    .whereNotIn('status', excludeStatuses)
+    .where(occupiedHoldFilter(includeClaimedReservations, 'reservation_expires_at'))
+    // Windowless placeholder rows are inert to conflicts (see header).
+    .whereNotNull('window_start');
+  excludeHeld(query, 'scheduled_services');
+  if (excludeIds.length) query.whereNotIn('id', excludeIds);
+  if (withCoords) return query.select([...CONFLICT_COLUMNS, 'lat', 'lng']);
+  return query.select(CONFLICT_COLUMNS);
+}
+
+async function listOccupiedWindows({
+  db = defaultDb,
+  dateFrom,
+  dateTo,
+  excludeServiceIds = [],
+  excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
+  withCoords = false,
+  includeClaimedReservations,
+  noCustomerReads = false,
+} = {}) {
+  if (!dateFrom || !dateTo) return [];
+  const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
+
+  const rows = await queryOccupiedWindowRows({
+    db, dateFrom, dateTo, excludeIds, excludeStatuses, withCoords, includeClaimedReservations, noCustomerReads,
+  });
   if (!Array.isArray(rows)) return [];
 
   // The offer-side travel mirrors (withCoords) need each stop's own

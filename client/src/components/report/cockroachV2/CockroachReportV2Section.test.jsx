@@ -2,7 +2,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import CockroachReportV2Section from './CockroachReportV2Section';
-import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from './CockroachReportV2';
+import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from './fieldKeys';
 
 const base = {
   source: 'primary',

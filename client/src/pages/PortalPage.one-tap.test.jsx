@@ -179,6 +179,53 @@ describe('one-tap purchase CTA gating', () => {
     expect(screen.getByText(/confirmation email and an app notification/)).toBeInTheDocument();
   });
 
+  it('displays the 2-hour arrival window (never 1-hour job windowEnd) across time, confirm, and done steps', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      purchaseId: 'p-2h',
+      estimateId: 'est-2h',
+      serviceKey: 'lawn_care',
+      label: 'Lawn Care',
+      perVisit: 84,
+      cadenceLabel: '9 applications/yr',
+      visitsPerYear: 9,
+      terms: { version: 'v1', text: 'Server terms text.' },
+      hasCardOnFile: true,
+      holdMinutes: 15,
+      slots: {
+        primary: [{
+          slotId: 'slot-1h', date: '2026-08-20', windowStart: '09:00', windowEnd: '10:00',
+          techFirstName: 'Adam', routeOptimal: false,
+        }],
+        expander: [],
+        nearby: false,
+      },
+    });
+    api.oneTapReserve.mockResolvedValue({ scheduledServiceId: 'ss-2h', expiresAt: new Date(Date.now() + 900000).toISOString(), holdMinutes: 15 });
+    api.oneTapConfirm.mockResolvedValue({
+      success: true, perVisit: 84, label: 'Lawn Care', emailQueued: true,
+      firstVisit: { date: '2026-08-20', windowStart: '09:00', windowEnd: '10:00' },
+    });
+
+    renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+    expect(await screen.findByText('Server terms text.')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Agree and choose a time'));
+
+    expect(await screen.findByText('Arrival 9:00 AM–11:00 AM')).toBeInTheDocument();
+    expect(screen.queryByText(/9:00 AM–10:00 AM/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Arrival 9:00 AM–11:00 AM'));
+
+    expect(await screen.findByText(/held for 15 minutes/)).toBeInTheDocument();
+    expect(screen.getByText(/9:00 AM–11:00 AM/)).toBeInTheDocument();
+    expect(screen.queryByText(/9:00 AM–10:00 AM/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Confirm'));
+
+    expect(await screen.findByText('Lawn Care is confirmed')).toBeInTheDocument();
+    expect(screen.getByText(/9:00 AM–11:00 AM/)).toBeInTheDocument();
+    expect(screen.queryByText(/9:00 AM–10:00 AM/)).not.toBeInTheDocument();
+  });
+
   // Owner 2026-11-11: the purchase screens show the discount on the service
   // being added and the new price of the services the customer already has.
   it('shows the WaveGuard discount on the new service and the new price of current services, then what the purchase applied', async () => {

@@ -381,7 +381,7 @@ function datePeriodRange(period, now = new Date()) {
   return { from: etDateString(addETDays(now, period === "7d" ? -7 : -30)), to };
 }
 function dateOnlyAtNoon(dateOnly) {
-  return new Date(`${dateOnly}T12:00:00`);
+  return new Date(`${dateOnly}T12:00:00Z`);
 }
 function parseInvoiceCreatedAt(value) {
   if (!value) return null;
@@ -1802,6 +1802,8 @@ function InvoiceList({
   // rowActionBusy scalar can be overwritten and cleared by a sibling
   // action mid-flight, which would re-enable the button early.
   const [reversingId, setReversingId] = useState(null);
+  const tapToPayInFlightRef = useRef(false);
+  const [tapToPayInvoiceId, setTapToPayInvoiceId] = useState(null);
   const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] =
     useState(null);
   const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
@@ -2269,6 +2271,36 @@ function InvoiceList({
     }
   };
   const domain = typeof window !== "undefined" ? window.location.origin : "";
+  const handleTapToPay = async (inv) => {
+    if (tapToPayInFlightRef.current) return;
+    tapToPayInFlightRef.current = true;
+    setTapToPayInvoiceId(inv.id);
+    try {
+      const outcome = await launchTapToPay(inv.id);
+      if (outcome?.status === "succeeded") {
+        showToast("Payment collected");
+        // Stripe's webhook marks the invoice paid a
+        // moment after the tap: read the list now
+        // and once more after it lands.
+        load();
+        onRefresh();
+        setTimeout(() => {
+          load();
+          onRefresh();
+        }, 4000);
+      } else if (outcome?.status === "failed") {
+        showToast(
+          `Tap to Pay failed: ${outcome.message || "try again"}`,
+          "error",
+        );
+      }
+    } catch (e) {
+      showToast(`Tap to Pay failed: ${e.message}`, "error");
+    } finally {
+      tapToPayInFlightRef.current = false;
+      setTapToPayInvoiceId(null);
+    }
+  };
 
   // Derive display status: overdue when unpaid + past due
   const getDisplayStatus = (inv) => {
@@ -2381,12 +2413,10 @@ function InvoiceList({
   const groupMap = new Map();
   for (const inv of rows) {
     const d = invoiceListRowDate(inv);
-    const key = d
-      ? `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
-      : "unknown";
+    const key = d ? etDateString(d) : "unknown";
     if (!groupMap.has(key)) {
       const label = d
-        ? d.toLocaleDateString("en-US", {
+        ? formatETDate(d, {
             weekday: "long",
             month: "long",
             day: "numeric",
@@ -2996,33 +3026,9 @@ function InvoiceList({
                           )}
                           {payerActions.tapToPay && (
                             <Button
-                              onClick={async () => {
-                                try {
-                                  const outcome = await launchTapToPay(inv.id);
-                                  if (outcome?.status === "succeeded") {
-                                    showToast("Payment collected");
-                                    // Stripe's webhook marks the invoice paid a
-                                    // moment after the tap: read the list now
-                                    // and once more after it lands.
-                                    load();
-                                    onRefresh();
-                                    setTimeout(() => {
-                                      load();
-                                      onRefresh();
-                                    }, 4000);
-                                  } else if (outcome?.status === "failed") {
-                                    showToast(
-                                      `Tap to Pay failed: ${outcome.message || "try again"}`,
-                                      "error",
-                                    );
-                                  }
-                                } catch (e) {
-                                  showToast(
-                                    `Tap to Pay failed: ${e.message}`,
-                                    "error",
-                                  );
-                                }
-                              }}
+                              onClick={() => handleTapToPay(inv)}
+                              disabled={tapToPayInvoiceId !== null}
+                              loading={tapToPayInvoiceId === inv.id}
                               title="Open Waves Tech app to tap customer's card/phone"
                               variant={"secondary"}
                               onClickCapture={(event) =>
@@ -3774,36 +3780,29 @@ function buildInvoiceTimeline(inv) {
   }
   return events.sort((a, b) => new Date(b.at) - new Date(a.at));
 }
-function formatTimelineWhen(iso) {
+export function formatTimelineWhen(iso, now = new Date()) {
   if (!iso) return "";
   const d = new Date(iso);
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  const timeStr = d.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  if (sameDay) return `Today at ${timeStr}`;
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (d.toDateString() === yesterday.toDateString())
+  if (Number.isNaN(d.getTime())) return "";
+  const dayKey = etDateString(d);
+  const todayKey = etDateString(now);
+  const timeStr = formatETTime(d);
+  if (dayKey === todayKey) return `Today at ${timeStr}`;
+  if (dayKey === etDateString(addETDays(now, -1)))
     return `Yesterday at ${timeStr}`;
-  const sameYear = d.getFullYear() === now.getFullYear();
-  return d.toLocaleDateString(
-    "en-US",
-    sameYear
-      ? {
-          month: "short",
-          day: "numeric",
-          hour: "numeric",
-          minute: "2-digit",
-        }
-      : {
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        },
-  );
+  const sameYear = dayKey.slice(0, 4) === todayKey.slice(0, 4);
+  return sameYear
+    ? formatETDateTime(d, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : formatETDate(d, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
 }
 function InvoiceTimeline({ invoice }) {
   const events = buildInvoiceTimeline(invoice);
@@ -4928,7 +4927,7 @@ function SendReceiptModal({
             className="bg-zinc-100 rounded-md text-ui-body text-zinc-900"
           >
             A receipt was already sent on{" "}
-            {new Date(invoice.receipt_sent_at).toLocaleString()}. Sending again
+            {formatETDateTime(invoice.receipt_sent_at)} ET. Sending again
             logs a second touch.
           </div>
         )}
@@ -8622,7 +8621,8 @@ function CreateInvoice({
                     (r) => r.id === e.target.value,
                   );
                   setSelectedService(sr || null);
-                  if (sr?.service_date) setServiceDate(sr.service_date);
+                  const normalizedDate = invoiceDateOnly(sr?.service_date);
+                  if (normalizedDate) setServiceDate(normalizedDate);
                   if (
                     sr &&
                     lineItems.length === 1 &&
@@ -8646,9 +8646,7 @@ function CreateInvoice({
                 {serviceRecords.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.service_type} --{" "}
-                    {new Date(
-                      r.service_date + "T12:00:00",
-                    ).toLocaleDateString()}{" "}
+                    {formatInvoiceDate(r.service_date)}{" "}
                     -- {r.tech_name || "Unknown tech"}
                   </option>
                 ))}
@@ -10011,19 +10009,26 @@ export function combinedReminderControls(customerSchedule) {
 
 function FollowupPanel({ invoiceId, showToast, isMobile }) {
   const busyRef = useRef(false);
+  const loadSeqRef = useRef(0);
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const [readError, setReadError] = useState(false);
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setReadError(false);
     const d = await adminFetch(`/admin/invoices/${invoiceId}/followup`).catch(
       () => null,
     );
+    if (seq !== loadSeqRef.current) return;
     setData(d);
     setReadError(!d);
   }, [invoiceId]);
   useEffect(() => {
+    setData(null);
     load();
+    return () => {
+      loadSeqRef.current += 1;
+    };
   }, [load]);
   const act = async (path, body) => {
     if (busyRef.current) return;
@@ -10153,13 +10158,13 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           {" "}
           <div>
             Touches sent:{" "}
-            <span className="font-medium">{seq.touches_sent}</span>
-            of {steps.length}
+            <span className="font-medium">{seq.touches_sent}</span> of{" "}
+            {steps.length}
           </div>
           {combinedSummary && <div>{combinedSummary}</div>}
           {!combinedSummary && nextStep && seq.next_touch_at && seq.status === "active" && (
             <div>
-              Next: <span className="font-medium">{nextStep.label}</span>on{" "}
+              Next: <span className="font-medium">{nextStep.label}</span> on{" "}
               {formatETDateTime(seq.next_touch_at)} ET
             </div>
           )}

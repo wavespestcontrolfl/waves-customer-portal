@@ -35,9 +35,10 @@
 
 import { createPortal } from 'react-dom';
 import { X, ChevronRight } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
 import { getAdminUser } from '../../lib/adminAuth';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 import MobileManualCardSheet from './MobileManualCardSheet';
 import MobileCashTenderSheet from './MobileCashTenderSheet';
 import MobileCheckTenderSheet from './MobileCheckTenderSheet';
@@ -56,6 +57,7 @@ export default function MobilePaymentSheet({
   hideInvoiceTender = false,
 }) {
   const [charging, setCharging] = useState(false);
+  const [awaitingSafariReturn, setAwaitingSafariReturn] = useState(false);
   const [sendingInvoice, setSendingInvoice] = useState(false);
   const [showManualCard, setShowManualCard] = useState(false);
   const [showCash, setShowCash] = useState(false);
@@ -63,11 +65,39 @@ export default function MobilePaymentSheet({
   const [showCardOnFile, setShowCardOnFile] = useState(false);
   const [error, setError] = useState(null);
   const [techCardOnFile, setTechCardOnFile] = useState(false);
+  const chargingRef = useRef(false);
+  const sendingInvoiceRef = useRef(false);
 
   const API_BASE = import.meta.env.VITE_API_URL || '/api';
   // Missing or unknown role fails closed to the technician's card-only list:
   // the server refuses the office tenders to anyone but an admin.
   const isAdmin = getAdminUser()?.role === 'admin';
+
+  // Safari Tap-to-Pay hands off via deep link without a callback: if the user
+  // cancels WavesPay or returns to Safari, unlock the button instead of leaving
+  // it stuck on "Opening Tap to Pay…".
+  useEffect(() => {
+    if (!awaitingSafariReturn) return undefined;
+    const resetOnReturn = () => {
+      if (document.visibilityState && document.visibilityState !== 'visible') return;
+      chargingRef.current = false;
+      setCharging(false);
+      setAwaitingSafariReturn(false);
+    };
+    const onPageShow = () => {
+      chargingRef.current = false;
+      setCharging(false);
+      setAwaitingSafariReturn(false);
+    };
+    document.addEventListener('visibilitychange', resetOnReturn);
+    window.addEventListener('pageshow', onPageShow);
+    window.addEventListener('focus', onPageShow);
+    return () => {
+      document.removeEventListener('visibilitychange', resetOnReturn);
+      window.removeEventListener('pageshow', onPageShow);
+      window.removeEventListener('focus', onPageShow);
+    };
+  }, [awaitingSafariReturn]);
 
   useEffect(() => {
     if (isAdmin || !invoiceId) return undefined;
@@ -84,51 +114,61 @@ export default function MobilePaymentSheet({
   if (!service || !invoiceId) return null;
 
   async function handleSendInvoice() {
-    if (sendingInvoice) return;
+    if (sendingInvoiceRef.current || sendingInvoice) return;
+    sendingInvoiceRef.current = true;
     setSendingInvoice(true);
     setError(null);
-    try {
-      // This tender fires right after MobileCheckoutSheet minted the
-      // invoice — a FIRST delivery by definition, same contract as the
-      // desktop create-and-send path (AdminInvoicesPage's handleCreate).
-      // No internal legacy request shape (AGENTS.md): every /:id/send
-      // caller states its intent explicitly now, never posts with no body.
-      const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/send`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-        },
-        body: JSON.stringify({ firstDelivery: true }),
-      });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        throw new Error(d.error || 'Failed to send invoice');
+    await holdReloadWhileSending('invoice-send', async () => {
+      try {
+        // This tender fires right after MobileCheckoutSheet minted the
+        // invoice — a FIRST delivery by definition, same contract as the
+        // desktop create-and-send path (AdminInvoicesPage's handleCreate).
+        // No internal legacy request shape (AGENTS.md): every /:id/send
+        // caller states its intent explicitly now, never posts with no body.
+        const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/send`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+          },
+          body: JSON.stringify({ firstDelivery: true }),
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          throw new Error(d.error || 'Failed to send invoice');
+        }
+        // A first delivery that finds the invoice already owned by another
+        // live delivery (the completion, a concurrent send, or — pre-push
+        // audit P1 #4633 — another first-delivery request that won this
+        // exact claim race) comes back ok:true with already_delivered/
+        // queued_delivery/in_progress instead of a thrown error — same
+        // no-op-success shape the desktop create path reads via
+        // sendOutcomeMessage. Nothing left to do here but proceed exactly as
+        // if this tender's own SMS+email had just gone out.
+        sendingInvoiceRef.current = false;
+        setSendingInvoice(false);
+        onInvoiceSent?.();
+      } catch (e) {
+        setError(e.message || 'Failed to send invoice');
+        sendingInvoiceRef.current = false;
+        setSendingInvoice(false);
       }
-      // A first delivery that finds the invoice already owned by another
-      // live delivery (the completion, a concurrent send, or — pre-push
-      // audit P1 #4633 — another first-delivery request that won this
-      // exact claim race) comes back ok:true with already_delivered/
-      // queued_delivery/in_progress instead of a thrown error — same
-      // no-op-success shape the desktop create path reads via
-      // sendOutcomeMessage. Nothing left to do here but proceed exactly as
-      // if this tender's own SMS+email had just gone out.
-      onInvoiceSent?.();
-    } catch (e) {
-      setError(e.message || 'Failed to send invoice');
-      setSendingInvoice(false);
-    }
+    });
   }
 
   async function handleTapToPay() {
-    if (charging) return;
+    if (chargingRef.current || charging) return;
+    chargingRef.current = true;
     setCharging(true);
+    setAwaitingSafariReturn(false);
     setError(null);
     try {
       const outcome = await launchTapToPay(invoiceId);
       if (outcome?.inApp) {
         // Waves Admin took the payment over this page: finish the way the
         // other card tenders do.
+        chargingRef.current = false;
+        setCharging(false);
         if (outcome.status === 'succeeded') {
           onChargeSuccess?.({ paymentIntentId: outcome.paymentIntentId });
           onClose?.();
@@ -137,15 +177,17 @@ export default function MobilePaymentSheet({
         if (outcome.status === 'failed') {
           setError(outcome.message || 'Tap to Pay did not go through. Try again or pick another way to pay.');
         }
-        setCharging(false);
         return;
       }
-      // Safari: control is now handed off to the native iOS shell. Leave the
-      // sheet open so the deep link has a stable document to return to; the
-      // parent will close it once the payment webhook updates status.
+      // Safari: control is handed off to the native iOS shell. Keep the sheet
+      // open for the deep-link return, and reset `charging` once Safari regains
+      // visibility/focus so a cancelled or failed handoff never wedges the button.
+      setAwaitingSafariReturn(true);
     } catch (e) {
       setError(e.message || 'Failed to open Tap to Pay');
+      chargingRef.current = false;
       setCharging(false);
+      setAwaitingSafariReturn(false);
     }
   }
 
@@ -185,9 +227,10 @@ export default function MobilePaymentSheet({
         >
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => { if (!sendingInvoice) onClose?.(); }}
+            disabled={sendingInvoice}
             aria-label="Close"
-            className="flex items-center justify-center h-11 w-11 u-focus-ring text-zinc-900"
+            className="flex items-center justify-center h-11 w-11 u-focus-ring text-zinc-900 disabled:opacity-50"
           >
             <X size={22} strokeWidth={1.75} />
           </button>
