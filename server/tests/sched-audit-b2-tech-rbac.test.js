@@ -14,9 +14,9 @@
  *            GET /api/admin/schedule/:id/estimate-source omits owner financial totals for technicians;
  *            GET /api/admin/schedule/zone-density & /recommend-slots & server/routes/dispatch.js admin routes require admin.
  *   - P1-11 & P1-17 & P2: GET /admin/dispatch/board LEFT JOINs tech_status & customers without 24h GPS drop;
- *            GET /admin/dispatch/alerts orders decision/critical first, uses stamped address, returns total;
+ *            GET /admin/dispatch/alerts orders critical then decision-only first, uses stamped address, returns total;
  *            GET /admin/dispatch/techs/:id excludes cancelled/rescheduled/held stops & scopes late_count to today;
- *            GET /admin/schedule/recommend-slots requires ../services/dispatch/csr-booker.
+ *            GET /admin/schedule/recommend-slots scans open non-held business hours without retired csr-booker.
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -126,13 +126,18 @@ describe('P0-5, P1-9, P1-11, P1-17 & P2: admin-dispatch RBAC, board LEFT JOINs &
         expect(jobSql).toContain('LEFT JOIN customers');
         expect(jobSql).toContain('s.customer_id IS NOT NULL OR s.reservation_expires_at IS NULL');
 
-        // 3. Admin /alerts orders decision/critical first, uses stamped address, returns total
+        // 3. Admin /alerts orders critical first then decision-only, uses stamped address, returns total
         const alertsRes = await fetch(`${base}/alerts`);
         expect(alertsRes.status).toBe(200);
         const alertsBody = await alertsRes.json();
         expect(alertsBody.total).toBe(73);
         expect(alertsBody.alerts[0].address).toBe('500 Rental Rd, Sarasota, FL 34236');
-        expect(orderByRaws.some(([t, sql]) => t === 'dispatch_alerts as a' && sql.includes('visit_not_closed_out') && sql.includes('critical'))).toBe(true);
+        expect(orderByRaws.some(([t, sql]) => (
+          t === 'dispatch_alerts as a'
+          && sql.includes('visit_not_closed_out')
+          && sql.includes('critical')
+          && sql.indexOf('critical') < sql.indexOf('visit_not_closed_out')
+        ))).toBe(true);
       } finally {
         await new Promise((r) => server.close(r));
       }
@@ -311,10 +316,12 @@ describe('P1-2 & P2: visit-hold alert cleanup, release guards, job-status holdFe
       await expect(visitHold.releaseVisitHold({ visitId: 'v3', conn: fakeConn }))
         .rejects.toMatchObject({ status: 409, code: 'past_date' });
 
-      // 4. Releasing a valid future visit checks assertAssignableTechnician when technician_id is set
+      // 4. Releasing a valid future visit acquires lockTechDays and checks assertAssignableTechnician when technician_id is set
+      fakeConn.raw.mockClear();
       currentRow = { id: 'v4', status: 'confirmed', held_at: '2026-11-26T00:00:00Z', scheduled_date: '2099-05-01', technician_id: 'tech-1' };
       const released = await visitHold.releaseVisitHold({ visitId: 'v4', conn: fakeConn });
       expect(released.changed).toBe(true);
+      expect(fakeConn.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['slot-reserve', 'tech-1:2099-05-01']);
       expect(assertAssignable).toHaveBeenCalledWith('tech-1', expect.objectContaining({ date: '2099-05-01' }));
     });
   });
@@ -381,20 +388,211 @@ describe('P1-2 & P2: visit-hold alert cleanup, release guards, job-status holdFe
 
       process.env.GATE_VISIT_HOLD = 'true';
       const todayEt = require('../utils/datetime-et').etDateString();
+      const selectCalls = [];
       fakeTrx.mockImplementation(() => ({
         leftJoin: jest.fn().mockReturnThis(),
         where: jest.fn().mockReturnThis(),
-        first: jest.fn().mockResolvedValue({
-          job_id: 'v-held-today',
-          customer_id: 'c1',
-          status: 'confirmed',
-          scheduled_date: todayEt,
-          held_at: '2026-11-28T00:00:00Z',
+        select: jest.fn((...cols) => { selectCalls.push(cols); return []; }),
+        first: jest.fn(async (...cols) => {
+          selectCalls.push(cols);
+          return {
+            job_id: 'v-held-today',
+            customer_id: 'c1',
+            status: 'confirmed',
+            scheduled_date: todayEt,
+            held_at: '2026-11-28T00:00:00Z',
+          };
         }),
       }));
       const { buildDispatchJobUpdatePayload } = require('../services/dispatch-assignment');
       const payload = await buildDispatchJobUpdatePayload('v-held-today', 'admin-1');
       expect(payload.board_visible).toBe(false);
+      expect(selectCalls.flat()).toContain('s.held_at');
+      expect(selectCalls.flat()).not.toContain('sheld_at');
+    });
+  });
+
+  test('job-status suppresses post-commit emit when nested savepoint rolls back inside committed outer trx', async () => {
+    await jest.isolateModulesAsync(async () => {
+      const emit = jest.fn();
+      let rejectSavepoint;
+      const savepointPromise = new Promise((_res, rej) => { rejectSavepoint = rej; });
+      let resolveOuter;
+      const outerPromise = new Promise((res) => { resolveOuter = res; });
+      const fakeTrx = jest.fn((table) => {
+        const isSvc = String(table).startsWith('scheduled_services');
+        return {
+          leftJoin: jest.fn().mockReturnThis(),
+          where: jest.fn().mockReturnThis(),
+          whereNull: jest.fn().mockReturnThis(),
+          whereIn: jest.fn().mockReturnThis(),
+          select: jest.fn().mockReturnThis(),
+          insert: jest.fn().mockResolvedValue([]),
+          update: jest.fn().mockResolvedValue(isSvc ? 1 : 0),
+          first: jest.fn().mockResolvedValue(isSvc ? {
+            id: 'job-sp',
+            job_id: 'job-sp',
+            customer_id: null,
+            technician_id: null,
+            service_type: 'General Pest',
+            status: 'confirmed',
+            scheduled_date: '2026-12-01',
+            window_start: '09:00',
+            window_end: '10:00',
+            notes: null,
+          } : null),
+          then: (resolve) => Promise.resolve([]).then(resolve),
+        };
+      });
+      fakeTrx.fn = { now: () => 'NOW()' };
+      fakeTrx.executionPromise = savepointPromise;
+      fakeTrx.parentTransaction = { executionPromise: outerPromise };
+      jest.doMock('../models/db', () => fakeTrx);
+      jest.doMock('../sockets', () => ({ getIo: () => ({ to: () => ({ emit }) }) }));
+      jest.doMock('../sockets/tech-rooms', () => ({ pingTechnicianRooms: jest.fn() }));
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+      jest.doMock('../services/dispatch-alerts', () => ({ autoResolveOverdueAlertsForJob: jest.fn().mockResolvedValue({ resolved: 0 }) }));
+      jest.doMock('../services/visit-live-activity', () => ({ onStatusTransition: jest.fn().mockResolvedValue(null) }));
+
+      const { transitionJobStatus } = require('../services/job-status');
+      await transitionJobStatus({ jobId: 'job-sp', fromStatus: 'confirmed', toStatus: 'en_route', trx: fakeTrx });
+      rejectSavepoint(new Error('savepoint failed'));
+      resolveOuter();
+      await new Promise((r) => setImmediate(r));
+      expect(emit).not.toHaveBeenCalled();
+    });
+  });
+
+  test('office-auto-technician excludes technicians marked off for any add-on category', async () => {
+    await jest.isolateModulesAsync(async () => {
+      jest.doMock('../models/db', () => jest.fn());
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/technician-eligibility', () => ({
+        applyAssignable: (q) => q,
+        absentTechDays: jest.fn(async () => new Set()),
+      }));
+      jest.doMock('../services/scheduling/line-technician', () => ({
+        serviceLineFor: jest.fn(async (_c, { serviceType }) => ({
+          line: /rodent/i.test(String(serviceType || '')) ? 'rodent' : 'general',
+        })),
+        lineMapLive: () => false,
+        pickLineTechnician: jest.fn(),
+      }));
+      jest.doMock('../services/scheduling/pick-technician', () => ({ pickTechnicianActive: () => false }));
+
+      const conn = jest.fn((table) => {
+        const rows = table === 'technicians'
+          ? [{ id: 'tech-a', name: 'Tech A' }, { id: 'tech-b', name: 'Tech B' }]
+          : [{ technician_id: 'tech-a', service_category: 'rodent', capability_level: 'off', active: false }];
+        const c = {};
+        c.where = jest.fn(() => c);
+        c.whereIn = jest.fn(() => c);
+        c.select = jest.fn(async () => rows);
+        return c;
+      });
+      const { resolveOfficeAutoTechnician } = require('../services/scheduling/office-auto-technician');
+      const picked = await resolveOfficeAutoTechnician({
+        conn,
+        date: '2099-05-01',
+        serviceType: 'Quarterly Pest',
+        serviceAddons: [{ serviceType: 'Rodent Trapping' }],
+      });
+      expect(picked).toEqual({ technicianId: 'tech-b', result: 'assigned', reason: 'only_assignable' });
+    });
+  });
+
+  test('GET /:id/estimate-source strips dollar amounts/token for techs while keeping VisitBrief payerBilled & billingTerm posture', async () => {
+    await jest.isolateModulesAsync(async () => {
+      let currentRole = 'technician';
+      const fakeDb = jest.fn((table) => {
+        const c = {};
+        for (const m of ['where', 'andWhere', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'whereNotIn', 'leftJoin', 'join', 'orderBy', 'select', 'countDistinct', 'forUpdate']) {
+          c[m] = jest.fn(() => c);
+        }
+        c.modify = jest.fn((fn) => { fn(c); return c; });
+        c.then = (resolve) => Promise.resolve([]).then(resolve);
+        c.first = jest.fn(async () => {
+          if (String(table).startsWith('scheduled_services')) {
+            return { id: 'svc-own', technician_id: 'tech-1', source_estimate_id: 'est-1', n: 1 };
+          }
+          if (String(table).startsWith('estimates')) {
+            return {
+              id: 'est-1',
+              customer_id: 'cust-1',
+              token: 'secret-tok',
+              estimate_slug: 'EST-2026-0001',
+              monthly_total: 49,
+              annual_total: 588,
+              onetime_total: 120,
+              status: 'accepted',
+            };
+          }
+          return null;
+        });
+        return c;
+      });
+      fakeDb.raw = (x) => x;
+      fakeDb.fn = { now: () => new Date() };
+      fakeDb.transaction = async (cb) => cb(fakeDb);
+
+      jest.doMock('../models/db', () => fakeDb);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+      jest.doMock('../services/estimate-deposits', () => ({
+        summarizeEstimateDeposit: jest.fn(async () => ({
+          payerBilled: true, required: true, paid: 100, creditRemaining: 40, policyAmount: 100,
+        })),
+      }));
+      jest.doMock('../services/estimate-payment-context', () => ({
+        buildEstimatePaymentContext: jest.fn(async () => ({
+          billingTerm: 'prepay_annual',
+          annualPrepay: { coversThisVisit: false, refunded: false, amount: 588 },
+        })),
+      }));
+      jest.doMock('../middleware/admin-auth', () => {
+        const actual = jest.requireActual('../middleware/admin-auth');
+        return {
+          ...actual,
+          adminAuthenticate: (req, _res, next) => {
+            req.technician = { id: currentRole === 'admin' ? 'admin-1' : 'tech-1', role: currentRole };
+            req.technicianId = req.technician.id;
+            req.techRole = currentRole;
+            next();
+          },
+        };
+      });
+
+      const express = require('express');
+      const router = require('../routes/admin-schedule');
+      const app = express();
+      app.use('/api/admin/schedule', router);
+      const server = app.listen(0);
+      const base = `http://127.0.0.1:${server.address().port}/api/admin/schedule`;
+      try {
+        const techRes = await fetch(`${base}/svc-own/estimate-source`);
+        expect(techRes.status).toBe(200);
+        const techBody = await techRes.json();
+        expect(techBody.estimateToken).toBeUndefined();
+        expect(techBody.quotedTotal).toBeUndefined();
+        expect(techBody.monthlyTotal).toBeUndefined();
+        expect(techBody.annualTotal).toBeUndefined();
+        expect(techBody.onetimeTotal).toBeUndefined();
+        expect(techBody.deposit).toEqual({ payerBilled: true, required: true });
+        expect(techBody.payment).toEqual({
+          billingTerm: 'prepay_annual',
+          annualPrepay: { coversThisVisit: false, refunded: false },
+        });
+
+        currentRole = 'admin';
+        const adminRes = await fetch(`${base}/svc-own/estimate-source`);
+        expect(adminRes.status).toBe(200);
+        const adminBody = await adminRes.json();
+        expect(adminBody.estimateToken).toBe('secret-tok');
+        expect(adminBody.quotedTotal).toBe(169);
+        expect(adminBody.deposit).toMatchObject({ payerBilled: true, paid: 100, policyAmount: 100 });
+        expect(adminBody.payment.annualPrepay.amount).toBe(588);
+      } finally {
+        await new Promise((r) => server.close(r));
+      }
     });
   });
 });

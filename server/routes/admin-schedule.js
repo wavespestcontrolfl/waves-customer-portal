@@ -25318,6 +25318,25 @@ router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function sanitizeEstimatePostureForTech(deposit, payment) {
+  return {
+    deposit: deposit
+      ? { payerBilled: Boolean(deposit.payerBilled), required: Boolean(deposit.required) }
+      : null,
+    payment: payment
+      ? {
+          billingTerm: payment.billingTerm || null,
+          ...(payment.annualPrepay ? {
+            annualPrepay: {
+              coversThisVisit: payment.annualPrepay.coversThisVisit,
+              refunded: Boolean(payment.annualPrepay.refunded),
+            },
+          } : {}),
+        }
+      : null,
+  };
+}
+
 // GET /api/admin/schedule/:id/estimate-source
 router.get('/:id/estimate-source', async (req, res, next) => {
   try {
@@ -25421,9 +25440,10 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         monthlyTotal: Number(est.monthly_total || 0),
         annualTotal: Number(est.annual_total || 0),
         onetimeTotal: Number(est.onetime_total || 0),
+        deposit,
+        payment,
       }),
-      deposit,
-      payment,
+      ...(isTechnicianRequest(req) ? sanitizeEstimatePostureForTech(deposit, payment) : {}),
       // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
@@ -29486,23 +29506,17 @@ router.get('/services-dropdown', async (req, res, next) => {
 // GET /api/admin/schedule/recommend-slots — smart slot recommendations
 router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
   try {
-    const { customerId, serviceType, date, serviceId } = req.query;
+    const { date } = req.query;
     if (!date) return res.status(400).json({ error: 'date required' });
 
-    // Try CSR booker first
-    try {
-      const CSRBooker = require('../services/dispatch/csr-booker');
-      if (CSRBooker.recommendSlots) {
-        const result = await CSRBooker.recommendSlots({ customerId, serviceType, date, serviceId });
-        if (result?.slots?.length) return res.json(result);
-      }
-    } catch (e) { logger.warn(`[recommend-slots] CSR booker unavailable: ${e.message}`); }
-
-    // Basic slot finder: check existing services on that date
-    const existing = await db('scheduled_services')
-      .where({ scheduled_date: date })
-      .whereNotIn('status', ['cancelled'])
-      .select('window_start', 'window_end', 'estimated_duration_minutes');
+    // Basic slot finder: check live non-held, non-cancelled services on that date
+    const existing = await require('../services/visit-hold').excludeHeld(
+      db('scheduled_services')
+        .where({ scheduled_date: date })
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at')),
+      'scheduled_services'
+    ).select('window_start', 'window_end', 'estimated_duration_minutes');
 
     const busySlots = existing.map(s => {
       const start = s.window_start || '08:00';
@@ -29511,16 +29525,16 @@ router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
       return { startMin: sh * 60 + sm, endMin: sh * 60 + sm + dur };
     });
 
-    // Find open 30-min windows between 7 AM (420) and 5 PM (1020)
+    // Find open 30-min windows between 8 AM (480) and 5 PM (1020)
     const candidates = [];
-    for (let min = 420; min <= 1020; min += 30) {
+    for (let min = 480; min <= 1020; min += 30) {
       const conflicts = busySlots.filter(b => min < b.endMin && min + 30 > b.startMin).length;
       candidates.push({ min, conflicts });
     }
 
     // Sort by fewest conflicts, pick top 3, spread across morning/midday/afternoon
     candidates.sort((a, b) => a.conflicts - b.conflicts);
-    const morning = candidates.find(c => c.min >= 420 && c.min < 660);
+    const morning = candidates.find(c => c.min >= 480 && c.min < 660);
     const midday = candidates.find(c => c.min >= 660 && c.min < 840);
     const afternoon = candidates.find(c => c.min >= 840 && c.min <= 1020);
 

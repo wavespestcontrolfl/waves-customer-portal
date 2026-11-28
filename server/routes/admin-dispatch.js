@@ -7465,9 +7465,16 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
         's.window_start',
         's.window_end'
       )
-      // Decision-only cards and critical alerts surface ahead of lower-priority
-      // warnings/info so high-backlog queues never bury urgent work past LIMIT 50 (P1-17).
-      .orderByRaw("CASE WHEN a.type IN ('visit_not_closed_out', 'follow_up_needed', 'tech_out_overflow') THEN 0 WHEN a.severity = 'critical' THEN 1 WHEN a.severity = 'warn' THEN 2 ELSE 3 END ASC, a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
+      // Critical severity and decision-only cards surface ahead of lower-priority
+      // warnings/info so high-backlog info follow-ups never bury urgent work past LIMIT 50 (P1-17).
+      .orderByRaw((() => {
+        const { DECISION_ONLY_ALERT_TYPES } = require('../services/dispatch-alerts');
+        const decisionTypes = (Array.isArray(DECISION_ONLY_ALERT_TYPES) && DECISION_ONLY_ALERT_TYPES.length
+          ? DECISION_ONLY_ALERT_TYPES
+          : ['visit_not_closed_out']).filter((t) => /^[a-z0-9_]+$/i.test(String(t)));
+        const list = decisionTypes.map((t) => `'${t}'`).join(', ');
+        return `CASE WHEN a.severity = 'critical' THEN 0 WHEN a.type IN (${list}) THEN 1 WHEN a.severity = 'warn' THEN 2 ELSE 3 END ASC, a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST`;
+      })())
       .limit(limit);
 
     const countQ = db('dispatch_alerts as a');

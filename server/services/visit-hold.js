@@ -188,8 +188,11 @@ async function releaseVisitHold({ visitId, now = new Date(), reason = 'released'
   const todayStr = etDateString(now);
   const result = await conn.transaction(async (trx) => {
     const occupancy = require('./scheduling/occupancy');
-    // Rung 1 (the booking day lock) before the row lock, the order every booking writer takes.
+    // Canonical lock order: Rung 1 (occupancy day lock) -> Rung 3 (tech-day lock) -> row lock.
     if (dateStr) await occupancy.acquireOccupancyLock(trx, dateStr);
+    if (dateStr && pre.technician_id) {
+      await require('./scheduling/tech-day-lock').lockTechDays(trx, [{ techId: pre.technician_id, date: dateStr }]);
+    }
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate().first(...cols);
     if (!row || !row.held_at) return { changed: false, visitId };
     // Refuse releasing a visit that is no longer holdable (cancelled/skipped/completed)

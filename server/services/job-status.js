@@ -140,6 +140,15 @@ const ADMIN_ROOM = 'dispatch:admins';
 const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
 const CUSTOMER_ETA_TIMEOUT_MS = 750;
 
+function enclosingCommitPromise(trx) {
+  const rootCommit = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+  if (!rootCommit) return null;
+  if (trx && trx.parentTransaction && trx.executionPromise) {
+    return Promise.all([trx.executionPromise, rootCommit]);
+  }
+  return rootCommit;
+}
+
 // Strictly-increasing claim timestamps within this process — the sweep
 // groups series claims by (customer, exact token), and two independent
 // same-millisecond cancels must not read as one series (codex #3233 r12;
@@ -1113,10 +1122,10 @@ async function transitionJobStatus({
   }
 
   if (trx) {
-    // Caller-owned trx. Do the writes; defer both emits until the caller's
-    // OUTERMOST transaction resolves (savepoint-safe via commitPromiseOf).
+    // Caller-owned trx. Do the writes; defer both emits until the enclosing
+    // transaction and savepoint settle (savepoint-safe via enclosingCommitPromise).
     const { customerId, customerPayload, adminPayload } = await doWrites(trx);
-    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+    const commitPromise = enclosingCommitPromise(trx);
     if (commitPromise) {
       commitPromise
         .then(() => {

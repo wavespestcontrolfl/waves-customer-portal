@@ -75,7 +75,7 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
       db.raw('COALESCE(s.service_address_city, c.city) as city'),
       db.raw('COALESCE(s.service_address_state, c.state) as state'),
       db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
-      ...visitHold.heldColumn('s')
+      ...visitHold.heldColumn('s.')
     );
 
   if (!row) return null;
