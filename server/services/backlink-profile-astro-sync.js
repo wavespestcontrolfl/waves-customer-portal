@@ -212,54 +212,33 @@ async function getVerifiedProfilesByOffice() {
   let dropped = 0;
   let refused = 0;
   for (const r of rows) {
-    const url = String(r.live_url || '').trim();
-    if (!/^https:\/\/\S+$/.test(url)) continue;
-    const reason = sameAsRejectReason(url);
-    let cleanUrl = url;
-    let isQueryVariant = false;
-    if (reason === 'not_profile') {
-      try {
-        const parsed = new URL(url);
-        if (parsed.search) {
-          parsed.search = '';
-          cleanUrl = parsed.toString();
-          isQueryVariant = sameAsRejectReason(cleanUrl) === null;
-        }
-      } catch { /* fall through */ }
-    }
-    if (reason && !isQueryVariant) { refused++; continue; }
-    const hp = urlHostAndPath(cleanUrl);
-    const key = hp ? `${hp.host}${hp.path}` : cleanUrl.toLowerCase();
-    let entry = byNormalized.get(key);
-    if (!entry) {
-      entry = { claimedOffices: new Set(), resolvedOffices: new Set(), urls: new Set() };
-      byNormalized.set(key, entry);
-    }
+    const raw = String(r.live_url || '').trim();
+    if (!/^https:\/\/\S+$/.test(raw)) continue;
+    const base = raw.split('?')[0];
+    if (sameAsRejectReason(base)) { refused++; continue; }
+    const hp = urlHostAndPath(base);
+    const key = `${hp.host}${hp.path}`;
+    const entry = byNormalized.get(key) || { claims: new Set(), resolved: new Set(), urls: new Set() };
+    byNormalized.set(key, entry);
     if (r.location && r.location !== 'default') {
-      entry.claimedOffices.add(LOCATION_TO_OFFICE_SLUG[r.location] || `unknown:${r.location}`);
+      entry.claims.add(LOCATION_TO_OFFICE_SLUG[r.location] || `unknown:${r.location}`);
     }
-    const slug = officeSlugForRow(r.location, cleanUrl);
-    if (slug) entry.resolvedOffices.add(slug);
-    if (!isQueryVariant) entry.urls.add(url);
+    // Query variants participate only in cross-office conflict checks; only
+    // query-free rows may resolve or supply a published sameAs URL.
+    if (base.length === raw.length) {
+      entry.urls.add(raw);
+      const slug = officeSlugForRow(r.location, raw);
+      if (slug) entry.resolved.add(slug);
+    }
   }
   const byOffice = {};
   for (const slug of OFFICE_SLUGS) byOffice[slug] = new Set();
   for (const entry of byNormalized.values()) {
     if (!entry.urls.size) { refused++; continue; }
-    // Reject if multiple offices claim the URL, no valid office was resolved,
-    // or any stored location disagrees with the resolved office.
-    if (entry.claimedOffices.size > 1 || entry.resolvedOffices.size !== 1) {
-      dropped++;
-      continue;
-    }
-    const [slug] = entry.resolvedOffices;
-    if ([...entry.claimedOffices].some((c) => c !== slug)) {
-      dropped++;
-      continue;
-    }
-    // Choose a deterministic representative spelling across identical normalized rows.
-    const canonicalUrl = [...entry.urls].sort()[0];
-    byOffice[slug].add(canonicalUrl);
+    const [slug] = entry.resolved;
+    const conflict = entry.claims.size > 1 || entry.resolved.size !== 1 || [...entry.claims].some((c) => c !== slug);
+    if (conflict) { dropped++; continue; }
+    byOffice[slug].add([...entry.urls].sort()[0]);
   }
   if (dropped) logger.warn(`[backlink-sync] dropped ${dropped} listing(s) with an unknown or ambiguous office location`);
   if (refused) logger.info(`[backlink-sync] kept ${refused} verified link(s) out of sameAs (not an allowlisted office profile page)`);
