@@ -173,12 +173,19 @@ describe('parseWhen fast deterministic path and interactive AI policy', () => {
     }
   });
 
-  it('keeps "Friday or Saturday morning" unresolved when AI times out', async () => {
-    const spy = jest.spyOn(llmCall, 'dispatchWithFallback').mockResolvedValueOnce({ ok: false, json: null });
+  it('keeps "Friday or Saturday morning" and negated relative phrases unresolved when AI times out', async () => {
     const nov27 = new Date('2026-11-27T17:00:00Z');
-    const res = await parseWhen('Friday or Saturday morning', { now: nov27, minDaysOut: 1, maxDaysOut: 90, defaultWindowDays: 14 });
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(res).toMatchObject({ source: 'fallback', understood: false, timeOfDay: 'morning', dateFrom: '2026-11-28', dateTo: '2026-12-11' });
+    for (const [query, expectedTod] of [
+      ['Friday or Saturday morning', 'morning'],
+      ['any day except tomorrow', 'any'],
+      ['not this weekend', 'any'],
+    ]) {
+      const spy = jest.spyOn(llmCall, 'dispatchWithFallback').mockResolvedValueOnce({ ok: false, json: null });
+      const res = await parseWhen(query, { now: nov27, minDaysOut: 1, maxDaysOut: 90, defaultWindowDays: 14 });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(res).toMatchObject({ source: 'fallback', understood: false, timeOfDay: expectedTod, dateFrom: '2026-11-28', dateTo: '2026-12-11' });
+      spy.mockRestore();
+    }
   });
 
   it.each(['Feb 30', '2/30', '2026-02-30', 'Feb 30 morning'])('keeps impossible explicit date %s out of the AI path', async (query) => {

@@ -23,6 +23,8 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // ("+1 (941) 555-1234") is 11 digits — drop the US country code so the same
 // input the gate accepts is also accepted by the contact step, the existing-
 // customer lookup, intent capture and confirm (they previously disagreed).
+const NANP_PHONE_RE = /^[2-9]\d{2}[2-9]\d{6}$/;
+
 const phoneDigits = (raw) => {
   const trimmed = String(raw || '').trim();
   if (!trimmed) return '';
@@ -31,9 +33,12 @@ const phoneDigits = (raw) => {
     // Only +1 E.164 US/NANP numbers (11 digits starting with 1) strip the
     // country code; foreign prefixes like +44 stay invalid instead of turning
     // into 10 domestic digits.
-    return trimmed.startsWith('+1') && d.length === 11 && d.startsWith('1') ? d.slice(1) : '';
+    const nat = trimmed.startsWith('+1') && d.length === 11 && d.startsWith('1') ? d.slice(1) : '';
+    return NANP_PHONE_RE.test(nat) ? nat : '';
   }
-  return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+  const nat = d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+  if (nat.length === 10 && !NANP_PHONE_RE.test(nat)) return '';
+  return nat;
 };
 
 const isContactPhoneInvalid = (existingCustomerId, rawPhone, normalizedDigits) => (

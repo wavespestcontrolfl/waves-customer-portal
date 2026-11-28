@@ -191,6 +191,12 @@ function fallbackParse(query, now) {
   const single = (dateStr) => ({ dateFrom: dateStr, dateTo: dateStr, timeOfDay, understood: true });
   const range = (fromStr, toStr) => ({ dateFrom: fromStr, dateTo: toStr, timeOfDay, understood: true });
 
+  // Never collapse a negated or excluded date ("any day except tomorrow",
+  // "not this weekend", "can't do next Friday") into an understood positive target.
+  if (NEGATION_CONSTRAINT_RE.test(q)) {
+    return { dateFrom: null, dateTo: null, timeOfDay, understood: false };
+  }
+
   if (/\btoday\b|\btonight\b/.test(q)) return single(today);
   if (/\btomorrow\b/.test(q)) return single(etDateString(addETDays(now, 1)));
 
@@ -212,16 +218,15 @@ function fallbackParse(query, now) {
   // never collapse to one date on fallback.
   const explicitDate = parseExplicitDate(q, now);
   if (explicitDate) {
-    return explicitDate.date && canFastParseDeterministically(q) && !NEGATION_CONSTRAINT_RE.test(q)
+    return explicitDate.date && canFastParseDeterministically(q)
       ? single(explicitDate.date)
       : { dateFrom: null, dateTo: null, timeOfDay, understood: false };
   }
 
   // Explicit weekday ("next tuesday", "on friday", "thursday") — require the
-  // whole phrase to match the deterministic grammar so ambiguous or negated
-  // requests ("Friday or Saturday morning", "can't do next friday") stay
-  // unresolved instead of silently collapsing to one day on fallback.
-  const dayMatch = canFastParseDeterministically(q) && !NEGATION_CONSTRAINT_RE.test(q)
+  // whole phrase to match the deterministic grammar so ambiguous requests
+  // ("Friday or Saturday morning") stay unresolved instead of collapsing to one day.
+  const dayMatch = canFastParseDeterministically(q)
     ? q.match(new RegExp(`\\b(next\\s+)?(${WEEKDAY_PATTERN})\\b`))
     : null;
   if (dayMatch) {

@@ -3210,16 +3210,22 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       scheduledServiceId: row.id,
       expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : expiresAt,
     });
-    return { scheduledServiceId: updated?.id || row.id, expiresAt };
-  }).then((result) => {
-    if (result?.staleHoldSuperseded) {
-      const err = new Error('slot no longer available');
-      err.code = 'SLOT_UNAVAILABLE';
-      err.slotId = result.slotId;
-      throw err;
-    }
-    return result;
-  });
+    return { scheduledServiceId: updated?.id || row.id, expiresAt, revivedHold: alreadyLapsed };
+  }).then((result) => finishExtendReservation(result, estimateId));
+}
+
+function finishExtendReservation(result, estimateId) {
+  if (result?.staleHoldSuperseded) {
+    invalidateSlotAvailabilityCache(estimateId, { all: true });
+    const err = new Error('slot no longer available');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = result.slotId;
+    throw err;
+  }
+  if (result?.revivedHold) {
+    invalidateSlotAvailabilityCache(estimateId, { all: true });
+  }
+  return { scheduledServiceId: result.scheduledServiceId, expiresAt: result.expiresAt };
 }
 
 module.exports = {

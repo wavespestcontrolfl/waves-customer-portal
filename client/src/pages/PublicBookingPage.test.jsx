@@ -429,15 +429,17 @@ describe('PublicBookingPage contact phone normalization', () => {
     expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
   });
 
-  it('rejects a 10-digit foreign E.164 number (+44) without calling customer-lookup or enabling Confirm', async () => {
+  it('rejects foreign E.164 (+44) and invalid-NANP 10-digit numbers without calling customer-lookup or enabling Confirm', async () => {
     const fetchMock = stubFetch();
     await walkToContactStep();
     const phone = screen.getByLabelText('Phone number');
-    fireEvent.change(phone, { target: { value: '+44 2234 5678' } });
-    fireEvent.blur(phone);
-    expect(screen.getByText('Enter a 10-digit phone number.')).toBeInTheDocument();
-    expect(phone).toHaveAttribute('aria-invalid', 'true');
-    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
+    for (const invalidPhone of ['+44 2234 5678', '0123456789', '1941555010', '9411550101']) {
+      fireEvent.change(phone, { target: { value: invalidPhone } });
+      fireEvent.blur(phone);
+      expect(screen.getByText('Enter a 10-digit phone number.')).toBeInTheDocument();
+      expect(phone).toHaveAttribute('aria-invalid', 'true');
+      expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
+    }
     const phoneLookups = fetchMock.mock.calls.filter(([url]) => (
       String(url).includes('/booking/customer-lookup') && String(url).includes('phone=')
     ));
