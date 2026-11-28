@@ -162,32 +162,65 @@ function verifiedCatalogRowForVisit(row, catalogRows) {
   return catalogRows.find((c) => c && String(c.id) === targetId) || null;
 }
 
+function rowHasExistingRequestProvenance(row) {
+  if (String(row?.customer_request || '').trim()) return true;
+  if (String(row?.customer_request_source || '').trim()) return true;
+  let pests = row?.customer_request_pests;
+  if (typeof pests === 'string') {
+    try { pests = JSON.parse(pests); } catch { return true; }
+  }
+  return Array.isArray(pests) && pests.length > 0;
+}
+
+function isAssessmentCatalogEntry(catalogRow) {
+  return Boolean(
+    catalogRow
+    && (/assessment/i.test(String(catalogRow.name || ''))
+      || /assessment/i.test(String(catalogRow.service_key || ''))),
+  );
+}
+
+function isReServiceCatalogEntry(catalogRow) {
+  return Boolean(
+    catalogRow
+    && (/re[- ]?service/i.test(String(catalogRow.name || ''))
+      || /reservice/i.test(String(catalogRow.service_key || ''))),
+  );
+}
+
 // Backfill an empty customer_request on a reused booking row created by this
 // same call (e.g. live voice-agent booking before recording processing ran).
-// Never overwrites an existing customer_request, never mutates attached manual
-// bookings or rows owned by another call, and NEVER copies an editable
-// row.service_type label (resolves fallback strictly from row.service_id in
-// the server-loaded catalog, omitting fallback if unverified).
+// Never overwrites an existing customer_request, customer_request_source, or
+// pest-only picker selection; never mutates attached manual bookings or rows
+// owned by another call; derives catalog/assessment/re-service strictly from
+// the reused row and its verified service_id catalog entry.
 async function backfillCallToTruckBriefOnReusedRow(trx, row, opts = {}) {
   if (opts.skip || !row?.id || !opts.callId) return row;
   if (String(row.source_call_log_id || '') !== String(opts.callId)) return row;
-  if (String(row.customer_request || '').trim()) return row;
+  if (rowHasExistingRequestProvenance(row)) return row;
   const verifiedCatalog = verifiedCatalogRowForVisit(row, opts.catalogRows);
   const verifiedName = verifiedCatalog?.name || null;
+  const isAssessment = verifiedCatalog
+    ? isAssessmentCatalogEntry(verifiedCatalog)
+    : /assessment/i.test(String(row.service_type || ''));
+  const isReService = Boolean(row.is_callback === true || isReServiceCatalogEntry(verifiedCatalog));
   const brief = resolveCallToTruckBriefForBooking({
     ...opts.briefInput,
     catalogServiceName: verifiedName,
-    isAssessmentBooking: Boolean(
-      opts.briefInput?.isAssessmentBooking
-      || /assessment/i.test(String(verifiedName || row.service_type || '')),
-    ),
+    isAssessmentBooking: isAssessment,
+    isReService,
   });
   if (!brief) return row;
   if (!(await trx.schema.hasColumn('scheduled_services', 'customer_request'))) return row;
-  const updated = await trx('scheduled_services')
+  const hasPestsCol = await trx.schema.hasColumn('scheduled_services', 'customer_request_pests');
+  const q = trx('scheduled_services')
     .where({ id: row.id })
     .whereRaw("COALESCE(TRIM(customer_request), '') = ''")
-    .update({ customer_request: brief, customer_request_source: 'call', updated_at: new Date() });
+    .whereNull('customer_request_source');
+  if (hasPestsCol) {
+    q.whereRaw("(customer_request_pests IS NULL OR jsonb_typeof(customer_request_pests) <> 'array' OR jsonb_array_length(customer_request_pests) = 0)");
+  }
+  const updated = await q.update({ customer_request: brief, customer_request_source: 'call', updated_at: new Date() });
   return updated ? { ...row, customer_request: brief, customer_request_source: 'call' } : row;
 }
 

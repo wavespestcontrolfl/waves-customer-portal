@@ -112,6 +112,8 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
       'Agent: How can I help today?\nCaller: Earlier the voicemail said thank you for calling Waves Pest Control and hung up.',
       'Agent: How can I help today?\nCaller: Your voicemail starts with thank you for calling Waves Pest Control.',
       'Agent: How can I help today?\nCaller: My name is Pat from Waves End Drive.',
+      'Agent: How can I help?\nCaller: I got a call saying "This is Sarah from Waves Pest Control" and wanted to check my appointment.',
+      'Agent: How can I help?\nCaller: I got a text saying this is Sarah from Waves Pest Control.',
     ];
     for (const transcript of cases) {
       expect(fixSwappedSpeakerRoles(transcript)).toEqual({ text: transcript, swapped: false, reason: null });
@@ -259,6 +261,7 @@ describe('PR B1: Call-to-Truck Brief (structured-only, report-safe & ANI-verifie
     const updates = [];
     const mockTrx = jest.fn(() => ({
       where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
       whereRaw: jest.fn().mockReturnThis(),
       update: jest.fn((payload) => {
         updates.push(payload);
@@ -327,15 +330,34 @@ describe('PR B1: Call-to-Truck Brief (structured-only, report-safe & ANI-verifie
     });
     expect(omitted.customer_request).toBeNull();
 
-    // Uses server catalog row matched strictly by service_id
+    // Uses server catalog row matched strictly by service_id (ignoring replay assessment/reservice guesses)
     const verifiedCatalogRow = { ...editedLabelRow, service_id: 'cat-1' };
     const fromCatalog = await backfillCallToTruckBriefOnReusedRow(mockTrx, verifiedCatalogRow, {
       skip: false,
       callId: 'call-1',
       catalogRows: [{ id: 'cat-1', name: 'One-Time Pest Control Service' }],
-      briefInput: { v2Extraction: {}, isReService: false },
+      briefInput: { v2Extraction: {} },
     });
     expect(fromCatalog.customer_request).toBe('Requested: One-Time Pest Control Service');
+    expect(updates).toHaveLength(2);
+
+    // Preserves pest-only picker selections (empty customer_request text, non-empty customer_request_pests or provenance)
+    const pestOnlyPickerRow = {
+      id: 'svc-3',
+      source_call_log_id: 'call-1',
+      service_id: 'cat-1',
+      customer_request: null,
+      customer_request_pests: ['ghost_ants'],
+      customer_request_source: 'picker',
+    };
+    const keptPicker = await backfillCallToTruckBriefOnReusedRow(mockTrx, pestOnlyPickerRow, {
+      skip: false,
+      callId: 'call-1',
+      catalogRows: [{ id: 'cat-1', name: 'One-Time Pest Control Service' }],
+      briefInput: { v2Extraction: {} },
+    });
+    expect(keptPicker.customer_request).toBeNull();
+    expect(keptPicker.customer_request_source).toBe('picker');
     expect(updates).toHaveLength(2);
   });
 });

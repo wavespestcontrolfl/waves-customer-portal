@@ -21848,8 +21848,6 @@ const CallRecordingProcessor = {
                       callerAni: clarifyAskTargetPhone(call),
                       customerPrimaryPhone: customer?.phone || null,
                       v2Extraction: v2ApprovedExtraction || v2CanonicalExtraction,
-                      isAssessmentBooking: isAssessmentServiceRow(callBookingCatalogRow),
-                      isReService: isFreeReServiceBookingRow(primaryRow) || isReServiceCatalogRow(callBookingCatalogRow),
                     },
                   });
                   if (!primaryRowSkipped && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
