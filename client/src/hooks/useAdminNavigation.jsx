@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { isAdminPath } from '../lib/adminBookmarkMeta';
 import { adminNavigationPreferenceKey as preferenceKey, warmFieldViewLanding } from '../lib/fieldView';
 import { ADMIN_WORKSPACE_DESTINATIONS, ADMIN_WORKSPACE_GROUP_IDS, getAdminWorkspaceGroups, getAdminWorkspaceSelection } from '../config/adminNavigation';
 
@@ -34,14 +35,17 @@ function readPreferences(accountId) {
   return { groups: {}, pins: [], fieldView: false, darkMode: fallbackDark === true };
 }
 
-function mergePendingPreferences(stored, pending) {
-  const kept = stored.pins.filter((id) => pending.pins[id] !== false);
-  const added = Object.keys(pending.pins).filter((id) => pending.pins[id] && !kept.includes(id));
+function mergePendingPreferences(stored, pending, accountId) {
+  const kept = pending ? stored.pins.filter((id) => pending.pins[id] !== false) : stored.pins;
+  const added = pending ? Object.keys(pending.pins).filter((id) => pending.pins[id] && !kept.includes(id)) : [];
+  const darkOverride = accountId && unsavedDarkModeByAccount.has(accountId)
+    ? unsavedDarkModeByAccount.get(accountId)
+    : pending?.darkMode;
   return {
     ...stored,
     pins: [...kept, ...added].slice(0, 3),
-    groups: { ...stored.groups, ...pending.groups },
-    ...(pending.darkMode !== undefined ? { darkMode: pending.darkMode } : {}),
+    groups: pending ? { ...stored.groups, ...pending.groups } : stored.groups,
+    ...(darkOverride !== undefined ? { darkMode: darkOverride } : {}),
   };
 }
 
@@ -103,27 +107,22 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   // change reached storage.
   const unsaved = useRef(null);
   const updatePreferences = (update, { onlyIfSaved = false } = {}) => {
-    const stored = user?.id ? readSavedPreferences(user.id) : null;
+    const accountId = user?.id;
+    const stored = accountId ? readSavedPreferences(accountId) : null;
     const pending = unsaved.current;
-    let base = stored || preferences;
-    if (stored && pending) {
-      base = mergePendingPreferences(stored, pending);
-    }
-    if (stored && user?.id && unsavedDarkModeByAccount.has(user.id)) {
-      base = { ...base, darkMode: unsavedDarkModeByAccount.get(user.id) };
-    }
+    const base = stored ? mergePendingPreferences(stored, pending, accountId) : preferences;
     const next = update(base);
     let saved = false;
-    if (user?.id) {
+    if (accountId) {
       try {
-        localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION }));
+        localStorage.setItem(preferenceKey(accountId), JSON.stringify({ ...next, version: PREFERENCE_VERSION }));
         saved = true;
       } catch { /* full or blocked storage */ }
     }
     if (!saved && onlyIfSaved) return false;
-    if (user?.id) {
-      if (saved) unsavedDarkModeByAccount.delete(user.id);
-      else if (next.darkMode !== base.darkMode || unsavedDarkModeByAccount.has(user.id)) unsavedDarkModeByAccount.set(user.id, next.darkMode);
+    if (accountId) {
+      if (saved) unsavedDarkModeByAccount.delete(accountId);
+      else if (next.darkMode !== base.darkMode) unsavedDarkModeByAccount.set(accountId, next.darkMode);
     }
     unsaved.current = saved ? null : captureUnsavedChanges(base, next, pending);
     setPreferences(next);
@@ -168,15 +167,14 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   const setDarkMode = (on) => updatePreferences((current) => ({ ...current, darkMode: on === true }));
 
   useEffect(() => {
-    if (typeof document === 'undefined') return undefined;
+    if (typeof document === 'undefined' || !enabled) return undefined;
     const root = document.documentElement;
-    if (enabled && darkMode) {
-      root.dataset.adminTheme = 'dark';
-    } else {
-      delete root.dataset.adminTheme;
-    }
+    if (darkMode) root.dataset.adminTheme = 'dark';
+    else delete root.dataset.adminTheme;
     return () => {
-      delete root.dataset.adminTheme;
+      if (!isAdminPath(window.location.pathname)) {
+        delete root.dataset.adminTheme;
+      }
     };
   }, [enabled, darkMode]);
 
