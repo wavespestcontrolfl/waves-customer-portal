@@ -118,26 +118,28 @@ function hasUnresolvedPlaceholder(value) {
 
 const HOSTNAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
 
-function isValidUnsubscribeTarget(trimmed) {
+function isValidUnsubscribeTarget(trimmed, { allowLocal = false } = {}) {
   if (!/^https?:\/\//i.test(trimmed) || /\s/.test(trimmed) || hasUnresolvedPlaceholder(trimmed)) return false;
   try {
     const parsed = new URL(trimmed);
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && HOSTNAME_RE.test(parsed.hostname);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (allowLocal && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')) return true;
+    return HOSTNAME_RE.test(parsed.hostname);
   } catch {
     return false;
   }
 }
 
-function validatedUnsubscribeUrl(url, { allowAsmToken = false, allowBatchToken = false } = {}) {
+function validatedUnsubscribeUrl(url, { allowAsmToken = false, allowBatchToken = false, allowLocal = false } = {}) {
   const trimmed = String(url == null ? '' : url).trim();
   if (!trimmed) return null;
   if (allowAsmToken && trimmed === ASM_UNSUBSCRIBE_URL) return trimmed;
   if (allowBatchToken && trimmed === BATCH_UNSUBSCRIBE_TOKEN) return trimmed;
-  return isValidUnsubscribeTarget(trimmed) ? trimmed : null;
+  return isValidUnsubscribeTarget(trimmed, { allowLocal }) ? trimmed : null;
 }
 
 function safeUnsubscribeHref(url) {
-  const valid = validatedUnsubscribeUrl(url, { allowAsmToken: true, allowBatchToken: true });
+  const valid = validatedUnsubscribeUrl(url, { allowAsmToken: true, allowBatchToken: true, allowLocal: true });
   if (!valid) return null;
   if (valid === ASM_UNSUBSCRIBE_URL || valid === BATCH_UNSUBSCRIBE_TOKEN) return valid;
   return escapeHtml(valid);
@@ -589,8 +591,8 @@ function isMarketingSend(template, suppressionGroupKey) {
     || sendStreamFor(template, suppressionGroupKey).startsWith('marketing_');
 }
 
-function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppressionGroupKey } = {}) {
-  const valid = validatedUnsubscribeUrl(unsubscribeUrl, { allowAsmToken: Boolean(asmGroupId) });
+function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppressionGroupKey, allowLocal = false } = {}) {
+  const valid = validatedUnsubscribeUrl(unsubscribeUrl, { allowAsmToken: Boolean(asmGroupId), allowLocal });
   if (valid) return valid;
   if (isMarketingSend(template, suppressionGroupKey) && asmGroupId) return ASM_UNSUBSCRIBE_URL;
   return null;
@@ -881,7 +883,7 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // one stream ("referral emails", "these follow-ups") would understate it.
   // Only an admin preview/test passes a link for a service-stream template.
   const unsubScope = isMarketingSend(template, null) ? 'Waves marketing emails' : 'these emails';
-  const validUnsubUrl = validatedUnsubscribeUrl(unsubscribeUrl, { allowAsmToken: true, allowBatchToken: true });
+  const validUnsubUrl = validatedUnsubscribeUrl(unsubscribeUrl, { allowAsmToken: true, allowBatchToken: true, allowLocal: true });
   const unsubHref = safeUnsubscribeHref(validUnsubUrl);
   const unsubFooterHtml = unsubHref
     ? `<a href="${unsubHref}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
@@ -1384,6 +1386,7 @@ function prepareTemplateSend({
     unsubscribeUrl,
     asmGroupId,
     suppressionGroupKey: effectiveSuppressionGroupKey,
+    allowLocal: Boolean(test),
   });
   if (isMarketingSend(template, effectiveSuppressionGroupKey) && !test && !effectiveUnsubscribeUrl) {
     const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');

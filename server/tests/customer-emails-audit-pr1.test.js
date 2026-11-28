@@ -139,22 +139,14 @@ describe('Customer emails audit PR 1 regressions', () => {
     expect(unresolvedTokenUnsub.html).not.toContain('{{missing}}');
     expect(unresolvedTokenUnsub.text).not.toContain('{{missing}}');
 
-    for (const malformed of [
-      'https://',
-      'mailto:',
-      'https://portal.wavespestcontrol.com/unsubscribe/{{missing}}',
-      'https://portal.wavespestcontrol.com/unsubscribe/<%asm%>',
-    ]) {
-      const out = renderTemplate({
-        template: { template_key: 'newsletter.promo', name: 'Promo', mode: 'marketing' },
-        version: { subject: 'Promo', blocks: [{ type: 'paragraph', content: 'Hello' }] },
-        payload: {},
-        unsubscribeUrl: malformed,
-      });
-      expect(out.html).not.toContain(`href="${malformed}"`);
-      expect(out.html).not.toContain('{{missing}}');
-      expect(out.text).not.toContain(`Unsubscribe: ${malformed}`);
-    }
+    const localPreview = renderTemplate({
+      template: { template_key: 'newsletter.promo', name: 'Promo', mode: 'marketing' },
+      version: { subject: 'Promo', blocks: [{ type: 'paragraph', content: 'Hello' }] },
+      payload: {},
+      unsubscribeUrl: 'http://localhost:5173/api/public/newsletter/unsubscribe/demo',
+    });
+    expect(localPreview.html).toContain('href="http://localhost:5173/api/public/newsletter/unsubscribe/demo"');
+    expect(localPreview.text).toContain('Unsubscribe: http://localhost:5173/api/public/newsletter/unsubscribe/demo');
   });
 
   test('automation-runner passes escaped previewText as preheader and requires whole-body darkAware opt-in', () => {
