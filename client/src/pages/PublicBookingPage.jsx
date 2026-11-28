@@ -603,7 +603,10 @@ export default function PublicBookingPage() {
     if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current || !service) return;
     if (preferredSubmittedRef.current) return;
     try {
-      fetch(`${API_BASE}/booking/capture-intent`, {
+      const doCaptureFetch = (isAuthenticated && !tokenEntry)
+        ? (url, opts) => api.fetchRaw(url, opts)
+        : (url, opts) => fetch(url, opts);
+      doCaptureFetch(`${API_BASE}/booking/capture-intent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         keepalive: true,

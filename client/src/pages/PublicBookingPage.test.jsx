@@ -388,6 +388,50 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
       expect(confirmCalls).toHaveLength(1);
     });
   });
+
+  it('sends capture-intent through api.fetchRaw for signed-in non-token entries and plain fetch when signed out', async () => {
+    authState.isAuthenticated = true;
+    authState.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', phone: '9415550101', email: 'pat@example.com' };
+    const fetchMock = stubFetch();
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    const phoneInput = await screen.findByLabelText('Phone number');
+    fireEvent.change(phoneInput, { target: { value: '9415550101' } });
+    fireEvent.blur(phoneInput);
+
+    await waitFor(() => {
+      const captureRaw = apiMock.fetchRaw.mock.calls.filter(([url]) => String(url).includes('/booking/capture-intent'));
+      expect(captureRaw).toHaveLength(1);
+    });
+
+    cleanup();
+    apiMock.fetchRaw.mockClear();
+    authState.isAuthenticated = false;
+    authState.customer = null;
+    const anonFetch = stubFetch();
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    const anonPhone = await screen.findByLabelText('Phone number');
+    fireEvent.change(anonPhone, { target: { value: '9415550101' } });
+    fireEvent.blur(anonPhone);
+
+    await waitFor(() => {
+      expect(anonFetch.mock.calls.some(([url]) => String(url).includes('/booking/capture-intent'))).toBe(true);
+    });
+    expect(apiMock.fetchRaw.mock.calls.some(([url]) => String(url).includes('/booking/capture-intent'))).toBe(false);
+  });
 });
 
 describe('PublicBookingPage contact phone normalization', () => {

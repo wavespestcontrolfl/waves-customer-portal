@@ -806,7 +806,6 @@
         "GET /api/booking/config",
         "GET /api/booking/customer-lookup",
         "GET /api/booking/embed-snippet",
-        "GET /api/booking/sources",
         "GET /api/booking/status/:code",
         "POST /api/booking/capture-intent",
         "POST /api/booking/confirm",
