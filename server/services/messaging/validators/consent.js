@@ -16,6 +16,15 @@ const db = require('../../../models/db');
 const logger = require('../../logger');
 const { toE164 } = require('../../../utils/phone');
 
+function hasVerifiedLeadWebPromoOptIn(input, contactState) {
+  return input.audience === 'lead'
+    && input.purpose === 'lead_promotional_followup'
+    && !contactState?.customer
+    && input.consentBasis?.status === 'opted_in'
+    && input.consentBasis?.source === 'web_form_sms_opt_in'
+    && input.consentBasis?.phoneBound === true;
+}
+
 /**
  * @param {import('../policy').SendCustomerMessageInput} input
  * @param {Object} policy - resolved policy from policy.resolvePolicy
@@ -90,6 +99,16 @@ async function checkConsentForPurpose(input, policy, contactState) {
       policy.requireConsent === 'transactional' &&
       input.purpose === 'conversational'
     ) {
+      return { ok: true };
+    }
+    if (hasVerifiedLeadWebPromoOptIn(input, contactState)) {
+      if (contactState?.suppressionLoaded !== true) {
+        return {
+          ok: false,
+          code: 'CONSENT_LOOKUP_FAILED',
+          reason: 'messaging_suppression state not positively loaded — required before lead promotional consent; retry advised',
+        };
+      }
       return { ok: true };
     }
     if (contactState && contactState.customer) {

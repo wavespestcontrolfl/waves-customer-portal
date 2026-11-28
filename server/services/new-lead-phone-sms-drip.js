@@ -8,22 +8,26 @@
  * `processPhoneOnlyLeadSmsDrip()` returns immediately with zero queries and zero sends.
  *
  * Audience: unquoted open residential leads (`status IN ('new', 'contacted')`, `is_commercial IS NOT TRUE`)
- * with a phone number, NO email address, verifiable SMS consent/inbound inquiry on that exact phone,
- * no linked/created/sent estimate, no booked visit, not a paying customer, and no human SMS engagement.
+ * with a phone number, NO email address, explicit promotional SMS opt-in bound to that exact destination
+ * phone (complete phone identity via `phoneMatchDigits`, never an inbound call/SMS bypass and never a
+ * mismatched phone), no explicit marketing opt-out, no linked/created/sent estimate, no booked visit,
+ * not a paying customer, and no prior SMS engagement (including Leads-page `lead_outreach`).
  *
  * Durability & safety:
  *   - Durable pre-dispatch claim in `new_lead_phone_drip_sends (lead_id, step)` before calling Twilio
  *     (deleted ONLY on definitive `deliveryOutcome === 'not_sent'`; `'uncertain'` stays locked).
- *   - Live lead, destination phone, consent, and stop recheck inside `providerPreSendCheck` at handoff.
- *   - Fail-closed `messaging_suppression` check + `VERIFIED_SUPPRESSION_ENTRY_POINTS`.
- *   - Paginates past stopped/completed leads so older ineligible rows never starve newer leads.
- *   - Brand copy = "Waves" ONLY, zero owner name, STOP opt-out on Touch 1, 8 AM–8 PM ET only.
+ *   - Holds the canonical phone lock (`withSmsHandoff`) through final suppression/consent/stop rechecks
+ *     (`providerPreSendCheck` reading through `dbi`) and Twilio dispatch.
+ *   - Uses `purpose: 'lead_promotional_followup'` (`requireConsent: 'marketing'`, `prefsColumn: 'marketing_offers'`).
+ *   - Keyset-paginates by `(created_at, id)` so claiming step 2 never shifts pages or skips due leads.
+ *   - Brand copy = "Waves" ONLY, zero owner name, approved "per application" unit, STOP on Touch 1, 8 AM–8 PM ET.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
-const { toE164, phoneIdentityKey } = require('../utils/phone');
+const { toE164, phoneMatchDigits } = require('../utils/phone');
+const { lockSmsPhone, withSmsConsentLock } = require('../utils/customer-comms-lock');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { NON_LIVE_APPOINTMENT_STATUSES } = require('./estimate-conversion-guard');
 const { HUMAN_REPLY_TYPES, SENT_STATUSES } = require('./sms-suggest-mode');
@@ -31,12 +35,19 @@ const { HUMAN_REPLY_TYPES, SENT_STATUSES } = require('./sms-suggest-mode');
 const STEP_1_ACTIVITY = 'phone_drip_sms_step_1';
 const STEP_2_ACTIVITY = 'phone_drip_sms_step_2';
 const DRIP_ENTRY_POINT = 'new_lead_phone_sms_drip';
+const DRIP_PURPOSE = 'lead_promotional_followup';
 const UNQUOTED_OPEN_STATUSES = Object.freeze(['new', 'contacted']);
 const CONSENTED_WEB_LEAD_TYPES = new Set(['form_submission', 'quote_wizard', 'website_chat']);
 const QUIET_START_HOUR_ET = 8;
 const QUIET_END_HOUR_ET = 20;
 const HOUR_MS = 3600 * 1000;
-const ENGAGEMENT_OUTBOUND_TYPES = [...HUMAN_REPLY_TYPES, 'ai_autosent', 'ai_gratitude'];
+const ENGAGEMENT_OUTBOUND_TYPES = [...HUMAN_REPLY_TYPES, 'lead_outreach', 'ai_autosent', 'ai_gratitude'];
+
+const LEAD_SELECT_COLS = Object.freeze([
+  'id', 'first_name', 'phone', 'email', 'customer_id', 'estimate_id',
+  'converted_at', 'is_commercial', 'status', 'deleted_at', 'created_at',
+  'twilio_call_sid', 'twilio_message_sid', 'lead_type', 'extracted_data',
+]);
 
 function firstNameOrDefault(lead) {
   const raw = String(lead?.first_name || '').trim().split(/\s+/)[0] || '';
@@ -47,7 +58,7 @@ function buildPhoneDripCopy(step, lead) {
   const name = firstNameOrDefault(lead);
   const hi = name ? `Hi ${name}, it's Waves.` : "Hi, it's Waves.";
   if (step === 1) {
-    return `${hi} Most homes here run $105-$120 per quarterly pest visit with no contract. Reply with your address if you'd like your exact price. Reply STOP to opt out.`;
+    return `${hi} Most homes here run $105-$120 per application for quarterly pest control with no contract. Reply with your address if you'd like your exact price. Reply STOP to opt out.`;
   }
   return `${hi} Quick check: are you seeing ants, roaches, lawn issues, or something else? Reply with one word and we'll let you know the best fix.`;
 }
@@ -62,6 +73,13 @@ function isEligibleUnquotedLeadRow(lead) {
   if (lead.converted_at || lead.estimate_id) return false;
   if (!UNQUOTED_OPEN_STATUSES.includes(lead.status)) return false;
   return Boolean(String(lead.phone || '').trim()) && !String(lead.email || '').trim();
+}
+
+function phonesShareIdentity(phoneA, phoneB) {
+  const a = phoneMatchDigits(phoneA);
+  const b = phoneMatchDigits(phoneB);
+  if (!a.length || !b.length) return false;
+  return a.some((digits) => b.includes(digits));
 }
 
 function pickDueStep(lead, sentClaims, now = new Date()) {
@@ -92,39 +110,45 @@ function parseExtractedData(raw) {
 }
 
 /**
- * Verifies positive SMS consent or a carrier-verified inbound inquiry matching `phoneDigits`.
- * Manually entered / cold leads without recorded consent return null and are NEVER texted.
+ * Verifies explicit promotional SMS opt-in bound to the exact destination phone (`phoneMatchDigits`)
+ * and rejects whenever ANY customer row linked by `customer_id` or sharing that phone has
+ * `sms_enabled = false` or `marketing_offers = false`.
+ *
+ * Inbound calls/texts without promotional opt-in are NOT accepted for scheduled sales texts.
  */
-async function verifyLeadSmsConsent(conn, lead, phoneDigits) {
-  if (lead.customer_id) {
-    const prefs = await conn('notification_prefs')
-      .where({ customer_id: lead.customer_id })
-      .first('sms_enabled', 'marketing_offers');
-    if (prefs && prefs.sms_enabled === false) return null;
-    if (prefs && prefs.marketing_offers === true) {
-      return { status: 'opted_in', source: 'customer_notification_prefs' };
-    }
+async function verifyLeadSmsConsent(conn, lead, matchDigitsInput = null) {
+  const matchDigits = Array.isArray(matchDigitsInput) && matchDigitsInput.length
+    ? matchDigitsInput
+    : phoneMatchDigits(lead?.phone);
+  if (!matchDigits.length) return null;
+
+  const prefRows = await conn('customers as c')
+    .leftJoin('notification_prefs as np', 'np.customer_id', 'c.id')
+    .whereNull('c.deleted_at')
+    .where((w) => {
+      if (lead.customer_id) w.where('c.id', lead.customer_id);
+      w.orWhereRaw("REGEXP_REPLACE(COALESCE(c.phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits]);
+    })
+    .select('c.id', 'c.phone', 'np.sms_enabled', 'np.marketing_offers');
+
+  const rows = Array.isArray(prefRows) ? prefRows : [];
+  if (rows.some((r) => r.sms_enabled === false || r.marketing_offers === false)) {
+    return null;
   }
 
-  if (lead.twilio_call_sid) {
-    const call = await conn('call_log')
-      .where({ twilio_call_sid: lead.twilio_call_sid, direction: 'inbound' })
-      .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_number, ''), '\\D', '', 'g'), 10) = ?", [phoneDigits])
-      .first('id');
-    if (call) return { status: 'transactional_allowed', source: 'inbound_call_inquiry' };
-  }
-
-  if (lead.twilio_message_sid) {
-    const msg = await conn('sms_log')
-      .where({ twilio_sid: lead.twilio_message_sid, direction: 'inbound' })
-      .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) = ?", [phoneDigits])
-      .first('id');
-    if (msg) return { status: 'transactional_allowed', source: 'inbound_sms_inquiry' };
+  const matchedOptedInCustomer = rows.find((r) => (
+    r.marketing_offers === true && phonesShareIdentity(r.phone, lead.phone)
+  ));
+  if (matchedOptedInCustomer) {
+    return { status: 'opted_in', source: 'customer_notification_prefs', phoneBound: true };
   }
 
   const extracted = parseExtractedData(lead.extracted_data);
-  if (CONSENTED_WEB_LEAD_TYPES.has(lead.lead_type) && (extracted.sms_opt_in === true || extracted.sms_consent === true)) {
-    return { status: 'opted_in', source: 'web_form_sms_opt_in' };
+  const webOptIn = CONSENTED_WEB_LEAD_TYPES.has(lead.lead_type)
+    && (extracted.marketing_sms_opt_in === true || extracted.sms_opt_in === true || extracted.sms_consent === true);
+  const submittedPhone = extracted.sms_consent_phone || extracted.submitted_phone || extracted.phone || null;
+  if (webOptIn && submittedPhone && phonesShareIdentity(submittedPhone, lead.phone)) {
+    return { status: 'opted_in', source: 'web_form_sms_opt_in', phoneBound: true };
   }
 
   return null;
@@ -160,10 +184,10 @@ async function hasCustomerConversion(conn, customerId) {
 }
 
 async function leadShouldStop(conn, lead) {
-  const phoneDigits = phoneIdentityKey(lead.phone);
-  if (!phoneDigits || phoneDigits.length < 10) return { stop: 'invalid_phone', consentBasis: null };
+  const matchDigits = phoneMatchDigits(lead?.phone);
+  if (!matchDigits.length) return { stop: 'invalid_phone', consentBasis: null };
 
-  const consentBasis = await verifyLeadSmsConsent(conn, lead, phoneDigits);
+  const consentBasis = await verifyLeadSmsConsent(conn, lead, matchDigits);
   if (!consentBasis) return { stop: 'no_recorded_consent', consentBasis: null };
 
   if (await hasBlockingEstimate(conn, lead)) return { stop: 'has_estimate', consentBasis: null };
@@ -171,16 +195,16 @@ async function leadShouldStop(conn, lead) {
   const converted = await hasCustomerConversion(conn, lead.customer_id);
   if (converted) return { stop: converted, consentBasis: null };
 
-  // Exclude the lead's own originating inbound message (twilio_message_sid) from engagement stop,
-  // while stopping on any subsequent inbound reply or staff/auto outbound reply.
+  // Match complete phone identity (`phoneMatchDigits`) so domestic and international numbers
+  // sharing a last-10 suffix never collide and international replies are never missed.
   const recentSms = await conn('sms_log')
     .where('created_at', '>=', lead.created_at)
     .where((w) => {
       if (lead.twilio_message_sid) w.whereRaw("COALESCE(twilio_sid, '') <> ?", [lead.twilio_message_sid]);
     })
     .where((w) => {
-      w.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) = ?", [phoneDigits])
-        .orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) = ?", [phoneDigits]);
+      w.whereRaw("REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits])
+        .orWhereRaw("REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits]);
     })
     .where((w) => {
       w.where('direction', 'inbound')
@@ -238,20 +262,26 @@ async function settleDripClaim(dbh, { claimId, leadId, step, activityType, outco
   await dbh('new_lead_phone_drip_sends').where({ id: claimId }).update({ status: 'uncertain' });
 }
 
+function buildPhoneDripHandoff(dbh, { customerId, phone }) {
+  return (dispatch) => {
+    if (customerId) {
+      return withSmsConsentLock(dbh, { phone, customerId }, dispatch);
+    }
+    return dbh.transaction(async (trx) => {
+      await lockSmsPhone(trx, phone);
+      return dispatch(trx);
+    });
+  };
+}
+
 function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step }) {
-  return async ({ database } = {}) => {
-    const conn = database || dbh;
-    const freshLead = await conn('leads')
-      .where({ id: leadId })
-      .first(
-        'id', 'first_name', 'phone', 'email', 'customer_id', 'estimate_id',
-        'converted_at', 'is_commercial', 'status', 'deleted_at', 'created_at',
-        'twilio_call_sid', 'twilio_message_sid', 'lead_type', 'extracted_data',
-      );
+  return async ({ dbi, database } = {}) => {
+    const conn = dbi || database || dbh;
+    const freshLead = await conn('leads').where({ id: leadId }).first(...LEAD_SELECT_COLS);
     if (!isEligibleUnquotedLeadRow(freshLead)) {
       return { ok: false, code: 'LEAD_DRIP_INELIGIBLE', reason: 'Lead is no longer an open unquoted phone-only residential lead' };
     }
-    if (phoneIdentityKey(freshLead.phone) !== phoneIdentityKey(expectedPhone)) {
+    if (!phonesShareIdentity(freshLead.phone, expectedPhone)) {
       return { ok: false, code: 'LEAD_PHONE_CHANGED', reason: 'Lead phone number changed before SMS handoff' };
     }
     const check = await leadShouldStop(conn, freshLead);
@@ -292,13 +322,14 @@ async function processOnePhoneLead(dbh, lead, { now, sender }) {
       body: buildPhoneDripCopy(step, lead),
       channel: 'sms',
       audience: 'lead',
-      purpose: 'missed_call_followup',
+      purpose: DRIP_PURPOSE,
       customerId: lead.customer_id || undefined,
       leadId: lead.id,
       identityTrustLevel: 'phone_provided_unverified',
       consentBasis,
       entryPoint: DRIP_ENTRY_POINT,
       metadata: { original_message_type: activityType, lead_id: lead.id, drip_step: step, delivery_key: deliveryKey },
+      withSmsHandoff: buildPhoneDripHandoff(dbh, { customerId: lead.customer_id, phone: destinationPhone }),
       providerPreSendCheck: buildHandoffPreSendCheck({ dbh, leadId: lead.id, expectedPhone: destinationPhone, step }),
     });
   } catch (err) {
@@ -317,6 +348,32 @@ async function processOnePhoneLead(dbh, lead, { now, sender }) {
   }
   await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: 'uncertain' });
   return 'deferred';
+}
+
+async function fetchPhoneDripLeadPage(dbh, { cutoffOldest, cutoffNewest, cursor, batchSize }) {
+  let q = dbh('leads')
+    .whereNull('deleted_at')
+    .whereNull('converted_at')
+    .whereNull('estimate_id')
+    .whereIn('status', UNQUOTED_OPEN_STATUSES)
+    .whereRaw('COALESCE(is_commercial, false) = false')
+    .whereRaw("NULLIF(TRIM(COALESCE(phone, '')), '') IS NOT NULL")
+    .whereRaw("NULLIF(TRIM(COALESCE(email, '')), '') IS NULL")
+    .where('created_at', '>=', cutoffOldest)
+    .where('created_at', '<=', cutoffNewest)
+    .whereNotExists(function step2Done() {
+      this.select(dbh.raw('1'))
+        .from('new_lead_phone_drip_sends as s2')
+        .whereRaw('s2.lead_id = leads.id')
+        .where('s2.step', 2);
+    })
+    .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
+    .limit(batchSize);
+  if (cursor) {
+    q = q.whereRaw('(created_at, id) > (?, ?)', [cursor.created_at, cursor.id]);
+  }
+  return q.select(...LEAD_SELECT_COLS);
 }
 
 async function processPhoneOnlyLeadSmsDrip({
@@ -340,35 +397,10 @@ async function processPhoneOnlyLeadSmsDrip({
   const batchSize = Number(pageSize) > 0 ? Math.min(200, Number(pageSize)) : Math.min(200, Math.max(limit * 2, 50));
   const sender = sendMessage || require('./messaging/send-customer-message').sendCustomerMessage;
   const counts = { checked: 0, sent: 0, stopped: 0, deferred: 0 };
-  let offset = 0;
+  let cursor = null;
 
   while (counts.sent < limit) {
-    const leads = await dbh('leads')
-      .whereNull('deleted_at')
-      .whereNull('converted_at')
-      .whereNull('estimate_id')
-      .whereIn('status', UNQUOTED_OPEN_STATUSES)
-      .whereRaw('COALESCE(is_commercial, false) = false')
-      .whereRaw("NULLIF(TRIM(COALESCE(phone, '')), '') IS NOT NULL")
-      .whereRaw("NULLIF(TRIM(COALESCE(email, '')), '') IS NULL")
-      .where('created_at', '>=', cutoffOldest)
-      .where('created_at', '<=', cutoffNewest)
-      .whereNotExists(function step2Done() {
-        this.select(dbh.raw('1'))
-          .from('new_lead_phone_drip_sends as s2')
-          .whereRaw('s2.lead_id = leads.id')
-          .where('s2.step', 2);
-      })
-      .orderBy('created_at', 'asc')
-      .orderBy('id', 'asc')
-      .offset(offset)
-      .limit(batchSize)
-      .select(
-        'id', 'first_name', 'phone', 'email', 'customer_id', 'estimate_id',
-        'converted_at', 'is_commercial', 'status', 'deleted_at', 'created_at',
-        'twilio_call_sid', 'twilio_message_sid', 'lead_type', 'extracted_data',
-      );
-
+    const leads = await fetchPhoneDripLeadPage(dbh, { cutoffOldest, cutoffNewest, cursor, batchSize });
     if (!leads.length) break;
 
     for (const lead of leads) {
@@ -384,7 +416,8 @@ async function processPhoneOnlyLeadSmsDrip({
     }
 
     if (leads.length < batchSize) break;
-    offset += batchSize;
+    const last = leads[leads.length - 1];
+    cursor = { created_at: last.created_at, id: last.id };
   }
 
   return { skipped: null, ...counts };
@@ -394,11 +427,15 @@ module.exports = {
   STEP_1_ACTIVITY,
   STEP_2_ACTIVITY,
   DRIP_ENTRY_POINT,
+  DRIP_PURPOSE,
   UNQUOTED_OPEN_STATUSES,
+  ENGAGEMENT_OUTBOUND_TYPES,
   buildPhoneDripCopy,
   isWithinSendHoursET,
+  phonesShareIdentity,
   pickDueStep,
   verifyLeadSmsConsent,
   leadShouldStop,
+  buildPhoneDripHandoff,
   processPhoneOnlyLeadSmsDrip,
 };
