@@ -430,7 +430,7 @@ export default function MobileServiceEditModal({
                 width: 120,
                 padding: '8px 10px 8px 22px',
                 fontSize: 16,
-                background: '#FFFFFF',
+                background: 'var(--surface-primary, #FFFFFF)',
               }}
             />
           </div>
@@ -574,7 +574,7 @@ export default function MobileServiceEditModal({
               width: 80,
               padding: '8px 10px',
               fontSize: 16,
-              background: '#FFFFFF',
+              background: 'var(--surface-primary, #FFFFFF)',
             }}
           />
           <span
