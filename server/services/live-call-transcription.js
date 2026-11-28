@@ -59,6 +59,10 @@ const QUARANTINED_SQL = "((metadata #>> '{live_transcription,quarantined_at}') I
 // The star-key hold holds the caller (GATE_CALL_HOLD, call-hold.js): a hold is wanted, or Twilio's hold is not yet undone.
 const HOLD_HELD_SQL = "COALESCE((metadata #>> '{conference_path,hold,phase}') = 'held'"
   + " OR (metadata #>> '{conference_path,hold,applied}') = 'held', false) AS hold_held";
+// Confirmed hold voicemail: recording has resumed for the caller's message (inbound_track must still reach
+// card-pause), while outbound_track carries Waves' CALLER_VOICEMAIL TTS and must not be stored as speaker:'staff'.
+const HOLD_VOICEMAIL_SQL = "COALESCE((metadata #>> '{conference_path,hold,phase}') = 'voicemail'"
+  + " AND (metadata #>> '{conference_path,hold,applied}') = 'voicemail', false) AS hold_voicemail";
 // A card-number recording pause is open on the call (GATE_CALL_RECORDING_CARD_PAUSE, live-call-card-pause.js).
 const CARD_PAUSE_OPEN_SQL = "(metadata -> 'live_transcription' -> 'card_pause' ->> 'paused_at') IS NOT NULL"
   + " AND (metadata -> 'live_transcription' -> 'card_pause' ->> 'resumed_at') IS NULL AS card_pause_open";
@@ -259,12 +263,14 @@ async function storeUtterance(callSid, body) {
     const claimed = await trx('call_log')
       .where('twilio_call_sid', callSid)
       .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
-      .first('id', trx.raw(QUARANTINED_SQL), trx.raw(CARD_PAUSE_OPEN_SQL), trx.raw(HOLD_HELD_SQL));
+      .first('id', trx.raw(QUARANTINED_SQL), trx.raw(CARD_PAUSE_OPEN_SQL), trx.raw(HOLD_HELD_SQL), trx.raw(HOLD_VOICEMAIL_SQL));
     if (!claimed) return { stored: false, reason: 'not_started_here' };
     // A quarantined call keeps no live text: a late callback or a redelivery stores nothing.
     if (claimed.quarantined) return { stored: false, reason: 'quarantined' };
     // On hold, or a return not yet confirmed: the caller hears the hold script, and the recording is paused.
     if (claimed.hold_held === true) return { stored: false, reason: 'on_hold' };
+    // Confirmed hold voicemail: suppress outbound TTS (speaker:'staff') while letting caller speech reach card-pause.
+    if (claimed.hold_voicemail === true && speaker === 'staff') return { stored: false, reason: 'hold_voicemail_tts' };
     pauseOpen = claimed.card_pause_open === true;
 
     // The rows spoken around this one, not the newest rows: a line that arrives late (after later
@@ -383,12 +389,17 @@ async function purgeLiveUtterances(callSid) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${callSid}`]);
     await stampLiveState(trx, callSid, { quarantined_at: new Date().toISOString() });
     const purged = await trx('call_live_utterances').where('call_sid', callSid).del();
-    // The early summary (live-call-early-summary.js) was written from that text, so it goes too, gate on or off,
-    // in the same transaction. A summary still being written is refused by its save's quarantined_at check.
+    // Derived live text (early_summary, spoken_notes, assist) was written from those utterances, so all of it goes
+    // too, gate on or off, in the same transaction. Any save still in flight is refused by its quarantine check.
+    // Use jsonb_exists_any (never the `?|` operator, which Knex parses as a positional binding).
     await trx('call_log')
       .where('twilio_call_sid', callSid)
-      .whereRaw("(metadata -> 'live_transcription' -> 'early_summary') IS NOT NULL")
-      .update({ metadata: trx.raw("jsonb_set(metadata, '{live_transcription}', (metadata -> 'live_transcription') - 'early_summary', true)") });
+      .whereRaw("jsonb_exists_any(metadata -> 'live_transcription', ARRAY['early_summary', 'spoken_notes', 'assist'])")
+      .update({
+        metadata: trx.raw(
+          "jsonb_set(metadata, '{live_transcription}', (metadata -> 'live_transcription') - 'early_summary' - 'spoken_notes' - 'assist', true)",
+        ),
+      });
     return purged;
   });
 }
@@ -404,7 +415,10 @@ async function purgeQuarantinedLiveText({ limit = 25 } = {}) {
       `SELECT c.twilio_call_sid AS call_sid FROM call_log c
         WHERE COALESCE(c.transcription_metadata ->> 'pan_detected', '') = 'true'
           AND COALESCE(c.source, '') <> ?
-          AND EXISTS (SELECT 1 FROM call_live_utterances u WHERE u.call_sid = c.twilio_call_sid)
+          AND (
+            EXISTS (SELECT 1 FROM call_live_utterances u WHERE u.call_sid = c.twilio_call_sid)
+            OR jsonb_exists_any(c.metadata -> 'live_transcription', ARRAY['early_summary', 'spoken_notes', 'assist'])
+          )
         LIMIT ?`,
       [VOICE_RELAY_SANDBOX_SOURCE, limit],
     );

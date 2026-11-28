@@ -109,6 +109,7 @@
  *   GATE_MOVING_AUTO_SEND=true (owner 2026-11-04, option A of the hands-off moves page: "and emails the estimate. A text goes too, from 8 AM if he sent the move at night". A job every 15 minutes sends each new-home estimate the app made, once, through the office's own estimate send: email and the moving text from 8 AM to 8 PM ET; at night the email at once and the text from 8 AM, unless the customer opened the estimate first. Only the app's own draft, unchanged, while the move still waits on it; an estimate the office changed, a draft made before this job, no email and no phone, or a send that reached no one rings one office item, and the office sends it. Needs GATE_MOVING_AUTO_ESTIMATE. Strict opt-in, read at call time via movingAutoSendLive(); off = the office sends the app's draft. The owner flips it: it sends customer messages. Kill switch: unset.)
  *   GATE_ONETIME_PLAN_OFFER=shadow|live (owner 2026-11-19 "build" and 2026-11-20 "i want auto": after a one-time pest or roach job, offer the Quarterly Pest Control Service plan with no setup fee. Each morning at 10:13 AM ET a job reads every one-time general pest or cockroach job whose service was done 3 to 14 days ago (by its service record; a visit closed without the service is skipped), for a customer with an email who has no plan and has not opted out. A job is held unless the account passes the send rules (no other visit booked or done since, the job's own invoice paid and nothing else owed, the customer pays after each visit (not billed to a payer, Auto Pay not paused or off), no review ask on its way, no complaint or open request, no other open estimate, no offer to this customer in the last 12 months, the email division says yes), and the app can price the home. A cockroach job's included follow-up, once done, moves the day count to the follow-up's day. shadow = emails ONE sample of the offer email and of its reminder to the office inbox for each job that passes, so a sample means that the customer would get the offer today; it saves no estimate and no customer gets a message. live = no office sample: for each job that passes, the job makes the customer's estimate for the plan (setup fee $0, good 30 days) and emails the customer the offer with a link to it, through the email division, once per job; it sends nothing until the offer email template is published in the template editor (the publish is the approval of the words), and it never replaces another estimate the customer holds. On day 21 after the job, live emails one reminder for each offer that went out while its estimate is still open (sent only once the reminder template is published too). A home the app cannot price gets one office notification to quote it by hand (live only). live sends customer email: the flip is the owner's. If the pest price settings stop every price on a morning, it raises one admin notification. Every other value, 'true' included, is off. services/onetime-plan-offer.js. Kill = unset.)
  *   GATE_ONETIME_PLAN_EXPANDED_SERVICES=true (owner 2026-11-27: widens the One-Time-to-Plan morning sweep beyond general pest and cockroach jobs to also surface unconverted completed WDO inspections, rodent trapping jobs, stinging insect removals, and free Waves Assessments (lawn_inspection) for 1-tap office review with a prefilled Estimate Tool link and $0 setup waiver metadata. Expanded services NEVER auto-send the general-pest "first plan visit" email or auto-mint a pest-only plan; in live mode they raise one office item per job so staff picks the right Pest or Lawn plan. Strict === 'true', read at call time via onetimePlanExpandedServicesLive(); ships dark by default; off = byte-identical to today's two pest/roach service keys. Kill = unset.)
+ *   GATE_INVENTORY_MARGIN_WATCHDOG=true (owner 2026-11-27: daily read-only one-way inventory cost-spike and cross-service gross margin watchdog. Alerts via one dedupe-keyed admin notification when an approved vendor cost jumps >10% above catalog baseline, when any watched non-lawn service's modeled gross margin drops below 35%, or when required material COGS mappings are missing/broken. Never mutates retail prices and never auto-cuts prices on cheaper generic substitutes. Strict === 'true', read at call time via inventoryMarginWatchdogLive(); dark by default. Kill = unset.)
  *   GATE_SETUP_FEE_APPLICATION_SETTLED=true (owner 2026-10-28, the three false setup-fee alerts of #6830: the setup-fee alert reconcile, which also runs right after a completion parks a new alert, counts a parked visit's application as billed when a prepay year whose bill is live (paid, or awaiting payment on a live prepay invoice) bought that visit, or when the visit's own invoices bill its base line plus its own add-on lines for the frozen visit charge. Billed = the alert closes, or shrinks to the charge still owed, instead of telling staff to bill the visit by hand. Read at call time via setupFeeApplicationSettledLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_SETUP_FEE_OPEN_INVOICE_NOTICE=true (owner 2026-10-31 "do these", the setup fee on an unpaid visit invoice: when the setup-fee alert's fee is not paid yet but the customer's open invoices (scheduled, sent, viewed, overdue or partly paid) carry fee lines that the setup-fee settled rule counts once they are paid, the alert stays open but says the fee is already on that invoice and must not be billed again, and the morning digest stops listing it as a fee to bill. The fee still counts as covered only once paid: paying the invoice resolves the alert, voiding it brings the fee instruction back. Read at call time via setupFeeOpenInvoiceNoticeLive(), strict 'true', dark by default; off = today's alert text, and a standing notice is rewritten back on the next reconcile. Sends nothing to a customer and creates no invoice.)
  *   GATE_STAFF_DOC_PREFILL=true (owner ruling 2026-10-25: a NEW staff form record opens with fields filled from the staff record, for the Vehicle Use & Commuting Agreement: assigned vehicle, home address and start date from the technicians row. The signer checks each value and saves; a typed value always wins. Never a checkbox, never a typed signature. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffDocPrefillLive(). Ships DARK; off = GET /versions/:id/prefill answers 404 { enabled: false } before any query and the form opens empty. Reads only; sends nothing to anyone.)
@@ -251,6 +252,7 @@
  *   GATE_SECOND_TECH_LOWS=true (owner 2026-10-25, second technician census lows L1 + L3: (L1) the admin dashboard tech utilization counts only assignable field staff (active and field-dispatchable) and, for each, only the days in the window they work (technicians.work_days; no list = every day), 8 hours a work day, instead of every active row on every calendar day; (L3) the four Intelligence Bar schedule-tool sites that pick a technician by name text with an unordered first() match use resolveTechnicianByName instead: assignable technicians only, and a name that fits two technicians is an error that lists them, never a guess. Strict opt-in: exactly 'true', read at call time via secondTechLowsLive(). Ships DARK; off = both paths byte-identical to before. Admin-only, sends nothing to a customer.)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
+ *   GATE_LLM_CIRCUIT_BREAKER=true (sliding-window provider circuit breaker for multi-provider dispatchWithFallback chains; trips on 429/5xx or >=15s provider timeouts and fails over while a usable backup exists; strict 'true', read at call time via llmCircuitBreakerLive(); dark by default; owner-flipped because cooldown failover can route to a pricier backup; kill = unset)
  *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
  *   GATE_AGENT_RUNS=true      (agent run ledger WRITES — services/agent-control/runs.js records work_items / agent_runs / steps / events for lanes that call it; off = every handle is inert; the /control/runs reads stay on GATE_AGENT_CONTROL_READ; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
@@ -1139,6 +1141,9 @@ const gates = {
   // Estimated AI spend: ships DARK. CALL-TIME reader is llmCostTrackingLive()
   // below; this entry is for logGateStatus only.
   llmCostTracking: process.env.GATE_LLM_COST_TRACKING === 'true',
+  // Sliding-window provider circuit breaker for dispatchWithFallback: ships
+  // DARK. CALL-TIME reader is llmCircuitBreakerLive() below.
+  llmCircuitBreaker: process.env.GATE_LLM_CIRCUIT_BREAKER === 'true',
 
   // Portal "Your yard this month" card. Map entry for logGateStatus only; the
   // canonical CALL-TIME reader is portalYardCalendarLive() below.
@@ -1150,20 +1155,6 @@ const gates = {
   // GATE_DISCOUNT_STACKING) — every caller (relay-conversation.js's session
   // allowlist, the eval harness, the benchmark runner) must use that.
   voiceRelayOpenai: process.env.GATE_VOICE_RELAY_OPENAI === 'true',
-
-  // Voice relay (Sandy) production INBOUND on an OpenAI model (owner
-  // ruling 2026-09-28: GPT-6 Luna after the benchmark). Ships DARK — off
-  // unless exactly 'true'. This is deliberately a SEPARATE gate from
-  // GATE_VOICE_RELAY_OPENAI above, which is already live in prod for the
-  // sandbox/eval lane alone: that gate must never be what opens production
-  // inbound to an OpenAI model. This map entry is for logGateStatus only;
-  // the canonical CALL-TIME reader is voiceRelayOpenaiInboundLive() below
-  // (strict 'true') — relay-conversation.js's resolveSessionModel reads it,
-  // at session construction, to decide whether a PRODUCTION inbound session
-  // may resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id. The
-  // shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only either
-  // way (collections-conversation.js shares it).
-  voiceRelayOpenaiInbound: process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true',
 
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
@@ -1682,13 +1673,6 @@ const gates = {
   // pattern.
   smsSealedEval: isProd ? process.env.GATE_SMS_SEALED_EVAL === 'true' : true,
 
-  // Sealed-exam AUTO-RUN — nightly sweep runs the exam for any drafter
-  // PROMPT_VERSION that lacks a completed run per leg (first baselines +
-  // every prompt bump). Spends LLM calls on its own, so it follows the
-  // auto-writer pattern: opt-in in EVERY environment, kill = unset.
-  // Spend rails: SEALED_EXAM_AUTO_MIN_ITEMS / SEALED_EXAM_AUTO_MAX_ITEMS.
-  smsSealedExamAutoRun: process.env.GATE_SMS_SEALED_EXAM_AUTORUN === 'true',
-
   // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
   // each draft_unsafe judgment into a fixed (harness surface × failure mode)
   // cell, and weekly parks a harness-patch PROPOSAL card when a cell
@@ -2196,9 +2180,6 @@ const gates = {
   // in 14 days (missed-call-bell.js isRepeatSilentCaller). On = bell row written,
   // no push, stamped repeat_quiet. Off = shadow: missed_call_spam_repeat_shadow.
   missedCallSpamRepeat: process.env.GATE_MISSED_CALL_SPAM_REPEAT === 'true',
-  // Admin bell when one number places 3+ inbound calls inside 3 hours
-  // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.
-  repeatCallerBell: process.env.GATE_REPEAT_CALLER_BELL === 'true',
   // Nightly self-audit: samples recent calls, strong-model re-read, drift
   // metrics to call_audit_findings; alerts ONLY on threshold breach.
   callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
@@ -4623,15 +4604,6 @@ const gates = {
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 
-  // Pest Insider monthly proof-approval (email division fact register lane).
-  // Ships DARK: off unless exactly 'true'. The monthly autopilot that sent
-  // the proof (pest-insider-autopilot.js) was deleted as unused after #7191;
-  // the gate still decides whether a Pest Insider proof can be approved
-  // (newsletter-proof.js) or dispatched (newsletter-sender.js). This entry
-  // is for logGateStatus only; pestInsiderProofLive() reads
-  // GATE_PEST_INSIDER_PROOF at call time. Kill = unset: a Pest Insider
-  // proof cannot be approved or dispatched.
-  pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
   // Waves Pest Insider auto-send. Ships DARK: off unless exactly 'true'.
   // For logGateStatus only; pestInsiderAutoSendLive() reads
   // GATE_PEST_INSIDER_AUTO_SEND at call time.
@@ -5356,6 +5328,13 @@ function llmCostTrackingLive() {
   return process.env.GATE_LLM_COST_TRACKING === 'true';
 }
 
+// GATE_LLM_CIRCUIT_BREAKER read at CALL time — ships DARK, off unless exactly
+// 'true'. Enables the sliding-window provider circuit breaker in
+// services/llm/circuit-breaker.js for multi-provider dispatchWithFallback chains.
+function llmCircuitBreakerLive() {
+  return process.env.GATE_LLM_CIRCUIT_BREAKER === 'true';
+}
+
 // GATE_PACKAGE_FOLLOWUP_AUTOBOOK read at CALL time — strict `=== 'true'`. Gates
 // package-followup-booking.ensurePackageFollowUpVisit (visit 2 of a cockroach /
 // flea / bed bug package booked with visit 1), the call pipeline's package
@@ -5926,10 +5905,6 @@ function publicLlmSharedCapLive() {
   return process.env.GATE_PUBLIC_LLM_SHARED_CAP === 'true';
 }
 
-function pestInsiderProofLive() {
-  return process.env.GATE_PEST_INSIDER_PROOF === 'true';
-}
-
 // GATE_PEST_INSIDER_AUTO_SEND read at CALL time, strict `=== 'true'`, dark by
 // default. On: a Waves Pest Insider issue the planner built becomes a draft,
 // the proof step emails the owner an FYI copy and queues it for its Thursday
@@ -6140,23 +6115,6 @@ function relayUnbookedHandoffLive() {
 // stamped model_fallback_reason path applies unchanged.
 function voiceRelayOpenaiLive() {
   return process.env.GATE_VOICE_RELAY_OPENAI === 'true';
-}
-
-// GATE_VOICE_RELAY_OPENAI_INBOUND read at CALL time — ships DARK, off unless
-// exactly 'true' (owner ruling 2026-09-28: GPT-6 Luna for Sandy's inbound
-// phone agent after the benchmark). The ONE reader relay-conversation.js's
-// resolveSessionModel uses, at session construction, to decide whether a
-// PRODUCTION inbound session (sandbox === false, evalHarness === false) may
-// resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id — a
-// DELIBERATELY SEPARATE gate from voiceRelayOpenaiLive() above, which is
-// already live in prod for the sandbox/eval lane and must never be read as
-// authorizing production inbound. Off: production inbound rejects any
-// OpenAI override exactly as before this gate existed — byte-identical. On:
-// the model-switchboard's voice_relay row (inboundOverrideParse /
-// inboundOverrideAllowed) reads this same function so the Models tab shows
-// what production inbound actually resolves.
-function voiceRelayOpenaiInboundLive() {
-  return process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true';
 }
 
 // GATE_LEAD_INSPECTION_LINK read at CALL time — strict `=== 'true'`, same
@@ -7996,7 +7954,7 @@ function callRingFactLive() {
   return process.env.GATE_CALL_RING_FACT === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 // Own-line reader exports go BELOW the object export above: an assignment above it is replaced with the object and lost
 // (these three read undefined, so off, from #7911 and #7929 until 2026-11-18). feature-gates-own-line-exports.test.js checks it.
 // GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.
@@ -8103,6 +8061,14 @@ function onetimePlanExpandedServicesLive() {
 }
 // GATE_ONETIME_PLAN_EXPANDED_SERVICES reader, on its own line so gate PRs never conflict.
 module.exports.onetimePlanExpandedServicesLive = onetimePlanExpandedServicesLive;
+// GATE_INVENTORY_MARGIN_WATCHDOG read at CALL time, strict `=== 'true'`, dark (owner 2026-11-27).
+// Daily read-only one-way watchdog alerting on >10% approved vendor cost spikes, <35% modeled gross margin,
+// or missing/broken COGS mappings (services/inventory-margin-watchdog.js). Never auto-cuts retail prices. Kill = unset.
+function inventoryMarginWatchdogLive() {
+  return process.env.GATE_INVENTORY_MARGIN_WATCHDOG === 'true';
+}
+// GATE_INVENTORY_MARGIN_WATCHDOG reader, on its own line so gate PRs never conflict.
+module.exports.inventoryMarginWatchdogLive = inventoryMarginWatchdogLive;
 // GATE_APP_RATING_PROMPT reader, on its own line so gate PRs never conflict.
 module.exports.appRatingPromptMode = appRatingPromptMode;
 module.exports.lawnScoreScaleV2Live = lawnScoreScaleV2Live;
@@ -8337,6 +8303,8 @@ module.exports.laneVoiceFillLive = laneVoiceFillLive;
 module.exports.typedVoiceFillLive = typedVoiceFillLive;
 // GATE_LLM_COST_TRACKING reader, on its own line.
 module.exports.llmCostTrackingLive = llmCostTrackingLive;
+// GATE_LLM_CIRCUIT_BREAKER reader, on its own line.
+module.exports.llmCircuitBreakerLive = llmCircuitBreakerLive;
 // GATE_FAST_COMPLETE_VOICE_FILL reader, on its own line so gate PRs adding lines above
 // never touch this one.
 module.exports.fastCompleteVoiceFillLive = fastCompleteVoiceFillLive;

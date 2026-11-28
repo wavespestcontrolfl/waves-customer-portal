@@ -295,12 +295,12 @@ function PayoutsTab() {
                 onClick={() => toggleExpand(p.id)}
                 style={{
                   cursor: "pointer",
-                  background: expanded === p.id ? "#F4F4F5" : "transparent",
+                  background: expanded === p.id ? "var(--surface-hover, #F4F4F5)" : "transparent",
                   transition: "background 0.15s",
                 }}
                 onMouseEnter={(e) => {
                   if (expanded !== p.id)
-                    e.currentTarget.style.background = "#FFFFFF88";
+                    e.currentTarget.style.background = "var(--surface-hover, #FFFFFF88)";
                 }}
                 onMouseLeave={(e) => {
                   if (expanded !== p.id)
@@ -388,7 +388,7 @@ function PayoutsTab() {
                   {p.reconciled ? (
                     <span
                       style={{
-                        color: "#18181B",
+                        color: "var(--text-primary, #18181B)",
                         fontSize: 16,
                       }}
                     >
@@ -410,7 +410,7 @@ function PayoutsTab() {
                   <TD
                     colSpan={7}
                     style={{
-                      background: "#F4F4F5",
+                      background: "var(--surface-hover, #F4F4F5)",
                     }}
                   >
                     <div className="px-0 py-3 min-[1101px]:px-5">
@@ -1032,7 +1032,7 @@ function ReconciliationTab() {
                   style={{
                     fontSize: 14,
                     fontWeight: 500,
-                    color: "#09090B",
+                    color: "var(--text-primary, #09090B)",
                   }}
                 >
                   {fmtDay(item.arrival_date)}
@@ -1040,14 +1040,14 @@ function ReconciliationTab() {
                 <div
                   style={{
                     fontSize: 14,
-                    color: "#71717A",
+                    color: "var(--text-tertiary, #71717A)",
                     marginTop: 2,
                   }}
                 >
                   Expected:{" "}
                   <span className="u-nums"
                     style={{
-                      color: "#27272A",
+                      color: "var(--text-primary, #27272A)",
                     }}
                   >
                     {fmtM(item.expected_amount || item.amount)}
@@ -1064,7 +1064,7 @@ function ReconciliationTab() {
                 >
                   <span
                     style={{
-                      color: "#18181B",
+                      color: "var(--text-primary, #18181B)",
                       fontSize: 16,
                     }}
                   >
@@ -1073,14 +1073,14 @@ function ReconciliationTab() {
                   <div
                     style={{
                       fontSize: 14,
-                      color: "#71717A",
+                      color: "var(--text-tertiary, #71717A)",
                     }}
                   >
                     <div>
                       Actual:{" "}
                       <span className="u-nums"
                         style={{
-                          color: "#18181B",
+                          color: "var(--text-primary, #18181B)",
                         }}
                       >
                         {fmtM(item.actual_amount)}
@@ -1300,7 +1300,7 @@ function ExportsTab() {
           style={{
             fontSize: 14,
             fontWeight: 500,
-            color: "#09090B",
+            color: "var(--text-primary, #09090B)",
             marginBottom: 14,
           }}
         >
@@ -1458,7 +1458,7 @@ function ExportsTab() {
             style={{
               fontSize: 14,
               fontWeight: 500,
-              color: "#09090B",
+              color: "var(--text-primary, #09090B)",
               marginBottom: 10,
             }}
           >
@@ -1695,7 +1695,8 @@ function PayoutModal({
                     display: "block",
                     marginTop: 4,
                     fontSize: 14,
-                    color: selected ? "#FFFFFF" : "#71717A",
+                    color: selected ? "currentColor" : "var(--text-tertiary, #71717A)",
+                    opacity: selected ? 0.85 : 1,
                   }}
                 >
                   {disabled ? "Unavailable" : note}
@@ -1737,7 +1738,7 @@ function PayoutModal({
             {isInstant ? "Instant available" : "Available"}:{" "}
             <span className="u-nums"
               style={{
-                color: methodLimit > 0 ? "#18181B" : "#C8312F",
+                color: methodLimit > 0 ? "var(--text-primary, #18181B)" : "var(--status-red, #C8312F)",
               }}
             >
               {fmtM(methodLimit)}
@@ -1746,7 +1747,7 @@ function PayoutModal({
         </div>
         <div
           style={{
-            background: "#F4F4F5",
+            background: "var(--surface-hover, #F4F4F5)",
             borderRadius: 10,
             padding: 14,
             marginBottom: 20,
@@ -1762,7 +1763,7 @@ function PayoutModal({
             <span
               style={{
                 fontSize: 14,
-                color: "#71717A",
+                color: "var(--text-tertiary, #71717A)",
               }}
             >
               Amount
@@ -1770,7 +1771,7 @@ function PayoutModal({
             <span className="u-nums"
               style={{
                 fontSize: 14,
-                color: "#27272A",
+                color: "var(--text-primary, #27272A)",
               }}
             >
               {fmtM(parsedAmount)}
@@ -1786,7 +1787,7 @@ function PayoutModal({
             <span
               style={{
                 fontSize: 14,
-                color: "#71717A",
+                color: "var(--text-tertiary, #71717A)",
               }}
             >
               {isInstant ? "Instant fee estimate" : "Instant fee"}
@@ -1794,7 +1795,7 @@ function PayoutModal({
             <span className="u-nums"
               style={{
                 fontSize: 14,
-                color: isInstant ? "#52525B" : "#18181B",
+                color: isInstant ? "var(--text-secondary, #52525B)" : "var(--text-primary, #18181B)",
               }}
             >
               {fmtM(fee)}
@@ -1802,7 +1803,7 @@ function PayoutModal({
           </div>{" "}
           <div
             style={{
-              borderTop: "1px solid #E4E4E7",
+              borderTop: "1px solid var(--border-default, #E4E4E7)",
               paddingTop: 6,
               display: "flex",
               justifyContent: "space-between",
@@ -1812,7 +1813,7 @@ function PayoutModal({
               style={{
                 fontSize: 14,
                 fontWeight: 500,
-                color: "#09090B",
+                color: "var(--text-primary, #09090B)",
               }}
             >
               Net Transfer
@@ -1821,7 +1822,7 @@ function PayoutModal({
               style={{
                 fontSize: 15,
                 fontWeight: 500,
-                color: "#18181B",
+                color: "var(--text-primary, #18181B)",
               }}
             >
               {fmtM(net)}
@@ -1879,7 +1880,8 @@ const fmtAsOf = (iso) =>
     : "as of the last bank update";
 const cashOf = (a) => (a.available != null ? a.available : a.current);
 const isUsdEntry = (e) => String(e.currency || "USD").toUpperCase() === "USD";
-const cashMuted = { color: "#71717A", fontSize: 14, marginTop: 4 };
+const cashInk = "var(--text-primary, #09090B)";
+const cashMuted = { color: "var(--text-tertiary, #71717A)", fontSize: 14, marginTop: 4 };
 const cashRow = {
   display: "flex",
   justifyContent: "space-between",
@@ -1949,54 +1951,54 @@ function CashTodayCard({ balance, balanceError, refreshKey }) {
 
   return (
     <Card style={{ padding: "16px 20px", marginBottom: 16 }}>
-      <div style={{ fontSize: 16, fontWeight: 500, color: "#09090B", marginBottom: 6 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: cashInk, marginBottom: 6 }}>
         Cash today
       </div>
       {data.accounts.map((a) => (
         <div key={`${a.account_label}-${a.mask}`} style={cashRow}>
           <div>
-            <div style={{ color: "#09090B" }}>
+            <div style={{ color: cashInk }}>
               {a.name || a.account_label}
               {a.mask ? ` ••${a.mask}` : ""}
             </div>
             <div style={{ ...cashMuted, marginTop: 0 }}>{fmtAsOf(a.balance_as_of)}</div>
           </div>
-          <div className="u-nums" style={{ color: "#09090B" }}>
+          <div className="u-nums" style={{ color: cashInk }}>
             {cashOf(a) == null ? "—" : money(a, cashOf(a))}
           </div>
         </div>
       ))}
       {stripeOk && (
         <div style={cashRow}>
-          <div style={{ color: "#09090B" }}>Stripe: available and pending</div>
-          <div className="u-nums" style={{ color: "#09090B" }}>
+          <div style={{ color: cashInk }}>Stripe: available and pending</div>
+          <div className="u-nums" style={{ color: cashInk }}>
             {fmtM(stripePart)}
           </div>
         </div>
       )}
       <div style={cashRow}>
         <div>
-          <div style={{ color: "#09090B" }}>Stripe payouts on the way</div>
+          <div style={{ color: cashInk }}>Stripe payouts on the way</div>
           {nextArrival && (
             <div style={{ ...cashMuted, marginTop: 0 }}>
               next arrives {fmtDay(nextArrival)}
             </div>
           )}
         </div>
-        <div className="u-nums" style={{ color: "#09090B" }}>
+        <div className="u-nums" style={{ color: cashInk }}>
           {transitFailed ? "—" : fmtM(transitTotal)}
         </div>
       </div>
       <div
         style={{
           ...cashRow,
-          borderTop: "1px solid #E4E4E7",
+          borderTop: "1px solid var(--border-default, #E4E4E7)",
           marginTop: 6,
           paddingTop: 10,
         }}
       >
-        <div style={{ color: "#09090B", fontWeight: 500 }}>{totalLabel}</div>
-        <div className="u-nums" style={{ color: "#09090B", fontWeight: 500 }}>
+        <div style={{ color: cashInk, fontWeight: 500 }}>{totalLabel}</div>
+        <div className="u-nums" style={{ color: cashInk, fontWeight: 500 }}>
           {fmtM(total)}
         </div>
       </div>
@@ -2145,7 +2147,7 @@ export default function BankingPage() {
           style={{
             fontSize: 32,
             fontWeight: 500,
-            color: "#09090B",
+            color: cashInk,
             lineHeight: 1.1,
           }}
         >
@@ -2155,7 +2157,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#C8312F" || "#dc2626",
+              color: "var(--status-red, #C8312F)",
               marginTop: 6,
             }}
           >
@@ -2177,7 +2179,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               marginTop: 6,
             }}
           >
@@ -2244,7 +2246,7 @@ export default function BankingPage() {
         >
           <div
             style={{
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               fontSize: 14,
               marginBottom: 6,
             }}
@@ -2255,7 +2257,7 @@ export default function BankingPage() {
             style={{
               fontSize: 22,
               fontWeight: 500,
-              color: "#52525B",
+              color: "var(--text-secondary, #52525B)",
             }}
           >
             {!balance || balanceError ? "—" : fmtM(pending)}
@@ -2263,7 +2265,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               marginTop: 4,
             }}
           >
@@ -2277,7 +2279,7 @@ export default function BankingPage() {
         >
           <div
             style={{
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               fontSize: 14,
               marginBottom: 6,
             }}
@@ -2288,7 +2290,7 @@ export default function BankingPage() {
             style={{
               fontSize: 22,
               fontWeight: 500,
-              color: "#09090B",
+              color: cashInk,
             }}
           >
             {!balance || balanceError
@@ -2298,7 +2300,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               marginTop: 4,
             }}
           >
@@ -2316,7 +2318,7 @@ export default function BankingPage() {
         >
           <div
             style={{
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               fontSize: 14,
               marginBottom: 6,
             }}
@@ -2327,7 +2329,7 @@ export default function BankingPage() {
             style={{
               fontSize: 22,
               fontWeight: 500,
-              color: "#09090B",
+              color: cashInk,
             }}
           >
             {!stats || statsError ? "—" : fmtM(stats?.mtd_deposited)}
@@ -2335,7 +2337,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               marginTop: 4,
             }}
           >

@@ -1331,11 +1331,10 @@ function calculatePestProductionDiagnostics(property) {
   const lowConfidenceReasons = [];
 
   if (!homeSqFt || !footprint) lowConfidenceReasons.push('missing_home_sqft');
-  if (!lotSqFt) lowConfidenceReasons.push('missing_lot_size');
   if (storiesSource === 'default' || storiesSource === 'estimated') manualReviewReasons.push('stories_estimated');
   if (poolCageSizeInferred) manualReviewReasons.push('pool_cage_size_inferred');
-  if (lotSqFt > (cfg.lowConfidenceLotSqFt || 40000)) lowConfidenceReasons.push('very_large_lot');
-  else if (lotSqFt > (cfg.manualReviewLotSqFt || 20000)) manualReviewReasons.push('large_lot');
+  // Owner ruling 2026-11-27: lot size and estimated service minutes (45+/60+ min) are
+  // informational production diagnostics only — never force manualReview or lowConfidence.
   if (poolCageSize === 'oversized') lowConfidenceReasons.push('oversized_pool_cage');
   else if (poolCageSize === 'large') manualReviewReasons.push('large_pool_cage');
   // GATE_CAGE_TWO_SIZES website hold: the public quote sets f.poolCageReview
@@ -1347,8 +1346,6 @@ function calculatePestProductionDiagnostics(property) {
   // only shrubs trigger the heavy-vegetation review flag now.
   if (f.complexity === 'complex' && f.shrubs === 'heavy') manualReviewReasons.push('complex_heavy_vegetation');
   if (outbuildingCount >= 2) manualReviewReasons.push('multiple_outbuildings');
-  if (estimatedMinutes >= (cfg.lowConfidenceMinutes || 60)) lowConfidenceReasons.push('estimated_service_time_60_plus');
-  else if (estimatedMinutes >= (cfg.manualReviewMinutes || 45)) manualReviewReasons.push('estimated_service_time_45_plus');
 
   const reviewReasons = [...new Set([...lowConfidenceReasons, ...manualReviewReasons])];
   const pricingConfidence = lowConfidenceReasons.length ? 'low' : manualReviewReasons.length ? 'medium' : 'high';

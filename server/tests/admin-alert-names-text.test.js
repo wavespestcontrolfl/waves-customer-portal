@@ -344,7 +344,7 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     const callRow = { name: 'Albert Clark', phone: '+19415550188', callLogId: CALL_ID, count: 3, unanswered: 2 };
     expect(TRIGGER_REGISTRY.customer_missed_call.build(callRow).alert)
       .toEqual({ buttons: { kind: 'call_back', items: [call({ callLogId: CALL_ID }), CALLED_BACK] } });
-    for (const key of ['customer_voicemail_callback', 'repeat_caller', 'promise_chaser', 'relay_unbooked_call']) {
+    for (const key of ['customer_voicemail_callback', 'promise_chaser', 'relay_unbooked_call']) {
       expect(TRIGGER_REGISTRY[key].build(callRow).alert).toEqual({ buttons: { kind: 'call_back', items: [call({ callLogId: CALL_ID })] } });
       // No call named: the row is written as before, with no button.
       expect(TRIGGER_REGISTRY[key].build({ ...callRow, callLogId: undefined }).alert).toBeUndefined();

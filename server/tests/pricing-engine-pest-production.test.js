@@ -81,7 +81,7 @@ describe('pest production burden pricing inputs', () => {
     expect(heavy.productionDiagnostics.breakdown.poolCage).toBe(12);
   });
 
-  test('flags inferred cage size and large lots for manual pricing review', () => {
+  test('flags inferred cage size and estimated stories, but does not hold for lot size or 45+/60+ min diagnostics', () => {
     const line = pestLine({
       homeSqFt: 4233,
       lotSqFt: 24394,
@@ -103,9 +103,32 @@ describe('pest production burden pricing inputs', () => {
     expect(line.productionDiagnostics.reviewReasons).toEqual(expect.arrayContaining([
       'stories_estimated',
       'pool_cage_size_inferred',
-      'large_lot',
     ]));
+    expect(line.productionDiagnostics.reviewReasons).not.toContain('large_lot');
+    expect(line.productionDiagnostics.reviewReasons).not.toContain('estimated_service_time_45_plus');
     expect(line.productionDiagnostics.manualReviewReasons).toEqual(line.productionDiagnostics.reviewReasons);
+
+    // Large lot / 45+ min alone stays high confidence and never forces manual review.
+    const largeLotOnly = pestLine({
+      homeSqFt: 5500,
+      lotSqFt: 45000,
+      stories: 1,
+      storiesSource: 'manual',
+      features: {
+        pool: true,
+        poolCage: true,
+        poolCageSize: 'medium',
+        shrubs: 'moderate',
+        trees: 'moderate',
+        complexity: 'moderate',
+        nearWater: true,
+        attachedGarage: true,
+      },
+    });
+    expect(largeLotOnly.productionDiagnostics.estimatedMinutes).toBeGreaterThanOrEqual(45);
+    expect(largeLotOnly.productionDiagnostics.pricingConfidence).toBe('high');
+    expect(largeLotOnly.productionDiagnostics.manualReview).toBe(false);
+    expect(largeLotOnly.requiresManualReview).toBe(false);
   });
 
   test('does not flag manually confirmed story count as estimated', () => {
@@ -148,10 +171,10 @@ describe('pest production burden pricing inputs', () => {
     expect(line.productionDiagnostics.manualReview).toBe(true);
     expect(line.productionDiagnostics.reviewReasons).toEqual(expect.arrayContaining([
       'missing_home_sqft',
-      'very_large_lot',
       'oversized_pool_cage',
-      'estimated_service_time_60_plus',
     ]));
+    expect(line.productionDiagnostics.reviewReasons).not.toContain('very_large_lot');
+    expect(line.productionDiagnostics.reviewReasons).not.toContain('estimated_service_time_60_plus');
   });
 
   // GATE_CAGE_TWO_SIZES website hold: the engine reads no gate. The public quote

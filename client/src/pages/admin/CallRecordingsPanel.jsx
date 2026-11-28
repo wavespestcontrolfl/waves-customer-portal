@@ -226,19 +226,23 @@ export default function CallRecordingsPanel() {
   const [stats, setStats] = useState(null);
   const [recordings, setRecordings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [processing, setProcessing] = useState(false);
   const [selected, setSelected] = useState(null);
   const [toast, setToast] = useState(null);
 
   const loadData = useCallback(async () => {
-    const [s, r] = await Promise.all([
-      adminFetch("/admin/call-recordings/stats").catch(() => null),
-      adminFetch("/admin/call-recordings/recordings?limit=30").catch(() => ({
-        recordings: [],
-      })),
+    const [statsRes, recRes] = await Promise.allSettled([
+      adminFetch("/admin/call-recordings/stats"),
+      adminFetch("/admin/call-recordings/recordings?limit=30"),
     ]);
-    setStats(s);
-    setRecordings(r.recordings || []);
+    if (statsRes.status === "fulfilled") setStats(statsRes.value);
+    if (recRes.status === "fulfilled") {
+      setRecordings(recRes.value?.recordings || []);
+      setLoadError(null);
+    } else {
+      setLoadError(recRes.reason?.message || "Could not load call recordings.");
+    }
     setLoading(false);
   }, []);
 
@@ -254,7 +258,19 @@ export default function CallRecordingsPanel() {
     setTimeout(() => setToast(null), 3500);
   };
 
+  const actionableCount = stats
+    ? Number(stats.pending || 0) +
+      Number(stats.retrying ?? stats.failed ?? 0) +
+      Number(stats.stalled_claims ?? stats.stalledClaims ?? 0)
+    : null;
+
   const processAll = async () => {
+    if (processing) return;
+    if (actionableCount != null && actionableCount === 0) return;
+    const label = actionableCount != null ? `${actionableCount} pending/retryable` : "all pending";
+    if (!window.confirm(`Process ${label} call recording(s)? This runs paid AI transcription and extraction.`)) {
+      return;
+    }
     setProcessing(true);
     try {
       const result = await adminFetch("/admin/call-recordings/process-all", {
@@ -342,8 +358,11 @@ export default function CallRecordingsPanel() {
         </div>{" "}
         <button
           onClick={processAll}
-          disabled={processing}
-          style={{ ...sBtn(D.teal, D.white), opacity: processing ? 0.5 : 1 }}
+          disabled={processing || (actionableCount != null && actionableCount === 0)}
+          style={{
+            ...sBtn(D.teal, D.white),
+            opacity: processing || (actionableCount != null && actionableCount === 0) ? 0.5 : 1,
+          }}
         >
           {processing ? "Processing..." : "Process All Pending"}
         </button>{" "}
@@ -420,17 +439,42 @@ export default function CallRecordingsPanel() {
       >
         {" "}
         <div>
-          {recordings.length === 0 ? (
+          {loadError && (
             <div
+              role="alert"
               style={{
                 ...sCard,
-                textAlign: "center",
-                padding: 40,
-                color: D.muted,
+                borderColor: D.red,
+                color: D.red,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 12,
               }}
             >
-              No call recordings found
+              <span>Could not load call recordings: {loadError}</span>
+              <button
+                type="button"
+                onClick={loadData}
+                style={sBtn(D.teal, D.white)}
+              >
+                Retry
+              </button>
             </div>
+          )}
+          {recordings.length === 0 ? (
+            !loadError && (
+              <div
+                style={{
+                  ...sCard,
+                  textAlign: "center",
+                  padding: 40,
+                  color: D.muted,
+                }}
+              >
+                No call recordings found
+              </div>
+            )
           ) : (
             recordings.map((r) => {
               const extraction = parseExtraction(r);
@@ -672,6 +716,7 @@ export default function CallRecordingsPanel() {
 function RecordingDetail({ recording, onClose, onUpdate }) {
   const [r, setR] = useState(recording);
   const [generatingSynopsis, setGeneratingSynopsis] = useState(false);
+  const [synopsisError, setSynopsisError] = useState(null);
   const [processingOne, setProcessingOne] = useState(false);
   const [processVerdict, setProcessVerdict] = useState(null);
   // Which process request owns the pane RIGHT NOW. An in-flight process
@@ -685,6 +730,7 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   // newer request for the same recording. Every selection change and every
   // new request takes the next token, so only the latest one can write.
   const requestTokenRef = useRef(0);
+  const synopsisTokenRef = useRef(0);
   const [synopsisExpanded, setSynopsisExpanded] = useState(true);
   const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   const extraction = parseExtraction(r);
@@ -697,12 +743,15 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   // button and describe the wrong recording.
   useEffect(() => {
     requestTokenRef.current += 1;
+    synopsisTokenRef.current += 1;
     setR(recording);
     setProcessVerdict(null);
-    // Reset the busy flag here rather than letting a fenced-out request do
+    setSynopsisError(null);
+    // Reset the busy flags here rather than letting a fenced-out request do
     // it: the fence stops a stale response from writing state, so without
-    // this the new recording would inherit a disabled Process button.
+    // this the new recording would inherit disabled buttons.
     setProcessingOne(false);
+    setGeneratingSynopsis(false);
   }, [recording]);
 
   const handleProcess = async () => {
@@ -755,20 +804,27 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
   };
 
   const handleGenerateSynopsis = async () => {
+    const targetId = r.id;
+    const token = (synopsisTokenRef.current += 1);
+    const stillShowing = () => synopsisTokenRef.current === token;
     setGeneratingSynopsis(true);
+    setSynopsisError(null);
     try {
       const result = await adminFetch(
         `/admin/call-recordings/synopsis/${r.twilio_call_sid}`,
         { method: "POST" },
       );
+      if (!stillShowing()) return;
       if (result?.synopsis) {
-        setR((prev) => ({ ...prev, lead_synopsis: result.synopsis }));
+        setR((prev) => (prev.id === targetId ? { ...prev, lead_synopsis: result.synopsis } : prev));
         if (onUpdate) onUpdate();
       }
     } catch (e) {
-      /* ignore */
+      if (!stillShowing()) return;
+      setSynopsisError(`Synopsis failed — ${e.message || "unknown error"}`);
+    } finally {
+      if (stillShowing()) setGeneratingSynopsis(false);
     }
-    setGeneratingSynopsis(false);
   };
 
   // Simple markdown-ish renderer for synopsis
@@ -1005,6 +1061,11 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
                   ? "Regenerate Synopsis"
                   : "Generate Synopsis"}
             </button>
+          )}
+          {synopsisError && (
+            <div style={{ width: "100%", fontSize: 12, color: D.red }}>
+              {synopsisError}
+            </div>
           )}
         </div>
         {/* Receiving number label */}

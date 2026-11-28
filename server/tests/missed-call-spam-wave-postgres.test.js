@@ -535,6 +535,19 @@ jest.setTimeout(30000);
       expect(metadata.missed_call_push_retries).toBeUndefined();
     });
 
+    test('mapped-line silent calls carrying call_log.source still match SILENT_SHAPE_SQL (C2-09)', async () => {
+      // Commit #8592 stamps call_log.source via dialedSourceColumn(To) on every
+      // mapped inbound line; SILENT_COLUMNS must allow 'source' so repeat-robocall
+      // detection continues to match silent hang-ups.
+      await database('call_log').insert([
+        prior(CALLER, 60 * 24 * 3, { source: 'gbp_parrish' }),
+        prior(CALLER, 60 * 24, { source: 'gbp_parrish' }),
+      ]);
+      const row = judged({ source: 'gbp_parrish' });
+      await database('call_log').insert(row);
+      await expect(repeat(row)).resolves.toBe(true);
+    });
+
     // The repeat quiet stamp applies the record check's own conditions in its
     // update: a change that lands after the check read the record, before the
     // stamp, leaves the stamp unwritten, and the push goes (pre-push audit r13,
