@@ -146,6 +146,15 @@ async function uploadTwilioMedia(body = {}) {
   return uploaded;
 }
 
+function isSafeHttpsUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 async function signMediaForClient(value) {
   const media = parseStoredMedia(value);
   if (!media.length) return [];
@@ -162,27 +171,60 @@ async function signMediaForClient(value) {
         logger.error(`[sms-media] Failed to sign media ${item.key}: ${err.message}`);
       }
     }
-    return { ...item, url: item.url || item.providerUrl || null };
+    const fallbackUrl = isSafeHttpsUrl(item.url)
+      ? item.url
+      : (isSafeHttpsUrl(item.providerUrl) ? item.providerUrl : null);
+    return { ...item, url: fallbackUrl };
   }));
 }
 
-function mediaFromOutboundAttachments(attachments = [], urls = []) {
-  if (Array.isArray(attachments) && attachments.length) {
-    return attachments.slice(0, 10).map((a, index) => ({
+function mediaFromOutboundAttachments(attachments = []) {
+  if (!Array.isArray(attachments) || !attachments.length) return [];
+  return attachments.slice(0, 10)
+    .filter((a) => isValidAttachmentToken(a))
+    .map((a, index) => ({
       direction: 'outbound',
-      key: isValidAttachmentToken(a) ? a.key : null,
-      url: a.url || null,
+      key: a.key,
+      url: null,
       fileName: a.fileName || null,
       contentType: a.mimeType || a.contentType || null,
-      size: a.size || null,
+      size: Number(a.size) || 0,
       index,
     }));
+}
+
+async function resolveVerifiedOutboundAttachments(attachments = []) {
+  if (!Array.isArray(attachments) || !attachments.length) {
+    return { media: [], mediaUrls: [] };
   }
-  return (Array.isArray(urls) ? urls : []).slice(0, 10).map((url, index) => ({
-    direction: 'outbound',
-    url,
-    index,
-  }));
+  const bounded = attachments.slice(0, 10);
+  if (bounded.some((a) => !isValidAttachmentToken(a))) {
+    return { error: 'Invalid or unverified media attachment', status: 400 };
+  }
+  if (!config.s3?.bucket) {
+    return { error: 'S3 not configured', status: 500 };
+  }
+  const media = [];
+  const mediaUrls = [];
+  for (let index = 0; index < bounded.length; index += 1) {
+    const a = bounded[index];
+    const signedUrl = await getSignedUrl(
+      s3,
+      new GetObjectCommand({ Bucket: config.s3.bucket, Key: a.key }),
+      { expiresIn: 24 * 60 * 60 },
+    );
+    mediaUrls.push(signedUrl);
+    media.push({
+      direction: 'outbound',
+      key: a.key,
+      url: null,
+      fileName: a.fileName || null,
+      contentType: a.mimeType || a.contentType || null,
+      size: Number(a.size) || 0,
+      index,
+    });
+  }
+  return { media, mediaUrls };
 }
 
 module.exports = {
@@ -190,7 +232,10 @@ module.exports = {
   uploadTwilioMedia,
   signMediaForClient,
   mediaFromOutboundAttachments,
+  resolveVerifiedOutboundAttachments,
   createAttachmentToken,
+  isValidAttachmentToken,
+  isSafeHttpsUrl,
   parseStoredMedia,
   isSignableStoredMediaKey,
   // Exposed for tests/review and to document the SSRF guard.

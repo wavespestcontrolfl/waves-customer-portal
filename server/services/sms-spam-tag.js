@@ -30,7 +30,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
-const { phoneIdentitySql, NON_ACTIONABLE_INBOUND_TYPES } = require('./sms-response-policy');
+const { phoneIdentitySql, NON_ACTIONABLE_INBOUND_TYPES, HUMAN_REPLY_TYPES } = require('./sms-response-policy');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { detectHelp } = require('./messaging/opt-out-detector');
 
@@ -296,10 +296,10 @@ async function tagSpamSender({ number, adminUserId = null, reason = null, source
 }
 
 /**
- * Undo a tag. Deletes the row and sets spam_verdict.enforced = false (with
+ * Undo a tag. Deletes the row, sets spam_verdict.enforced = false (with
  * cleared_by and cleared_at) on that sender's texts that carry an enforced
- * verdict, manual or model, so they count as needing a reply again (owner
- * ruling 2026-09-24: no durable dismissal marker). is_read is not touched.
+ * verdict (manual or model), and re-opens is_read = false on unanswered
+ * inbound rows so rescued prospects reappear in the unread badge/queue.
  */
 async function untagSpamSender({ number, adminUserId = null } = {}) {
   const phone = normalizePhone(number);
@@ -317,6 +317,25 @@ async function untagSpamSender({ number, adminUserId = null } = {}) {
     if (messageIds.length) {
       await trx('messages').whereIn('id', messageIds)
         .update({ metadata: trx.raw(CLEAR_VERDICT_SQL, [clearJson]), updated_at: new Date() });
+      // Re-open unanswered inbound rows so the Messages unread badge surfaces
+      // rescued prospects instead of leaving them silently read.
+      const reopened = await trx('messages')
+        .whereIn('id', messageIds)
+        .where({ channel: 'sms', direction: 'inbound' })
+        .whereNotExists(function hasLaterOutbound() {
+          this.select(1).from('messages as out_m')
+            .whereRaw('out_m.conversation_id = messages.conversation_id')
+            .where({ 'out_m.channel': 'sms', 'out_m.direction': 'outbound' })
+            .whereIn('out_m.message_type', HUMAN_REPLY_TYPES)
+            .whereIn('out_m.delivery_status', ['queued', 'sent', 'delivered'])
+            .whereRaw('out_m.created_at > messages.created_at');
+        })
+        .update({ is_read: false, read_at: null, read_by_admin_user_id: null, updated_at: new Date() })
+        .returning('twilio_sid');
+      const reopenedSids = reopened.map((r) => r.twilio_sid).filter(Boolean);
+      if (reopenedSids.length) {
+        await trx('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', reopenedSids).update({ is_read: false });
+      }
     }
     return { phone, removed: removed > 0, legacy: legacyIds.length, unified: messageIds.length };
   });

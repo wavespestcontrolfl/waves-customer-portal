@@ -37,6 +37,7 @@ function nextMillisecondBoundary(date) {
 // or, since the bell opens the conversation, ?message=<MessageSid>
 // (notification-triggers.js sms_reply). Both mean "unlinked".
 const UNLINKED_BELL_LINK = '/admin/communications';
+const SMS_BELL_CATEGORIES = ['inbound_sms', 'new_lead'];
 const isUnlinkedBellLink = (qb, column = 'link') => qb.where((b) => b
   .where(column, UNLINKED_BELL_LINK).orWhere(column, 'like', `${UNLINKED_BELL_LINK}?message=%`));
 
@@ -62,7 +63,8 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
       // Match the bell's current target and preserve customer-linked bells.
       const bellCutoff = nextMillisecondBoundary(cutoff);
       const liveBell = () => isUnlinkedBellLink(NotificationService.scopeAdminFeedToRole(trx('notifications'), role)
-        .where({ recipient_type: 'admin', category: 'inbound_sms' }))
+        .where({ recipient_type: 'admin' })
+        .whereIn('category', SMS_BELL_CATEGORIES))
         .whereNull('read_at')
         .where('created_at', '<', bellCutoff)
         .whereRaw(
@@ -118,7 +120,8 @@ async function phonesWithLiveUnlinkedBell(candidateRows) {
     .whereRaw('COALESCE(l.from_phone, c.contact_phone) = ANY(?)', [candidatePhones])
     .whereExists(function liveBell() {
       isUnlinkedBellLink(this.select(1).from('notifications as n')
-        .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms' }), 'n.link')
+        .where({ 'n.recipient_type': 'admin' })
+        .whereIn('n.category', SMS_BELL_CATEGORIES), 'n.link')
         .whereNull('n.read_at')
         .whereRaw("n.metadata->'payload'->>'twilioSid' = m.twilio_sid");
     })
@@ -210,7 +213,7 @@ async function markInboundSmsRead({
   const now = new Date();
   const scope = function scope() {
     if (ids.length) this.whereIn('id', ids);
-    if (convs.length) this.orWhere(function conv() { this.whereIn('conversation_id', convs).where('created_at', '<=', readBefore); });
+    if (convs.length) this.orWhere(function conv() { this.whereIn('conversation_id', convs).where('created_at', '<', nextMillisecondBoundary(readBefore)); });
     if (applicationId && appReplyIds.length) {
       this.orWhere(function applicant() {
         this.where({ message_type: 'job_applicant_reply' })
@@ -328,7 +331,10 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, exc
         .orWhereRaw("jsonb_exists(COALESCE(m.metadata, '{}'::jsonb), 'backlog_reset')")
         .orWhereIn('m.twilio_sid', function liveBells() {
           this.select(db.raw("n.metadata->'payload'->>'twilioSid'")).from('notifications as n')
-            .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms' }).whereNull('n.read_at');
+            .where({ 'n.recipient_type': 'admin' })
+            .whereIn('n.category', SMS_BELL_CATEGORIES)
+            .where((b) => b.where('n.category', 'inbound_sms').orWhere('n.link', 'like', `${UNLINKED_BELL_LINK}%`))
+            .whereNull('n.read_at');
         });
     })
     .whereRaw(`${receipt.effectiveCreatedAtSql} < ?`, [cutoff])

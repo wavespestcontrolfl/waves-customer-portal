@@ -1382,7 +1382,15 @@ const NotificationService = {
     const sids = [...(twilioSids || []), ...(twilioSid ? [twilioSid] : [])].filter(Boolean);
     if (!customerId && !sids.length) return 0;
     let q = scopeAdminFeedToRole(
-      db('notifications').where({ recipient_type: 'admin', category: 'inbound_sms' }),
+      db('notifications')
+        .where({ recipient_type: 'admin' })
+        .where((b) => b
+          .where('category', 'inbound_sms')
+          .orWhere((nl) => nl
+            .where('category', 'new_lead')
+            .where((smsOnly) => smsOnly
+              .where('link', 'like', '/admin/communications%')
+              .orWhereRaw("COALESCE(metadata->>'dedupeKey', '') LIKE 'sms-tracking-thread:%'")))),
       role,
     )
       .whereNull('read_at')

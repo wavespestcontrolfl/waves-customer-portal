@@ -1860,12 +1860,24 @@ export function SmsTab({
     startListRead({ all: true, readBefore, blockedKeys: blocked, label: "Marked all texts read" });
   };
 
+  const lastCustomerReadKeyRef = useRef(null);
   useEffect(() => {
     if (!active || !customer) return;
     const messages = customerMessages.filter((message) => message.channel === "sms");
+    const hasUnreadSms = messages.some((m) => m.direction === "inbound" && !m.isRead);
+    const readKey = `${customer.id}|${customerReadScope?.readBefore || ""}|${(customerReadScope?.conversationIds || []).join(",")}`;
+    if (!hasUnreadSms && lastCustomerReadKeyRef.current === readKey) return;
     // The read boundary comes from the loaded customer thread, including its
     // older conversations; SMS arriving after that snapshot remain unread.
-    if (messages.length || customerReadScope?.conversationIds?.length) void markMessagesRead({ messages, conversationIds: customerReadScope?.conversationIds, lastTimestamp: customerReadScope?.readBefore });
+    if (messages.length || customerReadScope?.conversationIds?.length) {
+      void Promise.resolve(markMessagesRead({
+        messages,
+        conversationIds: customerReadScope?.conversationIds,
+        lastTimestamp: customerReadScope?.readBefore,
+      })).then(() => {
+        lastCustomerReadKeyRef.current = readKey;
+      });
+    }
   }, [active, customer?.id, customerMessages, customerReadScope, markMessagesRead]);
 
   useEffect(() => {
@@ -1956,9 +1968,10 @@ export function SmsTab({
     if (phone) {
       setToNumber(phone);
       setToSearch("");
-      if (linkedCustomerId && UUID_PATTERN.test(linkedCustomerId) && !selectedCustomerId) setSelectedCustomerId(linkedCustomerId);
+      const nextCustomerId = selectedCustomerId || (linkedCustomerId && UUID_PATTERN.test(linkedCustomerId) ? linkedCustomerId : null);
+      if (nextCustomerId && !selectedCustomerId) setSelectedCustomerId(nextCustomerId);
       if (queryFromNumber && !loadedMessageDraft) {
-        selectSmsRecipient(phone, queryFromNumber, selectedCustomerId);
+        selectSmsRecipient(phone, queryFromNumber, nextCustomerId);
       }
     }
     const draftId = params.get("draftId");
@@ -3252,6 +3265,7 @@ export function SmsTab({
         t.ourNumber = unansweredReply.businessLine;
       }
       t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead && !hiddenReads.some((read) => pendingReadCovers(read, m)));
+      t.spamTagged = spamTagState(t, { canAct: false }).spamTagged;
       return t;
     });
     threadList.sort(
@@ -3362,6 +3376,7 @@ export function SmsTab({
       if (statusFilter === "unread" && !hasUnseen) return false;
       if (statusFilter === "unanswered" && !t.unanswered) return false;
       if (statusFilter === "unknown" && t.customerName) return false;
+      if (statusFilter === "spam" && !t.spamTagged) return false;
     }
     if (smsFilter === "all") return true;
     if (smsFilter === "sent")
@@ -3388,13 +3403,15 @@ export function SmsTab({
   const chipCounts = useMemo(() => {
     let unread = 0,
       unanswered = 0,
-      unknown = 0;
+      unknown = 0,
+      spam = 0;
     threads.forEach((t) => {
       if (t.unread) unread++;
       if (t.unanswered) unanswered++;
       if (!t.customerName) unknown++;
+      if (t.spamTagged) spam++;
     });
-    return { all: threads.length, unread, unanswered, unknown };
+    return { all: threads.length, unread, unanswered, unknown, spam };
   }, [threads]);
 
   // Mark spam: tag the sender. Nothing is removed: its texts stay in the
@@ -3419,6 +3436,7 @@ export function SmsTab({
     }
     setSmsView("threads");
     setActiveThread(null);
+    notifyUnreadChanged();
     loadData(smsSearch);
   };
 
@@ -3435,6 +3453,7 @@ export function SmsTab({
     }
     setSmsView("threads");
     setActiveThread(null);
+    notifyUnreadChanged();
     loadData(smsSearch);
   };
 
@@ -3442,6 +3461,7 @@ export function SmsTab({
   // the sent text and the server's record of the like appear in the thread.
   const handleLiked = (messageId, officeLike) => {
     if (officeLike) setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, officeLike } : m)));
+    notifyUnreadChanged();
     void loadData(smsSearchRef.current, { refresh: true });
   };
 
@@ -4349,6 +4369,7 @@ export function SmsTab({
                   count: chipCounts.unanswered,
                 },
                 { key: "unknown", label: "Unknown", count: chipCounts.unknown },
+                { key: "spam", label: "Spam", count: chipCounts.spam },
               ].map((opt) => (
                 <option key={opt.key} value={opt.key}>
                   {opt.label} ({opt.count})

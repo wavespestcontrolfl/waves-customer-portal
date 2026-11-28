@@ -48,7 +48,7 @@ let mockDatabase;
         contact_phone text, our_endpoint_id text);
       CREATE TABLE messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, channel text,
         direction text, body text, media jsonb DEFAULT '[]', metadata jsonb DEFAULT '{}', message_type text,
-        twilio_sid text, is_read boolean, read_at timestamptz, read_by_admin_user_id uuid,
+        delivery_status text, twilio_sid text, is_read boolean, read_at timestamptz, read_by_admin_user_id uuid,
         updated_at timestamptz, created_at timestamptz DEFAULT now());
       CREATE TABLE sms_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, direction text,
         from_phone text, to_phone text, message_body text, metadata jsonb, created_at timestamptz DEFAULT now(),
@@ -302,11 +302,22 @@ let mockDatabase;
     await expect(tag.tagSpamSender({ number: '', adminUserId: ADMIN })).rejects.toMatchObject({ code: 'INVALID_NUMBER' });
   });
 
-  test('not spam deletes the tag and clears enforced on manual and model verdicts, leaving is_read alone', async () => {
+  test('not spam deletes the tag, clears enforced on manual and model verdicts, and re-opens unanswered inbound rows', async () => {
     const manual = await addText({ from: '+19415550100', body: 'one' });
     const model = await addText({ from: '+19415550100', body: 'two', verdict: MODEL_VERDICT, read: true });
     const shadow = await addText({ from: '+19415550100', body: 'three', verdict: { ...MODEL_VERDICT, enforced: false } });
     const other = await addText({ from: '+19415550101', body: 'four', verdict: MODEL_VERDICT, read: true });
+    // Add an already-answered inbound text on the same sender: Not spam must
+    // keep answered rows read while reopening unanswered ones.
+    const answered = await addText({ from: '+19415550100', body: 'five', verdict: MODEL_VERDICT, read: true });
+    const answeredRow = await unified(answered.sid);
+    await mockDatabase('messages').insert({
+      conversation_id: answeredRow.conversation_id, channel: 'sms', direction: 'outbound',
+      body: 'Thanks, we got it', media: '[]', metadata: '{}', message_type: 'manual',
+      delivery_status: 'delivered', twilio_sid: 'SM-outbound-answer', is_read: true,
+      created_at: new Date(new Date(answeredRow.created_at).getTime() + 5000),
+    });
+
     await tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
     // The tag stamped "one" and "three"; "two" kept its model verdict.
     expect((await unified(manual.sid)).metadata.spam_verdict.method).toBe('manual');
@@ -319,10 +330,12 @@ let mockDatabase;
       for (const row of [await unified(sid), await legacy(sid)]) {
         expect(row.metadata.spam_verdict).toMatchObject({ enforced: false, cleared_by: ADMIN });
         expect(typeof row.metadata.spam_verdict.cleared_at).toBe('string');
-        expect(row.is_read).toBe(true);
+        expect(row.is_read).toBe(false);
       }
       expect(responseFlags({ direction: 'inbound', body: 'x', media: [], metadata: (await unified(sid)).metadata }).spamEnforced).toBe(false);
     }
+    // Answered inbound text stays read.
+    expect((await unified(answered.sid)).is_read).toBe(true);
     // The model's own fields survive the clear.
     expect((await unified(model.sid)).metadata.spam_verdict).toMatchObject({ method: 'model', confidence: 0.95 });
     // A shadow (not enforced) verdict does not count as silenced, so the tag stamped it and the undo cleared it.
