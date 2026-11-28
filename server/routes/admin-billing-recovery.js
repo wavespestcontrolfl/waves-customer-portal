@@ -251,6 +251,56 @@ async function unpaidPrepayBillByVisit(rows) {
   return byVisit;
 }
 
+async function hasPafHeldColumn(database = db, { throwOnError = false } = {}) {
+  try {
+    return Boolean(await database.schema.hasColumn('scheduled_services', 'paf_held_term_id'));
+  } catch (err) {
+    if (throwOnError) {
+      const e = new Error('Annual-prepay hold state could not be verified — try again.');
+      e.status = 503;
+      throw e;
+    }
+    return false;
+  }
+}
+
+function visitForPrepayCoverage(row) {
+  return {
+    ...row,
+    id: row.id ?? row.scheduled_service_id,
+    paf_held_term_id: row.paf_held_term_id ?? null,
+  };
+}
+
+async function assertVisitNotPrepaidForDismiss(visit, trx) {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  let covered;
+  try {
+    covered = await AnnualPrepayRenewals.annualPrepayCoversVisit(
+      visitForPrepayCoverage(visit),
+      trx,
+      { throwOnError: true },
+    );
+  } catch {
+    const e = new Error('Annual-prepay coverage could not be verified — try again.');
+    e.status = 503;
+    throw e;
+  }
+  if (covered) {
+    const e = new Error('Visit is covered by an annual prepay plan — cannot mark it free.');
+    e.status = 409;
+    throw e;
+  }
+  const otherPrepaid = visit.prepaid_method === AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
+    ? 0
+    : parseFloat(visit.prepaid_amount || 0);
+  if (otherPrepaid > 0) {
+    const e = new Error('Visit already has a prepayment recorded — cannot mark it free.');
+    e.status = 409;
+    throw e;
+  }
+}
+
 /**
  * The Billing recovery list: completed-but-uninvoiced visits from the last
  * `days` days, split into one-click-billable leaks (monthly_rate = 0,
@@ -270,8 +320,10 @@ async function listUninvoicedLeaks(days) {
   try {
     selfPayAware = await db.schema.hasColumn('scheduled_services', 'self_pay_override');
   } catch { /* keep legacy */ }
+  const pafHeldAware = await hasPafHeldColumn(db);
   const rows = await uninvoicedLeakQuery(days, { perAppAware, selfPayAware })
     .select(
+      'ss.id',
       'ss.id as scheduled_service_id',
       'sr.id as service_record_id',
       'ss.service_type',
@@ -279,6 +331,9 @@ async function listUninvoicedLeaks(days) {
       'ss.prepaid_amount',
       'ss.prepaid_method',
       'ss.annual_prepay_term_id',
+      'ss.recurring_parent_id',
+      'ss.property_id',
+      ...(pafHeldAware ? ['ss.paf_held_term_id'] : []),
       'ss.scheduled_date',
       'ss.completed_at',
       // Sibling first-application coverage (siblingCoverageStatus).
@@ -309,9 +364,11 @@ async function listUninvoicedLeaks(days) {
   // prepaid" filter and would otherwise surface here as a recovery candidate —
   // a manual double-bill trap. Drop live-covered visits using the SAME gate the
   // completion path uses (fail-closed; a stale stamp is NOT treated as covered).
+  // Pass the real visit id and PAF/termite-grace scope columns so PAF-held and
+  // termite-renewal-grace visits are excluded alongside stamped annual prepays.
   const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   const coveredFlags = await Promise.all(
-    rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r)),
+    rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(visitForPrepayCoverage(r))),
   );
   const prepayActiveRows = rows.filter((_, i) => !coveredFlags[i]);
   // A visit billed on its trip's combined first-application invoice has no
@@ -564,6 +621,7 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
   const { scheduledServiceId } = req.params;
   const reason = String(req.body.reason || '').trim().slice(0, 300) || null;
   try {
+    const pafHeldAware = await hasPafHeldColumn(db, { throwOnError: true });
     // Same per-visit advisory lock as POST /bill so a dismiss can't race a bill
     // (no invoice can be cut for a visit being dismissed, and vice versa). All
     // eligibility is re-validated INSIDE the lock so a stale UI / direct request
@@ -574,7 +632,23 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
       const visit = await trx({ ss: 'scheduled_services' })
         .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
         .where('ss.id', scheduledServiceId)
-        .select('ss.id as scheduled_service_id', 'ss.completed_at', 'sr.id as service_record_id')
+        .select(
+          'ss.id',
+          'ss.id as scheduled_service_id',
+          'ss.customer_id',
+          'ss.completed_at',
+          'ss.scheduled_date',
+          'ss.service_type',
+          'ss.estimated_price',
+          'ss.prepaid_amount',
+          'ss.prepaid_method',
+          'ss.annual_prepay_term_id',
+          'ss.recurring_parent_id',
+          'ss.source_estimate_id',
+          'ss.property_id',
+          ...(pafHeldAware ? ['ss.paf_held_term_id'] : []),
+          'sr.id as service_record_id',
+        )
         .first();
       if (!visit) { const e = new Error('Visit not found'); e.status = 404; throw e; }
       if (!visit.completed_at) { const e = new Error('Visit is not completed — nothing to dismiss.'); e.status = 422; throw e; }
@@ -587,6 +661,8 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
         .whereNot('status', 'void')
         .first();
       if (invoiced) { const e = new Error('Visit is already invoiced — cannot mark it free.'); e.status = 409; throw e; }
+
+      await assertVisitNotPrepaidForDismiss(visit, trx);
 
       const handled = await claimDispositionSlot(trx, scheduledServiceId);
       if (handled) { const e = new Error(handled); e.status = 409; throw e; }

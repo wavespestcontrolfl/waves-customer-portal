@@ -2344,12 +2344,11 @@ export default function PayPageV2() {
         // failure can never permanently bypass the required capture).
         if (setup.coveredByCredit || setup.status === 'prepaid') {
           // Credit fully covered THE ANCHOR — no combined PI exists and no
-          // money moves here, so the GET-time sibling preview must clear
-          // (codex r4 P1): leaving it would show a combined "Total due
-          // today" with no payment form behind it. The siblings keep their
-          // own pay links + dunning exactly as before.
+          // money moves here, so the GET-time sibling preview and any
+          // plan-choice offer must clear (codex r4 P1): leaving them would
+          // show a combined total or switch button on a settled invoice.
           setData((prev) => (prev
-            ? { ...prev, previousBalance: null, invoice: { ...prev.invoice, status: 'prepaid', captureNeeded: !!setup.captureNeeded } }
+            ? { ...prev, previousBalance: null, planChoice: null, invoice: { ...prev.invoice, status: 'prepaid', captureNeeded: !!setup.captureNeeded } }
             : prev));
           setPaymentState('idle');
           return;
@@ -2387,11 +2386,20 @@ export default function PayPageV2() {
             // partial-credit sync changes the amount; the idempotent re-run no-ops.
             const prevAmountDue = Number(prev.invoice.amountDue ?? prev.invoice.total);
             const prevCredit = Number(prev.invoice.creditApplied || 0);
+            // If mount-time /setup auto-applied credit or redeemed a promo code
+            // onto this invoice, drop any unchosen plan-choice offer so the
+            // customer never clicks a switch that the server must now refuse.
+            const clearPlanChoice = Boolean(prev.planChoice && !prev.planChoice.selected && (creditApplied > 0 || setup.promoCode?.applied));
             if (Math.abs(prevAmountDue - setupAmountDue) < 0.005
-              && Math.abs(prevCredit - creditApplied) < 0.005) {
+              && Math.abs(prevCredit - creditApplied) < 0.005
+              && !clearPlanChoice) {
               return prev;
             }
-            return { ...prev, invoice: { ...prev.invoice, amountDue: setupAmountDue, creditApplied } };
+            return {
+              ...prev,
+              ...(clearPlanChoice ? { planChoice: null } : {}),
+              invoice: { ...prev.invoice, amountDue: setupAmountDue, creditApplied },
+            };
           });
         }
         setStripeSetup({

@@ -60,6 +60,7 @@ function setDbQueues(queues) {
     if (!queue || !queue.length) {
       // Concurrent-seed recheck under the comms lock: nothing new appeared.
       if (table === 'scheduled_services as seed_recheck') return query({ rows: [] });
+      if (table === 'scheduled_services as term_series_links') return query({ rows: [] });
       if (table === 'annual_prepay_terms as apt_owner_probe') {
         return query({ first: { customer_id: 'owner-unchanged' } });
       }

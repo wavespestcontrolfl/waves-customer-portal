@@ -271,11 +271,14 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
 
 // strictProbe (opt-in): a failed table probe throws also in advisory mode.
 // The default answer there is [] ("no ledger"), see ledgerTableExists.
-async function loadComponents(database, customerId, { strictProbe = false } = {}) {
+async function loadComponents(database, customerId, { strictProbe = false, includeMeta = false } = {}) {
   if (!(await ledgerTableExists(database, { strictProbe }))) return [];
+  const cols = includeMeta
+    ? ['family_key', 'monthly_rate', 'source_estimate_id', 'source']
+    : ['family_key', 'monthly_rate'];
   return database('customer_plan_rates')
     .where({ customer_id: customerId })
-    .select('family_key', 'monthly_rate');
+    .select(...cols);
 }
 
 async function upsertComponent(database, {
@@ -487,7 +490,7 @@ async function applyAcceptToLedger(database, {
 // caller has locked the row, would invert the order against the wind-down
 // (rung 6 held, waiting on the row) and deadlock. The helpers below lock
 // only when they open the OUTERMOST transaction themselves.
-async function resetLedgerToScalar(database, customerId, rate, { source = 'scalar_write' } = {}) {
+async function resetLedgerToScalar(database, customerId, rate, { source = 'scalar_write', estimateId = null } = {}) {
   if (!(await ledgerTableExists(database))) return;
   await database('customer_plan_rates').where({ customer_id: customerId }).del();
   const amount = roundMoney(rate);
@@ -496,6 +499,7 @@ async function resetLedgerToScalar(database, customerId, rate, { source = 'scala
       customer_id: customerId,
       family_key: UNATTRIBUTED,
       monthly_rate: amount,
+      source_estimate_id: estimateId || null,
       source,
       effective_at: new Date(),
       updated_at: new Date(),
@@ -558,11 +562,11 @@ async function seedLedgerComponents(database, customerId, components = {}, { sou
 const MANUAL_RATE_SOURCES = new Set(['admin_edit', 'ib_update', 'ib_bulk_update']);
 const MANUAL_RATE_AUDIT_ACTION = 'customer.rate_manual_override';
 
-async function syncScalarWriteToLedger(database, customerId, rate, { source = 'scalar_write' } = {}) {
+async function syncScalarWriteToLedger(database, customerId, rate, { source = 'scalar_write', estimateId = null } = {}) {
   try {
     await database.transaction(async (sp) => {
       if (!database.isTransaction) await lockCustomerComms(sp, customerId); // rung 6 — see LOCKING above
-      return resetLedgerToScalar(sp, customerId, rate, { source });
+      return resetLedgerToScalar(sp, customerId, rate, { source, estimateId });
     });
   } catch (syncErr) {
     if (planRateLedgerEnabled()) {
@@ -708,6 +712,173 @@ async function setLineForScalarWrite(database, customerId, { familyKey, previous
   await recordManualRateAudit(database, customerId, newScalar, source);
 }
 
+async function capturePrepayPriorRateSnapshot(database, {
+  customerId, effectiveCustomer, createdCustomerId = null, estimateData, billingTerm, suppressRecurringConversion, groupedEstimateAccept,
+} = {}) {
+  if (billingTerm !== 'prepay_annual' || suppressRecurringConversion || groupedEstimateAccept || !customerId) {
+    return null;
+  }
+  if (estimateData?.prepayPriorRateSnapshot) return null;
+  // On a newly created customer, convertEstimate may have already stamped the
+  // quoted monthly_rate before this snapshot runs; keep priorMonthlyRate null
+  // so canceling prepay clears it back to no prior plan rather than retaining
+  // the canceled estimate's rate (Codex pre-push P0).
+  const isNewCustomer = createdCustomerId != null && String(createdCustomerId) === String(customerId);
+  const priorMonthlyRate = !isNewCustomer && effectiveCustomer?.monthly_rate != null
+    ? roundMoney(effectiveCustomer.monthly_rate)
+    : null;
+  if (isNewCustomer) {
+    return { customerId: String(customerId), priorMonthlyRate: null, priorComponents: [] };
+  }
+  const read = (q) => loadComponents(q, customerId, { strictProbe: true, includeMeta: true });
+  const rows = database?.isTransaction === true ? await database.transaction(read) : await read(database);
+  const priorComponents = (rows || []).map((row) => ({
+    family_key: row.family_key,
+    monthly_rate: roundMoney(row.monthly_rate),
+    source_estimate_id: row.source_estimate_id || null,
+    source: row.source || null,
+  }));
+  return { customerId: String(customerId), priorMonthlyRate, priorComponents };
+}
+
+async function persistPrepayPriorRateSnapshot(database, { estimateId, snapshot, writtenMonthlyRate } = {}) {
+  if (!snapshot || !estimateId || typeof database?.raw !== 'function') return false;
+  const payload = {
+    ...snapshot,
+    writtenMonthlyRate: writtenMonthlyRate != null ? roundMoney(writtenMonthlyRate) : null,
+  };
+  const write = (q) => q('estimates')
+    .where({ id: estimateId })
+    .update({
+      estimate_data: q.raw(
+        "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{prepayPriorRateSnapshot}', ?::jsonb, true)",
+        [JSON.stringify(payload)],
+      ),
+    });
+  await (database.isTransaction === true ? database.transaction(write) : write(database));
+  return true;
+}
+
+function parseEstimateDataForRevert(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+async function restoreLedgerComponentsOnPrepayCancel(database, customerId, sourceEstimateId, priorComponents) {
+  const hasTable = database?.schema?.hasTable
+    ? await database.schema.hasTable('customer_plan_rates')
+    : false;
+  if (!hasTable) return { hasTable: false, deletedCount: 0, remaining: [] };
+  const deletedCount = await database('customer_plan_rates')
+    .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
+    .del();
+  // Only restore prior non-estimate components if this accept still owned rows
+  // that we just removed; if deletedCount === 0 a later manual rate edit or
+  // reset already replaced the ledger and reinserting old rows would double-bill.
+  if (Number(deletedCount) > 0 && Array.isArray(priorComponents) && priorComponents.length > 0) {
+    const surviving = await database('customer_plan_rates')
+      .where({ customer_id: customerId })
+      .select('family_key');
+    const survivingKeys = new Set((surviving || []).map((row) => row.family_key));
+    for (const comp of priorComponents) {
+      if (!survivingKeys.has(comp.family_key) && roundMoney(comp.monthly_rate) > 0) {
+        await upsertComponent(database, {
+          customerId,
+          familyKey: comp.family_key,
+          monthlyRate: comp.monthly_rate,
+          estimateId: comp.source_estimate_id || null,
+          source: comp.source || 'prepay_cancel_restore',
+        });
+      }
+    }
+  }
+  const remaining = await database('customer_plan_rates')
+    .where({ customer_id: customerId })
+    .select('family_key', 'monthly_rate');
+  return { hasTable: true, deletedCount: Number(deletedCount) || 0, remaining: remaining || [] };
+}
+
+function prepayCancelRateTarget({ snapshot, snapshotMatches, termMonthlyRate, current, deletedCount, hasTable, remaining }) {
+  const writtenRate = snapshotMatches && snapshot.writtenMonthlyRate != null
+    ? roundMoney(snapshot.writtenMonthlyRate)
+    : (termMonthlyRate != null ? roundMoney(termMonthlyRate) : null);
+  const currentMatchesWritten = writtenRate != null
+    && current?.monthly_rate != null
+    && Math.round(roundMoney(current.monthly_rate) * 100) === Math.round(roundMoney(writtenRate) * 100);
+  if (hasTable && deletedCount === 0 && remaining.length > 0) {
+    return { shouldUpdate: false, restoredRate: null };
+  }
+  if (!currentMatchesWritten && !(deletedCount > 0 && planRateLedgerEnabled())) {
+    return { shouldUpdate: false, restoredRate: null };
+  }
+  const priorRate = snapshotMatches && snapshot.priorMonthlyRate != null
+    ? roundMoney(snapshot.priorMonthlyRate)
+    : null;
+  if (!planRateLedgerEnabled() && currentMatchesWritten && priorRate !== null) {
+    return { shouldUpdate: true, restoredRate: priorRate };
+  }
+  if (hasTable && remaining.length > 0) {
+    const sum = remaining.reduce((acc, row) => acc + Number(row.monthly_rate || 0), 0);
+    return { shouldUpdate: true, restoredRate: roundMoney(sum) };
+  }
+  return { shouldUpdate: true, restoredRate: priorRate };
+}
+
+function parsePrepayRevertContext(estimate, customerId) {
+  const data = parseEstimateDataForRevert(estimate?.estimate_data);
+  const snapshot = data?.prepayPriorRateSnapshot || null;
+  const snapshotMatches = Boolean(snapshot && String(snapshot.customerId || '') === String(customerId));
+  const acceptedTerm = String(data?.acceptedBillingTerm || data?.billingTerm || '');
+  return {
+    snapshot,
+    snapshotMatches,
+    isPrepayAccept: snapshotMatches || acceptedTerm === 'prepay_annual',
+    priorComponents: snapshotMatches ? snapshot.priorComponents : null,
+  };
+}
+
+// Revert customer_plan_rates rows and customers.monthly_rate minted by an
+// estimate's prepay_annual accept when that prepay term is voided or refunded
+// (cancelTermWithRestorations). Leaves per_application switch-prepays untouched
+// (they carry no prepayPriorRateSnapshot and were not accepted as prepay_annual).
+async function revertPrepayAcceptPlanRates(database, {
+  customerId, sourceEstimateId, termMonthlyRate = null, throwOnError = false,
+} = {}) {
+  if (!customerId || !sourceEstimateId) return { reverted: false, reason: 'no_source_estimate' };
+  try {
+    const estimate = await database('estimates')
+      .where({ id: sourceEstimateId, customer_id: customerId })
+      .first('estimate_data');
+    const ctx = parsePrepayRevertContext(estimate, customerId);
+    if (!ctx.isPrepayAccept) return { reverted: false, reason: 'not_prepay_accept' };
+    const { hasTable, deletedCount, remaining } = await restoreLedgerComponentsOnPrepayCancel(
+      database, customerId, sourceEstimateId, ctx.priorComponents,
+    );
+    const current = await database('customers').where({ id: customerId }).first('monthly_rate');
+    const target = prepayCancelRateTarget({
+      snapshot: ctx.snapshot,
+      snapshotMatches: ctx.snapshotMatches,
+      termMonthlyRate,
+      current,
+      deletedCount,
+      hasTable,
+      remaining,
+    });
+    if (target.shouldUpdate) {
+      await database('customers')
+        .where({ id: customerId })
+        .update({ monthly_rate: target.restoredRate, updated_at: new Date() });
+      return { reverted: true, restoredRate: target.restoredRate, deletedCount };
+    }
+    return { reverted: deletedCount > 0, restoredRate: null, deletedCount };
+  } catch (err) {
+    if (throwOnError) throw err;
+    logger.warn(`[plan-rate-ledger] prepay cancel rate revert skipped for customer ${customerId}: ${err.message}`);
+    return { reverted: false, reason: 'error' };
+  }
+}
+
 module.exports = {
   UNATTRIBUTED,
   planRateLedgerEnabled,
@@ -730,4 +901,7 @@ module.exports = {
   MANUAL_RATE_SOURCES,
   MANUAL_RATE_AUDIT_ACTION,
   seedLedgerComponents,
+  capturePrepayPriorRateSnapshot,
+  persistPrepayPriorRateSnapshot,
+  revertPrepayAcceptPlanRates,
 };

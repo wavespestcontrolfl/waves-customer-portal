@@ -853,9 +853,192 @@ function rowInRenewalScope(row, scope) {
     || (!!scope.propertyId && rowProperty === scope.propertyId);
 }
 
-// The in-window candidate visits coverage selection starts from: every
-// customer visit in the window for an ordinary term (unchanged), only the
-// plan's own visits for a renewal successor, none for an unresolved one.
+function isRecurringVisitRow(row) {
+  return Boolean(row?.is_recurring || row?.recurring_parent_id || row?.recurring_pattern);
+}
+
+function rowSeriesRootId(row) {
+  if (!row || !isRecurringVisitRow(row)) return null;
+  const root = row.recurring_parent_id != null ? row.recurring_parent_id : row.id;
+  return root == null ? null : String(root);
+}
+
+function singleDistinctString(values) {
+  const distinct = new Set(values.filter((v) => v != null).map((v) => String(v)));
+  return distinct.size === 1 ? [...distinct][0] : null;
+}
+
+function propertyIdFromCandidateRows(term, rows) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  if (term?.installation_anchor_visit_id != null) {
+    const anchor = rows.find((r) => String(r?.id) === String(term.installation_anchor_visit_id));
+    if (anchor?.property_id != null) return String(anchor.property_id);
+  }
+  if (term?.source_estimate_id != null) {
+    const estProp = singleDistinctString(
+      rows.filter((r) => r?.source_estimate_id != null && String(r.source_estimate_id) === String(term.source_estimate_id))
+        .map((r) => r.property_id),
+    );
+    if (estProp) return estProp;
+  }
+  if (term?.id != null) {
+    return singleDistinctString(
+      rows.filter((r) => r?.annual_prepay_term_id != null && String(r.annual_prepay_term_id) === String(term.id))
+        .map((r) => r.property_id),
+    );
+  }
+  return null;
+}
+
+const TERM_SCOPE_TAG_RE = /\[prepay-scope:([^\]]+)\]/;
+
+function parseTermScopeTag(term) {
+  const match = TERM_SCOPE_TAG_RE.exec(String(term?.renewal_notes || ''));
+  if (!match) return { propertyId: null, seriesRootId: null };
+  let propertyId = null;
+  let seriesRootId = null;
+  for (const part of match[1].split(',')) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k === 'property' && v) propertyId = v;
+    if (k === 'series' && v) seriesRootId = v;
+  }
+  return { propertyId, seriesRootId };
+}
+
+function mergeTermScopeRenewalNotes(existingNotes, { propertyId = null, seriesRootId = null } = {}) {
+  const fields = [];
+  if (propertyId) fields.push(`property=${String(propertyId)}`);
+  if (seriesRootId) fields.push(`series=${String(seriesRootId)}`);
+  if (!fields.length) return existingNotes;
+  const cleaned = String(existingNotes || '').replace(TERM_SCOPE_TAG_RE, '').trim();
+  const tag = `[prepay-scope:${fields.join(',')}]`;
+  return cleaned ? `${cleaned}\n${tag}` : tag;
+}
+
+async function nonSuccessorTermPropertyId(term, conn, rows = null) {
+  if (!term) return null;
+  if (term.property_id != null) return String(term.property_id);
+  const tagScope = parseTermScopeTag(term);
+  if (tagScope.propertyId) return tagScope.propertyId;
+  const canQuery = typeof conn === 'function';
+  const rowsCarryProperty = rows === null || (Array.isArray(rows) && rows.some((r) => r.property_id != null));
+  // Prefer the accepted estimate's explicit property BEFORE reading
+  // visit-derived stamps so a stale visit stamp at another property never
+  // overrides the estimate's own property (Codex pre-push P0). Skip querying
+  // estimates only when candidate rows carry no property_id fields at all.
+  if (rowsCarryProperty && term.source_estimate_id != null && canQuery) {
+    const est = await conn('estimates').where({ id: term.source_estimate_id }).first('property_id');
+    if (est?.property_id != null) return String(est.property_id);
+  }
+  const fromRows = propertyIdFromCandidateRows(term, rows);
+  if (fromRows) return fromRows;
+  if (!rowsCarryProperty || !canQuery || term.id == null || term.customer_id == null) return null;
+  const q = conn('scheduled_services')
+    .where({ customer_id: term.customer_id, annual_prepay_term_id: term.id });
+  if (typeof q.whereNotNull === 'function') q.whereNotNull('property_id');
+  const linked = await q.select('property_id');
+  return singleDistinctString((linked || []).map((r) => r.property_id).filter(Boolean));
+}
+
+function addTermLinkedRoots(term, rows, roots) {
+  if (!Array.isArray(rows)) return;
+  for (const row of rows) {
+    const linkedByAnchor = term?.installation_anchor_visit_id != null && String(row?.id) === String(term.installation_anchor_visit_id);
+    const linkedByTerm = term?.id != null && row?.annual_prepay_term_id != null && String(row.annual_prepay_term_id) === String(term.id);
+    const linkedByEstimate = term?.source_estimate_id != null && row?.source_estimate_id != null && String(row.source_estimate_id) === String(term.source_estimate_id);
+    if (linkedByAnchor || linkedByTerm || linkedByEstimate) {
+      const root = rowSeriesRootId(row);
+      if (root) roots.add(root);
+    }
+  }
+}
+
+async function nonSuccessorSeriesRoots(term, conn, rows = null) {
+  const roots = new Set();
+  if (term?.series_root_id != null) roots.add(String(term.series_root_id));
+  if (term?.recurring_parent_id != null) roots.add(String(term.recurring_parent_id));
+  const tagScope = parseTermScopeTag(term);
+  if (tagScope.seriesRootId) roots.add(tagScope.seriesRootId);
+  addTermLinkedRoots(term, rows, roots);
+  if (roots.size > 0 || !Array.isArray(rows) || typeof conn !== 'function' || !term?.customer_id) return roots;
+  const candidateRootsPresent = rows.some((r) => Boolean(rowSeriesRootId(r)));
+  if (!candidateRootsPresent) return roots;
+  if (term?.id != null || term?.source_estimate_id != null) {
+    const linked = await conn('scheduled_services as term_series_links')
+      .where({ customer_id: term.customer_id })
+      .where((q) => {
+        if (term?.id != null) q.where('annual_prepay_term_id', term.id);
+        if (term?.source_estimate_id != null) {
+          if (term?.id != null) q.orWhere('source_estimate_id', term.source_estimate_id);
+          else q.where('source_estimate_id', term.source_estimate_id);
+        }
+      })
+      .select('id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+    for (const row of (linked || [])) {
+      const root = rowSeriesRootId(row);
+      if (root) roots.add(root);
+    }
+  }
+  return roots;
+}
+
+async function nonSuccessorCoverageScope(term, conn, rows = null) {
+  const propertyId = await nonSuccessorTermPropertyId(term, conn, rows);
+  const seriesRootIds = await nonSuccessorSeriesRoots(term, conn, rows);
+  return {
+    propertyId,
+    estimateId: term?.source_estimate_id == null ? null : String(term.source_estimate_id),
+    seriesRootIds,
+  };
+}
+
+function nonSuccessorAdoptScope(term, seedPropertyId, existingRows) {
+  const seriesRootIds = new Set();
+  if (term?.series_root_id != null) seriesRootIds.add(String(term.series_root_id));
+  if (term?.recurring_parent_id != null) seriesRootIds.add(String(term.recurring_parent_id));
+  addTermLinkedRoots(term, existingRows, seriesRootIds);
+  const propertyId = term?.property_id != null
+    ? String(term.property_id)
+    : (seedPropertyId != null ? String(seedPropertyId) : propertyIdFromCandidateRows(term, existingRows));
+  return {
+    propertyId,
+    estimateId: term?.source_estimate_id == null ? null : String(term.source_estimate_id),
+    seriesRootIds,
+  };
+}
+
+// Non-successor scope: keep a term bound to its own property, estimate, and
+// recurring series root so multi-property / multi-series accounts never let
+// Property A / Series 1 steal visits from Property B / Series 2.
+function rowInNonSuccessorScope(row, scope) {
+  if (!scope) return true;
+  const rowProperty = row?.property_id == null ? null : String(row.property_id);
+  const rowEstimate = row?.source_estimate_id == null ? null : String(row.source_estimate_id);
+  if (scope.propertyId && rowProperty && rowProperty !== scope.propertyId) return false;
+  if (scope.estimateId && rowEstimate && rowEstimate !== scope.estimateId) return false;
+  if (scope.seriesRootIds && scope.seriesRootIds.size > 0) {
+    const root = rowSeriesRootId(row);
+    if (root && !scope.seriesRootIds.has(root)) return false;
+  }
+  return true;
+}
+
+async function filterOverridesForTermScope(term, overrides, dbRows, conn) {
+  if (!overrides.length) return overrides;
+  if (term?.renewed_from_term_id) {
+    const scope = await successorCoverageScope(term, conn);
+    return !scope ? overrides : (!scope.resolved ? [] : overrides.filter((row) => rowInRenewalScope(row, scope)));
+  }
+  const scope = await nonSuccessorCoverageScope(term, conn, [...dbRows, ...overrides]);
+  return overrides.filter((row) => rowInNonSuccessorScope(row, scope));
+}
+
+// The in-window candidate visits coverage selection starts from: only the
+// plan's own visits for a renewal successor (none for an unresolved one), and
+// property/estimate/series-scoped visits for non-successor terms.
 async function coverageCandidateRows(term, conn, termStart, termEnd) {
   const scope = await successorCoverageScope(term, conn);
   if (scope && !scope.resolved) return [];
@@ -864,7 +1047,9 @@ async function coverageCandidateRows(term, conn, termStart, termEnd) {
     .whereBetween('scheduled_date', [termStart, termEnd])
     .orderBy(['scheduled_date', 'window_start', 'id'])
     .select('*');
-  return scope ? rows.filter((row) => rowInRenewalScope(row, scope)) : rows;
+  if (scope) return rows.filter((row) => rowInRenewalScope(row, scope));
+  const nonSuccessor = await nonSuccessorCoverageScope(term, conn, rows);
+  return rows.filter((row) => rowInNonSuccessorScope(row, nonSuccessor));
 }
 
 async function coverageRowsForTerm(term, conn = db, {
@@ -920,10 +1105,7 @@ async function coverageRowsForTerm(term, conn = db, {
       const d = dateOnly(row?.scheduled_date);
       return !!(d && d >= termStart && d <= termEnd);
     });
-    if (overrides.length > 0 && term?.renewed_from_term_id) {
-      const scope = await successorCoverageScope(term, conn);
-      overrides = !scope ? overrides : (!scope.resolved ? [] : overrides.filter((row) => rowInRenewalScope(row, scope)));
-    }
+    overrides = await filterOverridesForTermScope(term, overrides, rows, conn);
     // Every overridden id leaves the DB list first — an override the gates
     // above dropped (moved OUT of the window or scope) must not survive
     // through its stale in-window DB row — then the eligible overrides go
@@ -1077,6 +1259,10 @@ async function coverageSeedPropertyId(term, cols, conn) {
   if (!cols.property_id) return null;
   const scope = await successorCoverageScope(term, conn);
   if (scope) return scope.propertyId || null;
+  const scopedProp = await nonSuccessorTermPropertyId(term, conn, null);
+  if (scopedProp) return scopedProp;
+  const tagProp = parseTermScopeTag(term).propertyId;
+  if (tagProp) return tagProp;
   return require('./customer-properties').soleActivePropertyId(term.customer_id, conn);
 }
 
@@ -1995,9 +2181,11 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // worth the async plumbing here — an unstamped row linked elsewhere
   // simply stays excluded, exactly as before this fix (never a regression,
   // just not more lenient in this one edge path).
+  const adoptScope = nonSuccessorAdoptScope(term, seedPropertyId, existingRows);
   const adoptableCoverageRow = (row) => !isCallbackRow(row)
     && serviceMatchesCoverage(row, coverageServiceType)
     && !rowLinkedToAnotherTerm(term, row)
+    && rowInNonSuccessorScope(row, adoptScope)
     && (!coverageIsPalm || (() => {
       // Same ID-FIRST classification as coverage matching (codex r27
       // pre-push P0): a foreign id/snapshot never adopts, even beside a
@@ -3431,12 +3619,12 @@ async function acceptInvoiceReplacedByPaidTerm(termId) {
   // The committed row: callers hand in snapshots read before activation.
   const term = await db('annual_prepay_terms').where({ id: termId }).first();
   if (!term?.source_estimate_id || !term.prepay_invoice_id || !ACTIVE_STATUSES.includes(String(term.status || ''))) return null;
-  const prepay = await db('invoices').where({ id: term.prepay_invoice_id }).first('id', 'status', 'notes');
+  const prepay = await db('invoices').where({ id: term.prepay_invoice_id }).first('id', 'invoice_number', 'status', 'notes');
   if (!['paid', 'prepaid'].includes(String(prepay?.status || '').toLowerCase())) return null;
   const marker = require('./invoice').prepaySwitchSupersededByMarker(prepay.id);
   const candidates = await db('invoices')
     .where({ customer_id: term.customer_id })
-    .whereIn('status', [...PayPlanChoice.OPEN_INVOICE_STATUSES, 'void'])
+    .whereIn('status', [...PayPlanChoice.OPEN_INVOICE_STATUSES, 'processing', 'paid', 'prepaid', 'void'])
     .whereNull('annual_prepay_term_id')
     .whereNull('payer_id')
     .where('notes', 'like', `Auto-generated from accepted estimate #${String(term.source_estimate_id)}%`)
@@ -3446,15 +3634,56 @@ async function acceptInvoiceReplacedByPaidTerm(termId) {
   return named.length === 1 ? { term, prepay, first: named[0], marker: `\n${marker}` } : null;
 }
 
-// Anything beyond this plan's own setup fee and first application (a sibling
-// charge, applied credit, a deposit line, a part payment) is not the year's
-// to erase.
+// Anything beyond this plan's own setup fee, first application, and itemized
+// non-positive estimate-discount lines (a sibling charge, applied credit, a
+// deposit line, a part payment) is not the year's to erase.
 function invoiceBillsOnlyAcceptedPlan(invoice) {
+  const { isRecognizedAcceptDiscountLine } = require('./estimate-first-application-invoice');
   const lines = require('./invoice')._parseInvoiceLineItems(invoice.line_items);
-  return lines.length > 0
-    && lines.every((li) => PLAN_CHOICE_ACCEPT_LINES.test(String(li?.description || '').trim()))
+  let hasBaseLine = false;
+  for (const li of lines) {
+    if (PLAN_CHOICE_ACCEPT_LINES.test(String(li?.description || '').trim())) {
+      hasBaseLine = true;
+    } else if (!isRecognizedAcceptDiscountLine(li)) {
+      return false;
+    }
+  }
+  return hasBaseLine
     && !(Number(invoice.credit_applied || 0) > 0)
     && !(Number(invoice.amount_paid || 0) > 0);
+}
+
+async function raisePlanChoiceReplaceInvoiceAlert(term, prepay, first, reason) {
+  try {
+    const firstLabel = first.invoice_number || first.id;
+    const prepayLabel = prepay.invoice_number || prepay.id;
+    await require('./admin-alert-compose').raiseAdminAlert('billing', {
+      area: 'Billing',
+      action: 'review first invoice after annual prepay',
+      why: 'Annual prepay paid, but the replaced first invoice could not auto-void and needs manual review.',
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(String(term.customer_id || ''))}`,
+      subject: { type: 'invoice', id: String(first.id) },
+      doneWhen: 'replaced_invoice_resolved',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `plan-choice-replace-close-refused:${term.id}:${first.id}`,
+      detail: `Annual prepay term ${term.id} (invoice ${prepayLabel}) settled, but replaced first invoice ${firstLabel} (status ${first.status || 'unknown'}) could not auto-void (${reason}). Review the invoice, credits, and payments before dunning runs.`,
+      metadata: {
+        customer_id: term.customer_id,
+        annual_prepay_term_id: term.id,
+        prepay_invoice_id: prepay.id,
+        first_invoice_id: first.id,
+        first_invoice_status: first.status || null,
+        reason,
+      },
+    });
+    return true;
+  } catch (err) {
+    logger.warn(`[annual-prepay] replaced-invoice review alert failed for term ${term.id}, invoice ${first.id}: ${err.message}`);
+    return false;
+  }
 }
 
 // A first visit that already completed becomes this year's covered visit, at
@@ -3489,9 +3718,14 @@ async function closeAcceptInvoiceReplacedByPaidTerm(termSnapshot) {
   if (!found) return { closed: false };
   const { term, prepay, first, marker } = found;
   if (first.status !== 'void') {
-    if (!invoiceBillsOnlyAcceptedPlan(first)) {
-      logger.warn(`[annual-prepay] term ${term.id}: invoice ${first.id} named by the paid prepay carries money, credit or charges beyond the accepted plan's setup and first application — left open for the office`);
-      return { closed: false };
+    const firstStatus = String(first.status || '').toLowerCase();
+    if (['processing', 'paid', 'prepaid'].includes(firstStatus) || !invoiceBillsOnlyAcceptedPlan(first)) {
+      const reason = ['processing', 'paid', 'prepaid'].includes(firstStatus)
+        ? `invoice_${firstStatus}`
+        : 'credit_payment_or_line_mismatch';
+      logger.warn(`[annual-prepay] term ${term.id}: invoice ${first.id} named by the paid prepay carries money, credit, in-flight payment, or charges beyond the accepted plan (${reason}) — left open and alerted for the office`);
+      const alerted = await raisePlanChoiceReplaceInvoiceAlert(term, prepay, first, reason);
+      return { closed: false, alerted, reason };
     }
     const InvoiceService = require('./invoice');
     // Marker BEFORE the void: a void that commits with no marker could never
@@ -3507,6 +3741,7 @@ async function closeAcceptInvoiceReplacedByPaidTerm(termSnapshot) {
     } catch (err) {
       await db('invoices').where({ id: first.id }).whereNot({ status: 'void' })
         .update({ notes: db.raw('replace(notes, ?, ?)', [marker, '']), updated_at: new Date() });
+      await raisePlanChoiceReplaceInvoiceAlert(term, prepay, first, 'void_failed');
       throw err;
     }
     // A refund or void of the prepay can cancel the term while this close
@@ -4782,6 +5017,48 @@ async function successorLineageLabel(row, customerId, conn) {
 // visit inside the successor's own plan scope (the same
 // successorCoverageScope/rowInRenewalScope selection applied it) — an
 // unresolved lineage never suppresses.
+async function independentTermSeriesRoots(term, scheduledService, conn) {
+  const roots = new Set();
+  if (term?.series_root_id != null) roots.add(String(term.series_root_id));
+  if (term?.recurring_parent_id != null) roots.add(String(term.recurring_parent_id));
+  if (roots.size > 0 || typeof conn !== 'function' || !term?.customer_id) return roots;
+  if (term?.id == null && term?.source_estimate_id == null && term?.installation_anchor_visit_id == null) return roots;
+  const linked = await conn('scheduled_services as term_series_links')
+    .where({ customer_id: term.customer_id })
+    .whereNot({ id: scheduledService.id })
+    .where((q) => {
+      let hasClause = false;
+      const addOr = (fn) => {
+        if (hasClause) q.orWhere(fn);
+        else { hasClause = true; q.where(fn); }
+      };
+      if (term?.id != null) addOr((sub) => sub.where('annual_prepay_term_id', term.id));
+      if (term?.source_estimate_id != null) addOr((sub) => sub.where('source_estimate_id', term.source_estimate_id));
+      if (term?.installation_anchor_visit_id != null) addOr((sub) => sub.where('id', term.installation_anchor_visit_id));
+    })
+    .select('id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+  for (const row of (linked || [])) {
+    const root = rowSeriesRootId(row);
+    if (root) roots.add(root);
+  }
+  return roots;
+}
+
+async function stampedRowInNonSuccessorScope(term, scheduledService, conn) {
+  const rowEstimate = scheduledService?.source_estimate_id == null ? null : String(scheduledService.source_estimate_id);
+  const termEstimate = term?.source_estimate_id == null ? null : String(term.source_estimate_id);
+  if (termEstimate && rowEstimate && rowEstimate !== termEstimate) return false;
+  const rowProperty = scheduledService?.property_id == null ? null : String(scheduledService.property_id);
+  if (rowProperty) {
+    const termProperty = await nonSuccessorTermPropertyId(term, conn, null);
+    if (termProperty && rowProperty !== termProperty) return false;
+  }
+  const owningRoots = await independentTermSeriesRoots(term, scheduledService, conn);
+  const rowRoot = rowSeriesRootId(scheduledService);
+  if (owningRoots.size > 0 && rowRoot && !owningRoots.has(rowRoot)) return false;
+  return true;
+}
+
 async function stampedTermStillCoversVisit(term, scheduledService, conn) {
   if (term.coverage_service_type
     && scheduledService.service_type
@@ -4789,7 +5066,8 @@ async function stampedTermStillCoversVisit(term, scheduledService, conn) {
     return false;
   }
   const scope = await successorCoverageScope(term, conn);
-  return !scope || (scope.resolved && rowInRenewalScope(scheduledService, scope));
+  if (scope) return scope.resolved && rowInRenewalScope(scheduledService, scope);
+  return stampedRowInNonSuccessorScope(term, scheduledService, conn);
 }
 
 // Pay after the first visit, annual prepay (GATE_PAF_PREPAY, PR-D). The accept
@@ -5671,8 +5949,14 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
       // with it.
       await reverseWaveguardExtensionCredits(updated, t);
       // Coverage is gone — return the customer to a billable mode (the
-      // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
-      await resetBillingModeAfterTermCancel(updated, t, { throwOnError });
+      // monthly cron skips 'annual_prepay' outright; see GUARD 3b) and revert
+      // any customer_plan_rates / customers.monthly_rate written before
+      // payment by a prepay_annual estimate accept.
+      const billingReset = await resetBillingModeAfterTermCancel(updated, t, { throwOnError });
+      await revertPlanRatesAfterTermCancel(updated, t, {
+        throwOnError,
+        hasAnyActiveReplacement: billingReset?.hasReplacement ?? null,
+      });
       // An ON-SITE SWITCH retired the accept-minted per-application invoice
       // when this prepay was created; with the prepay dead that AR (setup
       // fee included) must come back, or it is silently gone forever —
@@ -8076,7 +8360,7 @@ async function stampAnnualPrepayBillingMode(customerId, conn, termId = null) {
 // completions in the never-invoice branch with nothing to retry.
 async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = false } = {}) {
   try {
-    if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return;
+    if (!(await conn.schema.hasColumn('customers', 'billing_mode'))) return { hasReplacement: null };
     // Replacement coverage keeps the mode — but only a PAID (genuinely
     // covering) term counts: a payment_pending replacement is deliberately
     // NOT stamped (pre-payment completions bill per application/monthly),
@@ -8101,7 +8385,7 @@ async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = fals
       .where('term_start', '<=', today)
       .where('term_end', '>=', today)
       .first('id');
-    if (replacement) return;
+    if (replacement) return { hasReplacement: true };
     // Restore the EXACT prior mode when the stamp recorded it ('none' =
     // legacy NULL); pre-column terms fall back to the source heuristic
     // (estimate-flow term → per-visit, manual prepay → legacy monthly).
@@ -8128,9 +8412,39 @@ async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = fals
         billing_mode: restored,
         updated_at: new Date(),
       });
+    return { hasReplacement: false };
   } catch (err) {
     if (throwOnError) throw err;
     logger.warn(`[annual-prepay] billing_mode reset skipped for customer ${term.customer_id}: ${err.message}`);
+    return { hasReplacement: null };
+  }
+}
+
+async function revertPlanRatesAfterTermCancel(term, conn, { throwOnError = false, hasAnyActiveReplacement = null } = {}) {
+  if (!term?.customer_id || !term?.source_estimate_id) return { reverted: false, reason: 'no_source_estimate' };
+  try {
+    if (hasAnyActiveReplacement === true) return { reverted: false, reason: 'replacement_active' };
+    if (hasAnyActiveReplacement !== false) {
+      const today = etDateString();
+      const replacement = await conn('annual_prepay_terms')
+        .where({ customer_id: term.customer_id })
+        .whereNot({ id: term.id })
+        .whereIn('status', ACTIVE_STATUSES)
+        .where('term_start', '<=', today)
+        .where('term_end', '>=', today)
+        .first('id');
+      if (replacement) return { reverted: false, reason: 'replacement_active' };
+    }
+    return await require('./plan-rate-ledger').revertPrepayAcceptPlanRates(conn, {
+      customerId: term.customer_id,
+      sourceEstimateId: term.source_estimate_id,
+      termMonthlyRate: term.monthly_rate ?? null,
+      throwOnError,
+    });
+  } catch (err) {
+    if (throwOnError) throw err;
+    logger.warn(`[annual-prepay] plan-rate revert skipped for customer ${term.customer_id}: ${err.message}`);
+    return { reverted: false, reason: 'error' };
   }
 }
 
@@ -8317,6 +8631,8 @@ async function createTermForAnnualPrepay({
   coverageCadence = undefined,
   firstVisitDate = undefined,
   firstVisitWindowStart = undefined,
+  propertyId = undefined,
+  seriesRootId = undefined,
   // Termite annual plan marker (codex #4819 r7 P1). Written WITH the row so
   // the refreshTermSnapshot below already sees coverageAwaitsInstallation():
   // stamped after this returns, the first refresh would seed a signature-day
@@ -8490,6 +8806,11 @@ async function createTermForAnnualPrepay({
     const carryForward = renewalCarryForwardColumns(termCols, existing, renewedFromTermId, renewalChargeConsentAt);
     if (carryForward.renewedFromTermId !== undefined) updates.renewed_from_term_id = carryForward.renewedFromTermId;
     if (carryForward.renewalChargeConsentAt !== undefined) updates.renewal_charge_consent_at = carryForward.renewalChargeConsentAt;
+    if (termCols.property_id && propertyId) updates.property_id = propertyId;
+    if (termCols.series_root_id && seriesRootId) updates.series_root_id = seriesRootId;
+    if (termCols.renewal_notes && (propertyId || seriesRootId)) {
+      updates.renewal_notes = mergeTermScopeRenewalNotes(existing.renewal_notes, { propertyId, seriesRootId });
+    }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // Synchronous withdrawal (owner ruling 2026-09-28): a window move on a
     // termite parent is a durable parent_term_moved refusal for its unpaid
@@ -8568,6 +8889,11 @@ async function createTermForAnnualPrepay({
   const insertCarryForward = renewalCarryForwardColumns(termCols, null, renewedFromTermId, renewalChargeConsentAt);
   if (insertCarryForward.renewedFromTermId !== undefined) insert.renewed_from_term_id = insertCarryForward.renewedFromTermId;
   if (insertCarryForward.renewalChargeConsentAt !== undefined) insert.renewal_charge_consent_at = insertCarryForward.renewalChargeConsentAt;
+  if (termCols.property_id && propertyId) insert.property_id = propertyId;
+  if (termCols.series_root_id && seriesRootId) insert.series_root_id = seriesRootId;
+  if (termCols.renewal_notes && (propertyId || seriesRootId)) {
+    insert.renewal_notes = mergeTermScopeRenewalNotes('', { propertyId, seriesRootId });
+  }
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');
 
@@ -12126,6 +12452,10 @@ module.exports = {
     termNoticeAddress,
     successorCoverageScope,
     rowInRenewalScope,
+    nonSuccessorCoverageScope,
+    rowInNonSuccessorScope,
+    invoiceBillsOnlyAcceptedPlan,
+    revertPlanRatesAfterTermCancel,
     annualPrepayTableExists,
     TERMITE_EXTRA_NOTICE_DAYS,
     TERMITE_COPY_NOTICE_DAYS,

@@ -194,6 +194,7 @@ function setDbQueues(queues) {
       // Concurrent-seed recheck under the comms lock: default = no visit
       // appeared since the seeder read its gaps.
       if (table === 'scheduled_services as seed_recheck') return query({ rows: [] });
+      if (table === 'scheduled_services as term_series_links') return query({ rows: [] });
       // The recheck's canonical coverage read also does the palm identity
       // lookups (services) AFTER the main flow drained that queue: nothing found.
       if (table === 'services') return query({ first: undefined });

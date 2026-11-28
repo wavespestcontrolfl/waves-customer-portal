@@ -927,12 +927,119 @@ async function assertNoExistingPlanForPrepay(trx, ctx, estimate) {
       ['property-preferences', String(estimate.customer_id)],
     );
     const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
-    livePreservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
+    const createdCustomerId = ctx?.createdCustomerId ? String(ctx.createdCustomerId) : null;
+    const mintedByThisAccept = createdCustomerId != null
+      && linkedCustomer != null
+      && String(linkedCustomer.id) === createdCustomerId
+      && linkedCustomer.billing_mode == null;
+    livePreservesMembership = !mintedByThisAccept && Boolean(linkedCustomer && customerHasActiveMonthlyMembership(linkedCustomer));
     hasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null, ctx.bookedAppointmentIds);
   }
   if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || livePreservesMembership || hasLivePlan) {
-    throw httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
+    const err = httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
+    err.status = 400;
+    err.code = 'ANNUAL_PREPAY_EXISTING_PLAN';
+    throw err;
   }
+}
+
+function customerHasActiveMonthlyMembership(customer) {
+  if (!customer || customer.active === false) return false;
+  if (customerPreservesMonthlyMembership(customer)) return true;
+  const inactive = new Set(['cancelled', 'canceled', 'churned', 'inactive', 'lost', 'archived']);
+  return customer.billing_mode === 'monthly_membership'
+    && Number(customer.monthly_rate) > 0
+    && !inactive.has(String(customer.pipeline_stage || '').toLowerCase())
+    && !inactive.has(String(customer.status || '').toLowerCase());
+}
+
+// Customer 360 annual-prepay conversion guard: converting one service to
+// annual prepay stamps customer-wide billing_mode='annual_prepay' and
+// suppresses customer-wide monthly dues. Refuse (409) under the customer lock
+// when the account already holds an active monthly membership OR another live
+// recurring plan (different service family or different property) that would
+// silently stop billing. Single-service renewals and prepay-on-book for the
+// same service continue untouched.
+function findConflictingRecurringPlanRow(liveRows, { targetPropertyId, targetType }) {
+  const rows = liveRows || [];
+  const distinctProps = new Set(rows.map((r) => (r.property_id ? String(r.property_id) : null)).filter(Boolean));
+  const hasNullPropRow = rows.some((r) => !r.property_id);
+  const ambiguousMultiProperty = !targetPropertyId
+    && rows.length > 1
+    && (distinctProps.size > 1 || (distinctProps.size === 1 && hasNullPropRow));
+  if (ambiguousMultiProperty) return rows[0];
+
+  const { serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  return rows.find((row) => {
+    if (targetPropertyId && row.property_id && String(row.property_id) !== targetPropertyId) return true;
+    if (!targetType || !row.service_type) return false;
+    return !serviceMatchesCoverage(row, targetType);
+  }) || null;
+}
+
+function throwAnnualPrepayExistingPlanConflict(message, details) {
+  const err = httpError(message, 409);
+  err.status = 409;
+  err.code = 'ANNUAL_PREPAY_EXISTING_PLAN';
+  err.existingPlanConflict = {
+    error: err.message,
+    code: 'ANNUAL_PREPAY_EXISTING_PLAN',
+    ...details,
+  };
+  throw err;
+}
+
+async function assertCustomer360NoConflictingPlanForPrepay(trx, {
+  customerId, coverageServiceType, propertyId = null, scheduledServiceId = null, acquirePropertyLock = true,
+} = {}) {
+  if (!customerId) return { targetPropertyId: null, targetScheduledServiceId: null, targetSeriesRootId: null };
+  if (acquirePropertyLock) {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(customerId)],
+    );
+  }
+  const lockedCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+  if (customerHasActiveMonthlyMembership(lockedCustomer)) {
+    throwAnnualPrepayExistingPlanConflict(
+      'This customer is on an active monthly membership — annual prepay switches the whole account to annual_prepay billing, which would silence their monthly dues. Switch their billing mode first.',
+      { reason: 'monthly_membership' },
+    );
+  }
+  let targetPropertyId = propertyId ? String(propertyId) : null;
+  let targetSeriesRootId = null;
+  if (scheduledServiceId) {
+    const targetRow = await trx('scheduled_services')
+      .where({ id: scheduledServiceId, customer_id: customerId })
+      .first('id', 'property_id', 'recurring_parent_id');
+    if (targetRow?.property_id && !targetPropertyId) targetPropertyId = String(targetRow.property_id);
+    if (targetRow) targetSeriesRootId = String(targetRow.recurring_parent_id || targetRow.id);
+  }
+  const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  const { normalizeCoverageServiceType, serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  const targetType = normalizeCoverageServiceType(coverageServiceType);
+  const liveRows = await trx('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true })
+    .whereNotIn('status', TERMINAL_STATUSES)
+    .select('id', 'service_type', 'property_id', 'recurring_parent_id');
+  const conflict = findConflictingRecurringPlanRow(liveRows, { targetPropertyId, targetType });
+  if (conflict) {
+    throwAnnualPrepayExistingPlanConflict(
+      `This customer already has another active recurring plan (${conflict.service_type || 'other service'}) — annual prepay switches the whole account to annual_prepay billing, which would stop billing that plan.`,
+      { reason: 'other_recurring_plan', serviceType: conflict.service_type || null },
+    );
+  }
+  if (!targetSeriesRootId && targetPropertyId && targetType) {
+    const matchingRoots = new Set((liveRows || [])
+      .filter((r) => String(r.property_id || '') === targetPropertyId && serviceMatchesCoverage(r, targetType))
+      .map((r) => String(r.recurring_parent_id || r.id)));
+    if (matchingRoots.size === 1) [targetSeriesRootId] = matchingRoots;
+  }
+  return {
+    targetPropertyId,
+    targetScheduledServiceId: scheduledServiceId ? String(scheduledServiceId) : null,
+    targetSeriesRootId,
+  };
 }
 
 // Step 3: what an annual-prepay request needs. Returns the prepay amount, or
@@ -1581,5 +1688,7 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   bookedVisitsPinOf,
   bookedVisitsHaveAddons,
   BOOKED_VISIT_PIN_FIELDS,
+  assertNoExistingPlanForPrepay,
+  assertCustomer360NoConflictingPlanForPrepay,
   _private: { manualPrepayBlockingOneTimeCharge },
 };

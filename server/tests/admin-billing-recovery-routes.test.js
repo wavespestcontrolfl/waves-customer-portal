@@ -1194,3 +1194,161 @@ describe('billVisit — owner re-checked after the lock; breakdown pinned (GH Co
     expect(dispositionQB.insert).not.toHaveBeenCalled();
   });
 });
+
+describe('B-44: PAF/prepay exclusion on listUninvoicedLeaks and prepay guard on POST /dismiss', () => {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(true) };
+    customerOnAutopay.mockResolvedValue(false);
+  });
+
+  test('listUninvoicedLeaks passes real id + paf_held_term_id + recurring_parent_id + property_id to annualPrepayCoversVisit and excludes covered PAF visits', async () => {
+    const pafRow = {
+      ...BILLABLE_VISIT,
+      id: 'ss-paf-1',
+      scheduled_service_id: 'ss-paf-1',
+      paf_held_term_id: 'term-paf-1',
+      recurring_parent_id: 'ss-root-1',
+      property_id: 'prop-1',
+      billing_mode: 'per_application',
+      service_date: '2026-04-14',
+      scheduled_date: '2026-04-14',
+    };
+    const uncoveredRow = {
+      ...BILLABLE_VISIT,
+      id: 'ss-open-2',
+      scheduled_service_id: 'ss-open-2',
+      paf_held_term_id: null,
+      recurring_parent_id: null,
+      property_id: 'prop-1',
+      billing_mode: 'per_application',
+      service_date: '2026-04-14',
+      scheduled_date: '2026-04-14',
+    };
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ rows: [pafRow, uncoveredRow] });
+      return makeQB({ rows: [] });
+    });
+    const coversSpy = jest.spyOn(AnnualPrepayRenewals, 'annualPrepayCoversVisit')
+      .mockImplementation(async (visit) => Boolean(visit.id === 'ss-paf-1' && visit.paf_held_term_id === 'term-paf-1'));
+    try {
+      const out = await router.listUninvoicedLeaks({ from: '2026-04-01', to: '2026-04-30' });
+      expect(coversSpy).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'ss-paf-1',
+        paf_held_term_id: 'term-paf-1',
+        recurring_parent_id: 'ss-root-1',
+        property_id: 'prop-1',
+      }));
+      const allIds = [...out.leaks, ...out.needs_review].map((l) => l.scheduled_service_id);
+      expect(allIds).toEqual(['ss-open-2']);
+    } finally {
+      coversSpy.mockRestore();
+    }
+  });
+
+  test('POST /dismiss refuses (409) a visit covered by annual prepay / PAF and records no disposition', async () => {
+    const dispositionQB = makeQB({ first: null });
+    const coveredVisit = {
+      id: 'ss-paf-1',
+      customer_id: 'cust-1',
+      completed_at: '2026-04-14T15:00:00Z',
+      service_type: 'Quarterly Pest Control',
+      scheduled_date: '2026-04-14',
+      paf_held_term_id: 'term-paf-1',
+      prepaid_amount: 0,
+      prepaid_method: null,
+      annual_prepay_term_id: null,
+      recurring_parent_id: null,
+      property_id: 'prop-1',
+      service_record_id: 'sr-1',
+    };
+    installTransaction((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: coveredVisit });
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error('fall through');
+    });
+    const coversSpy = jest.spyOn(AnnualPrepayRenewals, 'annualPrepayCoversVisit').mockResolvedValue(true);
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-paf-1/dismiss`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'test dismiss' }),
+        });
+        expect(res.status).toBe(409);
+        const body = await res.json();
+        expect(body.error).toMatch(/annual prepay/i);
+        expect(dispositionQB.insert).not.toHaveBeenCalled();
+      });
+    } finally {
+      coversSpy.mockRestore();
+    }
+  });
+
+  test('POST /dismiss refuses (409) an out-of-band prepaid visit (prepaid_amount > 0) and records no disposition', async () => {
+    const dispositionQB = makeQB({ first: null });
+    const prepaidVisit = {
+      id: 'ss-cash-1',
+      customer_id: 'cust-1',
+      completed_at: '2026-04-14T15:00:00Z',
+      service_type: 'Quarterly Pest Control',
+      scheduled_date: '2026-04-14',
+      paf_held_term_id: null,
+      prepaid_amount: '129.00',
+      prepaid_method: 'cash',
+      annual_prepay_term_id: null,
+      recurring_parent_id: null,
+      property_id: 'prop-1',
+      service_record_id: 'sr-1',
+    };
+    installTransaction((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: prepaidVisit });
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error('fall through');
+    });
+    const coversSpy = jest.spyOn(AnnualPrepayRenewals, 'annualPrepayCoversVisit').mockResolvedValue(false);
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-cash-1/dismiss`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'test dismiss' }),
+        });
+        expect(res.status).toBe(409);
+        expect(dispositionQB.insert).not.toHaveBeenCalled();
+      });
+    } finally {
+      coversSpy.mockRestore();
+    }
+  });
+
+  test('POST /dismiss fails closed (503) if annualPrepayCoversVisit throws', async () => {
+    const dispositionQB = makeQB({ first: null });
+    installTransaction((arg) => {
+      if (typeof arg === 'object' && arg.ss) {
+        return makeQB({ first: { id: 'ss-err', customer_id: 'cust-1', completed_at: '2026-04-14T15:00:00Z', service_type: 'Quarterly Pest Control', scheduled_date: '2026-04-14', prepaid_amount: 0 } });
+      }
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error('fall through');
+    });
+    const coversSpy = jest.spyOn(AnnualPrepayRenewals, 'annualPrepayCoversVisit').mockRejectedValue(new Error('db timeout'));
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-err/dismiss`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'test dismiss' }),
+        });
+        expect(res.status).toBe(503);
+        expect(dispositionQB.insert).not.toHaveBeenCalled();
+      });
+    } finally {
+      coversSpy.mockRestore();
+    }
+  });
+});

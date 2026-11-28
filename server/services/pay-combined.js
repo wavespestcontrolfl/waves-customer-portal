@@ -260,12 +260,15 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
       onTruncation: () => { incomplete = 'candidate bound hit'; },
     });
     // A pay-page plan-choice prepay (pay-plan-choice.js) and the first invoice
-    // its note names are ALTERNATIVES: paying the year closes that invoice, so
-    // it is never a previous balance on the prepay's own charge. The reverse
-    // pairing cannot occur (the unpaid prepay is an undelivered draft, which
-    // the open-balance read never returns).
-    const { prepayNoteNamesInvoice } = require('./pay-plan-choice');
-    const candidates = openInvoices.filter((inv) => !prepayNoteNamesInvoice(anchorInvoice.notes, inv.invoice_number) && !invoiceHeldForChemicalReview(inv));
+    // its note names are mutually exclusive ALTERNATIVES: paying the year
+    // closes that invoice, and paying the first invoice voids the prepay.
+    // Once the prepay pay link is opened its status flips from draft to viewed,
+    // so openBalanceInvoices can return BOTH — exclude bidirectionally (and
+    // whenever a third invoice is the anchor beside both F and P) so F and P
+    // can NEVER ride the same combined PaymentIntent.
+    const { filterOutPlanChoiceAlternatives } = require('./pay-plan-choice');
+    const candidates = filterOutPlanChoiceAlternatives(anchorInvoice, openInvoices)
+      .filter((inv) => !invoiceHeldForChemicalReview(inv));
     if (incomplete) {
       logger.warn(`[pay-combined] sibling read incomplete for invoice ${anchorInvoice.invoice_number} (${incomplete}) — combined flow disabled for this session`);
       return degrade('incomplete');
@@ -605,8 +608,10 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
   // caller has finished its Stripe PI decision. One blocked sibling refuses
   // the whole combined amount.
   const { assertInvoiceDepositSettlementReady } = require('./estimate-deposits');
+  const { assertPlanChoiceCounterpartPayable } = require('./pay-plan-choice');
   for (const row of rows) {
     await assertInvoiceDepositSettlementReady(trx, row);
+    await assertPlanChoiceCounterpartPayable(trx, row, { inspectStripe: true, retireConfirmable: true });
   }
   return rows;
 }

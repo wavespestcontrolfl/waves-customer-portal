@@ -101,7 +101,10 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
     const db = makeDb(recurringServices, {
       annualTotal, estimateUpdate, priorActivationStatus, priorDeferredInvoice, customerUpdate, customerPropertyType,
     });
+    const schema = { hasTable: jest.fn().mockResolvedValue(false), hasColumn: jest.fn().mockResolvedValue(false) };
+    db.schema = schema;
     const invoiceTrx = jest.fn((table) => db(table));
+    invoiceTrx.schema = schema;
     invoiceTrx.raw = jest.fn().mockResolvedValue(undefined);
     invoiceTrx.isTransaction = true;
     db.transaction = jest.fn(async (callback) => callback(invoiceTrx));

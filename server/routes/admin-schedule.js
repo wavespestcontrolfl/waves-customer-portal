@@ -25958,6 +25958,69 @@ const {
   stripPrepaySwitchSupersededMarkers: stripSupersededMarkers,
 } = require('../services/invoice');
 
+const RECOGNIZED_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|Bait Station Setup — one-time setup fee|First service application)$/;
+
+function findUnrecognizedAcceptLine(lines) {
+  const { isRecognizedAcceptDiscountLine } = require('../services/estimate-first-application-invoice');
+  const bad = lines.find((li) => String(li?.category || '') !== 'deposit_credit'
+    && !RECOGNIZED_ACCEPT_LINES.test(String(li?.description || '').trim())
+    && !isRecognizedAcceptDiscountLine(li));
+  if (bad) return bad;
+  if (lines.length > 0
+    && !lines.some((li) => String(li?.category || '') === 'deposit_credit'
+      || RECOGNIZED_ACCEPT_LINES.test(String(li?.description || '').trim()))) {
+    return lines[0];
+  }
+  return null;
+}
+
+function parseSwitchEstimateData(raw) {
+  if (raw == null) return { ok: true, data: {} };
+  if (typeof raw === 'object') return { ok: true, data: raw };
+  if (typeof raw !== 'string') return { ok: false, data: null };
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? { ok: true, data: parsed } : { ok: false, data: null };
+  } catch {
+    return { ok: false, data: null };
+  }
+}
+
+function waivedSupersededSetupFee(supersedes) {
+  return supersedes
+    .flatMap((inv) => inv.lines)
+    .filter((li) => Number(li.amount) > 0
+      && /setup fee/i.test(li.description)
+      && !RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
+    .reduce((sum, li) => sum + (Number(li.amount) || 0), 0);
+}
+
+function payPageOfferBlockReason(payPage, pricing, supersededSetupFee) {
+  if (!payPage) return null;
+  if (pricing.prepay.setupAmount > 0) return 'carries a bait-station setup — switch it from the office';
+  const waivedSetup = supersededSetupFee > 0 ? Math.round(supersededSetupFee * 100) / 100 : 0;
+  const savings = Math.round((pricing.annualBase + waivedSetup - pricing.prepay.total) * 100) / 100;
+  if (!(savings > 0)) return 'carries no annual prepay savings';
+  return null;
+}
+
+async function invoiceHasActivePromoCode(invoiceId, conn) {
+  if (!invoiceId || !conn?.schema?.hasTable) return false;
+  const read = async (q) => {
+    if (!(await q.schema.hasTable('invoice_promo_codes'))) return false;
+    const row = await q('invoice_promo_codes')
+      .where({ invoice_id: invoiceId })
+      .whereIn('status', ['entered', 'redeemed'])
+      .first('id');
+    return Boolean(row);
+  };
+  try {
+    return conn.isTransaction === true ? await conn.transaction(read) : await read(conn);
+  } catch {
+    return false;
+  }
+}
+
 // `delivered` (the invoice pay page's plan choice, pay-plan-choice.js): the
 // customer is reading this invoice on its own pay link, so having gone out —
 // or carrying the PaymentIntent that page opens — is the normal state, not a
@@ -26036,6 +26099,7 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
   for (const inv of rows) {
     const status = String(inv.status || '').toLowerCase();
     if (SUPERSEDE_DEAD_STATUSES.has(status)) continue;
+    const invLabel = inv.invoice_number || 'the invoice';
     if (!acceptStamp.test(String(inv.notes || ''))) {
       return { ok: false, blockReason: `can’t be switched here — this visit also carries ${inv.invoice_number || 'another invoice'} (${status}), which the prepaid year does not replace. Resolve it from Invoices first` };
     }
@@ -26045,22 +26109,22 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     // Money already collected or in flight — a refund decision, not a field
     // action. Checked before delivery so the reason stays accurate.
     if (inv.paid_at || ['paid', 'prepaid', 'processing'].includes(status)) {
-      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is already ${status === 'prepaid' ? 'settled by account credit' : status}. Resolve it first, then mint the prepay from Customer 360` };
+      return { ok: false, blockReason: `can’t be switched here — ${invLabel} for this visit is already ${status === 'prepaid' ? 'settled by account credit' : status}. Resolve it first, then mint the prepay from Customer 360` };
     }
     // UNDELIVERED DRAFTS ONLY (Codex P0 r1). A delivered invoice has a live
     // pay link in the customer's hands; one carrying a PaymentIntent has a
     // payment in flight. Voiding either is a deliberate office decision.
     if (!delivered && (inv.sent_at || inv.stripe_payment_intent_id)) {
-      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has already gone out to the customer. Void it from Invoices first, then switch` };
+      return { ok: false, blockReason: `can’t be switched here — ${invLabel} for this visit has already gone out to the customer. Void it from Invoices first, then switch` };
     }
     if (status !== 'draft' && !(delivered && ['sent', 'viewed', 'overdue'].includes(status))) {
-      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360` };
+      return { ok: false, blockReason: `can’t be switched here — ${invLabel} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360` };
     }
     if (Number(inv.amount_paid || 0) > 0) {
-      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has a part payment on it. Resolve it from Invoices first` };
+      return { ok: false, blockReason: `can’t be switched here — ${invLabel} for this visit has a part payment on it. Resolve it from Invoices first` };
     }
     if (Number(inv.credit_applied || 0) > 0) {
-      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has account credit applied. Void it from Invoices (which returns the credit) and mint the prepay from Customer 360` };
+      return { ok: false, blockReason: `can’t be switched here — ${invLabel} for this visit has account credit applied. Void it from Invoices (which returns the credit) and mint the prepay from Customer 360` };
     }
     // A ledger-backed ESTIMATE DEPOSIT rides as a `deposit_credit` LINE, not
     // as credit_applied (Codex P0 r2). Voiding returns it to the ledger, but
@@ -26076,16 +26140,20 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     // The non-member rodent accept bills its bait-station setup beside the
     // first application (estimate-public.js) — a recognized accept line,
     // carried onto the prepay rather than waived (codex #3591 r38 P1).
-    const RECOGNIZED_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|Bait Station Setup — one-time setup fee|First service application)$/;
+    // Legitimate negative estimate-discount lines (_kind: 'discount') emitted
+    // under GATE_INVOICE_ESTIMATE_DISCOUNT_LINES are recognized too; positive
+    // or arbitrary office-edited lines still fail closed.
     // deposit_credit lines are exempt here only so the DEDICATED guard below
     // refuses them with its accurate ledger-restore reason.
-    const unrecognized = lines.find((li) => String(li?.category || '') !== 'deposit_credit'
-      && !RECOGNIZED_ACCEPT_LINES.test(String(li?.description || '').trim()));
+    const unrecognized = findUnrecognizedAcceptLine(lines);
     if (unrecognized) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the accept invoice'} carries charges beyond this plan’s setup fee and first application (“${String(unrecognized?.description || '').slice(0, 60)}”). Handle it from Customer 360, where the invoice can be split first` };
     }
     if (lines.some((li) => String(li?.category || '') === 'deposit_credit')) {
-      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit carries an estimate deposit credit. Mint the prepay from Customer 360 so the deposit is applied to it` };
+      return { ok: false, blockReason: `can’t be switched here — ${invLabel} for this visit carries an estimate deposit credit. Mint the prepay from Customer 360 so the deposit is applied to it` };
+    }
+    if (delivered && await invoiceHasActivePromoCode(inv.id, conn)) {
+      return { ok: false, blockReason: `can’t be switched here — ${invLabel} has a promo code applied. Resolve it from Invoices first` };
     }
     const holdBlockReason = supersedeInvoiceHoldReason(inv);
     if (holdBlockReason) {
@@ -26196,14 +26264,17 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   if (!estimate || !estimate.accepted_at || String(estimate.status || '').toLowerCase() !== 'accepted') {
     return { ok: false, status: 409, blockReason: 'is handled by the linked quote — accept it as annual prepay from the estimate instead' };
   }
-  const estimateData = parseEstimateDataJson(estimate.estimate_data);
+  const parsedEstimateData = parseSwitchEstimateData(estimate.estimate_data);
+  if (!parsedEstimateData.ok) {
+    return { ok: false, status: 409, blockReason: 'couldn’t verify the linked quote’s pricing — refresh and try again' };
+  }
   return {
     ok: true,
     visit,
     anchor,
     customerId: String(anchor.customer_id || visit.customer_id || ''),
     estimateId: String(anchor.source_estimate_id),
-    estimateData,
+    estimateData: parsedEstimateData.data,
     visitIds: seriesIds,
   };
 }
@@ -26737,6 +26808,9 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
       visitsPerYear,
       planClass,
       unwaivedSetupFee,
+      estimateData: anchorEstimateData,
+      serviceKey: coverageServiceKey,
+      serviceType: coverageServiceType,
       noYear1PrepayPercent: estimatePrepayNoPercent(anchorEstimateData),
     });
     // payPage: a bait-station setup is carried onto the prepay, never waived,
@@ -26751,10 +26825,12 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // lane never writes the fee, so it has nothing to waive; see setupFee
     // below).
     // The rodent bait-station setup is excluded: it is carried, never waived.
-    const supersededSetupFee = supersedes
-      .flatMap((inv) => inv.lines)
-      .filter((li) => /setup fee/i.test(li.description) && !RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
-      .reduce((sum, li) => sum + (Number(li.amount) || 0), 0);
+    const supersededSetupFee = waivedSupersededSetupFee(supersedes);
+    // payPage: refuse plans carrying an unwaived bait-station setup or offering
+    // $0 (or negative) savings over paying per application (e.g., floor-clamped
+    // lawn or already-waived setup without a prepay discount).
+    const payPageBlock = payPageOfferBlockReason(payPage, pricing, supersededSetupFee);
+    if (payPageBlock) return blocked(payPageBlock);
 
     return {
       eligible: true,

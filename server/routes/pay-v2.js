@@ -277,16 +277,57 @@ function respondWithPaymentError(req, res, {
   return res.status(statusCode).json({ error: clientMessage || message || error?.message || 'Payment error' });
 }
 
+function isExpectedSetupConflict(err) {
+  return Boolean(err && (err.inProgress || err.staleInvoice || err.staleBalance || err.planChoiceConflict));
+}
+
+function sendExpectedFinalizeConflict(res, err) {
+  if (!err || err.statusCode !== 409 || (!err.staleBalance && !err.planChoiceConflict)) return false;
+  res.status(409).json({
+    error: err.message,
+    staleBalance: !!err.staleBalance,
+    ...(err.planChoiceConflict ? { inProgress: !!err.inProgress, planChoiceConflict: true } : {}),
+  });
+  return true;
+}
+
+function respondToConfirmError(req, res, invoice, err) {
+  if (sendExpectedFinalizeConflict(res, err)) return;
+  logger.error(`[pay-v2] Confirm error: ${err.message}`);
+  const confirmStatus = confirmErrorStatus(err);
+  reportBillPaymentError(req, {
+    invoice,
+    phase: 'confirm',
+    methodCategory: req.body?.methodCategory || invoice?.payment_method,
+    paymentIntentId: req.body?.paymentIntentId,
+    error: err,
+    statusCode: confirmStatus,
+  });
+  res.status(confirmStatus).json(errorPayload(err));
+}
+
 async function rejectIfInvoiceCollectionPending(invoice, res, { recordExistingPayment = false } = {}) {
   try {
     if (!recordExistingPayment) {
       await require('../services/estimate-deposits').assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
+    }
+    const PayPlanChoice = require('../services/pay-plan-choice');
+    if (typeof PayPlanChoice.assertPlanChoiceCounterpartPayable === 'function') {
+      await PayPlanChoice.assertPlanChoiceCounterpartPayable(db, invoice, { inspectStripe: true });
     }
     await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
     return false;
   } catch (err) {
     if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
       res.status(409).json({ error: err.message, reconciliationRequired: true });
+      return true;
+    }
+    if (err.planChoiceConflict) {
+      res.status(409).json({
+        error: err.message,
+        inProgress: !!err.inProgress,
+        planChoiceConflict: true,
+      });
       return true;
     }
     if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
@@ -1178,7 +1219,7 @@ router.post('/:token/setup', async (req, res, next) => {
       // operator alert, the page just refreshes to the updated invoice.
       // staleBalance (a sibling changed under the combined verification) is
       // the same benign self-recovering race (codex r12 P2).
-      if (!err.inProgress && !err.staleInvoice && !err.staleBalance) {
+      if (!isExpectedSetupConflict(err)) {
         // Never log the raw pay-link token — it is the bearer credential for
         // this invoice and errors.log is broadly readable. When the invoice id
         // is unavailable, fall back to a masked suffix that still aids
@@ -1206,6 +1247,7 @@ router.post('/:token/setup', async (req, res, next) => {
         // page render and the mint — same reload-and-retry contract as
         // staleInvoice, surfaced separately for clarity.
         staleBalance: !!err.staleBalance,
+        planChoiceConflict: !!err.planChoiceConflict,
       });
     }
     logger.error(`[pay-v2] Setup error: ${err.message}`);
@@ -1264,6 +1306,10 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
       // No code on an invoice that must save a payment method first: its
       // credit coverage is held for the capture step, not applied at /setup.
       if (await invoiceRequiresSavedMethod(locked, { database: trx })) return { ok: false, reason: 'invalid_code' };
+      const PayPlanChoice = require('../services/pay-plan-choice');
+      if (await PayPlanChoice.planChoiceCounterpartConflict(locked, { conn: trx, inspectStripe: false })) {
+        return { ok: false, reason: 'invalid_code' };
+      }
       const entered = await require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code, trackInsert: true }, trx);
       return { ...entered, openPiId: locked.stripe_payment_intent_id || null };
     });
@@ -1511,12 +1557,9 @@ router.post('/:token/finalize', async (req, res, next) => {
         reconciliationRequired: !!err.reconciliationRequired,
       });
     }
-    // Expected races (the consent-stamp fence, combined-balance drift): the
-    // page reloads to the live session — same contract as /setup and
-    // /update-amount, no admin bill-payment-error alert.
-    if (err.statusCode === 409 && err.staleBalance) {
-      return res.status(409).json({ error: err.message, staleBalance: true });
-    }
+    // Expected races (the consent-stamp fence, combined-balance drift,
+    // plan-choice counterpart conflict): no admin bill-payment-error alert.
+    if (sendExpectedFinalizeConflict(res, err)) return;
     reportBillPaymentError(req, {
       invoice,
       phase: 'finalize',
@@ -1618,17 +1661,7 @@ router.post('/:token/confirm', async (req, res, next) => {
       },
     });
   } catch (err) {
-    logger.error(`[pay-v2] Confirm error: ${err.message}`);
-    const confirmStatus = confirmErrorStatus(err);
-    reportBillPaymentError(req, {
-      invoice,
-      phase: 'confirm',
-      methodCategory: req.body?.methodCategory || invoice?.payment_method,
-      paymentIntentId: req.body?.paymentIntentId,
-      error: err,
-      statusCode: confirmStatus,
-    });
-    res.status(confirmStatus).json(errorPayload(err));
+    respondToConfirmError(req, res, invoice, err);
   }
 });
 
