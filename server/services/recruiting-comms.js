@@ -258,7 +258,7 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff }) {
+function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff, lang = 'en' }) {
   const parts = [
     `<h2 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:20px;line-height:1.25;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};">${escapeHtml(heading)}</h2>`,
   ];
@@ -276,6 +276,8 @@ function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff })
   return wrapServiceEmail({
     preheader: paragraphs[0] ? escapeHtml(paragraphs[0]) : escapeHtml(heading),
     body: parts.join('\n'),
+    lang,
+    appPromo: false,
   });
 }
 
@@ -309,6 +311,8 @@ function buildEmailContent(app, stage, vars) {
   const first = firstNameOf(contactOf(app).name);
   const isEs = language === 'es';
 
+  const lang = isEs ? 'es' : 'en';
+
   if (stage === 'application_received') {
     const subject = isEs ? 'Recibimos tu solicitud' : 'We received your application';
     const intro = isEs
@@ -319,7 +323,7 @@ function buildEmailContent(app, stage, vars) {
       : `If you have questions, call or text ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
     return {
       subject,
-      html: wrapEmailHtml({ heading: subject, paragraphs: [intro, contactLine] }),
+      html: wrapEmailHtml({ heading: subject, paragraphs: [intro, contactLine], lang }),
       text: `${intro}\n\n${contactLine}`,
     };
   }
@@ -335,7 +339,7 @@ function buildEmailContent(app, stage, vars) {
     const buttonLabel = isEs ? 'Elegir horario' : 'Pick a time';
     return {
       subject,
-      html: wrapEmailHtml({ heading: subject, paragraphs: [intro, explain], buttonUrl: vars.interview_url, buttonLabel }),
+      html: wrapEmailHtml({ heading: subject, paragraphs: [intro, explain], buttonUrl: vars.interview_url, buttonLabel, lang }),
       text: `${intro}\n\n${vars.interview_url}\n\n${explain}`,
       buttonLabel,
     };
@@ -361,7 +365,7 @@ function buildEmailContent(app, stage, vars) {
     const buttonLabel = isEs ? 'Cambiar horario' : 'Change time';
     return {
       subject,
-      html: wrapEmailHtml({ heading: subject, paragraphs, buttonUrl: vars.interview_url, buttonLabel }),
+      html: wrapEmailHtml({ heading: subject, paragraphs, buttonUrl: vars.interview_url, buttonLabel, lang }),
       text: `${paragraphs.join('\n\n')}\n\n${vars.interview_url}`,
       buttonLabel,
     };

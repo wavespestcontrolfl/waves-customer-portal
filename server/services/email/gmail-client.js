@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { google } = require('googleapis');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { htmlToPlainText } = require('../../utils/html-to-plain-text');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
@@ -287,39 +288,6 @@ async function runBeforeSend(gmail, options) {
   await options.beforeSend();
 }
 
-function decodeBasicEntities(s) {
-  return String(s || '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-function formatPlainAnchor(_match, dbl, sgl, bare, inner) {
-  const href = decodeBasicEntities((dbl ?? sgl ?? bare ?? '').trim());
-  const label = decodeBasicEntities(inner.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
-  if (!href || /^(?:javascript|data):/i.test(href)) return label;
-  if (!label || label === href) return href;
-  return `${label} (${href})`;
-}
-
-function stripHtmlToPlainText(html) {
-  const withLinks = String(html || '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi, formatPlainAnchor);
-  return decodeBasicEntities(
-    withLinks
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
-      .replace(/<[^>]+>/g, ''),
-  )
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
 function encodeMimeBase64(text) {
   const crlf = String(text || '').replace(/\r?\n/g, '\r\n');
   const b64 = Buffer.from(crlf, 'utf8').toString('base64');
@@ -333,7 +301,7 @@ function buildRawMessage(to, subject, body, inReplyTo) {
   if (!safeTo) throw new Error('Recipient (to) is required');
   const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
   const boundary = `waves-alt-${crypto.randomBytes(8).toString('hex')}`;
-  const plainBody = stripHtmlToPlainText(body);
+  const plainBody = htmlToPlainText(body);
   const headers = [
     `From: ${fromHeader()}`,
     `To: ${safeTo}`,

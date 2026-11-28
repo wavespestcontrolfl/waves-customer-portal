@@ -407,13 +407,14 @@ function glassUniversalFooterHtml() {
 // run past a short preheader into the pill header's phone number.
 const PREHEADER_PAD = '&nbsp;&zwnj;'.repeat(80);
 
-function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
+function glassPage(T, { preheader, title, contentHtml, msoWidth = 640, lang = 'en' }) {
+  const safeLang = /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(String(lang || '')) ? lang : 'en';
   // The <style> block is a safety net for operator/DB-authored body HTML
   // that carries bare headings: without it they'd inherit the body grey.
   // Inline styles always beat these rules, so themed markup is unaffected;
   // clients that strip <style> just show grey headings (readable, not wrong).
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${safeLang}">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -528,7 +529,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
   return glassPage(T, { preheader, contentHtml, msoWidth: 560 });
 }
 
-function glassServiceEmail({ preheader, body, footerNote, darkAwareBody = false } = {}) {
+function glassServiceEmail({ preheader, body, footerNote, darkAwareBody = false, lang = 'en', appPromo = true } = {}) {
   const T = GLASS_THEME;
   const contentHtml = `${glassPillHeader(T)}
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;">
@@ -542,10 +543,10 @@ function glassServiceEmail({ preheader, body, footerNote, darkAwareBody = false 
           </div>
         </td></tr>` : ''}
         <tr><td align="center" style="padding:18px 4px 0 4px;">
-          ${universalWavesFooterHtml(T)}
+          ${universalWavesFooterHtml(T, { appPromo })}
         </td></tr>
       </table>`;
-  return glassPage(T, { preheader, contentHtml, msoWidth: 620 });
+  return glassPage(T, { preheader, contentHtml, msoWidth: 620, lang });
 }
 
 function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody = true } = {}) {
@@ -631,8 +632,8 @@ function plainText(lines) {
  *   footerNote?: string,
  * }} opts
  */
-function wrapServiceEmail({ preheader, body, footerNote, darkAwareBody } = {}) {
-  return glassServiceEmail({ preheader, body, footerNote, darkAwareBody });
+function wrapServiceEmail({ preheader, body, footerNote, darkAwareBody, lang, appPromo } = {}) {
+  return glassServiceEmail({ preheader, body, footerNote, darkAwareBody, lang, appPromo });
 }
 
 /**

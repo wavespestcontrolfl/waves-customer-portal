@@ -9,6 +9,7 @@
 
 const logger = require('./logger');
 const { wrapServiceEmail, ctaButton, colors } = require('./email-template');
+const { htmlToPlainText } = require('../utils/html-to-plain-text');
 
 let cachedTransporter = null;
 
@@ -38,39 +39,6 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-function decodeBasicEntities(s) {
-  return String(s || '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-function formatPlainAnchor(_match, dbl, sgl, bare, inner) {
-  const href = decodeBasicEntities((dbl ?? sgl ?? bare ?? '').trim());
-  const label = decodeBasicEntities(inner.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
-  if (!href || /^(?:javascript|data):/i.test(href)) return label;
-  if (!label || label === href) return href;
-  return `${label} (${href})`;
-}
-
-function stripHtmlToText(html) {
-  const withLinks = String(html || '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi, formatPlainAnchor);
-  return decodeBasicEntities(
-    withLinks
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
-      .replace(/<[^>]+>/g, ''),
-  )
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
 // Legacy callers still reach this path when the template library is
 // unavailable. Keep the body flexible, but use the same customer-facing
 // chrome as the main transactional template.
@@ -92,7 +60,7 @@ async function send({ to, subject, heading, body, text, ctaUrl, ctaLabel, replyT
   if (!to) return { ok: false, error: 'No email address' };
   const transporter = getTransporter();
   if (!transporter) return { ok: false, error: 'Email not configured (GOOGLE_SMTP_PASSWORD missing)' };
-  const plain = text || [heading, stripHtmlToText(body), ctaUrl && ctaLabel ? `${ctaLabel}: ${ctaUrl}` : ctaUrl].filter(Boolean).join('\n\n');
+  const plain = text || [heading, htmlToPlainText(body), ctaUrl && ctaLabel ? `${ctaLabel}: ${ctaUrl}` : ctaUrl].filter(Boolean).join('\n\n');
   try {
     await transporter.sendMail({
       from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',

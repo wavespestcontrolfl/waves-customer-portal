@@ -108,7 +108,7 @@ test('beforeSend runs after the token refresh and before the message request', a
 test('sendMessage emits multipart/alternative MIME with base64-wrapped plain-text and HTML parts', async () => {
   acceptedData = { id: 'synthetic-message', threadId: 'synthetic-thread' };
   const longNote = 'A'.repeat(1200);
-  const htmlBody = `<style>.a{color:red}</style><p>Hi Taylor &amp; Sam,</p><p><a href="https://portal.wavespestcontrol.com/estimate/abc?x=1&amp;y=2">View estimate</a> ${longNote}</p>`;
+  const htmlBody = `<style>.a{color:red}</style><p>Hi Taylor &amp; Sam,</p><p><a href="https://portal.wavespestcontrol.com/estimate/abc?x=1&amp;y=2">View estimate</a> or <a href="mailto:billing@example.com">Contact &lt;billing@example.com&gt;</a> ${longNote}</p>`;
   await gmail.sendMessage('fixture@example.test', 'Visit confirmed', htmlBody);
   const payload = requests[0].data ?? requests[0].body;
   const sentBody = typeof payload === 'string' ? JSON.parse(payload) : payload;
@@ -128,7 +128,7 @@ test('sendMessage emits multipart/alternative MIME with base64-wrapped plain-tex
   expect(sections[2]).toContain('Content-Transfer-Encoding: base64');
   const plainDecoded = decodePart(sections[1]);
   const htmlDecoded = decodePart(sections[2]);
-  expect(plainDecoded).toContain(`Hi Taylor & Sam,\r\nView estimate (https://portal.wavespestcontrol.com/estimate/abc?x=1&y=2) ${longNote}`);
+  expect(plainDecoded).toContain(`Hi Taylor & Sam,\r\nView estimate (https://portal.wavespestcontrol.com/estimate/abc?x=1&y=2) or Contact <billing@example.com> (mailto:billing@example.com) ${longNote}`);
   expect(plainDecoded).not.toContain('.a{color:red}');
   expect(htmlDecoded).toBe(htmlBody);
 });

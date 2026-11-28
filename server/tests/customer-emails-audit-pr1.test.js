@@ -149,6 +149,16 @@ describe('Customer emails audit PR 1 regressions', () => {
       {},
     );
     expect(received.html).toContain('Adam, the owner');
+    expect(received.html).toContain('<html lang="en">');
+    expect(received.html).not.toContain('Track visits, reports &amp; payments in the Waves app');
+
+    const spanish = buildEmailContent(
+      { language: 'es', applicant_name: 'Sofia Lopez' },
+      'interview_invite',
+      { interview_url: 'https://portal.wavespestcontrol.com/careers/interview/tok123' },
+    );
+    expect(spanish.html).toContain('<html lang="es">');
+    expect(spanish.html).not.toContain('Track visits, reports &amp; payments in the Waves app');
   });
 
   test('newsletter feedback, quiz, sunset, draft hero, and Pest Insider pass Outlook/dark-mode/typography checks', async () => {
@@ -242,12 +252,12 @@ describe('Customer emails audit PR 1 regressions', () => {
         to: 'customer@example.com',
         subject: 'Update',
         heading: 'Service Update',
-        body: '<style>.x{display:none}</style><p>We finished your visit. <a href="https://portal.wavespestcontrol.com/details">See details</a>.</p>',
+        body: '<style>.x{display:none}</style><p>We finished your visit. <a href="mailto:billing@example.com">Contact &lt;billing@example.com&gt;</a>.</p>',
         ctaUrl: 'https://portal.wavespestcontrol.com/report/1',
         ctaLabel: 'View Report',
       });
       expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({
-        text: 'Service Update\n\nWe finished your visit. See details (https://portal.wavespestcontrol.com/details).\n\nView Report: https://portal.wavespestcontrol.com/report/1',
+        text: 'Service Update\n\nWe finished your visit. Contact <billing@example.com> (mailto:billing@example.com).\n\nView Report: https://portal.wavespestcontrol.com/report/1',
       }));
     } finally {
       if (prevPw === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
