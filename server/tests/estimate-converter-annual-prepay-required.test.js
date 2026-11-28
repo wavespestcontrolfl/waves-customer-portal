@@ -36,6 +36,7 @@ describe('estimate converter annual prepay orchestration', () => {
           where: jest.fn().mockReturnThis(),
           forUpdate: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue(estimate),
+          update: jest.fn().mockResolvedValue(1),
         };
       }
       if (table === 'customers') {
@@ -74,7 +75,10 @@ describe('estimate converter annual prepay orchestration', () => {
   // a clean null read is the default no-deposit path.
   function setup(recurringServices, totals, { deposits = null, invoiceCreateResult = { id: 'invoice-1' } } = {}) {
     const db = makeDb(recurringServices, totals);
+    const schema = { hasTable: jest.fn().mockResolvedValue(false), hasColumn: jest.fn().mockResolvedValue(false) };
+    db.schema = schema;
     const invoiceTrx = jest.fn((table) => db(table));
+    invoiceTrx.schema = schema;
     invoiceTrx.raw = jest.fn().mockResolvedValue(undefined);
     invoiceTrx.isTransaction = true;
     db.transaction = jest.fn(async (callback) => callback(invoiceTrx));
@@ -254,6 +258,7 @@ describe('estimate converter annual prepay orchestration', () => {
     }));
     const callerTrx = jest.fn((table) => db(table));
     callerTrx.isTransaction = true;
+    callerTrx.schema = db.schema;
     callerTrx.raw = invoiceTrx.raw;
     callerTrx.transaction = jest.fn(async (callback) => callback(invoiceTrx));
 
@@ -466,6 +471,7 @@ describe('estimate converter annual prepay orchestration', () => {
     }));
     const callerTrx = jest.fn((table) => db(table));
     callerTrx.isTransaction = true;
+    callerTrx.schema = db.schema;
     callerTrx.raw = invoiceTrx.raw;
     callerTrx.transaction = jest.fn(async (callback) => callback(invoiceTrx));
 
