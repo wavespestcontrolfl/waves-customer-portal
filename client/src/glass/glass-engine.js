@@ -140,15 +140,15 @@ export function applyGlassScene({ motion = true } = {}) {
  */
 const pointerFxByOrbs = new WeakMap();
 
-function createPointerFxEntry(html, orbs) {
+function createPointerFxEntry(html, orbs, initialReduced) {
   const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
-  const owners = new Set();
   const orbEls = orbs.querySelectorAll('.glass-orb');
+  let users = 0;
   let raf = 0;
-  let lastEvt = null;
+  let pendingEvt = null;
   let px = 0;
   let py = 0;
-  let motionReduced = false;
+  let motionReduced = initialReduced;
 
   const resetVisuals = () => {
     orbEls.forEach((orb) => orb.style.removeProperty('transform'));
@@ -166,54 +166,73 @@ function createPointerFxEntry(html, orbs) {
     });
   };
 
-  const onMove = (e) => {
-    lastEvt = e;
-    if (raf) return;
-    raf = requestAnimationFrame(() => {
-      raf = 0;
-      const t = lastEvt.target instanceof Element ? lastEvt.target.closest('[data-glass],[data-glass-accent]') : null;
+  const flushFrame = () => {
+    raf = 0;
+    if (pendingEvt) {
+      const evt = pendingEvt;
+      pendingEvt = null;
+      const t = evt.target instanceof Element ? evt.target.closest('[data-glass],[data-glass-accent]') : null;
       if (t) {
         const r = t.getBoundingClientRect();
-        html.style.setProperty('--mx', `${((lastEvt.clientX - r.left) / r.width) * 100}%`);
-        html.style.setProperty('--my', `${((lastEvt.clientY - r.top) / r.height) * 100}%`);
+        html.style.setProperty('--mx', `${((evt.clientX - r.left) / r.width) * 100}%`);
+        html.style.setProperty('--my', `${((evt.clientY - r.top) / r.height) * 100}%`);
       }
-      px = lastEvt.clientX / window.innerWidth - 0.5;
-      py = lastEvt.clientY / window.innerHeight - 0.5;
-      parallax();
-    });
+      px = evt.clientX / window.innerWidth - 0.5;
+      py = evt.clientY / window.innerHeight - 0.5;
+    }
+    parallax();
   };
-  const onScroll = () => {
-    if (!raf) raf = requestAnimationFrame(() => { raf = 0; parallax(); });
+
+  const scheduleFrame = () => {
+    if (!raf) raf = requestAnimationFrame(flushFrame);
   };
+  const onMove = (e) => {
+    pendingEvt = e;
+    scheduleFrame();
+  };
+  const onScroll = () => scheduleFrame();
 
   // Under reduced motion the pointer listener is never registered. Gating only
   // `parallax()` left `--mx`/`--my` tracking the cursor, so the specular
   // highlight went on sliding across every card — motion the user asked not to
   // see, from the one path that was not checking the flag.
   const syncPreference = () => {
-    motionReduced = preference.matches || (owners.size > 0 && [...owners].every((o) => o.reduced));
     document.removeEventListener('pointermove', onMove);
     window.removeEventListener('scroll', onScroll);
-    if (!motionReduced && owners.size > 0) {
+    if (!motionReduced && users > 0) {
       document.addEventListener('pointermove', onMove, { passive: true });
       window.addEventListener('scroll', onScroll, { passive: true });
       return;
     }
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
+    pendingEvt = null;
     resetVisuals();
   };
 
-  preference.addEventListener('change', syncPreference);
+  const onPreference = () => {
+    motionReduced = preference.matches;
+    syncPreference();
+  };
+  preference.addEventListener('change', onPreference);
+
   return {
-    owners,
-    syncPreference,
+    addOwner(reduced) {
+      users += 1;
+      if (!reduced) motionReduced = preference.matches;
+      syncPreference();
+    },
+    removeOwner() {
+      users = Math.max(0, users - 1);
+      return users;
+    },
     destroy() {
       document.removeEventListener('pointermove', onMove);
       window.removeEventListener('scroll', onScroll);
-      preference.removeEventListener('change', syncPreference);
+      preference.removeEventListener('change', onPreference);
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
+      pendingEvt = null;
       resetVisuals();
     },
   };
@@ -223,22 +242,16 @@ export function attachGlassPointerFx(html, orbs, reduced) {
   if (!orbs) return () => {};
   let entry = pointerFxByOrbs.get(orbs);
   if (!entry) {
-    entry = createPointerFxEntry(html, orbs);
+    entry = createPointerFxEntry(html, orbs, reduced);
     pointerFxByOrbs.set(orbs, entry);
   }
-  const owner = { reduced };
-  entry.owners.add(owner);
-  entry.syncPreference();
+  entry.addOwner(reduced);
 
   let detached = false;
   return () => {
     if (detached) return;
     detached = true;
-    entry.owners.delete(owner);
-    if (entry.owners.size > 0) {
-      entry.syncPreference();
-      return;
-    }
+    if (entry.removeOwner() > 0) return;
     if (pointerFxByOrbs.get(orbs) === entry) pointerFxByOrbs.delete(orbs);
     entry.destroy();
   };

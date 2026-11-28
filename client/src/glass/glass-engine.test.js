@@ -127,6 +127,46 @@ describe('attachGlassPointerFx', () => {
     still.unmount();
     expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
   });
+
+  it('enables pointer FX when reduced motion toggles off while mounted and flushes queued pointer updates on scroll frame', () => {
+    const preference = window.matchMedia();
+    preference.matches = true;
+    const { orbs, cleanup } = applyGlassScene();
+    const add = vi.spyOn(document, 'addEventListener');
+    const detach = attachGlassPointerFx(document.documentElement, orbs, true);
+    expect(add.mock.calls.map(([type]) => type)).not.toContain('pointermove');
+
+    const onChange = preference.addEventListener.mock.calls.find(([event]) => event === 'change')[1];
+    preference.matches = false;
+    onChange();
+    expect(add).toHaveBeenCalledWith('pointermove', expect.any(Function), { passive: true });
+
+    const rafCallbacks = [];
+    const origRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (cb) => { rafCallbacks.push(cb); return rafCallbacks.length; };
+    try {
+      const card = document.createElement('div');
+      card.setAttribute('data-glass', 'card');
+      card.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 });
+      document.body.appendChild(card);
+
+      window.dispatchEvent(new Event('scroll'));
+      const evt = new Event('pointermove');
+      Object.defineProperties(evt, { clientX: { value: 25 }, clientY: { value: 75 }, target: { value: card } });
+      document.dispatchEvent(evt);
+
+      expect(rafCallbacks).toHaveLength(1);
+      rafCallbacks[0]();
+      expect(document.documentElement.style.getPropertyValue('--mx')).toBe('25%');
+      expect(document.documentElement.style.getPropertyValue('--my')).toBe('75%');
+      card.remove();
+    } finally {
+      globalThis.requestAnimationFrame = origRaf;
+      preference.matches = false;
+      detach();
+      cleanup();
+    }
+  });
 });
 
 describe('fireGlassConfetti', () => {
