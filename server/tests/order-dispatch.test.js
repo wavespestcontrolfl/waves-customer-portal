@@ -62,7 +62,7 @@ jest.mock('../models/db', () => {
         if (q._where?.external_order_number) return mockState.savedOrderMatch ? { id: q._where.id } : null;
         return mockState.requestLedger || null;
       }
-      if (cols[0] === 'vo.id' && cols[1] === 'vo.restock_request_id') return mockState.liveSkuOrder || null; // authorizeHistoryOrder cross-product SKU check
+      if (cols[0] === 'vo.id' && (cols[1] === 'vo.restock_request_id' || q._where === 'vo.id')) return mockState.liveSkuOrder || null; // authorizeHistoryOrder / competingLedgerStillLive
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
@@ -1900,6 +1900,57 @@ describe('DB-backed history-total auto-order policy (Sticker Mule)', () => {
     const settled = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true }));
     expect(settled).toEqual({ settled: true });
     expect(mockState.updates.filter((u) => u.table === 'notifications' && closedDone(u))).toHaveLength(1);
+  });
+
+  test('resolveBindingTotal checks SKU conflicts before no_binding_total, adapter_error, and duplicate-mapping cap refusals', async () => {
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 50000 });
+    mockState.liveSkuOrder = { id: 'ledger-a', restock_request_id: 'req-a', status: 'placing', external_order_number: null, product_name: 'Product A' };
+
+    // 1) No matching price in history while sibling order is in flight -> vendor_sku_order_live, not no_binding_total.
+    const noPrice = await run(historyAdapter({ bindingQuote: jest.fn(async () => null) }));
+    expect(noPrice).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+
+    // 2) History lookup fails while sibling order is in flight -> vendor_sku_order_live, not adapter_error.
+    const lookupFail = await run(historyAdapter({ bindingQuote: jest.fn(async () => { throw new Error('HTTP 502'); }) }));
+    expect(lookupFail).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+
+    // 3) Duplicate mapping with monthly cap exceeded -> duplicate_sku_mapping, not over_monthly_cap.
+    mockState.liveSkuOrder = null;
+    mockState.monthly = 40000;
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    const dupOverCap = await run(historyAdapter());
+    expect(dupOverCap).toMatchObject({ status: 'needs_review', reason: 'duplicate_sku_mapping' });
+  });
+
+  test('settleRequestLedgerBells releases vendor_sku_order_live warning once competing order and duplicate mapping clear', async () => {
+    const dbFn = require('../models/db');
+    mockState.requestLedger = {
+      id: 'ledger-comp',
+      status: 'needs_review',
+      placed_at: null,
+      vendor_id: 'vend-sm',
+      adapter: 'stickermule',
+      request_payload: { productId: 'prod-1', vendorSku: '4242' },
+      evidence: {
+        outstandingOrder: { number: null, why: 'coming' },
+        competingOrder: { ledgerId: 'ledger-a', requestId: 'req-a' },
+        bell: { v: 'v-comp', title: 'Auto-order needs review: Yard sign sticker (Sticker Mule)', body: 'Do NOT order by hand — wait for that competing restock request to settle.' },
+      },
+    };
+    mockState.liveSkuOrder = { id: 'ledger-a' };
+    expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
+      .toEqual({ preserved: 'vendor_sku_order_live' });
+
+    // Competing order settled, but duplicate mapping still active -> preserved as duplicate_sku_mapping.
+    mockState.liveSkuOrder = null;
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
+      .toEqual({ preserved: 'duplicate_sku_mapping' });
+
+    // Both competing order and duplicate mapping cleared -> warning retired for normal handoff.
+    mockState.otherVendorProducts = [];
+    expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
+      .toEqual({ settled: true });
   });
 
   test('settleRequestLedgerBells rewrites landedAfterReceive cap-alert wording after the second receipt clears landedAfterReceive', async () => {

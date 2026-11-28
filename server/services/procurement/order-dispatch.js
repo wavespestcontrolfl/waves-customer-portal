@@ -419,8 +419,7 @@ const isOutstandingParkRow = (row) => (
   isPreSubmitParkRow(row)
   && meta(row.evidence).outstandingOrder != null
 );
-async function duplicateSkuMappingStillActive(trx, row, ev) {
-  if (!isPreSubmitParkRow(row) || !Array.isArray(ev.duplicateSkuProducts) || ev.duplicateSkuProducts.length === 0) return false;
+async function skuMappingStillDuplicated(trx, row) {
   const payload = meta(row.request_payload);
   const vendorSku = payload.vendorSku ? String(payload.vendorSku).trim() : null;
   if (!row.vendor_id || !vendorSku || !payload.productId) return true;
@@ -436,6 +435,29 @@ async function duplicateSkuMappingStillActive(trx, row, ev) {
     excludeProductId: payload.productId,
   });
   return conflicts.length > 0;
+}
+async function competingLedgerStillLive(trx, ledgerId) {
+  if (!ledgerId) return false;
+  const row = await trx('vendor_orders as vo')
+    .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
+    .where('vo.id', ledgerId)
+    .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
+    .whereRaw(RECEIVED_SETTLES_SQL)
+    .whereRaw(`(${maybePlacedSql('vo')} OR (vo.status = 'placing' AND NULLIF(vo.evidence->>'postAuthorizedAt', '') IS NOT NULL))`)
+    .first('vo.id');
+  return !!row;
+}
+async function preservedPreSubmitWarning(trx, row, ev) {
+  if (!isPreSubmitParkRow(row)) return null;
+  if (ev.competingOrder?.ledgerId) {
+    if (await competingLedgerStillLive(trx, ev.competingOrder.ledgerId)) return 'vendor_sku_order_live';
+    return (await skuMappingStillDuplicated(trx, row)) ? 'duplicate_sku_mapping' : null;
+  }
+  if (isOutstandingParkRow(row)) return 'vendor_order_outstanding';
+  if (Array.isArray(ev.duplicateSkuProducts) && ev.duplicateSkuProducts.length > 0 && await skuMappingStillDuplicated(trx, row)) {
+    return 'duplicate_sku_mapping';
+  }
+  return null;
 }
 
 async function rewriteCapAlertOnReceipt(trx, { row, requestId, ev }) {
@@ -467,8 +489,8 @@ async function settleRequestLedgerBells(trx, requestId, { preserveOutstanding = 
     .first('id', 'status', 'placed_at', 'evidence', 'vendor_id', 'external_order_number', 'adapter', 'request_payload');
   if (!row) return { settled: false };
   const ev = meta(row.evidence);
-  if (preserveOutstanding && isOutstandingParkRow(row)) return { preserved: 'vendor_order_outstanding' };
-  if (preserveOutstanding && await duplicateSkuMappingStillActive(trx, row, ev)) return { preserved: 'duplicate_sku_mapping' };
+  const preserved = preserveOutstanding ? await preservedPreSubmitWarning(trx, row, ev) : null;
+  if (preserved) return { preserved };
   if (capAlert(ev)) {
     await rewriteCapAlertOnReceipt(trx, { row, requestId, ev });
     return { preserved: 'cap_alert' };
@@ -1240,8 +1262,26 @@ function unapprovedHistoryNote(policy, vendorSku) {
   return '';
 }
 
+const SKU_CONFLICT_REASONS = new Set(['vendor_sku_order_live', 'duplicate_sku_mapping']);
+
+async function historySkuConflictRefusal(trx, { ctx, vendor, vendorSku }) {
+  const live = await liveSkuOrderRefusal(trx, { adapterKey: ctx.adapterKey, vendorSku, vendorName: vendor.name, excludeLedgerId: ctx.ledger.id });
+  if (live) return live;
+  return duplicateSkuMappingRefusal(trx, { product: ctx.product, vendor, vendorSku });
+}
+
+async function parkHistoryConflict(conn, { adapter, ctx, vendor, vendorSku }) {
+  if (!noTotalBeforeOrder(adapter)) return null;
+  const conflict = await conn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
+    return historySkuConflictRefusal(trx, { ctx, vendor, vendorSku });
+  });
+  if (!conflict) return null;
+  return { parked: await park(conn, { ...ctx, reason: conflict.reason, message: conflict.message, evidence: conflict.evidence }) };
+}
+
 function capRefusalParkArgs(cap, { vendor, bq, holdCents, quoteCents }) {
-  if (cap.reason === 'vendor_sku_order_live') {
+  if (SKU_CONFLICT_REASONS.has(cap.reason)) {
     return { reason: cap.reason, message: cap.message, amountCents: quoteCents, evidence: cap.evidence };
   }
   const lastOrder = `the last identical order${bq.source ? `, ${bq.source}` : ''}`;
@@ -1258,6 +1298,8 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
     delivery = await deliveryEvidence(conn, { productId: ctx.request.product_id, vendorId: vendor.id });
     bq = await adapter.bindingQuote({ vendorSku, quantity, since: requestSince(ctx.request), ...delivery });
   } catch (err) {
+    const conflict = await parkHistoryConflict(conn, { adapter, ctx, vendor, vendorSku });
+    if (conflict) return conflict;
     return {
       parked: await park(conn, {
         ...ctx,
@@ -1279,16 +1321,20 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
       }),
     };
   }
-  if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no usable prior order of item ${vendorSku} at ${quantity}: there is none among its newest orders, or the latest one is not paid yet, was canceled, or cannot be read. So there is no binding total to cap.` }) };
+  if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) {
+    const conflict = await parkHistoryConflict(conn, { adapter, ctx, vendor, vendorSku });
+    if (conflict) return conflict;
+    return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no usable prior order of item ${vendorSku} at ${quantity}: there is none among its newest orders, or the latest one is not paid yet, was canceled, or cannot be read. So there is no binding total to cap.` }) };
+  }
   const quoteCents = bq.cents;
   const { policy, history, policyCaps } = await historyPolicyFor(conn, { adapter, adapterKey: ctx.adapterKey, vendorSku, env });
   // A history-total order approved in the DB policy HOLDS the full DB per-order cap, never the old
   // quote: until Sticker Mule confirms the paid charge, every fallback counts the order at that hold.
-  // Check competing live/in-flight SKU orders under CAPS_LOCK_KEY BEFORE any cap refusal so a
-  // request blocked by a sibling's in-flight hold never gets a "buy by hand" cap-refusal bell.
+  // Check competing live/in-flight SKU orders and duplicate SKU mappings under CAPS_LOCK_KEY BEFORE
+  // any cap refusal so a request blocked by a sibling never gets a "buy by hand" cap-refusal bell.
   const holdCents = history ? Math.max(quoteCents, policyCaps.perOrder) : quoteCents;
   const checkCompeting = noTotalBeforeOrder(adapter)
-    ? (trx) => liveSkuOrderRefusal(trx, { adapterKey: ctx.adapterKey, vendorSku, vendorName: vendor.name, excludeLedgerId: ctx.ledger.id })
+    ? (trx) => historySkuConflictRefusal(trx, { ctx, vendor, vendorSku })
     : null;
   const cap = await reserveUnderCaps(conn, ctx.ledger.id, holdCents, { env, capsOverride: policyCaps, authorize: checkCompeting });
   if (!cap.ok) return { parked: await park(conn, { ...ctx, ...capRefusalParkArgs(cap, { vendor, bq, holdCents, quoteCents }) }) };

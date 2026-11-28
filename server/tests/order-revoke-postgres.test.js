@@ -676,6 +676,18 @@ maybeDescribe('order-revoke (live Postgres)', () => {
       expect(voB.evidence.bell.body).toContain(a.request.id);
       expect(voB.evidence.bell.body).toMatch(/Do NOT order by hand/i);
       expect(voB.evidence.bell.body).not.toMatch(/order what is missing by hand|order manually/i);
+
+      // 4) Sweep handoff preserves reqB's competing-order warning while voA is live, preserves it
+      // while the duplicate mapping still exists after voA is received, and releases it once both clear.
+      expect(await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqB.id, { preserveOutstanding: true })))
+        .toEqual({ preserved: 'vendor_sku_order_live' });
+      await db('product_restock_requests').where({ id: a.request.id }).update({ status: 'received', closed_at: new Date() });
+      expect(await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqB.id, { preserveOutstanding: true })))
+        .toEqual({ preserved: 'duplicate_sku_mapping' });
+      await db('products_catalog').where({ id: prodB.id }).update({ auto_reorder_enabled: false });
+      expect(await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqB.id, { preserveOutstanding: true })))
+        .toEqual({ settled: true });
+      expect((await db('vendor_orders').where({ id: voB.id }).first('evidence')).evidence.bell).toBeUndefined();
     });
 
     test('immediate drift within hold stamps driftAlertAt and survives receipt; cancelled-mid-flight alert rewrites cleanly on receipt', async () => {
