@@ -891,7 +891,16 @@ stamp — so every money seam on this surface reads the invoice ROW, not its
 status. `/setup`, `/quote`, `/finalize`, `/confirm` and `/update-amount`
 refuse such an invoice through the shared collectibility gate, and `/consent`,
 `/capture-setup` and `/setup-complete` refuse it with
-`409 { error, code: 'invoice_withdrawn_from_customer' }`. What that refusal
+`409 { error, code: 'invoice_withdrawn_from_customer' }`, while
+`/consent`, `/capture-setup`, and `/setup-complete` also refuse
+chemical-review-held invoices with
+`409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`, `/consent`
+refuses unreadable/malformed combined-payment allocation metadata on the
+PI with `409 { error, code: 'COMBINED_ALLOCATION_UNREADABLE' }`, and
+`/consent` and `/setup-complete` refuse lock contention when another
+transaction holds the customer row with
+`409 { error, code: 'INVOICE_BUSY_RETRY' }` (retryable; no consent is
+recorded and no Auto Pay enrollment happens). What that refusal
 guarantees, precisely: no consent is recorded and no Auto Pay enrollment
 happens for a withdrawn invoice — the authorization row and the ownership
 judgement commit in ONE transaction, and the enrollment re-judges ownership
@@ -907,16 +916,40 @@ reconciliation and collects normally again). CHEMICAL AREA ADD-ON REVIEW HOLD
 (2026-11-26): an unpaid invoice whose visit completed a chemical area add-on
 without a recorded product application carries a `chemical_addon_review:<serviceId>`
 billing hold stamp while awaiting office review (keeping a collectible status
-and a NULL `payer_id`). `/setup`, `/quote`, `/update-amount`, `/finalize` and
-`/confirm` refuse such an invoice through the shared collectibility gate /
-hold check (code `INVOICE_CHEMICAL_ADDON_HOLD`); combined-balance
-selection (`open-balance.js` / `pay-combined.js`) excludes held siblings and
-refuses any held row under the locked allocation verifier (`verifyAllocationLocked`
-→ `409 staleBalance`); and `GET /api/pay/:token` / `payPageZelleVisibility`
-withholds `manualPayOptions` (Zelle) on held invoices via `zelleDeniedByInvoiceState`
-(including its final DB re-read). Nothing else in the payload changes, no
-customer or service details leak, and once the office reviews and explicitly
-releases/sends or reschedules the invoice it collects normally again. TERMITE RENEWAL ELIGIBILITY
+and a NULL `payer_id`). On `GET /api/pay/:token`, `GET /api/pay/:token/invoice.pdf`,
+`/plan-choice`, `/consent`, `/capture-setup`, `/setup-complete`, `/setup`,
+`/quote`, `/update-amount`, `/finalize`, and `/confirm`, a held invoice in a
+collectible non-processing status is refused (`409` on `GET`, `invoice.pdf`,
+`/plan-choice`, `/consent`, `/capture-setup`, `/setup-complete`, locked
+`/update-amount`, and `/confirm`; `400` on `/setup`, `/quote`, `/finalize`
+pre-check; all carrying `{ error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`). Already
+`paid`, `prepaid`, or `processing` invoices stay readable on `GET /api/pay/:token`
+and `GET /api/pay/:token/invoice.pdf` even if stamped, so receipt redirects and
+pending-ACH status remain accessible.
+Precedence and race outcomes: when the invoice is already in `status = 'processing'`
+(an ACH debit already submitted to Stripe before the hold landed), `/setup`
+returns `409 { error, inProgress: true }` (without `INVOICE_CHEMICAL_ADDON_HOLD`)
+so the page reflects the in-flight bank transfer; `/confirm` preserves
+`409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }` both on the route pre-check
+and if the hold commits mid-request before `confirmInvoicePayment`'s locked
+settlement — including combined full-balance settlements (`settleCombinedPaymentIntent`
+checks every allocated invoice under lock when `rejectHeldInvoices: true`, while
+internal webhook settlement of an already-succeeded/processing PI passes
+`allowChemicalReviewReconcile: true` / `rejectHeldInvoices: false` so cleared funds
+are never stranded); and both Stripe webhook enrollment paths (`payment_intent.succeeded`
+save-card mirror — locking the anchor plus every combined-allocation invoice on the
+PI in ascending-id order — and `setup_intent.succeeded` `covered_capture`) take the same
+locked `invoices → customers` chemical-hold check so a hold committed between
+mint and webhook delivery never records consent or enrolls Auto Pay.
+Combined-balance selection (`open-balance.js` / `pay-combined.js`) and the
+authenticated portal balance (both `unpaidInvoices` and `standaloneFailedTotal`)
+/ Pay Now list (`billing-v2.js` / `open-balance.js`) exclude held invoices and
+refuse any held row under the locked allocation verifier
+(`verifyAllocationLocked` → `409 staleBalance`); and `payPageZelleVisibility`
+withholds `manualPayOptions` (Zelle) on held invoices via
+`zelleDeniedByInvoiceState` (including its final DB re-read). No customer or
+service details leak, and once the office reviews and explicitly releases/sends
+the invoice it collects normally again. TERMITE RENEWAL ELIGIBILITY
 (2026-09-28, dark behind GATE_TERMITE_ANNUAL_PLAN — only an invoice that is a
 termite annual-plan RENEWAL successor's prepay invoice, found through its own
 `annual_prepay_term_id` link, is ever judged; every other invoice is
@@ -7697,17 +7730,17 @@ web report's screened form lists, never the merged note lists or
 `ai_report`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
-terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
-(2026-09-12): a combined-visit invoice whose Bill-To moved to a payer after
-the handoff was minted keeps a collectible status and a NULL `payer_id` —
-the move is recorded only in its withdrawal stamp — so this route treats a
-withdrawn invoice exactly like a terminal status change and refuses with the
-existing `invoice_changed` outcome after the burn, rather than handing the
-technician a card-present session for debt now owed by AP. `/handoff` refuses
-to mint one for the same reason, and `/payment-intent` refuses with
-`409 { code: 'invoice_withdrawn_from_customer' }` — including a re-read under
-the invoice row lock at the final bind, so a Bill-To change committing during
-the mint is caught). RESPONSE (2026-10-31, Waves Admin pay screens): beside
+terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL &
+CHEMICAL AREA ADD-ON REVIEW HOLD (2026-09-12, updated 2026-11-27): after the
+burn, this route refuses uncollectible statuses (`paid`, `prepaid`, `processing`,
+`void`, `refunded`, `canceled`, `cancelled`) with `409 { code: 'invoice_status_changed' }`,
+third-party payer / statement-accrued / `payer_billed:*` withdrawn invoices with
+`409 { code: 'invoice_withdrawn_from_customer' }`, and `chemical_addon_review:*`
+held invoices with `409 { code: 'INVOICE_CHEMICAL_ADDON_HOLD' }` (each audited
+under outcome `invoice_changed`). `/handoff` refuses to mint a handoff for the
+same terminal/payer/chemical-hold states (re-checked under the invoice row lock
+before credit apply), and `/payment-intent` and `/apply-surcharge` refuse with
+those same `409` codes both pre-create and under the invoice row lock). RESPONSE (2026-10-31, Waves Admin pay screens): beside
 `invoice_id`, `customer_name`, `amount_cents`, `currency`, `authToken` and the
 surcharge fields, a successful burn returns what the customer pays for:
 `invoice_number`, `items` (`{ description, amount_cents }`, the invoice's
