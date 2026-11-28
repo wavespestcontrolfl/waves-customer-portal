@@ -12,7 +12,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import MobileCheckoutSheet from './MobileCheckoutSheet';
 
 vi.mock('./MobileItemDiscountPickerSheet', () => ({ default: () => null }));
@@ -33,7 +33,13 @@ vi.mock('../../hooks/useDiscountStacking', () => ({
   useDiscountStackingState: () => ({ enabled: false, known: true, retry: vi.fn() }),
 }));
 
-afterEach(cleanup);
+beforeEach(() => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+});
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 const NEEDS_REVIEW_SERVICE = {
   id: 'svc-lawn',

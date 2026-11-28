@@ -48,7 +48,7 @@ const EmailCode = require('../services/customer-email-change-code');
 
 const router = express.Router();
 
-const NAME_PART = Joi.string().trim().max(50).pattern(/^[^<>\u0000-\u001f]*$/, 'plain text');
+const NAME_PART = Joi.string().trim().max(50).pattern(/^[^<>\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]*$/, 'plain text');
 const profileSchema = Joi.object({
   firstName: NAME_PART.min(1),
   lastName: NAME_PART.allow(''),
@@ -127,10 +127,24 @@ function ownsActiveRow(row, req) {
   return row.active === true && String(row.account_id || row.id) === String(req.accountId);
 }
 
-// The customer row under FOR UPDATE, or null.
-async function lockOwnedCustomer(trx, { customerId, req }) {
-  const row = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
-  return row && ownsActiveRow(row, req) ? row : null;
+// Lock all live session-account rows in ascending ID order so sibling/customer locks never
+// rely on unlocked reads or invert executeMerge's sorted lock order.
+async function lockOwnedAccountRows(trx, { customerId, req }) {
+  const rows = await trx('customers')
+    .whereNull('deleted_at')
+    .where((q) => {
+      q.where({ id: customerId });
+      if (req.accountId) q.orWhere({ account_id: req.accountId });
+    })
+    .orderBy('id', 'asc')
+    .forUpdate()
+    .select('*');
+  const before = rows.find((r) => String(r.id) === String(customerId)) || null;
+  if (!before || !ownsActiveRow(before, req)) return null;
+  const siblings = before.account_id
+    ? rows.filter((r) => String(r.id) !== String(customerId) && ownsActiveRow(r, req) && String(r.account_id || '') === String(before.account_id))
+    : [];
+  return { before, siblings };
 }
 
 // One committed audit row per quota unit, in the caller's transaction. Never a value: the name and email are the
@@ -150,16 +164,84 @@ async function auditStep(trx, { customerId, action, detail, req }) {
   });
 }
 
+const cleanPhone = (v) => String(v ?? '').replace(/\D/g, '').slice(-10);
+
+function isSameHolderRecord(target, before, { requirePhoneOnBlankEmail = true } = {}) {
+  const bFirst = clean(before.first_name).toLowerCase();
+  const bLast = clean(before.last_name).toLowerCase();
+  const bEmail = clean(before.email).toLowerCase();
+  if (!bFirst || clean(target.first_name).toLowerCase() !== bFirst || clean(target.last_name).toLowerCase() !== bLast) {
+    return false;
+  }
+  if (bEmail) return clean(target.email).toLowerCase() === bEmail;
+  if (!bLast || clean(target.email) !== '') return false;
+  if (!requirePhoneOnBlankEmail) return true;
+  const bPhone = cleanPhone(before.phone);
+  return bPhone.length === 10 && cleanPhone(target.phone) === bPhone;
+}
+
+function matchingFieldsPatch(target, before, changes, fields) {
+  const patch = {};
+  for (const field of fields) {
+    if (field in changes && clean(target[field]).toLowerCase() === clean(before[field]).toLowerCase()) {
+      patch[field] = changes[field];
+    }
+  }
+  return patch;
+}
+
+// Keep customer_accounts and identical-holder sibling properties aligned with holder profile
+// edits without overwriting intentionally different property-specific contacts.
+async function syncAccountAndSiblings(trx, { before, siblings = [], changes }) {
+  const accountId = before.account_id;
+  if (!accountId || !changes || !Object.keys(changes).length) return;
+  const acct = await trx('customer_accounts').where({ id: accountId }).forUpdate().first();
+  if (acct && isSameHolderRecord(acct, before, { requirePhoneOnBlankEmail: false })) {
+    const acctPatch = matchingFieldsPatch(acct, before, changes, ['first_name', 'last_name', 'email']);
+    if (Object.keys(acctPatch).length) {
+      await trx('customer_accounts').where({ id: accountId }).update({ ...acctPatch, updated_at: trx.fn.now() });
+    }
+  }
+  const nameFields = ['first_name', 'last_name'];
+  const nameFanout = require('../services/customer-contact-fanout');
+  for (const sib of siblings) {
+    if (!isSameHolderRecord(sib, before, { requirePhoneOnBlankEmail: true })) continue;
+    const sibPatch = matchingFieldsPatch(sib, before, changes, nameFields);
+    if (Object.keys(sibPatch).length) {
+      await trx('customers').where({ id: sib.id }).update({ ...sibPatch, updated_at: trx.fn.now() });
+      await nameFanout.propagateCustomerNameChange({ before: sib, after: { ...sib, ...sibPatch } }, trx);
+    }
+  }
+}
+
+async function syncSiblingEmails(trx, { before, siblings = [], newEmail, req }) {
+  const syncs = [];
+  const stripeSync = require('../services/stripe-email-sync');
+  for (const sib of siblings) {
+    if (!isSameHolderRecord(sib, before, { requirePhoneOnBlankEmail: true })) continue;
+    const sibResult = await applyOperatorCustomerEmail(trx, {
+      customerId: sib.id, email: newEmail, source: 'Customer app profile edit', rowAllowed: (row) => ownsActiveRow(row, req),
+    });
+    if (sibResult.outcome === 'updated' || (sibResult.emailSync && sibResult.outcome !== 'unchanged' && sibResult.outcome !== 'email_in_use' && sibResult.outcome !== 'not_allowed' && sibResult.outcome !== 'customer_not_found')) {
+      await stripeSync.enqueue(trx, sib.id, newEmail, 'app_email_change');
+      syncs.push({ customerId: sib.id, emailSync: sibResult.emailSync });
+    }
+  }
+  return syncs;
+}
+
 // Names save in one step: row lock, quota, update, the name fan-out with the locked before/after rows, audit row.
 async function commitNameEdit(trx, { customerId, input, req }) {
-  const before = await lockOwnedCustomer(trx, { customerId, req });
-  if (!before) return null;
+  const locked = await lockOwnedAccountRows(trx, { customerId, req });
+  if (!locked) return null;
+  const { before, siblings } = locked;
   const changes = diffNames(before, input);
   if (!Object.keys(changes).length) return { before, after: before, changes, emailSync: null };
   await assertUnderQuota(trx, customerId);
   await trx('customers').where({ id: customerId }).update({ ...changes, updated_at: trx.fn.now() });
   const after = { ...before, ...changes };
   await require('../services/customer-contact-fanout').propagateCustomerNameChange({ before, after }, trx);
+  await syncAccountAndSiblings(trx, { before, siblings, changes });
   await auditStep(trx, { customerId, action: AUDIT_SAVED, detail: { fields: Object.keys(changes) }, req });
   return { before, after, changes, emailSync: null };
 }
@@ -215,6 +297,8 @@ function sendChangeNotices({ customerId, before, after, changes }) {
       // The recipient is an address the customer typed or just left: the sender logs and stores a failure by its
       // code only, and the provider's own error body is not logged.
       suppressProviderErrorLog: true,
+      // Takeover security alarm (Decision 1): notify even when notification_prefs.email_enabled is false.
+      bypassEmailOptOut: true,
     })).catch((err) => logger.warn(`[customer-profile] account.updated email failed for ${customerId}: ${err.status || err.code || err.name || 'send_failed'}`));
   });
 }
@@ -344,8 +428,7 @@ router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
     // No active row under the lock: the account was cancelled (or removed) after authenticate() read it.
     if (!outcome) return res.status(403).json({ error: 'This account is not active.' });
 
-    const { before, after, changes, emailSync, pending, suppressed } = outcome;
-    runPostCommitFanout(emailSync, customerId);
+    const { before, after, changes, pending, suppressed } = outcome;
     if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
     // What was saved, in every answer below: a name saved in this request stays saved when its code did not go out.
     const saved = { profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) };
@@ -379,8 +462,9 @@ const CODE_REFUSALS = {
 // the request row: the same order as the PUT. Every refusal RETURNS (never throws) so the transaction commits: a wrong
 // code must keep its attempt count, and a spent request (right code, an address another account holds) stays consumed.
 async function confirmInTransaction(trx, { customerId, code, email, req }) {
-  const locked = await lockOwnedCustomer(trx, { customerId, req });
-  if (!locked) return { gone: true };
+  const lockedState = await lockOwnedAccountRows(trx, { customerId, req });
+  if (!lockedState) return { gone: true };
+  const { before: locked, siblings } = lockedState;
   const check = await EmailCode.checkCode(trx, { customerId, code, currentEmail: locked.email, expectedEmail: email });
   if (check.outcome !== 'ok') return { refused: check };
   const { request } = check;
@@ -392,12 +476,14 @@ async function confirmInTransaction(trx, { customerId, code, email, req }) {
   if (result.outcome === 'email_in_use') return { conflict: httpError(409, EMAIL_UNAVAILABLE, 'email_unavailable') };
   if (result.outcome === 'unchanged') return { edit: { before: result.before, after: result.before, changes: {}, emailSync: null } };
   const changes = { email: request.new_email };
+  await syncAccountAndSiblings(trx, { before: result.before, siblings: [], changes });
+  const sibEmailSyncs = await syncSiblingEmails(trx, { before: result.before, siblings, newEmail: request.new_email, req });
   await auditStep(trx, { customerId, action: AUDIT_SAVED, detail: { fields: Object.keys(changes) }, req });
   const after = { ...result.before, ...changes };
   await raiseEmailChangeAlert(trx, { customerId, before: result.before, after, requestId: request.id });
   // Stripe's copy of the email follows (owner 11-27 "build"): a durable job in this same transaction.
   await require('../services/stripe-email-sync').enqueue(trx, customerId, request.new_email, 'app_email_change');
-  return { edit: { before: result.before, after, changes, emailSync: result.emailSync } };
+  return { edit: { before: result.before, after, changes, emailSync: result.emailSync, sibEmailSyncs } };
 }
 
 router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res, next) => {
@@ -416,8 +502,11 @@ router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res
       return res.status(status).json({ error: message, code, ...(outcome.refused.attemptsLeft !== undefined ? { attemptsLeft: outcome.refused.attemptsLeft } : {}) });
     }
 
-    const { before, after, changes, emailSync } = outcome.edit;
+    const { before, after, changes, emailSync, sibEmailSyncs = [] } = outcome.edit;
     runPostCommitFanout(emailSync, customerId);
+    for (const sibSync of sibEmailSyncs) {
+      runPostCommitFanout(sibSync.emailSync, sibSync.customerId);
+    }
     if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
     return res.json({ profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
   } catch (err) {

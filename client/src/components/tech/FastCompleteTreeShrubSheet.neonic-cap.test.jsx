@@ -107,12 +107,13 @@ describe('with a neonicCap', () => {
     expect(screen.getAllByText(/left this year/)).toHaveLength(1);
   });
 
-  test('an amount over what is left holds Complete and says why; lowering it releases the hold', async () => {
+  test('an amount over what is left warns without blocking Complete; lowering it clears the warning', async () => {
     const request = await readyVisit({ ...BASE_CONTEXT, neonicCap: NEONIC_CAP });
     await useMerit('4');
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
     expect(screen.getAllByText('Merit: 4.0 fl oz is over the 3.2 fl oz left this year for this property.').length).toBeGreaterThan(0);
     fireEvent.change(screen.getByLabelText('How much?'), { target: { value: '3.2' } });
+    expect(screen.queryByText(/is over the .* left this year/)).toBeNull();
     expect(completeButton().disabled).toBe(false);
     fireEvent.click(completeButton());
     await waitFor(() => expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(true));

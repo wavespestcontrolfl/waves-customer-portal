@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { Badge, Card, CardBody, CardHeader, CardTitle, UiSurface, cn } from "../../../components/ui";
-import { ArrowRight, CheckCircle2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, ChevronDown, ChevronRight } from "lucide-react";
 import { RowLink } from "./RowLink";
 import { fmtMoneyCompact } from "../../../components/dashboard/charts";
 
@@ -59,35 +60,109 @@ function failedChecksNote(failures) {
 // as a confirmed all-clear. `failures` lists checks the server could not run
 // on a load that otherwise succeeded: an empty list is then incomplete, never
 // all-clear, and a non-empty one says which checks are missing.
+function AlertRow({ item }) {
+  return (
+    <RowLink
+      href={item.href}
+      className="flex min-h-11 items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-ui-body text-zinc-900 hover:bg-white u-focus-ring"
+    >
+      <span className="flex items-center gap-2 min-w-0">
+        <span
+          className={cn(
+            "h-2 w-2 rounded-full flex-shrink-0",
+            item.severity === "critical"
+              ? "bg-alert-fg"
+              : item.tier === "standing"
+                ? "bg-zinc-400"
+                : "bg-amber-500",
+          )}
+        />
+        <span className="truncate">{item.label}</span>
+      </span>
+      <span className="flex items-center gap-2 flex-shrink-0">
+        {item.amount != null && (
+          <span className="u-nums text-ui-caption text-ink-secondary">
+            {fmtMoneyCompact(item.amount)}
+          </span>
+        )}
+        <ArrowRight size={16} aria-hidden className="text-ink-tertiary" />
+      </span>
+    </RowLink>
+  );
+}
+
+function inboxSummaryText({ criticalCount, urgentCount, standingCount, stale }) {
+  const parts = [];
+  if (criticalCount > 0) parts.push(`${criticalCount} critical`);
+  else if (urgentCount > 0) parts.push(`${urgentCount} open`);
+  if (standingCount > 0) parts.push(`${standingCount} standing`);
+  const base = parts.join(" · ");
+  return `${base}${stale ? " · refresh failed, showing last loaded" : ""}`;
+}
+
+function unavailableState(loaded, stale, failedNote) {
+  if (!loaded) return { badge: "unavailable", message: "Alerts couldn't be loaded — retrying automatically." };
+  if (stale) return { badge: "unavailable", message: "Alerts couldn't be refreshed — retrying automatically." };
+  if (failedNote) {
+    return { badge: "incomplete", message: `Nothing found in the checks that ran. ${failedNote} Retrying automatically.` };
+  }
+  return null;
+}
+
+function StandingHealthGroup({ items, open, hasUrgent, onToggle }) {
+  if (items.length === 0) return null;
+  return (
+    <div className={cn(hasUrgent && "pt-2.5 border-t border-hairline border-zinc-200")}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 py-1 text-left text-ui-body text-ink-secondary hover:text-zinc-900 u-focus-ring rounded-xs"
+      >
+        <span className="flex items-center gap-1.5 font-medium">
+          {open ? <ChevronDown size={16} aria-hidden /> : <ChevronRight size={16} aria-hidden />}
+          Standing health
+        </span>
+        <Badge tone="neutral">{items.length}</Badge>
+      </button>
+      {open && (
+        <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+          {items.map((item) => <AlertRow key={item.id} item={item} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ActionInbox({ alerts, stale = false, failures = [] }) {
+  // null = follow default (open when no urgent alerts exist, collapsed when
+  // urgent alerts are present); boolean = explicit user toggle.
+  const [standingOpen, setStandingOpen] = useState(null);
   const loaded = Array.isArray(alerts);
   const items = loaded ? [...alerts].sort((a, b) => rank(a) - rank(b)) : [];
-  const criticalCount = items.filter((a) => a.severity === "critical").length;
   const failedNote = failedChecksNote(failures);
+  const blocked = items.length === 0 ? unavailableState(loaded, stale, failedNote) : null;
 
-  if (!loaded || (items.length === 0 && (stale || failedNote))) {
-    let badge = "unavailable";
-    let message = "Alerts couldn't be loaded — retrying automatically.";
-    if (loaded && stale) message = "Alerts couldn't be refreshed — retrying automatically.";
-    else if (loaded) {
-      badge = "incomplete";
-      message = `Nothing found in the checks that ran. ${failedNote} Retrying automatically.`;
-    }
+  if (blocked) {
     return (
       <UiSurface as={Card} className="mb-4">
         <CardHeader className="flex items-center gap-2.5">
           <CardTitle>Action inbox</CardTitle>
-          <Badge tone="neutral">{badge}</Badge>
+          <Badge tone="neutral">{blocked.badge}</Badge>
         </CardHeader>
         <CardBody>
-          <div className="py-2 text-ui-body text-ink-secondary">{message}</div>
+          <div className="py-2 text-ui-body text-ink-secondary">{blocked.message}</div>
         </CardBody>
       </UiSurface>
     );
   }
 
-  // Past the guard, an empty list means the latest load worked and every check ran.
+  const urgentItems = items.filter((a) => a.tier !== "standing");
+  const standingItems = items.filter((a) => a.tier === "standing");
+  const criticalCount = urgentItems.filter((a) => a.severity === "critical").length;
   const allClear = items.length === 0;
+  const headerBadgeCount = urgentItems.length || standingItems.length;
+  const isStandingOpen = standingOpen ?? urgentItems.length === 0;
 
   return (
     <UiSurface as={Card} className="mb-4">
@@ -100,23 +175,18 @@ export default function ActionInbox({ alerts, stale = false, failures = [] }) {
               All clear
             </Badge>
           ) : (
-            <span
-              className={cn(
-                "text-ui-caption",
-                criticalCount > 0 ? "text-alert-fg" : "text-ink-secondary",
-              )}
-            >
-              {criticalCount > 0
-                ? `${criticalCount} critical`
-                : `${items.length} open`}
-              {stale ? " · refresh failed, showing last loaded" : ""}
+            <span className={cn("text-ui-caption", criticalCount > 0 ? "text-alert-fg" : "text-ink-secondary")}>
+              {inboxSummaryText({
+                criticalCount,
+                urgentCount: urgentItems.length,
+                standingCount: standingItems.length,
+                stale,
+              })}
             </span>
           )}
         </div>
         {!allClear && (
-          <Badge tone={criticalCount > 0 ? "alert" : "neutral"}>
-            {items.length}
-          </Badge>
+          <Badge tone={criticalCount > 0 ? "alert" : "neutral"}>{headerBadgeCount}</Badge>
         )}
       </CardHeader>
       <CardBody>
@@ -126,38 +196,20 @@ export default function ActionInbox({ alerts, stale = false, failures = [] }) {
           </div>
         )}
         {allClear ? (
-          <div className="py-2 text-ui-body text-ink-secondary">
-            Nothing needs you right now.
-          </div>
+          <div className="py-2 text-ui-body text-ink-secondary">Nothing needs you right now.</div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {items.map((item) => (
-              <RowLink
-                key={item.id}
-                href={item.href}
-                className="flex min-h-11 items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-ui-body text-zinc-900 hover:bg-white u-focus-ring"
-              >
-                <span className="flex items-center gap-2 min-w-0">
-                  <span
-                    className={cn(
-                      "h-2 w-2 rounded-full flex-shrink-0",
-                      item.severity === "critical"
-                        ? "bg-alert-fg"
-                        : "bg-amber-500",
-                    )}
-                  />
-                  <span className="truncate">{item.label}</span>
-                </span>
-                <span className="flex items-center gap-2 flex-shrink-0">
-                  {item.amount != null && (
-                    <span className="u-nums text-ui-caption text-ink-secondary">
-                      {fmtMoneyCompact(item.amount)}
-                    </span>
-                  )}
-                  <ArrowRight size={16} aria-hidden className="text-ink-tertiary" />
-                </span>
-              </RowLink>
-            ))}
+          <div className="space-y-3">
+            {urgentItems.length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {urgentItems.map((item) => <AlertRow key={item.id} item={item} />)}
+              </div>
+            )}
+            <StandingHealthGroup
+              items={standingItems}
+              open={isStandingOpen}
+              hasUrgent={urgentItems.length > 0}
+              onToggle={() => setStandingOpen(!isStandingOpen)}
+            />
           </div>
         )}
       </CardBody>

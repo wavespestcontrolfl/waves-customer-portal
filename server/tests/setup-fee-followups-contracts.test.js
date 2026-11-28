@@ -72,8 +72,8 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     // The gate arm must never assign identity itself — bindGateEstimate
     // validates only the draft's stored contact.
     expect(booking).not.toContain('consumedByCustomerId');
-    expect(booking).toMatch(/const contactMatches = submitted10/);
-    expect(booking).toMatch(/if \(contactMatches\) custId = consumed\.customer_id;/);
+    expect(booking).toMatch(/function consumedHandoffContactMatches\(/);
+    expect(booking).toMatch(/if \(consumedHandoffContactMatches\(new_customer, consumedCust\)\) custId = consumed\.customer_id;/);
   });
 
   test('queued-claim checks ignore claims no live series row can consume (both sites)', () => {

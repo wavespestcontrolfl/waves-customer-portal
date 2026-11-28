@@ -435,19 +435,23 @@ const TOOLS_WITH_ACCOUNT_DETAILS = TOOLS.map((tool) => (tool.name !== 'capture_l
 }));
 
 // ⭐ A PRACTICE LINE'S WHOLE TOOL SET (RelayConversation practiceLine: the GPT-Live trial's brain).
-// Public information and one dry-run write, and NO paid provider request (no geocode, forecast, date
-// parser or road time) and nothing that reads a customer account: it resolves no caller context, so
-// there is no matched customer, and executeTool refuses every other name before any database call.
-// No availability tools, no lookup_customer, no account overview, history, invoices, estimates, ETA or
-// reports, no re-service, no booking, no transfer. The only paid calls are the brain's own model rounds.
-const PRACTICE_LINE_TOOLS = Object.freeze(['get_services_catalog', 'get_pricing', 'capture_lead']);
+// Public information, zero-paid-API open times by city centroid, and one dry-run write: NO paid
+// provider request (no geocode, forecast, date parser or road time) and nothing that reads a customer
+// account: it resolves no caller context, so there is no matched customer, and executeTool refuses
+// every other name before any database call. No find_slots (date parser LLM), no lookup_customer, no
+// account overview, history, invoices, estimates, ETA or reports, no re-service, no booking, no transfer.
+// The only paid calls are the brain's own model rounds.
+const PRACTICE_LINE_TOOLS = Object.freeze(['get_services_catalog', 'get_pricing', 'get_availability', 'capture_lead']);
 
-// The tool description that tells the model a human will follow up: on a practice line nothing is
-// filed, so it says what actually happens.
+// The tool descriptions that tell the model a human will follow up or confirm: on a practice line nothing
+// is booked or filed, so each says what actually happens.
 const PRACTICE_DESCRIPTIONS = Object.freeze({
   capture_lead: 'Practice run of saving a new-customer request. Call it once you have the caller\'s reason for calling and '
     + 'the contact and location detail they give. On this practice line NOTHING is saved and nobody follows up: the result '
     + 'says so, and you tell the caller plainly. Safe to call with partial information.',
+  get_availability: 'Practice lookup of open appointment windows by city in Waves\' service area (e.g. Bradenton, '
+    + 'Sarasota, Venice, Lakewood Ranch, Parrish). Uses service-zone centers only — no address lookup. '
+    + 'READ-ONLY: nothing is booked or held on this practice line, and nobody confirms or calls back.',
 });
 
 // The capture_lead fields whose descriptions promise a human will act (an opt-out "taken care of", an estimate sent,
@@ -467,10 +471,28 @@ function practiceCaptureTool(tool) {
   return { ...tool, description: PRACTICE_DESCRIPTIONS.capture_lead, input_schema: { ...tool.input_schema, properties } };
 }
 
+function practiceAvailabilityTool(tool) {
+  return {
+    ...tool,
+    description: PRACTICE_DESCRIPTIONS.get_availability,
+    input_schema: {
+      type: 'object',
+      properties: {
+        city: { type: 'string', description: 'City in Waves\' service area (e.g. Bradenton, Sarasota, Venice, Lakewood Ranch, Parrish)' },
+      },
+      required: ['city'],
+    },
+  };
+}
+
 function activeTools({ officeOpen = null, practiceLine = false } = {}) {
   if (practiceLine === true) {
     return [...TOOLS, ...CONTEXT_TOOLS].filter((tool) => PRACTICE_LINE_TOOLS.includes(tool.name))
-      .map((tool) => (tool.name === 'capture_lead' ? practiceCaptureTool(tool) : tool));
+      .map((tool) => {
+        if (tool.name === 'capture_lead') return practiceCaptureTool(tool);
+        if (tool.name === 'get_availability') return practiceAvailabilityTool(tool);
+        return tool;
+      });
   }
   const { isContextEnabled } = require('./relay-context');
   // PR 2A: transfer_to_office rides every tool set — it needs no account
@@ -620,6 +642,75 @@ function knownCallerRefusal(account, input = {}, ctx = {}) {
   return account.kind === 'which_property' ? WHICH_PROPERTY_TEXT : OTHER_PROPERTY_TEXT;
 }
 
+function defaultVoiceBookingWindow(config, today = new Date()) {
+  const { etDateString, addETDays } = require('../../utils/datetime-et');
+  return {
+    today,
+    duration: config.slot_duration_minutes || 60,
+    rangeFrom: etDateString(addETDays(today, config.advance_days_min ?? 1)),
+    rangeTo: etDateString(addETDays(today, config.advance_days_max ?? 14)),
+  };
+}
+
+async function resolvePracticeAvailability({ city }) {
+  const { isEnabled } = require('../../config/feature-gates');
+  if (!isEnabled('selfBooking')) return { status: 'unavailable' };
+
+  const cityStr = String(city || '').trim();
+  if (!cityStr) return { status: 'need_location' };
+
+  const booking = require('../../routes/booking')._internals;
+  // City-only call: resolveBookingCoords skips geocodeAddress when address and estimate_id are absent,
+  // resolving purely from local service_zones centroids.
+  const coords = await booking.resolveBookingCoords({ city: cityStr });
+  if (!coords?.lat || !coords?.lng) return { status: 'need_location' };
+
+  const config = await booking.loadBookingConfig();
+  const { today, duration, rangeFrom, rangeTo } = defaultVoiceBookingWindow(config);
+  // paidLookups: false skips Open-Meteo rain chips, customer rain rank, and paid Google Routes.
+  // noCustomerReads: true enforces the public route contract's strict "NO account reads" boundary
+  // so no `customers` table join or query ever runs for the practice line.
+  // verifiedOnly: true fails closed to unavailable if blackout or occupancy checks cannot be read.
+  try {
+    const availability = await booking.buildBookingAvailability({
+      lat: coords.lat,
+      lng: coords.lng,
+      duration,
+      rangeFrom,
+      rangeTo,
+      config,
+      today,
+      paidLookups: false,
+      noCustomerReads: true,
+      verifiedOnly: true,
+      mintSignedOffers: false,
+    });
+    return { status: 'ok', availability, summary: null, offerContext: null };
+  } catch (err) {
+    logger.warn(`[voice-relay] practice availability verification failed: ${errCode(err)}`);
+    return { status: 'unavailable' };
+  }
+}
+
+function practiceAvailabilityResultToText(res) {
+  if (res.status === 'unavailable') {
+    return 'Open appointment times are not available on this practice line right now. Tell the caller they can call or text the Waves office.';
+  }
+  if (res.status === 'need_location') {
+    return 'Could not match that city in the service area. Ask the caller which city they are in (for example Bradenton, Sarasota, Venice, Lakewood Ranch, or Parrish), then check again.';
+  }
+  const list = formatSlots(res.availability && res.availability.slots, 4);
+  if (!list) {
+    return 'No open times showed up in that window. Tell the caller they can call or text the Waves office to check other openings.';
+  }
+  return (
+    `Open times: ${list}. ` +
+    'PRACTICE LINE — NOTHING IS BOOKED OR HELD. Read the caller two or three of these options. ' +
+    'Do NOT say anything is reserved and do NOT promise a callback, a confirmation, or a call from the office. ' +
+    'Tell them they can call or text the Waves office to lock in a real appointment.'
+  );
+}
+
 async function resolveAvailability({ address_line1, city, zip, when, account = null }) {
   const { isEnabled } = require('../../config/feature-gates');
   if (!isEnabled('selfBooking')) return { status: 'unavailable' };
@@ -646,8 +737,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
   // location): request_booking books a known caller only from their own.
   const accountCustomerId = account ? account.customerId : null;
 
-  const today = new Date();
-  const duration = config.slot_duration_minutes || 60;
+  const { today, duration, rangeFrom, rangeTo } = defaultVoiceBookingWindow(config);
 
   if (when) {
     const { parseWhen, summarizeWindow } = require('../../services/scheduling/parse-when');
@@ -660,7 +750,7 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
     const availability = await booking.buildBookingAvailability({
       lat: coords.lat, lng: coords.lng, duration,
       rangeFrom: w.dateFrom, rangeTo: w.dateTo, config, today,
-      timeOfDay: w.timeOfDay, expandOpenDays: true, surface: 'voice',
+      timeOfDay: w.timeOfDay, expandOpenDays: true, surface: 'voice', mintSignedOffers: false,
     });
     const count = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
     return {
@@ -678,11 +768,8 @@ async function resolveAvailability({ address_line1, city, zip, when, account = n
     };
   }
 
-  const { etDateString, addETDays } = require('../../utils/datetime-et');
-  const rangeFrom = etDateString(addETDays(today, config.advance_days_min ?? 1));
-  const rangeTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
   const availability = await booking.buildBookingAvailability({
-    lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today, surface: 'voice',
+    lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today, surface: 'voice', mintSignedOffers: false,
   });
   return {
     status: 'ok',
@@ -817,6 +904,14 @@ function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } 
  * (customerId is the ANI-matched customer for this session, or null;
  * customerTier is 'full' | 'redacted' — see matchedCallerTier.)
  */
+const PRACTICE_READ_HANDLERS = Object.freeze({
+  get_pricing: (input) => require('./relay-context').pricingText(input, { practiceLine: true }),
+  get_services_catalog: () => require('./relay-context').servicesCatalogText({ practiceLine: true }),
+  get_availability: async (input) => practiceAvailabilityResultToText(
+    await resolvePracticeAvailability({ city: input?.city }),
+  ),
+});
+
 async function executeTool(name, input = {}, ctx = {}) {
   try {
     if (ctx.practiceLine === true) {
@@ -827,9 +922,10 @@ async function executeTool(name, input = {}, ctx = {}) {
           + 'and it cannot transfer the call. Do NOT try again. Tell the caller to call or text the Waves office for that.';
       }
       if (name === 'capture_lead') input = { ...input, use_account_details: false }; // no account is ever read here
-      // The two public reads run whether or not the account-context gate is on: they read no account.
-      if (name === 'get_pricing') return await require('./relay-context').pricingText(input, { practiceLine: true });
-      if (name === 'get_services_catalog') return await require('./relay-context').servicesCatalogText({ practiceLine: true });
+      // The three public reads run whether or not the account-context gate is on: they read no account
+      // and never start a paid provider lookup (get_availability uses zone centroids + paidLookups: false).
+      const practiceRead = PRACTICE_READ_HANDLERS[name];
+      if (practiceRead) return await practiceRead(input);
     }
     if (name === 'transfer_to_office') {
       // Gate + office state re-checked inside (fail closed); the packet is

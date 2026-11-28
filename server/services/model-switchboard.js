@@ -410,7 +410,7 @@ const LANES = [
   L('lawn_draft_timing_check', 'Lawn report draft result-timing check', 'service-report/lawn-draft-timing-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { note: 'lawn v6 copy (GATE_LAWN_REPORT_LEAD); kill LAWN_DRAFT_TIMING_CHECK=off' }),
   L('sms_service_identity', 'SMS draft · which job the open times are for', 'sms-shadow-drafter.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'GATE_SMS_REAL_ANSWERS only' }),
   L('ask_waves_emergency_check', 'Ask Waves · emergency second opinion', 'ask-waves-intake.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
-  L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructuredInteractive', 'primary'), P('fastStructuredInteractive', 'fallback'), { inbound: true }),
   L('social_judge', 'Social compliance judge', 'social-compliance-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('job_screen', 'Job application screening', 'job-application-screen.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('fast_complete_voice_fill', 'Fast Complete voice fill', 'fast-complete-voice-fill.js', 'fastText', T('FAST'), null, { inbound: true, note: 'GATE_FAST_COMPLETE_VOICE_FILL; technician speech mapped onto sheet choices, validated in code' }),

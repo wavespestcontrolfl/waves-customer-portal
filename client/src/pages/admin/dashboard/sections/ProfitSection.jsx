@@ -14,6 +14,12 @@ import CrossSellCard from "../CrossSellCard";
 import WorkAndRoutesCard from "../WorkAndRoutesCard";
 import MarginByLineBars from "../MarginByLineBars";
 
+function serviceMixSub(mix) {
+  if (!mix) return undefined;
+  const suffix = mix.period?.label ? ` · ${mix.period.label}` : " this month";
+  return `${mix.total_services || 0} completed services${suffix}`;
+}
+
 // PROFIT — what's helping or hurting margin: fully-burdened gross margin,
 // labor productivity, the adjusted-EBITDA bridge (company-level, kept in its
 // own card NEXT TO but never mixed with the job-level gross margin), the
@@ -117,7 +123,7 @@ export default function ProfitSection({
         </ChartCard>
         <ChartCard
           title="Service mix"
-          sub={mix ? `${mix.total_services || 0} completed services this month` : undefined}
+          sub={serviceMixSub(mix)}
         >
           <DashboardFeed value={mix} pending={pending.mix} label="service mix" onRetry={onRetry}>
             <ServiceMixDonut mix={mix?.mix || []} />

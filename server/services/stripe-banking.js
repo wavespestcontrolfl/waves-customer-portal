@@ -11,6 +11,7 @@ const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
 const BankingExport = require('./banking-export');
+const { ledgerInvoiceId, parseJson } = require('./payment-failed-allocation');
 
 const INSTANT_PAYOUT_FEE_RATE_US = 0.015;
 const PAYOUT_ATTEMPT_RETRY_WINDOW_MS = 23 * 60 * 60 * 1000;
@@ -327,102 +328,187 @@ async function syncPayouts(limit = 50) {
 // SYNC PAYOUT TRANSACTIONS
 // ═══════════════════════════════════════════════════════════════
 
+function isCombinedPaymentRows(rows) {
+  return rows.length > 1 || rows.some((p) => parseJson(p.metadata).combined_payment);
+}
+
+/**
+ * Non-blocking legacy fallback for refund balance transactions (`re_...`) whose
+ * refund id is not stamped on any `payments` row yet: resolve the refund's
+ * Stripe charge id and link the refund source to that charge's payment rows.
+ *
+ * Parked combined partial (or cumulative-full multi-partial) refunds are
+ * deliberately left unstamped on `payments` until staff assigns shares: keep
+ * the charge link for customer/anchor visibility and record the refund id in
+ * `unallocatedRefundSources` so `txnRowFromStripe` marks the allocation
+ * unresolved instead of listing every invoice's full charge share.
+ */
+async function resolveLegacyRefundLinks(
+  unresolvedRefunds,
+  paymentsBySource,
+  unallocatedRefundSources,
+  stripeClient,
+  addLink,
+) {
+  const retrieveRefund = stripeClient && stripeClient.refunds && stripeClient.refunds.retrieve;
+  if (!unresolvedRefunds.length || typeof retrieveRefund !== 'function') return [];
+  const refundToCharge = new Map();
+  for (const rid of unresolvedRefunds) {
+    try {
+      const ref = await stripeClient.refunds.retrieve(rid);
+      const rawCharge = ref && ref.charge;
+      const chargeId = typeof rawCharge === 'string' ? rawCharge : (rawCharge && rawCharge.id);
+      if (chargeId) refundToCharge.set(rid, chargeId);
+    } catch (err) {
+      logger.warn(`[stripe-banking] Legacy refund lookup failed for ${rid}: ${err.message}`);
+    }
+  }
+  const missingCharges = [...new Set(
+    [...refundToCharge.values()].filter((ch) => !paymentsBySource.has(ch)),
+  )];
+  const extraPayments = missingCharges.length
+    ? await db('payments').whereIn('stripe_charge_id', missingCharges).whereNot('status', 'canceled')
+    : [];
+  for (const pay of extraPayments) addLink(pay.stripe_charge_id, pay);
+  for (const [rid, ch] of refundToCharge.entries()) {
+    const chargeRows = paymentsBySource.get(ch) || [];
+    for (const pay of chargeRows) addLink(rid, pay);
+    if (isCombinedPaymentRows(chargeRows)) unallocatedRefundSources.set(rid, ch);
+  }
+  return extraPayments;
+}
+
 /**
  * Batch-resolve local payments/customers for a set of Stripe balance
  * transactions (avoids N+1). Shared by the per-payout and global syncs.
- * Returns { paymentsBySource, customersById }; paymentsBySource maps each
- * source to an ARRAY of payment rows (a combined full-balance charge backs
- * several per-invoice rows).
+ * Returns { paymentsBySource, customersById, unallocatedRefundSources };
+ * paymentsBySource maps each source (`ch_...` charge or `re_...` refund) to an
+ * ARRAY of payment rows (a combined full-balance charge backs several
+ * per-invoice rows).
  */
-async function resolveTxnLinkMaps(transactionRows) {
-  const chargeSources = transactionRows
-    .map(t => (typeof t.source === 'string' && t.source.startsWith('ch_')) ? t.source : null)
-    .filter(Boolean);
+async function resolveTxnLinkMaps(transactionRows, stripeClient = null) {
+  const chargeSources = [...new Set(
+    transactionRows
+      .map((t) => (typeof t.source === 'string' && t.source.startsWith('ch_') ? t.source : null))
+      .filter(Boolean),
+  )];
+  const refundSources = [...new Set(
+    transactionRows
+      .map((t) => (typeof t.source === 'string' && t.source.startsWith('re_') ? t.source : null))
+      .filter(Boolean),
+  )];
   const paymentsBySource = new Map();
   const customersById = new Map();
-  if (chargeSources.length) {
-    try {
-      const payments = await db('payments')
-        .where(function bySource() {
+  const unallocatedRefundSources = new Map();
+  if (!chargeSources.length && !refundSources.length) {
+    return { paymentsBySource, customersById, unallocatedRefundSources };
+  }
+  try {
+    const payments = await db('payments')
+      .where(function bySource() {
+        if (chargeSources.length) {
           this.whereIn('stripe_charge_id', chargeSources)
             .orWhereIn('stripe_payment_intent_id', chargeSources);
-        })
-        // Neutralized pre-settlement markers (status canceled, amount 0)
-        // must not appear beside the real per-invoice rows (codex r8 P1).
-        .whereNot('status', 'canceled');
-      // ARRAYS per source (codex #3427 r5 P1): a combined full-balance
-      // charge backs one payments row PER allocated invoice — a
-      // last-write-wins Map would attribute the whole balance transaction
-      // to an arbitrary share and drop the rest from reconciliation.
-      const addLink = (key, pay) => {
-        const arr = paymentsBySource.get(key);
-        if (arr) arr.push(pay); else paymentsBySource.set(key, [pay]);
-      };
-      for (const pay of payments) {
-        if (pay.stripe_charge_id) addLink(pay.stripe_charge_id, pay);
-        if (pay.stripe_payment_intent_id) addLink(pay.stripe_payment_intent_id, pay);
+        }
+        if (refundSources.length) {
+          const refundMatch = chargeSources.length ? 'orWhereIn' : 'whereIn';
+          this[refundMatch]('stripe_refund_id', refundSources)
+            .orWhereRaw(
+              "jsonb_typeof(metadata->'stamped_refund_ids') = 'array' AND (metadata->'stamped_refund_ids') \\?| ?::text[]",
+              [refundSources],
+            );
+        }
+      })
+      // Neutralized pre-settlement markers (status canceled, amount 0)
+      // must not appear beside the real per-invoice rows (codex r8 P1).
+      .whereNot('status', 'canceled');
+    // ARRAYS per source (codex #3427 r5 P1): a combined full-balance
+    // charge backs one payments row PER allocated invoice — a
+    // last-write-wins Map would attribute the whole balance transaction
+    // to an arbitrary share and drop the rest from reconciliation.
+    // Dedupe by pay.id so a row matching both stripe_refund_id and
+    // metadata.stamped_refund_ids is never pushed twice.
+    const addLink = (key, pay) => {
+      if (!key) return;
+      const arr = paymentsBySource.get(key);
+      if (!arr) { paymentsBySource.set(key, [pay]); return; }
+      if (pay.id == null || !arr.some((existing) => existing.id === pay.id)) arr.push(pay);
+    };
+    const refundSet = new Set(refundSources);
+    for (const pay of payments) {
+      if (pay.stripe_charge_id) addLink(pay.stripe_charge_id, pay);
+      if (pay.stripe_payment_intent_id) addLink(pay.stripe_payment_intent_id, pay);
+      if (pay.stripe_refund_id && refundSet.has(pay.stripe_refund_id)) addLink(pay.stripe_refund_id, pay);
+      const stamped = parseJson(pay.metadata).stamped_refund_ids;
+      if (Array.isArray(stamped)) {
+        stamped.filter((rid) => refundSet.has(rid)).forEach((rid) => addLink(rid, pay));
       }
-      const customerIds = [...new Set(payments.map(p => p.customer_id).filter(Boolean))];
-      if (customerIds.length) {
-        const customers = await db('customers')
-          .whereIn('id', customerIds)
-          .select('id', 'first_name', 'last_name');
-        for (const c of customers) customersById.set(c.id, c);
-      }
-    } catch (err) {
-      logger.warn('[stripe-banking] Batch payment/customer lookup failed:', err.message);
     }
+    const unresolvedRefunds = refundSources.filter((rid) => !paymentsBySource.has(rid));
+    const legacyPayments = await resolveLegacyRefundLinks(
+      unresolvedRefunds,
+      paymentsBySource,
+      unallocatedRefundSources,
+      stripeClient,
+      addLink,
+    );
+    const allPayments = legacyPayments.length ? [...payments, ...legacyPayments] : payments;
+    const customerIds = [...new Set(allPayments.map((p) => p.customer_id).filter(Boolean))];
+    if (customerIds.length) {
+      const customers = await db('customers')
+        .whereIn('id', customerIds)
+        .select('id', 'first_name', 'last_name');
+      for (const c of customers) customersById.set(c.id, c);
+    }
+  } catch (err) {
+    logger.warn('[stripe-banking] Batch payment/customer lookup failed:', err.message);
   }
-  return { paymentsBySource, customersById };
+  return { paymentsBySource, customersById, unallocatedRefundSources };
 }
 
 /** One insertable stripe_payout_transactions row from a Stripe balance txn. */
-function txnRowFromStripe(txn, { paymentsBySource, customersById }, payoutId = null) {
+function txnRowFromStripe(txn, { paymentsBySource, customersById, unallocatedRefundSources }, payoutId = null) {
   let customerId = null;
   let customerName = null;
   let invoiceId = null;
   let paymentId = null;
   let combinedNote = null;
-  const linked = (typeof txn.source === 'string') ? (paymentsBySource.get(txn.source) || []) : [];
-  const metaOf = (pay) => {
-    try {
-      return (typeof pay.metadata === 'string' ? JSON.parse(pay.metadata) : pay.metadata) || {};
-    } catch { return {}; }
-  };
+  const sourceKey = typeof txn.source === 'string' ? txn.source : null;
+  const linked = (sourceKey && paymentsBySource.get(sourceKey)) || [];
+  const metaOf = (pay) => parseJson(pay.metadata);
   let payment = linked[0] || null;
   // Combined detection by METADATA, not row count (codex r13 P2): a share
   // that couldn't settle (terminal invoice → residual) leaves only ONE
   // recorded row for a combined charge — the whole Stripe amount must not
   // be attributed to that one invoice while the residual share vanishes.
-  const isCombinedLink = linked.length > 1 || linked.some((p) => metaOf(p).combined_payment);
+  const isCombinedLink = isCombinedPaymentRows(linked);
+  const unallocatedChargeRef = sourceKey && unallocatedRefundSources && unallocatedRefundSources.get(sourceKey);
   if (isCombinedLink) {
     // Combined full-balance charge: ONE balance transaction carries the
     // whole amount + fee across N per-invoice payment rows (codex #3427 r5
     // P1). The ledger row stays one-per-txn (unique stripe_txn_id), so:
     // anchor the linkage on the ANCHOR payment row (it carries the
     // surcharge), leave invoice_id null (no single invoice owns the txn),
-    // and expose the recorded allocation in the description so the payout
-    // ledger never silently drops a share.
+    // and expose either the recorded per-invoice allocation (charges /
+    // stamped full refunds) or an explicit unallocated marker (parked
+    // combined partials awaiting staff assignment).
     payment = linked.find((p) => {
       const m = metaOf(p);
       return m.combined_payment && m.invoice_id
         && String(m.combined_anchor_invoice_id || '') === String(m.invoice_id);
     }) || payment;
-    combinedNote = `combined: ${linked
-      .map((p) => `$${Number(p.amount || 0).toFixed(2)} → invoice ${metaOf(p).invoice_id || `payment ${p.id}`}`)
-      .join('; ')}${linked.length === 1 ? ' (allocation may be incomplete — check residual shares in stripe_orphan_charges)' : ''}`;
+    combinedNote = unallocatedChargeRef
+      ? `combined refund unallocated (charge ${unallocatedChargeRef}) — pending staff allocation in stripe_orphan_charges`
+      : `combined: ${linked
+        .map((p) => `$${Number(p.amount || 0).toFixed(2)} → invoice ${metaOf(p).invoice_id || `payment ${p.id}`}`)
+        .join('; ')}${linked.length === 1 ? ' (allocation may be incomplete — check residual shares in stripe_orphan_charges)' : ''}`;
   }
   if (payment) {
     paymentId = payment.id;
     customerId = payment.customer_id;
-    if (customerId) {
-      const customer = customersById.get(customerId);
-      if (customer) customerName = `${customer.first_name} ${customer.last_name}`;
-    }
-    if (!isCombinedLink) {
-      const meta = metaOf(payment);
-      if (meta.invoice_id) invoiceId = meta.invoice_id;
-    }
+    const customer = customersById.get(customerId);
+    if (customer) customerName = `${customer.first_name} ${customer.last_name}`;
+    if (!isCombinedLink) invoiceId = ledgerInvoiceId(payment);
   }
   return {
     payout_id: payoutId,
@@ -511,7 +597,7 @@ async function syncBalanceTransactions(limit = 100) {
   let upserted = 0;
   let newestCreated = watermark;
   if (rows.length) {
-    const linkMaps = await resolveTxnLinkMaps(rows);
+    const linkMaps = await resolveTxnLinkMaps(rows, stripe);
     // Merge every column EXCEPT payout_id: the global stream carries no
     // payout linkage (null), and blindly merging null would erase linkage
     // previously written by the per-payout sync for automatic payouts.
@@ -628,7 +714,7 @@ async function syncPayoutTransactions(stripePayoutId) {
       logger.warn(`[stripe-banking] Payout ${stripePayoutId} transaction sync hit ${MAX_PAGES} page safety cap`);
     }
 
-    const linkMaps = await resolveTxnLinkMaps(transactionRows);
+    const linkMaps = await resolveTxnLinkMaps(transactionRows, stripe);
     const txnInserts = transactionRows.map(txn => txnRowFromStripe(txn, linkMaps, payout.id));
     const totalFees = txnInserts.reduce((s, r) => s + (Number(r.fee) || 0), 0);
     const txnCount = txnInserts.length;
