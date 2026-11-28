@@ -75,7 +75,7 @@ router.post('/threads/:id/read', noStore, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/messenger/threads/:id/reply { text } -> { sent: true } | 409 outside_window | 502 send_failed
+// POST /api/admin/messenger/threads/:id/reply { text, requestId? } -> { sent: true } | 409 outside_window | 502 send_failed
 // (Facebook refused: nothing went out) | 504 send_uncertain (no confirmation: check Facebook before resending)
 router.post('/threads/:id/reply', noStore, async (req, res, next) => {
   try {
@@ -83,7 +83,14 @@ router.post('/threads/:id/reply', noStore, async (req, res, next) => {
     if (!text || text.length > messenger.REPLY_MAX_CHARS) {
       return res.status(400).json({ error: `Reply must be 1 to ${messenger.REPLY_MAX_CHARS} characters` });
     }
-    const result = await messenger.sendReply(req, req.params.id, text);
+    const rawRequestId = req.body?.requestId;
+    if (rawRequestId !== undefined && (typeof rawRequestId !== 'string' || !rawRequestId.trim() || rawRequestId.trim().length > 64)) {
+      return res.status(400).json({ error: 'requestId must be a non-empty string up to 64 characters' });
+    }
+    const requestId = typeof rawRequestId === 'string' ? rawRequestId.trim() : null;
+    const result = requestId
+      ? await messenger.sendReply(req, req.params.id, text, { requestId })
+      : await messenger.sendReply(req, req.params.id, text);
     if (!result.ok) return res.status(result.status).json({ error: result.error });
     res.json({ sent: true, message: result.message });
   } catch (err) { next(err); }
