@@ -69,7 +69,7 @@ test('technicians cannot infer private health or retention from result membershi
 
 test('hasBalance qualifies on net due (payments and credits subtracted), the same rule as balance_owed', () => {
   const result = compile({ hasBalance: 'true' });
-  expect(result.sql).toContain('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)');
+  expect(result.sql).toContain('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0), 0)');
   expect(result.sql).not.toContain('SUM(total)');
   expect(result.bindings).toEqual(['sent', 'viewed', 'overdue']);
   expect(compile({}).sql).not.toContain('credit_applied');

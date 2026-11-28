@@ -60,7 +60,12 @@ jest.mock('../models/db', () => {
     });
     return q;
   };
+  const customersTable = () => {
+    const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), forShare: jest.fn(() => q), first: jest.fn(async () => ({ id: 'cust-1' })) };
+    return q;
+  };
   const dbFn = jest.fn((table) => {
+    if (table === 'customers') return customersTable();
     if (table !== 'property_preferences') throw new Error(`Unexpected table ${table}`);
     return propertyPreferencesTable();
   });
