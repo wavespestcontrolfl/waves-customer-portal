@@ -104,6 +104,7 @@ const {
   decideExpenseVendorAction,
   extractMerchantRefundTarget,
   recoverGrossExpenseCents,
+  buildMerchantRefundDeltaEntry,
   timestampToUtcDate,
 } = require('../services/accounting/sync-bridge');
 const migrationGl = require('../models/migrations/20261127140000_accounting_gl_core');
@@ -2785,5 +2786,166 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     const decProfile = resolveInvoiceProfileForReceipt(decInvoiceLines, '2026-11-28', null);
     const decAlloc = allocateCumulativeCashReceipt(0, 10700, decProfile, 'commercial', revIdByCode);
     expect(decAlloc).toEqual([{ accountId: commRevId, signedCents: 10000 }]);
+  });
+
+  test('Codex R10: recategorizing an expense reconciles its already-synced merchant refund into the new account', async () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const accountsById = new Map(accounts.map((a) => [String(a.id).toLowerCase(), a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    const expId = 'exp-recat-100';
+    const btRefId = '00000000-0000-4000-8000-000000007801';
+    const supplies = byCode.get(SYSTEM_CODES.COGS_CHEMICALS_SUPPLIES);
+    const utilities = byCode.get(SYSTEM_CODES.OPEX_UTILITIES);
+
+    // 1. Original $100 Supplies purchase + $20 Supplies refund
+    const origExpJe = rules.buildExpenseEntry({
+      sourceId: expId,
+      entryDate: '2026-07-10',
+      paymentAccountCode: SYSTEM_CODES.CREDIT_CARD_PRIMARY,
+      paymentMethod: 'card',
+      splits: [{ accountCode: SYSTEM_CODES.COGS_CHEMICALS_SUPPLIES, amountCents: 10000 }],
+      memo: 'Initial Supplies purchase',
+    });
+    const origRefJe = rules.buildExpenseRefundEntry({
+      sourceId: btRefId,
+      entryDate: '2026-08-05',
+      paymentAccountCode: SYSTEM_CODES.CREDIT_CARD_PRIMARY,
+      paymentMethod: 'card',
+      bankTransactionId: btRefId,
+      splits: [{ accountCode: SYSTEM_CODES.COGS_CHEMICALS_SUPPLIES, amountCents: 2000 }],
+      reference: expId,
+      memo: 'Initial Supplies refund',
+    });
+
+    // 2. Expense recategorized to Utilities on Aug 12: both gross expense AND merchant refund adjust cleanly
+    const expAdjJe = rules.buildExpenseEntry({
+      sourceId: `${expId}-adj`,
+      entryDate: '2026-08-12',
+      paymentAccountCode: SYSTEM_CODES.COGS_CHEMICALS_SUPPLIES,
+      splits: [{ accountCode: SYSTEM_CODES.OPEX_UTILITIES, amountCents: 10000 }],
+      memo: 'Recat gross expense to Utilities',
+    });
+    const desiredRef = rules.buildExpenseRefundEntry({
+      sourceId: btRefId,
+      entryDate: '2026-08-05',
+      paymentAccountCode: SYSTEM_CODES.CREDIT_CARD_PRIMARY,
+      paymentMethod: 'card',
+      bankTransactionId: btRefId,
+      splits: [{ accountId: utilities.id, amountCents: 2000 }],
+      reference: expId,
+      memo: 'Updated Utilities refund',
+    });
+    const bookedRefByCode = new Map([
+      [SYSTEM_CODES.CREDIT_CARD_PRIMARY, 2000],
+      [SYSTEM_CODES.COGS_CHEMICALS_SUPPLIES, -2000],
+    ]);
+    const refAdjJe = buildMerchantRefundDeltaEntry(
+      { id: btRefId, exp_id: expId, vendor_name: 'Vendor', description: 'Refund', payment_method: 'card' },
+      desiredRef.lines,
+      bookedRefByCode,
+      '2026-08-12',
+      1,
+      { accountsById },
+    );
+    expect(refAdjJe).not.toBeNull();
+    expect(refAdjJe.idempotencyKey.startsWith(`expense-refund-adj:${btRefId}:seq-1:`)).toBe(true);
+    expect(refAdjJe.entryDate).toBe('2026-08-12');
+    expect(validateJournalEntryInput(refAdjJe).totalCents).toBe(2000);
+
+    // Supplies nets to $0, Utilities nets to $80, Credit Card stays at $80 (untouched by category reclass)
+    const finalSums = accumulateEntries(accounts, [origExpJe, origRefJe, expAdjJe, refAdjJe]);
+    expect(bal(finalSums, SYSTEM_CODES.COGS_CHEMICALS_SUPPLIES)).toBe(0);
+    expect(bal(finalSums, SYSTEM_CODES.OPEX_UTILITIES)).toBe(8000);
+    expect(bal(finalSums, SYSTEM_CODES.CREDIT_CARD_PRIMARY)).toBe(8000);
+
+    // Unchanged allocation produces null (idempotent skip)
+    const unchangedBooked = new Map([
+      [SYSTEM_CODES.CREDIT_CARD_PRIMARY, 2000],
+      [SYSTEM_CODES.OPEX_UTILITIES, -2000],
+    ]);
+    expect(buildMerchantRefundDeltaEntry(
+      { id: btRefId, exp_id: expId, vendor_name: 'Vendor', description: 'Refund', payment_method: 'card' },
+      desiredRef.lines,
+      unchangedBooked,
+      '2026-08-12',
+      2,
+      { accountsById },
+    )).toBeNull();
+
+    // End-to-end dryRun sync previews would_adjust = 1 on an already-booked refund after category change
+    const utilCatId = '00000000-0000-4000-8000-00000000c650';
+    const glAccountsWithCat = accounts.map((a) => (a.id === utilities.id ? { ...a, expense_category_id: utilCatId } : a));
+    const recatConn = (table) => {
+      const state = { hasJoinExpenses: false, sourceType: null };
+      const chain = {
+        leftJoin: () => chain,
+        join: (t) => {
+          if (String(t).startsWith('expenses')) state.hasJoinExpenses = true;
+          return chain;
+        },
+        where: (arg) => {
+          if (arg && typeof arg === 'object' && arg['e.source_type']) state.sourceType = arg['e.source_type'];
+          return chain;
+        },
+        whereIn: () => chain,
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(glAccountsWithCat);
+          if (table === 'bank_transactions as bt' && state.hasJoinExpenses) {
+            return Promise.resolve([{
+              id: btRefId,
+              status: 'refund_applied',
+              amount: '20.00',
+              txn_date: '2026-08-05',
+              account_type: 'card',
+              account_label: 'Amex Blue',
+              description: 'MERCHANT REFUND',
+              suggestion: { refundAppliedTo: expId, refundAmount: 20 },
+              matched_at: '2026-08-06T12:00:00Z',
+              updated_at: '2026-08-06T12:00:00Z',
+              exp_id: expId,
+              category_id: utilCatId,
+              exp_description: 'Updated utility expense',
+              exp_notes: null,
+              vendor_name: 'FPL',
+              payment_method: 'card',
+              scheduled_service_id: null,
+              exp_updated_at: '2026-08-12T15:00:00Z',
+            }]);
+          }
+          if (table === 'gl_journal_lines as l' && state.sourceType === 'expense_refund') {
+            return Promise.resolve([
+              { entry_id: 'je-ref-orig', reversed_by_entry_id: null, code: SYSTEM_CODES.CREDIT_CARD_PRIMARY, debit_cents: 2000, credit_cents: 0 },
+              { entry_id: 'je-ref-orig', reversed_by_entry_id: null, code: supplies.code, debit_cents: 0, credit_cents: 2000 },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return chain;
+    };
+    recatConn.raw = (sql) => sql;
+    recatConn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+    const recatPreview = await syncSubledgersToGl({ fromDate: '2026-08-01', toDate: '2026-08-31', dryRun: true, conn: recatConn });
+    expect(recatPreview.expenses.would_adjust).toBe(1);
+    expect(recatPreview.expenses.errors).toEqual([]);
   });
 });

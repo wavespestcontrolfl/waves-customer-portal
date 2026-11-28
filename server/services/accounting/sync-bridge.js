@@ -3043,9 +3043,9 @@ async function loadBookedExpenseState(conn, expenseId) {
   return { bookedByCode, entryCount: activeEntryIds.size, totalEntryCount: allEntryIds.size };
 }
 
-async function reconcileExpenseVendorAttribution(exp, matchedVendor, vendorById, trx, ctx) {
+async function reconcileExpenseVendorAttribution(exp, matchedVendor, vendorById, trx, ctx, { sourceType = 'expense', sourceId = null } = {}) {
   const existing = await trx('gl_journal_entries as e')
-    .where({ 'e.source_type': 'expense', 'e.source_id': String(exp.id), 'e.status': 'posted' })
+    .where({ 'e.source_type': sourceType, 'e.source_id': String(sourceId ?? exp.id), 'e.status': 'posted' })
     .whereNull('e.reversed_by_entry_id')
     .select('e.id');
 
@@ -3292,7 +3292,46 @@ async function syncExpenses(conn, from, to, ctx, plaidGlLookup = null, bankCapsA
   await syncExpenseMerchantRefunds(conn, from, to, ctx, glByCatId, vendorLookup, plaidGlLookup, bankCaps);
 }
 
-async function syncSingleMerchantRefundRow(row, mapped, matchedVendor, matchedExpBankTxn, plaidGlLookup, ctx) {
+async function loadBookedExpenseRefundState(conn, bankTxnId) {
+  const rows = await conn('gl_journal_lines as l')
+    .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+    .join('gl_accounts as a', 'a.id', 'l.account_id')
+    .where({ 'e.status': 'posted', 'e.source_type': 'expense_refund', 'e.source_id': String(bankTxnId) })
+    .select('e.id as entry_id', 'e.reversed_by_entry_id', 'a.code', 'l.debit_cents', 'l.credit_cents');
+
+  const bookedByCode = new Map();
+  const allEntryIds = new Set();
+  const activeEntryIds = new Set();
+  for (const r of rows) {
+    allEntryIds.add(r.entry_id);
+    if (!r.reversed_by_entry_id) {
+      activeEntryIds.add(r.entry_id);
+      const net = Number(r.debit_cents) - Number(r.credit_cents);
+      bookedByCode.set(r.code, (bookedByCode.get(r.code) || 0) + net);
+    }
+  }
+  return { bookedByCode, activeEntryCount: activeEntryIds.size, totalEntryCount: allEntryIds.size };
+}
+
+function buildMerchantRefundDeltaEntry(row, desiredLines, bookedByCode, adjDate, revisionSeq, { matchedVendor = null, accountsById = null } = {}) {
+  const detail = [row.vendor_name, row.description || row.exp_description].filter(Boolean).join(' — ');
+  return buildDeltaEntry({
+    sourceType: 'expense_refund',
+    sourceId: row.id,
+    keyPrefix: 'expense-refund-adj',
+    revisionSeq,
+    desiredLines,
+    bookedByCode,
+    adjustmentDate: adjDate,
+    basisScope: 'both',
+    reference: String(row.exp_id),
+    memo: `Merchant refund adjustment — ${detail || row.exp_id}`.slice(0, 500),
+    lineMeta: { vendorId: matchedVendor ? matchedVendor.id : null, paymentMethod: row.payment_method || null },
+    accountsById,
+  });
+}
+
+async function syncSingleMerchantRefundRow(row, mapped, matchedVendor, matchedExpBankTxn, plaidGlLookup, vendorById, ctx) {
   const target = extractMerchantRefundTarget(row);
   const entryDate = dateCellText(row.txn_date);
   if (!target || !entryDate) return;
@@ -3314,26 +3353,49 @@ async function syncSingleMerchantRefundRow(row, mapped, matchedVendor, matchedEx
   const detail = [row.vendor_name, row.description || row.exp_description].filter(Boolean).join(' — ');
   const memo = `Merchant refund — ${detail || row.exp_id}`.slice(0, 500);
   const keyBase = `expense-refund:bt:${row.id}`;
-
-  const run = async (trx) => postOrRepostSettlement(trx, {
-    keyBase,
-    ctx,
-    bucket: 'expenses',
-    buildEntry: (revKey) => rules.buildExpenseRefundEntry({
-      sourceType: 'expense_refund',
-      sourceId: row.id,
-      idempotencyKey: revKey,
-      entryDate,
-      paymentAccountId: resolvedPayment.accountId,
-      paymentAccountCode: resolvedPayment.accountCode,
-      paymentMethod: row.payment_method || null,
-      bankTransactionId: row.id,
-      splits,
-      vendorId: matchedVendor ? matchedVendor.id : null,
-      reference: String(row.exp_id),
-      memo,
-    }),
+  const adjDate = latestAdjustmentDate(entryDate, [row.exp_updated_at, row.matched_at, row.updated_at]);
+  const buildDesired = (idempotencyKey) => rules.buildExpenseRefundEntry({
+    sourceType: 'expense_refund',
+    sourceId: row.id,
+    idempotencyKey,
+    entryDate,
+    paymentAccountId: resolvedPayment.accountId,
+    paymentAccountCode: resolvedPayment.accountCode,
+    paymentMethod: row.payment_method || null,
+    bankTransactionId: row.id,
+    splits,
+    vendorId: matchedVendor ? matchedVendor.id : null,
+    reference: String(row.exp_id),
+    memo,
   });
+
+  const run = async (trx) => {
+    const { bookedByCode, activeEntryCount, totalEntryCount } = await loadBookedExpenseRefundState(trx, row.id);
+    if (activeEntryCount === 0) {
+      const revKey = totalEntryCount === 0 ? keyBase : `${keyBase}:rev-${totalEntryCount}`;
+      await postOrPreview(buildDesired(revKey), ctx, 'expenses', { connOverride: trx });
+      return;
+    }
+
+    const vendorChanged = await reconcileExpenseVendorAttribution(
+      { id: row.exp_id, vendor_name: row.vendor_name },
+      matchedVendor,
+      vendorById,
+      trx,
+      ctx,
+      { sourceType: 'expense_refund', sourceId: row.id },
+    );
+    const desired = buildDesired(keyBase);
+    const adjEntry = buildMerchantRefundDeltaEntry(row, desired.lines, bookedByCode, adjDate, totalEntryCount, {
+      matchedVendor,
+      accountsById: ctx.caches.accountsById,
+    });
+    if (!adjEntry) {
+      if (!vendorChanged) ctx.stats.expenses.skipped += 1;
+      return;
+    }
+    await postOrPreview(adjEntry, ctx, 'expenses', { isAdjustment: true, connOverride: trx });
+  };
 
   if (ctx.dryRun) {
     await run(ctx.conn);
@@ -3382,6 +3444,7 @@ async function syncExpenseMerchantRefunds(conn, from, to, ctx, glByCatId, vendor
     conn.raw('bt.txn_date::text as txn_date'),
     'e.id as exp_id', 'e.category_id', 'e.description as exp_description',
     'e.notes as exp_notes', 'e.vendor_name', 'e.payment_method', 'e.scheduled_service_id',
+    'e.updated_at as exp_updated_at',
   ];
   if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id');
 
@@ -3399,7 +3462,17 @@ async function syncExpenseMerchantRefunds(conn, from, to, ctx, glByCatId, vendor
     })
     .where((win) => {
       win.whereBetween('bt.txn_date', [from, to])
-        .orWhereRaw("DATE(COALESCE(bt.matched_at, bt.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+        .orWhereRaw("DATE(COALESCE(bt.matched_at, bt.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to])
+        .orWhere((expEdited) => {
+          expEdited.whereRaw("e.updated_at IS NOT NULL AND DATE(e.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to])
+            .whereExists(function refundAlreadyBooked() {
+              this.select(conn.raw('1'))
+                .from('gl_journal_entries as ge')
+                .where({ 'ge.source_type': 'expense_refund', 'ge.status': 'posted' })
+                .whereNull('ge.reversed_by_entry_id')
+                .whereRaw('ge.source_id = bt.id::text');
+            });
+        });
     })
     .whereRaw("COALESCE(c.name, '') <> 'Payroll (counted from pay runs)'")
     .whereRaw("COALESCE(c.irs_line, '') NOT IN ('13', '30')")
@@ -3410,7 +3483,7 @@ async function syncExpenseMerchantRefunds(conn, from, to, ctx, glByCatId, vendor
     const mapped = row.category_id ? glByCatId.get(row.category_id) : null;
     const matchedVendor = vendorLookup.match(row.vendor_name);
     const matchedExpBankTxn = matchedExpBank.get(String(row.exp_id)) || null;
-    await syncSingleMerchantRefundRow(row, mapped, matchedVendor, matchedExpBankTxn, plaidGlLookup, ctx);
+    await syncSingleMerchantRefundRow(row, mapped, matchedVendor, matchedExpBankTxn, plaidGlLookup, vendorLookup.byId, ctx);
   }
 
   await reconcileRemovedExpenseMerchantRefunds(conn, from, to, ctx);
@@ -4003,6 +4076,7 @@ module.exports = {
   decideExpenseVendorAction,
   extractMerchantRefundTarget,
   recoverGrossExpenseCents,
+  buildMerchantRefundDeltaEntry,
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildRefundedDepositRestorePayload,
