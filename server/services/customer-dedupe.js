@@ -2517,13 +2517,14 @@ async function repointReviewSequences(trx, _table, column, winnerId, loserId) {
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      await trx('review_sequences').where({ id: row.id }).update({
-        [column]: winnerId,
-        status: 'stopped',
-        stop_reason: 'manual',
-        next_run_at: null,
-        updated_at: trx.fn.now(),
+      const ReviewService = require('./review-request');
+      const { stopped: seqStopped } = await ReviewService.stopReviewSequence(row.id, 'manual', {
+        trx,
+        repoint: { column, winnerId },
       });
+      if (!seqStopped) {
+        throw new Error('Review sequence is currently mid-send — retry merging in a moment');
+      }
       stopped += 1;
     }
   }

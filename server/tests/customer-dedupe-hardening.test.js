@@ -253,6 +253,7 @@ describe('PR 3 merge & undo table coverage', () => {
           else whereObj = { ...whereObj, ...a };
           return q;
         },
+        whereIn() { return q; },
         select: async () => [{ id: 'seq-1', status: 'active' }],
         update: async (patch) => {
           updates.push({ id: whereObj.id, patch });
@@ -279,7 +280,7 @@ describe('PR 3 merge & undo table coverage', () => {
     expect(msg).toMatch(/stopped 1/);
     expect(updates).toEqual([{
       id: 'seq-1',
-      patch: { customer_id: 'win-1', status: 'stopped', stop_reason: 'manual', next_run_at: null, updated_at: 'NOW()' },
+      patch: { customer_id: 'win-1', status: 'stopped', stop_reason: 'manual', next_run_at: null, completed_at: expect.any(Date), updated_at: expect.any(Date) },
     }]);
   });
 
