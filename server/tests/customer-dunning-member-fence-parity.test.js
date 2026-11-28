@@ -52,6 +52,7 @@ const VERIFIER_CALLS = {
   amountDueCents: 'session-only (snapshot cents)',
   assertNoInvoiceChargeReconciliationPending: 'predicate',
   assertInvoiceDepositSettlementReady: 'predicate',
+  assertPlanChoiceCounterpartPayable: 'plan-choice pair guard (B-22)',
   // plain control flow / constructors that are not checks
   staleErr: 'refusal constructor', require: 'module load', Error: 'constructor', Set: 'constructor', Map: 'constructor',
   String: 'coercion', warn: 'logging', has: 'set lookup', get: 'map lookup', map: 'array', filter: 'array', sort: 'array',
@@ -83,7 +84,11 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     const start = route.indexOf('async function rejectIfInvoiceCollectionPending');
     const body = route.slice(start, route.indexOf('\n}\n', start));
     const asserts = [...new Set([...body.matchAll(/\b(assert[A-Za-z]+)\(/g)].map((m) => m[1]))].sort();
-    expect(asserts).toEqual(['assertInvoiceDepositSettlementReady', 'assertNoInvoiceChargeReconciliationPending']);
+    expect(asserts).toEqual([
+      'assertInvoiceDepositSettlementReady',
+      'assertNoInvoiceChargeReconciliationPending',
+      'assertPlanChoiceCounterpartPayable',
+    ]);
   });
 
   test('the predicate itself calls exactly the verifier\'s collection helpers (no fewer, no invented ones)', () => {
