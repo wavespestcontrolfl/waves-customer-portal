@@ -1389,7 +1389,7 @@ const NotificationService = {
           .orWhere((nl) => nl
             .where('category', 'new_lead')
             .where((smsOnly) => smsOnly
-              .where('link', 'like', '/admin/communications%')
+              .where('link', 'like', `${'/admin/communications'}%`)
               .orWhereRaw("COALESCE(metadata->>'dedupeKey', '') LIKE 'sms-tracking-thread:%'")))),
       role,
     )
