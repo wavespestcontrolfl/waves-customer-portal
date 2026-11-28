@@ -63,7 +63,7 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   jest.clearAllMocks();
   mockSession.current = { customerId: OWN, customer: { id: OWN } };
-  mockProfiles.current = { [OWN]: { id: OWN, active: true, deleted_at: null, owner_account: OWN } };
+  mockProfiles.current = { [OWN]: { id: OWN, active: true, deleted_at: null, account_id: OWN } };
 });
 
 const call = (method, path) => fetch(`${baseUrl}/api/notifications${path}`, { method, headers: { 'content-type': 'application/json' } })
@@ -119,8 +119,8 @@ test('a profile merged away (or no longer on the account) between the check and 
 test('a signed-in profile moved to another account after sign-in reaches nothing on its old account', async () => {
   const SIBLING = '44444444-4444-4444-8444-444444444444';
   mockProfiles.current = {
-    [OWN]: { id: OWN, active: true, deleted_at: null, owner_account: OTHER },
-    [SIBLING]: { id: SIBLING, active: true, deleted_at: null, owner_account: OWN },
+    [OWN]: { id: OWN, active: true, deleted_at: null, account_id: OTHER },
+    [SIBLING]: { id: SIBLING, active: true, deleted_at: null, account_id: OWN },
   };
   expect((await call('GET', `/reminder-contacts/${SIBLING}`)).status).toBe(403);
   expect((await call('POST', `/reminder-contacts/${SIBLING}/${REMINDER}/restart`)).status).toBe(403);
@@ -131,8 +131,8 @@ test('a signed-in profile moved to another account after sign-in reaches nothing
 test('a signed-in profile staff turned off reaches nothing on its account', async () => {
   const SIBLING = '44444444-4444-4444-8444-444444444444';
   mockProfiles.current = {
-    [OWN]: { id: OWN, active: false, deleted_at: null, owner_account: OWN },
-    [SIBLING]: { id: SIBLING, active: true, deleted_at: null, owner_account: OWN },
+    [OWN]: { id: OWN, active: false, deleted_at: null, account_id: OWN },
+    [SIBLING]: { id: SIBLING, active: true, deleted_at: null, account_id: OWN },
   };
   expect((await call('GET', `/reminder-contacts/${SIBLING}`)).status).toBe(403);
   expect((await call('POST', `/reminder-contacts/${SIBLING}/${REMINDER}/stop`)).status).toBe(403);
@@ -143,8 +143,8 @@ test('a profile id in capital letters is the same profile', async () => {
   const UPPER = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
   const lower = UPPER.toLowerCase();
   mockProfiles.current = {
-    [OWN]: { id: OWN, active: true, deleted_at: null, owner_account: OWN },
-    [lower]: { id: lower, active: true, deleted_at: null, owner_account: OWN },
+    [OWN]: { id: OWN, active: true, deleted_at: null, account_id: OWN },
+    [lower]: { id: lower, active: true, deleted_at: null, account_id: OWN },
   };
   expect((await call('GET', `/reminder-contacts/${UPPER}`)).status).toBe(200);
 });

@@ -1274,7 +1274,7 @@ async function profileOnAccount(req, customerId, { conn = db, lock = false } = {
   const rows = await q.select('id', 'account_id', 'active', 'deleted_at');
   const byId = new Map(rows.map((r) => [key(r.id), r]));
   // Both rows active, undeleted and on the session's account (staff turning off the signed-in profile ends its reach).
-  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && key(r.account_id || r.id) === key(accountId);
+  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && key(r.account_id ?? r.owner_account ?? r.id) === key(accountId);
   return onAccount(byId.get(key(customerId))) && onAccount(byId.get(key(selfId)));
 }
 
