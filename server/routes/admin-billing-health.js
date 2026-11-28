@@ -621,16 +621,18 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       });
     }
 
-    const body = { success: true, payment, ...(lockOutcome.replayed ? { idempotent_replay: true } : {}) };
+    if (!payment) return res.json({ success: true, payment });
+    const body = { success: true, payment };
+    if (lockOutcome.replayed) body.idempotent_replay = true;
     // An accepted bank payment is not evidence of a completed charge.
-    if (payment?.status !== 'paid') return res.json(body);
+    if (payment.status !== 'paid') return res.json(body);
 
     // Send receipt SMS
-    if (await claimManualReceiptDelivery(customer, payment?.id, lockOutcome)) {
+    if (await claimManualReceiptDelivery(customer, payment.id, lockOutcome)) {
       let receiptUrl = null;
       try {
-        const meta = typeof payment?.metadata === 'string' ? JSON.parse(payment.metadata) : payment?.metadata;
-        receiptUrl = meta?.stripe_receipt_url || null;
+        const meta = typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata;
+        if (meta && meta.stripe_receipt_url) receiptUrl = meta.stripe_receipt_url;
       } catch (_) {}
       try {
         const receiptLine = receiptUrl ? ` View receipt: ${receiptUrl}` : '';
@@ -654,7 +656,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           // operator-triggered sends).
           operatorInitiated: true,
           body: smsBody,
-          metadata: { source: 'admin_manual_charge', paymentId: payment?.id || null },
+          metadata: { source: 'admin_manual_charge', paymentId: payment.id || null },
         });
         if (!result?.sent) logger.warn(`[admin-billing] receipt SMS blocked: ${result?.code || 'unknown'}`);
       } catch (smsErr) {
