@@ -65,15 +65,26 @@ function visitBusy(error) {
     { code: 'visit_busy', status: 409, statusCode: 409, isOperational: true });
 }
 
+async function lockPayerTaxExempt(trx, payerId, fallbackExempt = false) {
+  if (!payerId) return false;
+  if (typeof trx === 'function') {
+    const locked = await trx('payers').where({ id: payerId }).forShare().first('tax_exempt');
+    return locked?.tax_exempt === true;
+  }
+  return Boolean(fallbackExempt);
+}
+
 async function acceptanceTaxRefusal({ invoice, members, customer, trx, payerId = null, payerTaxExempt = false }) {
   const taxableBase = Number(invoice.subtotal) - Number(invoice.discount_amount || 0);
   const baseCents = Math.round(taxableBase * 100);
   let currentRate = 0;
   let expectedTaxCents = 0;
-  if (['commercial', 'business'].includes(customer.property_type) && !payerTaxExempt) {
+  const effectivePayerId = invoice.payer_id || payerId || null;
+  const payerExempt = await lockPayerTaxExempt(trx, effectivePayerId, payerTaxExempt);
+  if (['commercial', 'business'].includes(customer.property_type) && !payerExempt) {
     const rates = new Set();
     let authority;
-    const skipCustomerExemption = Boolean(invoice.payer_id || payerId);
+    const skipCustomerExemption = Boolean(effectivePayerId);
     for (const member of members) {
       const tax = await require('./tax-calculator').calculateTax(
         customer.id, member.service_type, taxableBase,
@@ -97,7 +108,10 @@ async function acceptanceTaxRefusal({ invoice, members, customer, trx, payerId =
 }
 
 async function hasMixedCommercialTaxTreatment({ billed, customer, trx, payerId = null, payerTaxExempt = false }) {
-  if (!['commercial', 'business'].includes(customer.property_type) || payerTaxExempt) return false;
+  if (!['commercial', 'business'].includes(customer.property_type)) return false;
+  // Lock the payer row FOR SHARE before reading its tax_exempt flag so an
+  // exemption removal cannot race between this pre-check and InvoiceService.create.
+  if (await lockPayerTaxExempt(trx, payerId, payerTaxExempt)) return false;
   const rates = new Set();
   const skipCustomerExemption = Boolean(payerId);
   for (const { member, lineItems } of billed) {

@@ -129,6 +129,7 @@ describe('Schedule & Dispatch audit Batch 1 — completion, billing & warn-never
     expect(completeSrc).toContain('const pafExcluded = isExcludedFromPafHold({ visitIsPayerBilled, svc, packetBilledMember });');
     expect(completeSrc).toContain('if (pafExcluded && svc.paf_held_term_id)');
     expect(completeSrc).toContain('if (!pafExcluded && !isBackfillCompletion)');
+    expect(completeSrc).toContain('skipDeferredHold: isBackfillCompletion || pafExcluded');
 
     const packetSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'visit-completion-invoice.js'), 'utf8');
     expect(packetSrc).toContain(".whereNotNull('paf_held_term_id')");
@@ -216,17 +217,30 @@ describe('Schedule & Dispatch audit Batch 1 — completion, billing & warn-never
     const owner = _test.payerOwnerForPacket(payerSeen);
     expect(owner).toEqual({ payerId: 'payer-exempt', payerTaxExempt: true });
 
+    let lockedPayerTable = null;
+    let lockedPayerForShare = false;
+    const lockTrx = jest.fn((table) => {
+      lockedPayerTable = table;
+      const q = {
+        where: jest.fn(() => q),
+        forShare: jest.fn(() => { lockedPayerForShare = true; return q; }),
+        first: jest.fn(async () => ({ tax_exempt: true })),
+      };
+      return q;
+    });
     const mixedExempt = await _test.hasMixedCommercialTaxTreatment({
       billed: [
         { member: { id: 'm-1', service_type: 'General Pest Control', property_id: 'prop-1' }, lineItems: [{ amount: 100, category: 'pest' }] },
         { member: { id: 'm-2', service_type: 'Lawn Care', property_id: 'prop-1' }, lineItems: [{ amount: 80, category: 'lawn' }] },
       ],
       customer: { id: 'cust-1', property_type: 'commercial' },
-      trx: {},
+      trx: lockTrx,
       payerId: owner.payerId,
       payerTaxExempt: owner.payerTaxExempt,
     });
     expect(mixedExempt).toBe(false);
+    expect(lockedPayerTable).toBe('payers');
+    expect(lockedPayerForShare).toBe(true);
     expect(calcSpy).not.toHaveBeenCalled();
 
     const exemptAcceptance = await _test.acceptanceTaxRefusal({
@@ -236,7 +250,7 @@ describe('Schedule & Dispatch audit Batch 1 — completion, billing & warn-never
         { id: 'm-2', service_type: 'Lawn Care', property_id: 'prop-1' },
       ],
       customer: { id: 'cust-1', property_type: 'commercial' },
-      trx: {},
+      trx: lockTrx,
       payerId: 'payer-exempt',
       payerTaxExempt: true,
     });
