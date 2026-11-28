@@ -49,6 +49,8 @@ const recentChargesLimiter = rateLimit({
 // dead entries from crowding valid ones out of the 20-slot list.
 function chargeIsReconcilable(charge) {
   return charge.status === 'succeeded'
+    && charge.captured !== false
+    && !(charge.amount_captured != null && Number(charge.amount_captured) <= 0)
     && !charge.refunded
     && !(Number(charge.amount_refunded) > 0)
     && !charge.disputed
@@ -80,7 +82,7 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
       .slice(0, 20)
       .map(c => ({
         id: c.id,
-        amount: c.amount / 100,
+        amount: Number(c.amount_captured ?? c.amount) / 100,
         currency: c.currency,
         created: new Date(c.created * 1000).toISOString(),
         payment_method_type: c.payment_method_details?.type,
@@ -173,9 +175,9 @@ async function verifyStripeChargeForReconcile(invoice, stripeChargeId) {
   return { chargeDetails };
 }
 
-async function verifySelfPayAndVisitUnderLock(trx, lockedInvoice) {
-  // Lock order: invoice -> customer -> visit -> payer (matches recordManualPayment).
-  const cust = await trx('customers').where({ id: lockedInvoice.customer_id }).forUpdate().first('id', 'payer_id');
+async function verifySelfPayAndVisitUnderLock(trx, lockedInvoice, lockedCust) {
+  // Caller already holds customers FOR UPDATE -> invoices FOR UPDATE (matching
+  // apply-credit lock order to avoid ABBA deadlocks). Lock visit -> payers next.
   const visit = lockedInvoice.scheduled_service_id
     ? await lockVisitForSettlement(trx, lockedInvoice.scheduled_service_id, ['id', 'status', 'payer_id'])
     : null;
@@ -183,12 +185,12 @@ async function verifySelfPayAndVisitUnderLock(trx, lockedInvoice) {
   if (neverRan) {
     return `This invoice's visit is ${neverRan.replace('_', '-')} — nothing was reconciled. Void or reissue the invoice first.`;
   }
-  const payerIds = [...new Set([cust?.payer_id, visit?.payer_id].filter(Boolean))];
+  const payerIds = [...new Set([lockedCust?.payer_id, visit?.payer_id].filter(Boolean))];
   if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id', 'asc').forUpdate().select('id');
   const resolved = await require('../services/payer').resolveForInvoice({
     database: trx,
     customerId: lockedInvoice.customer_id,
-    customer: cust || null,
+    customer: lockedCust || null,
     scheduledServiceId: lockedInvoice.scheduled_service_id || null,
     throwOnError: true,
   });
@@ -199,8 +201,16 @@ async function verifySelfPayAndVisitUnderLock(trx, lockedInvoice) {
 }
 
 async function checkReconcileFencesInLock(trx, { invoiceId, invoice, triagedPiId, chargePiId }) {
+  // Acquire customers FOR UPDATE BEFORE invoices FOR UPDATE (matches apply-credit
+  // lock order so concurrent reconcile + apply-credit cannot ABBA deadlock).
+  const lockedCust = invoice.customer_id
+    ? await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id', 'payer_id')
+    : null;
   const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
   if (!lockedInvoice) return { updated: 0 };
+  if (lockedInvoice.customer_id && String(lockedInvoice.customer_id) !== String(invoice.customer_id || '')) {
+    return { conflict: 'Invoice customer changed while reconciling — reload it and reconcile again' };
+  }
 
   const lockedPiId = lockedInvoice.stripe_payment_intent_id || null;
   if (lockedPiId && lockedPiId !== triagedPiId && lockedPiId !== chargePiId) {
@@ -224,7 +234,7 @@ async function checkReconcileFencesInLock(trx, { invoiceId, invoice, triagedPiId
     throw fenceErr;
   }
 
-  const visitOrPayerConflict = await verifySelfPayAndVisitUnderLock(trx, lockedInvoice);
+  const visitOrPayerConflict = await verifySelfPayAndVisitUnderLock(trx, lockedInvoice, lockedCust);
   if (visitOrPayerConflict) return { conflict: visitOrPayerConflict };
 
   const lockedOwedCents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
@@ -395,7 +405,7 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     }
 
     const collectedAmount = chargeDetails
-      ? chargeDetails.amount / 100
+      ? Number(chargeDetails.amount_captured ?? chargeDetails.amount) / 100
       : (amount != null ? Number(amount) : invoiceAmountDue(invoice));
 
     let txResult;
@@ -481,7 +491,7 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       invoice: refreshed,
       stripe_charge: chargeDetails ? {
         id: chargeDetails.id,
-        amount: chargeDetails.amount / 100,
+        amount: Number(chargeDetails.amount_captured ?? chargeDetails.amount) / 100,
         receipt_url: chargeDetails.receipt_url,
       } : null,
       ...(reviewUnrecordedWarning ? {

@@ -203,16 +203,27 @@ function chargeableCustomerRefusal(customer) {
   return null;
 }
 
-function buildOneTimeChargeIdempotencyKey(req, customerId) {
+function buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount) {
   const headerKey = typeof req.get === 'function' ? req.get('idempotency-key') : null;
   const rawCallerKey = (typeof headerKey === 'string' && headerKey.trim())
     || (typeof req.body?.idempotencyKey === 'string' && req.body.idempotencyKey.trim())
     || null;
   if (rawCallerKey) {
     const hash = crypto.createHash('sha256').update(rawCallerKey.slice(0, 256)).digest('hex').slice(0, 24);
-    return `admin_charge_one_time_${customerId}_${hash}`;
+    return { key: `admin_charge_one_time_${customerId}_${hash}`, hasCallerKey: true };
   }
-  return `admin_charge_one_time_${customerId}_${crypto.randomUUID()}`;
+  const cents = toCents(chargeAmount);
+  return { key: `admin_charge_one_time_${customerId}_${cents}_${crypto.randomUUID()}`, hasCallerKey: false };
+}
+
+async function isManualChargeAlreadyLogged(lockOutcome, customerId, eventType) {
+  if (!lockOutcome?.hasCallerKey || !lockOutcome.payment?.id) return false;
+  const q = db('autopay_logs');
+  if (!q || typeof q.where !== 'function') return false;
+  const existing = await q
+    .where({ customer_id: customerId, payment_id: lockOutcome.payment.id, event_type: eventType })
+    .first('id');
+  return Boolean(existing);
 }
 
 // Inside the billing lock, just before the dues charge: re-read customer state
@@ -427,7 +438,7 @@ async function runExplicitChargeInLock(req, { customerId, chargeAmount, desc, se
   const customerRefusal = chargeableCustomerRefusal(lockedCustomer);
   if (customerRefusal) return { response: customerRefusal };
 
-  const idempotencyKey = buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount, desc);
+  const { key: idempotencyKey, hasCallerKey } = buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount);
   try {
     const payment = await service.chargeOneTime(
       customerId,
@@ -437,7 +448,7 @@ async function runExplicitChargeInLock(req, { customerId, chargeAmount, desc, se
       { initiated_by: 'machine' },
       { operatorOverride: true, overrideTrail: chargeNowOverrideTrail(req) },
     );
-    return { payment };
+    return { payment, hasCallerKey };
   } catch (err) {
     return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };
   }
@@ -513,8 +524,15 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
 
     if (lockOutcome.response) return res.status(lockOutcome.response.status).json(lockOutcome.response.body);
     const payment = lockOutcome.payment;
+    const eventType = payment?.status === 'paid' ? 'manual_charge' : 'manual_charge_processing';
 
-    await logAutopay(customerId, payment?.status === 'paid' ? 'manual_charge' : 'manual_charge_processing', {
+    // Deduplicate manual-charge logging and receipt SMS on caller-keyed replays
+    // so retrying after a lost response produces one log and one receipt.
+    if (await isManualChargeAlreadyLogged(lockOutcome, customerId, eventType)) {
+      return res.json({ success: true, payment });
+    }
+
+    await logAutopay(customerId, eventType, {
       amountCents: Math.round(Number(payment?.amount) * 100),
       paymentId: payment?.id || null,
       details: { source: 'manual_charge', description: desc, admin_id: req.technicianId || null },

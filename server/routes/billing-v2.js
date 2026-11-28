@@ -884,6 +884,19 @@ async function ensureDefaultAutopayConsent(trx, req, card) {
   return null;
 }
 
+function resolveActiveAutopayIncumbent(customer, methods, currentDefault) {
+  const isActive = (m) => Boolean(m && m.autopay_enabled && m.processor === 'stripe' && m.stripe_payment_method_id);
+  const pointerMethod = customer?.autopay_payment_method_id
+    ? methods.find((m) => String(m.id) === String(customer.autopay_payment_method_id)) || null
+    : null;
+  // Resolve incumbent Auto Pay from the locked customer enrollment pointer
+  // and eligible default only (matching collection rules in autopay-eligibility):
+  // a stray autopay_enabled flag on an unreferenced non-default method must
+  // never be promoted into an active Auto Pay enrollment.
+  if (isActive(pointerMethod)) return pointerMethod;
+  return isActive(currentDefault) ? currentDefault : null;
+}
+
 router.put('/cards/:id/default', async (req, res, next) => {
   try {
     const outcome = await db.transaction(async (trx) => {
@@ -911,9 +924,7 @@ router.put('/cards/:id/default', async (req, res, next) => {
       if (candidateRefusal) return { refusal: candidateRefusal };
 
       const currentDefault = methods.find((m) => m.is_default) || null;
-      const priorAutopay = currentDefault?.autopay_enabled
-        ? currentDefault
-        : (methods.find((m) => m.autopay_enabled) || null);
+      const priorAutopay = resolveActiveAutopayIncumbent(customer, methods, currentDefault);
       const carriesAutopay = Boolean(priorAutopay && String(priorAutopay.id) !== String(card.id));
       const newCardChargeable = card.processor === 'stripe' && Boolean(card.stripe_payment_method_id);
 
