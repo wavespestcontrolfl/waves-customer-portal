@@ -152,10 +152,13 @@ async function counterpartHasPendingChargeClaim(counterpartId, conn) {
   }
 }
 
-async function counterpartLiveStripeState(counterpart, inspectStripe, { retireConfirmable = false } = {}) {
+async function counterpartLiveStripeState(counterpart, inspectStripe, { retireConfirmable = false, conn = null } = {}) {
   if (!inspectStripe || !counterpart?.stripe_payment_intent_id) return null;
   if (retireConfirmable) {
-    const verdict = await require('./prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(counterpart, { inspectOnly: false });
+    const verdict = await require('./prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(
+      counterpart,
+      { inspectOnly: false, database: conn },
+    );
     // Retain stripe_payment_intent_id on the canceled counterpart so any new setup picks a fresh
     // idempotency suffix instead of replaying the original (now canceled) Stripe PaymentIntent (P1).
     if (verdict?.ok) return null;
@@ -198,7 +201,7 @@ async function planChoiceCounterpartConflict(invoice, { conn = db, inspectStripe
     if (claimState) {
       return { role: cp.role, invoiceId: cp.id, invoiceNumber: cp.invoice_number, status: claimState, inProgress: claimState === 'processing' };
     }
-    const piState = await counterpartLiveStripeState(cp, inspectStripe, { retireConfirmable });
+    const piState = await counterpartLiveStripeState(cp, inspectStripe, { retireConfirmable, conn });
     if (piState) {
       return { role: cp.role, invoiceId: cp.id, invoiceNumber: cp.invoice_number, status: piState, inProgress: piState === 'processing' };
     }

@@ -1186,8 +1186,7 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
       // credit coverage is held for the capture step, not applied at /setup.
       if (await invoiceRequiresSavedMethod(locked, { database: trx })) return { ok: false, reason: 'invalid_code' };
       const PayPlanChoice = require('../services/pay-plan-choice');
-      if (typeof PayPlanChoice.planChoiceCounterpartConflict === 'function'
-        && await PayPlanChoice.planChoiceCounterpartConflict(locked, { conn: trx, inspectStripe: true })) {
+      if (await PayPlanChoice.planChoiceCounterpartConflict(locked, { conn: trx, inspectStripe: false })) {
         return { ok: false, reason: 'invalid_code' };
       }
       return require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code }, trx);
