@@ -155,7 +155,28 @@ async function upsertStatementPaymentRecord(database, {
  * `settlement.amountCents` = the CHARGED total (surcharged for a card; bare total
  * for ACH/offline). The base/surcharge split rides the `*_cents` columns.
  */
-async function settleStatementPaid(statementId, settlement = {}, { database = db, allowedStatuses = SETTLEABLE_STATEMENT_STATUSES } = {}) {
+const DEFAULT_SETTLEMENT = Object.freeze({
+  paymentMethod: 'offline',
+  processor: null,
+  stripePaymentIntentId: null,
+  stripeChargeId: null,
+  baseAmountCents: null,
+  surchargeAmountCents: 0,
+  surchargeRateBps: 0,
+  surchargePolicyVersion: null,
+  cardFunding: null,
+  cardBrand: null,
+  // Settlement moment when the caller knows it (the webhook passes
+  // Stripe's event timestamp); payment_date buckets P&L revenue, so
+  // defaulting to handler-run time would let a delayed/retried webhook
+  // move statement cash across a period boundary.
+  settledAt: null,
+  source: 'unknown',
+});
+
+async function settleStatementPaid(statementId, settlement, options) {
+  const database = (options && options.database) || db;
+  const allowedStatuses = (options && options.allowedStatuses) || SETTLEABLE_STATEMENT_STATUSES;
   // Serialize against concurrent/out-of-order dispute & refund events on the same
   // statement (they take the same advisory lock) — see withStatementMoneyLock.
   await database.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
@@ -184,27 +205,8 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     throw err;
   }
 
-  const {
-    paymentMethod = 'offline',
-    processor = null,
-    stripePaymentIntentId = null,
-    stripeChargeId = null,
-    amountCents,
-    baseAmountCents = null,
-    surchargeAmountCents = 0,
-    surchargeRateBps = 0,
-    surchargePolicyVersion = null,
-    cardFunding = null,
-    cardBrand = null,
-    // Settlement moment when the caller knows it (the webhook passes
-    // Stripe's event timestamp); payment_date buckets P&L revenue, so
-    // defaulting to handler-run time would let a delayed/retried webhook
-    // move statement cash across a period boundary.
-    settledAt = null,
-    source = 'unknown',
-  } = settlement;
-
-  if (!Number.isFinite(amountCents)) throw new Error('settleStatementPaid: numeric amountCents required');
+  const s = { ...DEFAULT_SETTLEMENT, ...settlement };
+  if (!Number.isFinite(s.amountCents)) throw new Error('settleStatementPaid: numeric amountCents required');
 
   // Guard BEFORE mutating payer_statements (B-34): lock and verify every
   // attached non-void child invoice is settleable and not held.
@@ -217,9 +219,9 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   await database('payer_statements').where({ id: statementId }).update({
     status: 'paid',
     paid_at: paidAt,
-    payment_method: paymentMethod,
-    stripe_charge_id: stripeChargeId || stmt.stripe_charge_id || null,
-    stripe_payment_intent_id: stripePaymentIntentId || stmt.stripe_payment_intent_id || null,
+    payment_method: s.paymentMethod,
+    stripe_charge_id: s.stripeChargeId || stmt.stripe_charge_id || null,
+    stripe_payment_intent_id: s.stripePaymentIntentId || stmt.stripe_payment_intent_id || null,
     updated_at: paidAt,
   });
 
@@ -235,25 +237,9 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     throw err;
   }
 
-  await upsertStatementPaymentRecord(database, {
-    statementId,
-    stmt,
-    stripePaymentIntentId,
-    stripeChargeId,
-    amountCents,
-    baseAmountCents,
-    surchargeAmountCents,
-    surchargeRateBps,
-    surchargePolicyVersion,
-    cardFunding,
-    cardBrand,
-    paymentMethod,
-    processor,
-    settledAt,
-    source,
-  });
+  await upsertStatementPaymentRecord(database, { ...s, statementId, stmt });
 
-  logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${source})`);
+  logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${s.paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${s.source})`);
   // The packet children are RETURNED, not enrolled here (local audit r29 P1):
   // both callers settle inside a transaction, and enrollment runs on the root
   // connection — it would read each child's pre-commit `unpaid` status,
