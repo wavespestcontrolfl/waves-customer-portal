@@ -35,7 +35,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const gh = require('./content-astro/github-client');
 const { isEnabled } = require('../config/feature-gates');
-const { CITY_TO_LOCATION } = require('../config/locations');
+const { REVIEW_CITY_TO_LOCATION } = require('../config/locations');
 
 const ASTRO_FILE = 'src/data/entity-profiles.auto.json';
 const SYNC_BRANCH_PREFIX = 'data/entity-profiles-sync-';
@@ -87,8 +87,8 @@ const EXPLICIT_OFFICE_URLS = new Map([
 ]);
 
 const OFFICE_CITY_KEYS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
-const SERVICE_AREA_CITY_PATTERN = Object.keys(CITY_TO_LOCATION || {})
-  .filter((c) => !OFFICE_CITY_KEYS.has(c) && c !== 'lakewood ranch')
+const SERVICE_AREA_CITY_PATTERN = Object.keys(REVIEW_CITY_TO_LOCATION || {})
+  .filter((c) => !OFFICE_CITY_KEYS.has(c))
   .map((c) => c.trim().replace(/\s+/g, '[-_]?'))
   .sort((a, b) => b.length - a.length)
   .join('|');
@@ -108,36 +108,36 @@ function urlHostAndPath(rawUrl) {
 function inferOfficeSlugFromUrl(rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
-  if (NON_OFFICE_CITY_RE && NON_OFFICE_CITY_RE.test(hp.path)) return null;
   const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
   const matches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   if (explicit) {
-    // Reject if the path also mentions a conflicting city.
     if (matches.some((m) => m !== explicit)) return null;
     return explicit;
   }
+  if (NON_OFFICE_CITY_RE && NON_OFFICE_CITY_RE.test(hp.path)) return null;
   return matches.length === 1 ? matches[0] : null;
 }
 
 function officeSlugForRow(location, rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
-  if (NON_OFFICE_CITY_RE && NON_OFFICE_CITY_RE.test(hp.path)) return null;
-  const pathMatches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
+  const pathMatches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   if (pathMatches.length > 1) return null;
 
-  if (location && location !== 'default') {
-    const stored = LOCATION_TO_OFFICE_SLUG[location] || null;
-    if (!stored) return null;
-    if (explicit && explicit !== stored) return null;
+  const stored = location && location !== 'default' ? LOCATION_TO_OFFICE_SLUG[location] || null : null;
+  if (location && location !== 'default' && !stored) return null;
+
+  if (explicit) {
+    if (pathMatches.some((m) => m !== explicit)) return null;
+    if (stored && stored !== explicit) return null;
+    return explicit;
+  }
+  if (NON_OFFICE_CITY_RE && NON_OFFICE_CITY_RE.test(hp.path)) return null;
+
+  if (stored) {
     if (pathMatches.length === 1 && pathMatches[0] !== stored) return null;
-    // The signup runner writes `bradenton` as its default fallback, so an
-    // unmapped URL (e.g. a Lakewood Ranch HQ listing) with stored `bradenton`
-    // must still have explicit office evidence in the URL or reviewed map.
-    if (stored === 'bradenton-fl' && explicit !== 'bradenton-fl' && pathMatches[0] !== 'bradenton-fl') {
-      return null;
-    }
+    if (stored === 'bradenton-fl' && pathMatches[0] !== 'bradenton-fl') return null;
     return stored;
   }
   // Unscoped rows (location null/'default') must unambiguously name ONE office

@@ -104,6 +104,8 @@ describe('getVerifiedProfilesByOffice', () => {
       { live_url: 'https://citysquares.com/b/waves-pest-control-englewood-1234', location: 'venice' },
       { live_url: 'https://citysquares.com/b/waves-pest-control-north-port-1234', location: 'venice' },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-north-venice-fl/', location: null },
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-south-venice-fl/', location: null },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-lakewood-ranch-99999', location: 'sarasota' },
       { live_url: 'https://sub.reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-bradenton-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota/posts/123', location: 'sarasota' },
