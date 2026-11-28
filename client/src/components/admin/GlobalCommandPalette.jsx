@@ -2122,6 +2122,7 @@ function AttachmentStrip({ attachments, onRemove, border, padded = true }) {
           />
           <button
             type="button"
+            className="admin-palette-attachment-remove"
             onClick={() => onRemove(i)}
             title="Remove"
             aria-label={`Remove ${a.name}`}

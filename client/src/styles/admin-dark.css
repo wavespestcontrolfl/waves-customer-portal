@@ -25,8 +25,11 @@
   html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-200, .bg-slate-200, .bg-gray-200) {
     background-color: #2b3038;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.bg-white\/95, .bg-white\/90, .bg-white\/80, .bg-zinc-50\/80) {
+  html.admin-app[data-admin-theme="dark"] :is(.bg-surface-page\/95, .bg-white\/95, .bg-white\/90, .bg-white\/85, .bg-white\/80, .bg-white\/70) {
     background-color: rgba(24, 27, 31, 0.94);
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-50\/80, .bg-zinc-50\/60, .bg-zinc-50\/50, .bg-zinc-100\/80, .bg-zinc-100\/60) {
+    background-color: rgba(20, 23, 26, 0.88);
   }
 
   /* Hover / Active / Disabled states */
@@ -48,7 +51,7 @@
     background-color: rgba(0, 0, 0, 0.68);
   }
 
-  /* Switch thumb stays crisp dark on light-inverted checked track, light on unchecked track */
+  /* Switch & Radio high-contrast checked states */
   html.admin-app[data-admin-theme="dark"] [role="switch"][aria-checked="true"] > span {
     background-color: #111315;
   }
@@ -56,6 +59,12 @@
     background-color: #3d4450;
   }
   html.admin-app[data-admin-theme="dark"] [role="switch"][aria-checked="false"] > span {
+    background-color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] input[type="radio"]:checked {
+    border-color: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] input[type="radio"]:checked::after {
     background-color: #f4f5f6;
   }
 
@@ -285,5 +294,9 @@
   }
   html.admin-app[data-admin-theme="dark"] :is(.admin-palette-dialog, [role="dialog"][aria-label="Notifications"]:not([data-glass])) :is([style*="color: rgb(82, 82, 91)"], [style*="color: rgb(100, 116, 139)"], [style*="color: rgb(113, 113, 122)"], [style*="color: rgb(161, 161, 170)"]) {
     color: #b4bac4 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .admin-palette-attachment-remove {
+    background-color: rgba(24, 27, 31, 0.92) !important;
+    color: #f4f5f6 !important;
   }
 }

@@ -109,6 +109,9 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     if (stored && pending) {
       base = mergePendingPreferences(stored, pending);
     }
+    if (stored && user?.id && unsavedDarkModeByAccount.has(user.id)) {
+      base = { ...base, darkMode: unsavedDarkModeByAccount.get(user.id) };
+    }
     const next = update(base);
     let saved = false;
     if (user?.id) {

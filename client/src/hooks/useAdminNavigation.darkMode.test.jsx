@@ -105,6 +105,11 @@ describe('Admin dark mode preference', () => {
       expect(navigation.darkMode).toBe(true);
       expect(document.documentElement.dataset.adminTheme).toBe('dark');
 
+      // Toggling another preference (like a menu group) after remount keeps unsaved dark mode
+      act(() => { navigation.toggleGroup(navigation.groups[0].id); });
+      expect(navigation.darkMode).toBe(true);
+      expect(document.documentElement.dataset.adminTheme).toBe('dark');
+
       // Does not leak to a different account
       cleanup();
       mount({ id: 'acct-unsaved-2', role: 'admin' });
