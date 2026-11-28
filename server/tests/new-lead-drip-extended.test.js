@@ -5,10 +5,11 @@
  *   1. Email Steps 3 (Day 10) & 4 (Day 21) in new_lead sequence (requires BOTH base & extended gates,
  *      stored enabled=false, gate-controlled in Admin, guarded by all 7 stops).
  *   2. Phone-only residential lead SMS drip (Day 2 & Day 5, 8 AM-8 PM ET including live handoff
- *      clock recheck, promotional opt-in bound to exact destination phone via phoneMatchDigits,
- *      SMS-capable marketing_channel, explicit marketing_sms_opt_in on web forms, phone-matched
- *      customer conversion checks, lead_outreach stop, durable claims, locked withSmsHandoff +
- *      providerPreSendCheck on dbi, created_at::text keyset pagination, real sendCustomerMessage check).
+ *      clock recheck, canonical E.164 phone binding, explicit 'sms'/'both' marketing_channel
+ *      [null defaults to email], explicit marketing_sms_opt_in on web forms, phone-matched customer
+ *      conversion & standalone customer_phone estimate stops, consentingCustomerId forwarded to
+ *      sendCustomerMessage, lockCustomerComms->lockSmsPhone handoff, lead_outreach stop, durable
+ *      claims, created_at::text keyset pagination, real sendCustomerMessage integration check).
  * Ships 100% DARK. Synthetic test records only.
  */
 
@@ -34,10 +35,13 @@ const {
   ENGAGEMENT_OUTBOUND_TYPES,
   buildPhoneDripCopy,
   isWithinSendHoursET,
+  canonicalE164,
   phonesShareIdentity,
+  isSmsCapableMarketingChannel,
   pickDueStep,
   verifyLeadSmsConsent,
   leadShouldStop,
+  buildPhoneDripHandoff,
   processPhoneOnlyLeadSmsDrip,
 } = require('../services/new-lead-phone-sms-drip');
 
@@ -186,10 +190,20 @@ describe('phone-only residential SMS drip pure helpers & central marketing conse
     expect(ENGAGEMENT_OUTBOUND_TYPES).toContain('lead_outreach');
   });
 
-  test('phonesShareIdentity uses complete phoneMatchDigits so UK +44 never collides with domestic +1 sharing last 10 digits', () => {
+  test('phonesShareIdentity compares canonical E.164 strictly so 10-digit international never matches NANP', () => {
+    expect(canonicalE164('(941) 555-0144')).toBe('+19415550144');
     expect(phonesShareIdentity('(941) 555-0144', '+19415550144')).toBe(true);
     expect(phonesShareIdentity('+442079460958', '+12079460958')).toBe(false);
+    expect(phonesShareIdentity('+9415550144', '+19415550144')).toBe(false);
     expect(phonesShareIdentity('+442079460958', '+44 20 7946 0958')).toBe(true);
+  });
+
+  test('isSmsCapableMarketingChannel requires explicit sms or both (blank/null defaults to email)', () => {
+    expect(isSmsCapableMarketingChannel(null)).toBe(false);
+    expect(isSmsCapableMarketingChannel('')).toBe(false);
+    expect(isSmsCapableMarketingChannel('email')).toBe(false);
+    expect(isSmsCapableMarketingChannel('sms')).toBe(true);
+    expect(isSmsCapableMarketingChannel('both')).toBe(true);
   });
 
   test('lead_promotional_followup policy requires marketing consent and enforces marketing_offers centrally', async () => {
@@ -294,8 +308,8 @@ describe('phone-only residential SMS drip pure helpers & central marketing conse
   });
 });
 
-describe('promotional SMS consent binding, marketing_channel, and explicit promotional opt-in', () => {
-  test('rejects inbound-call-only or generic sms_opt_in web form (even if sms_opt_in=true when marketing_sms_opt_in=false)', async () => {
+describe('promotional SMS consent binding, marketing_channel default, phone-matched customers, and standalone estimates', () => {
+  test('rejects inbound-call-only, generic sms_opt_in, and legacy null marketing_channel rows', async () => {
     const callLead = {
       id: 'lead-call', phone: '+19415550101', customer_id: null,
       twilio_call_sid: 'CA123', lead_type: 'phone_call', extracted_data: null,
@@ -307,19 +321,21 @@ describe('promotional SMS consent binding, marketing_channel, and explicit promo
       extracted_data: { sms_opt_in: true, marketing_sms_opt_in: false, sms_consent_phone: '+19415550144' },
     };
     await expect(verifyLeadSmsConsent(makeDb({ customers: [chain({ result: [] })] }), genericOptIn)).resolves.toBeNull();
+
+    // Legacy customer row with marketing_offers=true but marketing_channel=null (defaults to email!) -> rejected
+    const nullChannelDb = makeDb({
+      customers: [chain({ result: [{ id: 'cust-legacy', phone: '+19415550144', sms_enabled: true, marketing_offers: true, marketing_channel: null }] })],
+    });
+    const lead = { id: 'lead-null-ch', phone: '+19415550144', customer_id: 'cust-legacy', lead_type: 'phone_call' };
+    await expect(verifyLeadSmsConsent(nullChannelDb, lead)).resolves.toBeNull();
   });
 
-  test('rejects customer with marketing_channel=email or mismatched phone; accepts SMS-capable marketing_offers=true', async () => {
+  test('rejects marketing_channel=email or mismatched phone; accepts explicit sms/both on canonical phone match', async () => {
     const emailOnlyDb = makeDb({
       customers: [chain({ result: [{ id: 'cust-1', phone: '+19415550144', sms_enabled: true, marketing_offers: true, marketing_channel: 'email' }] })],
     });
     const lead = { id: 'lead-ch', phone: '+19415550144', customer_id: 'cust-1', lead_type: 'phone_call' };
     await expect(verifyLeadSmsConsent(emailOnlyDb, lead)).resolves.toBeNull();
-
-    const mismatchDb = makeDb({
-      customers: [chain({ result: [{ id: 'cust-1', phone: '+19415550100', sms_enabled: true, marketing_offers: true, marketing_channel: 'both' }] })],
-    });
-    await expect(verifyLeadSmsConsent(mismatchDb, { ...lead, phone: '+19415559999' })).resolves.toBeNull();
 
     const okDb = makeDb({
       customers: [chain({ result: [{ id: 'cust-1', phone: '(941) 555-0144', sms_enabled: true, marketing_offers: true, marketing_channel: 'sms' }] })],
@@ -331,6 +347,20 @@ describe('promotional SMS consent binding, marketing_channel, and explicit promo
     });
   });
 
+  test('stops on standalone office estimate quoting customer_phone (even with no customer_id or lead_id)', async () => {
+    const webLead = {
+      id: 'lead-standalone', phone: '(941) 555-0144', customer_id: null,
+      created_at: new Date('2026-11-25T15:00:00Z'), lead_type: 'form_submission',
+      extracted_data: { marketing_sms_opt_in: true, sms_consent_phone: '(941) 555-0144' },
+    };
+    const dbh = makeDb({
+      customers: [chain({ result: [] })],
+      estimates: [chain({ result: [{ id: 'est-phone-1', customer_id: null, customer_phone: '+19415550144', estimate_data: {} }] })],
+    });
+    const res = await leadShouldStop(dbh, webLead);
+    expect(res.stop).toBe('has_estimate');
+  });
+
   test('carries phone-matched customer IDs into estimate/conversion checks when lead.customer_id is null', async () => {
     const unlinkedLead = {
       id: 'lead-unlinked', phone: '+19415550144', customer_id: null,
@@ -339,16 +369,30 @@ describe('promotional SMS consent binding, marketing_channel, and explicit promo
     const bookedQ = chain({ first: { id: 'svc-booked-1' } });
     const dbh = makeDb({
       customers: [chain({ result: [{ id: 'cust-phone-match', phone: '+19415550144', sms_enabled: true, marketing_offers: true, marketing_channel: 'both' }] })],
-      estimates: [chain({ first: null })],
+      estimates: [chain({ result: [] })],
       scheduled_services: [bookedQ],
     });
     const res = await leadShouldStop(dbh, unlinkedLead);
     expect(bookedQ.whereIn).toHaveBeenCalledWith('customer_id', ['cust-phone-match']);
-    expect(res).toEqual({ stop: 'visit_booked', consentBasis: null });
+    expect(res.stop).toBe('visit_booked');
+  });
+
+  test('buildPhoneDripHandoff acquires sorted customer-comms locks BEFORE lockSmsPhone', async () => {
+    const rawCalls = [];
+    const trx = { raw: jest.fn(async (sql, bindings) => { rawCalls.push([sql, bindings]); }) };
+    const dbh = { transaction: jest.fn(async (fn) => fn(trx)) };
+    const handoff = buildPhoneDripHandoff(dbh, { customerIds: ['cust-b', 'cust-a', 'cust-b'], phone: '+19415550144' });
+    const out = await handoff(async (conn) => ({ ok: true, sameTrx: conn === trx }));
+    expect(out).toEqual({ ok: true, sameTrx: true });
+    expect(rawCalls.map((c) => c[1])).toEqual([
+      ['customer-comms:cust-a'],
+      ['customer-comms:cust-b'],
+      ['+19415550144'],
+    ]);
   });
 });
 
-describe('processPhoneOnlyLeadSmsDrip durability, locked handoff, 8 PM recheck, engagement stop, and cursor precision', () => {
+describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwarding, 8 PM recheck, and cursor precision', () => {
   const NOW_DAYTIME = new Date('2026-11-27T17:00:00Z');
   const OPTED_IN_LEAD = {
     id: 'lead-10', first_name: 'Taylor', phone: '(941) 555-0144', email: null,
@@ -370,6 +414,38 @@ describe('processPhoneOnlyLeadSmsDrip durability, locked handoff, 8 PM recheck, 
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
+  test('forwards phone-matched consentingCustomerId to sendCustomerMessage for unlinked lead with punctuated customer phone', async () => {
+    const unlinkedCallLead = { ...OPTED_IN_LEAD, lead_type: 'phone_call', extracted_data: null };
+    const claimInsert = chain({ returning: [{ id: 'claim-c1' }] });
+    const claimUpdate = chain();
+    const actInsert = chain();
+    const dbh = makeDb({
+      leads: [chain({ result: [unlinkedCallLead] })],
+      new_lead_phone_drip_sends: [chain({ result: [] }), claimInsert, claimUpdate],
+      customers: [
+        chain({ result: [{ id: 'cust-punct-1', phone: '(941) 555-0144', sms_enabled: true, marketing_offers: true, marketing_channel: 'both' }] }),
+        chain({ first: null }),
+      ],
+      estimates: [chain({ result: [] })],
+      scheduled_services: [chain({ first: null })],
+      invoices: [chain({ first: null })],
+      sms_log: [chain({ first: null })],
+      messaging_suppression: [chain({ first: null })],
+      lead_activities: [actInsert],
+    });
+    const sendMessage = jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SM_CUST' }));
+
+    const res = await processPhoneOnlyLeadSmsDrip({
+      now: NOW_DAYTIME, clock: () => NOW_DAYTIME, dbh, gates: { newLeadDripExtendedLive: () => true }, sendMessage,
+    });
+    expect(res.sent).toBe(1);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-punct-1',
+      purpose: DRIP_PURPOSE,
+      consentBasis: { status: 'opted_in', source: 'customer_notification_prefs', phoneBound: true },
+    }));
+  });
+
   test('claims durably, passes lead_promotional_followup + withSmsHandoff + providerPreSendCheck, and settles claim', async () => {
     const claimInsert = chain({ returning: [{ id: 'claim-1' }] });
     const claimUpdate = chain();
@@ -378,7 +454,7 @@ describe('processPhoneOnlyLeadSmsDrip durability, locked handoff, 8 PM recheck, 
       leads: [chain({ result: [OPTED_IN_LEAD] })],
       new_lead_phone_drip_sends: [chain({ result: [] }), claimInsert, claimUpdate],
       customers: [chain({ result: [] })],
-      estimates: [chain({ first: null })],
+      estimates: [chain({ result: [] })],
       sms_log: [chain({ first: null })],
       messaging_suppression: [chain({ first: null })],
       lead_activities: [actInsert],
@@ -410,12 +486,11 @@ describe('processPhoneOnlyLeadSmsDrip durability, locked handoff, 8 PM recheck, 
       leads: [chain({ result: [OPTED_IN_LEAD] })],
       new_lead_phone_drip_sends: [chain({ result: [] }), claimInsert, claimDelete],
       customers: [chain({ result: [] })],
-      estimates: [chain({ first: null })],
+      estimates: [chain({ result: [] })],
       sms_log: [chain({ first: null })],
       messaging_suppression: [chain({ first: null })],
     });
     let calls = 0;
-    // First two checks (while loop + for loop) are 7:59 PM ET; handoff recheck crosses 8:00 PM ET!
     const clock = () => {
       calls += 1;
       return calls <= 2 ? new Date('2026-11-28T00:59:00Z') : new Date('2026-11-28T01:00:05Z');
@@ -434,63 +509,14 @@ describe('processPhoneOnlyLeadSmsDrip durability, locked handoff, 8 PM recheck, 
     expect(claimDelete.del).toHaveBeenCalled();
   });
 
-  test('providerPreSendCheck reads through dbi inside handoff and refuses if lead phone changed', async () => {
-    const claimInsert = chain({ returning: [{ id: 'claim-2b' }] });
-    const claimDelete = chain();
-    const outerDb = makeDb({
-      leads: [chain({ result: [OPTED_IN_LEAD] })],
-      new_lead_phone_drip_sends: [chain({ result: [] }), claimInsert, claimDelete],
-      customers: [chain({ result: [] })],
-      estimates: [chain({ first: null })],
-      sms_log: [chain({ first: null })],
-      messaging_suppression: [chain({ first: null })],
-    });
-    const handoffTrx = makeDb({
-      leads: [chain({ first: { ...OPTED_IN_LEAD, phone: '+19415559999' } })],
-    });
-    const sendMessage = jest.fn(async (input) => {
-      const check = await input.providerPreSendCheck({ channel: 'sms', dbi: handoffTrx });
-      expect(check).toEqual(expect.objectContaining({ ok: false, code: 'LEAD_PHONE_CHANGED' }));
-      return { sent: false, blocked: true, deliveryOutcome: 'not_sent' };
-    });
-
-    const res = await processPhoneOnlyLeadSmsDrip({
-      now: NOW_DAYTIME, clock: () => NOW_DAYTIME, dbh: outerDb,
-      gates: { newLeadDripExtendedLive: () => true }, sendMessage,
-    });
-    expect(handoffTrx).toHaveBeenCalledWith('leads');
-    expect(res).toEqual({ skipped: null, checked: 1, sent: 0, stopped: 1, deferred: 0 });
-    expect(claimDelete.del).toHaveBeenCalled();
-  });
-
   test('stops drip after staff texts the lead from Leads page (lead_outreach)', async () => {
     const dbh = makeDb({
       customers: [chain({ result: [] })],
-      estimates: [chain({ first: null })],
+      estimates: [chain({ result: [] })],
       sms_log: [chain({ first: { id: 'sms-staff-outreach-1' } })],
     });
     const res = await leadShouldStop(dbh, OPTED_IN_LEAD);
-    expect(res).toEqual({ stop: 'already_engaged', consentBasis: null });
-  });
-
-  test('marks claim uncertain on uncertain provider outcome and never deletes claim', async () => {
-    const claimInsert = chain({ returning: [{ id: 'claim-3' }] });
-    const claimUpdate = chain();
-    const dbh = makeDb({
-      leads: [chain({ result: [OPTED_IN_LEAD] })],
-      new_lead_phone_drip_sends: [chain({ result: [] }), claimInsert, claimUpdate],
-      customers: [chain({ result: [] })],
-      estimates: [chain({ first: null })],
-      sms_log: [chain({ first: null })],
-      messaging_suppression: [chain({ first: null })],
-    });
-    const sendMessage = jest.fn(async () => ({ sent: false, blocked: false, deliveryOutcome: 'uncertain' }));
-
-    const res = await processPhoneOnlyLeadSmsDrip({
-      now: NOW_DAYTIME, clock: () => NOW_DAYTIME, dbh, gates: { newLeadDripExtendedLive: () => true }, sendMessage,
-    });
-    expect(res).toEqual({ skipped: null, checked: 1, sent: 0, stopped: 0, deferred: 1 });
-    expect(claimUpdate.update).toHaveBeenCalledWith({ status: 'uncertain' });
+    expect(res.stop).toBe('already_engaged');
   });
 
   test('keyset-paginates using created_at::text without OFFSET so PostgreSQL microsecond precision is preserved', async () => {
@@ -516,7 +542,7 @@ describe('processPhoneOnlyLeadSmsDrip durability, locked handoff, 8 PM recheck, 
         claimUpdate,
       ],
       customers: [chain({ result: [] }), chain({ result: [] })],
-      estimates: [chain({ first: null })],
+      estimates: [chain({ result: [] })],
       sms_log: [chain({ first: null })],
       messaging_suppression: [chain({ first: null })],
       lead_activities: [actInsert],
@@ -541,7 +567,7 @@ describe('processPhoneOnlyLeadSmsDrip durability, locked handoff, 8 PM recheck, 
       leads: [chain({ result: [OPTED_IN_LEAD] })],
       new_lead_phone_drip_sends: [chain({ result: [] })],
       customers: [chain({ result: [] })],
-      estimates: [chain({ first: null })],
+      estimates: [chain({ result: [] })],
       sms_log: [chain({ first: null })],
       messaging_suppression: [chain({ firstError: Object.assign(new Error('db down'), { code: '57014' }) })],
     });

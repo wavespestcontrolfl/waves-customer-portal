@@ -9,17 +9,20 @@
  *
  * Audience: unquoted open residential leads (`status IN ('new', 'contacted')`, `is_commercial IS NOT TRUE`)
  * with a phone number, NO email address, explicit promotional SMS opt-in bound to that exact destination
- * phone (complete phone identity via `phoneMatchDigits`, SMS-capable `marketing_channel`, or explicit
- * web-form `marketing_sms_opt_in === true` bound to submitted phone), no explicit marketing opt-out,
- * no linked/created/sent estimate (including any phone-matched customer), no booked visit, not a paying
+ * phone (canonical E.164 equality + complete `phoneMatchDigits`, explicit `'sms'` or `'both'`
+ * `marketing_channel` — null/blank defaults to email — or explicit web-form `marketing_sms_opt_in === true`
+ * bound to submitted phone), no explicit marketing opt-out, no linked/created/sent estimate (including
+ * phone-matched customers and standalone `customer_phone` estimates), no booked visit, not a paying
  * customer, and no prior SMS engagement (including Leads-page `lead_outreach`).
  *
  * Durability & safety:
  *   - Durable pre-dispatch claim in `new_lead_phone_drip_sends (lead_id, step)` before calling Twilio
  *     (deleted ONLY on definitive `deliveryOutcome === 'not_sent'`; `'uncertain'` stays locked).
- *   - Holds the canonical phone lock (`withSmsHandoff`) through final suppression/consent/stop/window
- *     rechecks (`providerPreSendCheck` reading through `dbi` with current clock) and Twilio dispatch.
- *   - Uses `purpose: 'lead_promotional_followup'` (`requireConsent: 'marketing'`, `prefsColumn: 'marketing_offers'`).
+ *   - Holds `lockCustomerComms` (sorted matched customer IDs) then `lockSmsPhone` inside `withSmsHandoff`
+ *     through final suppression/consent/stop/window rechecks (`providerPreSendCheck` reading through `dbi`
+ *     with current clock) and Twilio dispatch.
+ *   - Uses `purpose: 'lead_promotional_followup'` (`requireConsent: 'marketing'`, `prefsColumn: 'marketing_offers'`)
+ *     and passes the consenting customer ID (if any) so `loadContactState` finds formatted customer phones.
  *   - Keyset-paginates using PostgreSQL `created_at::text` so microseconds are never truncated.
  *   - Brand copy = "Waves" ONLY, zero owner name, approved "per application" unit, STOP on Touch 1, 8 AM–8 PM ET.
  */
@@ -28,7 +31,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
 const { toE164, phoneMatchDigits } = require('../utils/phone');
-const { lockSmsPhone, withSmsConsentLock } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, lockSmsPhone } = require('../utils/customer-comms-lock');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { NON_LIVE_APPOINTMENT_STATUSES } = require('./estimate-conversion-guard');
 const { HUMAN_REPLY_TYPES, SENT_STATUSES } = require('./sms-suggest-mode');
@@ -76,16 +79,29 @@ function isEligibleUnquotedLeadRow(lead) {
   return Boolean(String(lead.phone || '').trim()) && !String(lead.email || '').trim();
 }
 
-function phonesShareIdentity(phoneA, phoneB) {
-  const a = phoneMatchDigits(phoneA);
-  const b = phoneMatchDigits(phoneB);
-  if (!a.length || !b.length) return false;
-  return a.some((digits) => b.includes(digits));
+function canonicalE164(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  const e164 = toE164(text);
+  if (!/^\+[1-9]\d{7,14}$/.test(e164 || '')) return null;
+  const digits = text.replace(/\D/g, '');
+  if (!text.startsWith('+') && !/^(?:1)?\d{10}$/.test(digits)) return null;
+  return e164;
 }
 
+function phonesShareIdentity(phoneA, phoneB) {
+  const a = canonicalE164(phoneA);
+  const b = canonicalE164(phoneB);
+  return Boolean(a && b && a === b);
+}
+
+/**
+ * Portal treats a blank/null `marketing_channel` as email-only default.
+ * Customer-based promotional SMS requires explicit `'sms'` or `'both'`.
+ */
 function isSmsCapableMarketingChannel(channel) {
   const normalized = String(channel || '').trim().toLowerCase();
-  return !normalized || normalized === 'sms' || normalized === 'both';
+  return normalized === 'sms' || normalized === 'both';
 }
 
 function pickDueStep(lead, sentClaims, now = new Date()) {
@@ -117,23 +133,17 @@ function parseExtractedData(raw) {
 
 /**
  * Loads all active customer/notification_prefs rows linked by `lead.customer_id` OR matching
- * the lead's exact destination phone identity (`phoneMatchDigits`), evaluates promotional SMS
- * consent, and returns `{ consentBasis, matchedCustomerIds }`.
- *
- * Rules:
- *   - Any linked or phone-matched customer with `sms_enabled=false`, `marketing_offers=false`,
- *     or `marketing_channel='email'` blocks promotional SMS immediately.
- *   - Customer opt-in requires `marketing_offers === true`, SMS-capable `marketing_channel`,
- *     and complete phone identity match against `lead.phone`.
- *   - Web-form opt-in requires `extracted.marketing_sms_opt_in === true` (generic transactional
- *     `sms_opt_in` does NOT qualify and an explicit `marketing_sms_opt_in === false` never passes)
- *     bound to the original submitted phone matching `lead.phone`.
+ * the lead's exact destination phone identity, evaluates promotional SMS consent, and returns
+ * `{ consentBasis, consentingCustomerId, matchedCustomerIds }`.
  */
 async function resolveLeadPromotionalConsent(conn, lead, matchDigitsInput = null) {
+  const leadE164 = canonicalE164(lead?.phone);
   const matchDigits = Array.isArray(matchDigitsInput) && matchDigitsInput.length
     ? matchDigitsInput
     : phoneMatchDigits(lead?.phone);
-  if (!matchDigits.length) return { consentBasis: null, matchedCustomerIds: [] };
+  if (!leadE164 || !matchDigits.length) {
+    return { consentBasis: null, consentingCustomerId: null, matchedCustomerIds: [] };
+  }
 
   const prefRows = await conn('customers as c')
     .leftJoin('notification_prefs as np', 'np.customer_id', 'c.id')
@@ -144,20 +154,23 @@ async function resolveLeadPromotionalConsent(conn, lead, matchDigitsInput = null
     })
     .select('c.id', 'c.phone', 'np.sms_enabled', 'np.marketing_offers', 'np.marketing_channel');
 
-  const rows = Array.isArray(prefRows) ? prefRows : [];
+  const rows = (Array.isArray(prefRows) ? prefRows : []).filter((r) => (
+    (lead.customer_id && String(r.id) === String(lead.customer_id)) || phonesShareIdentity(r.phone, leadE164)
+  ));
   const matchedCustomerIds = [...new Set([lead.customer_id, ...rows.map((r) => r.id)].filter(Boolean))];
-  if (rows.some((r) => r.sms_enabled === false || r.marketing_offers === false || !isSmsCapableMarketingChannel(r.marketing_channel))) {
-    return { consentBasis: null, matchedCustomerIds };
+  if (rows.some((r) => r.sms_enabled === false || r.marketing_offers === false || String(r.marketing_channel || '').trim().toLowerCase() === 'email')) {
+    return { consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
   }
 
   const matchedOptedInCustomer = rows.find((r) => (
     r.marketing_offers === true
     && isSmsCapableMarketingChannel(r.marketing_channel)
-    && phonesShareIdentity(r.phone, lead.phone)
+    && phonesShareIdentity(r.phone, leadE164)
   ));
   if (matchedOptedInCustomer) {
     return {
       consentBasis: { status: 'opted_in', source: 'customer_notification_prefs', phoneBound: true },
+      consentingCustomerId: matchedOptedInCustomer.id,
       matchedCustomerIds,
     };
   }
@@ -165,14 +178,15 @@ async function resolveLeadPromotionalConsent(conn, lead, matchDigitsInput = null
   const extracted = parseExtractedData(lead.extracted_data);
   const webPromoOptIn = CONSENTED_WEB_LEAD_TYPES.has(lead.lead_type) && extracted.marketing_sms_opt_in === true;
   const submittedPhone = extracted.sms_consent_phone || extracted.submitted_phone || extracted.phone || null;
-  if (webPromoOptIn && submittedPhone && phonesShareIdentity(submittedPhone, lead.phone)) {
+  if (webPromoOptIn && submittedPhone && phonesShareIdentity(submittedPhone, leadE164)) {
     return {
       consentBasis: { status: 'opted_in', source: 'web_form_sms_opt_in', phoneBound: true },
+      consentingCustomerId: null,
       matchedCustomerIds,
     };
   }
 
-  return { consentBasis: null, matchedCustomerIds };
+  return { consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
 }
 
 async function verifyLeadSmsConsent(conn, lead, matchDigitsInput = null) {
@@ -180,17 +194,30 @@ async function verifyLeadSmsConsent(conn, lead, matchDigitsInput = null) {
   return consentBasis;
 }
 
-async function hasBlockingEstimate(conn, lead, customerIds) {
-  const est = await conn('estimates')
+async function hasBlockingEstimate(conn, lead, customerIds, matchDigits) {
+  const leadE164 = canonicalE164(lead?.phone);
+  const rows = await conn('estimates')
     .where((w) => {
       w.whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)]);
       if (customerIds.length) {
         w.orWhere((c) => c.whereIn('customer_id', customerIds)
           .andWhere((when) => when.where('created_at', '>=', lead.created_at).orWhere('sent_at', '>=', lead.created_at)));
       }
+      if (matchDigits.length) {
+        w.orWhere((p) => p.whereRaw("REGEXP_REPLACE(COALESCE(customer_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits])
+          .andWhere((when) => when.where('created_at', '>=', lead.created_at).orWhere('sent_at', '>=', lead.created_at)));
+      }
     })
-    .first('id');
-  return Boolean(est);
+    .select('id', 'customer_id', 'customer_phone', 'estimate_data');
+
+  const list = Array.isArray(rows) ? rows : [];
+  return list.some((est) => {
+    const linkedLeadId = est.estimate_data && typeof est.estimate_data === 'object' ? est.estimate_data.lead_id : null;
+    if (String(linkedLeadId || '') === String(lead.id)) return true;
+    if (est.customer_id && customerIds.some((cid) => String(cid) === String(est.customer_id))) return true;
+    if (!est.customer_phone && !est.customer_id && !est.estimate_data) return true;
+    return Boolean(leadE164 && est.customer_phone && phonesShareIdentity(est.customer_phone, leadE164));
+  });
 }
 
 async function hasCustomerConversion(conn, customerIds) {
@@ -210,19 +237,26 @@ async function hasCustomerConversion(conn, customerIds) {
 }
 
 async function leadShouldStop(conn, lead) {
+  const leadE164 = canonicalE164(lead?.phone);
   const matchDigits = phoneMatchDigits(lead?.phone);
-  if (!matchDigits.length) return { stop: 'invalid_phone', consentBasis: null };
+  if (!leadE164 || !matchDigits.length) {
+    return { stop: 'invalid_phone', consentBasis: null, consentingCustomerId: null, matchedCustomerIds: [] };
+  }
 
-  const { consentBasis, matchedCustomerIds } = await resolveLeadPromotionalConsent(conn, lead, matchDigits);
-  if (!consentBasis) return { stop: 'no_recorded_consent', consentBasis: null };
+  const { consentBasis, consentingCustomerId, matchedCustomerIds } = await resolveLeadPromotionalConsent(conn, lead, matchDigits);
+  if (!consentBasis) {
+    return { stop: 'no_recorded_consent', consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
+  }
 
-  if (await hasBlockingEstimate(conn, lead, matchedCustomerIds)) return { stop: 'has_estimate', consentBasis: null };
+  if (await hasBlockingEstimate(conn, lead, matchedCustomerIds, matchDigits)) {
+    return { stop: 'has_estimate', consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
+  }
 
   const converted = await hasCustomerConversion(conn, matchedCustomerIds);
-  if (converted) return { stop: converted, consentBasis: null };
+  if (converted) {
+    return { stop: converted, consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
+  }
 
-  // Match complete phone identity (`phoneMatchDigits`) so domestic and international numbers
-  // sharing a last-10 suffix never collide and international replies are never missed.
   const recentSms = await conn('sms_log')
     .where('created_at', '>=', lead.created_at)
     .where((w) => {
@@ -239,16 +273,20 @@ async function leadShouldStop(conn, lead) {
           .whereIn('status', [...SENT_STATUSES, 'scheduled', 'sending']));
     })
     .first('id');
-  if (recentSms) return { stop: 'already_engaged', consentBasis: null };
+  if (recentSms) {
+    return { stop: 'already_engaged', consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
+  }
 
-  const phoneCandidates = [...new Set([lead.phone, toE164(lead.phone)].filter(Boolean))];
+  const phoneCandidates = [...new Set([lead.phone, leadE164].filter(Boolean))];
   const suppressed = await conn('messaging_suppression')
     .whereIn('phone', phoneCandidates)
     .where({ active: true })
     .first('phone');
-  if (suppressed) return { stop: 'opted_out', consentBasis: null };
+  if (suppressed) {
+    return { stop: 'opted_out', consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
+  }
 
-  return { stop: null, consentBasis };
+  return { stop: null, consentBasis, consentingCustomerId, matchedCustomerIds };
 }
 
 async function claimLeadDripStep(dbh, { leadId, step, destinationPhone, deliveryKey }) {
@@ -288,16 +326,18 @@ async function settleDripClaim(dbh, { claimId, leadId, step, activityType, outco
   await dbh('new_lead_phone_drip_sends').where({ id: claimId }).update({ status: 'uncertain' });
 }
 
-function buildPhoneDripHandoff(dbh, { customerId, phone }) {
-  return (dispatch) => {
-    if (customerId) {
-      return withSmsConsentLock(dbh, { phone, customerId }, dispatch);
-    }
-    return dbh.transaction(async (trx) => {
-      await lockSmsPhone(trx, phone);
-      return dispatch(trx);
-    });
-  };
+/**
+ * Lock order contract (`customer-comms-lock.js`): acquire sorted `customer-comms:<id>`
+ * locks for every linked/phone-matched customer BEFORE `lockSmsPhone`, serializing
+ * against concurrent notification_prefs opt-outs and STOP/START writers.
+ */
+function buildPhoneDripHandoff(dbh, { customerIds = [], phone }) {
+  const sortedIds = [...new Set(customerIds.filter(Boolean).map(String))].sort();
+  return (dispatch) => dbh.transaction(async (trx) => {
+    for (const cid of sortedIds) await lockCustomerComms(trx, cid);
+    await lockSmsPhone(trx, phone);
+    return dispatch(trx);
+  });
 }
 
 function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock }) {
@@ -336,10 +376,11 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender }) {
   const step = pickDueStep(lead, claims, now);
   if (!step) return 'skip';
 
-  const { stop, consentBasis } = await leadShouldStop(dbh, lead);
+  const { stop, consentBasis, consentingCustomerId, matchedCustomerIds } = await leadShouldStop(dbh, lead);
   if (stop) return 'stopped';
 
-  const destinationPhone = toE164(lead.phone) || lead.phone;
+  const destinationPhone = canonicalE164(lead.phone);
+  const effectiveCustomerId = lead.customer_id || consentingCustomerId || undefined;
   const activityType = step === 1 ? STEP_1_ACTIVITY : STEP_2_ACTIVITY;
   const deliveryKey = `${DRIP_ENTRY_POINT}:${lead.id}:step_${step}`;
   const claimId = await claimLeadDripStep(dbh, { leadId: lead.id, step, destinationPhone, deliveryKey });
@@ -353,13 +394,13 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender }) {
       channel: 'sms',
       audience: 'lead',
       purpose: DRIP_PURPOSE,
-      customerId: lead.customer_id || undefined,
+      customerId: effectiveCustomerId,
       leadId: lead.id,
       identityTrustLevel: 'phone_provided_unverified',
       consentBasis,
       entryPoint: DRIP_ENTRY_POINT,
       metadata: { original_message_type: activityType, lead_id: lead.id, drip_step: step, delivery_key: deliveryKey },
-      withSmsHandoff: buildPhoneDripHandoff(dbh, { customerId: lead.customer_id, phone: destinationPhone }),
+      withSmsHandoff: buildPhoneDripHandoff(dbh, { customerIds: matchedCustomerIds, phone: destinationPhone }),
       providerPreSendCheck: buildHandoffPreSendCheck({ dbh, leadId: lead.id, expectedPhone: destinationPhone, step, clock }),
     });
   } catch (err) {
@@ -466,6 +507,7 @@ module.exports = {
   ENGAGEMENT_OUTBOUND_TYPES,
   buildPhoneDripCopy,
   isWithinSendHoursET,
+  canonicalE164,
   phonesShareIdentity,
   isSmsCapableMarketingChannel,
   pickDueStep,

@@ -16,40 +16,33 @@ const db = require('../../../models/db');
 const logger = require('../../logger');
 const { toE164 } = require('../../../utils/phone');
 
+function isLeadOrApplicantTransactional(input, policy) {
+  if (policy.requireConsent !== 'transactional') return false;
+  if (input.audience === 'lead' && input.purpose === 'conversational') return true;
+  return ['lead', 'applicant'].includes(input.audience)
+    && ['transactional_allowed', 'opted_in'].includes(input.consentBasis?.status);
+}
+
+function isVerifiedLeadWebPromoOptIn(input, contactState) {
+  return input.audience === 'lead'
+    && input.purpose === 'lead_promotional_followup'
+    && !contactState?.customer
+    && input.consentBasis?.status === 'opted_in'
+    && input.consentBasis?.source === 'web_form_sms_opt_in'
+    && input.consentBasis?.phoneBound === true;
+}
+
 function resolveLeadOrApplicantNoPrefs(input, policy, contactState) {
-  if (
-    (input.audience === 'lead' || input.audience === 'applicant') &&
-    policy.requireConsent === 'transactional' &&
-    input.consentBasis &&
-    ['transactional_allowed', 'opted_in'].includes(input.consentBasis.status)
-  ) {
-    return { ok: true };
+  if (isLeadOrApplicantTransactional(input, policy)) return { ok: true };
+  if (!isVerifiedLeadWebPromoOptIn(input, contactState)) return null;
+  if (contactState?.suppressionLoaded !== true) {
+    return {
+      ok: false,
+      code: 'CONSENT_LOOKUP_FAILED',
+      reason: 'messaging_suppression state not positively loaded — required before lead promotional consent; retry advised',
+    };
   }
-  if (
-    input.audience === 'lead' &&
-    policy.requireConsent === 'transactional' &&
-    input.purpose === 'conversational'
-  ) {
-    return { ok: true };
-  }
-  if (
-    input.audience === 'lead' &&
-    input.purpose === 'lead_promotional_followup' &&
-    !contactState?.customer &&
-    input.consentBasis?.status === 'opted_in' &&
-    input.consentBasis?.source === 'web_form_sms_opt_in' &&
-    input.consentBasis?.phoneBound === true
-  ) {
-    if (contactState?.suppressionLoaded !== true) {
-      return {
-        ok: false,
-        code: 'CONSENT_LOOKUP_FAILED',
-        reason: 'messaging_suppression state not positively loaded — required before lead promotional consent; retry advised',
-      };
-    }
-    return { ok: true };
-  }
-  return null;
+  return { ok: true };
 }
 
 /**
