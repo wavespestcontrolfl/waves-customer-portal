@@ -116,12 +116,16 @@ function emailPlainText(row) {
   // attribution line) using one shared predicate — only using HTML output when
   // a real quote container was present so bottom/inline replies survive.
   if (html.trim() && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
-    const parsed = require('../../utils/html-to-plain-text').htmlToPlainTextWithMeta(html, {
-      stripQuotes: true,
-      stripSignatures: true,
-      attributionPatterns: HISTORY_HEADERS,
-    });
-    if (parsed.hasQuoteContainer) return parsed.text;
+    try {
+      const parsed = require('../../utils/html-to-plain-text').htmlToPlainTextWithMeta(html, {
+        stripQuotes: true,
+        stripSignatures: true,
+        attributionPatterns: HISTORY_HEADERS,
+      });
+      if (parsed.hasQuoteContainer) return parsed.text;
+    } catch {
+      // Fall back to the existing plain-text part on pathological HTML.
+    }
   }
   if (text.trim()) return text;
   return html.trim() ? require('../newsletter-proof').htmlReplyToText(html) : '';

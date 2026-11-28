@@ -98,12 +98,24 @@ function safeImageUrl(url) {
 
 const BATCH_UNSUBSCRIBE_TOKEN = '{{unsubscribe_url}}';
 
+function isValidUnsubscribeTarget(trimmed) {
+  if (/\s/.test(trimmed)) return false;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return Boolean(parsed.hostname);
+    if (parsed.protocol === 'mailto:') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(parsed.pathname);
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function validatedUnsubscribeUrl(url, { allowAsmToken = false, allowBatchToken = false } = {}) {
   const trimmed = String(url == null ? '' : url).trim();
   if (!trimmed) return null;
   if (allowAsmToken && trimmed === ASM_UNSUBSCRIBE_URL) return trimmed;
   if (allowBatchToken && trimmed === BATCH_UNSUBSCRIBE_TOKEN) return trimmed;
-  return /^(?:https?:\/\/|mailto:)/i.test(trimmed) ? trimmed : null;
+  return isValidUnsubscribeTarget(trimmed) ? trimmed : null;
 }
 
 function safeUnsubscribeHref(url) {

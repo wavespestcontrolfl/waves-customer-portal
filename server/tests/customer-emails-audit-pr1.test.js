@@ -138,6 +138,17 @@ describe('Customer emails audit PR 1 regressions', () => {
     });
     expect(unresolvedTokenUnsub.html).not.toContain('{{missing}}');
     expect(unresolvedTokenUnsub.text).not.toContain('{{missing}}');
+
+    for (const malformed of ['https://', 'mailto:']) {
+      const out = renderTemplate({
+        template: { template_key: 'newsletter.promo', name: 'Promo', mode: 'marketing' },
+        version: { subject: 'Promo', blocks: [{ type: 'paragraph', content: 'Hello' }] },
+        payload: {},
+        unsubscribeUrl: malformed,
+      });
+      expect(out.html).not.toContain(`href="${malformed}"`);
+      expect(out.text).not.toContain(`Unsubscribe: ${malformed}`);
+    }
   });
 
   test('automation-runner passes escaped previewText as preheader and detects darkAwareBody', () => {
@@ -301,6 +312,8 @@ describe('Customer emails audit PR 1 regressions', () => {
         .toBe('Intro\nNext block\n10 20\n30 40');
       expect(htmlToPlainText('<div style="display:none">Secret preheader</div><span hidden>Hidden text</span><p><a href="https://portal.wavespestcontrol.com/app"><img src="badge.png" alt="Download app" /></a></p><img src="banner.png" alt="Spring offer" />'))
         .toBe('Download app (https://portal.wavespestcontrol.com/app)\nSpring offer');
+      const deepHtml = `${'<div>'.repeat(2500)}Deep note${'</div>'.repeat(2500)}`;
+      expect(htmlToPlainText(deepHtml)).toBe('Deep note');
     } finally {
       if (prevPw === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
       else process.env.GOOGLE_SMTP_PASSWORD = prevPw;

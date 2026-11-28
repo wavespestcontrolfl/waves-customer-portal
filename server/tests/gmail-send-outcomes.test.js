@@ -184,4 +184,10 @@ test('emailPlainText preserves a staff reply below an attributed quote container
     body_html: '<div id="yahoo_quoted_12345"><p>Please cancel my Friday visit.</p></div>',
   }));
   expect(yahooOnly).toBe('');
+
+  const keptAboveAttribution = stripQuotedAndSignature(emailPlainText({
+    body_text: 'On Friday I can meet the technician.\nOn Nov 28, Pat wrote:\n> Old question',
+    body_html: '<p>On Friday I can meet the technician.</p><p>On Nov 28, Pat wrote:</p><blockquote><p>Old question</p></blockquote>',
+  }));
+  expect(keptAboveAttribution).toBe('On Friday I can meet the technician.');
 });
