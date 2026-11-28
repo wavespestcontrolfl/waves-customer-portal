@@ -144,11 +144,13 @@ describe('Gross margin target 55% alignment', () => {
       audit_log: [],
     };
     const rows = tables.kpi_targets;
+    let auditSeq = 0;
     const makeKnex = () => {
       const knex = (table) => {
         const list = tables[table];
         let filter = {};
         let nullCols = [];
+        let orderDesc = false;
         const matches = (row) => (
           Object.entries(filter).every(([k, v]) => row[k] === v)
           && nullCols.every((c) => row[c] == null)
@@ -156,9 +158,15 @@ describe('Gross margin target 55% alignment', () => {
         return {
           where(obj) { filter = { ...filter, ...obj }; return this; },
           whereNull(col) { nullCols.push(col); return this; },
-          orderBy() { return this; },
-          async first() { return list.find(matches); },
-          async insert(row) { list.push({ created_at: '2026-11-27T19:00:00Z', ...row }); },
+          orderBy(_col, dir) { orderDesc = String(dir).toLowerCase() === 'desc'; return this; },
+          async first() {
+            const hits = list.filter(matches);
+            return orderDesc ? hits[hits.length - 1] : hits[0];
+          },
+          async insert(row) {
+            auditSeq += 1;
+            list.push({ created_at: `2026-11-27T19:00:${String(auditSeq).padStart(2, '0')}Z`, ...row });
+          },
           async del() {
             for (let i = list.length - 1; i >= 0; i -= 1) {
               if (matches(list[i])) list.splice(i, 1);
@@ -200,14 +208,14 @@ describe('Gross margin target 55% alignment', () => {
     expect(rows[1].amber_band_pct).toBe(10);
     expect(rows.find((r) => r.metric === 'recurring_autopay_pct')).toBeUndefined();
 
-    // A pre-existing recurring_autopay_pct row (not inserted by up()) survives down() even if timestamps match.
-    tables.audit_log.length = 0;
+    // After an earlier up+down left history in audit_log, a later manual row
+    // with identical values skipped by up() MUST survive a subsequent down().
     rows.push({
-      metric: 'recurring_autopay_pct', target: 85, amber_band_pct: 5, lower_is_better: false,
+      metric: 'recurring_autopay_pct', target: 75, amber_band_pct: 10, lower_is_better: false,
       updated_by: 'Adam', updated_at: '2026-09-01T00:00:00Z',
     });
     await recurringAutopayMigration.up(knex);
     await recurringAutopayMigration.down(knex);
-    expect(rows.find((r) => r.metric === 'recurring_autopay_pct')?.target).toBe(85);
+    expect(rows.find((r) => r.metric === 'recurring_autopay_pct')?.target).toBe(75);
   });
 });

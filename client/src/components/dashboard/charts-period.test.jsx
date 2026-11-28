@@ -53,6 +53,17 @@ describe("Period-driven dashboard chart states", () => {
     expect(container.innerHTML).toContain("width: 30%");
   });
 
+  it("handles null rates without throwing", () => {
+    render(
+      <EstimateFunnel
+        funnel={{ sent: 2, viewed: 1, accepted: 1, declined: 0, pending: 1 }}
+        rates={null}
+      />,
+    );
+    expect(screen.getByText("Sent")).toBeInTheDocument();
+    expect(screen.getByText("Accepted")).toBeInTheDocument();
+  });
+
   it("uses period-neutral empty copy for RevenueByCity", () => {
     render(<RevenueByCity cities={[]} total={0} />);
     expect(screen.getByText("No completed-service revenue this period")).toBeInTheDocument();

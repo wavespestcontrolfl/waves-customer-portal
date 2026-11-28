@@ -769,7 +769,7 @@ async function getEstimateFunnel(input) {
     // windows (e.g. Today) include carry-over acceptances from earlier sends.
     stageQuery(sentAtSql('e')).select(
       db.raw('COUNT(*) as c'),
-      db.raw(`COUNT(*) FILTER (WHERE ${countableViewAtSql('e')} IS NOT NULL AND ${countableViewAtSql('e')} < ?) as cohort_viewed`, [bounds.toTs]),
+      db.raw(`COUNT(*) FILTER (WHERE ${countableViewAtSql('e')} >= ${sentAtSql('e')} AND ${countableViewAtSql('e')} < ?) as cohort_viewed`, [bounds.toTs]),
       // Require acceptance/decline within [sentAt, toTs) so neither pre-delivery
       // self-serve decisions nor post-window outcomes distort historical cohorts.
       db.raw(`COUNT(*) FILTER (WHERE e.status = 'accepted' AND e.accepted_at >= ${sentAtSql('e')} AND e.accepted_at < ?) as cohort_accepted`, [bounds.toTs]),

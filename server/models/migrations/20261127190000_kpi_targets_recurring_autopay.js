@@ -9,12 +9,28 @@
 
 const MIGRATION_AUDIT_ACTION = 'migration:kpi_targets_recurring_autopay';
 
+async function recordMarker(knex, metadata) {
+  if (!(await knex.schema.hasTable('audit_log'))) return;
+  await knex('audit_log').insert({
+    actor_type: 'system',
+    action: MIGRATION_AUDIT_ACTION,
+    resource_type: 'kpi_targets',
+    metadata: JSON.stringify(metadata),
+  });
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('kpi_targets'))) return;
   const oldAutopay = await knex('kpi_targets').where({ metric: 'autopay_pct' }).first();
-  if (!oldAutopay) return;
+  if (!oldAutopay) {
+    await recordMarker(knex, { outcome: 'skipped', reason: 'no_source_row' });
+    return;
+  }
   const existing = await knex('kpi_targets').where({ metric: 'recurring_autopay_pct' }).first();
-  if (existing) return;
+  if (existing) {
+    await recordMarker(knex, { outcome: 'skipped', reason: 'target_exists' });
+    return;
+  }
 
   await knex('kpi_targets').insert({
     metric: 'recurring_autopay_pct',
@@ -25,22 +41,16 @@ exports.up = async function up(knex) {
     updated_at: oldAutopay.updated_at,
   });
 
-  if (await knex.schema.hasTable('audit_log')) {
-    await knex('audit_log').insert({
-      actor_type: 'system',
-      action: MIGRATION_AUDIT_ACTION,
-      resource_type: 'kpi_targets',
-      metadata: JSON.stringify({
-        source_metric: 'autopay_pct',
-        target_metric: 'recurring_autopay_pct',
-        target: oldAutopay.target,
-        amber_band_pct: oldAutopay.amber_band_pct,
-        lower_is_better: oldAutopay.lower_is_better,
-        updated_by: oldAutopay.updated_by,
-        updated_at: oldAutopay.updated_at,
-      }),
-    });
-  }
+  await recordMarker(knex, {
+    outcome: 'inserted',
+    source_metric: 'autopay_pct',
+    target_metric: 'recurring_autopay_pct',
+    target: oldAutopay.target,
+    amber_band_pct: oldAutopay.amber_band_pct,
+    lower_is_better: oldAutopay.lower_is_better,
+    updated_by: oldAutopay.updated_by,
+    updated_at: oldAutopay.updated_at,
+  });
 };
 
 exports.down = async function down(knex) {
@@ -54,6 +64,8 @@ exports.down = async function down(knex) {
   if (!marker) return;
 
   const meta = typeof marker.metadata === 'string' ? JSON.parse(marker.metadata) : (marker.metadata || {});
+  if (meta.outcome !== 'inserted') return;
+
   const q = knex('kpi_targets').where({
     metric: 'recurring_autopay_pct',
     target: meta.target,
@@ -64,4 +76,5 @@ exports.down = async function down(knex) {
   if (meta.updated_by == null) q.whereNull('updated_by');
   else q.where({ updated_by: meta.updated_by });
   await q.del();
+  await recordMarker(knex, { outcome: 'rolled_back' });
 };

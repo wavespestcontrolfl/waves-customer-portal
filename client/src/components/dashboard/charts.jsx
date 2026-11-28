@@ -523,11 +523,13 @@ export function ServiceMixDonut({ mix = [], height = 220 }) {
 // Pass `funnel` { sent, viewed, accepted, declined } and `rates` { view_rate,
 // close_rate, decline_rate }.
 function buildEstimateFunnelStages(funnel, rates, cohort) {
-  const sent = funnel.sent || 0;
-  const viewed = funnel.viewed || 0;
-  const accepted = funnel.accepted || 0;
-  const declined = funnel.declined || 0;
-  const pending = funnel.pending || 0;
+  const safeFunnel = funnel || {};
+  const safeRates = rates || {};
+  const sent = safeFunnel.sent || 0;
+  const viewed = safeFunnel.viewed || 0;
+  const accepted = safeFunnel.accepted || 0;
+  const declined = safeFunnel.declined || 0;
+  const pending = safeFunnel.pending || 0;
   const counts = [sent, viewed, accepted, declined, pending];
   const maxCount = Math.max(...counts, 1);
   // Short periods (e.g. Today) can include carry-over views/acceptances/declines
@@ -548,9 +550,9 @@ function buildEstimateFunnelStages(funnel, rates, cohort) {
     maxCount,
     stages: [
       { label: 'Sent',     count: sent,     pct: pctOfSent(100) },
-      { label: 'Viewed',   count: viewed,   pct: pctOfSent(rates.view_rate ?? 0) },
-      { label: 'Accepted', count: accepted, pct: pctOfSent(rates.close_rate ?? 0) },
-      { label: 'Declined', count: declined, pct: pctOfSent(rates.decline_rate ?? 0), dim: true },
+      { label: 'Viewed',   count: viewed,   pct: pctOfSent(safeRates.view_rate ?? 0) },
+      { label: 'Accepted', count: accepted, pct: pctOfSent(safeRates.close_rate ?? 0) },
+      { label: 'Declined', count: declined, pct: pctOfSent(safeRates.decline_rate ?? 0), dim: true },
       // Neither won nor lost yet — these are the follow-up work, so they earn a
       // visible row instead of hiding in the sent-minus-decided arithmetic.
       { label: 'Pending',  count: pending,  pct: pctOfSent(Math.round((pending / (sent || 1)) * 100)), dim: true },

@@ -104,12 +104,13 @@ test('the funnel\'s viewed stage counts a self-serve quote\'s view only from sta
   }
   // The raw first-view stamp filters nothing on its own.
   expect(recorded.some((r) => r.method === 'whereBetween' && r.args[0] === 'e.viewed_at')).toBe(false);
-  // Sent-cohort outcome counts bound views/acceptances/declines by the same
-  // exclusive Eastern end instant so post-window outcomes never skew historical rates.
+  // Sent-cohort outcome counts bound views/acceptances/declines to [sentAt, toTs)
+  // so neither pre-resend views nor post-window outcomes skew historical rates.
   const cohortSelect = recorded.find((r) => r.method === 'select' && JSON.stringify(r.args).includes('cohort_accepted'));
   const cohortRawArgs = cohortSelect.args.slice(1);
   expect(cohortRawArgs).toHaveLength(3);
   for (const raw of cohortRawArgs) {
+    expect(raw.__raw[0]).toContain(`>= ${sentAtSql('e')}`);
     expect(raw.__raw[0]).toContain('< ?');
     expect(raw.__raw[1].map((d) => d.toISOString())).toEqual(['2026-11-20T05:00:00.000Z']);
   }
