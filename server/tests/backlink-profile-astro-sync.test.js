@@ -1,9 +1,6 @@
 /**
- * Backlink profile → astro sameAs sync: only pages that ARE a Waves listing ship.
- * Regression: astro #817 (2026-11-02) proposed 21 verified links for Bradenton's
- * sameAs; 16 were search/category pages, dead pages, blocked hosts or listings
- * with another address. The verifier rightly tracks them as backlinks, so the
- * sync itself must refuse them, or every weekly run re-proposes them.
+ * Backlink profile → astro sameAs sync: only verified per-office Waves pages on
+ * allowlisted hosts ship, routed to their matching office bucket.
  */
 jest.mock('../models/db', () => {
   const db = jest.fn();
@@ -17,31 +14,44 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) })
 const db = require('../models/db');
 const { getVerifiedProfilesByOffice, sameAsRejectReason } = require('../services/backlink-profile-astro-sync');
 
-// The 21 live_url values astro #817 proposed (all with no location → bradenton-fl).
-const PR_817_KEPT = [
+const ALLOWED_OFFICE_PAGES = [
+  'https://citysquares.com/b/waves-pest-control-lakewood-ranch-26663854',
+  'https://citysquares.com/b/waves-pest-control-parrish-26468506',
+  'https://citysquares.com/b/waves-pest-control-sarasota-26347392',
+  'https://citysquares.com/b/waves-pest-control-venice-26858800',
+  'https://www.n49.com/biz/6597767/waves-pest-control-sarasota-fl-sarasota-1450-pine-warbler-place/',
+  'https://nextdoor.com/pages/waves-pest-control-sarasota-sarasota-fl/',
+  'https://nextdoor.com/pages/waves-pest-control-venice-venice-fl-9crfqd/',
+  'https://reviews.birdeye.com/waves-pest-control-parrish-176686921044177',
+  'https://reviews.birdeye.com/waves-pest-control-sarasota-175373465862437',
+  'https://reviews.birdeye.com/waves-pest-control-venice-176686916548706',
+];
+
+const SAAS_DIRECTORIES = [
   'https://proofstories.io/directory/products/waves-pest-control/',
   'https://toolfio.com/item/waves-pest-control',
   'https://toolhub.me/listings/waves-pest-control/',
   'https://www.betterlaunch.co/product/waves-pest-control-2',
   'https://www.showmysites.com/wavespestcontrol/waves-pest-control-1/',
+  'https://www.saashub.com/waves-lawn-watering-calculator',
+  'https://mcpservers.org/servers/www-wavespestcontrol-com',
+  'https://glama.ai/mcp/connectors/com.wavespestcontrol/pest-control',
 ];
-const PR_817_REFUSED = [
-  'https://bizscoreai.com/business-search/florida/pest-control/',
-  'https://dlmpropertygroup.com/directory/fl/englewood?page=2',
-  'https://flokii.com/businesses/view/137994/north-port-pest-control',
-  'https://weboworld.com/listings/Pest-Control/page/9',
-  'https://www.enigma.com/directory/fl/all-cities/pest-control-service/',
-  'https://www.enigma.com/directory/fl/sarasota/',
-  'https://www.yellowpages.com/rotonda-west-fl/pest-control-services',
+
+const NON_ALLOWLISTED_OR_BAD = [
+  'https://angeloxmbp14703.blogadvize.com/46847483/waves-pest-control-venice',
+  'https://damienbzxs26150.bloggerbags.com/44266969/waves-pest-control-venice',
+  'https://nearspotusa.com/business/waves-pest-control-englewood',
+  'https://www.loc8nearme.com/florida/englewood/waves-pest-control/9302390/',
+  'https://www.hotfrog.com/company/ARaKID9jeQC5gaWYQ5I5Tw/waves-pest-control/englewood/pest-control',
+  'https://www.trustpilot.com/review/wavespestcontrol.com',
+  'https://www.facebook.com/wavespestcontrol',
+  'https://www.bbb.org/us/fl/lakewood-ranch/profile/pest-control/waves-pest-control-0653-90447425',
+  'https://www.swflinc.com/business-directory/waves-pest-control/',
+  'https://www.pinterest.com/wavespestcontrol/',
+  'https://reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312',
   'https://adsly.io/listings/waves-pest-control-7519',
-  'https://leakdirectory.org/business/waves-pest-control-lakewood-ranch-bradenton/',
-  'https://mybusinessplaces.com/listing/waves-pest-control-sarasota/',
-  'https://mybusinessplaces.com/listing/waves-pest-control-venice/',
-  'https://www.wildlifecontrol.io/listing/waves-pest-control-lakewood-ranch',
-  'https://ajax-directory.com/listings810335/waves-pest-control-venice',
-  'https://victordirectory.com/listings784135/waves-pest-control-venice',
-  'https://kevsbest.com/listing/waves-pest-control/',
-  'https://local-biz.directory/listing/waves-pest-control-sarasota/',
+  'https://www.yellowpages.com/rotonda-west-fl/pest-control-services',
 ];
 
 function mockRows(rows) {
@@ -54,42 +64,62 @@ function mockRows(rows) {
 }
 
 describe('sameAsRejectReason', () => {
-  test.each(PR_817_KEPT)('a single Waves listing page ships: %s', (url) => {
+  test.each(ALLOWED_OFFICE_PAGES)('allowlisted per-office profile ships: %s', (url) => {
     expect(sameAsRejectReason(url)).toBeNull();
   });
 
-  test('search, category and paginated pages are not profiles', () => {
-    expect(sameAsRejectReason('https://www.yellowpages.com/rotonda-west-fl/pest-control-services')).toBe('not_profile');
-    expect(sameAsRejectReason('https://dlmpropertygroup.com/directory/fl/englewood?page=2')).toBe('not_profile');
-    expect(sameAsRejectReason('https://example.com/listing/waves-pest-control?sort=new')).toBe('not_profile');
-    expect(sameAsRejectReason('https://example.com/search?q=waves+pest+control')).toBe('not_profile');
+  test.each(SAAS_DIRECTORIES)('SaaS/tool/MCP directory is excluded: %s', (url) => {
+    expect(sameAsRejectReason(url)).toBe('excluded');
   });
 
-  test('hand-refused hosts (with subdomains) and pages are excluded, ignoring www, case and trailing slash', () => {
-    expect(sameAsRejectReason('https://listings.adsly.io/waves-pest-control')).toBe('excluded');
-    expect(sameAsRejectReason('https://www.KEVSBEST.com/listing/Waves-Pest-Control')).toBe('excluded');
-    expect(sameAsRejectReason('https://www.swflinc.com/business-directory/waves-pest-control/')).toBe('excluded');
-    expect(sameAsRejectReason('https://notadsly.io/listing/waves-pest-control')).toBeNull();
+  test.each(NON_ALLOWLISTED_OR_BAD)('PBN, Englewood, corporate, or bad-phone listing is excluded: %s', (url) => {
+    expect(sameAsRejectReason(url)).toBe('excluded');
   });
 
-  test('the brand-wide Pinterest handle stays out of an office bucket; another Pinterest page does not match', () => {
-    expect(sameAsRejectReason('https://www.pinterest.com/wavespestcontrol/')).toBe('excluded');
-    expect(sameAsRejectReason('https://www.pinterest.com/wavespestcontrol/waves-bradenton-office/')).toBeNull();
+  test('query strings or non-waves paths on allowlisted hosts are not profiles', () => {
+    expect(sameAsRejectReason('https://citysquares.com/b/waves-pest-control-venice-26858800?ref=x')).toBe('not_profile');
+    expect(sameAsRejectReason('https://nextdoor.com/pages/other-pest-control-sarasota-fl/')).toBe('not_profile');
   });
 
-  test('a non-https or unparseable URL is invalid', () => {
-    expect(sameAsRejectReason('http://toolfio.com/item/waves-pest-control')).toBe('invalid');
+  test('non-https or unparseable URL is invalid', () => {
+    expect(sameAsRejectReason('http://citysquares.com/b/waves-pest-control-venice-26858800')).toBe('invalid');
     expect(sameAsRejectReason('not a url')).toBe('invalid');
   });
 });
 
 describe('getVerifiedProfilesByOffice', () => {
-  test('the astro #817 rows reduce to the 5 real Waves listings', async () => {
-    mockRows([...PR_817_KEPT, ...PR_817_REFUSED].map((live_url) => ({ live_url, location: null })));
+  test('filters out SaaS/PBN/corporate/bad listings and routes unscoped URLs to their exact office', async () => {
+    mockRows([
+      ...ALLOWED_OFFICE_PAGES.map((live_url) => ({ live_url, location: null })),
+      ...SAAS_DIRECTORIES.map((live_url) => ({ live_url, location: null })),
+      ...NON_ALLOWLISTED_OR_BAD.map((live_url) => ({ live_url, location: null })),
+      // Ambiguous or non-office city on allowlisted host with null location -> dropped
+      { live_url: 'https://citysquares.com/b/waves-pest-control-englewood-1234', location: null },
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-bradenton-fl/', location: null },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: null },
+      // Explicit location on allowlisted host overrides URL inference
+      { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: 'venice' },
+    ]);
+
     const offices = await getVerifiedProfilesByOffice();
-    expect(offices['bradenton-fl']).toEqual([...PR_817_KEPT].sort());
-    expect(offices['sarasota-fl']).toEqual([]);
-    expect(offices['venice-fl']).toEqual([]);
-    expect(offices['parrish-fl']).toEqual([]);
+    expect(offices['bradenton-fl']).toEqual([
+      'https://citysquares.com/b/waves-pest-control-lakewood-ranch-26663854',
+    ]);
+    expect(offices['parrish-fl']).toEqual([
+      'https://citysquares.com/b/waves-pest-control-parrish-26468506',
+      'https://reviews.birdeye.com/waves-pest-control-parrish-176686921044177',
+    ]);
+    expect(offices['sarasota-fl']).toEqual([
+      'https://citysquares.com/b/waves-pest-control-sarasota-26347392',
+      'https://nextdoor.com/pages/waves-pest-control-sarasota-sarasota-fl/',
+      'https://reviews.birdeye.com/waves-pest-control-sarasota-175373465862437',
+      'https://www.n49.com/biz/6597767/waves-pest-control-sarasota-fl-sarasota-1450-pine-warbler-place/',
+    ]);
+    expect(offices['venice-fl']).toEqual([
+      'https://citysquares.com/b/waves-pest-control-99999',
+      'https://citysquares.com/b/waves-pest-control-venice-26858800',
+      'https://nextdoor.com/pages/waves-pest-control-venice-venice-fl-9crfqd/',
+      'https://reviews.birdeye.com/waves-pest-control-venice-176686916548706',
+    ]);
   });
 });

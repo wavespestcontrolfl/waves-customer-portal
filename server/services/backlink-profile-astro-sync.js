@@ -64,8 +64,7 @@ const OFFICE_SLUGS = ['bradenton-fl', 'sarasota-fl', 'venice-fl', 'parrish-fl'];
 
 // signup-runner location id → office slug. The runner's CITY_TO_LOCATION collapses
 // every SWFL city (incl. service-area-only ones like North Port) to one of these
-// four location ids; the default_location_id is 'bradenton'. (Join key behind
-// these is googlePlaceId — see waves-offices.ts / config/locations.js.)
+// four location ids (join key: googlePlaceId — waves-offices.ts / locations.js).
 const LOCATION_TO_OFFICE_SLUG = {
   bradenton: 'bradenton-fl',
   parrish: 'parrish-fl',
@@ -73,47 +72,65 @@ const LOCATION_TO_OFFICE_SLUG = {
   venice: 'venice-fl',
 };
 
-function officeSlugForLocation(location) {
-  // Brand-level / unscoped listings carry the default location (Bradenton).
-  if (!location || location === 'default') return 'bradenton-fl';
-  return LOCATION_TO_OFFICE_SLUG[location] || null; // unknown id → drop
+const URL_PATH_OFFICE_RULES = [
+  { slug: 'bradenton-fl', re: /(?:^|[-_/])(bradenton|lakewood[-_]ranch)(?:$|[-_/])/ },
+  { slug: 'parrish-fl', re: /(?:^|[-_/])parrish(?:$|[-_/])/ },
+  { slug: 'sarasota-fl', re: /(?:^|[-_/])sarasota(?:$|[-_/])/ },
+  { slug: 'venice-fl', re: /(?:^|[-_/])venice(?:$|[-_/])/ },
+];
+
+function inferOfficeSlugFromUrl(rawUrl) {
+  let u;
+  try { u = new URL(rawUrl); } catch { return null; }
+  const path = u.pathname.toLowerCase();
+  if (/(?:^|[-_/])englewood(?:$|[-_/])/.test(path)) return null;
+  const matches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(path)).map((r) => r.slug);
+  return matches.length === 1 ? matches[0] : null;
 }
 
-// Hand-reviewed refusals (astro #817, 2026-11-02). Each still links to us, so the
-// verifier keeps tracking it as a backlink; it only stays out of sameAs. Remove an
-// entry once its page is fixed. Hosts match their subdomains too.
-const SAMEAS_EXCLUDED_HOSTS = new Set([
-  'adsly.io', // ad-space marketplace ("Advertise on wavespestcontrol.com"), not a profile
-  'leakdirectory.org', // ISP filter blocks it as a suspicious site; page unreadable
-  'mybusinessplaces.com', // same
-  'wildlifecontrol.io', // domain does not resolve
+function officeSlugForRow(location, rawUrl) {
+  if (location && location !== 'default') {
+    return LOCATION_TO_OFFICE_SLUG[location] || null;
+  }
+  // Unscoped rows (location null/'default') must unambiguously name ONE office
+  // in their URL path; never dump brand-wide or ambiguous listings into Bradenton.
+  return inferOfficeSlugFromUrl(rawUrl);
+}
+
+// Strict allowlist of verified, publicly crawlable per-office directory hosts.
+// Switching from a denylist to an allowlist keeps SaaS/tool launch directories
+// (betterlaunch.co, proofstories.io, showmysites.com, toolfio.com, toolhub.me),
+// PBN blog-network links, corporate/HQ profiles (trustpilot.com, facebook.com,
+// bbb.org, swflinc.com, pinterest.com), and unverified aggregators out of
+// per-office LocalBusiness sameAs.
+const SAMEAS_ALLOWED_OFFICE_HOSTS = new Set([
+  'citysquares.com',
+  'n49.com',
+  'nextdoor.com',
+  'reviews.birdeye.com',
 ]);
+
+// Specific excluded pages on allowlisted (or legacy) hosts — e.g. wrong phone,
+// stale Englewood/9040 addresses, or duplicate/404 listings.
 // host + path, lower-case, no www, no trailing slash.
 const SAMEAS_EXCLUDED_PAGES = new Set([
   'ajax-directory.com/listings810335/waves-pest-control-venice', // 664 Grove Rd: not the Venice office
   'victordirectory.com/listings784135/waves-pest-control-venice', // same
   'kevsbest.com/listing/waves-pest-control', // 7057 Pinebay Blvd, Englewood: not an office
   'local-biz.directory/listing/waves-pest-control-sarasota', // 404
-  // Brand-wide handle, not one office's profile: the Sarasota and Parrish listings link it too, and every
-  // unscoped listing lands in the Bradenton bucket (astro #841). A corporate profile is hand-curated in astro.
-  'pinterest.com/wavespestcontrol',
-  // 9040 Town Center Pkwy + (941) 297-5749 = the HQ, not the Bradenton office this unscoped listing lands in
-  // (astro #865). Its corporate entry is hand-curated in astro CORPORATE_ENTITY_PROFILES.
-  'swflinc.com/business-directory/waves-pest-control',
+  'pinterest.com/wavespestcontrol', // brand-wide handle (astro #841)
+  'swflinc.com/business-directory/waves-pest-control', // corporate HQ profile (astro #865)
+  'reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312', // wrong phone (941) 381-7612
 ]);
 
-function isExcludedHost(host) {
-  return [...SAMEAS_EXCLUDED_HOSTS].some((h) => host === h || host.endsWith(`.${h}`));
+function isAllowedOfficeHost(host) {
+  return [...SAMEAS_ALLOWED_OFFICE_HOSTS].some((h) => host === h || host.endsWith(`.${h}`));
 }
 
 /**
  * Why a verified URL stays out of sameAs, or null when it may ship. A sameAs entry
- * must be ONE page that IS a Waves listing, but the verifier's domain reconcile
- * records whatever page DataForSEO saw linking to us: often a search, city or
- * paginated category page that lists Waves among others (astro #817: a Yellow
- * Pages "pest control in Rotonda West" search, Enigma city lists, "?page=2").
- * Those are backlinks, not profiles. So the path must name Waves and there is no
- * query string. A wrong refusal only omits a listing; it never adds one.
+ * must be ONE live Waves per-office listing on an allowlisted directory host, with
+ * no query string and no exclusion override.
  */
 function sameAsRejectReason(rawUrl) {
   let u;
@@ -121,7 +138,7 @@ function sameAsRejectReason(rawUrl) {
   if (u.protocol !== 'https:') return 'invalid';
   const host = u.hostname.toLowerCase().replace(/^www\./, '');
   const path = u.pathname.toLowerCase().replace(/\/+$/, '');
-  if (isExcludedHost(host) || SAMEAS_EXCLUDED_PAGES.has(host + path)) return 'excluded';
+  if (!isAllowedOfficeHost(host) || SAMEAS_EXCLUDED_PAGES.has(host + path)) return 'excluded';
   if (u.search || !path.includes('waves')) return 'not_profile';
   return null;
 }
@@ -144,15 +161,15 @@ async function getVerifiedProfilesByOffice() {
   let dropped = 0;
   let refused = 0;
   for (const r of rows) {
-    const slug = officeSlugForLocation(r.location);
     const url = String(r.live_url || '').trim();
-    if (!slug) { dropped++; continue; }
     if (!/^https:\/\/\S+$/.test(url)) continue;
     if (sameAsRejectReason(url)) { refused++; continue; }
+    const slug = officeSlugForRow(r.location, url);
+    if (!slug) { dropped++; continue; }
     byOffice[slug].add(url);
   }
-  if (dropped) logger.warn(`[backlink-sync] dropped ${dropped} listing(s) with an unknown location id`);
-  if (refused) logger.info(`[backlink-sync] kept ${refused} verified link(s) out of sameAs (not a Waves profile page)`);
+  if (dropped) logger.warn(`[backlink-sync] dropped ${dropped} listing(s) with an unknown or ambiguous office location`);
+  if (refused) logger.info(`[backlink-sync] kept ${refused} verified link(s) out of sameAs (not an allowlisted office profile page)`);
 
   const offices = {};
   for (const slug of OFFICE_SLUGS) offices[slug] = [...byOffice[slug]].sort();
