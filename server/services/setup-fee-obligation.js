@@ -815,13 +815,14 @@ const REFUNDED_FEE_INVOICE_STATUSES = new Set(['refunded', 'partially_refunded']
 // ($0 or positive) and annual-prepay line requires a settled, non-refunded
 // invoice; a positive setup-fee line collected and later refunded (full or
 // partial) stays recognized so we never instruct a duplicate re-bill.
-function feeLineEvidence(li, status, createdAt, { hasRefund = false } = {}) {
+function feeLineEvidence(li, status, createdAt, { hasRefund = false, allowPendingPrepayZeroWaiver = false } = {}) {
   const cents = settledLineCents(li);
   if (cents === null || !waveguardFeeLine(li)) return null;
   const isSettled = SETTLED_FEE_INVOICE_STATUSES.has(status);
   const isRefunded = REFUNDED_FEE_INVOICE_STATUSES.has(status) || hasRefund;
   if (isWaivedFeeLine(String(li?.description || ''), cents)) {
-    return isSettled && !isRefunded ? { kind: 'waived' } : null;
+    const canCountUnsettledZero = allowPendingPrepayZeroWaiver && cents === 0;
+    return !isRefunded && (isSettled || canCountUnsettledZero) ? { kind: 'waived' } : null;
   }
   if (cents <= 0) return null;
   if (isSettled && !isRefunded && isRecentAnnualPrepayLine(li, createdAt)) return { kind: 'annual_prepay' };
@@ -830,7 +831,7 @@ function feeLineEvidence(li, status, createdAt, { hasRefund = false } = {}) {
   return { kind: 'paid', cents, partiallyRefunded: status !== 'refunded' && isRefunded };
 }
 
-function evaluateCandidateFeeRow(row, hasRefund) {
+function evaluateCandidateFeeRow(row, hasRefund, { allowPendingPrepayZeroWaiver = false } = {}) {
   const status = String(row.status || '').toLowerCase();
   if (row.setup_fee_waived === true && SETTLED_FEE_INVOICE_STATUSES.has(status) && !hasRefund) {
     return { settledNow: { settled: true, reason: 'waived', invoiceId: row.id } };
@@ -838,7 +839,7 @@ function evaluateCandidateFeeRow(row, hasRefund) {
   let cents = 0;
   let partiallyRefunded = false;
   for (const li of invoiceLineItems(row)) {
-    const evidence = feeLineEvidence(li, status, row.created_at, { hasRefund });
+    const evidence = feeLineEvidence(li, status, row.created_at, { hasRefund, allowPendingPrepayZeroWaiver });
     if (evidence && evidence.kind !== 'paid') return { settledNow: { settled: true, reason: evidence.kind, invoiceId: row.id } };
     if (evidence) {
       cents += evidence.cents;
@@ -846,6 +847,29 @@ function evaluateCandidateFeeRow(row, hasRefund) {
     }
   }
   return { cents, partiallyRefunded };
+}
+
+async function loadPendingPrepayWaivedInvoiceIds(conn, customerId, rows, partiallyRefundedIds) {
+  const candidateIds = rows
+    .filter((row) => {
+      const st = String(row.status || '').toLowerCase();
+      if (SETTLED_FEE_INVOICE_STATUSES.has(st) || REFUNDED_FEE_INVOICE_STATUSES.has(st)) return false;
+      if (partiallyRefundedIds.has(String(row.id))) return false;
+      return invoiceLineItems(row).some((li) => {
+        const cents = settledLineCents(li);
+        return cents === 0 && waveguardFeeLine(li) && isWaivedFeeLine(String(li?.description || ''), cents);
+      });
+    })
+    .map((row) => row.id);
+  if (!candidateIds.length) return new Set();
+  try {
+    const terms = await conn('annual_prepay_terms as t')
+      .where({ 't.customer_id': customerId, 't.status': 'payment_pending' })
+      .whereNull('t.annual_plan_version')
+      .whereIn('t.prepay_invoice_id', candidateIds)
+      .select('t.prepay_invoice_id');
+    return new Set((terms || []).map((t) => String(t.prepay_invoice_id)));
+  } catch { return new Set(); }
 }
 
 async function filterLiveInvoicesInScope(conn, rows, scope) {
@@ -890,10 +914,14 @@ async function setupFeeSettledElsewhere(conn, {
   );
   const liveInScope = await filterLiveInvoicesInScope(conn, rows, scope);
   const partiallyRefundedIds = await loadPartiallyRefundedInvoiceIds(conn, customerId, liveInScope);
+  const pendingPrepayWaivedIds = await loadPendingPrepayWaivedInvoiceIds(conn, customerId, liveInScope, partiallyRefundedIds);
   const paidByInvoice = new Map();
   let anyPartiallyRefunded = false;
   for (const row of liveInScope) {
-    const evaluated = evaluateCandidateFeeRow(row, partiallyRefundedIds.has(String(row.id)));
+    const rowId = String(row.id);
+    const evaluated = evaluateCandidateFeeRow(row, partiallyRefundedIds.has(rowId), {
+      allowPendingPrepayZeroWaiver: pendingPrepayWaivedIds.has(rowId),
+    });
     if (evaluated.settledNow) return evaluated.settledNow;
     if (evaluated.cents > 0) {
       paidByInvoice.set(String(row.id), (paidByInvoice.get(String(row.id)) || 0) + evaluated.cents);

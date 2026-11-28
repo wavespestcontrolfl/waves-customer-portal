@@ -490,8 +490,18 @@ async function loadReturningVisitHistory(database, { customerId, now = new Date(
       'svc.name as service_name', 'svc.billing_type as catalog_billing_type', 'a.service_id as addon_service_id',
       ...SERIES_COLUMNS, database.raw(LATEST_OUTCOME_SQL), database.raw(PERFORMED_DATE_SQL),
       database.raw(FROZEN_IDENTITY_SQL));
-  const visitRows = await filterRowsToQuotedProperty(database, rawVisitRows, propertyScope, propertyCache, { requirePositiveMatch: true });
-  const scheduleLines = await filterRowsToQuotedProperty(database, rawScheduleLines, propertyScope, propertyCache, { requirePositiveMatch: true });
+  const hasCustomerPropertyEvidence = Boolean(
+    propertyScope?.propertyId
+    || [...rawVisitRows, ...rawScheduleLines].some((r) => Boolean(
+      r.property_id || r.parent_property_id || r.source_estimate_id || r.parent_source_estimate_id || stampedStreetForVisitOrParent(r),
+    )),
+  );
+  const visitRows = await filterRowsToQuotedProperty(
+    database, rawVisitRows, propertyScope, propertyCache, { requirePositiveMatch: hasCustomerPropertyEvidence },
+  );
+  const scheduleLines = await filterRowsToQuotedProperty(
+    database, rawScheduleLines, propertyScope, propertyCache, { requirePositiveMatch: hasCustomerPropertyEvidence },
+  );
   const catalog = await frozenCatalogRows(database, visitRows);
   // A plan application can also ride as a recurring add-on line on another plan visit (mosquito on a lawn
   // visit). As the schedule reads a line (admin-schedule lineDueOnRecurringDate): an explicit one_time line is

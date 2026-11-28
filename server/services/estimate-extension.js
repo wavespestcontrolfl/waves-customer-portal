@@ -174,10 +174,18 @@ async function fixedBidBlocksExtension(database, estimate) {
 // must not carry forward a stale returning-customer setup-fee waiver. Re-evaluates and
 // strips stale waivers on the locked anchor (and any locked grouped siblings) inside the tx.
 async function stripAnchorReturningWaiverInTx(trx, { estimate, anchor, updates, strippedIds }) {
-  const { refreshReturningWaiverOnExtend } = require('./returning-setup-fee-waiver');
+  const { refreshReturningWaiverOnExtend, returningSetupFeeWaiverOf } = require('./returning-setup-fee-waiver');
+  let hydrated = anchor;
+  if (hydrated && returningSetupFeeWaiverOf(hydrated.estimate_data) && hydrated.customer_id === undefined) {
+    hydrated = {
+      ...hydrated,
+      ...(await trx('estimates').where({ id: estimate.id })
+        .first('customer_id', 'address', 'property_id', 'onetime_total', 'monthly_total', 'annual_total')),
+    };
+  }
   const anchorRow = {
     ...estimate,
-    ...anchor,
+    ...hydrated,
     id: estimate.id,
   };
   const anchorRes = await refreshReturningWaiverOnExtend(trx, anchorRow);
@@ -343,10 +351,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       // Judge the locked row before the write so refusal keeps its public
       // FIXED_BID_VALIDITY / generic-404 classification.
       anchor = await trx('estimates').where({ id: estimate.id }).whereNull('estimate_group_id')
-        .forUpdate().first(
-          'customer_id', 'address', 'property_id', 'onetime_total', 'monthly_total', 'annual_total',
-          'estimate_data', 'disposition', 'disposition_source',
-        );
+        .forUpdate().first('estimate_data', 'disposition', 'disposition_source');
     }
     if (!anchor) {
       const err = new Error('Estimate changed groups while extending — retry.');

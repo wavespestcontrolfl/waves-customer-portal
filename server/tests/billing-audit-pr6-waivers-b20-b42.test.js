@@ -584,16 +584,22 @@ describe('B-42: Admin create/revise strips forged waivers & estimate-public fall
         address: '200 Pine St, Testville, FL 34200',
       });
       expect(history.lastByFamily).toEqual({});
-      // Even when no active plan rows exist at all, a moved non-member at a new
-      // address matching customerPrimaryStreet still excludes unstamped completed visits.
+      // Unstamped primary-home history stays isolated from a second property ('200 Pine St'),
+      // while matching the primary address itself preserves single-home restart eligibility.
       customer.waveguard_tier = null;
       customer.monthly_rate = 0;
-      const historyNonMember = await Returning.loadReturningVisitHistory(conn, {
+      const historyOtherAddr = await Returning.loadReturningVisitHistory(conn, {
+        customerId: CUST_ID,
+        now: new Date('2026-11-01T15:00:00Z'),
+        address: '200 Pine St, Testville, FL 34200',
+      });
+      expect(historyOtherAddr.lastByFamily).toEqual({});
+      const historyPrimaryAddr = await Returning.loadReturningVisitHistory(conn, {
         customerId: CUST_ID,
         now: new Date('2026-11-01T15:00:00Z'),
         address: '100 Oak St, Testville, FL 34200',
       });
-      expect(historyNonMember.lastByFamily).toEqual({});
+      expect(historyPrimaryAddr.lastByFamily).toHaveProperty('pest_control');
     } finally {
       delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
     }
