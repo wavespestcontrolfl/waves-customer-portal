@@ -614,12 +614,24 @@ describe('requireEveryChemicalAddOnRecorded', () => {
     await expect(ask('', tags([]))).resolves.toBeUndefined();
   });
 
-  test('a carried chemical add-on with no row is refused by name', async () => {
+  test('a carried chemical add-on with no row is refused by name, and multiple missing add-ons are all reported in missingAddOns (P1-2)', async () => {
     await expect(ask(FIRE, tags([]))).rejects.toMatchObject({
       statusCode: 400, code: 'area_addon_application_required', addOnKey: FIRE,
       message: expect.stringMatching(/add-on: no product is recorded for it\. Record its product, rate and treated square feet, then complete the visit\. If it was not applied, ask the office to take it off this visit first\.$/),
+      missingAddOns: [expect.objectContaining({ addOnKey: FIRE })],
     });
-    await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([['p-1|x', FIRE]]))).rejects.toMatchObject({ addOnKey: 'area_addon_bed_pre_emergent' });
+    await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([['p-1|x', FIRE]]))).rejects.toMatchObject({
+      addOnKey: 'area_addon_bed_pre_emergent',
+      missingAddOns: [expect.objectContaining({ addOnKey: 'area_addon_bed_pre_emergent' })],
+    });
+    await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([]))).rejects.toMatchObject({
+      code: 'area_addon_application_required',
+      addOnKey: 'area_addon_bed_pre_emergent',
+      missingAddOns: [
+        expect.objectContaining({ addOnKey: 'area_addon_bed_pre_emergent' }),
+        expect.objectContaining({ addOnKey: FIRE }),
+      ],
+    });
   });
 
   test('an incomplete outcome and a replay are not judged; a set that could not be read is a retryable refusal for a fresh completed visit', async () => {
@@ -632,8 +644,27 @@ describe('requireEveryChemicalAddOnRecorded', () => {
   });
 
   test('the completion asks it before the transaction, with the outcome (source)', () => {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
     expect(src).toContain("requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });");
+  });
+
+  test('requireAddOnActuals collects EVERY deficient tagged add-on row in err.problems (P1-2)', async () => {
+    const products = [
+      { productId: 'p-1', name: 'Topchoice', areaAddOnKey: FIRE, rate: null, areaValue: null },
+      { productId: 'p-2', name: 'Snapshot', areaAddOnKey: 'area_addon_bed_pre_emergent', rate: 2, rateUnit: 'lb/1000sf', areaValue: null },
+    ];
+    const tagMap = tags([
+      [`p-1|${FIRE}`, FIRE],
+      ['p-2|area_addon_bed_pre_emergent', 'area_addon_bed_pre_emergent'],
+    ]);
+    await expect(governed.requireAddOnActuals({}, products, tagMap, { fresh: true })).rejects.toMatchObject({
+      code: 'area_addon_actuals_required',
+      addOnKey: FIRE,
+      problems: [
+        expect.objectContaining({ addOnKey: FIRE, missing: ['application rate', 'treated square feet'] }),
+        expect.objectContaining({ addOnKey: 'area_addon_bed_pre_emergent', missing: ['treated square feet'] }),
+      ],
+    });
   });
 });
 

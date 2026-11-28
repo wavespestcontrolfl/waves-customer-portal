@@ -27,6 +27,8 @@ describeOrSkip('pruneSmsSendClaims on PostgreSQL', () => {
       dailyFresh: { claim_key: `outbound_voicemail:${tag}`, age: '1 hour' },
       weeklyThisWeek: { claim_key: `bi_briefing_sms:${tag}-a`, age: '6 days' },
       weeklyExpired: { claim_key: `bi_briefing_sms:${tag}-b`, age: '9 days' },
+      pushDedupeRecent: { claim_key: `notif_push_dedupe:${tag}-a`, age: '14 days' },
+      pushDedupeExpired: { claim_key: `notif_push_dedupe:${tag}-b`, age: '31 days' },
       // Underscores are LIKE wildcards; the prefix match must be exact.
       lookalikeOld: { claim_key: `biXbriefingXsms:${tag}`, age: '2 days' },
     };
@@ -38,7 +40,7 @@ describeOrSkip('pruneSmsSendClaims on PostgreSQL', () => {
       }
       await pruneSmsSendClaims(trx);
       const left = await trx('sms_send_claims').where('claim_key', 'like', `%${tag}%`).pluck('claim_key');
-      expect(left.sort()).toEqual([rows.dailyFresh.claim_key, rows.weeklyThisWeek.claim_key].sort());
+      expect(left.sort()).toEqual([rows.dailyFresh.claim_key, rows.weeklyThisWeek.claim_key, rows.pushDedupeRecent.claim_key].sort());
       throw ROLLBACK;
     })).rejects.toBe(ROLLBACK);
   });

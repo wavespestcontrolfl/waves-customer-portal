@@ -63,7 +63,7 @@ export default function MobileItemDiscountPickerSheet({
     const input = window.prompt(type === 'percent' ? 'Discount % (0-100):' : 'Discount $ amount:');
     if (input == null) return;
     const amt = Number(input);
-    if (!Number.isFinite(amt) || amt <= 0) return;
+    if (!Number.isFinite(amt) || amt <= 0 || (type === 'percent' && amt > 100)) return;
     onSelect?.({
       kind: 'custom_discount',
       discount_type: type === 'percent' ? 'percentage' : 'fixed_amount',

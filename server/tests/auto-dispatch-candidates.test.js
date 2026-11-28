@@ -208,6 +208,61 @@ describe('findValidCandidateSlots', () => {
     expect(findAvailableSlots.mock.calls[2][0]).toMatchObject({ includeWeekends: true, arrivalSearch: true, departureMinutes: 450 });
   });
 
+  test('arrival search passes arrivalInsert for standalone visits only when placeMovedVisit can persist (not grouped, not capacity mode, not routing-off)', async () => {
+    const prevShared = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    const prevAdminWin = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    const prevCap = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      findAvailableSlots.mockResolvedValue({ slots: [] });
+      const prefsNone = { service_category: 'general', blackout: null };
+      const sharedDb = (siblings = []) => () => {
+        let isSiblingRead = false;
+        const c = {};
+        ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'whereNotNull', 'orWhere', 'orWhereNull', 'leftJoin', 'orderBy'].forEach((m) => {
+          c[m] = (...args) => {
+            if (m === 'where' && (args[0] === 'visit_id' || (args[0] && args[0].visit_id))) isSiblingRead = true;
+            if (m === 'whereIn' && args[0] === 'id') isSiblingRead = true;
+            return c;
+          };
+        });
+        c.first = async () => ({ window_start: '09:00' });
+        c.select = async () => (isSiblingRead ? siblings : []);
+        return c;
+      };
+      await findValidCandidateSlots(SERVICE, prefsNone, { ...ctx(), db: sharedDb([]), arrivalSearch: true });
+      expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ arrivalSearch: true, arrivalInsert: true });
+
+      const groupedSiblings = [
+        { id: 's1', status: 'confirmed' },
+        { id: 's2', status: 'confirmed', scheduled_date: '2026-08-04', technician_id: 't1', window_start: '09:00', window_end: '10:00' },
+      ];
+      await findValidCandidateSlots({ ...SERVICE, visit_id: 'v1' }, prefsNone, { ...ctx(), db: sharedDb(groupedSiblings), arrivalSearch: true });
+      expect(findAvailableSlots.mock.calls[1][0].arrivalSearch).toBe(true);
+      expect(findAvailableSlots.mock.calls[1][0].arrivalInsert).toBeUndefined();
+
+      // Capacity mode enabled -> placeMovedVisit returns null, so do not request arrivalInsert.
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      await findValidCandidateSlots(SERVICE, prefsNone, { ...ctx(), db: sharedDb([]), arrivalSearch: true });
+      expect(findAvailableSlots.mock.calls[2][0].arrivalInsert).toBeUndefined();
+
+      // Arrival-window routing disabled -> placeMovedVisit returns null, so do not request arrivalInsert.
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+      await findValidCandidateSlots(SERVICE, prefsNone, { ...ctx(), db: sharedDb([]), arrivalSearch: true });
+      expect(findAvailableSlots.mock.calls[3][0].arrivalInsert).toBeUndefined();
+    } finally {
+      if (prevShared === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+      else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = prevShared;
+      if (prevAdminWin === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+      else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = prevAdminWin;
+      if (prevCap === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = prevCap;
+    }
+  });
+
   test('records what the search saw: the window and each searched day\'s open starts before any filter, so a full week reads as full (owner audit 2026-10-22, finding 6)', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [

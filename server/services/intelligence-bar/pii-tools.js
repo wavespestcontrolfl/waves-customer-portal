@@ -70,6 +70,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'create_invoice',
   // set_customer_bill_to previews name the customer, the payer and the invoices.
   'set_customer_bill_to',
+  // set_customer_service_contact previews name the customer and each contact's phone and email.
+  'set_customer_service_contact',
   // The Agent Review draft tools name the customer, a masked number and the message bodies.
   'list_agent_review_drafts',
   'approve_agent_review_draft',
@@ -78,6 +80,9 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   // resolve_dispatch_alert previews name the customer and technician; unblock_sender previews carry the blocked address.
   'resolve_dispatch_alert',
   'unblock_sender',
+  // link_customer_family / unlink_customer_family previews name both profiles and their addresses.
+  'link_customer_family',
+  'unlink_customer_family',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',

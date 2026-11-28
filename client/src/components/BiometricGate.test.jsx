@@ -4,26 +4,46 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
+const platformState = vi.hoisted(() => ({ platform: 'ios', listeners: [] }));
+
 vi.mock('../native/platform', () => ({
   isNativeApp: () => true,
   hasSessionToken: () => true,
+  nativePlatform: () => platformState.platform,
 }));
 vi.mock('../native/biometric', () => ({
   NEEDS_PHONE_CODE: 'needs-phone-code',
   authenticateBiometric: vi.fn(() => new Promise(() => {})),
 }));
 vi.mock('@capacitor/app', () => ({
-  App: { addListener: vi.fn(async () => ({ remove: vi.fn() })) },
+  App: {
+    addListener: vi.fn(async (name, fn) => {
+      if (name === 'appStateChange') platformState.listeners.push(fn);
+      return { remove: vi.fn() };
+    }),
+    minimizeApp: vi.fn(async () => {}),
+    exitApp: vi.fn(async () => {}),
+  },
 }));
 
-import BiometricGate from './BiometricGate';
+import BiometricGate, { UNLOCK_GRACE_MS } from './BiometricGate';
 import CustomerDialogHost, { showCustomerAlert } from './brand/CustomerDialogHost';
+import { handleAndroidBackButton, _resetNativeBackButtonForTests } from '../native/nativeBackButton';
 
-beforeEach(() => {
+beforeEach(async () => {
+  platformState.platform = 'ios';
+  platformState.listeners.length = 0;
+  const { authenticateBiometric } = await import('../native/biometric');
+  authenticateBiometric.mockReset();
+  authenticateBiometric.mockImplementation(() => new Promise(() => {}));
   Object.defineProperty(window, 'scrollTo', { value: vi.fn(), writable: true });
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  _resetNativeBackButtonForTests();
+  vi.useRealTimers();
+});
 
 it('makes account content inert and suppresses portaled customer dialogs while locked', () => {
   render(
@@ -61,4 +81,120 @@ it('keeps the lock and offers the phone code sign-in when Face ID cannot run', a
   await vi.waitFor(() => expect(assign).toHaveBeenCalledWith('/login'));
   expect(localStorage.getItem('waves_token')).toBeNull();
   expect(localStorage.getItem('waves_refresh_token')).toBeNull();
+});
+
+it('uses platform-accurate lock copy on Android instead of hardcoding Face ID', () => {
+  platformState.platform = 'android';
+  render(
+    <BiometricGate>
+      <div data-testid="account-content">Private account details</div>
+    </BiometricGate>,
+  );
+  const dialog = screen.getByRole('dialog');
+  expect(dialog).toHaveAttribute('aria-label', 'Waves is locked. Unlock to view your account.');
+  expect(dialog.getAttribute('aria-label')).not.toMatch(/Face ID/i);
+});
+
+it('covers on background but skips re-prompting within the 5-minute grace window, then re-prompts after it expires', async () => {
+  vi.useFakeTimers();
+  const { authenticateBiometric } = await import('../native/biometric');
+  authenticateBiometric.mockResolvedValue(true);
+
+  render(
+    <BiometricGate>
+      <div data-testid="account-content">Private account details</div>
+    </BiometricGate>,
+  );
+
+  // Initial launch unlock runs once.
+  await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  // Move past the 700ms prompt-dismiss suppression window, stay inside the 5-minute grace period.
+  await vi.advanceTimersByTimeAsync(1500);
+  platformState.listeners.forEach((fn) => fn({ isActive: false }));
+  await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+  // Returning within 5 minutes clears the privacy cover without re-prompting.
+  await vi.advanceTimersByTimeAsync(10_000);
+  platformState.listeners.forEach((fn) => fn({ isActive: true }));
+  await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  // After the 5-minute grace period expires, a background/foreground cycle re-prompts.
+  await vi.advanceTimersByTimeAsync(UNLOCK_GRACE_MS + 1000);
+  platformState.listeners.forEach((fn) => fn({ isActive: false }));
+  await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+  platformState.listeners.forEach((fn) => fn({ isActive: true }));
+  await vi.waitFor(() => expect(authenticateBiometric).toHaveBeenCalledTimes(2));
+});
+
+it('expires biometric grace and re-prompts when the device clock moves backward', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-27T12:00:00Z'));
+  const { authenticateBiometric } = await import('../native/biometric');
+  authenticateBiometric.mockResolvedValue(true);
+
+  render(
+    <BiometricGate>
+      <div data-testid="account-content">Private account details</div>
+    </BiometricGate>,
+  );
+
+  await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  // Advance past the 700ms prompt-dismiss suppression window, lock on background,
+  // then roll the wall clock backward before returning to foreground.
+  await vi.advanceTimersByTimeAsync(1500);
+  platformState.listeners.forEach((fn) => fn({ isActive: false }));
+  await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+  vi.setSystemTime(new Date('2026-11-27T11:55:00Z'));
+  platformState.listeners.forEach((fn) => fn({ isActive: true }));
+  await vi.waitFor(() => expect(authenticateBiometric).toHaveBeenCalledTimes(2));
+});
+
+it('prevents a backward wall-clock adjustment from reviving an expired grace window', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-27T12:00:00Z'));
+  const { authenticateBiometric } = await import('../native/biometric');
+  authenticateBiometric.mockResolvedValue(true);
+
+  render(
+    <BiometricGate>
+      <div data-testid="account-content">Private account details</div>
+    </BiometricGate>,
+  );
+
+  await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  // Advance 10 minutes (past the 5-minute grace window on both wall & monotonic clocks).
+  await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+  platformState.listeners.forEach((fn) => fn({ isActive: false }));
+  await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+  // Move wall clock backward into the original 5-minute window (12:02, +2 min after unlock).
+  // Monotonic elapsed time is still 10 minutes, so the lock MUST re-prompt.
+  vi.setSystemTime(new Date('2026-11-27T12:02:00Z'));
+  platformState.listeners.forEach((fn) => fn({ isActive: true }));
+  await vi.waitFor(() => expect(authenticateBiometric).toHaveBeenCalledTimes(2));
+});
+
+it('minimizes the app on Android Back while locked instead of dismissing the lock', async () => {
+  platformState.platform = 'android';
+  const { App } = await import('@capacitor/app');
+  App.minimizeApp.mockClear();
+
+  render(
+    <BiometricGate>
+      <div data-testid="account-content">Private account details</div>
+    </BiometricGate>,
+  );
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
+  const result = await handleAndroidBackButton({ canGoBack: true }, App);
+  expect(result).toBe('handled');
+  await vi.waitFor(() => expect(App.minimizeApp).toHaveBeenCalledTimes(1));
+  expect(screen.getByRole('dialog')).toBeInTheDocument();
 });

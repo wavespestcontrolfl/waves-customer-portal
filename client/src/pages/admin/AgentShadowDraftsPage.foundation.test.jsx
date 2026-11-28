@@ -365,3 +365,46 @@ it('shows the current intent error even when an earlier read succeeds afterwards
   expect(screen.getByText(/Synthetic current failure/)).toBeInTheDocument();
   expect(screen.queryByText('Scheduling Caller')).not.toBeInTheDocument();
 });
+
+it('offers Resume for failed current-channel Gemini runs and hides it for stale pre-cutover Gemini runs', async () => {
+  mockShadowData(undefined, async (url) => (url.endsWith('/sealed-eval') ? {
+    ...fixtures.exam,
+    currentVersion: 'house_voice_v12',
+    currentVersionsByLeg: {
+      anthropic: 'house_voice_v12',
+      openai: 'house_voice_v12',
+      gemini: 'hv_g_v12',
+    },
+    runs: [
+      { id: 'gem-stale', status: 'failed', providerLeg: 'gemini', promptVersion: 'house_voice_v12', itemsJudged: 5, itemsTotal: 10 },
+      { id: 'gem-current', status: 'failed', providerLeg: 'gemini', promptVersion: 'hv_g_v12', itemsJudged: 3, itemsTotal: 10 },
+    ],
+  } : undefined));
+  render(<AgentShadowDraftsPage />);
+
+  const resumeBtn = await screen.findByRole('button', { name: 'Resume failed run (Gemini (measure))' });
+  fireEvent.click(resumeBtn);
+  await waitFor(() => expect(mutationCalls()).toContainEqual([
+    '/admin/agents/sealed-eval/runs',
+    { method: 'POST', body: JSON.stringify({ resumeRunId: 'gem-current' }) },
+  ]));
+
+  cleanup();
+  adminFetch.mockReset();
+  mockShadowData(undefined, async (url) => (url.endsWith('/sealed-eval') ? {
+    ...fixtures.exam,
+    currentVersion: 'house_voice_v12',
+    currentVersionsByLeg: {
+      anthropic: 'house_voice_v12',
+      openai: 'house_voice_v12',
+      gemini: 'hv_g_v12',
+    },
+    runs: [
+      { id: 'gem-stale', status: 'failed', providerLeg: 'gemini', promptVersion: 'house_voice_v12', itemsJudged: 5, itemsTotal: 10 },
+    ],
+  } : undefined));
+  render(<AgentShadowDraftsPage />);
+
+  expect(await screen.findByRole('button', { name: 'Run exam — Gemini (measure)' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Resume failed run/ })).not.toBeInTheDocument();
+});

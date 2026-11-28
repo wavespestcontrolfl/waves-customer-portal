@@ -9,9 +9,12 @@
 #
 # What it does:
 #   1. installs the exact lockfile-pinned Capacitor deps
-#   2. builds the web app into client/dist (the webDir Capacitor copies)
+#   2. verifies the slim native fallback shell (client/native-shell/index.html)
+#      — the native app loads https://portal.wavespestcontrol.com remotely, so
+#      bundling client/dist would copy ~95 MB of unused marketing/admin files
+#      into the .ipa
 #   3. generates the native Xcode project at client/ios/App (idempotent)
-#   4. syncs web assets + native plugins into the iOS project
+#   4. syncs the slim shell + native plugins into the iOS project
 #   5. opens Xcode so you can set the signing team and run on a device
 #
 # Run from the repo root:  bash scripts/mobile/bootstrap-ios.sh
@@ -89,8 +92,11 @@ echo "==> 1/5  Installing lockfile-pinned native dependencies…"
 # between release builds.
 npm ci
 
-echo "==> 2/5  Building web bundle (dist/)…"
-npm run build
+echo "==> 2/5  Verifying slim native shell (native-shell/)…"
+# capacitor.config.json sets server.url = https://portal.wavespestcontrol.com
+# and webDir = native-shell, keeping the .ipa slim (~10-15 MB) instead of
+# bundling ~95 MB of unreachable marketing media and admin bundles from dist/.
+test -f native-shell/index.html || { echo "ERROR: client/native-shell/index.html missing." >&2; exit 1; }
 
 # Capacitor 8 defaults new iOS projects to Swift Package Manager, but
 # @aparajita/capacitor-biometric-auth ships no Package.swift — under SPM it is

@@ -14,7 +14,7 @@
 // Styling matches the light/zinc detail sheet it opens over (not the tech
 // app's dark palette) — neutral chrome only, per the admin design spec.
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -357,15 +357,100 @@ function PickPreview({ first, pick, reason, labelStyle }) {
   );
 }
 
+function RainOutCloseButton({ busy, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      aria-label="Close"
+      style={{
+        background: 'transparent', border: 'none', color: '#71717A', fontSize: 24,
+        cursor: busy ? 'default' : 'pointer', minWidth: 44, minHeight: 44,
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        opacity: busy ? 0.5 : 1,
+      }}
+    >
+      ×
+    </button>
+  );
+}
+
+function RainOutFooterActions({ busy, moveLocked, pickSelected, committed, first, onCancel, onCommit }) {
+  return (
+    <div style={{ display: 'flex', gap: 10 }}>
+      <button
+        type="button"
+        onClick={onCancel}
+        disabled={busy}
+        style={{
+          flex: 1, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
+          border: '1px solid #E4E4E7', background: '#FFFFFF', color: '#18181B',
+          cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1,
+        }}
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        onClick={onCommit}
+        disabled={moveLocked}
+        style={{
+          flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
+          border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
+          cursor: moveLocked ? 'default' : 'pointer',
+          opacity: moveLocked ? 0.5 : 1,
+        }}
+      >
+        {pickSelected
+          ? (busy ? 'Sending…' : committed ? 'Sent' : `Text ${first} to pick a day`)
+          : (busy ? 'Moving…' : committed ? 'Moved' : 'Move appointment')}
+      </button>
+    </div>
+  );
+}
+
+function RainOutInitialErrorActions({ visible, onCancel, onRetry }) {
+  if (!visible) return null;
+  return (
+    <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+      <button
+        type="button"
+        onClick={onCancel}
+        style={{
+          flex: 1, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
+          border: '1px solid #E4E4E7', background: '#FFFFFF', color: '#18181B', cursor: 'pointer',
+        }}
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        onClick={onRetry}
+        style={{
+          flex: 1, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
+          border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF', cursor: 'pointer',
+        }}
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
 // `allowRouteScope` false (a non-admin login, which POST /rain-out refuses
 // scope 'route' for): this stop only, no whole-route chip.
 export default function RainOutSheet({ service, onClose, onDone, allowRouteScope = true }) {
   const isMobile = useIsMobile();
   // Shared dialog focus contract (hooks/useModalFocus): focus moves into the
   // sheet on open, Tab stays inside, Escape closes it, and focus returns to the
-  // control that opened it. Escape runs the same onClose as Cancel / the ×, so
-  // a parent that dismisses on a committed warning still does.
-  const dialogRef = useModalFocus(true, onClose);
+  // control that opened it. Escape runs the same closeIfIdle as Cancel / the ×,
+  // blocking dismissal while a commit POST is in flight.
+  const [busy, setBusy] = useState(false);
+  const closeIfIdle = useCallback(() => {
+    if (!busy) onClose?.();
+  }, [busy, onClose]);
+  const dialogRef = useModalFocus(true, closeIfIdle);
   const customDateId = useId();
   const customStartId = useId();
   const [options, setOptions] = useState(null);
@@ -376,7 +461,6 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
   const [notify, setNotify] = useState(true);
   // Optional dispatcher note appended to the end of the customer text.
   const [note, setNote] = useState('');
-  const [busy, setBusy] = useState(false);
   // Latched once a move has COMMITTED but the sheet stays open to show an
   // attention-required result (failed stop / un-texted / advisory overlap):
   // the Move button must not fire a second move — a same-day retry would
@@ -779,7 +863,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
       role="dialog"
       aria-modal="true"
       aria-label="Quick Move Appointment"
-      onClick={onClose}
+      onClick={closeIfIdle}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 110,
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
@@ -806,14 +890,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
           <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B' }}>Quick Move Appointment</div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            style={{ background: 'transparent', border: 'none', color: '#71717A', fontSize: 24, cursor: 'pointer', padding: '0 6px' }}
-          >
-            ×
-          </button>
+          <RainOutCloseButton busy={busy} onClick={closeIfIdle} />
         </div>
         <div style={{ fontSize: 14, color: '#71717A', marginBottom: 16 }}>
           {service.customerName || 'Customer'}
@@ -828,6 +905,12 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
             {error}
           </div>
         )}
+
+        <RainOutInitialErrorActions
+          visible={!options && Boolean(error)}
+          onCancel={closeIfIdle}
+          onRetry={() => { setError(''); setRouteRetry((n) => n + 1); }}
+        />
 
         {routeLoadError && (
           <div style={{
@@ -1035,9 +1118,9 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               </div>
             )}
 
-            {/* Overlap disclaimer — warn-only (owner call 2026-08-12): the
-                Move button stays enabled; the server's locked occupancy
-                check at commit is the enforcer and rejects real overlaps. */}
+            {/* Overlap warning — advisory: RainOut.commit passes
+                overlapAdvisory: true so tapping Move still books the overlap
+                with a warning and texts the customer if notify is checked. */}
             {activeConflicts.length > 0 && selected && (
               <div style={{
                 fontSize: 14, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 18,
@@ -1045,7 +1128,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               }}>
                 {`⚠️ This time overlaps ${conflictLabel(activeConflicts[0])}`}
                 {activeConflicts.length > 1 && ` and ${activeConflicts.length - 1} more`}
-                {' — the schedule will block this move. Pick a different time.'}
+                {' — moving here will double-book this slot and still text the customer if checked. Pick a different time to avoid stacking.'}
               </div>
             )}
 
@@ -1132,33 +1215,15 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: 10 }}>
-              <button
-                type="button"
-                onClick={onClose}
-                style={{
-                  flex: 1, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
-                  border: '1px solid #E4E4E7', background: '#FFFFFF', color: '#18181B', cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleCommit}
-                disabled={moveLocked}
-                style={{
-                  flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
-                  border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
-                  cursor: moveLocked ? 'default' : 'pointer',
-                  opacity: moveLocked ? 0.5 : 1,
-                }}
-              >
-                {pickSelected
-                  ? (busy ? 'Sending…' : committed ? 'Sent' : `Text ${first} to pick a day`)
-                  : (busy ? 'Moving…' : committed ? 'Moved' : 'Move appointment')}
-              </button>
-            </div>
+            <RainOutFooterActions
+              busy={busy}
+              moveLocked={moveLocked}
+              pickSelected={pickSelected}
+              committed={committed}
+              first={first}
+              onCancel={closeIfIdle}
+              onCommit={handleCommit}
+            />
           </>
         )}
       </div>

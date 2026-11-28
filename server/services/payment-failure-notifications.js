@@ -126,6 +126,7 @@ async function dispatchPendingNotification(trx, key) {
       shouldContinue,
       beforePush: shouldContinue,
       deliveredSubscriptionIds,
+      pushOnDedupe: true,
     });
     if (recheckError) throw recheckError;
     const { bellWritten, push, suppressed, policySilenced, retryable, error, prefsUnavailable } = result || {};

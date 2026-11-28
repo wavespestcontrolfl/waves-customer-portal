@@ -35,6 +35,17 @@ describe('alert sounds map', () => {
     expect(soundForTrigger('new_lead_quote')).toBe('waves-lead.caf');
   });
 
+  test('high-value customer call, reservice, reschedule, and applicant triggers carry custom sounds', () => {
+    expect(soundForTrigger('relay_unbooked_call')).toBe('waves-missed-call.caf');
+    expect(soundForTrigger('relay_reservice_filed')).toBe('waves-missed-call.caf');
+    expect(soundForTrigger('sandy_transfer_no_context')).toBe('waves-missed-call.caf');
+    expect(soundForTrigger('appointment_reschedule_intent')).toBe('waves-text.caf');
+    expect(soundForTrigger('reservice_self_booked')).toBe('waves-reminder.caf');
+    expect(soundForTrigger('new_job_application')).toBe('waves-lead.caf');
+    expect(soundForTrigger('job_applicant_reply')).toBe('waves-email.caf');
+    expect(soundForTrigger('job_interview_booked')).toBe('waves-reminder.caf');
+  });
+
   test('the map is frozen', () => {
     expect(Object.isFrozen(ALERT_SOUNDS)).toBe(true);
   });

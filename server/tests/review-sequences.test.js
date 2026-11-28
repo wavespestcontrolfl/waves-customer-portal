@@ -282,11 +282,13 @@ describe('review sequences — cadence engine', () => {
         plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
         started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
       }],
-      // 3 delivered review asks already exist (e.g. 2 prior + the cadence Day-0).
+      // 3 delivered review asks already exist inside the 180-day cap window
+      // (e.g. 2 prior + the cadence Day-0). Use dates relative to now so the
+      // oldest ask does not age past the rolling 180-day cap window.
       review_requests: [
-        { customer_id: 'cap1', channel: 'sms', sms_sent_at: new Date('2026-06-01') },
-        { customer_id: 'cap1', channel: 'sms', sms_sent_at: new Date('2026-06-10') },
-        { customer_id: 'cap1', sequence_id: 'seqCap', channel: 'sms', sms_sent_at: new Date('2026-06-20') },
+        { customer_id: 'cap1', channel: 'sms', sms_sent_at: new Date(Date.now() - 30 * 86400000) },
+        { customer_id: 'cap1', channel: 'sms', sms_sent_at: new Date(Date.now() - 20 * 86400000) },
+        { customer_id: 'cap1', sequence_id: 'seqCap', channel: 'sms', sms_sent_at: new Date(Date.now() - 4 * 86400000) },
       ],
     });
     db.mockImplementation(mock);

@@ -5,6 +5,8 @@ import './styles/brand-tokens.css';
 import App from './App';
 import { initNativePush } from './native/nativePush';
 import { initNativeLinks } from './native/nativeLinks';
+import { initNativeBackButton } from './native/nativeBackButton';
+import { initNativeChrome } from './native/nativeChrome';
 import { clearStaffDeviceData, getAdminAuthToken } from './lib/adminAuth';
 import { installStaffSessionGuard } from './lib/staffSessionGuard';
 import { installPortalVersionWatch } from './lib/portalVersion';
@@ -48,13 +50,21 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   </React.StrictMode>
 );
 
-// Native (iOS Capacitor) APNs registration. No-op on the web — see
+// Native (iOS + Android Capacitor) push registration. No-op on the web — see
 // client/src/native/nativePush.js.
 initNativePush();
 
 // Universal/App Link → in-app navigation. No-op on the web — see
 // client/src/native/nativeLinks.js.
 initNativeLinks();
+
+// Android hardware/gesture Back button → close dialogs/sheets before exiting.
+// No-op on web and iOS — see client/src/native/nativeBackButton.js.
+initNativeBackButton();
+
+// Native StatusBar light-background icon styling (iOS + Android edge-to-edge).
+// No-op on web — see client/src/native/nativeChrome.js.
+initNativeChrome();
 
 // Register PWA service worker
 if ('serviceWorker' in navigator) {

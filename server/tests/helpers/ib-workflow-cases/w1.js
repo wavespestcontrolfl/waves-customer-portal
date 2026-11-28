@@ -48,7 +48,7 @@ async function snapshotState(h, cast) {
 
 async function ambient(opts = {}) {
   const { listNeedsMe } = require('../../../services/needs-me'); // lazy: the database env is set at boot
-  return listNeedsMe({ limit: 500, ...opts });
+  return listNeedsMe({ limit: 500, fullAccess: true, ...opts });
 }
 
 function needsMeCall(ctx, turn) {

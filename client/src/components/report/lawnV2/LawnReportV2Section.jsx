@@ -12,8 +12,8 @@
 // today" + "Products Applied" own that); the snapshot's "Today's focus" covers the
 // at-a-glance version. `treatment` stays on the payload for the standalone preview.
 
+import { PrintContext } from './lawnPrintContext';
 import {
-  PrintContext,
   LawnSnapshotHero,
   LawnFollowUpCard,
   LawnInsightCards,

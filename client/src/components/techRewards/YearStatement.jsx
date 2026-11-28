@@ -67,6 +67,9 @@ export function YearStatementView({ statement }) {
       <TBody>
         {amountRows(PAY_ROWS, pay)}
         <AmountRow label="Gross pay" cents={pay.grossCents} strong />
+        {(withheld.totalCents > 0 || statement.simpleSavingsCents !== 0) && (
+          <TR><TH colSpan={2} className="text-ui-caption font-medium text-ink-secondary">Withheld from gross pay</TH></TR>
+        )}
         {amountRows(TAX_ROWS, withheld)}
         {statement.simpleSavingsCents !== 0 && <AmountRow label="SIMPLE IRA (pre-tax)" cents={statement.simpleSavingsCents} />}
         <AmountRow label="Net pay" cents={statement.netCents} strong />

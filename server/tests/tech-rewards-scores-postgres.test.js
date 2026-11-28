@@ -43,6 +43,33 @@ describe('tech rewards scores input checks', () => {
     expect(await code(() => scores.saveSettings({ weights: WEIGHTS, cutLines: CUTS, effectiveFrom: '2026-01-01' }, 'not-a-uuid'))).toBe('INVALID_ACTOR');
     expect(await code(() => scores.seasonScore(randomUUID(), 1800))).toBe('INVALID_YEAR');
   });
+
+  test('saveSettings with preserveBaseline seeds default baseline version 1 when table is empty', async () => {
+    const inserts = [];
+    const trx = {
+      raw: jest.fn(async (sql, bindings = []) => {
+        if (/ORDER BY version DESC LIMIT 1/.test(sql)) return { rows: [] };
+        if (/INSERT INTO tech_reward_settings/.test(sql)) {
+          inserts.push({ version: bindings[0], weights: JSON.parse(bindings[1]), cutLines: JSON.parse(bindings[2]), effectiveFrom: bindings[3], actor: bindings[4] });
+          return {
+            rows: [{
+              version: bindings[0],
+              weights: JSON.parse(bindings[1]),
+              cut_lines: JSON.parse(bindings[2]),
+              effective_from: bindings[3],
+            }],
+          };
+        }
+        return { rows: [] };
+      }),
+    };
+    const conn = { transaction: (fn) => fn(trx) };
+    const saved = await scores.saveSettings({ weights: WEIGHTS, cutLines: CUTS, effectiveFrom: '2026-11-27', preserveBaseline: true }, null, conn);
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0]).toMatchObject({ version: 1, effectiveFrom: '1970-01-01' });
+    expect(inserts[1]).toMatchObject({ version: 2, weights: WEIGHTS, cutLines: CUTS, effectiveFrom: '2026-11-27' });
+    expect(saved).toMatchObject({ version: 2, weights: WEIGHTS, cutLines: CUTS, effectiveFrom: '2026-11-27', source: 'stored' });
+  });
 });
 
 (SKIP ? describe.skip : describe)('tech rewards scores (live Postgres)', () => {
@@ -320,6 +347,14 @@ describe('tech rewards scores input checks', () => {
       await db('tech_reward_settings').insert({ version: 3, weights: WEIGHTS, cut_lines: { top: 50, mid: 60, low: 70 }, effective_from: '2026-09-03' });
       await expect(scores.getSettings('2026-09-03')).rejects.toMatchObject({ code: 'MALFORMED_SETTINGS' });
       expect((await scores.getSettings('2026-09-01')).version).toBe(1);
+    });
+
+    test('preserveBaseline keeps earlier seasons on calculator defaults when saving the first UI settings version', async () => {
+      const v2 = await scores.saveSettings({ weights: WEIGHTS, cutLines: CUTS, effectiveFrom: '2026-11-27', preserveBaseline: true }, tech);
+      expect(v2).toMatchObject({ version: 2, effectiveFrom: '2026-11-27', weights: WEIGHTS, cutLines: CUTS, source: 'stored' });
+      const priorSeason = await scores.getSettings('2026-08-31');
+      expect(priorSeason).toMatchObject({ version: 1, effectiveFrom: '1970-01-01', weights: calc.DEFAULT_WEIGHTS, cutLines: calc.DEFAULT_CUT_LINES, source: 'stored' });
+      expect((await scores.getSettings('2026-11-27')).version).toBe(2);
     });
   });
 
@@ -638,6 +673,17 @@ describe('tech rewards scores input checks', () => {
       await visit(other, { customer_id: customers[2], service_date: '2026-04-22', is_callback: true });
       expect(await scores.readCallbacks(tech, WINDOW)).toBe(0); // 15 per 100, clamped
       expect(await scores.readCallbacks(tech, { from: '2026-05-01', to: '2026-05-31' })).toBeNull();
+    });
+
+    test('callbacks: internal test customer visits and callbacks are both excluded from the score', async () => {
+      const testCustId = INTERNAL_TEST_CUSTOMER_IDS[0];
+      await db('customers').insert({ id: testCustId, first_name: 'Internal', last_name: 'Test' });
+      const realCust = randomUUID();
+      await visit(tech, { customer_id: realCust, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+      await visit(tech, { customer_id: testCustId, service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      await visit(other, { customer_id: testCustId, service_date: '2026-04-20', is_callback: true, created_at: ts('2026-04-20T14:00:00Z') });
+      // Real visit stays 100; internal test visit and its callback are both left out.
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(100);
     });
 
     test('callbacks: 63 callbacks in 1,600 visits is exactly 60.625, rounded half up to 60.63; both id spellings agree', async () => {

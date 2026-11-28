@@ -5,6 +5,7 @@
 // admin-timetracking-start-point.test.js.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => undefined) }));
 jest.mock('../services/time-tracking', () => ({}));
 jest.mock('../services/push-notifications', () => ({ deactivateStaffUser: jest.fn(async () => 1) }));
 jest.mock('../sockets', () => ({ disconnectStaffSockets: jest.fn() }));
@@ -22,6 +23,8 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { recordAuditEvent } = require('../services/audit-log');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const router = require('../routes/admin-timetracking');
 
 const DOC_ID = '11111111-2222-4333-8444-555555555555';
@@ -120,5 +123,51 @@ describe('POST /documents/:id/restore', () => {
 
     expect(res.statusCode).toBe(404);
     expect(res.body).toEqual({ error: 'Document not found' });
+  });
+});
+
+describe('GET /documents/:id/download', () => {
+  test('returns presigned URL and writes an audit row with structural metadata only', async () => {
+    const active = { ...ARCHIVED, is_archived: false, file_name: 'Jane_Doe_W4.pdf', technician_id: 'tech-1' };
+    db.mockReturnValueOnce(chain({ first: active }));
+    getSignedUrl.mockResolvedValueOnce('https://s3.example.test/signed');
+
+    const res = await invoke('get', '/documents/:id/download', {
+      params: { id: DOC_ID },
+      technicianId: 'admin-1',
+      ip: '203.0.113.9',
+      get: (h) => (h.toLowerCase() === 'user-agent' ? 'WavesTest/1.0' : undefined),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ url: 'https://s3.example.test/signed', fileName: 'Jane_Doe_W4.pdf' });
+    expect(recordAuditEvent).toHaveBeenCalledWith({
+      actor_type: 'admin',
+      actor_id: 'admin-1',
+      action: 'hr_document.download_url_issued',
+      resource_type: 'company_document',
+      resource_id: DOC_ID,
+      ip_address: '203.0.113.9',
+      user_agent: 'WavesTest/1.0',
+      metadata: {
+        category: 'policy',
+        technician_id: 'tech-1',
+      },
+      critical: true,
+    });
+  });
+
+  test('fails the request and does not return a presigned URL if the audit write fails', async () => {
+    const active = { ...ARCHIVED, is_archived: false, file_name: 'Jane_Doe_W4.pdf', technician_id: 'tech-1' };
+    db.mockReturnValueOnce(chain({ first: active }));
+    getSignedUrl.mockResolvedValueOnce('https://s3.example.test/signed');
+    recordAuditEvent.mockRejectedValueOnce(new Error('audit_log write failed'));
+
+    await expect(invoke('get', '/documents/:id/download', {
+      params: { id: DOC_ID },
+      technicianId: 'admin-1',
+      ip: '203.0.113.9',
+      get: () => undefined,
+    })).rejects.toThrow('audit_log write failed');
   });
 });

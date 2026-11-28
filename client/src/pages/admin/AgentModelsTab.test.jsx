@@ -344,4 +344,96 @@ describe("AgentModelsTab", () => {
     expect(within(dialog).getByText("Report copy")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Draft eligible" })).toBeEnabled();
   });
+
+  it("warns on inbound Gemini moves only for lanes without a systemInstruction boundary (including combined-prompt callers like contact dictation)", async () => {
+    adminFetch.mockImplementation(async (path, init) => {
+      if (path === "/admin/agents/models") {
+        const data = makeData();
+        data.models.g1 = { label: "Gemini 3.8", provider: "gemini", caps: ["text"], status: "current" };
+        data.models.g2 = { label: "Gemini 4", provider: "gemini", caps: ["text"], status: "current" };
+        data.lanes = [
+          {
+            id: "shared_inbound",
+            name: "Shared Gemini lane",
+            describe: "Routes through shared adapter",
+            area: "sms",
+            continuity: "verified",
+            inbound: true,
+            geminiFoldsSystem: false,
+            lock: null,
+            fanout: false,
+            applies: "restart",
+            primary: { model: "g1", selector: null, pinEnv: "PIN_SHARED_G", setEnv: "PIN_SHARED_G", pinned: true, unpinnedModel: "g1", accepts: { providers: ["gemini"], cap: "text", deep: false }, live: false },
+            fallback: null,
+            retry: null,
+            also: [],
+          },
+          {
+            id: "contact_dictation",
+            name: "Contact dictation decoder",
+            describe: "Sends combined prompt without separated system channel",
+            area: "sms",
+            continuity: "verified",
+            inbound: true,
+            geminiFoldsSystem: true,
+            lock: null,
+            fanout: false,
+            applies: "restart",
+            primary: { model: "g1", selector: null, pinEnv: "GEMINI_CONTACT_DECODER_MODEL", setEnv: "GEMINI_CONTACT_DECODER_MODEL", pinned: true, unpinnedModel: "g1", accepts: { providers: ["gemini"], cap: "text", deep: false }, live: true },
+            fallback: null,
+            retry: null,
+            also: [],
+          },
+          {
+            id: "legacy_omitted_flag",
+            name: "Legacy API inbound lane",
+            describe: "Server response predates geminiFoldsSystem flag",
+            area: "sms",
+            continuity: "verified",
+            inbound: true,
+            lock: null,
+            fanout: false,
+            applies: "restart",
+            primary: { model: "g1", selector: null, pinEnv: "PIN_LEGACY_INBOUND", setEnv: "PIN_LEGACY_INBOUND", pinned: true, unpinnedModel: "g1", accepts: { providers: ["gemini"], cap: "text", deep: false }, live: true },
+            fallback: null,
+            retry: null,
+            also: [],
+          },
+        ];
+        return data;
+      }
+      if (path.startsWith("/admin/agents/models/search")) return { newest: [], results: [], unavailable: [] };
+      if (path === "/admin/agents/models/probe") return { ok: true, provider: JSON.parse(init.body).provider, id: JSON.parse(init.body).id };
+      throw new Error(path);
+    });
+    renderTab();
+    const sharedCard = (await screen.findByText("Shared Gemini lane")).closest(".p-4");
+    fireEvent.click(within(sharedCard).getByRole("button", { name: /Change/ }));
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
+    expect(await screen.findByText("PIN_SHARED_G=g2")).toBeInTheDocument();
+    expect(screen.queryByText(/Moves inbound customer content onto Gemini/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    const legacyCard = screen.getByText("Legacy API inbound lane").closest(".p-4");
+    fireEvent.click(within(legacyCard).getByRole("button", { name: /Change/ }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
+    let warning = await screen.findByText(/Moves inbound customer content onto Gemini without a systemInstruction boundary/);
+    expect(warning).toHaveTextContent(/Legacy API inbound lane/);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    const contactCard = screen.getByText("Contact dictation decoder").closest(".p-4");
+    fireEvent.click(within(contactCard).getByRole("button", { name: /Change/ }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
+    warning = await screen.findByText(/Moves inbound customer content onto Gemini without a systemInstruction boundary/);
+    expect(warning).toHaveAttribute("role", "alert");
+    expect(warning).toHaveTextContent(/Contact dictation decoder/);
+    expect(warning).toHaveTextContent(/Legacy API inbound lane/);
+    expect(warning).not.toHaveTextContent(/Shared Gemini lane/);
+  });
 });

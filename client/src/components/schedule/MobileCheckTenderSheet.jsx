@@ -5,7 +5,8 @@
 // that invoice paid for AR and completion-SMS branching.
 
 import { ArrowLeft } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -19,6 +20,7 @@ export default function MobileCheckTenderSheet({
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const savingRef = useRef(false);
   // Set when the server recorded the payment but sent no receipt ({ receipt: { manual: true } }: a part-paid invoice, whose
   // receipt would name the whole bill). The sheet then says so and closes on Done. It does not ask for a resend: the Invoices
   // page receipt names the whole bill too.
@@ -28,48 +30,55 @@ export default function MobileCheckTenderSheet({
   const amountText = `$${Number(amount || 0).toFixed(2)}`;
 
   async function handleRecord() {
-    if (saving) return;
+    if (savingRef.current || saving) return;
     if (!invoiceId) {
       setError('Missing invoice id');
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     setError(null);
-    try {
-      const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/record-payment`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-        },
-        body: JSON.stringify({
-          method: 'check',
-          note: note.trim() || null,
-          reference: note.trim() || null,
-          sendReceipt: false,
-          // With GATE_CHECKOUT_TENDER_RECEIPT on, the server queues the receipt and records exactly the amount this
-          // sheet showed (a balance that moved since is refused). Gate off, sendReceipt: false stands, as before.
-          checkoutTender: true,
-          totalSeen: Number(amount || 0),
-        }),
-      });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        throw new Error(d.error || 'Failed to record payment');
-      }
-      const data = await r.json();
-      const payload = { amount: Number(amount || 0), method: 'check', note, invoice: data.invoice };
-      if (data.receipt?.manual) {
-        setRecorded(payload);
+    await holdReloadWhileSending('check-tender', async () => {
+      try {
+        const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/record-payment`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+          },
+          body: JSON.stringify({
+            method: 'check',
+            note: note.trim() || null,
+            reference: note.trim() || null,
+            sendReceipt: false,
+            // With GATE_CHECKOUT_TENDER_RECEIPT on, the server queues the receipt and records exactly the amount this
+            // sheet showed (a balance that moved since is refused). Gate off, sendReceipt: false stands, as before.
+            checkoutTender: true,
+            totalSeen: Number(amount || 0),
+          }),
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          throw new Error(d.error || 'Failed to record payment');
+        }
+        const data = await r.json();
+        const payload = { amount: Number(amount || 0), method: 'check', note, invoice: data.invoice };
+        if (data.receipt?.manual) {
+          setRecorded(payload);
+          savingRef.current = false;
+          setSaving(false);
+          return;
+        }
+        savingRef.current = false;
         setSaving(false);
-        return;
+        onRecorded?.(payload);
+        onClose?.();
+      } catch (e) {
+        setError(e.message || 'Failed to record payment');
+        savingRef.current = false;
+        setSaving(false);
       }
-      onRecorded?.(payload);
-      onClose?.();
-    } catch (e) {
-      setError(e.message || 'Failed to record payment');
-      setSaving(false);
-    }
+    });
   }
 
   return (

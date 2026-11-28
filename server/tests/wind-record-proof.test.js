@@ -95,7 +95,7 @@ describe('the shared Open-Meteo request and the normalized forecast', () => {
       'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation_probability,weather_code',
     );
     expect(url.searchParams.get('hourly')).toBe(
-      'precipitation,precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m',
+      'precipitation,precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,weather_code',
     );
     expect(url.searchParams.get('wind_speed_unit')).toBe('mph');
     expect(url.searchParams.get('timeformat')).toBe('unixtime');

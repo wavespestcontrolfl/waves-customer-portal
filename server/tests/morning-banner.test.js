@@ -40,17 +40,34 @@ const many = (n, meta) => Array.from({ length: n }, () => row(meta));
 const MORNING = new Date('2026-11-03T13:00:00Z'); // 8:00 AM EST
 
 let claimed;
+let activeAdmins;
 beforeEach(() => {
   jest.clearAllMocks();
   rowSeq = 0;
   claimed = new Set();
+  activeAdmins = [{ id: 1, email: 'contact@wavespestcontrol.com' }];
   mockDb.raw.mockImplementation(async (_sql, [key]) => {
     if (claimed.has(key)) return { rows: [] };
     claimed.add(key);
     return { rows: [{ id: claimed.size }] };
   });
   const del = jest.fn().mockResolvedValue(1);
-  mockDb.mockImplementation(() => ({ where: ({ claim_key: key }) => ({ del: async () => { claimed.delete(key); return del(); } }) }));
+  mockDb.mockImplementation((table) => {
+    if (table === 'technicians') {
+      return { where: () => ({ select: async () => activeAdmins }) };
+    }
+    return {
+      where: ({ claim_key: key }) => ({
+        first: async () => (claimed.has(key) ? { id: 1 } : null),
+        del: async () => { claimed.delete(key); return del(); },
+      }),
+      whereIn: (_col, keys) => ({
+        first: async () => (keys.some((k) => claimed.has(k)) ? { id: 1 } : null),
+        del: async () => { for (const k of keys) claimed.delete(k); return del(); },
+      }),
+    };
+  });
+  mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
   mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
 });
 
@@ -63,7 +80,7 @@ describe('what counts as waiting', () => {
       row({ area: 'Estimates' }),
     ]);
     const result = await runMorningBanner({ now: MORNING });
-    expect(mockOpenRows).toHaveBeenCalledWith('admin');
+    expect(mockOpenRows).toHaveBeenCalledWith('admin', null, true);
     expect(result).toMatchObject({ count: 7, sent: true });
     expect(mockTrigger).toHaveBeenCalledTimes(1);
     expect(mockTrigger).toHaveBeenCalledWith('waiting_summary', {
@@ -71,7 +88,7 @@ describe('what counts as waiting', () => {
       total: 7,
       areas: [{ area: 'Comms', count: 3 }, { area: 'Billing', count: 2 }, { area: 'Schedule', count: 1 }, { area: 'Estimates', count: 1 }],
       day: '2026-11-03',
-    }, { pushOnly: true });
+    }, { pushOnly: true, onlyUserIds: [1] });
   });
 
   test('leaves out fyi, Claude and either rows, Activity-only rows, rows sent to Claude and unsorted rows', async () => {
@@ -150,7 +167,7 @@ describe('once per ET day', () => {
     // Late in the evening ET it is still the same ET day.
     expect((await runMorningBanner({ now: new Date('2026-11-04T03:30:00Z') })).skipped).toBe('already_claimed');
     expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect([...claimed]).toEqual(['morning_banner:2026-11-03']);
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:owner', 'morning_banner:2026-11-03:scoped']);
   });
 
   test('the next ET day sends again, across the November fall-back day too', async () => {
@@ -163,16 +180,81 @@ describe('once per ET day', () => {
     expect(mockTrigger.mock.calls.map(([, payload]) => payload.day)).toEqual(['2026-10-31', '2026-11-01', '2026-11-02']);
   });
 
-  test('a send that definitely did not happen releases the claim so a rerun can send', async () => {
+  test('a send that definitely did not happen releases the audience claim so a rerun can send, while retaining the legacy rollout fence', async () => {
     mockOpenRows.mockResolvedValue(many(2));
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, prefsUnavailable: true });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
-    expect(claimed.size).toBe(0);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    expect(claimed.has('morning_banner:2026-11-03:scoped')).toBe(true);
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'recipient_lookup' });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'before_handoff' });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
     mockTrigger.mockRejectedValueOnce(new Error('boom'));
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
-    expect(claimed.size).toBe(0);
-    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: true });
-    expect(claimed.size).toBe(1);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
+    // Missing push credentials (skipped with apns_not_configured / push_not_configured)
+    // is a delivery failure, NOT a routine skip — releases the audience claim so retry works once configured.
+    mockTrigger.mockResolvedValueOnce({
+      bellWritten: false,
+      push: { sent: 0, failed: 0, skipped: 1, subscriptions: 1, results: [{ sent: false, skipped: true, reason: 'apns_not_configured' }] },
+    });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'push_not_configured' });
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
+    // Opt-outs / empty subscriptions (sent=0, failed=0, no config error) release audience claim
+    // while retaining the legacy rollout fence so an older instance cannot broadcast private counts.
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, failed: 0, subscriptions: 0 } });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, skipped: 'no_delivery' });
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    // Per-device failure after handoff (push.failed > 0) may have had its ack lost ->
+    // treat as uncertain and KEEP the claim so a rerun never sends a duplicate banner.
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, failed: 2, subscriptions: 2 } });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, uncertain: true });
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(true);
+    claimed.clear();
+    // Provider handoff may already have happened -> keep both claims to avoid duplicates,
+    // but report uncertain delivery instead of claiming sent: true.
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'push_dispatch' });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, uncertain: true });
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(true);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('delivery uncertain'));
+    mockTrigger.mockClear();
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, skipped: 'already_claimed' });
+    expect(mockTrigger).not.toHaveBeenCalled();
+
+    // When only ownerOnly alerts are open and no owner admin exists, reserve the legacy key
+    // so an older instance cannot broadcast the private count to non-owner admins.
+    claimed.clear();
+    activeAdmins = [{ id: 2, email: 'office@wavespestcontrol.com' }];
+    mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 1, sent: false, skipped: 'no_recipients' });
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    expect(claimed.has('morning_banner:2026-11-03:scoped')).toBe(true);
+  });
+
+  test('a failed recipient lookup leaves no stranded daily claim so a rerun succeeds', async () => {
+    mockOpenRows.mockResolvedValue(many(2));
+    let failOnce = true;
+    const origImpl = mockDb.getMockImplementation();
+    mockDb.mockImplementation((table) => {
+      if (table === 'technicians' && failOnce) {
+        failOnce = false;
+        return { where: () => ({ select: async () => { throw new Error('technicians lookup failed'); } }) };
+      }
+      return origImpl(table);
+    });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 2, sent: false, error: 'dispatch_failed' });
+    // Rollout fence stays held so older instances cannot send ownerOnly counts,
+    // while both per-audience keys remain unclaimed so a new-release rerun succeeds.
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:scoped']);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
   });
 
   test('a claim that cannot be taken sends nothing', async () => {
@@ -187,5 +269,154 @@ describe('once per ET day', () => {
     await runMorningBanner({ now: MORNING });
     expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 4 unread of 4 waiting, banner sent');
     for (const [line] of [...logger.info.mock.calls, ...logger.error.mock.calls]) expect(line).not.toMatch(/Synthetic item/);
+  });
+
+  test('unread ownerOnly alerts ring only the owner and keep non-owner admin banners restricted', async () => {
+    activeAdmins = [
+      { id: 1, email: 'contact@wavespestcontrol.com' },
+      { id: 2, email: 'office@wavespestcontrol.com' },
+    ];
+
+    // Only an ownerOnly cash-forecast alert is unread -> only the owner gets a banner.
+    mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true })]);
+    const ownerOnlyResult = await runMorningBanner({ now: MORNING });
+    expect(ownerOnlyResult).toMatchObject({ count: 1, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 1, total: 1, areas: [{ area: 'Billing', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [1] },
+    );
+
+    // Mix of ownerOnly + shared alerts -> owner gets 2, other admin gets 1.
+    mockTrigger.mockClear();
+    claimed.clear();
+    mockOpenRows.mockResolvedValue([
+      row({ area: 'Billing', ownerOnly: true }),
+      row({ area: 'Comms' }),
+    ]);
+    const mixedResult = await runMorningBanner({ now: MORNING });
+    expect(mixedResult).toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(2);
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 2, total: 2, areas: [{ area: 'Comms', count: 1 }, { area: 'Billing', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [1] },
+    );
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 1, total: 1, areas: [{ area: 'Comms', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [2] },
+    );
+
+    // Partial failure: owner dispatch fails with prefsUnavailable while shared succeeds ->
+    // reports dispatch_failed, keeps shared claim, releases owner claim so retry sends only to owner.
+    mockTrigger.mockClear();
+    claimed.clear();
+    mockTrigger
+      .mockResolvedValueOnce({ bellWritten: false, push: null, prefsUnavailable: true })
+      .mockResolvedValueOnce({ bellWritten: false, push: { sent: 1 } })
+      .mockResolvedValueOnce({ bellWritten: false, push: { sent: 1 } });
+    const partial = await runMorningBanner({ now: MORNING });
+    expect(partial).toEqual({ count: 2, sent: false, error: 'dispatch_failed' });
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:scoped', 'morning_banner:2026-11-03:shared']);
+
+    mockTrigger.mockClear();
+    const retry = await runMorningBanner({ now: MORNING });
+    expect(retry).toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 2, total: 2, areas: [{ area: 'Comms', count: 1 }, { area: 'Billing', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [1] },
+    );
+
+    // Same-day rerun after the alert mix changes (shared-only -> mixed) keeps stable keys
+    // and never sends a duplicate banner to either audience.
+    mockTrigger.mockClear();
+    claimed.clear();
+    mockOpenRows.mockResolvedValue([row({ area: 'Comms' })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 1, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(2);
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:owner', 'morning_banner:2026-11-03:scoped', 'morning_banner:2026-11-03:shared']);
+
+    mockTrigger.mockClear();
+    mockOpenRows.mockResolvedValue([row({ area: 'Comms' }), row({ area: 'Billing', ownerOnly: true })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 2, sent: false, skipped: 'already_claimed' });
+    expect(mockTrigger).not.toHaveBeenCalled();
+
+    // Reverse mix change (owner-only -> mixed): owner is already claimed, so only non-owner admins send.
+    mockTrigger.mockClear();
+    claimed.clear();
+    mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 1, sent: true });
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:owner', 'morning_banner:2026-11-03:scoped']);
+
+    mockTrigger.mockClear();
+    mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true }), row({ area: 'Comms' })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 1, total: 1, areas: [{ area: 'Comms', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [2] },
+    );
+
+    // Interrupted new run (legacy + :scoped committed, crash before either audience claimed):
+    // rerun detects the :scoped marker and resumes unclaimed audiences.
+    mockTrigger.mockClear();
+    claimed.clear();
+    claimed.add('morning_banner:2026-11-03');
+    claimed.add('morning_banner:2026-11-03:scoped');
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(2);
+
+    // Rollout order 1 (old -> new): a legacy bare-date claim (`morning_banner:<day>`) written by
+    // the previous release suppresses both per-audience banners on a same-day rerun.
+    mockTrigger.mockClear();
+    claimed.clear();
+    claimed.add('morning_banner:2026-11-03');
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 2, sent: false, skipped: 'already_claimed' });
+    expect(mockTrigger).not.toHaveBeenCalled();
+
+    // Rollout order 2 (new -> old): new release atomically reserves `morning_banner:<day>` too,
+    // so an older instance attempting takeSendClaim('morning_banner:2026-11-03') gets false.
+    mockTrigger.mockClear();
+    claimed.clear();
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 2, sent: true });
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    const oldInstanceClaim = await mockDb.raw('INSERT INTO sms_send_claims (claim_key) VALUES (?) ON CONFLICT DO NOTHING RETURNING id', ['morning_banner:2026-11-03']);
+    expect(oldInstanceClaim.rows).toEqual([]);
+  });
+
+  test('failed claim release reports claim_release_failed instead of a routine skip', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    mockOpenRows.mockResolvedValue([row()]);
+    mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 0, failed: 0, expired: 0, skipped: 0, subscriptions: 0 } });
+    mockDb.mockImplementation((table) => {
+      if (table === 'technicians') return { where: () => ({ select: async () => activeAdmins }) };
+      return {
+        where: ({ claim_key: key }) => ({
+          first: async () => (claimed.has(key) ? { id: 1 } : null),
+          del: async () => { throw Object.assign(new Error('delete failed'), { code: '57P01' }); },
+        }),
+        whereIn: (_col, keys) => ({
+          first: async () => (keys.some((k) => claimed.has(k)) ? { id: 1 } : null),
+          del: async () => 0,
+        }),
+      };
+    });
+
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({
+      count: 1,
+      sent: false,
+      error: 'claim_release_failed',
+    });
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(true);
+
+    // Scheduler surfaces morning-banner error AND uncertain delivery inside runExclusive for job health.
+    const schedulerSrc = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(schedulerSrc).toMatch(/runExclusive\('morning-banner',[\s\S]*?if \(result\?\.error \|\| result\?\.uncertain\)/);
   });
 });

@@ -42,6 +42,7 @@ test('the projection carries NO amount columns — the figure never leaves the d
   // The cents test happens IN SQL, with the same integer arithmetic
   // invoiceAmountDue uses — not the broad-phase float GREATEST.
   expect(captured.whereRaw.some((sql) => sql.includes('ROUND(total * 100)'))).toBe(true);
+  expect(captured.whereRaw.some((sql) => sql.includes("NOT LIKE 'chemical_addon_review:%'"))).toBe(true);
 });
 
 test('a qualifying self-pay row → true; a payer-billed row is DROPPED', async () => {

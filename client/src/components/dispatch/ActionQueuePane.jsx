@@ -18,19 +18,42 @@ import { useDispatchAlerts } from '../../hooks/useDispatchAlerts';
 import AlertCard from './AlertCard';
 import { ActionFeedback, Button } from '../ui';
 
+const PROTECTED_DECISION_TYPES = new Set([
+  'visit_not_closed_out',
+  'follow_up_needed',
+  'tech_out_overflow',
+]);
+
 export default function ActionQueuePane({ onOpenJob, feedbackRetryEnabled = false }) {
-  const { alerts, loading, error, retryAlerts, resolveAlert, clearAlerts, decideNotClosedOut } = useDispatchAlerts();
+  const { alerts, total, loading, error, retryAlerts, resolveAlert, clearAlerts, decideNotClosedOut } = useDispatchAlerts();
   const [clearing, setClearing] = useState(false);
   const [clearError, setClearError] = useState(null);
+  const [clearNotice, setClearNotice] = useState(null);
+
+  const openTotal = Math.max(alerts.length, Number.isFinite(total) ? total : alerts.length);
+  const isTruncated = openTotal > alerts.length;
+  const protectedCount = alerts.filter((a) => PROTECTED_DECISION_TYPES.has(a.type)).length;
 
   async function handleClearAll() {
     if (clearing || alerts.length === 0) return;
-    const ok = window.confirm('Clear all active Action Queue alerts? This marks them resolved and keeps audit history.');
+    const msg = protectedCount > 0
+      ? 'Clear informational and overdue alerts? Decision cards (missed closeouts, follow-ups, and tech-out stops) stay open until decided.'
+      : 'Clear all active Action Queue alerts? This marks them resolved and keeps audit history.';
+    const ok = window.confirm(msg);
     if (!ok) return;
     setClearing(true);
     setClearError(null);
+    setClearNotice(null);
     try {
-      await clearAlerts();
+      const data = await clearAlerts();
+      const cleared = Number(data?.resolved ?? 0);
+      if (protectedCount > 0) {
+        setClearNotice(
+          cleared > 0
+            ? `Cleared ${cleared} alert${cleared === 1 ? '' : 's'}. Decision cards stay open until acted on.`
+            : 'Only decision cards remain — each requires an action on the card.',
+        );
+      }
     } catch (err) {
       setClearError(err?.message || 'Clear failed');
     } finally {
@@ -46,7 +69,7 @@ export default function ActionQueuePane({ onOpenJob, feedbackRetryEnabled = fals
         </h2>
         <div className="flex items-center gap-2">
           <span className="text-11 text-ink-tertiary tabular-nums">
-            {alerts.length}
+            {isTruncated ? `${alerts.length} / ${openTotal}` : openTotal}
           </span>
           <Button
             size="sm"
@@ -59,6 +82,11 @@ export default function ActionQueuePane({ onOpenJob, feedbackRetryEnabled = fals
           </Button>
         </div>
       </div>
+      {isTruncated && (
+        <div role="status" className="px-4 py-2 text-12 text-ink-secondary bg-zinc-50 border-b border-hairline border-zinc-200">
+          Showing top {alerts.length} of {openTotal} open alerts. Resolve or decide cards to see more.
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto p-3">
         {loading ? (
           <div className="text-12 text-ink-tertiary px-1 py-2">
@@ -83,6 +111,11 @@ export default function ActionQueuePane({ onOpenJob, feedbackRetryEnabled = fals
             {clearError && (
               <div className="text-12 text-alert-fg px-1 pb-2">
                 Clear failed: {clearError}
+              </div>
+            )}
+            {clearNotice && (
+              <div role="status" className="text-12 text-ink-secondary px-1 pb-2">
+                {clearNotice}
               </div>
             )}
             {alerts.map((a) => (
