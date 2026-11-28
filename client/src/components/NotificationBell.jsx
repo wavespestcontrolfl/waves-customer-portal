@@ -1380,7 +1380,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
           // account menu). Inset so the rounded sheet floats over the scene
           // and clears the notch + bottom tab bar. Admin: unchanged white
           // full-screen panel (no glass theme mounted on /admin).
-          <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
+          <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" className={isDark ? 'admin-bell-panel' : undefined} data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
             // 52px matches AdminLayoutV2's mobile top bar (calc(52px + safe-area));
             // 56 left a 4px strip of page showing between header and panel.
@@ -1548,7 +1548,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
           // Desktop: admin keeps the flush right-edge drawer; customer gets a
           // floating glass panel (data-glass="modal" material, inset so the
           // rounded corners read intentionally).
-          <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
+          <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" className={isDark ? 'admin-bell-panel' : undefined} data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
             top: isDark ? 56 : 'calc(12px + env(safe-area-inset-top, 0px))',
             right: isDark ? 0 : 'calc(12px + env(safe-area-inset-right, 0px))',
@@ -1620,7 +1620,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                 <div key={group || 'ranked'}>
                   {/* The office panel is white: a light gray band with 14px text
                       (admin minimum), not the old dark one. */}
-                  {group && <div style={{
+                  {group && <div data-bell-group="true" style={{
                     padding: '8px 20px', fontSize: isDark ? 14 : 11, fontWeight: 700, color: isDark ? colors.text : colors.muted,
                     textTransform: 'uppercase', letterSpacing: 0.5,
                     background: isDark ? '#F1F5F9' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,

@@ -33,3 +33,32 @@
   --kbd-border: #e7e5e4;
   --kbd-fg: #78716c;
 }
+
+@media not print {
+  html.admin-app[data-admin-theme="dark"],
+  html.admin-app[data-admin-theme="dark"] .admin-shell-v2 {
+    color-scheme: dark;
+
+    /* Surfaces — calm obsidian neutrals */
+    --surface-page: #111315;
+    --surface-primary: #181b1f;
+    --surface-hover: #22262c;
+    --surface-active: #2b3038;
+
+    /* Borders */
+    --border-subtle: #22262c;
+    --border-default: #2c313a;
+    --border-strong: #3d4450;
+
+    /* Text — high-contrast daylight-calibrated neutrals on dark ground */
+    --text-primary: #f4f5f6;
+    --text-secondary: #b4bac4;
+    --text-tertiary: #8b93a0;
+    --text-quaternary: #68707d;
+
+    /* Keyboard hint chip */
+    --kbd-bg: #22262c;
+    --kbd-border: #323842;
+    --kbd-fg: #b4bac4;
+  }
+}

@@ -20,12 +20,35 @@ function readSavedPreferences(accountId) {
       .filter((id) => typeof saved?.groups?.[id] === 'boolean')
       .map((id) => [id, saved.groups[id]]));
     const pins = Array.isArray(saved?.pins) ? [...new Set(saved.pins)].filter((id) => destinationIds.has(id)).slice(0, 3) : [];
-    return { groups, pins, fieldView: saved?.fieldView === true };
+    return { groups, pins, fieldView: saved?.fieldView === true, darkMode: saved?.darkMode === true };
   } catch { return null; }
 }
 
 function readPreferences(accountId) {
-  return (accountId && readSavedPreferences(accountId)) || { groups: {}, pins: [], fieldView: false };
+  return (accountId && readSavedPreferences(accountId)) || { groups: {}, pins: [], fieldView: false, darkMode: false };
+}
+
+function mergePendingPreferences(stored, pending) {
+  const kept = stored.pins.filter((id) => pending.pins[id] !== false);
+  const added = Object.keys(pending.pins).filter((id) => pending.pins[id] && !kept.includes(id));
+  return {
+    ...stored,
+    pins: [...kept, ...added].slice(0, 3),
+    groups: { ...stored.groups, ...pending.groups },
+    ...(pending.darkMode !== undefined ? { darkMode: pending.darkMode } : {}),
+  };
+}
+
+function captureUnsavedChanges(base, next, pending) {
+  return {
+    pins: {
+      ...pending?.pins,
+      ...Object.fromEntries(base.pins.filter((id) => !next.pins.includes(id)).map((id) => [id, false])),
+      ...Object.fromEntries(next.pins.filter((id) => !base.pins.includes(id)).map((id) => [id, true])),
+    },
+    groups: { ...pending?.groups, ...Object.fromEntries(Object.entries(next.groups).filter(([id, open]) => base.groups[id] !== open)) },
+    darkMode: next.darkMode !== base.darkMode ? next.darkMode : pending?.darkMode,
+  };
 }
 
 export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, children }) {
@@ -78,9 +101,7 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     const pending = unsaved.current;
     let base = stored || preferences;
     if (stored && pending) {
-      const kept = stored.pins.filter((id) => pending.pins[id] !== false);
-      const added = Object.keys(pending.pins).filter((id) => pending.pins[id] && !kept.includes(id));
-      base = { ...stored, pins: [...kept, ...added].slice(0, 3), groups: { ...stored.groups, ...pending.groups } };
+      base = mergePendingPreferences(stored, pending);
     }
     const next = update(base);
     let saved = false;
@@ -91,14 +112,7 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
       } catch { /* full or blocked storage */ }
     }
     if (!saved && onlyIfSaved) return false;
-    unsaved.current = saved ? null : {
-      pins: {
-        ...pending?.pins,
-        ...Object.fromEntries(base.pins.filter((id) => !next.pins.includes(id)).map((id) => [id, false])),
-        ...Object.fromEntries(next.pins.filter((id) => !base.pins.includes(id)).map((id) => [id, true])),
-      },
-      groups: { ...pending?.groups, ...Object.fromEntries(Object.entries(next.groups).filter(([id, open]) => base.groups[id] !== open)) },
-    };
+    unsaved.current = saved ? null : captureUnsavedChanges(base, next, pending);
     setPreferences(next);
     return saved;
   };
@@ -133,6 +147,25 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   // row the save failed, so the row can say why the switch did not move.
   const fieldView = user?.role === 'admin' && preferences.fieldView === true;
   const setFieldView = (on) => updatePreferences((current) => ({ ...current, fieldView: on === true }), { onlyIfSaved: true });
+  // Dark mode is per-account on this browser/device and applies for all staff
+  // roles (both admin and technician). Cleaned up on unmount so customer routes
+  // and login pages stay light.
+  const darkMode = preferences.darkMode === true;
+  const setDarkMode = (on) => updatePreferences((current) => ({ ...current, darkMode: on === true }));
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const root = document.documentElement;
+    if (enabled && darkMode) {
+      root.dataset.adminTheme = 'dark';
+    } else {
+      delete root.dataset.adminTheme;
+    }
+    return () => {
+      delete root.dataset.adminTheme;
+    };
+  }, [enabled, darkMode]);
+
   // A verified session with the switch on readies Today too: after a deploy
   // the app can open on another page (a push tap), and the next open with no
   // signal still lands on Today. Each mount reuses the page's try (see
@@ -153,7 +186,7 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     };
   }, [enabled, fieldView]);
 
-  return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView } : null}>
+  return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView, darkMode, setDarkMode } : null}>
     {children}
   </AdminNavigationContext.Provider>;
 }

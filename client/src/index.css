@@ -4,6 +4,7 @@
 @import "./styles/tokens.css";
 @import "./styles/theme-square.css";
 @import "./styles/ui-workspace.css";
+@import "./styles/admin-dark.css";
 
 @tailwind base;
 @tailwind components;
