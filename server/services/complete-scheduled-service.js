@@ -164,6 +164,18 @@ const {
 // recorded amount the same way.
 const { calculateInventoryCost } = require('../services/inventory-cost');
 
+function hasTreeShrubCloseoutNotes(summary, warnings) {
+  return !!summary || (Array.isArray(warnings) && warnings.length > 0);
+}
+
+function definedOrUndefined(value) {
+  return value == null ? undefined : value;
+}
+
+function restoredArrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
 async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -6769,6 +6781,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
       treeShrubCloseoutSummary = resumedStructuredNotes.treeShrubCloseout || null;
+      treeShrubCloseoutWarnings = restoredArrayOrEmpty(resumedStructuredNotes.treeShrubCloseoutWarnings);
       servicePhotoVisit = resumedStructuredNotes.servicePhotoVisit || null;
       // An authorized correction can land after the packet committed its
       // records but before an effects replay. Its durable revision and notes
@@ -7930,8 +7943,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             waveguardCalibrationAdvisory,
             waveguardInventoryAdvisory,
             waveguardTankCleanout,
-            ...(treeShrubCloseoutSummary ? {
-              treeShrubCloseout: treeShrubCloseoutSummary,
+            ...(hasTreeShrubCloseoutNotes(treeShrubCloseoutSummary, treeShrubCloseoutWarnings) ? {
+              treeShrubCloseout: definedOrUndefined(treeShrubCloseoutSummary),
               treeShrubCloseoutWarnings,
             } : {}),
             ...(treeShrubTechFindingsFreeze || {}),
