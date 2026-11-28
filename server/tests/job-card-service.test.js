@@ -4063,6 +4063,41 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     });
     const dipelCalc = await jobCard.mixForProduct('dipel', 100, { serviceId: 'svc7', dbh: dipelDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(dipelCalc.warnings.join(' ')).not.toContain('below the label minimum');
+    expect(dipelCalc.warnings).toEqual(expect.arrayContaining([
+      'Tank amount is for: Ornamental and shade trees',
+      expect.stringContaining('Shrubs, flowers and bedding plants: 0.2 to 0.7 oz of product per 1,000 sq ft treated'),
+    ]));
+
+    // Zylam (mixed foliar tank + soil-drench direct dose) identifies the foliar tank use and preserves the soil-drench instruction.
+    const zylam = { id: 'zylam', name: 'Zylam Liquid', epa_reg_number: '2217-937', default_rate: '0.0725-0.16', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const zylamDb = dbFor({
+      scheduled_services: [{ id: 'svc9', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-12-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [zylam],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const zylamCalc = await jobCard.mixForProduct('zylam', 4, { serviceId: 'svc9', dbh: zylamDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-12-10T15:00:00Z') });
+    expect(zylamCalc.warnings).toEqual(expect.arrayContaining([
+      'Tank amount is for: Foliar spray, ornamentals',
+      expect.stringContaining('Soil drench, shrubs and sagos: 0.18 to 0.4 fl oz per foot of height'),
+    ]));
+
+    // Termite trench Taurus SC honors the 100-gal label-table amount (78 fl oz, not 80) and preserves the work-order restriction.
+    const termiteTaurusDb = dbFor({
+      scheduled_services: [{ id: 'svc10', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const taurus100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurus100).toMatchObject({ rateSource: 'protocol', amount: 78, amountMax: null, unit: 'fl_oz', context: { conditional: true } });
+    expect(taurus100.warnings.join(' ')).toContain('only when the work order names Taurus');
+    const taurus4 = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurus4).toMatchObject({ amount: 3.2, amountMax: null, unit: 'fl_oz' });
 
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
