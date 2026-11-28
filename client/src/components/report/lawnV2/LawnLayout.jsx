@@ -53,7 +53,6 @@ import {
   bannerRepeatsAftercare,
   bannerShowsAnything,
   insightsWithoutRepeats,
-  lawnLayoutActive,
   mowingLine,
   pageCarriesInstruction,
   nextVisitPlacement,

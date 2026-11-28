@@ -1,6 +1,7 @@
-import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
+import { lazyPanel } from '../components/LazyPanel';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import { AccountHomeLink, signedInSafe } from '../components/brand/BackToAccount';
@@ -64,69 +65,135 @@ import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { reportGreetingFirstName } from '../lib/reportGreeting';
 import { adminLoginUrl } from '../utils/admin-fetch';
 
-// Code-split heavy service-specific dashboards, maps, and PDF document so each
-// report open only downloads the chunks for its service line and mode.
-const LazyServiceReportDocument = lazy(() => import('./ServiceReportDocument'));
-const LazyLawnReportV2Section = lazy(() => import('../components/report/lawnV2/LawnReportV2Section'));
-const LazyLawnNewSodCard = lazy(() => import('../components/report/lawnV2/LawnNewSodCard'));
-const LazyLawnLayoutBody = lazy(() => import('../components/report/lawnV2/LawnLayout').then((m) => ({ default: m.LawnLayoutBody })));
-const LazyLawnYourPartCard = lazy(() => import('../components/report/lawnV2/LawnLayout').then((m) => ({ default: m.LawnYourPartCard })));
-const LazyLawnLeadCard = lazy(() => import('../components/report/lawnV2/LawnReportV2').then((m) => ({ default: m.LawnLeadCard })));
-const LazyLawnVisitTimeline = lazy(() => import('../components/report/lawnV2/LawnReportV2').then((m) => ({ default: m.LawnVisitTimeline })));
-const LazyLawnWateringBanner = lazy(() => import('../components/report/lawnV2/LawnReportV2').then((m) => ({ default: m.LawnWateringBanner })));
-const LazyPestReportV2Section = lazy(() => import('../components/report/pestV2/PestReportV2Section'));
-const LazyPestCustomerConcern = lazy(() => import('../components/report/pestV2/PestReportV2').then((m) => ({ default: m.PestCustomerConcern })));
-const LazyMosquitoReportV2Section = lazy(() => import('../components/report/mosquitoV2/MosquitoReportV2Section'));
-const LazyTermiteReportV2Section = lazy(() => import('../components/report/termiteV2/TermiteReportV2Section'));
-const LazyCockroachReportV2Section = lazy(() => import('../components/report/cockroachV2/CockroachReportV2Section'));
-const LazyTreeShrubReportV2Section = lazy(() => import('../components/report/treeShrubV2/TreeShrubReportV2Section'));
-const LazyStationMapCard = lazy(() => import('../components/StationMapCard').then((m) => ({ default: m.StationMapCard })));
-const LazyTracedTreatmentZoneMap = lazy(() => import('../components/report/TracedTreatmentZoneMap'));
-const LazyReferralShareCard = lazy(() => import('../components/referral/ReferralShareCard'));
-
-function ReportSectionFallback({ mode = 'live' }) {
-  if (mode === 'pdf' || mode === 'static') return null;
-  return <div aria-hidden="true" className="sr-section" style={{ minHeight: 110, opacity: 0.45 }} />;
+// Code-split heavy service-specific dashboards, maps, and PDF document via
+// lazyPanel so each report open only downloads the chunks for its service line
+// and mode, while preloading eligible chunks before data commits so prints and
+// interactive cards render in a single frame.
+function createPreloadablePanel(loader, pick = (mod) => mod?.default) {
+  let resolved = null;
+  let inflight = null;
+  const load = () => {
+    if (resolved) return Promise.resolve({ default: resolved });
+    if (!inflight) {
+      inflight = loader()
+        .then((mod) => {
+          const Comp = pick(mod);
+          if (Comp) resolved = Comp;
+          return { default: Comp };
+        })
+        .catch((err) => {
+          inflight = null;
+          throw err;
+        });
+    }
+    return inflight;
+  };
+  const LazyComp = lazyPanel(load);
+  function Panel(props) {
+    if (resolved) {
+      const Comp = resolved;
+      return <Comp {...props} />;
+    }
+    return (
+      <Suspense fallback={null}>
+        <LazyComp {...props} />
+      </Suspense>
+    );
+  }
+  Panel.preload = load;
+  return Panel;
 }
 
-function LawnLayoutBody(props) {
-  return <Suspense fallback={<ReportSectionFallback mode="live" />}><LazyLawnLayoutBody {...props} /></Suspense>;
+const ServiceReportDocument = createPreloadablePanel(() => import('./ServiceReportDocument'));
+const LawnReportV2Section = createPreloadablePanel(() => import('../components/report/lawnV2/LawnReportV2Section'));
+const PreloadableLawnNewSodCard = createPreloadablePanel(() => import('../components/report/lawnV2/LawnNewSodCard'));
+const LawnLayoutBody = createPreloadablePanel(() => import('../components/report/lawnV2/LawnLayout'), (m) => m.LawnLayoutBody);
+const LawnYourPartCard = createPreloadablePanel(() => import('../components/report/lawnV2/LawnLayout'), (m) => m.LawnYourPartCard);
+const LawnLeadCard = createPreloadablePanel(() => import('../components/report/lawnV2/LawnReportV2'), (m) => m.LawnLeadCard);
+const LawnVisitTimeline = createPreloadablePanel(() => import('../components/report/lawnV2/LawnReportV2'), (m) => m.LawnVisitTimeline);
+const LawnWateringBanner = createPreloadablePanel(() => import('../components/report/lawnV2/LawnReportV2'), (m) => m.LawnWateringBanner);
+const PestReportV2Section = createPreloadablePanel(() => import('../components/report/pestV2/PestReportV2Section'));
+const PestCustomerConcern = createPreloadablePanel(() => import('../components/report/pestV2/PestReportV2'), (m) => m.PestCustomerConcern);
+const MosquitoReportV2Section = createPreloadablePanel(() => import('../components/report/mosquitoV2/MosquitoReportV2Section'));
+const TermiteReportV2Section = createPreloadablePanel(() => import('../components/report/termiteV2/TermiteReportV2Section'));
+const CockroachReportV2Section = createPreloadablePanel(() => import('../components/report/cockroachV2/CockroachReportV2Section'));
+const TreeShrubReportV2Section = createPreloadablePanel(() => import('../components/report/treeShrubV2/TreeShrubReportV2Section'));
+const PreloadableStationMapCard = createPreloadablePanel(() => import('../components/StationMapCard'), (m) => m.StationMapCard);
+const TracedTreatmentZoneMap = createPreloadablePanel(() => import('../components/report/TracedTreatmentZoneMap'));
+const ReferralShareCard = createPreloadablePanel(() => import('../components/referral/ReferralShareCard'));
+
+function isNewSodEligible(data, mode) {
+  const card = data?.lawnNewSod;
+  return mode === 'live' && Boolean(card) && typeof card.title === 'string' && Array.isArray(card.items) && card.items.length > 0;
 }
-function LawnWateringBanner(props) {
-  return <Suspense fallback={null}><LazyLawnWateringBanner {...props} /></Suspense>;
+
+function isStationMapEligible(stationMap) {
+  return Boolean(stationMap?.available && Array.isArray(stationMap.stations) && stationMap.stations.length > 0 && stationMap.image?.url);
 }
-function LawnLeadCard(props) {
-  return <Suspense fallback={null}><LazyLawnLeadCard {...props} /></Suspense>;
-}
-function LawnVisitTimeline(props) {
-  return <Suspense fallback={null}><LazyLawnVisitTimeline {...props} /></Suspense>;
-}
+
 function LawnNewSodCard(props) {
-  return <Suspense fallback={null}><LazyLawnNewSodCard {...props} /></Suspense>;
+  if (!isNewSodEligible(props.data, props.mode)) return null;
+  return <PreloadableLawnNewSodCard {...props} />;
 }
-function PestCustomerConcern(props) {
-  return <Suspense fallback={null}><LazyPestCustomerConcern {...props} /></Suspense>;
-}
-function PestReportV2Section(props) {
-  return <Suspense fallback={<ReportSectionFallback mode={props.mode} />}><LazyPestReportV2Section {...props} /></Suspense>;
-}
-function MosquitoReportV2Section(props) {
-  return <Suspense fallback={<ReportSectionFallback mode={props.mode} />}><LazyMosquitoReportV2Section {...props} /></Suspense>;
-}
-function TermiteReportV2Section(props) {
-  return <Suspense fallback={<ReportSectionFallback mode={props.mode} />}><LazyTermiteReportV2Section {...props} /></Suspense>;
-}
-function CockroachReportV2Section(props) {
-  return <Suspense fallback={<ReportSectionFallback mode={props.mode} />}><LazyCockroachReportV2Section {...props} /></Suspense>;
-}
-function LawnReportV2Section(props) {
-  return <Suspense fallback={<ReportSectionFallback mode={props.print ? 'static' : 'live'} />}><LazyLawnReportV2Section {...props} /></Suspense>;
-}
-function TreeShrubReportV2Section(props) {
-  return <Suspense fallback={<ReportSectionFallback mode={props.print ? 'static' : 'live'} />}><LazyTreeShrubReportV2Section {...props} /></Suspense>;
-}
+
 function StationMapCard(props) {
-  return <Suspense fallback={null}><LazyStationMapCard {...props} /></Suspense>;
+  if (!isStationMapEligible(props.stationMap)) return null;
+  return <PreloadableStationMapCard {...props} />;
+}
+
+const LIVE_CHUNK_PRELOADERS = [
+  [(d) => d.serviceLine === 'lawn' && Boolean(d.reportV2), () => LawnReportV2Section.preload()],
+  [(d) => d.serviceLine === 'lawn' && Boolean(d.reportV2), () => LawnVisitTimeline.preload()],
+  [(d) => d.serviceLine === 'lawn' && Boolean(d.reportV2?.banner), () => LawnWateringBanner.preload()],
+  [(d) => d.serviceLine === 'lawn' && Boolean(d.reportV2?.lead), () => LawnLeadCard.preload()],
+  [(d, m) => lawnLayoutActive(d, m), () => LawnLayoutBody.preload()],
+  [(d, m) => lawnLayoutActive(d, m), () => LawnYourPartCard.preload()],
+  [(d) => d.serviceLine === 'tree_shrub' && Boolean(d.reportV2), () => TreeShrubReportV2Section.preload()],
+  [(d) => d.serviceLine === 'tree_shrub' && Boolean(d.reportV2), () => LawnVisitTimeline.preload()],
+  [(d, m) => isNewSodEligible(d, m), () => PreloadableLawnNewSodCard.preload()],
+  [(d) => Boolean(d.customerConcernCard), () => PestCustomerConcern.preload()],
+  [(d) => Boolean(d.pestReportV2), () => PestReportV2Section.preload()],
+  [(d) => Boolean(d.mosquitoReportV2), () => MosquitoReportV2Section.preload()],
+  [(d) => Boolean(d.termiteReportV2), () => TermiteReportV2Section.preload()],
+  [(d) => Boolean(d.cockroachReportV2), () => CockroachReportV2Section.preload()],
+  [(d, m) => isStationMapEligible(d.stationMap) && (m === 'live' || Boolean(d.termiteReportV2)), () => PreloadableStationMapCard.preload()],
+  [(d) => Boolean(d.treatmentMap?.traced), () => TracedTreatmentZoneMap.preload()],
+  [(d, m) => m === 'live' && Boolean(d.referral?.headline), () => ReferralShareCard.preload()],
+];
+
+async function preloadReportChunks(payload, effectiveMode) {
+  if (!payload || payload.error || payload.reportVersion !== 'service_report_v1') return;
+  if (effectiveMode === 'pdf') {
+    await ServiceReportDocument.preload().catch(() => {});
+    return;
+  }
+  const tasks = LIVE_CHUNK_PRELOADERS
+    .filter(([matches]) => matches(payload, effectiveMode))
+    .map(([, preload]) => preload());
+  if (tasks.length) await Promise.allSettled(tasks);
+}
+
+if (import.meta.env.MODE === 'test') {
+  if (!globalThis.__WAVES_TEST_WARMUP__) globalThis.__WAVES_TEST_WARMUP__ = [];
+  globalThis.__WAVES_TEST_WARMUP__.push(Promise.allSettled([
+    ServiceReportDocument.preload(),
+    LawnReportV2Section.preload(),
+    PreloadableLawnNewSodCard.preload(),
+    LawnLayoutBody.preload(),
+    LawnYourPartCard.preload(),
+    LawnLeadCard.preload(),
+    LawnVisitTimeline.preload(),
+    LawnWateringBanner.preload(),
+    PestReportV2Section.preload(),
+    PestCustomerConcern.preload(),
+    MosquitoReportV2Section.preload(),
+    TermiteReportV2Section.preload(),
+    CockroachReportV2Section.preload(),
+    TreeShrubReportV2Section.preload(),
+    PreloadableStationMapCard.preload(),
+    TracedTreatmentZoneMap.preload(),
+    ReferralShareCard.preload(),
+  ]));
 }
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -2813,15 +2880,13 @@ function LawnYourPart({ data, mode, token, othersCarryInstruction = false }) {
     trackReportEvent(token, 'reentry_timer_viewed');
   }, [context, mode, token, timedShown]);
   return (
-    <Suspense fallback={null}>
-      <LazyLawnYourPartCard
-        banner={data.reportV2?.banner}
-        reentry={reentry}
-        lines={alsoSteps(data.reportV2?.lead)}
-        othersCarryInstruction={othersCarryInstruction}
-        style={{ marginTop: 16 }}
-      />
-    </Suspense>
+    <LawnYourPartCard
+      banner={data.reportV2?.banner}
+      reentry={reentry}
+      lines={alsoSteps(data.reportV2?.lead)}
+      othersCarryInstruction={othersCarryInstruction}
+      style={{ marginTop: 16 }}
+    />
   );
 }
 
@@ -4383,18 +4448,16 @@ function ReferralCard({ data, token, mode }) {
     return response.json();
   };
   return (
-    <Suspense fallback={null}>
-      <LazyReferralShareCard
-        referral={referral}
-        className="report-card cross-sell-card referral-card"
-        // The beacon fires on every tap, staff QA included — the same event
-        // contract as before the extraction; only the enrolling fetch is
-        // suppressed for staff views.
-        onTap={() => trackReportEvent(token, 'referral_cta_clicked', {})}
-        staffView={staffViewTokens.has(token)}
-        fetchLink={fetchLink}
-      />
-    </Suspense>
+    <ReferralShareCard
+      referral={referral}
+      className="report-card cross-sell-card referral-card"
+      // The beacon fires on every tap, staff QA included — the same event
+      // contract as before the extraction; only the enrolling fetch is
+      // suppressed for staff views.
+      onTap={() => trackReportEvent(token, 'referral_cta_clicked', {})}
+      staffView={staffViewTokens.has(token)}
+      fetchLink={fetchLink}
+    />
   );
 }
 
@@ -5848,9 +5911,7 @@ function ServiceCoverageCard({
               the map to a thumbnail beside the list. */}
           {showMap ? (
             showTraced ? (
-              <Suspense fallback={null}>
-                <LazyTracedTreatmentZoneMap traced={tracedMap} live={live} variant={tracedVariant} />
-              </Suspense>
+              <TracedTreatmentZoneMap traced={tracedMap} live={live} variant={tracedVariant} />
             ) : (
               <ServiceCoverageMap
                 coverage={coverage}
@@ -11199,13 +11260,15 @@ export default function ReportViewPage({ previewServiceId = null } = {}) {
         if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
         return r.json();
       })
-      .then((d) => {
+      .then(async (d) => {
         // A SUPERSEDED effect decides nothing. staffViewTokens is a module
         // global that outlives this mount, so a cancelled response must not
         // touch it: an in-flight staff read can resolve AFTER the reader has
         // navigated away, lost the admin JWT, and reopened the same token,
         // and it would then re-add a suppression the current load just
         // cleared — the dropped-request bug below, arriving from behind.
+        if (cancelled) return;
+        await preloadReportChunks(d, isPreview ? 'live' : mode);
         if (cancelled) return;
         // Must register BEFORE setData: the view-event effect fires on first
         // render of the report, and a staff read may never post events.
@@ -11376,11 +11439,7 @@ export default function ReportViewPage({ previewServiceId = null } = {}) {
     // the renderer hits ?mode=pdf, so the download, the share sheet, and
     // the post-service email attachment all serve this capture. The glass
     // web report (live) and the unused static mode are unchanged.
-    if (mode === 'pdf') return (
-      <Suspense fallback={null}>
-        <LazyServiceReportDocument data={data} token={token} />
-      </Suspense>
-    );
+    if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
     // GATE_LAWN_REPORT_STAGE1_FIXES: the web page leaves out an applied card that repeats Today's result (the PDF returns above).
     return <ServiceReportV1 data={withoutRepeatedAppliedCard(data)} token={token} mode={mode} />;
   }
