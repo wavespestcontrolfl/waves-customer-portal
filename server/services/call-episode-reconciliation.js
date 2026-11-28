@@ -64,16 +64,21 @@ const GENERIC_LEAD_SOURCES = Object.freeze(new Set([
 ]));
 
 const NON_DELIVERY_ASK_RE = /\?|\b(?:how\s+much|quote|price|pricing|cost|estimate|rate|charge|charges|ballpark|bid|range|approx\w*|rough\s+(?:idea|number|figure)|schedule|book|appoint\w*|also|too\b|(?:i|we)\s+(?:need|want|would\s+like)\b|looking\s+for\b|another\s+property|please\s+(?:treat|spray|send|quote|price|check|schedule|book|come|call|add)|can\s+you\b|do\s+you\b|would\s+(?:it|that|this)\b|what\s+would\b|run\s+me\b)\b/i;
-const PHOTO_SUBJECT_RE = '(?:(?:of|from|for)\\s+(?:the\\s+|my\\s+|our\\s+|those\\s+|these\\s+)?(?:(?:front|back|side)\\s+)?(?:yard|lawn|grass|house|home|porch|patio|pool|garage|attic|kitchen|bathroom|bedroom|wall|ceiling|roof|eaves|tree|trees|bush|bushes|shrub|shrubs|nest|hive|mound|ant(?:s|\\s+mound)?|bug|bugs|pest|pests|weed|weeds|roach(?:es)?|wasp(?:s|\\s+nest)?|hornet(?:s|\\s+nest)?|bee(?:s|\\s+hive)?|termite(?:s)?|rodent(?:s)?|mouse|mice|rat|rats|flea|fleas|spider|spiders|spot|spots|patch|patches|damage|area|issue|problem|visit|call|tech(?:nician)?))';
-const PHOTO_DELIVERY_TAIL_RE = `(?:\\s+(?:${PHOTO_SUBJECT_RE}|you\\s+(?:asked|requested)(?:\\s+for)?|as\\s+requested|for\\s+you|from\\s+(?:our|the)\\s+call|attached|below|above|now|just\\s+now)){0,3}(?:\\s*[,!-]?\\s*(?:thanks|thank\\s+you|thx|ty))?`;
-// Delivery-only caption: the ENTIRE message (optional greeting + photo-delivery phrase +
-// strictly allowlisted subject/closing tail) states only that photos are being delivered.
+const LEADING_GREETING_RE = /^(?:hi|hello|hey|thanks|thank you|ok|okay|sure)(?:[,!.—-]|\s)+/i;
+const TRAILING_THANKS_RE = /(?:[,!-]|\s)+(?:thanks|thank you|thx|ty)[.!]?$/i;
+const PHOTO_NOUN_RE = '(?:pic(?:ture)?s?|photos?|images?|snapshots?)';
+const PHOTO_SUBJECT_RE = '(?:(?:of|from|for) (?:the |my |our |those |these )?(?:(?:front|back|side) )?(?:yard|lawn|grass|house|home|porch|patio|pool|garage|attic|kitchen|bathroom|bedroom|wall|ceiling|roof|eaves|tree|trees|bush|bushes|shrub|shrubs|nest|hive|mound|ants?(?: mound)?|bugs?|pests?|weeds?|roach(?:es)?|wasps?(?: nest)?|hornets?(?: nest)?|bees?(?: hive)?|termites?|rodents?|mouse|mice|rats?|fleas?|spiders?|spots?|patch(?:es)?|damage|area|issue|problem|visit|call|tech(?:nician)?))';
+const PHOTO_TAIL_CHUNK_RE = `(?:${PHOTO_SUBJECT_RE}|you (?:asked|requested)(?: for)?|as requested|for you|from (?:our|the) call|attached|below|above|just now|now)`;
+// Linear-time (single-space normalized, no nested quantifiers) delivery-only caption matcher.
 const DELIVERY_ONLY_PHOTO_CAPTION_RE = new RegExp(
-  `^(?:(?:hi|hello|hey|thanks|thank\\s+you|ok(?:ay)?|sure)\\s*[,!.—-]?\\s*)*(?:(?:here(?:'s|’s| is| are)?|attached(?:\\s+is|\\s+are)?|sending|sent|sharing)\\s+(?:is\\s+|are\\s+)?(?:the\\s+|a\\s+|my\\s+|some\\s+)?(?:pic(?:ture)?s?|photos?|images?|snapshots?)|(?:the\\s+|a\\s+|my\\s+)?(?:pic(?:ture)?s?|photos?|images?)\\s+(?:of|from|as\\s+requested|you\\s+asked|for\\s+you))${PHOTO_DELIVERY_TAIL_RE}[.!]?$`,
+  `^(?:(?:here(?:'s|’s| is| are)?|attached(?: is| are)?|sending|sent|sharing) (?:(?:is|are) )?(?:(?:the|a|my|some) )?${PHOTO_NOUN_RE}|(?:(?:the|a|my|some) )?${PHOTO_NOUN_RE})(?: ${PHOTO_TAIL_CHUNK_RE}){0,3}[.!]?$`,
   'i',
 );
-const STAFF_PHOTO_REQUEST_RE = /\b(?:text|send|shoot|email|message|snap)\b[^.!?\n]{0,50}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
+const NEGATED_PHOTO_REQUEST_RE = /\b(?:don'?t|do not|no need to|never|not|won'?t)\b[^.!?\n]{0,25}\b(?:text|send|shoot|email|message|snap)\b[^.!?\n]{0,40}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
+const AGENT_SELF_SEND_PHOTO_RE = /\b(?:i'?ll|i will|we'?ll|we will|let me|going to)\b[^.!?\n]{0,20}\b(?:text|send|shoot|email|message)\b[^.!?\n]{0,30}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
+const CALLER_DIRECTED_PHOTO_REQUEST_RE = /\b(?:can you|could you|would you|if you(?:'d| could| can| want to)?|please|go ahead and|feel free to|just|you can|want to|wanna)\s+(?:text|send|shoot|email|message|snap)\b[^.!?\n]{0,40}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
 const RESERVICE_LABEL_RE = /\b(?:re[- ]?service|callback\s+treatment|covered\s+re[- ]?service)\b/i;
+const MAX_DELIVERY_CAPTION_CHARS = 160;
 
 const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 const normName = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '').trim();
@@ -140,15 +145,16 @@ async function isConfirmedNonReServiceBooking(conn, bookedServiceId, customerId)
       .first('id', 'status', 'is_callback', 'service_type', 'service_id');
     if (!visit || isVisitReServiceRow(visit)) return false;
     if (!CONFIRMED_OR_FULFILLED_STATUSES.has(String(visit.status || ''))) return false;
-    if (visit.service_id) {
-      const svc = await conn('services')
-        .where({ id: visit.service_id })
-        .first('service_key', 'name');
-      if (!svc) return false;
-      if (isReService({ serviceKey: svc.service_key, serviceName: svc.name, serviceType: visit.service_type })
-        || RESERVICE_LABEL_RE.test(String(svc.name || ''))) {
-        return false;
-      }
+    // Require a verified catalog service row before retiring a lead alert:
+    // a null service_id could hide a legacy included trap check / callback.
+    if (!visit.service_id) return false;
+    const svc = await conn('services')
+      .where({ id: visit.service_id })
+      .first('service_key', 'name');
+    if (!svc) return false;
+    if (isReService({ serviceKey: svc.service_key, serviceName: svc.name, serviceType: visit.service_type })
+      || RESERVICE_LABEL_RE.test(String(svc.name || ''))) {
+      return false;
     }
     return true;
   } catch (err) {
@@ -168,7 +174,9 @@ function callSidMatchesBookedLead(sibling, leadIdStr, leadCallSid) {
 // `leadId` or its originating call SID (never website quote alerts from public-quote.js
 // or missed-callback alerts sharing metadata.leadId). Enforces an atomic SQL
 // `processing_generation` + released-token predicate inside the UPDATE.
-async function retireBookedLeadBells(conn, { callId, procGeneration, leadId, siblings, anchor, since, resolvedAt }) {
+async function retireBookedLeadBells(conn, {
+  callId, procGeneration, bookedServiceId, customerId, leadId, siblings, anchor, since, resolvedAt,
+}) {
   if (!leadId) return 0;
   const leadIdStr = String(leadId);
   const leadRow = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'twilio_call_sid');
@@ -199,6 +207,15 @@ async function retireBookedLeadBells(conn, { callId, procGeneration, leadId, sib
       this.from('call_log')
         .where({ id: callId, processing_generation: procGeneration })
         .whereNull('processing_token')
+        .select(1);
+    });
+  }
+  if (bookedServiceId && customerId && typeof q.whereExists === 'function') {
+    q.whereExists(function bookingEligibilityFence() {
+      this.from('scheduled_services')
+        .where({ id: bookedServiceId, customer_id: customerId })
+        .whereIn('status', [...CONFIRMED_OR_FULFILLED_STATUSES])
+        .whereRaw('COALESCE(is_callback, false) = false')
         .select(1);
     });
   }
@@ -263,6 +280,8 @@ async function maybeRetireBookedLeadBells(conn, { callId, customerId, siblings, 
   return retireBookedLeadBells(conn, {
     callId,
     procGeneration: opts.procGeneration,
+    bookedServiceId,
+    customerId,
     leadId,
     siblings,
     anchor,
@@ -307,27 +326,43 @@ async function reconcilePriorEpisodeOnCallCompletion(conn, opts = {}) {
   }
 }
 
+function stripBoundedGreetings(text) {
+  let out = String(text || '').replace(/\s+/g, ' ').trim();
+  for (let i = 0; i < 3; i += 1) {
+    const next = out.replace(LEADING_GREETING_RE, '').trim();
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(TRAILING_THANKS_RE, '').trim();
+}
+
 // Pure predicate: is this inbound SMS a delivery-only photo submission (bare media
-// OR a single photo-delivery caption with zero questions, bids, ballparks, or
-// additional service/scheduling requests)?
+// OR a single linear-time photo-delivery caption with zero questions, bids, ballparks,
+// or additional service/scheduling requests)?
 function isPhotoSubmissionSms({ triggerBody = '', hasMedia = false } = {}) {
-  const body = String(triggerBody || '').trim();
+  const raw = String(triggerBody || '').trim();
+  if (!raw) return Boolean(hasMedia);
+  if (raw.length > MAX_DELIVERY_CAPTION_CHARS) return false;
+  if (NON_DELIVERY_ASK_RE.test(raw)) return false;
+  const body = stripBoundedGreetings(raw);
   if (!body) return Boolean(hasMedia);
-  if (NON_DELIVERY_ASK_RE.test(body)) return false;
   return DELIVERY_ONLY_PHOTO_CAPTION_RE.test(body);
 }
 
-// Pure predicate: did diarized Waves staff (`Agent:` lines ONLY) explicitly ask for
-// photos/pictures in this call transcript? Fails open (false) when speaker labels are absent.
+// Pure predicate: did diarized Waves staff (`Agent:` lines ONLY) make an affirmative
+// caller-directed request for photos/pictures? Rejects negated statements ("don't send
+// photos") and agent offers ("I'll send you a photo"). Fails open (false) without labels.
 function transcriptRequestedPhotos(transcription) {
   const text = String(transcription || '');
   if (!text) return false;
   const agentLines = text
     .split('\n')
-    .filter((line) => /^\s*Agent\s*:/i.test(line))
-    .join('\n');
-  if (!agentLines) return false;
-  return STAFF_PHOTO_REQUEST_RE.test(agentLines);
+    .filter((line) => /^\s*Agent\s*:/i.test(line));
+  return agentLines.some((line) => (
+    CALLER_DIRECTED_PHOTO_REQUEST_RE.test(line)
+    && !NEGATED_PHOTO_REQUEST_RE.test(line)
+    && !AGENT_SELF_SEND_PHOTO_RE.test(line)
+  ));
 }
 
 async function smsRowHasMedia(conn, triggerSmsLogId, timeoutMs) {
@@ -395,7 +430,7 @@ function identityConflictsWithCaller(candidate, callerIdentity) {
   if (candLast && callLast && candLast !== callLast) return true;
   const candFirst = normName(candidate?.firstName);
   const callFirst = normName(callerIdentity?.firstName);
-  if (!candLast && !callLast && candFirst && callFirst && candFirst !== callFirst) return true;
+  if (candFirst && callFirst && candFirst !== callFirst) return true;
   return false;
 }
 

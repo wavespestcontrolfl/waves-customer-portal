@@ -25,7 +25,9 @@ function makeChain(result) {
       const sub = {
         from: jest.fn().mockReturnThis(),
         where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
         whereNull: jest.fn().mockReturnThis(),
+        whereRaw: jest.fn().mockReturnThis(),
         select: jest.fn().mockReturnThis(),
       };
       if (typeof fn === 'function') fn.call(sub);
@@ -100,7 +102,9 @@ describe('PR B2: Post-finalization delegation to triage-auto-resolve, customer-e
           const sub = {
             from: jest.fn().mockReturnThis(),
             where: jest.fn().mockReturnThis(),
+            whereIn: jest.fn().mockReturnThis(),
             whereNull: jest.fn().mockReturnThis(),
+            whereRaw: jest.fn().mockReturnThis(),
             select: jest.fn().mockReturnThis(),
           };
           if (typeof fn === 'function') fn.call(sub);
@@ -219,6 +223,12 @@ describe('PR B2: Post-finalization delegation to triage-auto-resolve, customer-e
       { call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' }, customerId: 'cust-1', leadId: 'lead-vm', procGeneration: 2, appointmentResult: { scheduledServiceId: 'svc-4' } },
     )).resolves.toEqual({ cardsResolved: 0, bellsRetired: 0 });
 
+    // Null service_id fails CLOSED (requires verified catalog service row)
+    await expect(reconcilePriorEpisodeOnCallCompletion(
+      makeConn({ id: 'svc-5', status: 'confirmed', is_callback: false, service_type: 'Service', service_id: null }),
+      { call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' }, customerId: 'cust-1', leadId: 'lead-vm', procGeneration: 2, appointmentResult: { scheduledServiceId: 'svc-5' } },
+    )).resolves.toEqual({ cardsResolved: 0, bellsRetired: 0 });
+
     // address_unit_conflict hold blocks bell retirement
     await expect(reconcilePriorEpisodeOnCallCompletion(
       makeConn({ id: 'svc-1', status: 'confirmed', is_callback: false, service_type: 'One-Time Pest', service_id: 'cat-1' }),
@@ -230,6 +240,7 @@ describe('PR B2: Post-finalization delegation to triage-auto-resolve, customer-e
 describe('PR B2: Suppress false "Quote asked by text" on delivery-only photo SMS', () => {
   test('suppresses delivery-only captions / bare media and keeps mixed or arbitrary trailing captions eligible for triage', async () => {
     expect(isPhotoSubmissionSms({ triggerBody: 'Here are the pictures of the ants.', hasMedia: true })).toBe(true);
+    expect(isPhotoSubmissionSms({ triggerBody: 'Photos of the ants', hasMedia: true })).toBe(true);
     expect(isPhotoSubmissionSms({ triggerBody: 'Attached is the photo you asked for', hasMedia: false })).toBe(true);
     expect(isPhotoSubmissionSms({ triggerBody: 'Here is the photo of the wasp nest', hasMedia: true })).toBe(true);
     expect(isPhotoSubmissionSms({ triggerBody: '', hasMedia: true })).toBe(true);
@@ -243,6 +254,8 @@ describe('PR B2: Suppress false "Quote asked by text" on delivery-only photo SMS
     expect(isPhotoSubmissionSms({ triggerBody: 'Wasp nest by porch', hasMedia: true })).toBe(false);
 
     expect(transcriptRequestedPhotos('Agent: Could you text me a picture of those bugs?\nCaller: Sure, sending now.')).toBe(true);
+    expect(transcriptRequestedPhotos('Agent: I will send you a photo of the trap setup.\nCaller: Sounds good.')).toBe(false);
+    expect(transcriptRequestedPhotos("Agent: Please don't send photos of the neighbor's yard.\nCaller: Okay.")).toBe(false);
     expect(transcriptRequestedPhotos('Caller: Can I text you a picture of the bugs?\nAgent: Let me check.')).toBe(false);
 
     const callChain = makeChain([
@@ -298,6 +311,23 @@ describe('PR B2: Preserve first-touch lead_source across repeat calls & tracking
       return makeChain([]);
     });
     await expect(resolveFirstTouchCallLeadSource(connConflictName, {
+      contactPhone: '+19415550199',
+      currentCallId: 'call-2',
+      currentCallCreatedAt: '2026-11-28T10:00:00Z',
+      currentLeadSource: { source: 'google_business', area: 'Bradenton GBP' },
+      callerFirstName: 'Jane',
+      callerLastName: 'Smith',
+      twilioNumbers: fakeTwilioNumbers,
+    })).resolves.toEqual({ source: 'google_business', area: 'Bradenton GBP' });
+
+    // Conflicting first name sharing the same surname -> retains currentLeadSource
+    const connConflictFirst = jest.fn((table) => {
+      if (table === 'customers') return makeChain([]);
+      if (table === 'call_log') return makeChain([{ twilio_call_sid: 'CA-call-1', to_phone: '+19415551111', created_at: '2026-11-28T07:00:00Z', ai_extraction: { first_name: 'Bob', last_name: 'Smith' } }]);
+      if (table === 'leads') return makeChain([{ created_at: '2026-11-28T07:02:00Z', twilio_call_sid: 'CA-call-1', first_name: 'Bob', last_name: 'Smith', source_type: 'google_ads', name: 'Google Ads' }]);
+      return makeChain([]);
+    });
+    await expect(resolveFirstTouchCallLeadSource(connConflictFirst, {
       contactPhone: '+19415550199',
       currentCallId: 'call-2',
       currentCallCreatedAt: '2026-11-28T10:00:00Z',
