@@ -122,7 +122,12 @@ function emailPlainText(row) {
         stripSignatures: true,
         attributionPatterns: HISTORY_HEADERS,
       });
-      if (parsed.hasQuoteContainer) return parsed.text;
+      if (parsed.hasQuoteContainer) {
+        if (!parsed.text) return text;
+        const plainPrefix = stripQuotedAndSignature(text);
+        if (plainPrefix && !parsed.text.includes(plainPrefix)) return `${plainPrefix}\n${parsed.text}`;
+        return parsed.text;
+      }
     } catch {
       // Fall back to the existing plain-text part on pathological HTML.
     }

@@ -190,4 +190,10 @@ test('emailPlainText preserves a staff reply below an attributed quote container
     body_html: '<p>On Friday I can meet the technician.</p><p>On Nov 28, Pat wrote:</p><blockquote><p>Old question</p></blockquote>',
   }));
   expect(keptAboveAttribution).toBe('On Friday I can meet the technician.');
+
+  const wrappedInGmailQuote = stripQuotedAndSignature(emailPlainText({
+    body_text: 'Please reschedule to Thursday.\n> Old thread',
+    body_html: '<div class="gmail_quote"><p>Please reschedule to Thursday.</p><blockquote>Old thread</blockquote></div>',
+  }));
+  expect(wrappedInGmailQuote).toBe('Please reschedule to Thursday.');
 });

@@ -59,10 +59,21 @@ function matchesAttributionStart(text, patterns) {
 }
 
 function trimTrailingAttribution(out, patterns) {
-  if (!patterns?.length) return;
-  const current = out.join('').replace(/[ \t\n]+$/, '');
-  if (!current) return;
-  const lines = current.split('\n');
+  if (!patterns?.length || !out.length) return;
+  let startIdx = out.length;
+  let collected = '';
+  let newlineCount = 0;
+  while (startIdx > 0 && collected.length < 300 && newlineCount < 4) {
+    startIdx -= 1;
+    const chunk = out[startIdx];
+    collected = chunk + collected;
+    for (let i = 0; i < chunk.length; i += 1) {
+      if (chunk[i] === '\n') newlineCount += 1;
+    }
+  }
+  const trimmedEnd = collected.replace(/[ \t\n]+$/, '');
+  if (!trimmedEnd) return;
+  const lines = trimmedEnd.split('\n');
   const last = lines[lines.length - 1].trim();
   let dropCount = 0;
   if (matchesAttributionStart(last, patterns)) {
@@ -74,9 +85,8 @@ function trimTrailingAttribution(out, patterns) {
     }
   }
   if (!dropCount) return;
-  out.length = 0;
   const kept = lines.slice(0, lines.length - dropCount).join('\n').replace(/[ \t\n]+$/, '');
-  if (kept) out.push(kept, '\n');
+  out.splice(startIdx, out.length - startIdx, ...(kept ? [kept, '\n'] : []));
 }
 
 function pushChildren(stack, node) {
