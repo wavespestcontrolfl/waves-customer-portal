@@ -335,8 +335,8 @@ describeDb('call prepay choice (PostgreSQL)', () => {
       const row = items.find((i) => i.id === card.id);
       expect(row.call_prepay).toMatchObject({ can_accept: true, message: null });
       expect(row.call_prepay.amount).toBeGreaterThan(0);
-      const tech = await (await fetch(`${base}/admin/triage?status=open`, { headers: { 'x-test-role': 'technician' } })).json();
-      expect(tech.items.some((i) => i.id === card.id)).toBe(false);
+      const techRes = await fetch(`${base}/admin/triage?status=open`, { headers: { 'x-test-role': 'technician' } });
+      expect(techRes.status).toBe(403);
       const denied = await post(`${card.id}/accept-call-prepay`, { expected_updated_at: card.updated_at }, { 'x-test-role': 'technician' });
       expect(denied.status).toBe(403);
       expect(acceptSpy).not.toHaveBeenCalled();
