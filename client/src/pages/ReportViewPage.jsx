@@ -4383,8 +4383,9 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
   }
   addConditionAction(add, data);
   if (pendingTarget) {
+    const areaLabel = String(pendingTarget.label || 'areas').toLowerCase();
     add(
-      `Wait until ${formatReadyTime(pendingTarget.readyAt, data.dynamicContext?.reentry?.displayTimezone)} before using treated ${String(pendingTarget.label || 'areas').toLowerCase()}.`,
+      `Keep people and pets off treated ${areaLabel} until dry.`,
       data.dynamicContext?.reentry?.petAdvisory,
     );
   }
