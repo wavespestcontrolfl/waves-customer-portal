@@ -170,6 +170,8 @@ const RERING = [
     decision: 'expire: only a new first-visit request from the customer on the estimate page raises it again (one open row per estimate; the settle pass closes it once the estimate is no longer open)' },
   { emitter: 'portal-message', files: ['services/portal-messages.js'], prefixes: ['portal-message:'], kind: 'event',
     decision: 'expire: only a new message the customer writes in their portal thread raises it again (one open row per thread)' },
+  { emitter: 'billing-lane-review', files: ['routes/admin-customers.js'], prefixes: ['billing-lane-review:'], kind: 'event',
+    decision: 'expire: only a new save that stamps monthly_membership without an explicit lane raises it again' },
 ];
 
 const parseMeta = (metadata) => {
