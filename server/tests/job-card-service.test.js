@@ -1300,7 +1300,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
 
   test('the scheduled T&S guide keeps the mix and warns beside it for an unverified product label (owner 2026-11-26)', async () => {
     const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
-      products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: null }] });
+      products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: null }] });
     const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
     const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
     expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
@@ -1324,7 +1324,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
         const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null, recordSprayRainShadow: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
         return card.protocol.procedure.fieldGuide.products.tritek;
       };
-      const oil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: '2027-12-01' };
+      const oil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01' };
       const shown = await guide(oil);
       expect(shown.mix).toEqual([1.28, 1.28]);
       expect(shown.summary).not.toMatch(/Mix withheld/);
@@ -3972,5 +3972,51 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(card.protocol.procedure.fieldGuide.products.tritek.mixWarning).toContain('Protocol dilution exceeds verified catalog label rate');
     const calc = await jobCard.mixForProduct('oil', 4, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
     expect(calc.tank.source).toBeNull();
+
+    // A wrong-EPA verified product never clears the field-guide detail warning when mixRates could not match its registration.
+    const wrongEpaOil = { id: 'oil-wrong', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '99999-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const wrongEpaDb = dbFor({
+      scheduled_services: [{ id: 'svc2', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [wrongEpaOil],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const wrongCard = await jobCard.buildJobCard('svc2', { dbh: wrongEpaDb, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(wrongCard.protocol.procedure.fieldGuide.mixRates.find((r) => r.product === 'TriTek 1%').productId).toBeNull();
+    expect(wrongCard.protocol.procedure.fieldGuide.products.tritek.mixWarning).toContain('Label rate not yet verified');
+
+    // A lawn plan whose carrierSource is 'rig' does not restore another technician's rejected calibration as a protocol default.
+    const lawnDb = dbFor({
+      scheduled_services: [{ id: 'svc3', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-05-10', service_type: 'Lawn Care', service_category: 'lawn_care', assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [{ id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.1, rate_unit: 'oz', label_verified_at: '2027-12-01', active: true }],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const mockPlan = { propertyGate: { blocks: [] }, protocol: { structured: { window: { defaultCarrierGalPer1000: 1.5 } } }, mixCalculator: { carrierGalPer1000: 2, carrierSource: 'rig', items: [], conditionalOptions: [] } };
+    const lawnCard = await jobCard.buildJobCard('svc3', { dbh: lawnDb, deps: { buildPlan: jest.fn().mockResolvedValue(mockPlan), getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-05-10T15:00:00Z') });
+    expect(lawnCard.tank).toMatchObject({ source: 'protocol_default', carrierGalPer1000: 1.5 });
+    const lawnCalc = await jobCard.mixForProduct('p1', 100, { serviceId: 'svc3', dbh: lawnDb, deps: { buildPlan: jest.fn().mockResolvedValue(mockPlan) }, now: new Date('2028-05-10T15:00:00Z') });
+    expect(lawnCalc.tank).toMatchObject({ source: 'protocol_default', carrierGalPer1000: 1.5 });
+
+    // The tank calculator also checks minimum and maximum spray-volume bounds against the picked or assigned rig.
+    const ace = { id: 'ace', name: 'Acelepryn Insecticide', epa_reg_number: '100-1489', default_rate: '0.02-0.16', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const lowRig = [{ id: 'cal-low', equipment_system_id: 'sys-low', technician_id: 'tech-a', system_type: 'backpack', system_name: 'FlowZone #2', carrier_gal_per_1000: 0.5, tank_capacity_gal: '4.00' }];
+    const aceProtocols = { tree_shrub: { visits: [{ visit: 3, month: 'Mar', primary: 'Acelepryn Insecticide: 2-16 fl oz/100 gal; at least 1 gal of mix per 1,000 sq ft; no more than 0.37 fl oz per 1,000 sq ft in one spray' }] } };
+    const aceDb = dbFor({
+      scheduled_services: [{ id: 'svc4', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-low', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [ace],
+      product_aliases: [],
+      equipment_calibrations: lowRig,
+      equipment_systems: [{ id: 'sys-low', name: 'FlowZone #2', system_type: 'backpack', tank_capacity_gal: '4.00' }],
+      scheduled_service_addons: [],
+    });
+    const aceCalc = await jobCard.mixForProduct('ace', 4, { serviceId: 'svc4', dbh: aceDb, deps: { buildPlan: jest.fn(), protocols: aceProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(aceCalc.warnings.join(' ')).toContain('below the label minimum of 1 gal per 1,000 sq ft');
   });
 });

@@ -1780,6 +1780,15 @@ async function getActiveCalibrations(knex, filters = {}, { strict = false } = {}
   return savepointRead(knex, () => query).catch((err) => { if (strict) throw err; return []; });
 }
 
+async function loadServiceCalibrations(knex, service, options = {}, { strict = false } = {}) {
+  const equipmentSystemId = options.equipmentSystemId || service.assigned_equipment_system_id;
+  const calibrationId = options.calibrationId || service.assigned_calibration_id;
+  const rows = await getActiveCalibrations(knex, { equipmentSystemId, calibrationId }, { strict });
+  if (!equipmentSystemId || calibrationId) return rows;
+  const technicianId = options.technicianId || service.technician_id || null;
+  return rows.filter((row) => !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId)));
+}
+
 // strict: a failed catalog read throws instead of reading as an empty
 // catalog (the job card treats that plan as unavailable; the Lawn plan and
 // closeout keep the lenient default).
@@ -2506,10 +2515,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const jurisdiction = resolveOrdinanceJurisdiction(service, profile);
   const resolvedOrdinanceCity = jurisdiction.city || null;
   const ordinances = profile ? await getApplicableOrdinances(knex, jurisdiction) : [];
-  const activeCalibrations = await getActiveCalibrations(knex, {
-    equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
-    calibrationId: options.calibrationId || service.assigned_calibration_id,
-  }, { strict });
+  const activeCalibrations = await loadServiceCalibrations(knex, service, options, { strict });
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
   // A visit on a lawn_rounds_9 series takes the program step of its round (roundRouting), not of its calendar month; null for every other
@@ -3061,6 +3067,7 @@ module.exports = {
   isConditionalSelected,
   summarizeCalibration,
   getActiveCalibrations,
+  loadServiceCalibrations,
   itemHasNitrogen,
   itemHasPhosphorus,
   itemIsPgr,

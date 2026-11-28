@@ -1236,3 +1236,35 @@ describe('turf profile completeness (owner 2026-10-31: soil tests run on trigger
     expect(summary.missing.map((field) => field.key)).toEqual(['cultivar']);
   });
 });
+
+describe('loadServiceCalibrations technician scoping', () => {
+  const { loadServiceCalibrations } = require('../services/waveguard-plan-engine');
+  const stubKnex = (rows) => () => {
+    const q = {
+      join: () => q,
+      where: () => q,
+      select: () => q,
+      orderBy: () => q,
+      then: (res, rej) => Promise.resolve(rows).then(res, rej),
+    };
+    return q;
+  };
+
+  test('system-only assignments keep shared and assigned-technician calibrations, never another technician', async () => {
+    const rows = [
+      { id: 'cal-shared', equipment_system_id: 'sys-1', technician_id: null, carrier_gal_per_1000: 2 },
+      { id: 'cal-a', equipment_system_id: 'sys-1', technician_id: 'tech-a', carrier_gal_per_1000: 1.5 },
+      { id: 'cal-b', equipment_system_id: 'sys-1', technician_id: 'tech-b', carrier_gal_per_1000: 3 },
+    ];
+    const forTechA = await loadServiceCalibrations(
+      stubKnex(rows),
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(forTechA.map((r) => r.id)).toEqual(['cal-shared', 'cal-a']);
+    const otherOnly = await loadServiceCalibrations(
+      stubKnex([rows[2]]),
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(otherOnly).toEqual([]);
+  });
+});

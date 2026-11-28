@@ -1457,7 +1457,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     } : null;
     return {
       visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks, procedure,
-      carrierGalPer1000: plan.mixCalculator?.carrierGalPer1000 ?? null,
+      carrierGalPer1000: planProtocolDefaultCarrier(plan),
       mixingOrder: plan.mixingOrder || [], bermudaMixingOrder: plan.bermudaMixingOrder || [],
       mixRequired: requiredNotes(planned.filter((item) => !item.bermudaStep)),
       bermudaRequired: requiredNotes(planned.filter((item) => item.bermudaStep)),
@@ -2395,7 +2395,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   const [rigs, systems] = await Promise.all([loadRigCalibrations(dbh), equipmentSystemId ? loadRigSystems(dbh, { strict: true }) : []]);
   const pickedRig = equipmentSystemId ? rigOptions(systems).find((r) => r.equipmentSystemId === equipmentSystemId) || null : null;
   if (equipmentSystemId && !pickedRig) return null;
-  const tank = mixTankForRequest(rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback: lawnPlan?.plan?.mixCalculator?.carrierGalPer1000 });
+  const tank = mixTankForRequest(rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback: planProtocolDefaultCarrier(lawnPlan?.plan) });
   const volume = pickedRig ? pickedRig.tankCapacityGal : gallons;
   // The lawn plan governs every product it names (rate, blocks, approvals)
   // even when a non-lawn add-on's line names it too — Iron Plus on a lawn
@@ -2515,7 +2515,10 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
       const dose = perGallon ? perGallonDose({ band: perGallon, volume, lineCarrier, ...rigCtx }) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume });
       // At another spray volume the tank covers the rig's own area, and the card's volume would cover another: both are said, neither read as the other's.
       const coverage = dose.labelCoversSqft ? `${rigCtx.rigName} sprays ${fmtGal(dose.rigSprayGalPer1000)} gal per 1,000 sq ft, so this tank covers ${dose.coversSqft.toLocaleString('en-US')} sq ft. At the card's ${fmtGal(dose.sprayVolumeGalPer1000)} gal per 1,000 sq ft the same tank would cover ${dose.labelCoversSqft.toLocaleString('en-US')} sq ft` : null;
-      return { mix: { ...dose, ratePerGallon: dose.amount != null ? perGallon : null }, warnings: [rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, areaCapWarning({ band: perGallon, line: protocolLine, ...rigCtx }), ...serviceWarnings].filter(Boolean) };
+      return {
+        mix: { ...dose, ratePerGallon: dose.amount != null ? perGallon : null },
+        warnings: singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, rigCtx, serviceWarnings }),
+      };
     },
   }[doseMode]();
   const warnings = [...mixWarnings({ svc, protocolLine, treatment, primaryIsLawn, lawnAddon, planWide, productBlocks, product, tankMixable, sprayCheck, labelPerGallon, governedRows }), ...doseWarnings];
@@ -2578,6 +2581,13 @@ const APPROX_VOL_QUAL_RE = /^(?:about|approx(?:\.|imately)?|around|~)$/i;
 const roundDbPrecision = (v) => Math.round(Number(v) * 1000) / 1000;
 const SPRAYER_KEY_ALIASES = { bg: 'bg_1_gal', flowzone: 'flowzone_4_gal', rig: 'rig_100_gal' };
 const normalizeSprayerKey = (key) => SPRAYER_KEY_ALIASES[key] || key;
+
+function planProtocolDefaultCarrier(plan) {
+  const defaultCarrier = Number(plan?.protocol?.structured?.window?.defaultCarrierGalPer1000 || 0);
+  if (defaultCarrier > 0) return defaultCarrier;
+  if (plan?.mixCalculator?.carrierSource === 'rig') return null;
+  return plan?.mixCalculator?.carrierGalPer1000 ?? null;
+}
 
 function procedureCalibrationTank(calibrations, rig, technicianId, fallbackCarrierGalPer1000 = null) {
   const matched = rigRows(calibrations, rig);
@@ -2644,6 +2654,28 @@ function rigVolumeBoundWarnings({ min, max, rigCarrier, rigName, rigGalPer1000 }
   return warnings;
 }
 
+function rigLineVolumeWarnings({ lineCarrier, line, band, rigCtx }) {
+  const capWarn = areaCapWarning({ band, line, ...rigCtx });
+  return [
+    rigVolumeWarning({ lineCarrier, ...rigCtx }),
+    capWarn,
+    ...(rigCtx.rigCarrier ? rigVolumeBoundWarnings({ min: line?.minCarrier, max: capWarn ? null : line?.maxCarrier, ...rigCtx }) : []),
+  ].filter(Boolean);
+}
+
+function singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, rigCtx, serviceWarnings }) {
+  const capWarn = areaCapWarning({ band: perGallon, line: protocolLine, ...rigCtx });
+  const boundWarnings = rigCtx.rigCarrier
+    ? rigVolumeBoundWarnings({ min: protocolLine?.minCarrier, max: capWarn ? null : protocolLine?.maxCarrier, ...rigCtx })
+    : [];
+  return [rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, capWarn, ...boundWarnings, ...serviceWarnings].filter(Boolean);
+}
+
+function statedLabelVolume(raw) {
+  const labelVol = /\bat the label volume of (\d+(?:\.\d+)?)\s*gal\b/i.exec(String(raw || ''));
+  return labelVol && Number(labelVol[1]) > 0 ? roundDbPrecision(Number(labelVol[1])) : null;
+}
+
 function entryMixRateRows(entry) {
   const proc = entry?.procedure || entry;
   return [
@@ -2658,19 +2690,28 @@ function mapProcedureMixRates(entry, mapper) {
   if (Array.isArray(proc?.fieldGuide?.mixRates)) proc.fieldGuide.mixRates = proc.fieldGuide.mixRates.map(mapper);
 }
 
+function fieldGuideCatalogRow(product, matchingMixRows, catalog, products) {
+  if (matchingMixRows.length) {
+    const matchedId = matchingMixRows.find((mr) => mr.productId)?.productId;
+    if (!matchedId) return null;
+    return (catalog || []).find((p) => String(p.id) === String(matchedId)) || null;
+  }
+  const name = product.name.startsWith('TriTek') ? 'TriTek Spray Oil Emulsion (OMRI)' : product.name;
+  return resolveCatalogProductForName(name, catalog, { exactOnly: true })
+    || fieldGuideLineProduct(name, products);
+}
+
 function attachFieldGuideWarnings(procedures, { blocks, catalog, products, sprayCheck, labelSources }) {
   for (const currentProcedure of procedures) {
     if (!currentProcedure?.fieldGuide) continue;
     const mixRows = Array.isArray(currentProcedure.fieldGuide.mixRates) ? currentProcedure.fieldGuide.mixRates : [];
     for (const product of Object.values(currentProcedure.fieldGuide.products)) {
       if (!product.mix) continue;
-      const name = product.name.startsWith('TriTek') ? 'TriTek Spray Oil Emulsion (OMRI)' : product.name;
-      const row = resolveCatalogProductForName(name, catalog, { exactOnly: true })
-        || fieldGuideLineProduct(name, products);
-      const verdict = sprayCheck.verdicts.find(item => item.productId === row?.id);
+      const matchingMixRows = mixRows.filter((mr) => mr.product === product.name);
+      const row = fieldGuideCatalogRow(product, matchingMixRows, catalog, products);
+      const verdict = row ? sprayCheck.verdicts.find(item => String(item.productId) === String(row.id)) : undefined;
       const baseWarning = fieldGuideMixWarning({ blocks, row, verdict, labelSource: row ? labelSources[row.id] : null });
-      const rowWarnings = mixRows
-        .filter((mr) => mr.product === product.name)
+      const rowWarnings = matchingMixRows
         .flatMap((mr) => [mr.labelWarning, ...(Array.isArray(mr.calibrationWarnings) ? mr.calibrationWarnings : [])]);
       const rawParts = [baseWarning, ...rowWarnings].filter(Boolean);
       const parts = rawParts.filter(
@@ -2720,12 +2761,7 @@ function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey }) {
       ? [`${tank.reason || 'No sprayer calibration on file'} — verify ${rigCtx.rigName} output against this row's spray volume or area limit.`]
       : [];
   }
-  const capWarn = areaCapWarning({ band, line: capLine, ...rigCtx });
-  return [
-    rigVolumeWarning({ lineCarrier, ...rigCtx }),
-    capWarn,
-    ...rigVolumeBoundWarnings({ min: minCarrier, max: capWarn ? null : maxCarrier, ...rigCtx }),
-  ].filter(Boolean);
+  return rigLineVolumeWarnings({ lineCarrier, line: { ...capLine, minCarrier, maxCarrier }, band, rigCtx });
 }
 
 function attachMixCalibrationWarnings(entries, tank, rig, systems = []) {
@@ -2814,9 +2850,8 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     const band = protocolBandOfLine || (!labelPerGallon && line.explicitDilution && line.rate ? line.rate : null);
     const used = band || labelPerGallon || null;
     const lineCarrier = used ? lineCarrierOf(band, line) : null;
-    const rigWarning = rigVolumeWarning({ lineCarrier, ...rigCtx });
     // The row's own conditions ride with it whether or not a number can be worked out for it.
-    const warning = [...lineConditions(line), rigWarning, areaCapWarning({ band: used, line, ...rigCtx })].filter(Boolean);
+    const warning = [...lineConditions(line), ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx })];
     if (!used) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: warning, ...(line.conditional ? { conditional: true } : {}) };
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier });
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
@@ -2928,22 +2963,21 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw, hit.selected === false));
   // The spray volume a line states for its own rate: a label-use card's carrier, or the protocol text's "at the label volume of N gal"
   // (the April Distance IGR line) or an exact "N gallon(s) per 1,000 sq ft". "At least / at most N gal" bounds are never read as exact.
-  const statedVolumeOf = (hit) => {
-    const labelVol = /\bat the label volume of (\d+(?:\.\d+)?)\s*gal\b/i.exec(String(hit.raw || ''));
-    if (labelVol && Number(labelVol[1]) > 0) return roundDbPrecision(Number(labelVol[1]));
-    return parseSprayVolumeSpecs(hit.raw).exact;
-  };
+  const statedVolumeOf = (hit) => statedLabelVolume(hit.raw) || parseSprayVolumeSpecs(hit.raw).exact;
   // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
   // narrowed by the label band, as before.
   const conflictLinesOf = (list) => (servicesConflict(list, { rateOf, statedVolumeOf }) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {});
   const lineOf = (h) => {
-    const stated = h.hit.labelCarrierGalPer1000 ? null : statedVolumeOf(h.hit);
+    const specs = parseSprayVolumeSpecs(h.hit.raw);
+    const stated = h.hit.labelCarrierGalPer1000 ? null : (statedLabelVolume(h.hit.raw) || specs.exact);
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
       // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
       explicitDilution: lineRateIsDilution(h.hit.raw, h.hit.selected === false),
       // The line's own per-area limit for one spray (Acelepryn: no more than 0.37 fl oz per 1,000 sq ft), checked against the rig's volume.
       ...areaCapOf(h.hit.raw),
+      ...(specs.min ? { minCarrier: specs.min } : {}),
+      ...(specs.max ? { maxCarrier: specs.max } : {}),
       ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
       ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
       ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
