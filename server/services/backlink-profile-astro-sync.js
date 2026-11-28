@@ -101,15 +101,18 @@ const NON_OFFICE_CITY_RE = SERVICE_AREA_CITY_PATTERN
   : null;
 
 function urlHostAndPath(rawUrl) {
+  const s = typeof rawUrl === 'string' ? rawUrl : String(rawUrl || '');
+  if (!/^https:\/\/\S+$/.test(s)) return null;
   let u;
-  try { u = new URL(rawUrl); } catch { return null; }
-  if (u.protocol !== 'https:' || /%2f|%5c/i.test(u.pathname)) return null;
+  try { u = new URL(s); } catch { return null; }
+  if (/%2f|%5c/i.test(u.pathname)) return null;
   let decodedPath;
   try { decodedPath = decodeURIComponent(u.pathname); } catch { return null; }
   return {
     host: u.hostname.toLowerCase().replace(/^www\./, ''),
     path: decodedPath.toLowerCase().replace(/\s+/g, '-').replace(/\/+$/, ''),
     search: u.search,
+    href: u.href,
   };
 }
 
@@ -218,7 +221,8 @@ async function getVerifiedProfilesByOffice() {
     const base = noFrag.split('?')[0];
     if (sameAsRejectReason(base)) { refused++; continue; }
     const hp = urlHostAndPath(base);
-    const key = `${hp.host}${hp.path}`;
+    const n49Id = hp.host === 'n49.com' ? hp.path.match(/^\/biz\/(\d+)\//)?.[1] : null;
+    const key = n49Id ? `n49.com:/biz/${n49Id}` : `${hp.host}${hp.path}`;
     const entry = byNormalized.get(key) || { claims: new Set(), resolved: new Set(), urls: new Set() };
     byNormalized.set(key, entry);
     if (r.location && r.location !== 'default') {
@@ -227,8 +231,8 @@ async function getVerifiedProfilesByOffice() {
     // Query variants participate only in cross-office conflict checks; only
     // query-free URLs (with any #fragment stripped) may resolve or ship.
     if (base.length === noFrag.length) {
-      entry.urls.add(noFrag);
-      const slug = officeSlugForRow(r.location, noFrag);
+      entry.urls.add(hp.href);
+      const slug = officeSlugForRow(r.location, hp.href);
       if (slug) entry.resolved.add(slug);
     }
   }

@@ -87,8 +87,10 @@ describe('sameAsRejectReason', () => {
     expect(sameAsRejectReason('https://citysquares.com/articles/waves-pest-control-sarasota')).toBe('not_profile');
   });
 
-  test('non-https, encoded separator, or unparseable URL is invalid', () => {
+  test('non-https, missing double slash, whitespace, encoded separator, or unparseable URL is invalid', () => {
     expect(sameAsRejectReason('http://citysquares.com/b/waves-pest-control-venice-26858800')).toBe('invalid');
+    expect(sameAsRejectReason('https:citysquares.com/b/waves-pest-control-venice-26858800')).toBe('invalid');
+    expect(sameAsRejectReason('https://citysquares.com/b/waves-\tpest-control-venice-26858800')).toBe('invalid');
     expect(sameAsRejectReason('https://nextdoor.com/pages/waves-pest-control-sarasota%2Fposts%2F123')).toBe('invalid');
     expect(sameAsRejectReason('not a url')).toBe('invalid');
   });
@@ -114,6 +116,9 @@ describe('getVerifiedProfilesByOffice', () => {
       // Competing office claim on a Sarasota-named URL -> omitted completely
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-77777', location: 'sarasota' },
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-77777', location: 'venice' },
+      // Same N49 listing ID under conflicting Sarasota vs Venice city slugs -> omitted completely
+      { live_url: 'https://www.n49.com/biz/999111/waves-pest-control-sarasota/', location: 'sarasota' },
+      { live_url: 'https://www.n49.com/biz/999111/waves-pest-control-venice/', location: 'venice' },
       // Unscoped Sarasota URL also claimed once by Venice -> omitted completely
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-66666', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-66666', location: 'venice' },
