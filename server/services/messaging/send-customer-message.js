@@ -488,7 +488,7 @@ function normalizeRecipient(phone) {
 // Entry points whose recipient may have no notification_prefs row (a stranger who texted us), so the phone-keyed STOP list is
 // their only opt-out check: an unreadable suppression row refuses (retryable) and is re-read at the provider handoff, the
 // same as policy.requireVerifiedSuppression, instead of failing open for SMS.
-const VERIFIED_SUPPRESSION_ENTRY_POINTS = new Set(['mail_home_text_to_book']);
+const VERIFIED_SUPPRESSION_ENTRY_POINTS = new Set(['mail_home_text_to_book', 'new_lead_phone_sms_drip']);
 
 // Purposes with policy.requireVerifiedSuppression (payer_payment_link): the phone-keyed suppression row is read AGAIN at the
 // provider handoff, so a STOP that committed while the send was prepared still stops it, and an unreadable row refuses

@@ -6,6 +6,7 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_NEW_LEAD_DRIP_EXTENDED=true (owner 2026-11-27 "ok go", Decision 2: extends the residential new-lead drip with Email Steps 3 [Day 10] and 4 [Day 21] in automation_steps [stored enabled=false, checked by all 7 stops in new-lead-drip-stops.js] plus Day 2 and Day 5 SMS follow-ups for phone-only residential unquoted leads [new-lead-phone-sms-drip.js, 8 AM-8 PM ET, fail-closed suppression check, canonical sendCustomerMessage]. Emails and texts leads and carries small SMS cost (~$0.34/mo), so it ships 100% DARK and requires explicit owner flip. Strict `=== 'true'`, read at call time via newLeadDripExtendedLive(). Off = Steps 3 & 4 never load and phone-only SMS drip returns immediately with zero queries. Kill: unset.)
  *   GATE_ACCOUNTING_GL=true (owner 2026-11-27, QuickBooks-style double-entry General Ledger core: exposes /api/admin/accounting/* and /admin/accounting with Chart of Accounts, balanced Journal Entries, Statement Reconciliation, Period Locks, Vendor 1099 Master, Subledger Sync, Trial Balance, Accrual & Cash P&L, Balance Sheet, and Statement of Cash Flows; all accounting mutations require full owner access and log critical audit_log entries; sends nothing to customers. Strict `=== 'true'`, read at call time via accountingGlLive(); dark by default. Off = /api/admin/accounting/status returns {enabled:false} and every other /api/admin/accounting route answers 404 {enabled:false}. Kill: unset.)
  *   GATE_CUSTOMER_PROFILE_EDIT=true (owner 2026-11-26 "yes do all these fixes": a signed-in account holder edits their own first name, last name and email in the Waves app and the portal, from the Account menu (PUT /api/customer/profile). A phone number can never be changed there (it is the login). It has a gate because a change emails the customer: an email change sends an "account updated" notice to the OLD address and to the NEW address, so a takeover shows; a name-only change sends one notice to the current address. A contact login and a cancelled account are refused. Off, the route answers 404 {enabled:false} and /api/auth/me reports profileEdit:false, so the app hides the Edit control. Strict `=== 'true'`, read at call time via customerProfileEditLive(); dark by default. Kill: unset.)
  *   GATE_EMAIL_UNIFIED_REPLY_CONTEXT=true (owner 2026-11-27: Gmail auto-draft replies use unified cross-channel customer context from email-reply-context.js in the user channel, crisp Waves email brevity, and deterministic structure/claims verifier checks before saving a draft. Off = draftReplyForEmail keeps its existing email-draft-facts prompt verbatim. Strict `=== 'true'`, read at call time via emailUnifiedReplyContextLive(); dark by default. Kill: unset.)
@@ -4791,6 +4792,10 @@ const gates = {
   // logGateStatus only: automation-runner.js reads GATE_NEW_LEAD_DRIP_STEPS at call time via newLeadDripStepsLive(). Kill switch: unset.
   newLeadDripSteps: process.env.GATE_NEW_LEAD_DRIP_STEPS === 'true',
 
+  // Extended new_lead drip: Email Steps 3 (Day 10) & 4 (Day 21) + phone-only residential SMS Days 2 & 5 (owner 2026-11-27).
+  // Ships 100% DARK: strict 'true'. Read at call time via newLeadDripExtendedLive(). Kill switch: unset.
+  newLeadDripExtended: process.env.GATE_NEW_LEAD_DRIP_EXTENDED === 'true',
+
   // The engagement engine's follow-up emails: the reply pause counts only messages since the estimate was made, for a person who has been sent no other
   // estimate (owner 2026-11-21; the text stages, the deferred text replay and the payment-step follow-up keep 14 days). Ships DARK:
   // exactly 'true'. This entry is for logGateStatus only: estimate-follow-up.js reads
@@ -9273,3 +9278,13 @@ function emailUnifiedReplyContextLive() {
 }
 // GATE_EMAIL_UNIFIED_REPLY_CONTEXT reader, on its own line so gate PRs never conflict.
 module.exports.emailUnifiedReplyContextLive = emailUnifiedReplyContextLive;
+
+// GATE_NEW_LEAD_DRIP_EXTENDED read at CALL time (owner 2026-11-27, Decision 2): strict 'true', dark by default.
+// Extends new_lead email sequence with Day 10 & Day 21 steps (stored enabled=false) and enables Day 2 & Day 5 SMS follow-ups
+// for phone-only residential unquoted leads (new-lead-phone-sms-drip.js). Sends customer comms + ~$0.34/mo SMS cost.
+// Off = Steps 3 & 4 never load and phone-only SMS drip returns immediately with zero queries. Kill = unset.
+function newLeadDripExtendedLive() {
+  return process.env.GATE_NEW_LEAD_DRIP_EXTENDED === 'true';
+}
+// GATE_NEW_LEAD_DRIP_EXTENDED reader, on its own line so gate PRs never conflict.
+module.exports.newLeadDripExtendedLive = newLeadDripExtendedLive;
