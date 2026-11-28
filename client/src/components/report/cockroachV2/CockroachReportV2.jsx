@@ -8,21 +8,14 @@ import { COLORS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import Icon from '../../Icon';
 import ReportText from '../ReportSections';
+import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from './fieldKeys';
+
+export { COCKROACH_V2_DASHBOARD_FIELD_KEYS };
 
 const TEXT = 'var(--text)';
 const MUTED = 'var(--muted)';
 const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
-
-export const COCKROACH_V2_DASHBOARD_FIELD_KEYS = new Set([
-  'species',
-  'activity_level',
-  'activity_locations',
-  'evidence_observed',
-  'conducive_conditions',
-  'work_completed',
-  'customer_prep',
-]);
 
 const TONE = {
   good: { color: COLORS.glassNavy, wash: 'rgba(4, 57, 94, 0.08)', border: 'rgba(4, 57, 94, 0.35)' },

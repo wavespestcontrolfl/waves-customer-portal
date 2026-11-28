@@ -2,8 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary, printedVisitSummary, hidesTreatedAreas, reserviceCardView, reserviceAsksView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
-import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
-import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
+import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/fieldKeys';
+import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/fieldKeys';
+import { sanitizeReentryCopy } from '../lib/sanitizeReentryCopy';
+
+export { sanitizeReentryCopy };
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
@@ -222,67 +225,8 @@ function interactionLabel(value) {
 // channels closed, so it is enforced at the render site rather than per
 // field: any string asserting a clock time or a duration is replaced with
 // the approved once-dry idiom instead of being printed.
-// What the rule bans is a fixed figure attached to a RE-ENTRY or DRYING
-// claim — not every number and not every duration. "Irrigate within 14 days"
-// and "water in with 0.25 inches" are label-required agronomic directions
-// that must survive, and they carry time units too. So the test is BOTH: a
-// time figure AND a re-entry/drying claim in the same sentence.
-const REENTRY_NUMBER_WORDS = 'a|an|one|two|three|four|five|six|seven|eight|nine|ten'
-  + '|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen'
-  + '|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|half|several';
-// a clock time (7 PM / 7:03 PM) or a quantity attached to a time unit
-const REENTRY_TIME_RX = new RegExp(
-  '\\b\\d{1,2}(:\\d{2})?\\s*(a\\.?m\\.?|p\\.?m\\.?)\\b'
-  + `|\\b(\\d+(\\.\\d+)?|(${REENTRY_NUMBER_WORDS})([\\s-](${REENTRY_NUMBER_WORDS}))?)`
-  + '[\\s-]*(second|sec|minute|min|hour|hr|day|week)s?\\b',
-  'i',
-);
-// ...and the sentence must actually make a re-entry / drying claim. This
-// vocabulary is exhaustive on purpose: two earlier attempts failed at the
-// extremes (a phrasing blocklist kept missing wordings; an any-quantity
-// allowlist erased agronomic instructions).
-const REENTRY_CLAIM_RX = new RegExp(
-  '\\b(re-?enter|re-?entry|reentry|entry|ready|dry|dries|dried|drying|safe'
-  + '|keep\\s+(\\w+\\s+){0,3}(off|out|away|clear)'
-  + '|stay\\s+(off|out|away)'
-  // "avoid the treated area for five hours" is a re-entry claim too
-  // (codex P1 #3176 r18) — scoped to the treated-surface nouns so "avoid
-  // watering for 24 hours" stays agronomic.
-  + '|avoid\\w*\\s+(the\\s+)?(treated|lawn|grass|yard|area)'
-  // "Return after 7 PM" is the clock-time phrasing of the same claim
-  // (codex P1 #3176 r20). Mirrors the server context regex's two return
-  // forms — person-subject or sentence-leading — NOT a bare "return",
-  // which would erase agronomic prose like "results return within two
-  // weeks".
-  + '|(you|your\\s+family|residents?|occupants?|everyone)\\s+(\\w+\\s+){0,3}return\\w*'
-  + '|^\\s*return(ing)?\\b'
-  + '|off\\s+(the\\s+)?treated)\\b',
-  'i',
-);
-const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
-
-// DEFENCE IN DEPTH ONLY. Compliance is now enforced server-side at the
-// payload boundary (reports-public.js) with stripFixedReentryTiming — the
-// same clause-level rule and regression matrix validateContent uses for
-// social copy. Five rounds of tuning a second, weaker rule here is what made
-// that consolidation necessary; this local pass stays as a backstop for any
-// path that reaches the document without going through that boundary, and
-// must never become the primary enforcement point again.
-export function sanitizeReentryCopy(value) {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
-  let replaced = false;
-  const kept = sentences.filter((sentence) => {
-    if (REENTRY_TIME_RX.test(sentence) && REENTRY_CLAIM_RX.test(sentence)) {
-      replaced = true;
-      return false;
-    }
-    return true;
-  });
-  if (!replaced) return text;
-  return [REENTRY_SAFE_COPY, ...kept].join(' ').trim();
-}
+// Defense-in-depth sanitizer lives in ../lib/sanitizeReentryCopy so ReportViewPage
+// can use it without eagerly pulling ServiceReportDocument into the web bundle.
 
 // COMPLIANCE (AGENTS.md): never publish a fixed re-entry/drying figure on a
 // customer surface — not as a duration ("keep clear for 2 hours") and not as

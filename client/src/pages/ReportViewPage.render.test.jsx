@@ -1301,7 +1301,7 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
   it('renders the cross-sell as a price-free estimate request', async () => {
     const { container } = mountWithFetch(dataOnlyFetch());
     expect(await screen.findByRole('button', { name: 'Request an Estimate' })).toBeInTheDocument();
-    expect(screen.getByText('Know someone who could use Waves?')).toBeInTheDocument();
+    expect(await screen.findByText('Know someone who could use Waves?')).toBeInTheDocument();
     const crossSellCard = container.querySelector('[data-section="cross-sell"]');
     expect(crossSellCard.querySelector('h3')).toBeNull();
     // Heading + one line above the button (owner 2026-10-05).

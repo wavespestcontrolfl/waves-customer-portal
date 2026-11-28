@@ -71,16 +71,12 @@ function suppressedTypedReport(record) {
 }
 
 // Seasonal pest forecast for the V2 report dashboards (pest + mosquito).
-// Best-effort with a hard 4s cap — a forecast/network hiccup must never
-// block or slow a report render.
+// Non-blocking lookup (350ms cold cap + stale-while-revalidate on same-day
+// cached entries) so an external weather call never slows a report open.
 async function fetchSeasonalForecastSafe(zip) {
   try {
-    const { getForecast } = require('../services/pest-forecast/forecast');
-    const timer = new Promise((resolve) => {
-      const t = setTimeout(() => resolve(null), 4000);
-      if (t.unref) t.unref();
-    });
-    return await Promise.race([getForecast({ zip }), timer]);
+    const { getForecastFast } = require('../services/pest-forecast/forecast');
+    return await getForecastFast({ zip }, { timeoutMs: 350 });
   } catch {
     return null;
   }
@@ -2450,8 +2446,6 @@ router.get('/:token/data', async (req, res, next) => {
       await trackServiceReportView(service);
     }
 
-    const products = await db('service_products').where({ service_record_id: service.id });
-
     if (service.report_template_version === 'service_report_v1') {
       // ?assessment=<id> pins which lawn assessment this render shows (#3168).
       // The headless PDF render passes it so the attachment provably carries
@@ -2546,6 +2540,8 @@ router.get('/:token/data', async (req, res, next) => {
       }
       return res.json(v1Data);
     }
+
+    const products = await db('service_products').where({ service_record_id: service.id });
 
     res.json({
       serviceType: service.service_type,

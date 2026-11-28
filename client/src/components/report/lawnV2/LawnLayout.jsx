@@ -16,6 +16,8 @@
 // in the page, and the plan, the next visit, the re-service card and the blog follow the lawn sections.
 
 import { cloneElement, useEffect, useState } from 'react';
+import { LawnLayoutSwitch } from './lawnLayoutRules';
+export { LawnLayoutSwitch };
 import ReportText, { reportSectionsForText } from '../ReportSections';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
@@ -438,9 +440,4 @@ export function LawnLayoutBody({ data, slots }) {
       </div>
     </PrintContext.Provider>
   );
-}
-
-/** The standard page body, or the lawn layout while the gate's payload key is on a live lawn report. */
-export function LawnLayoutSwitch({ data, mode, layout, children }) {
-  return lawnLayoutActive(data, mode) ? layout : children;
 }
