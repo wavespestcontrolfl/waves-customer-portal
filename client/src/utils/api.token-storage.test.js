@@ -396,4 +396,44 @@ describe('API token publication', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(api.token).toBe(replacementAccess);
   });
+
+  it('proactively refreshes expiring access tokens in ensureFreshToken before returning refreshed status', async () => {
+    const expiredAccess = jwtFor({
+      customerId: 'customer-a',
+      sessionId: 'family-a',
+      exp: Math.floor(Date.now() / 1000) - 60,
+    });
+    const freshAccess = jwtFor({
+      customerId: 'customer-a',
+      sessionId: 'family-a',
+      exp: Math.floor(Date.now() / 1000) + 900,
+    });
+    const store = {
+      waves_token: expiredAccess,
+      waves_refresh_token: 'refresh-a',
+    };
+    vi.stubGlobal('localStorage', {
+      getItem: (key) => store[key] || null,
+      setItem: (key, value) => { store[key] = String(value); },
+      removeItem: (key) => { delete store[key]; },
+    });
+    vi.stubGlobal('navigator', {
+      locks: { request: (_name, _options, callback) => callback() },
+    });
+    const fetchMock = vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => ({ token: freshAccess, refreshToken: 'refresh-b' }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { ApiClient } = await import('./api.js');
+    const api = new ApiClient();
+
+    await expect(api.ensureFreshToken()).resolves.toBe('refreshed');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(api.token).toBe(freshAccess);
+
+    await expect(api.ensureFreshToken()).resolves.toBe('valid');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

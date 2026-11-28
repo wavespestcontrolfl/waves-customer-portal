@@ -49,6 +49,7 @@ vi.mock('../hooks/useAuth', () => ({
 // confirm rode without breaking the walk.
 const apiMock = vi.hoisted(() => ({
   token: 'ambient-token',
+  ensureFreshToken: vi.fn(async () => 'valid'),
   fetchRaw: vi.fn((url, opts) => globalThis.fetch(url, opts)),
 }));
 vi.mock('../utils/api', () => ({ api: apiMock, default: apiMock }));
@@ -387,6 +388,51 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
       const confirmCalls = apiMock.fetchRaw.mock.calls.filter(([url]) => String(url).includes('/booking/confirm'));
       expect(confirmCalls).toHaveLength(1);
     });
+  });
+
+  it('sends capture-intent through api.fetchRaw for signed-in non-token entries and plain fetch when signed out', async () => {
+    authState.isAuthenticated = true;
+    authState.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', phone: '9415550101', email: 'pat@example.com' };
+    const fetchMock = stubFetch();
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    const phoneInput = await screen.findByLabelText('Phone number');
+    fireEvent.change(phoneInput, { target: { value: '9415550101' } });
+    fireEvent.blur(phoneInput);
+
+    await waitFor(() => {
+      const captureRaw = apiMock.fetchRaw.mock.calls.filter(([url]) => String(url).includes('/booking/capture-intent'));
+      expect(captureRaw).toHaveLength(1);
+    });
+    expect(apiMock.ensureFreshToken).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    apiMock.fetchRaw.mockClear();
+    authState.isAuthenticated = false;
+    authState.customer = null;
+    const anonFetch = stubFetch();
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    const anonPhone = await screen.findByLabelText('Phone number');
+    fireEvent.change(anonPhone, { target: { value: '9415550101' } });
+    fireEvent.blur(anonPhone);
+
+    await waitFor(() => {
+      expect(anonFetch.mock.calls.some(([url]) => String(url).includes('/booking/capture-intent'))).toBe(true);
+    });
+    expect(apiMock.fetchRaw.mock.calls.some(([url]) => String(url).includes('/booking/capture-intent'))).toBe(false);
   });
 });
 
