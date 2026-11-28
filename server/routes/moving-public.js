@@ -37,10 +37,12 @@ const PRIVACY_HEADERS = {
 
 const NOT_FOUND = { error: 'Not found' };
 
-router.use((req, res, next) => {
+function stampMovingPrivacyHeaders(_req, res, next) {
   res.set(PRIVACY_HEADERS);
   return next();
-});
+}
+
+router.use(stampMovingPrivacyHeaders);
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -86,7 +88,10 @@ async function loadMove(req, res) {
 }
 
 function sendFailure(res, err, label) {
-  if (err instanceof Moves.MoveError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof Moves.MoveError) {
+    if (err.status === 404) return res.status(404).json(NOT_FOUND);
+    return res.status(err.status).json({ error: err.message });
+  }
   logger.error(`[moving-public] ${label} failed (${errCode(err)})`);
   return res.status(500).json({ error: 'Something went wrong. Please try again.' });
 }
@@ -123,6 +128,8 @@ router.post('/:token/submit', submitLimiter, async (req, res) => {
     const body = req.body || {};
     const saved = await Moves.submitMove(move, {
       checkId: typeof body.checkId === 'string' && body.checkId ? body.checkId : null,
+      clearAddress: body.clearAddress === true,
+      expectedAddressVersion: typeof body.expectedAddressVersion === 'string' && body.expectedAddressVersion ? body.expectedAddressVersion : null,
       moveOutDate: body.moveOutDate,
       moveInDate: body.moveInDate,
     });
@@ -132,4 +139,5 @@ router.post('/:token/submit', submitLimiter, async (req, res) => {
   }
 });
 
+router.stampMovingPrivacyHeaders = stampMovingPrivacyHeaders;
 module.exports = router;

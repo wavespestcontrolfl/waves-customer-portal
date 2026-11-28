@@ -22221,6 +22221,10 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
 
 function annualPrepayEligibleForEstimateData(estData) {
   if (!estData || typeof estData !== 'object') return false;
+  // Moving flow (P1-M2): per-visit movers' new-home estimates stay on
+  // per-application billing so accepting a single-service non-fee move
+  // estimate never flips billing_mode to annual_prepay and deadlocks Apply move.
+  if (estData.move && estData.move.moveId) return false;
   // Existing customers get pay-per-application only — no annual prepay
   // option and no waivable setup fee (the setup is waived outright; see
   // estimate-converter's matching guard on the accept invoice).
@@ -22264,6 +22268,7 @@ function mosquitoTierForAxisToken(token) {
 // customer, termite bond, one-time-only) keep their normal effect.
 function annualPrepayEligibleForMosquitoTier(estData, frequency) {
   if (!estData || typeof estData !== 'object') return false;
+  if (estData.move && estData.move.moveId) return false;
   if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
   if (frequencyIsSeasonalMosquitoTier(frequency)) return false;
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
@@ -29112,6 +29117,10 @@ function recurringDataAsAccepted(estData, estimate, { frequencyResolves = true }
 // unknown, not one unit, so prepay closes too: the page never offers a prepay, or its setup-fee waiver, that accept
 // may refuse.
 function prepayUnitCountClosed(estData, estimate, { frequencyResolves = true } = {}) {
+  // Moving flow (P1-M2): moving-linked estimates stay pay-per-application on
+  // /data, SSR GET /estimate/:token, and PUT /accept so a single-service mover
+  // never flips billing_mode to annual_prepay and deadlocks Apply move.
+  if (estData && estData.move && estData.move.moveId) return true;
   try {
     const converter = require('../services/estimate-converter');
     // A termite annual plan prepays only its own termite unit. When the estimate names the plan (the converter's

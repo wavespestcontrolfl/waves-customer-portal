@@ -10,9 +10,9 @@ const BAD = '%E0%A4%A';
 function build() {
   const seen = { limiter: 0, errors: [] };
   const app = express();
-  app.use(['/api/estimates', '/api/pay', '/api/public/secure-card'], rejectUndecodablePath);
+  app.use(['/api/estimates', '/api/pay', '/api/public/secure-card', '/api/public/moving'], rejectUndecodablePath);
   app.use('/api/', (req, res, next) => { seen.limiter += 1; next(); });
-  for (const mount of ['/api/estimates', '/api/pay', '/api/pay/statement', '/api/public/secure-card']) {
+  for (const mount of ['/api/estimates', '/api/pay', '/api/pay/statement', '/api/public/secure-card', '/api/public/moving']) {
     const router = express.Router();
     router.get('/:token/data', (req, res) => res.json({ reached: req.params.token }));
     app.use(mount, router);
@@ -36,6 +36,7 @@ describe('rejectUndecodablePath', () => {
     ['/api/estimates', 'Estimate not found'],
     ['/api/pay', 'Invoice not found'],
     ['/api/public/secure-card', 'Not found'],
+    ['/api/public/moving', 'Not found'],
   ])('%s: an undecodable token is the mount\'s generic 404, not counted, not an error', async (mount, error) => {
     const { app, seen } = build();
     const res = await get(app, `${mount}/${BAD}/data`);
@@ -49,6 +50,7 @@ describe('rejectUndecodablePath', () => {
     ['/API/PAY', 'Invoice not found'],
     ['/Api/Estimates', 'Estimate not found'],
     ['/api/PUBLIC/Secure-Card', 'Not found'],
+    ['/api/PUBLIC/Moving', 'Not found'],
     ['/api/estimates/', 'Estimate not found'],
   ])('%s: the mount matches case-insensitively and the lookup follows', async (mount, error) => {
     const { app, seen } = build();

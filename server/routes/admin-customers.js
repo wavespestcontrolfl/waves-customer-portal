@@ -50,6 +50,7 @@ const {
   longText: prefsLongText,
   validatePrefsBody: validatePrefsBodyWithSchemas,
   camelToSnake: prefsCamelToSnake,
+  snakeToCamel: prefsSnakeToCamel,
   transformKeys: prefsTransformKeys,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage: normalizePrefsUpdatesForStorage,
@@ -5555,8 +5556,21 @@ function sodWriteIsFresh(current, sodInput, renderStamp) {
 // A sod record the stored row could not accept joins `rejected`. So does a sprinkler timer on file, which follows
 // the same contract (services/controller-timer.js). Returns the 400 message when those were the only things in the
 // batch (nothing was written), else null.
+function settleMovedHomeAccessWrite(row, fresh) {
+  if (fresh) return [];
+  const { MOVED_HOME_ACCESS_COLUMNS } = require('../services/customer-address-fanout');
+  const rejected = [];
+  for (const col of MOVED_HOME_ACCESS_COLUMNS) {
+    if (col in row) {
+      delete row[col];
+      rejected.push({ field: prefsSnakeToCamel(col), message: 'This home moved since the page opened. Refresh before updating access details or gate codes.' });
+    }
+  }
+  return rejected;
+}
+
 function recordsRejectedWithNothingSaved(outcome, rejected) {
-  const refused = [outcome.sodRejected, ...(outcome.timerRejected || [])].filter(Boolean);
+  const refused = [outcome.sodRejected, ...(outcome.timerRejected || []), ...(outcome.accessRejected || [])].filter(Boolean);
   rejected.push(...refused);
   if (!refused.length || outcome.written.length) return null;
   return [...new Set(refused.map((r) => r.message))].join('; ');
@@ -5564,9 +5578,11 @@ function recordsRejectedWithNothingSaved(outcome, rejected) {
 
 // The field names a prefs write saved, for the audit trail (names only, sorted).
 function savedPrefFieldNames(updates, outcome) {
+  const rejectedAccess = new Set((outcome.accessRejected || []).map((r) => prefsCamelToSnake(r.field)));
   return Object.keys(updates)
     .filter((f) => !(outcome.sodRejected && SOD_PREFS_INPUT_FIELDS.includes(f)))
     .filter((f) => !(outcome.timerRejected?.length && CONTROLLER_TIMER_FIELDS.includes(f)))
+    .filter((f) => !rejectedAccess.has(f))
     .sort();
 }
 
@@ -5638,7 +5654,9 @@ async function writeAdminPreferences(customerId, updates, outcome = {}, { render
     const row = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
       ? { ...updates, irrigation_system: true }
       : { ...updates };
-    outcome.timerRejected = settleControllerTimer(row, { fresh: renderedAgainstCurrentHome(current, renderStamp), stored: current, seen: timerSeen });
+    const freshHome = renderedAgainstCurrentHome(current, renderStamp);
+    outcome.accessRejected = settleMovedHomeAccessWrite(row, freshHome);
+    outcome.timerRejected = settleControllerTimer(row, { fresh: freshHome, stored: current, seen: timerSeen });
     if (SOD_PREFS_INPUT_FIELDS.some((f) => f in updates)) {
       const sodInput = {};
       for (const f of SOD_PREFS_INPUT_FIELDS) {
@@ -6068,9 +6086,16 @@ async function customerArchiveHandler(req, res, next) {
           throw err;
         }
         // Billing was just wound down by churnGuardForRow on this same
-        // transaction — stamp deleted_at and unlink any Same-Family membership
-        // (cleaning up a 1-member orphan so surviving homes are not stranded).
-        await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
+        // transaction — stamp deleted_at, close any live moving links so an
+        // archived customer cannot keep opening /moving/:token or burning paid
+        // Google Address Validation checks (P2-M2), and unlink any Same-Family
+        // membership (cleaning up a 1-member orphan so surviving homes are not stranded).
+        const archiveNow = new Date();
+        await trx('customers').where({ id: req.params.id }).update({ deleted_at: archiveNow });
+        await trx('customer_moves')
+          .where({ customer_id: req.params.id })
+          .whereIn('status', ['open', 'submitted'])
+          .update({ status: 'closed', closed_reason: 'cancelled', closed_at: archiveNow, updated_at: archiveNow });
         const familyUnlink = await Family.unlinkMemberInExistingTx(trx, req.params.id, req.technicianId, { reason: 'customer_archived' });
         const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
         await auditCustomerMutation(req, 'customer.archive', req.params.id, {

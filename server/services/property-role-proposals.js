@@ -1128,6 +1128,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       // the settings, the new-sod record and the confirmation ledger all still
       // describe the home, like the lawn measurement above.
       if (!sameHomeFlip) await require('./customer-address-fanout').markSprinklerSettingsMoved(customerId, trx);
+      await require('./customer-address-fanout').clearMovedHomeAccessOnAddressChange(customerId, formerHome, newPrimary, trx, { retirePrimaryProperty: false });
       // The move marker just cleared the confirmation ledger. The promoted property's own reviewed lawn IS the
       // current home's area, so re-establish it for the weekly plan's gallons line at once (its own ledger entry —
       // codex #6498 r1 P2).

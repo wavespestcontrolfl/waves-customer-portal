@@ -120,7 +120,7 @@ function isReservicePath(reqPath = '') {
 // contract as the reservice shell: never indexed/archived, token never leaks
 // via Referer, no caching.
 function isMovingPath(reqPath = '') {
-  return /^\/moving\/[a-f0-9]{48}\/?$/.test(String(reqPath || ''));
+  return /^\/moving\/[^/]+\/*$/i.test(routerDecodedPath(reqPath));
 }
 
 // Public lead consultation-booking page (/inspection/<leadId>.<exp>.<sig>) —

@@ -5706,6 +5706,18 @@ function recordEstimateLinePick(database, visit) {
   });
 }
 
+function assertMoveEstimateNotAnnualPrepay(billingTerm, estimateData) {
+  if (billingTerm !== 'prepay_annual' || !estimateData?.move?.moveId) return;
+  const err = new Error(
+    'Annual prepay is not supported for moving new-home estimates — convert this estimate as per-application billing.'
+  );
+  err.code = 'ANNUAL_PREPAY_MOVE_ESTIMATE_UNSUPPORTED';
+  err.isOperational = true;
+  err.status = 422;
+  err.statusCode = 422;
+  throw err;
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -5815,6 +5827,10 @@ const EstimateConverter = {
     // transaction, so the move row is share-locked through that commit.
     const newHomeMove = await require('./customer-moves').lockMoveForConversion(database, estimateData);
     estimateData = estimateData || {};
+    // FAIL-CLOSED: moving new-home estimates never convert as annual prepay
+    // (runs before termite signature parking so move-linked termite estimates
+    // never enter awaiting_signature only to fail on activation).
+    assertMoveEstimateNotAnnualPrepay(billingTerm, estimateData);
 
     // Termite annual-plan sign-before-pay (slice 3a restructure, owner
     // ruling 2026-09-24): detected as early as possible — right after

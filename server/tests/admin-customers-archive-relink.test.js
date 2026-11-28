@@ -108,6 +108,7 @@ describe('DELETE /admin/customers/:id (archive)', () => {
       expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
       expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
+      expect.objectContaining({ table: 'customer_moves', viaTrx: true, where: { customer_id: 'cust-1' }, patch: expect.objectContaining({ status: 'closed', closed_reason: 'cancelled' }) }),
     ]);
     // r6: no write on this path touches `active`.
     expect(mockState.updates.filter((u) => u.table === 'customers').every((u) => !('active' in u.patch))).toBe(true);
@@ -149,6 +150,7 @@ describe('archiveCustomerAsAdmin (the DELETE /:id handler, no HTTP)', () => {
       expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
       expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
+      expect.objectContaining({ table: 'customer_moves', viaTrx: true, where: { customer_id: 'cust-1' }, patch: expect.objectContaining({ status: 'closed', closed_reason: 'cancelled' }) }),
     ]);
     expect(relinkSubscribersFromArchivedCustomer).toHaveBeenCalledWith(mockTrx, 'cust-1');
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -193,7 +195,8 @@ describe('archiveCustomerAsAdmin (the DELETE /:id handler, no HTTP)', () => {
       // Locked before the precheck ran (so before every check and write), inside the archive transaction.
       expect(locksSeenByPrecheck.filter((l) => l.table === 'customers' && l.viaTrx)).toHaveLength(1);
       // The archive write follows on the same transaction; no second lock statement releases or reorders it.
-      expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customers', viaTrx: true, patch: { deleted_at: expect.any(Date) } }));
+      expect(mockState.updates.filter((u) => u.table === 'customers').at(-1)).toEqual(expect.objectContaining({ table: 'customers', viaTrx: true, patch: { deleted_at: expect.any(Date) } }));
+      expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customer_moves', viaTrx: true, where: { customer_id: 'cust-1' }, patch: expect.objectContaining({ status: 'closed', closed_reason: 'cancelled' }) }));
     }
   });
 
@@ -208,7 +211,8 @@ describe('archiveCustomerAsAdmin (the DELETE /:id handler, no HTTP)', () => {
     await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' }, precheck }))
       .resolves.toEqual({ status: 200, json: { success: true } });
     expect(precheck).toHaveBeenCalledWith(mockTrx);
-    expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customers', patch: { deleted_at: expect.any(Date) } }));
+    expect(mockState.updates.filter((u) => u.table === 'customers').at(-1)).toEqual(expect.objectContaining({ table: 'customers', patch: { deleted_at: expect.any(Date) } }));
+    expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customer_moves', patch: expect.objectContaining({ status: 'closed', closed_reason: 'cancelled' }) }));
   });
 
   test('an error the handler passes to next() rejects', async () => {

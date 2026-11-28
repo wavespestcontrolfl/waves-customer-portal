@@ -9,6 +9,7 @@ const NOT_FOUND = {
   '/api/estimates': { error: 'Estimate not found' },
   '/api/pay': { error: 'Invoice not found' },
   '/api/public/secure-card': { error: 'Not found' }, // its privacy headers are stamped by the mount just above this one
+  '/api/public/moving': { error: 'Not found' }, // its privacy headers are stamped by the mount just above this one
   '/api/public/estimates': { error: 'Not found' },
   '/api/public/reschedule': { error: 'Not found' },
   '/api/public/reservice': { error: 'Not found' },
