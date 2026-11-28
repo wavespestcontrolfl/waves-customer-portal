@@ -23,7 +23,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
-import { TIMEZONE } from '../../lib/timezone';
+import { TIMEZONE, etDateString } from '../../lib/timezone';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
 import SkipVisitOption from './SkipVisitOption';
@@ -376,7 +376,8 @@ export default function MobileAppointmentDetailSheet({
   // this sheet may treat as membership coverage; a tier badge with no
   // `covered_membership` prediction is decoration, never a $0 inference.
   const coveredByMembership = predictionKind === 'covered_membership';
-  const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
+  const rawPrepaid = service.prepaidAmount ?? service.checkoutPrepaidCredit;
+  const prepaidAmt = rawPrepaid != null ? Number(rawPrepaid) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
   const prepaidCovered = usingUnpricedPrediction
     ? predictionKind === 'prepaid'
@@ -438,7 +439,9 @@ export default function MobileAppointmentDetailSheet({
   const hasOpenVisitInvoice = !siblingCoverageOverridesOwnInvoice && !!(
     visitInvoice?.open && Number(visitInvoice.amountDue || 0) > 0
   );
-  const hasCheckoutAmount = hasChargeableAmount || hasOpenVisitInvoice;
+  const visitDate = String(service.scheduledDate || '').slice(0, 10);
+  const techNonTodayCheckoutBlocked = !adminActions && !!visitDate && visitDate !== etDateString();
+  const hasCheckoutAmount = !techNonTodayCheckoutBlocked && (hasChargeableAmount || hasOpenVisitInvoice);
   // Coarse client-side pre-filter for the annual-prepay switch action: a
   // recurring visit, a customer, and a lane where a prepaid year is a
   // meaningful sale. Monthly members' visits are covered by dues (nothing per

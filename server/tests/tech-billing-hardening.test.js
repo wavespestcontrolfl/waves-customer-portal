@@ -295,7 +295,9 @@ describe('P1-T4 & P2-T1: admin-schedule tech billing & dispatch-admin boundaries
     expect(res.body.services).toHaveLength(2);
     const [todayRow, futureRow] = res.body.services;
     expect(todayRow.estimatedPrice).toBe(155);
+    expect(todayRow.checkoutPrepaidCredit).toBe(75);
     expect(futureRow.estimatedPrice).toBeUndefined();
+    expect(futureRow.checkoutPrepaidCredit).toBeUndefined();
     for (const row of [todayRow, futureRow]) {
       for (const key of ['primaryLinePrice', 'prepaidAmount', 'prepaidMethod', 'prepaidAt', 'payerId', 'poNumber', 'selfPayOverride', 'monthlyRate', 'leadScore']) {
         expect(row[key]).toBeUndefined();

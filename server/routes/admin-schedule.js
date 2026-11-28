@@ -641,6 +641,12 @@ function stripTechScheduleListBilling(req, rows) {
   const today = etDateString();
   for (const row of rows) {
     const isToday = dateOnly(row.scheduledDate) === today;
+    const prepaid = row.prepaidAmount != null ? Math.max(0, Number(row.prepaidAmount) || 0) : 0;
+    if (isToday && prepaid > 0) {
+      row.checkoutPrepaidCredit = Math.round(prepaid * 100) / 100;
+    } else {
+      delete row.checkoutPrepaidCredit;
+    }
     delete row.monthlyRate;
     delete row.leadScore;
     if (!isToday) delete row.estimatedPrice;
@@ -5936,6 +5942,8 @@ function formatServiceDisplay(primaryType, addons = []) {
   return `${names[0]} + ${names.length - 1} more`;
 }
 
+const optNum = (v) => (v != null ? Number(v) : null);
+
 function mapAddonRow(row, { forTech = false } = {}) {
   return {
     id: row.id,
@@ -5947,13 +5955,13 @@ function mapAddonRow(row, { forTech = false } = {}) {
     hasBillablePrice: Number(row.estimated_price ?? row.base_price ?? 0) > 0,
     ...(forTech ? {} : {
       excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
-      basePrice: row.base_price != null ? Number(row.base_price) : null,
-      estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
+      basePrice: optNum(row.base_price),
+      estimatedPrice: optNum(row.estimated_price),
       discountId: row.discount_id || null,
       discountName: row.discount_name || null,
       discountType: row.discount_type || null,
-      discountAmount: row.discount_amount != null ? Number(row.discount_amount) : null,
-      discountDollars: row.discount_dollars != null ? Number(row.discount_dollars) : null,
+      discountAmount: optNum(row.discount_amount),
+      discountDollars: optNum(row.discount_dollars),
     }),
     recurringPattern: row.recurring_pattern || null,
     recurringIntervalDays: row.recurring_interval_days ?? null,

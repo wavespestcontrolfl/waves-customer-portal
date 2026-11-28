@@ -728,4 +728,16 @@ describe('MobileAppointmentDetailSheet sibling invoice needs-review visit', () =
     expect(screen.getByText(/On completion: sends the customer an invoice\./i)).toBeInTheDocument();
     expect(screen.queryByText(/\$0\.00/)).not.toBeInTheDocument();
   });
+
+  it('never offers "Review & checkout" on a future visit for a technician while keeping details accessible', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{ ...BASE_SERVICE, scheduledDate: '2099-01-15', estimatedPrice: 120 }}
+        onClose={() => {}}
+        adminActions={false}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Review visit details/i })).toBeInTheDocument();
+  });
 });

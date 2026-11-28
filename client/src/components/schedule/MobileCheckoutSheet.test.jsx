@@ -688,4 +688,32 @@ describe('MobileCheckoutSheet priced-visit sibling review', () => {
     );
     expect(screen.getByRole('button', { name: 'Charge $115.00' })).toBeEnabled();
   });
+
+  it('disables Charge on a non-today visit for a technician while preserving checkoutPrepaidCredit math on today list rows', () => {
+    render(
+      <MobileCheckoutSheet
+        isAdmin={false}
+        service={{ ...BASE_SERVICE, scheduledDate: '2099-01-15', billingLane: { siblingCoverage: { state: 'none' } } }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /Today’s visits only — cannot charge/i })).toBeDisabled();
+
+    cleanup();
+    const todayEt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    render(
+      <MobileCheckoutSheet
+        isAdmin={false}
+        service={{
+          ...BASE_SERVICE,
+          scheduledDate: todayEt,
+          estimatedPrice: 160,
+          checkoutPrepaidCredit: 60,
+          billingLane: { siblingCoverage: { state: 'none' } },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Charge $100.00' })).toBeEnabled();
+  });
 });
