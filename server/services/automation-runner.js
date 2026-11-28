@@ -19,7 +19,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
-const { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS } = require('./new-lead-drip-stops');
+const { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS, NEW_LEAD_EXTENDED_STEP_IDS } = require('./new-lead-drip-stops');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -848,12 +848,28 @@ function enabledSequenceSteps(templateKey, client = db) {
   let query;
   if (templateKey !== 'new_lead') {
     query = client('automation_steps').where({ template_key: templateKey, enabled: true });
-  } else if (require('../config/feature-gates').newLeadDripStepsLive?.() === true) {
-    query = client('automation_steps').where({ template_key: templateKey })
-      .where((own) => own.where('enabled', true).orWhereIn('id', NEW_LEAD_DRIP_STEP_IDS));
   } else {
-    query = client('automation_steps').where({ template_key: templateKey, enabled: true })
-      .where((rest) => rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS));
+    const featureGates = require('../config/feature-gates');
+    const stepsOn = featureGates.newLeadDripStepsLive?.() === true;
+    // Steps 3 (Day 10, +120h) and 4 (Day 21, +264h) use relative delays after Step 2, so they
+    // require BOTH GATE_NEW_LEAD_DRIP_STEPS and GATE_NEW_LEAD_DRIP_EXTENDED to stay on schedule.
+    const extendedOn = stepsOn && featureGates.newLeadDripExtendedLive?.() === true;
+    if (stepsOn) {
+      query = client('automation_steps').where({ template_key: templateKey })
+        .where((own) => {
+          own.where('enabled', true).orWhereIn('id', NEW_LEAD_DRIP_STEP_IDS);
+          if (extendedOn) own.orWhereIn('id', NEW_LEAD_EXTENDED_STEP_IDS);
+        });
+      if (!extendedOn) {
+        query = query.where((excl) => { excl.whereNotIn('id', NEW_LEAD_EXTENDED_STEP_IDS); });
+      }
+    } else {
+      query = client('automation_steps').where({ template_key: templateKey, enabled: true })
+        .where((rest) => {
+          rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS);
+          rest.whereNotIn('id', NEW_LEAD_EXTENDED_STEP_IDS);
+        });
+    }
   }
   return query.orderBy('step_order', 'asc').orderBy('id', 'asc');
 }
