@@ -640,7 +640,7 @@ const REFUSALS = Object.freeze({
 
 async function legacyPayerKeyVerdict(dbh, legacyKey, holdsEarlier) {
   if (!dbh || !legacyKey) return 'send';
-  const row = await dbh('email_messages').where({ idempotency_key: legacyKey }).first();
+  const row = await dbh('email_messages').where({ idempotency_key: legacyKey, recipient_type: 'payer' }).first();
   if (!row) return 'send';
   const status = String(row.status || '').toLowerCase();
   if (status === 'failed') {

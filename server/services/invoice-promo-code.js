@@ -78,9 +78,9 @@ async function promoDrawAmountForInvoice(invoiceId, conn) {
     if (!q || typeof q.where !== 'function') return null;
     const rows = await q
       .where({ invoice_id: invoiceId, created_by: APPLIED_BY })
-      .select('amount');
+      .select('delta');
     if (!Array.isArray(rows) || !rows.length) return null;
-    const total = rows.reduce((sum, r) => sum + Math.max(0, -Number(r.amount || 0)), 0);
+    const total = rows.reduce((sum, r) => sum + Math.max(0, -Number(r.delta || 0)), 0);
     return total > 0 ? round2(total) : null;
   } catch {
     return null;
@@ -268,9 +268,11 @@ async function enterPromoCodeOnInvoice({ invoice, rawCode }, conn = db) {
 
   const existing = await conn('invoice_promo_codes').where({ invoice_id: invoice.id }).first();
   if (existing) {
-    return existing.code === code && existing.status !== 'void'
-      ? { ok: true, applied: appliedView(existing, invoice), insertedNew: false }
-      : { ok: false, reason: 'code_already_entered' };
+    if (existing.code === code && existing.status !== 'void') {
+      const promoDraw = existing.status === 'redeemed' ? await promoDrawAmountForInvoice(invoice.id, conn) : null;
+      return { ok: true, applied: appliedView(existing, invoice, promoDraw), insertedNew: false };
+    }
+    return { ok: false, reason: 'code_already_entered' };
   }
   if (!(await invoiceEligibleForPromoEntry(invoice, conn))) return { ok: false, reason: 'invalid_code' };
 
@@ -368,7 +370,7 @@ async function redeemAndApplyPromoCode(trx, invoice) {
       // Void confirmed payer ownership so checkout does not loop on a stale
       // entered row; leave entered only when ownership cannot be verified.
       const liveOwner = await invoicePayerOwnership(invoice, savepoint);
-      if (liveOwner === 'payer') {
+      if (liveOwner === 'payer_owned') {
         return voidRow(savepoint, row, 'invoice_not_payable');
       }
       if (liveOwner !== null) {
