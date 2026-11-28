@@ -2683,38 +2683,50 @@ async function voidOpenEmailChangeRequestsBeforeSweep(trx, loserId, winnerId = n
 // the generic FK sweep runs: without this, a non-colliding merge transfers an
 // issued standalone Auto Pay token onto the survivor (exposing firstName), or
 // repoints a live move while applyMove is between steps.
+async function runOptionalTableStep(trx, fn) {
+  if (typeof trx.transaction === 'function') {
+    await trx.transaction(async (sp) => fn(sp));
+  } else {
+    await fn(trx);
+  }
+}
+
 async function prepareCustomerMovesAndCardRequestsBeforeSweep(trx, loserId) {
   try {
-    const liveMoves = await trx('customer_moves')
-      .where({ customer_id: loserId })
-      .whereIn('status', ['open', 'submitted'])
-      .select('id');
-    for (const mv of liveMoves) {
-      const lockRes = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['customer-move-apply', String(mv.id)]);
-      if (lockRes?.rows?.[0]?.locked === false) {
-        throw Object.assign(new Error('Duplicate customer move is currently being updated — retry merging in a moment'), {
-          statusCode: 409,
-          isOperational: true,
-        });
+    await runOptionalTableStep(trx, async (conn) => {
+      const liveMoves = await conn('customer_moves')
+        .where({ customer_id: loserId })
+        .whereIn('status', ['open', 'submitted'])
+        .select('id');
+      for (const mv of liveMoves) {
+        const lockRes = await conn.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['customer-move-apply', String(mv.id)]);
+        if (lockRes?.rows?.[0]?.locked === false) {
+          throw Object.assign(new Error('Duplicate customer move is currently being updated — retry merging in a moment'), {
+            statusCode: 409,
+            isOperational: true,
+          });
+        }
       }
-    }
+    });
   } catch (e) {
     if (!(e && e.code === '42P01')) throw e;
   }
   try {
-    const cardReqs = await trx('appointment_card_requests')
-      .where({ customer_id: loserId, kind: 'customer' })
-      .forUpdate()
-      .select('id', 'status');
-    if (cardReqs.some((r) => r.status === 'completing')) {
-      throw new Error('Archived customer has an in-flight standalone Auto Pay setup link — wait for it to finish before merging');
-    }
-    const pendingIds = cardReqs.filter((r) => r.status === 'pending').map((r) => r.id);
-    if (pendingIds.length) {
-      await trx('appointment_card_requests')
-        .whereIn('id', pendingIds)
-        .update({ status: 'expired', updated_at: trx.fn.now() });
-    }
+    await runOptionalTableStep(trx, async (conn) => {
+      const cardReqs = await conn('appointment_card_requests')
+        .where({ customer_id: loserId, kind: 'customer' })
+        .forUpdate()
+        .select('id', 'status');
+      if (cardReqs.some((r) => r.status === 'completing')) {
+        throw new Error('Archived customer has an in-flight standalone Auto Pay setup link — wait for it to finish before merging');
+      }
+      const pendingIds = cardReqs.filter((r) => r.status === 'pending').map((r) => r.id);
+      if (pendingIds.length) {
+        await conn('appointment_card_requests')
+          .whereIn('id', pendingIds)
+          .update({ status: 'expired', updated_at: trx.fn.now() });
+      }
+    });
   } catch (e) {
     if (!(e && e.code === '42P01')) throw e;
   }
@@ -2724,11 +2736,13 @@ async function reconcileMergedMoveFromProperty(trx, winnerId, repointed = null) 
   if (repointed && !repointed['customer_moves.customer_id']) return;
   let liveMove = null;
   try {
-    liveMove = await trx('customer_moves')
-      .where({ customer_id: winnerId })
-      .whereIn('status', ['open', 'submitted'])
-      .whereNotNull('from_property_id')
-      .first('id', 'from_property_id');
+    await runOptionalTableStep(trx, async (conn) => {
+      liveMove = await conn('customer_moves')
+        .where({ customer_id: winnerId })
+        .whereIn('status', ['open', 'submitted'])
+        .whereNotNull('from_property_id')
+        .first('id', 'from_property_id');
+    });
   } catch (e) {
     if (e && e.code === '42P01') return;
     throw e;
@@ -4432,10 +4446,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Open email-change verification codes belong solely to the retired profile —
     // void them before the sweep (table is in REPOINT_EXCLUDED_TABLES).
     await voidOpenEmailChangeRequestsBeforeSweep(trx, loser.id, winner.id);
-    // The loser's open pin suggestion (and its bell) is retired, not moved: it names the retired profile.
-    await retirePinSuggestionsBeforeSweep(trx, loser.id);
     // Lock any live moves and expire pending standalone Auto Pay links before the sweep.
     await prepareCustomerMovesAndCardRequestsBeforeSweep(trx, loser.id);
+    // The loser's open pin suggestion (and its bell) is retired, not moved: it names the retired profile.
+    await retirePinSuggestionsBeforeSweep(trx, loser.id);
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -4449,19 +4463,18 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
           // Bounded prefetch (r35): the journal stores {count} beyond the
           // cap anyway — materializing every id first let a 10k+-row FK
           // table allocate an unbounded list inside the merge transaction.
-          rowIds = (await sp(table).where(column, loserId)
-            .modify((q) => { if (table === 'appointment_card_requests') q.whereNot('kind', 'customer'); })
-            .select(pkColumn)
-            .limit(REPOINT_ID_CAP + 1)).map((r) => r[pkColumn]);
+          let q = sp(table).where(column, loserId);
+          if (table === 'appointment_card_requests') q = q.whereNot('kind', 'customer');
+          rowIds = (await q.select(pkColumn).limit(REPOINT_ID_CAP + 1)).map((r) => r[pkColumn]);
         });
       } catch {
         rowIds = null;
       }
       try {
         await trx.transaction(async (sp) => {
-          const count = await sp(table).where(column, loserId)
-            .modify((q) => { if (table === 'appointment_card_requests') q.whereNot('kind', 'customer'); })
-            .update({ [column]: winnerId });
+          let uq = sp(table).where(column, loserId);
+          if (table === 'appointment_card_requests') uq = uq.whereNot('kind', 'customer');
+          const count = await uq.update({ [column]: winnerId });
           if (count) {
             repointed[`${table}.${column}`] = count;
             // Record ids only when the update provably covered exactly them
