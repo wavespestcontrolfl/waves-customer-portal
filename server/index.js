@@ -654,7 +654,14 @@ app.use('/api/estimates', estimatePublicRoutes.darkEstimateRoutePreGuard);
 // Public moving page (/api/public/moving/:token): privacy headers land BEFORE
 // rejectUndecodablePath (404) and the global /api/ limiter (429), matching
 // secure-card so bearer tokens are never cached or leaked via Referer.
-app.use('/api/public/moving', require('./routes/moving-public').stampMovingPrivacyHeaders);
+app.use('/api/public/moving', (req, res, next) => {
+  res.set({
+    'Cache-Control': 'private, no-store',
+    'X-Robots-Tag': 'noindex, nofollow',
+    'Referrer-Policy': 'no-referrer',
+  });
+  return next();
+});
 // A token path segment that does not percent-decode answers the mount's generic unknown-token 404 here, before the global limiter,
 // instead of Express's param-decode error (the error handler logs the raw segment and answers 500). After the estimate header
 // guards above (they match the raw path and never decode), so that 404 carries their headers; the secure-card and moving privacy

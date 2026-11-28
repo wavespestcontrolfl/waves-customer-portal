@@ -279,11 +279,12 @@ function premiseFields(row) {
 }
 
 function premiseParts(row) {
+  const { streetKey } = require('./customer-property-address-keys');
   const inline = splitStreetLineUnit(row?.address_line1 || '');
   const embedded = unitKey(inline.unit || '');
   const line2 = unitKey(row?.address_line2 || '');
   return {
-    street: addressMatchKey(normalizeStreetLine(inline.unit ? inline.street : (row?.address_line1 || ''))),
+    street: streetKey(inline.unit ? inline.street : (row?.address_line1 || '')),
     unit: embedded && line2 && embedded !== line2 ? `${embedded}${line2}` : (embedded || line2),
   };
 }
@@ -324,9 +325,11 @@ function homeMovedDestructively(rowA, rowB) {
     || (Boolean(pa.unit) && Boolean(pb.unit) && pa.unit !== pb.unit);
 }
 
-async function clearMovedHomeAccessOnAddressChange(customerId, before, after, conn) {
+async function clearMovedHomeAccessOnAddressChange(customerId, before, after, conn, { retirePrimaryProperty = true } = {}) {
+  const hadPriorStreet = Boolean(before && addressMatchKey(before.address_line1));
+  if (!hadPriorStreet) return;
   if (!addressMatchKey(after && after.address_line1) || homeMovedDestructively(before, after)) {
-    await clearMovedHomeAccessDetails(customerId, conn, { retirePrimaryProperty: true });
+    await clearMovedHomeAccessDetails(customerId, conn, { retirePrimaryProperty });
   }
 }
 
@@ -605,6 +608,7 @@ module.exports = {
   MOVED_HOME_ACCESS_COLUMNS,
   clearedMovedHomeAccess,
   clearMovedHomeAccessDetails,
+  clearMovedHomeAccessOnAddressChange,
   markSprinklerSettingsMoved,
   formatAddressBounded,
   snapshotMatchesContact,

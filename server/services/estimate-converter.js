@@ -5755,6 +5755,10 @@ const EstimateConverter = {
     // transaction, so the move row is share-locked through that commit.
     const newHomeMove = await require('./customer-moves').lockMoveForConversion(database, estimateData);
     estimateData = estimateData || {};
+    // FAIL-CLOSED: moving new-home estimates never convert as annual prepay
+    // (runs before termite signature parking so move-linked termite estimates
+    // never enter awaiting_signature only to fail on activation).
+    assertMoveEstimateNotAnnualPrepay(billingTerm, estimateData);
 
     // Termite annual-plan sign-before-pay (slice 3a restructure, owner
     // ruling 2026-09-24): detected as early as possible — right after
@@ -5908,8 +5912,6 @@ const EstimateConverter = {
     // primary name — the combined "…+ Termite Bond Service" service_type
     // can't be stamped, so its completions would bill again on top of the
     // prepaid amount. Route bond + annual-prepay to manual conversion.
-    // FAIL-CLOSED: moving new-home estimates never convert as annual prepay.
-    assertMoveEstimateNotAnnualPrepay(billingTerm, estimateData);
     if (billingTerm === 'prepay_annual' && hasTermiteBondLine) {
       const err = new Error(
         'Annual prepay isn\'t supported with a termite bond rider yet — convert this estimate as per-application billing, or bill the prepay manually.'

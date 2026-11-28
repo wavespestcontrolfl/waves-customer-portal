@@ -50,6 +50,7 @@ const {
   longText: prefsLongText,
   validatePrefsBody: validatePrefsBodyWithSchemas,
   camelToSnake: prefsCamelToSnake,
+  snakeToCamel: prefsSnakeToCamel,
   transformKeys: prefsTransformKeys,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage: normalizePrefsUpdatesForStorage,
@@ -5430,8 +5431,21 @@ function sodWriteIsFresh(current, sodInput, renderStamp) {
 // A sod record the stored row could not accept joins `rejected`. So does a sprinkler timer on file, which follows
 // the same contract (services/controller-timer.js). Returns the 400 message when those were the only things in the
 // batch (nothing was written), else null.
+function settleMovedHomeAccessWrite(row, fresh) {
+  if (fresh) return [];
+  const { MOVED_HOME_ACCESS_COLUMNS } = require('../services/customer-address-fanout');
+  const rejected = [];
+  for (const col of MOVED_HOME_ACCESS_COLUMNS) {
+    if (col in row) {
+      delete row[col];
+      rejected.push({ field: prefsSnakeToCamel(col), message: 'This home moved since the page opened. Refresh before updating access details or gate codes.' });
+    }
+  }
+  return rejected;
+}
+
 function recordsRejectedWithNothingSaved(outcome, rejected) {
-  const refused = [outcome.sodRejected, ...(outcome.timerRejected || [])].filter(Boolean);
+  const refused = [outcome.sodRejected, ...(outcome.timerRejected || []), ...(outcome.accessRejected || [])].filter(Boolean);
   rejected.push(...refused);
   if (!refused.length || outcome.written.length) return null;
   return [...new Set(refused.map((r) => r.message))].join('; ');
@@ -5439,9 +5453,11 @@ function recordsRejectedWithNothingSaved(outcome, rejected) {
 
 // The field names a prefs write saved, for the audit trail (names only, sorted).
 function savedPrefFieldNames(updates, outcome) {
+  const rejectedAccess = new Set((outcome.accessRejected || []).map((r) => prefsCamelToSnake(r.field)));
   return Object.keys(updates)
     .filter((f) => !(outcome.sodRejected && SOD_PREFS_INPUT_FIELDS.includes(f)))
     .filter((f) => !(outcome.timerRejected?.length && CONTROLLER_TIMER_FIELDS.includes(f)))
+    .filter((f) => !rejectedAccess.has(f))
     .sort();
 }
 
@@ -5513,7 +5529,9 @@ async function writeAdminPreferences(customerId, updates, outcome = {}, { render
     const row = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
       ? { ...updates, irrigation_system: true }
       : { ...updates };
-    outcome.timerRejected = settleControllerTimer(row, { fresh: renderedAgainstCurrentHome(current, renderStamp), stored: current, seen: timerSeen });
+    const freshHome = renderedAgainstCurrentHome(current, renderStamp);
+    outcome.accessRejected = settleMovedHomeAccessWrite(row, freshHome);
+    outcome.timerRejected = settleControllerTimer(row, { fresh: freshHome, stored: current, seen: timerSeen });
     if (SOD_PREFS_INPUT_FIELDS.some((f) => f in updates)) {
       const sodInput = {};
       for (const f of SOD_PREFS_INPUT_FIELDS) {

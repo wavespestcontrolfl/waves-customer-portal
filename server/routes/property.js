@@ -66,6 +66,7 @@ const {
   prefsRenderStamp,
   renderedAgainstCurrentHome,
 } = require('../services/property-preferences-schema');
+const { MOVED_HOME_ACCESS_COLUMNS } = require('../services/customer-address-fanout');
 const { controllerTimerSeen, settleControllerTimer } = require('../services/controller-timer');
 // The locked write found nothing left to save (the only fields were a rejected sprinkler timer).
 const NOTHING_SAVED = Symbol('nothing saved');
@@ -323,6 +324,14 @@ router.put('/preferences', async (req, res, next) => {
       // after a move the request must carry the matching stamp (an absent
       // token — an old bundle — fails closed, gh-r43).
       const requestFresh = renderedAgainstCurrentHome(current, renderStamp);
+      if (!requestFresh) {
+        for (const col of MOVED_HOME_ACCESS_COLUMNS) {
+          if (col in updates) {
+            delete updates[col];
+            rejected.push({ field: snakeToCamel(col), message: 'This home moved since the page opened. Refresh before updating access details or gate codes.' });
+          }
+        }
+      }
       // The sprinkler timer on file is one record about one home: it saves whole, only from a page rendered against
       // the current home (a move clears it under this lock), and only over the timer that page showed. A rejected
       // timer leaves `updates` without it.

@@ -8605,7 +8605,7 @@ a clash or a raced edit) books the re-service exactly as before. GET and
 `POST /:token/submit`; the moving page the office sends a customer who is
 moving, by email from the Customer 360 Moving card or by text from the
 Communications composer, always on a staff click). 48-hex token format gate on
-`customer_moves.token`; a malformed, unknown or closed move is the same
+`customer_moves.token`; a malformed, unknown, closed, or archived-customer move is the same
 generic 404. Privacy headers (`Cache-Control: private, no-store`,
 `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) on every
 answer, and the `/moving/<token>` SPA shell gets the sensitive-page headers.

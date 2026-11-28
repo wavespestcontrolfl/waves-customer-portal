@@ -237,11 +237,14 @@ function reusableCheck(move, key, now) {
   return last;
 }
 
-// Claim one check slot for today (ET), atomically, before the paid call. The
-// UPDATE matches no row once today's calls reach the cap.
+// Claim one check slot for today (ET), atomically, before the paid call.
+// Re-verifies move status and customer archive state inside the SQL UPDATE so
+// a concurrent archive cannot burn a paid Google call; returns 'ok' | 'closed' | 'cap'.
 async function claimCheckSlot(moveId, today) {
   const rows = await db('customer_moves')
     .where({ id: moveId })
+    .whereIn('status', ['open', 'submitted'])
+    .whereRaw('EXISTS (SELECT 1 FROM customers WHERE customers.id = customer_moves.customer_id AND customers.deleted_at IS NULL)')
     .where(function underCap() {
       this.whereRaw('validation_day IS DISTINCT FROM ?::date', [today]).orWhere('validation_calls', '<', DAILY_CHECK_CAP);
     })
@@ -251,7 +254,14 @@ async function claimCheckSlot(moveId, today) {
       updated_at: new Date(),
     })
     .returning('id');
-  return rows.length === 1;
+  if (rows.length === 1) return 'ok';
+  const live = await db('customer_moves as m')
+    .join('customers as c', 'c.id', 'm.customer_id')
+    .where({ 'm.id': moveId })
+    .whereIn('m.status', ['open', 'submitted'])
+    .whereNull('c.deleted_at')
+    .first('m.id');
+  return live ? 'cap' : 'closed';
 }
 
 /**
@@ -266,7 +276,9 @@ async function checkMoveAddress(move, rawAddress, { now = new Date() } = {}) {
   if (reused) return { ...reused.result, checkId: reused.id, reused: true };
 
   const today = etDateString(now);
-  if (!(await claimCheckSlot(move.id, today))) {
+  const claim = await claimCheckSlot(move.id, today);
+  if (claim === 'closed') throw new MoveError('closed', 'This link is no longer open.', 404);
+  if (claim !== 'ok') {
     throw new MoveError('check_cap', 'We have checked that address a few times today. Please try again tomorrow, or call us.', 429);
   }
 
@@ -1009,6 +1021,11 @@ async function verifyMoveForEstimate({ moveId, customerId, address }, conn = db)
  */
 async function lockMoveForEstimate(trx, { moveId, customerId, address }) {
   if (!UUID_RE.test(String(moveId || ''))) throw newHomeError('not_found', 404);
+  // Lock customers BEFORE customer_moves so estimate creation, conversion,
+  // public submit, and customer archive all follow one lock order.
+  if (UUID_RE.test(String(customerId || ''))) {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+  }
   await trx('customer_moves').where({ id: moveId }).forUpdate().first('id');
   const move = await verifyMoveForEstimate({ moveId, customerId, address }, trx);
   const existing = await liveMoveEstimate(move, trx);
@@ -1082,6 +1099,12 @@ function moveRowBlock(move, stamp) {
 async function lockMoveForConversion(conn, data) {
   const stamp = data && data.move;
   if (!stamp || typeof stamp !== 'object' || !stamp.moveId) return null;
+  // Lock customers BEFORE customer_moves so estimate conversion, public submit,
+  // and customer archive all take row locks in the same order and never deadlock.
+  const owner = await conn('customer_moves').where({ id: stamp.moveId }).first('customer_id');
+  if (owner?.customer_id) {
+    await conn('customers').where({ id: owner.customer_id }).forUpdate().first('id');
+  }
   const move = await conn('customer_moves')
     .where({ id: stamp.moveId })
     .forShare()

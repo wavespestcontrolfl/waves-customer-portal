@@ -88,7 +88,10 @@ async function loadMove(req, res) {
 }
 
 function sendFailure(res, err, label) {
-  if (err instanceof Moves.MoveError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof Moves.MoveError) {
+    if (err.status === 404) return res.status(404).json(NOT_FOUND);
+    return res.status(err.status).json({ error: err.message });
+  }
   logger.error(`[moving-public] ${label} failed (${errCode(err)})`);
   return res.status(500).json({ error: 'Something went wrong. Please try again.' });
 }

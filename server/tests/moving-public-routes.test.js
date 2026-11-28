@@ -123,11 +123,18 @@ test('submit passes a checkId only as a non-empty string and answers the receipt
   // The pause lane picks the receipt sentence and never reaches the page.
   expect(res.body).toEqual({ ok: true, receipt: ['Thanks, Chris. We have your move.'], view: { firstName: 'Chris', status: 'submitted' } });
   expect(Moves.receiptFor).toHaveBeenCalledWith({ firstName: 'Chris', status: 'submitted' }, 'auto');
-  expect(Moves.submitMove).toHaveBeenCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-15', moveInDate: '', clearAddress: false });
+  expect(Moves.submitMove).toHaveBeenCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-15', moveInDate: '', clearAddress: false, expectedAddressVersion: null });
   await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ checkId: 'abcdef0123456789' });
-  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: 'abcdef0123456789', moveOutDate: undefined, moveInDate: undefined, clearAddress: false });
-  await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ clearAddress: true, moveOutDate: '2026-11-20' });
-  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-20', moveInDate: undefined, clearAddress: true });
+  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: 'abcdef0123456789', moveOutDate: undefined, moveInDate: undefined, clearAddress: false, expectedAddressVersion: null });
+  await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ clearAddress: true, expectedAddressVersion: 'v1-addr', moveOutDate: '2026-11-20' });
+  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-20', moveInDate: undefined, clearAddress: true, expectedAddressVersion: 'v1-addr' });
+});
+
+test('a closed or archived MoveError 404 returns the same generic Not found response', async () => {
+  Moves.submitMove.mockRejectedValueOnce(new Moves.MoveError('closed', 'This link is no longer open.', 404));
+  const res = await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ moveOutDate: '2026-11-20' });
+  expect(res.status).toBe(404);
+  expect(res.body).toEqual({ error: 'Not found' });
 });
 
 test('a stale check is a 409 with plain words', async () => {
