@@ -109,7 +109,7 @@ describe('Admin dark mode preference', () => {
       expect(document.documentElement.dataset.adminTheme).toBeUndefined();
 
       // Logging out or opening standalone /admin/login or /admin/two-step clears data-admin-theme
-      for (const standalonePath of ['/admin/login', '/admin/two-step']) {
+      for (const standalonePath of ['/admin/login', '/admin/two-step', '/ADMIN/LOGIN', '/admin/%6Cogin']) {
         window.history.pushState({}, '', '/admin/dashboard');
         mount({ id: 'acct-1', role: 'admin' }, { enabled: true });
         expect(document.documentElement.dataset.adminTheme).toBe('dark');

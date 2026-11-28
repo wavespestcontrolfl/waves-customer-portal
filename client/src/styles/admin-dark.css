@@ -31,6 +31,14 @@
   html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-50\/80, .bg-zinc-50\/60, .bg-zinc-50\/50, .bg-zinc-100\/80, .bg-zinc-100\/60) {
     background-color: rgba(20, 23, 26, 0.88);
   }
+  @media (min-width: 768px) {
+    html.admin-app[data-admin-theme="dark"] .md\:bg-white {
+      background-color: #181b1f;
+    }
+    html.admin-app[data-admin-theme="dark"] .md\:bg-surface-page\/95 {
+      background-color: rgba(17, 19, 21, 0.95);
+    }
+  }
 
   /* Hover / Active / Disabled states */
   html.admin-app[data-admin-theme="dark"] :is(.hover\:bg-white:hover, .hover\:bg-zinc-50:hover, .hover\:bg-zinc-100:hover, .hover\:bg-surface-hover:hover, .hover\:bg-slate-50:hover, .hover\:bg-slate-100:hover) {
@@ -133,6 +141,12 @@
   }
   html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-900.text-white, .bg-zinc-900 .text-white) {
     color: #111315;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900 :is(.text-white\/70, .text-zinc-200, .text-zinc-300, .text-zinc-400) {
+    color: #3f3f46;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900 .text-red-200 {
+    color: #b91c1c;
   }
   html.admin-app[data-admin-theme="dark"] .bg-zinc-900.hover\:bg-zinc-800:hover {
     background-color: #e2e5e9;
@@ -293,9 +307,15 @@
   html.admin-app[data-admin-theme="dark"] .recharts-text {
     fill: #b4bac4;
   }
-  html.admin-app[data-admin-theme="dark"] svg text[fill="#18181B" i],
+  html.admin-app[data-admin-theme="dark"] svg :is(text[fill="#18181B" i], text[fill="#27272A" i], text[fill="#0F172A" i]),
   html.admin-app[data-admin-theme="dark"] .recharts-wrapper text[fill="#18181B" i] {
     fill: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] .recharts-wrapper :is(path, rect, circle)[fill="#18181B" i] {
+    fill: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] .recharts-wrapper :is(path, rect, circle, line)[stroke="#18181B" i] {
+    stroke: #f4f5f6;
   }
   html.admin-app[data-admin-theme="dark"] .recharts-radial-bar-background-sector {
     fill: #2c313a;

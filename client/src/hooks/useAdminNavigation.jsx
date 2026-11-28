@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { isAdminPath } from '../lib/adminBookmarkMeta';
+import { isAdminPath, routerPath } from '../lib/adminBookmarkMeta';
 import { adminNavigationPreferenceKey as preferenceKey, warmFieldViewLanding } from '../lib/fieldView';
 import { ADMIN_WORKSPACE_DESTINATIONS, ADMIN_WORKSPACE_GROUP_IDS, getAdminWorkspaceGroups, getAdminWorkspaceSelection } from '../config/adminNavigation';
 
@@ -12,7 +12,7 @@ const PREFERENCE_VERSION = 2;
 const destinationIds = new Set(ADMIN_WORKSPACE_DESTINATIONS.map(({ id }) => id));
 // Standalone /admin/* routes outside AdminLayoutV2 (auth, two-step, report preview);
 // never carry dark mode onto them on logout, redirect, or navigation.
-const isStandaloneAdminPath = (path) => /^\/admin\/(login|change-password|two-step|forgot-password|reset-password|report-preview)(\/|$)/.test(String(path || ''));
+const isStandaloneAdminPath = (path) => /^\/admin\/(login|change-password|two-step|forgot-password|reset-password|report-preview)(\/|$)/.test(routerPath(path));
 // In-memory per-account fallback when device storage is full or blocked so
 // toggling dark mode survives pathname-keyed AdminNavigationProvider remounts.
 const unsavedDarkModeByAccount = new Map();
