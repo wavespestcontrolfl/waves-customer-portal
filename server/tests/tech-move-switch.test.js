@@ -62,7 +62,9 @@ jest.mock('../models/db', () => {
       select() { return builder; },
       async first() {
         const rows = table === 'scheduled_services' ? state.scheduledServices
-          : table === 'technicians' ? state.technicians : [];
+          : table === 'technicians' ? state.technicians
+          : table === 'triage_items' ? state.triageItems
+          : table === 'call_log' ? state.callLog : [];
         const found = rows.find((r) => Object.entries(builder._where).every(([k, v]) => r[k] === v));
         return found ? { ...found } : undefined;
       },
@@ -114,6 +116,8 @@ beforeEach(() => {
     { id: 'tech-2', can_move_visits: true },
     { id: 'admin-1', can_move_visits: false },
   ];
+  db.__state.triageItems = [{ id: PROPOSAL_ID, call_log_id: 'call-1' }];
+  db.__state.callLog = [{ id: 'call-1', customer_id: 'cust-1' }];
   db.__state.queries = [];
   mockCommit.mockClear();
   mockGetOptions.mockClear();

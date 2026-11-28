@@ -59,7 +59,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/customers/:id/contact-notification-prefs` | admin-customers |
 | GET | `/api/admin/customers/:id/estimates-summary` | admin-customers |
 | GET | `/api/admin/customers/:id/latest-scheduled-service` | admin-customers |
-| POST | `/api/admin/customers/at-address` | admin-customers |
 | GET | `/api/admin/discounts` | admin-discounts |
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
@@ -398,8 +397,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/dashboard-ops/photos/:id/approve` | admin-dashboard-ops |
 | POST | `/api/admin/dashboard-ops/photos/:id/flag` | admin-dashboard-ops |
 | GET | `/api/admin/dashboard-ops/recent-photos` | admin-dashboard-ops |
-| POST | `/api/admin/discounts/calculate` | admin-discounts |
-| GET | `/api/admin/discounts/stats` | admin-discounts |
 | GET | `/api/admin/drafts` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | PUT | `/api/admin/drafts/:id/approve` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | PUT | `/api/admin/drafts/:id/reject` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |

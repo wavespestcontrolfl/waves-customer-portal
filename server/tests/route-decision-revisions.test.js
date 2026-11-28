@@ -48,8 +48,9 @@ const versionOf = (q) => q.bindings.find((b) => typeof b === 'string' && /^v2-/.
 
 describe('revision versions', () => {
   test('bounded, varchar(30) safe, enumerable for every base version', () => {
-    expect(routeDecisionRevisionVersion(V2_DECISION_VERSION, 1)).toBe('v2-1.50.0+r1');
-    expect(routeDecisionFamilyVersions(V2_DECISION_VERSION)).toEqual(['v2-1.50.0', 'v2-1.50.0+r1']);
+    expect(routeDecisionRevisionVersion(V2_DECISION_VERSION, 1)).toBe('v2-1.51.0+r1');
+    expect(routeDecisionFamilyVersions(V2_DECISION_VERSION)).toEqual(['v2-1.51.0', 'v2-1.51.0+r1']);
+    expect(routeDecisionFamilyVersions('v2-1.50.0')).toEqual(['v2-1.50.0', 'v2-1.50.0+r1']);
     expect(ROUTE_DECISION_MAX_REVISIONS).toBe(1); // route_feedback is one verdict per call
     expect(V2_DECISION_VERSIONS_WITH_REVISIONS).toEqual(expect.arrayContaining([...V2_DECISION_VERSIONS, 'v2-1.0.0+r1']));
     expect(new Set(V2_DECISION_VERSIONS_WITH_REVISIONS).size).toBe(V2_DECISION_VERSIONS_WITH_REVISIONS.length);
@@ -82,7 +83,7 @@ describe('the family rule (codex #5377 r4 + r7 P1): read base + +r1 FOR UPDATE, 
     expect(r).toMatchObject({ n: 1, out: { decisionVersion: V2_DECISION_VERSION } });
     expect(r.ins).toHaveLength(1);
     expect(r.upd).toHaveLength(1);
-    expect(r.upd[0].bindings).toContain('id-v2-1.50.0');
+    expect(r.upd[0].bindings).toContain('id-v2-1.51.0');
   });
 
   test('reviewed BASE, different verdict: a NEW +r1 row (targetless insert), the reviewed row untouched', async () => {
@@ -118,7 +119,7 @@ describe('the family rule (codex #5377 r4 + r7 P1): read base + +r1 FOR UPDATE, 
     const r = await run(family({ members, reviewed: REV }), booked);
     expect(r).toMatchObject({ n: 1, out: { decisionVersion: V2_DECISION_VERSION } });
     expect(r.upd).toHaveLength(1);
-    expect(r.upd[0].bindings).toContain('id-v2-1.50.0');
+    expect(r.upd[0].bindings).toContain('id-v2-1.51.0');
     for (const q of [...r.upd, ...r.ins]) expect(q.bindings).not.toContain(`id-${REV}`);
     expect(r.ins).toHaveLength(1);
   });
@@ -128,7 +129,7 @@ describe('the family rule (codex #5377 r4 + r7 P1): read base + +r1 FOR UPDATE, 
     const r = await run(family({ members, reviewed: REV }), held);
     expect(r).toMatchObject({ n: 1, out: { decisionVersion: V2_DECISION_VERSION } });
     expect(r.upd).toHaveLength(1);
-    expect(r.upd[0].bindings).toContain('id-v2-1.50.0');
+    expect(r.upd[0].bindings).toContain('id-v2-1.51.0');
     expect(r.ins).toHaveLength(1);
   });
 

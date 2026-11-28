@@ -138,7 +138,7 @@ async function stillDecidingByEstimateId(database, ids) {
 // the table ever outgrows this cap the analytics silently truncate to the newest rows, so keep generous headroom
 // (pricing-risk batch is pure compute after one inventory preload).
 const ESTIMATE_LIST_LIMIT = 2000;
-const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
+const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed', 'accepted', 'declined'];
 
 // Short-link click telemetry per estimate, one batched query. One estimate can hold several short_codes rows when
 // /send runs again (a re-send or a follow-up), so the click counts are SUMMED and the last-clicked time is the MAX.

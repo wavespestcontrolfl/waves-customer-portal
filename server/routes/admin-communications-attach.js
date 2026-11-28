@@ -64,8 +64,17 @@ const s3 = new S3Client({
     : undefined,
 });
 
-router.post('/attach', upload.array('attachments', MAX_PER_MESSAGE), async (req, res, next) => {
+const uploadAttachments = upload.array('attachments', MAX_PER_MESSAGE);
+
+function runUpload(req, res) {
+  return new Promise((resolve, reject) => {
+    uploadAttachments(req, res, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+router.post('/attach', async (req, res, next) => {
   try {
+    await runUpload(req, res);
     if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files provided' });

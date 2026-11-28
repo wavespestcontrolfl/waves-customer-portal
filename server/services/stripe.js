@@ -5011,6 +5011,7 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
+    await require('./invoice-promo-code').assertNoPendingPromoCode(invoice);
     if (!invoice.stripe_payment_intent_id) {
       throw new Error('PaymentIntent does not belong to this invoice');
     }
@@ -5178,6 +5179,7 @@ const StripeService = {
             anchorInvoiceId: invoiceId,
             expectPaymentIntentId: effectivePaymentIntentId,
           });
+          await require('./invoice-promo-code').assertNoPendingPromoCode(invoice, updateTrx);
           await refuseInPlaceOnConsentStampChange();
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
@@ -5185,6 +5187,7 @@ const StripeService = {
         paymentIntent = await db.transaction(async (updateTrx) => {
           const lockedInvoice = await updateTrx('invoices').where({ id: invoiceId }).forUpdate().first();
           assertLockedUpdateInvoice(lockedInvoice, effectivePaymentIntentId, baseCents);
+          await require('./invoice-promo-code').assertNoPendingPromoCode(lockedInvoice, updateTrx);
           await require('./estimate-deposits').assertInvoiceDepositSettlementReady(updateTrx, lockedInvoice);
           await refuseInPlaceOnConsentStampChange();
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
@@ -5408,6 +5411,7 @@ const StripeService = {
           err.staleBalance = true;
           throw err;
         }
+        await require('./invoice-promo-code').assertNoPendingPromoCode(lockedInvoice, trx);
         await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, lockedInvoice);
       }
       // Guard against a racing setup/replace having already repointed the PI.
@@ -5520,6 +5524,7 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
+    await require('./invoice-promo-code').assertNoPendingPromoCode(invoice);
 
     // Retrieve the PM from Stripe to get real-time funding type
     let pm;
@@ -5536,6 +5541,9 @@ const StripeService = {
     // this as invoiceTotal below, so /finalize matches (finalize re-derives
     // the same combined base and refuses on drift).
     const quoteCombinedCtx = await require('./pay-combined').combinedContextForInvoice(invoice);
+    if (quoteCombinedCtx) {
+      await assertCombinedSiblingsNoPendingPromo(quoteCombinedCtx.siblings);
+    }
     const baseAmount = quoteCombinedCtx ? quoteCombinedCtx.totalCents / 100 : invoiceAmountDue(invoice);
 
     const chargeInfo = computeChargeAmount(baseAmount, methodType, { funding });
@@ -5605,6 +5613,7 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
+    await require('./invoice-promo-code').assertNoPendingPromoCode(invoice);
 
     if (!invoice.stripe_payment_intent_id) {
       throw new Error('Invoice has no active PaymentIntent');
@@ -5702,6 +5711,7 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
+        await require('./invoice-promo-code').assertNoPendingPromoCode(lockedInvoice, finalizeTrx);
         if (String(lockedInvoice.stripe_payment_intent_id || '')
           !== String(invoice.stripe_payment_intent_id)) {
           throw new Error('Invoice has a different active payment');
@@ -6771,6 +6781,14 @@ const StripeService = {
     }
   },
 };
+
+async function assertCombinedSiblingsNoPendingPromo(siblings, conn = db) {
+  if (!Array.isArray(siblings) || !siblings.length) return;
+  const { assertNoPendingPromoCode } = require('./invoice-promo-code');
+  for (const sibling of siblings) {
+    await assertNoPendingPromoCode(sibling, conn);
+  }
+}
 
 function rethrowOrWrapConfirmError(err) {
   if (err && err.code === 'INVOICE_CHEMICAL_ADDON_HOLD') throw err;

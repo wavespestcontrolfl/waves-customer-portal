@@ -122,4 +122,4 @@ async function liveInvoiceOwnership(customerId, rows, dbh = db, { ownLimit = Inf
   return { ownedIds, unverifiable };
 }
 
-module.exports = { invoicePayerOwnership, liveInvoiceOwnership };
+module.exports = { invoicePayerOwnership, liveInvoiceOwnership, linkedVisitIdOf };

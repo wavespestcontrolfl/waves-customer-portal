@@ -1717,9 +1717,17 @@ router.post('/:id/send-sms', async (req, res, next) => {
       return res.status(409).json({ error: 'The lead phone changed. Reopen messages before sending.' });
     }
 
-    const { mediaFromOutboundAttachments } = require('../services/sms-media');
-    const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
-    const media = mediaFromOutboundAttachments(mediaAttachments, cleanMediaUrls);
+    const { resolveVerifiedOutboundAttachments } = require('../services/sms-media');
+    const hasRawMediaUrls = Array.isArray(mediaUrls) && mediaUrls.some((u) => typeof u === 'string' && u.trim());
+    const rawAttachments = Array.isArray(mediaAttachments) ? mediaAttachments : [];
+    if (hasRawMediaUrls && rawAttachments.length === 0) {
+      return res.status(400).json({ error: 'Raw mediaUrls are not supported; upload attachments via /attach' });
+    }
+    const resolvedMedia = await resolveVerifiedOutboundAttachments(rawAttachments);
+    if (resolvedMedia.error) {
+      return res.status(resolvedMedia.status || 400).json({ error: resolvedMedia.error });
+    }
+    const { media, mediaUrls: verifiedMediaUrls } = resolvedMedia;
     // Twilio caps a single MMS at 5MB total across all media — same check
     // and message as the generic route, so an attachment rejected here
     // reads the same to the operator whichever composer sent it.
@@ -1866,8 +1874,8 @@ router.post('/:id/send-sms', async (req, res, next) => {
         original_message_type: 'lead_outreach',
         adminUserId: req.technicianId,
         fromNumber: fromNumber || undefined,
-        mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
-        allowMediaUrls: cleanMediaUrls.length > 0,
+        mediaUrls: verifiedMediaUrls.length ? verifiedMediaUrls : undefined,
+        allowMediaUrls: verifiedMediaUrls.length > 0,
         media,
       },
     });

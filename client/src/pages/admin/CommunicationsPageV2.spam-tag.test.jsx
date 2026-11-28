@@ -139,3 +139,23 @@ it("a customer-linked thread with silenced texts still offers Not spam", async (
   fireEvent.click(await screen.findByRole("button", { name: /Not spam/ }));
   await vi.waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.path.includes("/spam-senders/"))).toBe(true));
 });
+
+it("offers a Spam filter option that shows only spam-tagged threads (C2-24)", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  stubServer({
+    messages: [
+      pitch({ id: "m-spam", from: "+15557654321", body: "Spam pitch", spamEnforced: true, isRead: true }),
+      pitch({ id: "m-ok", from: "+15559998888", body: "Real inquiry", isRead: false }),
+    ],
+  });
+  render(<SmsTab active />, { wrapper: MemoryRouter });
+  expect(await screen.findByText("Spam pitch")).toBeInTheDocument();
+  expect(screen.getByText("Real inquiry")).toBeInTheDocument();
+
+  const filter = screen.getByLabelText(/Filter conversations/i);
+  expect(screen.getByRole("option", { name: /Spam \(1\)/ })).toBeInTheDocument();
+  fireEvent.change(filter, { target: { value: "spam" } });
+
+  await vi.waitFor(() => expect(screen.queryByText("Real inquiry")).not.toBeInTheDocument());
+  expect(screen.getByText("Spam pitch")).toBeInTheDocument();
+});

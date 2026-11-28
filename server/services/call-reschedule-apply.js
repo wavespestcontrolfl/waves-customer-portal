@@ -421,8 +421,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
     // codex #4204 r8 P1). Base table stays unaliased so the column list below
     // is the only qualified part.
     .leftJoin('services', 'services.id', 'scheduled_services.service_id')
-    .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
-      'scheduled_services.technician_id',
+    .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id', 'scheduled_services.property_id',
       'scheduled_services.service_id', 'scheduled_services.service_type', 'scheduled_services.scheduled_date',
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes',
       'scheduled_services.service_key_snapshot', 'scheduled_services.status', 'scheduled_services.source_action', 'scheduled_services.visit_id',
