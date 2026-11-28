@@ -424,6 +424,7 @@ async function hasActivePlanAtQuotedAddress(database, customer, { address = null
 // still defers to the existing-member waiver.
 async function hasActivePlanAtQuotedProperty(database, customerId, customer, scope, cache) {
   const { isMembershipCustomerRow, isLiveObligationRow, TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
   const { sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
   const { etDateString } = require('../utils/datetime-et');
   const accountHasActiveTier = Boolean(customer && customer.active !== false && isMembershipCustomerRow(customer));
@@ -431,15 +432,22 @@ async function hasActivePlanAtQuotedProperty(database, customerId, customer, sco
   // are never covered by the existing-member waiver — check membership first (Codex P2).
   if (!accountHasActiveTier) return false;
   const today = etDateString();
-  const rawActiveRows = await database('scheduled_services')
-    .where({ customer_id: customerId, is_recurring: true })
-    .whereNotIn('status', TERMINAL_STATUSES)
+  const rawActiveRows = await database('scheduled_services as s')
+    .leftJoin('scheduled_services as p', 's.recurring_parent_id', 'p.id')
+    .where({ 's.customer_id': customerId })
+    .whereNotIn('s.status', TERMINAL_STATUSES)
+    .where(function legacyOrRecurring() {
+      this.where('s.is_recurring', true)
+        .orWhere(function legacyChild() {
+          this.whereNull('s.is_recurring').whereNotNull('s.recurring_parent_id');
+        });
+    })
     .select(
-      'id', 'status', 'scheduled_date', 'is_callback', 'followup_included', 'source',
-      'property_id', 'source_estimate_id',
-      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+      's.id', 's.status', 's.scheduled_date', 's.is_recurring', 's.recurring_parent_id',
+      's.is_callback', 's.followup_included', 's.source',
+      ...VISIT_PROPERTY_COLUMNS,
     );
-  const activeRows = (rawActiveRows || []).filter((r) => isLiveObligationRow(r, today));
+  const activeRows = (rawActiveRows || []).filter((r) => isPlanSeriesRow(r) && isLiveObligationRow(r, today));
   const matchingActive = await filterRowsToQuotedProperty(database, activeRows, scope, cache);
   if (matchingActive.length > 0) return true;
   if (activeRows.length > 0) return false; // active plan rows exist only on other property(ies)
