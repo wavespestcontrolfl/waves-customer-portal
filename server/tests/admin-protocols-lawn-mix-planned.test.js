@@ -449,3 +449,53 @@ describe('resolveMixWith: the tank sheet ties a mix by product id, from the plan
   });
 });
 
+describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like the plan engine', () => {
+  const { loadSheetCalibration } = adminProtocolsRouter._internals;
+
+  test('system-only visit assignment excludes another technician calibration and keeps shared or assigned technician rows', async () => {
+    const otherTechRow = { id: 'cal-b', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_name: 'Truck #1', carrier_gal_per_1000: 2.5 };
+    const ownTechRow = { id: 'cal-a', equipment_system_id: 'sys-1', technician_id: 'tech-a', system_name: 'Truck #1', carrier_gal_per_1000: 1.5 };
+    const sharedRow = { id: 'cal-shared', equipment_system_id: 'sys-1', technician_id: null, system_name: 'Truck #1', carrier_gal_per_1000: 2 };
+
+    calibration = [otherTechRow];
+    const rejected = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(rejected).toEqual({ rigId: 'sys-1', calibration: null });
+
+    calibration = [otherTechRow, ownTechRow];
+    const matchedOwn = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(matchedOwn.calibration).toEqual(ownTechRow);
+
+    calibration = [otherTechRow, sharedRow];
+    const matchedShared = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(matchedShared.calibration).toEqual(sharedRow);
+  });
+
+  test('explicit assigned_calibration_id queries that calibration directly', async () => {
+    const pinned = { id: 'cal-pinned', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_name: 'Truck #1', carrier_gal_per_1000: 2.2 };
+    const whereCalls = [];
+    db.mockImplementation((table) => {
+      if (table === 'equipment_calibrations as ec') {
+        const q = readQuery([pinned]);
+        q.where = jest.fn((...args) => { whereCalls.push(args); return q; });
+        return q;
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const out = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: 'cal-pinned', technician_id: 'tech-a' },
+    );
+    expect(out).toEqual({ rigId: 'sys-1', calibration: pinned });
+    expect(whereCalls).toContainEqual(['ec.id', 'cal-pinned']);
+  });
+});
+

@@ -750,7 +750,7 @@ async function getProtocolProducts() {
   }));
 }
 
-async function getActiveCalibration(equipmentSystemId) {
+async function getActiveCalibration(equipmentSystemId, { calibrationId = null, technicianId = null } = {}) {
   const query = db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -765,8 +765,24 @@ async function getActiveCalibration(equipmentSystemId) {
     .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 when es.system_type = 'tank' then 1 else 2 end")
     .orderBy('es.name', 'asc');
 
+  if (calibrationId) query.where('ec.id', calibrationId);
   if (equipmentSystemId) query.where('ec.equipment_system_id', equipmentSystemId);
+  if (equipmentSystemId && !calibrationId) {
+    const rows = await query.catch(() => []);
+    const list = Array.isArray(rows) ? rows : [];
+    return list.find((row) => !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId))) || null;
+  }
   return query.first().catch(() => null);
+}
+
+async function loadSheetCalibration(req, scheduled) {
+  const pickedRigId = req.query.equipmentSystemId || null;
+  const rigId = pickedRigId || await assignedRigId(scheduled);
+  const calibrationId = pickedRigId ? null : (scheduled?.assigned_calibration_id || null);
+  const viewerTechId = isTechnicianRequest(req) ? req.technicianId : null;
+  const technicianId = pickedRigId ? (viewerTechId || scheduled?.technician_id || null) : (scheduled?.technician_id || null);
+  const calibration = await getActiveCalibration(rigId, { calibrationId, technicianId });
+  return { rigId, calibration };
 }
 
 // The sprayer line of each other big tank the sheet names an amount for (tankOptions: no sprayer picked, the tanks differ).
@@ -1274,10 +1290,9 @@ router.get('/lawn-mix', async (req, res, next) => {
     const lineMeta = visit.lineMeta || {};
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
-    // The picked sprayer, else the visit's own assigned rig; neither: every active 110 gal tank, so the sheet names each tank's
-    // amount when their numbers differ.
-    const rigId = req.query.equipmentSystemId || await assignedRigId(scheduled);
-    const calibration = await getActiveCalibration(rigId);
+    // The picked sprayer, else the visit's own assigned rig (scoped by assigned calibration and technician, matching the plan engine);
+    // neither: every active 110 gal tank, so the sheet names each tank's amount when their numbers differ.
+    const { rigId, calibration } = await loadSheetCalibration(req, scheduled);
     const backpack = await getBackpackCalibration(calibration);
     const bigTanks = rigId ? [] : await getActiveBigTanks();
     const products = await getProtocolProducts();
@@ -2282,6 +2297,7 @@ router._internals = {
   loadWindowSopPayload,
   renderWindowSopMarkdown,
   resolveMixWith,
+  loadSheetCalibration,
 };
 
 module.exports = router;

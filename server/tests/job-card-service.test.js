@@ -4095,13 +4095,14 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       scheduled_service_addons: [],
     });
     const taurus100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
-    expect(taurus100).toMatchObject({ rateSource: 'protocol', amount: 78, amountMax: null, unit: 'fl_oz', context: { conditional: true } });
+    expect(taurus100).toMatchObject({ rateSource: 'protocol', amount: 78, amountMax: null, unit: 'fl_oz', basis: 'tank_table', tankTableOverride: true, ratePerGallon: null, context: { conditional: true } });
     expect(taurus100.warnings.join(' ')).toContain('only when the work order names Taurus');
+    expect(taurus100.warnings.join(' ')).toContain('Label tank table: 78 fl oz for a 100 gal tank');
     const taurus4 = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
-    expect(taurus4).toMatchObject({ amount: 3.2, amountMax: null, unit: 'fl_oz' });
+    expect(taurus4).toMatchObject({ amount: 3.2, amountMax: null, unit: 'fl_oz', basis: 'per_gallon', ratePerGallon: { lo: 0.8, hi: 0.8, unit: 'fl_oz' } });
     // The 100-gal exception applies only at 100 gal; 110 gal uses the 0.8 fl oz/gal rate (88 fl oz).
     const taurus110 = await jobCard.mixForProduct('taurus', 110, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
-    expect(taurus110).toMatchObject({ amount: 88, amountMax: null, unit: 'fl_oz' });
+    expect(taurus110).toMatchObject({ amount: 88, amountMax: null, unit: 'fl_oz', basis: 'per_gallon', ratePerGallon: { lo: 0.8, hi: 0.8, unit: 'fl_oz' } });
 
     // March DiPel uses the structured dry-ounce rate (0.08-0.16 oz/gal) even when catalog lacks a per-gallon rate, never prose teaspoons.
     const dipelNoCatRate = { ...dipel, default_rate: null, default_unit: null };
@@ -4402,6 +4403,47 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(cappedAntapexCalc.sprayVolumeGalPer1000).toBeUndefined();
     expect(cappedAntapexCalc.warnings).toContain('Protocol dilution exceeds verified catalog label rate — confirm label before mixing.');
     expect(cappedAntapexCalc.warnings).toContain('Protocol spray volume: 1 gal per 1,000 sq ft');
+
+    // A procedure's own conditional product line (Summit Bti Dunks on mosquito visits) stays conditional even when its mixRates row does not repeat "if needed".
+    const bti = { id: 'bti', name: 'Summit Bti Dunks', epa_reg_number: '6218-47', application_method: 'granular', inventory_on_hand: 0, inventory_unit: 'each', label_verified_at: '2027-12-01', active: true };
+    const mosquitoBtiDb = dbFor({
+      scheduled_services: [{ id: 'svc26', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Mosquito Control', service_category: 'mosquito', service_key: 'mosquito_monthly', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [bti],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const mosquitoBtiReadiness = await jobCard.buildJobCard('svc26', {
+      dbh: mosquitoBtiDb,
+      readinessOnly: true,
+      deps: { getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(mosquitoBtiReadiness.issues.some((i) => i.kind === 'stock')).toBe(false);
+    const mosquitoBtiCard = await jobCard.buildJobCard('svc26', {
+      dbh: mosquitoBtiDb,
+      deps: { getRecentCalls: async () => [], getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(mosquitoBtiCard.products).toEqual([expect.objectContaining({ id: 'bti', conditional: true })]);
+
+    // Per-service results also suppress the generic ratePerGallon and emit the label tank-table note when a 100-gal override fires.
+    const taurusConflictDb = dbFor({
+      scheduled_services: [{ id: 'svc27', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Termite Liquid Trench & Rod', category: 'termite' }],
+    });
+    const taurusConflict100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc27', dbh: taurusConflictDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurusConflict100.serviceAmounts).toEqual([
+      expect.objectContaining({ service: 'Quarterly Pest Control', amount: 40, ratePerGallon: { lo: 0.4, hi: 0.4, unit: 'fl_oz' } }),
+      expect.objectContaining({ service: 'Termite Liquid Trench & Rod', amount: 78, basis: 'tank_table', tankTableOverride: true, ratePerGallon: null }),
+    ]);
+    expect(taurusConflict100.warnings.join(' ')).toContain('Termite Liquid Trench & Rod: Label tank table: 78 fl oz for a 100 gal tank');
 
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],

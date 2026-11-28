@@ -2516,9 +2516,10 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
       const dose = perGallon ? perGallonDose({ band: perGallon, volume, lineCarrier, tankOverrides: lineBand ? protocolLine?.tankOverrides : [], ...rigCtx }) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume });
       // At another spray volume the tank covers the rig's own area, and the card's volume would cover another: both are said, neither read as the other's.
       const coverage = dose.labelCoversSqft ? `${rigCtx.rigName} sprays ${fmtGal(dose.rigSprayGalPer1000)} gal per 1,000 sq ft, so this tank covers ${dose.coversSqft.toLocaleString('en-US')} sq ft. At the card's ${fmtGal(dose.sprayVolumeGalPer1000)} gal per 1,000 sq ft the same tank would cover ${dose.labelCoversSqft.toLocaleString('en-US')} sq ft` : null;
+      const tableNote = tankTableOverrideNote(dose);
       return {
-        mix: { ...dose, ratePerGallon: dose.amount != null ? perGallon : null },
-        warnings: singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, rigCtx, serviceWarnings }),
+        mix: { ...dose, ratePerGallon: dose.amount != null && !dose.tankTableOverride ? perGallon : null },
+        warnings: [tableNote, ...singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, rigCtx, serviceWarnings })].filter(Boolean),
       };
     },
   }[doseMode]();
@@ -2593,7 +2594,12 @@ function applyTankTableOverride(dose, { band, volume, tankOverrides }) {
   if (!dose || dose.amount == null || !Array.isArray(tankOverrides) || !tankOverrides.length || !(gal > 0)) return dose;
   const bandUnit = normRateUnit(band?.unit || dose.unit);
   const exact = tankOverrides.find((o) => Math.abs(o.gallons - gal) < 1e-6 && o.unit === bandUnit);
-  return exact ? { ...dose, amount: Math.round(exact.amount * 10000) / 10000, amountMax: null } : dose;
+  return exact ? { ...dose, amount: Math.round(exact.amount * 10000) / 10000, amountMax: null, basis: 'tank_table', tankTableOverride: true } : dose;
+}
+
+function tankTableOverrideNote(dose) {
+  if (!dose?.tankTableOverride) return null;
+  return `Label tank table: ${dose.amount} ${String(dose.unit || '').replace('_', ' ')} for a ${dose.gallons} gal tank (replaces the per-gallon rate for this fill)`;
 }
 
 // Reuse the tank calculator's carrier-volume and one-spray area-cap checks for every
@@ -2871,9 +2877,10 @@ function requiredMixRateLines(entries, lines, catalog) {
   const catalogById = new Map(catalog.map((p) => [String(p.id), p]));
   const out = [];
   for (const entry of entries) {
+    const entryLineIds = new Set((entry.lines || []).map((l) => String(l.product.id)));
     for (const row of entryMixRateRows(entry)) {
       const id = row.productId ? String(row.productId) : null;
-      if (!id || selectedLineIds.has(id) || isConditionalMixRow(row)) continue;
+      if (!id || entryLineIds.has(id) || selectedLineIds.has(id) || isConditionalMixRow(row)) continue;
       const product = catalogById.get(id);
       if (!product) continue;
       selectedLineIds.add(id);
@@ -2940,25 +2947,30 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     // The band actually used, tracked as the single dose does: the card's own, else the line's own dilution when the catalog has no
     // per-gallon band, else the label band.
     const band = protocolBandOfLine || (!labelPerGallon && line.explicitDilution && line.rate ? line.rate : null);
-    const used = band || labelPerGallon || null;
-    const lineCarrier = used ? lineCarrierOf(band, line) : null;
+    const used = band || labelPerGallon;
+    const lineCarrier = lineCarrierOf(band, line);
     // The row's own conditions ride with it whether or not a number can be worked out for it.
-    const labelWarnings = Array.isArray(line.rowLabelWarnings) ? line.rowLabelWarnings : [];
-    const useNotes = Array.isArray(line.doseUseNotes) ? line.doseUseNotes : [];
-    const fallbackVol = protocolSprayVolumeFallback(line, lineCarrier);
-    const warning = [...lineConditions(line), ...labelWarnings, fallbackVol, ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx }), ...useNotes].filter(Boolean);
+    const warning = [
+      ...lineConditions(line),
+      ...(line.rowLabelWarnings || []),
+      protocolSprayVolumeFallback(line, lineCarrier),
+      ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx }),
+      ...(line.doseUseNotes || []),
+    ].filter(Boolean);
+    const cond = line.conditional ? { conditional: true } : {};
     if (!used || line.directDoseOnly) {
-      const directWarn = line.directDoseOnly ? [DIRECT_DOSE_NO_TANK] : [];
-      return { service: line.name, amount: null, unit: null, fromCard: false, warnings: [...directWarn, ...warning], ...(line.conditional ? { conditional: true } : {}) };
+      return { service: line.name, amount: null, unit: null, fromCard: false, warnings: line.directDoseOnly ? [DIRECT_DOSE_NO_TANK, ...warning] : warning, ...cond };
     }
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier, tankOverrides: band ? line.tankOverrides : [] });
-    const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
+    const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000, basis, tankTableOverride } = dose;
     return {
-      service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band),
+      service: line.name, amount, amountMax: amountMax ?? null, unit,
+      ...(tankTableOverride ? { ratePerGallon: null, basis, tankTableOverride: true } : { ratePerGallon: used }),
+      fromCard: Boolean(band),
       ...(sprayVolumeGalPer1000 ? { sprayVolumeGalPer1000, coversSqft } : {}),
       ...(labelCoversSqft ? { labelCoversSqft, rigSprayGalPer1000 } : {}),
-      ...(line.conditional ? { conditional: true } : {}),
-      warnings: warning,
+      ...cond,
+      warnings: [tankTableOverrideNote(dose), ...warning].filter(Boolean),
     };
   });
 }
@@ -3240,31 +3252,31 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // narrowed by the label band, as before.
   const conflictLinesOf = (list) => (servicesConflict(list, { rateOf, statedVolumeOf }) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {});
   const lineOf = (h) => {
-    const boundLine = h.useSpecific ? null : h.hit;
-    const specs = sprayVolumeBoundsForRows(h.mixRows, boundLine);
-    const stated = h.hit.labelCarrierGalPer1000 ? null : ((h.useSpecific ? null : statedLabelVolume(h.hit.raw)) || specs.exact);
+    const { hit, mixRows: rows, doseUseNotes } = h;
+    const boundLine = h.useSpecific ? null : hit;
+    const specs = sprayVolumeBoundsForRows(rows, boundLine);
+    const stated = (boundLine && statedLabelVolume(boundLine.raw)) || specs.exact;
     const { rate, declared } = protocolHitRate(h);
-    const tankOverrides = (h.mixRows || []).flatMap((row) => tankTableOverrides(row?.sprayVolume));
-    const rowLabelWarnings = rowLabelWarningsOf(h.mixRows);
-    const exactSprayVolume = exactSprayVolumeOf(h.mixRows);
-    const explicitDilution = Boolean(h.mixRows.some((row) => row?.perGallon)) || (!h.useSpecific && lineRateIsDilution(h.hit.raw, h.hit.selected === false));
+    const tankOverrides = rows.flatMap((row) => tankTableOverrides(row?.sprayVolume));
+    const rowLabelWarnings = rowLabelWarningsOf(rows);
+    const exactSprayVolume = exactSprayVolumeOf(rows);
+    const carrierField = hit.labelCarrierGalPer1000 ? { carrier: hit.labelCarrierGalPer1000 } : (stated ? { carrier: stated, statedVolume: true } : {});
     return {
-      rate, declared, labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
+      rate, declared, labelUse: Boolean(hit.labelUseRate), conditional: hit.selected === false,
       // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
-      explicitDilution,
+      explicitDilution: rows.some((row) => row?.perGallon) || (Boolean(boundLine) && lineRateIsDilution(hit.raw, hit.selected === false)),
       // The line's own per-area limit for one spray (Acelepryn: no more than 0.37 fl oz per 1,000 sq ft), checked against the rig's volume.
-      ...areaCapForRows(h.mixRows, boundLine),
+      ...areaCapForRows(rows, boundLine),
       ...(specs.min ? { minCarrier: specs.min } : {}),
       ...(specs.max ? { maxCarrier: specs.max } : {}),
       ...(tankOverrides.length ? { tankOverrides } : {}),
       ...(rowLabelWarnings.length ? { rowLabelWarnings } : {}),
       ...(exactSprayVolume ? { exactSprayVolume } : {}),
-      ...(h.doseUseNotes?.length ? { doseUseNotes: h.doseUseNotes } : {}),
+      ...(doseUseNotes.length ? { doseUseNotes } : {}),
       ...(h.directDoseOnly ? { directDoseOnly: true } : {}),
-      ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
-      ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
-      ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
-      ...(stated ? { carrier: stated, statedVolume: true } : {}),
+      ...(hit.labelHold ? { labelHold: hit.labelHold } : {}),
+      ...(hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
+      ...carrierField,
     };
   };
   if (!hits.length) return found(null, owners);
