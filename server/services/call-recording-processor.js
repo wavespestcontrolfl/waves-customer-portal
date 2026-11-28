@@ -13672,7 +13672,8 @@ const CallRecordingProcessor = {
       if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
     }
 
-    // Skip spam and non-workable voicemail (never terminal-spam an active linked customer)
+    // Skip spam and non-workable voicemail
+    // Never terminal-spam an active linked customer.
     require('./call-hygiene-guards').clearSpamForActiveCustomer({ extracted, knownCaller, knownCallerLookupFailed, call });
     if (extracted.is_spam || (voicemailChannel && !voicemailLeadPath)) {
       // A retry newly classified spam/non-workable must first unlink any
