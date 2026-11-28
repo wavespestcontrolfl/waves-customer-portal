@@ -56,6 +56,26 @@ function formatPhoneDisplay(e164) {
   return m ? `(${m[1]}) ${m[2]}-${m[3]}` : String(e164 || '');
 }
 
+function resolvePassContact(techLine, location) {
+  const phoneRaw = techLine?.number || location.phoneRaw;
+  const phone = techLine?.formatted || (techLine?.number ? formatPhoneDisplay(techLine.number) : location.phone);
+  return { phone, phoneRaw };
+}
+
+async function loadPassTechContext(technicianId) {
+  if (!technicianId) return { techName: null, techPhotoUrl: null, techLine: null };
+  const tech = await db('technicians')
+    .where({ id: technicianId })
+    .first('name', 'photo_url', 'photo_s3_key');
+  let techPhotoUrl = null;
+  if (tech) {
+    const { resolveTechPhotoUrl } = require('./tech-photo');
+    techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
+  }
+  const techLine = await require('./tech-line').lineForTechnician(technicianId);
+  return { techName: tech?.name || null, techPhotoUrl, techLine };
+}
+
 /**
  * Complete pass.json for the card — pure, unit-testable. Wallet renders the
  * QR itself from `barcodes`; colors carry the glass theme (passes are flat
@@ -75,8 +95,7 @@ function buildPassJson({
   hasLeftGoogleReview = false,
 }) {
   const techFirst = firstNameOf(techName);
-  const contactPhoneRaw = techLine?.number || location.phoneRaw;
-  const contactPhone = techLine?.formatted || (techLine?.number ? formatPhoneDisplay(techLine.number) : location.phone);
+  const { phone: contactPhone, phoneRaw: contactPhoneRaw } = resolvePassContact(techLine, location);
   // No NEXT VISIT on the static pass (Codex P2 #2592): without PassKit
   // update plumbing (webServiceURL/authenticationToken) the date would sit
   // stale in Wallet forever. Returns with the pass-update follow-up.
@@ -219,20 +238,7 @@ async function generateForToken(token) {
     .first('id', 'first_name', 'member_since', 'created_at', 'deleted_at', 'referral_code', 'has_left_google_review');
   if (!customer || customer.deleted_at) return null;
 
-  let techName = null;
-  let techPhotoUrl = null;
-  let techLine = null;
-  if (card.technician_id) {
-    const tech = await db('technicians')
-      .where({ id: card.technician_id })
-      .first('name', 'photo_url', 'photo_s3_key');
-    techName = tech?.name || null;
-    if (tech) {
-      const { resolveTechPhotoUrl } = require('./tech-photo');
-      techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
-    }
-    techLine = await require('./tech-line').lineForTechnician(card.technician_id);
-  }
+  const { techName, techPhotoUrl, techLine } = await loadPassTechContext(card.technician_id);
 
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
 
