@@ -73,27 +73,58 @@ const LOCATION_TO_OFFICE_SLUG = {
 };
 
 const URL_PATH_OFFICE_RULES = [
-  { slug: 'bradenton-fl', re: /(?:^|[-_/])(bradenton|lakewood[-_]ranch)(?:$|[-_/])/ },
+  { slug: 'bradenton-fl', re: /(?:^|[-_/])bradenton(?:$|[-_/])/ },
   { slug: 'parrish-fl', re: /(?:^|[-_/])parrish(?:$|[-_/])/ },
   { slug: 'sarasota-fl', re: /(?:^|[-_/])sarasota(?:$|[-_/])/ },
   { slug: 'venice-fl', re: /(?:^|[-_/])venice(?:$|[-_/])/ },
 ];
 
-function inferOfficeSlugFromUrl(rawUrl) {
+// Verified office-specific URLs whose slug uses "lakewood-ranch" (which on
+// other sites can denote HQ) or omits the city name.
+const EXPLICIT_OFFICE_URLS = new Map([
+  ['citysquares.com/b/waves-pest-control-lakewood-ranch-26663854', 'bradenton-fl'],
+]);
+
+function urlHostAndPath(rawUrl) {
   let u;
   try { u = new URL(rawUrl); } catch { return null; }
-  const path = u.pathname.toLowerCase();
-  if (/(?:^|[-_/])englewood(?:$|[-_/])/.test(path)) return null;
-  const matches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(path)).map((r) => r.slug);
+  return {
+    host: u.hostname.toLowerCase().replace(/^www\./, ''),
+    path: u.pathname.toLowerCase().replace(/\/+$/, ''),
+  };
+}
+
+function inferOfficeSlugFromUrl(rawUrl) {
+  const hp = urlHostAndPath(rawUrl);
+  if (!hp) return null;
+  if (/(?:^|[-_/])englewood(?:$|[-_/])/.test(hp.path)) return null;
+  const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
+  const matches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
+  if (explicit) {
+    // Reject if the path also mentions a conflicting city.
+    if (matches.some((m) => m !== explicit)) return null;
+    return explicit;
+  }
   return matches.length === 1 ? matches[0] : null;
 }
 
 function officeSlugForRow(location, rawUrl) {
+  const hp = urlHostAndPath(rawUrl);
+  if (!hp) return null;
+  if (/(?:^|[-_/])englewood(?:$|[-_/])/.test(hp.path)) return null;
+  const pathMatches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
+  const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
+  if (pathMatches.length > 1) return null;
+
   if (location && location !== 'default') {
-    return LOCATION_TO_OFFICE_SLUG[location] || null;
+    const stored = LOCATION_TO_OFFICE_SLUG[location] || null;
+    if (!stored) return null;
+    if (explicit && explicit !== stored) return null;
+    if (pathMatches.length === 1 && pathMatches[0] !== stored) return null;
+    return stored;
   }
   // Unscoped rows (location null/'default') must unambiguously name ONE office
-  // in their URL path; never dump brand-wide or ambiguous listings into Bradenton.
+  // in their URL path (or explicit office map); never default into Bradenton.
   return inferOfficeSlugFromUrl(rawUrl);
 }
 

@@ -93,11 +93,15 @@ describe('getVerifiedProfilesByOffice', () => {
       ...ALLOWED_OFFICE_PAGES.map((live_url) => ({ live_url, location: null })),
       ...SAAS_DIRECTORIES.map((live_url) => ({ live_url, location: null })),
       ...NON_ALLOWLISTED_OR_BAD.map((live_url) => ({ live_url, location: null })),
-      // Ambiguous or non-office city on allowlisted host with null location -> dropped
+      // Ambiguous, HQ-only lakewood-ranch, or non-office city on allowlisted host -> dropped
       { live_url: 'https://citysquares.com/b/waves-pest-control-englewood-1234', location: null },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-englewood-1234', location: 'venice' },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-bradenton-fl/', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: null },
-      // Explicit location on allowlisted host overrides URL inference
+      { live_url: 'https://citysquares.com/b/waves-pest-control-lakewood-ranch-99999', location: null },
+      // Stored default 'bradenton' conflicting with a Sarasota URL -> dropped
+      { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-99999', location: 'bradenton' },
+      // Explicit location on allowlisted host with non-conflicting URL
       { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: 'venice' },
     ]);
 
