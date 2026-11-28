@@ -251,7 +251,10 @@ async function main() {
           assert.equal(await send.isDisabled(), true);
           await send.evaluate((button) => button.click());
           assert.equal(state.sends.length, 2, 'A repeated pending click must not submit again');
-          assert.deepEqual(state.sends[1], { to: a.from_address, subject: `Re: ${a.subject}`, body: 'Fixture reply with a clear recipient', threadId: a.gmail_thread_id, replyEmailId: a.id });
+          const { idempotencyKey: retryKey, ...sentPayload } = state.sends[1];
+          assert.equal(typeof retryKey, 'string');
+          assert.ok(retryKey.length > 0, 'Retry send must carry an idempotencyKey');
+          assert.deepEqual(sentPayload, { to: a.from_address, subject: `Re: ${a.subject}`, body: 'Fixture reply with a clear recipient', threadId: a.gmail_thread_id, replyEmailId: a.id });
           state.releaseSend();
           await page.getByText('Reply sent.', { exact: true }).waitFor();
           assert.equal(await reply.inputValue(), '');

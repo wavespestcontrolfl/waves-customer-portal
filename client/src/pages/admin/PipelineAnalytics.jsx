@@ -63,6 +63,11 @@ const SERVICE_META = {
     icon: Leaf,
     ticketSuffix: "manual quote",
   },
+  commercial_tree_shrub: {
+    label: "Commercial tree & shrub",
+    icon: Trees,
+    ticketSuffix: "manual quote",
+  },
   commercial_mosquito: {
     label: "Commercial mosquito",
     icon: Bug,
@@ -238,7 +243,9 @@ export function aggregateServiceLineRows(estimates) {
       let ticketSuffix = metaSuffix;
       if (ticketCount > 0) {
         if (useOneTime) ticketSuffix = "one-time";
-        else if (metaSuffix === "one-time") ticketSuffix = "/mo recurring";
+        else if (metaSuffix === "one-time" || metaSuffix === "manual quote") {
+          ticketSuffix = "/mo recurring";
+        }
       }
       return {
         key,
