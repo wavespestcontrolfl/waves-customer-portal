@@ -59,6 +59,28 @@ describe('Visit Brief: Add-On Prompt', () => {
     expect(screen.queryByTestId('visit-brief-addon-prompt')).toBeNull();
   });
 
+  it('suppresses the add-on banner while brief refresh is loading or failed so stale eligibility cannot be clicked', () => {
+    const staleByService = { 'svc-1': { estimate: null, brief: { brief: null, facts: { addon_prompt: LAWN_PROMPT } } } };
+    const { rerender } = render(
+      <VisitBriefPanel
+        stop={stop}
+        detail={{ status: 'loading', byService: staleByService }}
+        request={vi.fn(async () => ({}))}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('visit-brief-addon-prompt')).toBeNull();
+    rerender(
+      <VisitBriefPanel
+        stop={stop}
+        detail={{ status: 'error', byService: staleByService }}
+        request={vi.fn(async () => ({}))}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('visit-brief-addon-prompt')).toBeNull();
+  });
+
   it('passes the sibling service that supplied the prompt on a grouped stop', () => {
     const primary = { id: 'svc-primary', service_type: 'Mosquito Control', status: 'scheduled', customer_id: 'cust-1' };
     const sibling = { id: 'svc-sibling', service_type: 'Quarterly Pest Control', status: 'scheduled', customer_id: 'cust-1' };
@@ -68,7 +90,7 @@ describe('Visit Brief: Add-On Prompt', () => {
       <VisitBriefPanel
         stop={stop}
         detail={{
-          status: 'loaded',
+          status: 'ready',
           byService: {
             'svc-primary': { brief: { facts: { access: {} } } },
             'svc-sibling': {

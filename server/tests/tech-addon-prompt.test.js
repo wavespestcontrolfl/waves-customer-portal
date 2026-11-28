@@ -277,6 +277,24 @@ describe('techAddonPromptFacts', () => {
         catalogById: new Map([[rootId, { service_key: 'pest-quarterly', service_category: 'pest' }]]),
       });
       expect(collectResidentialKeysOrNull(resolvedOff)).toEqual(['pest_control']);
+
+      // Ongoing root moved onto primary street via appointment_address override + unlinked snapshot key
+      const movedLegacyLawnRoot = {
+        id: rootId, customer_id: 'cust-1', service_type: 'Recurring Service',
+        service_key_snapshot: 'lawn-care',
+        is_recurring: true, recurring_ongoing: true, recurring_parent_id: null,
+        service_address_line1: '999 Old Ave', service_address_city: 'Venice', service_address_zip: '34285',
+        recurring_template_overrides: JSON.stringify({
+          appointment_address: {
+            service_address_line1: '100 Main St', service_address_city: 'Sarasota', service_address_zip: '34231',
+          },
+        }),
+      };
+      const resolvedMoved = await loadScopedOngoingRootRows(makeRootDb(movedLegacyLawnRoot), 'cust-1', {
+        streetScope,
+        catalogById: new Map(),
+      });
+      expect(collectResidentialKeysOrNull(resolvedMoved)).toEqual(['lawn_care']);
     } finally {
       gateSpy.mockRestore();
     }

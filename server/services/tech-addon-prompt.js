@@ -42,6 +42,7 @@ const {
   parseTemplateOverrides,
   overlayRecurringTemplateOverrides,
 } = require('./recurring-template-overrides');
+const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
 const { isCommercialServiceRow } = require('./self-booking-plan-sync');
 const { OFFER_LADDER } = require('./service-report/cross-sell');
 const { planStartBlocker } = require('./plan-start-eligibility');
@@ -83,7 +84,7 @@ const CUSTOMER_PROMPT_COLUMNS = Object.freeze([
 ]);
 
 const OFF_CALENDAR_COLS = Object.freeze([
-  'id', 'customer_id', 'service_type', 'scheduled_date', 'status', 'source',
+  'id', 'customer_id', 'service_type', 'service_key_snapshot', 'scheduled_date', 'status', 'source',
   'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',
   'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
   'property_id', 'source_estimate_id',
@@ -194,16 +195,20 @@ async function loadScopedOffCalendarRows(dbh, customerId, { streetScope, catalog
   const live = [...legacy, ...noStatus].filter((row) => isPlanSeriesRow(row) && isLiveObligationRow(row, today));
   if (!live.length) return [];
   const scoped = await filterRowsToStreet(dbh, live, streetScope);
-  return scoped.map((row) => ({ ...row, ...(catalogById.get(row.id) || {}) }));
+  return scoped.map((row) => {
+    const cat = catalogById.get(row.id) || {};
+    return { ...row, ...cat, service_key: cat.service_key || row.service_key_snapshot || null };
+  });
 }
 
 function resolveSeriesRootTemplateRow(row, cols, catalogById, overrideCatalogById) {
   const baseCatalog = catalogById.get(row.id) || {};
+  const fallbackBase = { ...baseCatalog, service_key: baseCatalog.service_key || row.service_key_snapshot || null };
   const overlaid = overlayRecurringTemplateOverrides(row, cols);
-  if (overlaid === row) return { ...row, ...baseCatalog };
+  if (overlaid === row) return { ...row, ...fallbackBase };
   const overrides = parseTemplateOverrides(row.recurring_template_overrides) || {};
   const hasServiceOverride = PRICE_SERVICE_SERVICE_KEYS.some((k) => k in overrides);
-  if (!hasServiceOverride) return { ...overlaid, ...baseCatalog };
+  if (!hasServiceOverride) return { ...overlaid, ...fallbackBase };
   const svcCatalog = overrides.service_id && overrideCatalogById.get(overrides.service_id);
   return {
     ...overlaid,
@@ -215,9 +220,10 @@ function resolveSeriesRootTemplateRow(row, cols, catalogById, overrideCatalogByI
 }
 
 /**
- * Loads ongoing series roots between visits (`eligibleSeriesParentIds`) and applies
- * `overlayRecurringTemplateOverrides` (honoring the scheduler's edit-scope feature gate)
- * while preserving original catalog identity on price-only overrides.
+ * Loads ongoing series roots between visits (`eligibleSeriesParentIds`), applies
+ * `recurringServiceAddress` before street scoping, and overlays `recurring_template_overrides`
+ * (honoring the scheduler's edit-scope feature gate) while preserving saved snapshot / catalog
+ * identity on unlinked or price-only roots.
  */
 async function loadScopedOngoingRootRows(dbh, customerId, { streetScope, catalogById }) {
   const parentIds = await eligibleSeriesParentIds(dbh, { customerId });
@@ -230,7 +236,8 @@ async function loadScopedOngoingRootRows(dbh, customerId, { streetScope, catalog
     .where({ customer_id: customerId })
     .whereIn('id', parentIds)
     .select(...selectCols);
-  const scoped = await filterRowsToStreet(dbh, roots, streetScope);
+  const addressedRoots = roots.map((r) => ({ ...r, ...recurringServiceAddress(r) }));
+  const scoped = await filterRowsToStreet(dbh, addressedRoots, streetScope);
   const overrideServiceIds = [...new Set(
     scoped
       .map((r) => overlayRecurringTemplateOverrides(r, cols))
