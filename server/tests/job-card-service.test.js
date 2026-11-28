@@ -4732,5 +4732,63 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(heldSingle.context.conditional).toBe(true);
     expect(heldSingle.amount).toBe(0.4);
     expect(heldSingle.warnings.join(' ')).toContain('If you find: Whitefly');
+
+    // Dispatch readiness and job-card product cards reconcile the same single conditional mix row so zero stock does not hold dispatch.
+    const condReadinessDb = dbFor({
+      scheduled_services: [{ id: 'svc39', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', first_name: 'A', last_name: 'B' }],
+      products_catalog: [{ ...singleCondProduct, inventory_on_hand: 0, inventory_unit: 'fl_oz' }],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const condReadiness = await jobCard.buildJobCard('svc39', { dbh: condReadinessDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z'), readinessOnly: true });
+    expect(condReadiness.status).not.toBe('hold');
+    const condCard = await jobCard.buildJobCard('svc39', { dbh: condReadinessDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(condCard.products.find((p) => p.id === 'cond-p')).toMatchObject({ role: 'conditional', conditional: true });
+
+    // Termidor SC's "Work order's product and rate" limit keeps the primary trench product required while Taurus SC's "only when the work order names Taurus" stays conditional.
+    const termidor = { id: 'termidor', name: 'Termidor SC', epa_reg_number: '7969-210', default_rate: '0.8', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const termiteTermidorDb = dbFor({
+      scheduled_services: [{ id: 'svc40', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [termidor, taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const termidorCalc = await jobCard.mixForProduct('termidor', 4, { serviceId: 'svc40', dbh: termiteTermidorDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(termidorCalc.context.conditional).toBe(false);
+    const termiteTaurusAltDb = dbFor({
+      scheduled_services: [{ id: 'svc40b', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus, termidor],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const taurusAltCalc = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc40b', dbh: termiteTaurusAltDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurusAltCalc.context.conditional).toBe(true);
+
+    // Published Tree & Shrub guide carries Merit 2F's FlowZone soil-injector equipment restriction into both job-card calibration warnings and mixForProduct.
+    const meritEquipDb = dbFor({
+      scheduled_services: [{ id: 'svc41', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-truck', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [merit],
+      product_aliases: [],
+      equipment_calibrations: [{ id: 'cal-truck', equipment_system_id: 'sys-truck', technician_id: null, active: true, system_name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00', carrier_rate_gal_per_1000: '2.000' }],
+      equipment_systems: [
+        { id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' },
+        { id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: '4.00' },
+      ],
+      scheduled_service_addons: [],
+    });
+    const meritCard = await jobCard.buildJobCard('svc41', { dbh: meritEquipDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    const meritRow = meritCard.protocol.procedure.fieldGuide.mixRates.find((r) => r.product === 'Merit 2F');
+    expect(meritRow.allowedSprayers).toEqual(['flowzone_4_gal']);
+    expect(meritRow.calibrationWarnings).toEqual(['Truck Rig #1 is not allowed for Merit 2F.']);
+    const meritTruckCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc41', equipmentSystemId: 'sys-truck', dbh: meritEquipDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(meritTruckCalc.warnings).toContain('Truck Rig #1 is not allowed for Merit 2F.');
+    const meritFzCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc41', equipmentSystemId: 'sys-fz', dbh: meritEquipDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(meritFzCalc.warnings.join(' ')).not.toContain('is not allowed for Merit 2F.');
   });
 });

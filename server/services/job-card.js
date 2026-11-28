@@ -2267,7 +2267,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const rainRules = rainRulesFor(products, (p) => sprayServicesForProduct(p, lines, procedureEntries, facts));
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
   attachMixSprayVerdicts(procedureEntries, sprayCheck.verdicts);
-  const cardLines = [...lines, ...requiredMixRateLines(procedureEntries, catalog)];
+  const cardLines = [...reconcileMixRowLines(lines, procedureEntries), ...requiredMixRateLines(procedureEntries, catalog)];
   if (isToday && products.length) {
     const shadow = sprayCheck;
     const names = new Map(products.map((p) => [p.id, p.name]));
@@ -2968,6 +2968,20 @@ function isConditionalMixRow(row) {
   return CONDITIONAL_MIX_ROW_RE.test([row?.condition, row?.where, row?.limit].filter(Boolean).join('; '));
 }
 
+function entryForLine(line, entries) {
+  return entries.find((entry) => (line.source ? entry.isAddon && entry.name === line.source : !entry.isAddon)) || null;
+}
+
+function reconcileMixRowLines(lines, entries) {
+  return lines.map((line) => {
+    if (line.selected === false || !line.product?.id) return line;
+    const entry = entryForLine(line, entries);
+    const rows = entryMixRateRows(entry).filter((row) => String(row.productId) === String(line.product.id));
+    if (!rows.length || !rows.every(isConditionalMixRow)) return line;
+    return { ...line, selected: false, role: 'conditional' };
+  });
+}
+
 function requiredMixRateLines(entries, catalog) {
   const catalogById = new Map(catalog.map((p) => [String(p.id), p]));
   const out = [];
@@ -3187,7 +3201,7 @@ function mixRowRate(row) {
   return { lo, hi, unit: normRateUnit(row.perGallon.unit) };
 }
 
-const CONDITIONAL_MIX_ROW_RE = /\b(?:if you find|if needed|if found|only when|only where|work order|live finds? only|top up where|bugs found)\b/i;
+const CONDITIONAL_MIX_ROW_RE = /\b(?:if you find|if needed|if found|only when|only where|live finds? only|top up where|bugs found)\b/i;
 
 function syntheticHitFromMixRow(row, baseHit = null) {
   const r = row || {};
