@@ -1969,24 +1969,36 @@ async function recordPairCommitFailure({ entryA, evalA, checkedA, entryB, evalB,
 
 async function commitAtomicPair({ entryA, evalA, checkedA, entryB, evalB, checkedB, sourceTechId, sourceDate, verifySourceInTrx, run }) {
   const { runId, totals } = run;
+  let applied;
   try {
-    const { resultA, resultB } = await applyAutoDispatchPairMove(
+    applied = await applyAutoDispatchPairMove(
       { service: entryA.service, best: evalA.best, config: pairMoveConfig(entryA, evalA, checkedA, run) },
       { service: entryB.service, best: evalB.best, config: pairMoveConfig(entryB, evalB, checkedB, run) },
       runId,
       { sourceTechId, sourceDate, verifySourceInTrx },
     );
-    totals.changed += (resultA.movedCount || 1) + (resultB.movedCount || 1);
-    run.southDays.invalidate();
-    run.claimedPairIds.add(String(entryA.service.id));
-    run.claimedPairIds.add(String(entryB.service.id));
-    await logCommittedPairLeg(entryA, evalA, checkedA, resultA, run);
-    await logCommittedPairLeg(entryB, evalB, checkedB, resultB, run);
-    return true;
   } catch (applyErr) {
     await recordPairCommitFailure({ entryA, evalA, checkedA, entryB, evalB, checkedB, applyErr, run });
     return false;
   }
+  const { resultA, resultB } = applied;
+  totals.changed += (resultA.movedCount || 1) + (resultB.movedCount || 1);
+  run.southDays.invalidate();
+  run.claimedPairIds.add(String(entryA.service.id));
+  run.claimedPairIds.add(String(entryB.service.id));
+  if (resultA.postCommitError || resultB.postCommitError) run.guardReadDegraded = true;
+  for (const [entry, evalResult, checked, result] of [
+    [entryA, evalA, checkedA, resultA],
+    [entryB, evalB, checkedB, resultB],
+  ]) {
+    try {
+      await logCommittedPairLeg(entry, evalResult, checked, result, run);
+    } catch (auditErr) {
+      run.guardReadDegraded = true;
+      logger.error(`[auto-dispatch] pair post-commit audit failed for ${entry.service.id}: ${auditErr.message}`);
+    }
+  }
+  return true;
 }
 
 function pairClearHelpers() {

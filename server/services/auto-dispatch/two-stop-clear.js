@@ -36,6 +36,7 @@ const logger = require('../logger');
 const { autoDispatchSharedModelLive, multiTechConfirmLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { currentOrder } = require('../route-reorder-window-fit');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+const { OVERLAP_EXCLUDED_STATUSES } = require('./overlap-predicate');
 const { bookedVisitOrLiveHold } = require('../scheduling/reservation-occupancy');
 const { loadArrivalRouteContext, evaluateArrivalPlacement, hasInsertionIncompatibleRow } = require('../scheduling/arrival-route');
 const { loadTechShifts, shiftBounds } = require('../technician-eligibility');
@@ -152,6 +153,30 @@ function homeDepartureMin(home, stopGeo, startMin, vanDepartureMin = SHIFT.start
   return startMin >= shiftStart ? Math.max(shiftStart, startMin - estOut) : Math.max(0, startMin - estOut);
 }
 
+function disjointRoadEntryFor(located, idx, startMin, home, vanDepartureMin) {
+  const durOf = (stop) => stop.minutes || stopPlanningMinutes(stop);
+  const atGeo = (i) => (i >= 0 && i < located.length ? located[i].geo : home);
+  const prevStop = idx > 0 ? located[idx - 1] : null;
+  const nextStop = idx + 1 < located.length ? located[idx + 1] : null;
+  const prevDepMin = prevStop && Number.isFinite(prevStop.startMin)
+    ? Math.round(prevStop.startMin + durOf(prevStop))
+    : homeDepartureMin(home, located[idx].geo, startMin, vanDepartureMin);
+  const baseDepMin = prevStop
+    ? prevDepMin
+    : (nextStop && Number.isFinite(nextStop.startMin)
+      ? homeDepartureMin(home, nextStop.geo, nextStop.startMin, vanDepartureMin)
+      : prevDepMin);
+  return {
+    prev: atGeo(idx - 1),
+    stop: located[idx].geo,
+    next: atGeo(idx + 1),
+    startMin,
+    prevDepMin,
+    baseDepMin,
+    durationMin: durOf(located[idx]),
+  };
+}
+
 function sameDestRoadSpecFor(finalChain, idA, idB, { date, startMinA, startMinB, home, vanDepartureMin = SHIFT.startMinutes }) {
   const located = finalChain.filter((s) => s.geo);
   const idxA = located.findIndex((s) => String(s.id) === String(idA));
@@ -190,8 +215,8 @@ function sameDestRoadSpecFor(finalChain, idA, idB, { date, startMinA, startMinB,
   return {
     date, startMin: startMinA,
     disjoint: [
-      { prev: atGeo(idxA - 1), stop: located[idxA].geo, next: atGeo(idxA + 1), startMin: startMinA },
-      { prev: atGeo(idxB - 1), stop: located[idxB].geo, next: atGeo(idxB + 1), startMin: startMinB },
+      disjointRoadEntryFor(located, idxA, startMinA, home, vanDepartureMin),
+      disjointRoadEntryFor(located, idxB, startMinB, home, vanDepartureMin),
     ],
   };
 }
@@ -294,6 +319,50 @@ function livePairRowsValid(rows, a, b, techId, expectedOrder) {
   const routeOrderB = rowB.route_order ?? null;
   if (expectedOrder && (routeOrderA !== expectedOrder.routeOrderA || routeOrderB !== expectedOrder.routeOrderB)) return null;
   return { routeOrderA, routeOrderB };
+}
+
+function routeSignatureOf(rows) {
+  return (rows || [])
+    .map((r) => `${String(r.id)}:${r.route_order ?? ''}:${String(r.window_start || '').slice(0, 5)}`)
+    .sort()
+    .join('|');
+}
+
+async function loadLiveDaySignature(dbc, techId, date, excludeIds) {
+  const query = require('../visit-hold').excludeHeld(dbc('scheduled_services')
+    .where({ scheduled_date: date })
+    .where((q) => (techId ? q.where('technician_id', techId).orWhereNull('technician_id') : q.whereNull('technician_id')))
+    .whereNotIn('status', [...OVERLAP_EXCLUDED_STATUSES])
+    .where(bookedVisitOrLiveHold)
+    .whereNotNull('window_start'), 'scheduled_services');
+  const excluded = [...(excludeIds || [])];
+  if (excluded.length) query.whereNotIn('id', excluded);
+  const rows = await query.select('id', 'route_order', 'window_start');
+  return { count: rows.length, signature: routeSignatureOf(rows) };
+}
+
+async function resolveDestExpected(pair, excludeIds) {
+  if (pair.destExpected) return pair.destExpected;
+  const { slotA, slotB } = pair;
+  const [sigA, sigB] = await Promise.all([
+    loadLiveDaySignature(db, slotA.technician_id, slotA.date, excludeIds),
+    loadLiveDaySignature(db, slotB.technician_id, slotB.date, excludeIds),
+  ]);
+  const wantA = Math.max(0, (Number(slotA.stops_that_day) || 1) - 1);
+  const wantB = Math.max(0, (Number(slotB.stops_that_day) || 1) - 1);
+  if (sigA.count !== wantA || sigB.count !== wantB) return null;
+  return [
+    { techId: slotA.technician_id, date: slotA.date, signature: sigA.signature },
+    { techId: slotB.technician_id, date: slotB.date, signature: sigB.signature },
+  ];
+}
+
+async function verifyDestinationSignatures(dbc, destExpected, excludeIds) {
+  for (const dest of destExpected || []) {
+    const live = await loadLiveDaySignature(dbc, dest.techId, dest.date, excludeIds);
+    if (live.signature !== dest.signature) return false;
+  }
+  return true;
 }
 
 async function verifyExactTwoStopDay(dbc, entryA, entryB, { expectedOrder = null } = {}) {
@@ -511,6 +580,7 @@ async function evaluatePairCombinations({
         addedDrive: joint.addedDrive,
         saving: round2(sourceInfo.driveMinutes - joint.addedDrive),
         sameDestRoadSpec: joint.sameDestRoadSpec,
+        destExpected: [{ techId: aRow.cand.technician_id, date: aRow.cand.date, signature: routeSignatureOf(destStops) }],
         index: idx,
       });
     }
@@ -634,8 +704,11 @@ async function findConfirmedPair(entryA, entryB, verified, run) {
     sourceLegs: sourceInfo.roadLegs, floor, config, travel: run.roadTravel,
   });
   if (!confirmed) return null;
+  const excludeIds = new Set([String(entryA.service.id), String(entryB.service.id)]);
+  const destExpected = await resolveDestExpected(confirmed.pair, excludeIds);
+  if (!destExpected) return null;
   return {
-    ...confirmed, floor, ctxA, ctxB, curA: resA.current, curB: resB.current, currentScoreA, currentScoreB,
+    ...confirmed, floor, ctxA, ctxB, curA: resA.current, curB: resB.current, currentScoreA, currentScoreB, destExpected,
   };
 }
 
@@ -647,7 +720,7 @@ async function tryClearOneTwoStopDay(entryA, entryB, run, helpers) {
   const found = await findConfirmedPair(entryA, entryB, verified, run);
   if (!found) return false;
   const {
-    pair, road, floor, ctxA, ctxB, curA, curB, currentScoreA, currentScoreB,
+    pair, road, floor, ctxA, ctxB, curA, curB, currentScoreA, currentScoreB, destExpected,
   } = found;
 
   const evalA = buildPairEval({
@@ -675,6 +748,7 @@ async function tryClearOneTwoStopDay(entryA, entryB, run, helpers) {
   if (!proof.ok) return false;
 
   const expectedOrder = { routeOrderA: verified.routeOrderA, routeOrderB: verified.routeOrderB };
+  const excludeIds = new Set([String(entryA.service.id), String(entryB.service.id)]);
   return helpers.commitAtomicPair({
     entryA,
     evalA,
@@ -684,7 +758,10 @@ async function tryClearOneTwoStopDay(entryA, entryB, run, helpers) {
     checkedB: proof.checkedB,
     sourceTechId: verified.techId,
     sourceDate: verified.sourceDate,
-    verifySourceInTrx: (trx) => verifyExactTwoStopDay(trx, entryA, entryB, { expectedOrder }),
+    verifySourceInTrx: async (trx) => Boolean(
+      await verifyExactTwoStopDay(trx, entryA, entryB, { expectedOrder })
+      && await verifyDestinationSignatures(trx, destExpected, excludeIds),
+    ),
     run,
   });
 }

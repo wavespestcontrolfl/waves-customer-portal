@@ -368,21 +368,33 @@ async function adjacentDestRoadAdded(date, startMin, adjacent, travel) {
   return t3 == null ? null : Math.max(0, round2(t1 + t2 + t3 - tBase));
 }
 
+async function disjointStopRoadAdded(date, entry, fallbackStartMin, travel) {
+  const leg = (from, to, dep) => ({ date, from, to, departureMin: dep });
+  const stopStart = Number.isFinite(entry.startMin) ? entry.startMin : fallbackStartMin;
+  const depIn = Number.isFinite(entry.prevDepMin) ? entry.prevDepMin : stopStart;
+  const baseDep = Number.isFinite(entry.baseDepMin) ? entry.baseDepMin : depIn;
+  const firstPair = await lookupGoogleLegs([leg(entry.prev, entry.stop, depIn), leg(entry.prev, entry.next, baseDep)], travel);
+  if (!firstPair) return null;
+  const [tIn, tBase] = firstPair;
+  const startAt = Math.max(depIn + tIn, stopStart);
+  const depOut = Number.isFinite(entry.durationMin) ? Math.round(startAt + entry.durationMin) : stopStart;
+  const tOut = await lookupOneGoogleLeg(leg(entry.stop, entry.next, depOut), travel);
+  return tOut == null ? null : Math.max(0, round2(tIn + tOut - tBase));
+}
+
 // Real-road added detour for a pair landing on the same destination day:
 // adjacent inserted stops propagate travel, waiting, and service durations across
-// all 4 legs; disjoint stops price two independent 3-leg detours.
+// all 4 legs; disjoint stops propagate arrival and service duration per detour.
 async function sameDestRoadAdded(destSpec, travel) {
   if (!destSpec || !destSpec.date) return null;
   const { date, startMin, adjacent, disjoint } = destSpec;
   if (adjacent) return adjacentDestRoadAdded(date, startMin, adjacent, travel);
   if (disjoint) {
-    const leg = (from, to, dep = startMin) => ({ date, from, to, departureMin: dep });
     const [a, b] = disjoint;
-    const mins = await lookupGoogleLegs([
-      leg(a.prev, a.stop, a.startMin), leg(a.stop, a.next, a.startMin), leg(a.prev, a.next, a.startMin),
-      leg(b.prev, b.stop, b.startMin), leg(b.stop, b.next, b.startMin), leg(b.prev, b.next, b.startMin),
-    ], travel);
-    return mins ? round2(Math.max(0, mins[0] + mins[1] - mins[2]) + Math.max(0, mins[3] + mins[4] - mins[5])) : null;
+    const addedA = await disjointStopRoadAdded(date, a, startMin, travel);
+    if (addedA == null) return null;
+    const addedB = await disjointStopRoadAdded(date, b, startMin, travel);
+    return addedB == null ? null : round2(addedA + addedB);
   }
   return null;
 }

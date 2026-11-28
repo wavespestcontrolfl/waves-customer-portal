@@ -1125,12 +1125,27 @@ async function applyAutoDispatchPairMove(pairA, pairB, runId, { sourceTechId, so
       }
     }
   }
-  const resultA = await finalizeCommittedSingleMove({
-    service: pairA.service, best: pairA.best, fresh: liveA.fresh, runId, config: pairA.config, techChanged: specA.techChanged, moveResult: moveResultA,
-  });
-  const resultB = await finalizeCommittedSingleMove({
-    service: pairB.service, best: pairB.best, fresh: liveB.fresh, runId, config: pairB.config, techChanged: specB.techChanged, moveResult: moveResultB,
-  });
+  const finalizePairLeg = async (pair, fresh, spec, moveResult) => {
+    try {
+      return await finalizeCommittedSingleMove({
+        service: pair.service, best: pair.best, fresh, runId, config: pair.config, techChanged: spec.techChanged, moveResult,
+      });
+    } catch (err) {
+      logger.error(`[auto-dispatch] pair post-commit finalization failed for ${pair.service.id}: ${err.message}`);
+      return {
+        ok: true,
+        pre_status: fresh.status,
+        post_status: moveResult.landedStatus || fresh.status,
+        technician_changed: spec.techChanged,
+        notification: null,
+        movedCount: 1,
+        applied: pair.best,
+        postCommitError: err.message,
+      };
+    }
+  };
+  const resultA = await finalizePairLeg(pairA, liveA.fresh, specA, moveResultA);
+  const resultB = await finalizePairLeg(pairB, liveB.fresh, specB, moveResultB);
   return { ok: true, resultA, resultB };
 }
 

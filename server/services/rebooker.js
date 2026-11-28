@@ -2072,7 +2072,7 @@ class SmartRebooker {
     // for the nightly auto-dispatch move: it blocks when the list is unreadable.
     if (initiatedBy !== 'admin') {
       const { isBlackoutDate } = require('./scheduling/blackout-dates');
-      if (await isBlackoutDate(newDateStr, undefined, { strict: isNightWriter(initiatedBy) })) {
+      if (await isBlackoutDate(newDateStr, options.trx, { strict: isNightWriter(initiatedBy) })) {
         throw Object.assign(new Error('That day is no longer available'), {
           statusCode: 409,
           isOperational: true,

@@ -191,16 +191,20 @@ describe('two-stop-clear pure rules', () => {
     })).toBeNull();
   });
 
-  test('sameDestRoadSpecFor distinguishes adjacent 4-leg vs disjoint 6-leg placements', () => {
+  test('sameDestRoadSpecFor distinguishes adjacent 4-leg vs disjoint 6-leg placements with departure & duration metadata', () => {
     const disjoint = sameDestRoadSpecFor(
-      [{ id: 'a', geo: NORTH_A }, { id: 'd1', geo: MID }, { id: 'b', geo: NORTH_B }, { id: 'd2', geo: SOUTH }],
-      'a', 'b', { date: '2026-12-22', startMinA: 540, startMinB: 720, home: HQ },
+      [
+        { id: 'a', geo: NORTH_A, startMin: 540, estimated_duration_minutes: 90 },
+        { id: 'd1', geo: MID, startMin: 660, estimated_duration_minutes: 60 },
+        { id: 'b', geo: NORTH_B, startMin: 720, estimated_duration_minutes: 60 },
+        { id: 'd2', geo: SOUTH, startMin: 840, estimated_duration_minutes: 60 },
+      ],
+      'a', 'b', { date: '2026-12-22', startMinA: 540, startMinB: 720, home: HQ, vanDepartureMin: 480 },
     );
     expect(disjoint.adjacent).toBeUndefined();
-    expect(disjoint.disjoint).toEqual([
-      { prev: HQ, stop: NORTH_A, next: MID, startMin: 540 },
-      { prev: MID, stop: NORTH_B, next: SOUTH, startMin: 720 },
-    ]);
+    expect(disjoint.disjoint[0]).toMatchObject({ prev: HQ, stop: NORTH_A, next: MID, startMin: 540, durationMin: 90 });
+    expect(disjoint.disjoint[0].prevDepMin).toBeLessThan(540);
+    expect(disjoint.disjoint[1]).toMatchObject({ prev: MID, stop: NORTH_B, next: SOUTH, startMin: 720, prevDepMin: 720, baseDepMin: 720, durationMin: 60 });
   });
 
   test('sameDateSouthCompatible blocks mixing far-south and non-far-south stops onto the same destination day', () => {
@@ -378,17 +382,18 @@ describe('road-check confirmPairOnRoads', () => {
       sameDestRoadSpec: {
         date: '2026-12-22', startMin: 540,
         disjoint: [
-          { prev: P('H'), stop: P('A'), next: P('D1'), startMin: 540 },
-          { prev: P('D1'), stop: P('B'), next: P('H'), startMin: 720 },
+          { prev: P('H'), stop: P('A'), next: P('D1'), startMin: 540, prevDepMin: 525, baseDepMin: 640, durationMin: 90 },
+          { prev: P('D1'), stop: P('B'), next: P('H'), startMin: 720, prevDepMin: 710, baseDepMin: 710, durationMin: 60 },
         ],
       },
       saving: 22,
     };
     // Source: 38 min. Disjoint dest: (10+6-12) + (6+10-12) = 4 + 4 = 8 min -> saving = 30 >= 20.
+    // Outgoing legs leave after each stop finishes: A at max(525+10,540)+90 = 630; B at max(710+6,720)+60 = 780.
+    const disjAsked = [];
     const disjMap = { 'H->A': 10, 'A->B': 2, 'B->H': 10, 'A->D1': 6, 'H->D1': 12, 'D1->B': 6, 'D1->H': 12 };
-    // Make source day 38 min via separate legs on source date:
     const travelDateAware = {
-      preload: jest.fn(async () => {}),
+      preload: jest.fn(async (legs) => { disjAsked.push(...legs); }),
       lookup: (leg) => {
         if (leg.date === '2026-12-21') {
           const m = { 'H->A': 18, 'A->B': 2, 'B->H': 18 }[keyOf(leg.from, leg.to)];
@@ -400,6 +405,8 @@ describe('road-check confirmPairOnRoads', () => {
     };
     const disjRes = await confirmPairOnRoads([disjPair], { sourceLegs, floor: 20, config: baseConfig, travel: travelDateAware });
     expect(disjRes.road).toEqual({ source_drive_minutes: 38, added_drive_minutes: 8, saving_minutes: 30, source: 'google' });
+    // After 3 source legs: H->A@525, H->D1@640, A->D1@630, D1->B@710, D1->H@710, B->H@780.
+    expect(disjAsked.slice(3).map((l) => l.departureMin)).toEqual([525, 640, 630, 710, 710, 780]);
   });
 });
 
@@ -419,7 +426,7 @@ describe('runTwoStopClearPass orchestration safety', () => {
 
   function makeChain(rows) {
     const c = {};
-    ['where', 'whereNotIn', 'orWhereNull'].forEach((m) => { c[m] = () => c; });
+    ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'orWhereNull', 'whereRaw'].forEach((m) => { c[m] = () => c; });
     c.select = async () => rows;
     return c;
   }
@@ -459,12 +466,12 @@ describe('runTwoStopClearPass orchestration safety', () => {
     };
     const slotA = {
       date: '2026-12-22', start_time: '10:00', end_time: '11:00', technician_id: 'tech-1',
-      detour_minutes: 4, stops_that_day: 5, same_area_share: 0.8, route_minutes: 300, capability_level: 'qualified',
+      detour_minutes: 4, stops_that_day: 3, same_area_share: 0.8, route_minutes: 300, capability_level: 'qualified',
       [ROAD_LEGS]: { prev: HQ, stop: NORTH_A, next: HQ, date: '2026-12-22', startMin: 600 },
     };
     const slotB = {
       date: '2026-12-23', start_time: '11:00', end_time: '12:00', technician_id: 'tech-1',
-      detour_minutes: 4, stops_that_day: 5, same_area_share: 0.8, route_minutes: 300, capability_level: 'qualified',
+      detour_minutes: 4, stops_that_day: 3, same_area_share: 0.8, route_minutes: 300, capability_level: 'qualified',
       [ROAD_LEGS]: { prev: HQ, stop: NORTH_B, next: HQ, date: '2026-12-23', startMin: 660 },
     };
     return { svcA, svcB, run, slotA, slotB };
