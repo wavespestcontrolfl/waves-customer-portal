@@ -10,6 +10,7 @@ const {
   resolveCallToTruckBriefForBooking,
   MAX_BRIEF_CHARS,
 } = require('../services/call-to-truck-brief');
+const { bookedReasonBlock } = require('../services/service-report/report-writer-rules');
 
 describe('PR B1: Waves ASR domain vocabulary hints', () => {
   test('STT_HINTS keeps original 16 terms first, stays under ConversationRelay 2000-char & XML limits, and includes SWFL/Waves domain vocabulary', () => {
@@ -96,8 +97,11 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
     expect(qRes.text).toContain('Agent: Hi, this is Jordan calling from Waves Pest Control, am I speaking with John?');
   });
 
-  test('does NOT swap on customer questions, third-person voicemail references, composite transcripts, or quoted greetings', () => {
+  test('does NOT swap on customer complaints, questions, third-person voicemail references, composite transcripts, or quoted greetings', () => {
     const cases = [
+      "Agent: How can I help?\nCaller: I'm frustrated with Waves Pest Control about yesterday's visit.\nAgent: I'm sorry to hear that, let me pull up your account.",
+      "Agent: How can I help?\nCaller: I'm upset with Waves Pest Control and want to cancel.\nAgent: Let me help right away.",
+      "Agent: How can I help?\nCaller: I'm happy with Waves Pest Control, just need to add mosquito.\nAgent: Happy to help.",
       'Agent: Hello?\nCaller: Hi, is this Waves Pest Control?\nAgent: Yes it is, how can I help?',
       'Agent: Hello?\nCaller: Good morning, Waves Pest Control?\nAgent: Yes, speaking.',
       'Agent: Hello?\nCaller: Good morning, Waves Pest Control treated my house yesterday.\nAgent: Happy to check on that for you.',
@@ -119,22 +123,20 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
   });
 });
 
-describe('PR B1: Call-to-Truck Brief (100% of call bookings, report-safe & ANI-verified)', () => {
-  test('builds brief from schema-valid V2 pests_observed (location_on_property), keeps household/medical details out of public customer_request, and strips money/objections/PII/codes', () => {
+describe('PR B1: Call-to-Truck Brief (structured-only, report-safe & ANI-verified)', () => {
+  test('emits ONLY structured pests and allowlisted property zones — never free-text pain_points, medical details, money, PII, or access codes', () => {
     const brief = buildCallToTruckBrief({
       extracted: {
-        pain_points: 'too expensive; Ants around the back patio. Quoted $250 one-time. Gate code is 4545#. Call (941) 555-0199 or test@example.com.',
+        pain_points: 'Ants in the bedroom where our child uses oxygen. Quoted $250. Gate code is 4545#. Call (941) 555-0199 or test@example.com.',
         call_summary: 'The landlord will pay 200 per visit for One-Time Pest.',
       },
       v2Extraction: {
         service_request: {
           pests_observed: [
             { pest_type: 'ghost_ants', location_on_property: 'kitchen' },
+            { pest_type: 'ants', location_on_property: 'bedroom where our child uses oxygen' },
             { pest_type: 'unspecified', location_on_property: null },
           ],
-        },
-        sentiment_and_lead: {
-          objections_raised: ['too expensive'],
         },
         property: {
           no_spray_areas: 'koi pond',
@@ -142,27 +144,22 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, report-safe & ANI-v
           household_children_or_elderly: 'Toddler in home',
         },
       },
+      catalogServiceName: 'One-Time Pest Control Service',
       isAssessmentBooking: false,
       isReService: false,
     });
 
-    expect(brief).toBe('Pests: ghost ants (kitchen) | Ants around the back patio.');
-    // Household medical/sensitivity notes stay strictly in property_preferences (never published into forwardable customer_request)
-    expect(brief).not.toMatch(/asthma|toddler|koi pond|too expensive|\$250|quoted|landlord|200 per visit|4545|941|555-0199|test@example\.com/i);
+    expect(brief).toBe('Pests: ghost ants (kitchen), ants');
+    expect(brief).not.toMatch(/oxygen|child|asthma|toddler|koi pond|\$250|quoted|landlord|4545|941|555-0199|test@example\.com/i);
     expect(brief.length).toBeLessThanOrEqual(MAX_BRIEF_CHARS);
   });
 
-  test('enforces GATE_CALL_ENRICH_CODES_REQUIRE_ANI: unverified callers emit ONLY structured pest types or catalog service name', async () => {
+  test('enforces GATE_CALL_ENRICH_CODES_REQUIRE_ANI synchronously using pre-loaded customerPrimaryPhone (zero DB query inside booking trx)', () => {
     const priorGate = process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI;
     process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI = 'true';
     try {
-      const mockConn = jest.fn(() => ({
-        where: jest.fn().mockReturnThis(),
-        first: jest.fn().mockResolvedValue({ phone: '+19415550100' }),
-      }));
       const baseInput = {
-        customerId: 'cust-1',
-        extracted: { pain_points: 'Please avoid spraying the nursery.' },
+        customerPrimaryPhone: '+19415550100',
         v2Extraction: {
           service_request: { pests_observed: [{ pest_type: 'ghost_ants', location_on_property: 'kitchen' }] },
         },
@@ -171,41 +168,32 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, report-safe & ANI-v
         isReService: false,
       };
 
-      const unverified = await resolveCallToTruckBriefForBooking(mockConn, { ...baseInput, callerAni: '+19415559999' });
+      const unverified = resolveCallToTruckBriefForBooking({ ...baseInput, callerAni: '+19415559999' });
       expect(unverified).toBe('Pests: ghost ants');
-      expect(unverified).not.toContain('nursery');
       expect(unverified).not.toContain('kitchen');
 
-      const unverifiedNoPests = await resolveCallToTruckBriefForBooking(mockConn, {
-        customerId: 'cust-1',
+      const unverifiedNoPests = resolveCallToTruckBriefForBooking({
+        customerPrimaryPhone: '+19415550100',
         callerAni: '+19415559999',
-        extracted: { requested_service: 'Do not treat the back lawn' },
         v2Extraction: {},
         catalogServiceName: 'One-Time Pest Control Service',
         isAssessmentBooking: false,
         isReService: false,
       });
       expect(unverifiedNoPests).toBe('Requested: One-Time Pest Control Service');
-      expect(unverifiedNoPests).not.toContain('back lawn');
 
-      const verified = await resolveCallToTruckBriefForBooking(mockConn, { ...baseInput, callerAni: '(941) 555-0100' });
-      expect(verified).toBe('Pests: ghost ants (kitchen) | Please avoid spraying the nursery.');
+      const verified = resolveCallToTruckBriefForBooking({ ...baseInput, callerAni: '(941) 555-0100' });
+      expect(verified).toBe('Pests: ghost ants (kitchen)');
     } finally {
       if (priorGate === undefined) delete process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI;
       else process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI = priorGate;
     }
   });
 
-  test('Assessment booking (final catalog row) keeps pests_observed without leaking unagreed service or summary', () => {
-    const brief = buildCallToTruckBrief({
-      extracted: {
-        pain_points: null,
-        specific_service_name: 'Termite Fumigation Service',
-        call_summary: 'Caller wants full termite fumigation.',
-      },
+  test('Assessment booking keeps structured pests without leaking catalog fallback; re-service omits generic Requested fallback', () => {
+    const assessment = buildCallToTruckBrief({
       v2Extraction: {
         service_request: {
-          specific_service_name: 'Termite Fumigation Service',
           pests_observed: [{ pest_type: 'termites', location_on_property: 'garage' }],
         },
       },
@@ -213,34 +201,54 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, report-safe & ANI-v
       isAssessmentBooking: true,
       isReService: false,
     });
+    expect(assessment).toBe('Pests: termites (garage)');
 
-    expect(brief).toBe('Pests: termites (garage)');
-    expect(brief).not.toContain('Fumigation');
+    const assessmentNoPests = buildCallToTruckBrief({
+      v2Extraction: {},
+      catalogServiceName: 'Waves Assessment',
+      isAssessmentBooking: true,
+      isReService: false,
+    });
+    expect(assessmentNoPests).toBeNull();
+
+    const reserviceNoPests = buildCallToTruckBrief({
+      v2Extraction: {},
+      catalogServiceName: 'Covered Re-Service',
+      isAssessmentBooking: false,
+      isReService: true,
+    });
+    expect(reserviceNoPests).toBeNull();
   });
 
-  test('caps at 400 chars and screens out billing chatter, PANs, and disallowed customer-report copy violations', () => {
-    const billingOnly = buildCallToTruckBrief({
-      extracted: {
-        pain_points: 'The landlord will pay 200 per visit. Quoted $200.',
-        call_summary: 'Caller asked about autopay and credit card on file.',
-      },
-      isAssessmentBooking: false,
-      isReService: false,
-    });
-    expect(billingOnly).toBeNull();
-
-    const unsafeCopy = buildCallToTruckBrief({
-      extracted: {
-        pain_points: 'Customer asked for pet safe spray. Ants on kitchen counter. Card 4111-1111-1111-1111.',
-      },
-      isAssessmentBooking: false,
-      isReService: false,
-    });
-    expect(unsafeCopy).toBe('Ants on kitchen counter.');
-
-    const longPain = `Heavy ant trails along patio. ${'Active foraging near perimeter beds. '.repeat(20)}`;
-    const capped = buildCallToTruckBrief({ extracted: { pain_points: longPain } });
+  test('caps cleanly on a word boundary within 400 chars and screens banned report copy in both brief builder and bookedReasonBlock', () => {
+    const manyPests = Array.from({ length: 40 }, (_, i) => ({
+      pest_type: `beetle type ${i + 1}`,
+      location_on_property: 'back patio',
+    }));
+    const capped = buildCallToTruckBrief({ v2Extraction: { service_request: { pests_observed: manyPests } } });
     expect(capped).toBeTruthy();
     expect(capped.length).toBeLessThanOrEqual(MAX_BRIEF_CHARS);
+    expect(capped).not.toMatch(/[,|;:\s]$/);
+
+    const bannedInBookedReason = bookedReasonBlock(
+      {
+        customer_request: 'Customer requested pet safe guaranteed pest free spray for ants.',
+        customer_request_pests: ['ghost_ants'],
+        customer_request_source: 'call',
+      },
+      (s) => s,
+    );
+    expect(bannedInBookedReason).toContain('Pests picked: ghost ants');
+    expect(bannedInBookedReason).not.toContain('pet safe');
+    expect(bannedInBookedReason).not.toContain('Reason:');
+
+    const cleanBookedReason = bookedReasonBlock(
+      {
+        customer_request: 'Pests: ghost ants (kitchen)',
+        customer_request_source: 'call',
+      },
+      (s) => s,
+    );
+    expect(cleanBookedReason).toContain('Reason: Pests: ghost ants (kitchen)');
   });
 });

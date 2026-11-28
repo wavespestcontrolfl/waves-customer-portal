@@ -22486,14 +22486,15 @@ const CallRecordingProcessor = {
                 // before the attach guard.)
                 // Call-to-Truck Brief (scheduled_services.customer_request +
                 // customer_request_source = 'call', hasColumn-guarded):
-                // populates a clean, price-free, code-free operational brief
-                // for 100% of phone bookings (re-service + regular/specialty),
-                // enforcing GATE_CALL_ENRICH_CODES_REQUIRE_ANI on safety notes.
+                // populates a clean, structured, customer-report-safe brief
+                // (canonical pests + allowlisted zones or resolved catalog name;
+                // never free-text household/medical prose) for phone bookings,
+                // enforcing GATE_CALL_ENRICH_CODES_REQUIRE_ANI using the
+                // pre-loaded customer phone (zero queries inside trx).
                 const isReServiceBooking = isReServiceCatalogRow(callBookingCatalogRow);
-                const callBookingCustomerRequest = await resolveCallToTruckBriefForBooking(trx, {
-                  customerId,
+                const callBookingCustomerRequest = resolveCallToTruckBriefForBooking({
                   callerAni: clarifyAskTargetPhone(call),
-                  extracted: bookingExtracted,
+                  customerPrimaryPhone: customer?.phone || null,
                   v2Extraction: v2ApprovedExtraction,
                   catalogServiceName: callBookingCatalogRow?.name || null,
                   isAssessmentBooking: isAssessmentServiceRow(callBookingCatalogRow),
