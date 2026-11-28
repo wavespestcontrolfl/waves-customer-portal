@@ -12660,7 +12660,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // the prepay-year and visit-add-on coverage this transaction does not,
       // so it runs now rather than at the next daily sweep. The alert row
       // stays the durable follow-up: a coverage regression reopens it.
-      if (shouldReconcileSetupFeeAlertAfterCommit()) setupFeeReconcileAfterCommit = true;
+      if (require('../config/feature-gates').setupFeeApplicationSettledLive()) setupFeeReconcileAfterCommit = true;
+      setupFeeReconcileAfterCommit = shouldReconcileSetupFeeAlertAfterCommit(setupFeeReconcileAfterCommit);
       if (setupFeeReconcileAfterCommit) {
         // Multi-visit resolution deferred from the alert transaction
         // (Codex P0): the shared reconciler proves EVERY parked visit
@@ -17318,20 +17319,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
   }
 }
 
-function shouldReconcileSetupFeeAlertAfterCommit() {
+function shouldReconcileSetupFeeAlertAfterCommit(already = false) {
+  if (already) return true;
   const gates = require('../config/feature-gates');
   return gates.setupFeeApplicationSettledLive() || gates.setupFeeOpenInvoiceNoticeLive();
 }
 
 function resolveOpenSetupFeeCoverage(settledNow, { countedRows, feeCovered, expectedSetupFeeCents, liveFeeCentsNow }) {
   const openFeeInvoices = Array.isArray(settledNow?.open) ? settledNow.open : [];
-  const openFeeCents = require('../services/setup-fee-obligation').partialElsewhereCents(openFeeInvoices, countedRows);
-  const feeOnOpenInvoice = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive()
+  const rawOpenFeeCents = require('../services/setup-fee-obligation').partialElsewhereCents(openFeeInvoices, countedRows);
+  const noticeLive = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive();
+  // Respect GATE_SETUP_FEE_OPEN_INVOICE_NOTICE for open-invoice fee accounting:
+  // when off, openFeeCents stays 0 for remainder labels so full open coverage
+  // never falls through to "bill the one-time setup fee ($0.00 remaining)".
+  // hasOpenFeeInvoice still reflects raw open invoices so billBothPlain stays off.
+  const openFeeCents = noticeLive ? rawOpenFeeCents : 0;
+  const feeOnOpenInvoice = noticeLive
     && !feeCovered
     && expectedSetupFeeCents > 0
     && liveFeeCentsNow + openFeeCents >= expectedSetupFeeCents
     && openFeeInvoices.length > 0;
-  return { openFeeInvoices, openFeeCents, hasOpenFeeInvoice: openFeeCents > 0, feeOnOpenInvoice };
+  return { openFeeInvoices, openFeeCents, hasOpenFeeInvoice: rawOpenFeeCents > 0, feeOnOpenInvoice };
 }
 
 function mergeChemicalHoldVisitIds(existing, visitId, held) {
@@ -17352,8 +17360,10 @@ function buildTerminalSetupFeeNote({
   estimateId,
 }) {
   if (!terminalSetupFeeNote || terminalFeeCovered) return '';
-  const coveredWithOpen = liveFeeCentsOnVisit + refundedFeeCentsTerm + openFeeCentsTerm;
-  const openCoversAll = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive()
+  const openNoticeLive = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive();
+  const effectiveOpenFeeCents = openNoticeLive ? openFeeCentsTerm : 0;
+  const coveredWithOpen = liveFeeCentsOnVisit + refundedFeeCentsTerm + effectiveOpenFeeCents;
+  const openCoversAll = openNoticeLive
     && termExpectedFeeCents > 0
     && coveredWithOpen >= termExpectedFeeCents
     && openFeeInvoicesTerm.length > 0;
@@ -17363,9 +17373,6 @@ function buildTerminalSetupFeeNote({
   }
   const termFeeRemainder = Math.max(0, termExpectedFeeCents - coveredWithOpen);
   if (!(termFeeRemainder > 0)) {
-    // Open invoice(s) cover the fee while unpaid (even when the notice gate is
-    // off): keep a non-empty clause so the terminal alert and its
-    // setupFeeDedupeKey stay registered until the open fee invoice pays or voids.
     const invs = openFeeInvoicesTerm.map((inv) => inv.invoiceNumber || inv.id).filter(Boolean).join(' and ');
     const openRef = invs ? `open invoice ${invs}` : 'an open invoice';
     return ` ALSO: the one-time WaveGuard setup fee for accepted estimate ${termFeeEstimateRef} is currently on ${openRef} (not paid yet) — do NOT bill it again; this alert clears after payment.`;

@@ -6301,7 +6301,7 @@ const StripeService = {
           cardBrand,
           cardLastFour: cardLastFour || bankLastFour || null,
           receiptUrl,
-        });
+        }, { rejectHeldInvoices: !opts.allowChemicalReviewReconcile });
         if (combinedOutcome.anchorPaymentRow) return combinedOutcome.anchorPaymentRow;
         // The anchor row can be absent only when its allocation share was
         // recorded as a residual (invoice raced terminal) — surface loudly.
@@ -6602,13 +6602,18 @@ const StripeService = {
 
       return paymentRecord;
     } catch (err) {
-      logger.error(`[stripe] Confirm invoice payment failed: ${err.message}`, { stack: err.stack });
-      // Map Stripe decline_codes to friendly customer-facing messages.
-      const friendly = friendlyStripeError(err);
-      throw new Error(friendly);
+      rethrowOrWrapConfirmError(err);
     }
   },
 };
+
+function rethrowOrWrapConfirmError(err) {
+  if (err && err.code === 'INVOICE_CHEMICAL_ADDON_HOLD') throw err;
+  logger.error(`[stripe] Confirm invoice payment failed: ${err.message}`, { stack: err.stack });
+  // Map Stripe decline_codes to friendly customer-facing messages.
+  const friendly = friendlyStripeError(err);
+  throw new Error(friendly);
+}
 
 // Map Stripe error codes/decline_codes to friendly customer-facing messages.
 // Raw Stripe error messages are logged server-side, never returned to the customer.

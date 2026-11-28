@@ -2586,17 +2586,12 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         // miss falls to the account scope (toward refusing — fail closed).
         let mirrorScopeSsId = null;
         let mirrorInvoiceId = null;
+        let mirrorInvoiceIds = [];
         try {
-          const piInvoice = await db('invoices')
-            .where({ stripe_payment_intent_id: piId })
-            .first('id', 'scheduled_service_id');
-          mirrorScopeSsId = piInvoice?.scheduled_service_id || null;
-          // The INVOICE too (Codex #4311 r45 P1): the enrollment re-judges the
-          // withdrawal stamp and the packet's live owner under its own lock,
-          // which is the only way a payer on a SIBLING billed member is seen.
-          // Without it this mirror could enroll the homeowner for Auto Pay on
-          // debt that moved to AP while the payment was in flight.
-          mirrorInvoiceId = piInvoice?.id || null;
+          const scope = await resolveMirrorInvoiceScope(paymentIntent, piId);
+          mirrorScopeSsId = scope.mirrorScopeSsId;
+          mirrorInvoiceId = scope.mirrorInvoiceId;
+          mirrorInvoiceIds = scope.mirrorInvoiceIds;
         } catch (scopeErr) {
           // FAIL CLOSED (Codex #4311 r47 P1): without the invoice id the
           // transaction below skips invoicePayerOwnedNow and the enrollment
@@ -2616,11 +2611,10 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         let mirrorEnrollment = null;
         try {
           await db.transaction(async (trx) => {
-            // Lock invoice BEFORE customer (billing lock order), then check
-            // chemical-review hold and payer ownership before recording consent
-            // or enrolling Auto Pay so a hold landed between mint and webhook
-            // cannot enroll Auto Pay on a held invoice.
-            if (await webhookInvoiceRefusesEnrollment(trx, mirrorInvoiceId, wavesCustomerId)) {
+            // Lock all invoices on this PI (anchor + combined allocation, sorted)
+            // BEFORE customer (billing lock order), then check chemical-review
+            // hold and payer ownership before recording consent or enrolling Auto Pay.
+            if (await webhookInvoiceRefusesEnrollment(trx, mirrorInvoiceId, wavesCustomerId, { extraInvoiceIds: mirrorInvoiceIds })) {
               throw MIRROR_PAYER_BILLED_ROLLBACK;
             }
             if (mirrorNeedsConsentRow) {
@@ -9486,30 +9480,64 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
   }
 }
 
-// Shared locked enrollment fence for payment_intent.succeeded save-card mirror
-// and setup_intent.succeeded covered_capture (billing lock order: invoice →
-// customer → packet/visit SHARE). Refuses consent + Auto Pay enrollment when
-// the invoice moved to a chemical-review hold or third-party payer between
-// intent mint and webhook delivery.
-async function webhookInvoiceRefusesEnrollment(trx, invoiceId, customerId) {
-  let liveInv = null;
-  if (invoiceId) {
-    liveInv = await trx('invoices').where({ id: invoiceId }).forUpdate().first('id', 'scheduled_send_error');
+async function resolveMirrorInvoiceScope(paymentIntent, piId) {
+  const anchorMetaId = paymentIntent?.metadata?.waves_invoice_id || null;
+  let allocation = null;
+  try {
+    allocation = require('../services/pay-combined').parseCombinedAllocation(paymentIntent?.metadata);
+  } catch { /* fall back to PI-bound DB rows */ }
+  const piRows = await db('invoices')
+    .where({ stripe_payment_intent_id: piId })
+    .select('id', 'scheduled_service_id');
+  const rows = Array.isArray(piRows) ? piRows : (piRows ? [piRows] : []);
+  const mirrorInvoiceIds = [...new Set([
+    ...(anchorMetaId ? [String(anchorMetaId)] : []),
+    ...(Array.isArray(allocation) ? allocation.map((a) => String(a.invoiceId)) : []),
+    ...rows.map((r) => String(r.id)),
+  ].filter(Boolean))];
+  let anchorRow = anchorMetaId
+    ? rows.find((r) => String(r.id) === String(anchorMetaId)) || null
+    : (rows[0] || null);
+  if (!anchorRow && anchorMetaId) {
+    anchorRow = await db('invoices').where({ id: anchorMetaId }).first('id', 'scheduled_service_id');
   }
+  return {
+    mirrorInvoiceId: anchorRow?.id || anchorMetaId || null,
+    mirrorScopeSsId: anchorRow?.scheduled_service_id || null,
+    mirrorInvoiceIds,
+  };
+}
+
+// Shared locked enrollment fence for payment_intent.succeeded save-card mirror
+// and setup_intent.succeeded covered_capture (billing lock order: invoice(s)
+// sorted by id → customer → packet/visit SHARE). Refuses consent + Auto Pay
+// enrollment when any covered invoice moved to a chemical-review hold or
+// third-party payer between intent mint and webhook delivery.
+async function webhookInvoiceRefusesEnrollment(trx, invoiceId, customerId, { extraInvoiceIds = [] } = {}) {
+  const ids = [...new Set([
+    ...(invoiceId ? [String(invoiceId)] : []),
+    ...(Array.isArray(extraInvoiceIds) ? extraInvoiceIds.map((id) => String(id)) : []),
+  ].filter(Boolean))].sort();
+  const liveInvs = ids.length
+    ? await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate().select('id', 'scheduled_send_error')
+    : [];
   if (customerId) {
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
   }
-  if (liveInv && require('../services/invoice-helpers').invoiceHeldForChemicalReview(liveInv)) {
+  const { invoiceHeldForChemicalReview } = require('../services/invoice-helpers');
+  if (liveInvs.some((inv) => invoiceHeldForChemicalReview(inv))) {
     return true;
   }
-  if (invoiceId && await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoiceId, trx)) {
-    return true;
+  const { invoicePayerOwnedNow } = require('../services/visit-completion-packets');
+  for (const id of ids) {
+    if (await invoicePayerOwnedNow(id, trx)) return true;
   }
   return false;
 }
 
 module.exports = router;
 // Exposed for unit tests.
+module.exports._resolveMirrorInvoiceScope = resolveMirrorInvoiceScope;
 module.exports._webhookInvoiceRefusesEnrollment = webhookInvoiceRefusesEnrollment;
 module.exports._handleRefundFailed = handleRefundFailed;
 module.exports._handlePaymentMethodAutomaticallyUpdated = handlePaymentMethodAutomaticallyUpdated;

@@ -907,17 +907,23 @@ and a NULL `payer_id`). On `GET /api/pay/:token`, `GET /api/pay/:token/invoice.p
 collectible non-processing status is refused (`409` on `GET`, `invoice.pdf`,
 `/plan-choice`, `/consent`, `/capture-setup`, `/setup-complete`, locked
 `/update-amount`, and `/confirm`; `400` on `/setup`, `/quote`, `/finalize`
-pre-check; all carrying `{ error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`).
+pre-check; all carrying `{ error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`). Already
+`paid`, `prepaid`, or `processing` invoices stay readable on `GET /api/pay/:token`
+and `GET /api/pay/:token/invoice.pdf` even if stamped, so receipt redirects and
+pending-ACH status remain accessible.
 Precedence and race outcomes: when the invoice is already in `status = 'processing'`
 (an ACH debit already submitted to Stripe before the hold landed), `/setup`
 returns `409 { error, inProgress: true }` (without `INVOICE_CHEMICAL_ADDON_HOLD`)
 so the page reflects the in-flight bank transfer; `/confirm` preserves
 `409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }` both on the route pre-check
 and if the hold commits mid-request before `confirmInvoicePayment`'s locked
-settlement (while internal webhook settlement of an already-succeeded/processing
-PI passes `allowChemicalReviewReconcile: true` so cleared funds are never
-stranded); and both Stripe webhook enrollment paths (`payment_intent.succeeded`
-save-card mirror and `setup_intent.succeeded` `covered_capture`) take the same
+settlement — including combined full-balance settlements (`settleCombinedPaymentIntent`
+checks every allocated invoice under lock when `rejectHeldInvoices: true`, while
+internal webhook settlement of an already-succeeded/processing PI passes
+`allowChemicalReviewReconcile: true` / `rejectHeldInvoices: false` so cleared funds
+are never stranded); and both Stripe webhook enrollment paths (`payment_intent.succeeded`
+save-card mirror — locking the anchor plus every combined-allocation invoice on the
+PI in ascending-id order — and `setup_intent.succeeded` `covered_capture`) take the same
 locked `invoices → customers` chemical-hold check so a hold committed between
 mint and webhook delivery never records consent or enrolls Auto Pay.
 Combined-balance selection (`open-balance.js` / `pay-combined.js`) and the

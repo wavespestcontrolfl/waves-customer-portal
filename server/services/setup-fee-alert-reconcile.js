@@ -393,8 +393,11 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
           // once they are paid — billing it by hand would charge it twice. The alert
           // stays open and says so; the payment resolves it, a void brings it back.
           // Only against the frozen fee amount: open lines short of it change nothing.
-          const openFeeCents = partialElsewhereCents(elsewhere.open, [...stampedAll, ...onParkedAll]);
-          const feeOnOpenInvoice = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive()
+          const openFeeNoticeLive = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive();
+          const openFeeCents = openFeeNoticeLive
+            ? partialElsewhereCents(elsewhere.open, [...stampedAll, ...onParkedAll])
+            : 0;
+          const feeOnOpenInvoice = openFeeNoticeLive
             && !feeProven && expectedFeeCents !== null && coveredFeeCentsAll + openFeeCents >= expectedFeeCents;
           await reconcileTerminalFeeAlerts(feeProven, expectedFeeCents !== null ? coveredFeeCentsAll : null, openFeeCents);
           const expectedAppCents = (visitId) => {
@@ -726,10 +729,15 @@ function reconcileFeeRemainderLabel(expectedFeeCents, coveredFeeCentsNow, openFe
 
 function reconcileAppInstructionForVisits(ids, staleMeta) {
   const chemHoldSet = new Set(Array.isArray(staleMeta?.chemicalHoldVisitIds) ? staleMeta.chemicalHoldVisitIds.map(String) : []);
-  const hasChemHold = ids.some((id) => chemHoldSet.has(String(id)));
-  const base = `the application charge for visit${ids.length === 1 ? '' : 's'} ${ids.join(', ')} — use the EXACT line description "First service application"`;
-  if (!hasChemHold) return base;
-  return `${base} (HOLD billing until office chemical add-on review confirms with the technician whether the chemical add-on was applied)`;
+  const unheldIds = ids.filter((id) => !chemHoldSet.has(String(id)));
+  const heldIds = ids.filter((id) => chemHoldSet.has(String(id)));
+  const visitPhrase = (list) => `the application charge for visit${list.length === 1 ? '' : 's'} ${list.join(', ')} — use the EXACT line description "First service application"`;
+  const parts = [];
+  if (unheldIds.length) parts.push(visitPhrase(unheldIds));
+  if (heldIds.length) {
+    parts.push(`${visitPhrase(heldIds)} (HOLD billing until office chemical add-on review confirms with the technician whether the chemical add-on was applied)`);
+  }
+  return parts.join('; ');
 }
 
 function reconcileHeldInvoiceNotice(onParkedLive) {

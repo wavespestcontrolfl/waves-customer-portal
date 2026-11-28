@@ -231,7 +231,7 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       expect(bodyWithChemHold).not.toContain('Bill BOTH charges manually');
     });
 
-    test('still marks hasOpenFeeInvoice=true when gate is off so billBothPlain does not double-bill', () => {
+    test('still marks hasOpenFeeInvoice=true when gate is off so billBothPlain does not double-bill and keeps openFeeCents=0', () => {
       delete process.env.GATE_SETUP_FEE_OPEN_INVOICE_NOTICE;
       const cov = resolveOpenSetupFeeCoverage(
         { open: [{ id: 'inv-open-2', invoiceNumber: 'INV-2026-9002', cents: 9900 }] },
@@ -239,6 +239,16 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       );
       expect(cov.hasOpenFeeInvoice).toBe(true);
       expect(cov.feeOnOpenInvoice).toBe(false);
+      expect(cov.openFeeCents).toBe(0);
+    });
+
+    test('reconcileAppInstructionForVisits separates unheld visits from held visits in mixed lists', () => {
+      const { _private } = require('../services/setup-fee-alert-reconcile');
+      const mixed = _private.reconcileAppInstructionForVisits(['v-unheld', 'v-held'], {
+        chemicalHoldVisitIds: ['v-held'],
+      });
+      expect(mixed).toContain('visit v-unheld — use the EXACT line description "First service application";');
+      expect(mixed).toContain('visit v-held — use the EXACT line description "First service application" (HOLD billing');
     });
   });
 
@@ -533,89 +543,96 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
     });
 
     test('open setup-fee partial coverage ($40 of $99) instructs $59.00 remaining in completion, terminal, and reconcile alerts', () => {
-      const {
-        resolveOpenSetupFeeCoverage,
-        buildUnmintedSetupFeeAlertBody,
-        buildTerminalSetupFeeNote,
-      } = require('../services/complete-scheduled-service');
-      const { _private: reconcilePrivate } = require('../services/setup-fee-alert-reconcile');
+      const prevNotice = process.env.GATE_SETUP_FEE_OPEN_INVOICE_NOTICE;
+      process.env.GATE_SETUP_FEE_OPEN_INVOICE_NOTICE = 'true';
+      try {
+        const {
+          resolveOpenSetupFeeCoverage,
+          buildUnmintedSetupFeeAlertBody,
+          buildTerminalSetupFeeNote,
+        } = require('../services/complete-scheduled-service');
+        const { _private: reconcilePrivate } = require('../services/setup-fee-alert-reconcile');
 
-      const settledNow = {
-        settled: false,
-        open: [{ invoiceId: 'inv-open-40', invoiceNumber: 'INV-OPEN-40', cents: 4000 }],
-      };
-      const cov = resolveOpenSetupFeeCoverage(settledNow, {
-        countedRows: [],
-        feeCovered: false,
-        expectedSetupFeeCents: 9900,
-        liveFeeCentsNow: 0,
-      });
-      expect(cov.openFeeCents).toBe(4000);
-      expect(cov.hasOpenFeeInvoice).toBe(true);
-      expect(cov.feeOnOpenInvoice).toBe(false);
+        const settledNow = {
+          settled: false,
+          open: [{ invoiceId: 'inv-open-40', invoiceNumber: 'INV-OPEN-40', cents: 4000 }],
+        };
+        const cov = resolveOpenSetupFeeCoverage(settledNow, {
+          countedRows: [],
+          feeCovered: false,
+          expectedSetupFeeCents: 9900,
+          liveFeeCentsNow: 0,
+        });
+        expect(cov.openFeeCents).toBe(4000);
+        expect(cov.hasOpenFeeInvoice).toBe(true);
+        expect(cov.feeOnOpenInvoice).toBe(false);
 
-      const remainderCents = Math.max(0, 9900 - cov.openFeeCents);
-      const body = buildUnmintedSetupFeeAlertBody({
-        feeCoveredBy: null,
-        feeOnOpenInvoice: false,
-        openFeeInvoices: cov.openFeeInvoices,
-        applicationCoveredBy: null,
-        applicationCoveredOutOfBand: false,
-        unrecordedChemicalAddOnHold: false,
-        feeEstimateRef: 'est-40',
-        feeHistoryClause: 'its WaveGuard setup fee was never invoiced',
-        setupFeeLabel: `$${(remainderCents / 100).toFixed(2)} remaining`,
-        firstAppLabel: ' ($89.00)',
-        estimateId: 40,
-        setupFeeParkedNote: '',
-      });
-      expect(body).toContain('$59.00 remaining');
-      expect(body).not.toContain('$99.00');
+        const remainderCents = Math.max(0, 9900 - cov.openFeeCents);
+        const body = buildUnmintedSetupFeeAlertBody({
+          feeCoveredBy: null,
+          feeOnOpenInvoice: false,
+          openFeeInvoices: cov.openFeeInvoices,
+          applicationCoveredBy: null,
+          applicationCoveredOutOfBand: false,
+          unrecordedChemicalAddOnHold: false,
+          feeEstimateRef: 'est-40',
+          feeHistoryClause: 'its WaveGuard setup fee was never invoiced',
+          setupFeeLabel: `$${(remainderCents / 100).toFixed(2)} remaining`,
+          firstAppLabel: ' ($89.00)',
+          estimateId: 40,
+          setupFeeParkedNote: '',
+        });
+        expect(body).toContain('$59.00 remaining');
+        expect(body).not.toContain('$99.00');
 
-      const termNote = buildTerminalSetupFeeNote({
-        terminalSetupFeeNote: true,
-        terminalFeeCovered: false,
-        termExpectedFeeCents: 9900,
-        liveFeeCentsOnVisit: 0,
-        refundedFeeCentsTerm: 0,
-        openFeeCentsTerm: 4000,
-        openFeeInvoicesTerm: settledNow.open,
-        termFeeEstimateRef: 'est-40',
-        estimateId: 40,
-      });
-      expect(termNote).toContain('$59.00 remaining');
-      expect(termNote).not.toContain('$99.00');
+        const termNote = buildTerminalSetupFeeNote({
+          terminalSetupFeeNote: true,
+          terminalFeeCovered: false,
+          termExpectedFeeCents: 9900,
+          liveFeeCentsOnVisit: 0,
+          refundedFeeCentsTerm: 0,
+          openFeeCentsTerm: 4000,
+          openFeeInvoicesTerm: settledNow.open,
+          termFeeEstimateRef: 'est-40',
+          estimateId: 40,
+        });
+        expect(termNote).toContain('$59.00 remaining');
+        expect(termNote).not.toContain('$99.00');
 
-      expect(reconcilePrivate.reconcileFeeRemainderLabel(9900, 0, 4000)).toBe(' ($59.00 remaining)');
-      const termReconcileClause = reconcilePrivate.terminalFeeClauseFor(
-        { sourceEstimateId: 40 },
-        40,
-        { feeIsProven: false, effectiveCovered: 4000, tExpectCents: 9900 },
-      );
-      expect(termReconcileClause).toContain('$59.00 remaining');
+        expect(reconcilePrivate.reconcileFeeRemainderLabel(9900, 0, 4000)).toBe(' ($59.00 remaining)');
+        const termReconcileClause = reconcilePrivate.terminalFeeClauseFor(
+          { sourceEstimateId: 40 },
+          40,
+          { feeIsProven: false, effectiveCovered: 4000, tExpectCents: 9900 },
+        );
+        expect(termReconcileClause).toContain('$59.00 remaining');
 
-      // Full $99 open unpaid coverage keeps a non-empty pending-open-invoice clause (even with notice gate off)
-      // and never tells staff to bill "the accepted amount".
-      const fullOpenTermNote = buildTerminalSetupFeeNote({
-        terminalSetupFeeNote: true,
-        terminalFeeCovered: false,
-        termExpectedFeeCents: 9900,
-        liveFeeCentsOnVisit: 0,
-        refundedFeeCentsTerm: 0,
-        openFeeCentsTerm: 9900,
-        openFeeInvoicesTerm: [{ invoiceId: 'inv-open-99', invoiceNumber: 'INV-OPEN-99', cents: 9900 }],
-        termFeeEstimateRef: 'est-99',
-        estimateId: 99,
-      });
-      expect(fullOpenTermNote).toContain('INV-OPEN-99');
-      expect(fullOpenTermNote).toContain('do NOT bill it again');
-      const fullOpenReconcile = reconcilePrivate.terminalFeeClauseFor(
-        { sourceEstimateId: 99 },
-        99,
-        { feeIsProven: false, effectiveCovered: 9900, tExpectCents: 9900 },
-      );
-      expect(fullOpenReconcile).toContain('open invoice');
-      expect(fullOpenReconcile).not.toContain('the accepted amount');
+        // Full $99 open unpaid coverage keeps a non-empty pending-open-invoice clause
+        // and never tells staff to bill "the accepted amount".
+        const fullOpenTermNote = buildTerminalSetupFeeNote({
+          terminalSetupFeeNote: true,
+          terminalFeeCovered: false,
+          termExpectedFeeCents: 9900,
+          liveFeeCentsOnVisit: 0,
+          refundedFeeCentsTerm: 0,
+          openFeeCentsTerm: 9900,
+          openFeeInvoicesTerm: [{ invoiceId: 'inv-open-99', invoiceNumber: 'INV-OPEN-99', cents: 9900 }],
+          termFeeEstimateRef: 'est-99',
+          estimateId: 99,
+        });
+        expect(fullOpenTermNote).toContain('INV-OPEN-99');
+        expect(fullOpenTermNote).toContain('do NOT bill it again');
+        const fullOpenReconcile = reconcilePrivate.terminalFeeClauseFor(
+          { sourceEstimateId: 99 },
+          99,
+          { feeIsProven: false, effectiveCovered: 9900, tExpectCents: 9900 },
+        );
+        expect(fullOpenReconcile).toContain('open invoice');
+        expect(fullOpenReconcile).not.toContain('the accepted amount');
+      } finally {
+        if (prevNotice === undefined) delete process.env.GATE_SETUP_FEE_OPEN_INVOICE_NOTICE;
+        else process.env.GATE_SETUP_FEE_OPEN_INVOICE_NOTICE = prevNotice;
+      }
     });
 
     test('webhook enrollment fence locks invoice before customer and refuses chemical-held invoices on covered_capture & mirror', async () => {
@@ -628,10 +645,17 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
         const { _webhookInvoiceRefusesEnrollment } = require('../routes/stripe-webhook');
         const trx = jest.fn((table) => ({
           where: jest.fn().mockReturnThis(),
+          whereIn: jest.fn().mockReturnThis(),
+          orderBy: jest.fn().mockReturnThis(),
           forUpdate: jest.fn(function recordLock() {
             lockOrder.push(table);
             return this;
           }),
+          select: jest.fn(async () => (
+            table === 'invoices'
+              ? [{ id: 'inv-held-wh', scheduled_send_error: 'chemical_addon_review:svc-1' }]
+              : [{ id: 'cust-1' }]
+          )),
           first: jest.fn(async () => (
             table === 'invoices'
               ? { id: 'inv-held-wh', scheduled_send_error: 'chemical_addon_review:svc-1' }
@@ -769,6 +793,168 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       expect(caught.message).toMatch(/chemical area add-on/i);
       expect(caught.code).toBe('INVOICE_CHEMICAL_ADDON_HOLD');
       expect(caught.statusCode).toBe(409);
+    });
+
+    test('confirmInvoicePayment rethrows INVOICE_CHEMICAL_ADDON_HOLD instead of wrapping it into friendlyStripeError', async () => {
+      let caught = null;
+      await jest.isolateModulesAsync(async () => {
+        const prevKey = process.env.STRIPE_SECRET_KEY;
+        process.env.STRIPE_SECRET_KEY = 'sk_test_confirm_hold';
+        const mockStripe = {
+          paymentIntents: {
+            retrieve: jest.fn(async () => ({
+              id: 'pi_confirm_hold',
+              status: 'succeeded',
+              amount: 15000,
+              amount_received: 15000,
+              payment_method: 'pm_1',
+              latest_charge: { id: 'ch_1', payment_method_details: { type: 'us_bank_account', us_bank_account: { last4: '1234' } } },
+              metadata: { waves_invoice_id: 'inv-confirm-hold', base_amount: '150', card_surcharge: '0' },
+            })),
+          },
+        };
+        jest.doMock('stripe', () => jest.fn(() => mockStripe));
+        const unlockedInv = {
+          id: 'inv-confirm-hold',
+          customer_id: 'cust-1',
+          invoice_number: 'INV-CONFIRM-HOLD',
+          status: 'sent',
+          total: '150.00',
+          credit_applied: 0,
+          amount_paid: 0,
+          stripe_payment_intent_id: 'pi_confirm_hold',
+          scheduled_send_error: null,
+        };
+        const lockedInv = { ...unlockedInv, scheduled_send_error: 'chemical_addon_review:svc-confirm' };
+        const makeQ = (row) => {
+          const q = {
+            where: jest.fn(() => q),
+            whereNotIn: jest.fn(() => q),
+            forUpdate: jest.fn(() => q),
+            orderBy: jest.fn(() => q),
+            first: jest.fn(async () => row),
+          };
+          return q;
+        };
+        const mockDb = jest.fn((table) => makeQ(table === 'invoices' ? unlockedInv : null));
+        mockDb.transaction = jest.fn(async (fn) => {
+          const trx = jest.fn((table) => makeQ(table === 'invoices' ? lockedInv : null));
+          trx.raw = jest.fn(async () => ({}));
+          return fn(trx);
+        });
+        jest.doMock('../models/db', () => mockDb);
+        try {
+          const StripeService = require('../services/stripe');
+          await StripeService.confirmInvoicePayment('inv-confirm-hold', 'pi_confirm_hold');
+        } catch (err) {
+          caught = err;
+        } finally {
+          if (prevKey === undefined) delete process.env.STRIPE_SECRET_KEY;
+          else process.env.STRIPE_SECRET_KEY = prevKey;
+        }
+      });
+      expect(caught).toBeTruthy();
+      expect(caught.code).toBe('INVOICE_CHEMICAL_ADDON_HOLD');
+      expect(caught.message).toMatch(/chemical area add-on/i);
+    });
+
+    test('settleCombinedPaymentIntent rejects held allocated invoices when rejectHeldInvoices is true and settles when false', async () => {
+      let rejectedErr = null;
+      await jest.isolateModulesAsync(async () => {
+        const heldAnchor = {
+          id: 'inv-a',
+          customer_id: 'cust-1',
+          invoice_number: 'INV-A',
+          status: 'sent',
+          total: '100.00',
+          credit_applied: 0,
+          amount_paid: 0,
+          stripe_payment_intent_id: 'pi_comb_hold',
+          scheduled_send_error: 'chemical_addon_review:svc-a',
+        };
+        const unheldSibling = {
+          id: 'inv-b',
+          customer_id: 'cust-1',
+          invoice_number: 'INV-B',
+          status: 'sent',
+          total: '50.00',
+          credit_applied: 0,
+          amount_paid: 0,
+          stripe_payment_intent_id: 'pi_comb_hold',
+          scheduled_send_error: null,
+        };
+        const mockDb = jest.fn();
+        mockDb.transaction = jest.fn(async (fn) => {
+          const trx = jest.fn((table) => {
+            if (table === 'invoices') {
+              const q = {
+                whereIn: jest.fn(() => q),
+                orderBy: jest.fn(() => q),
+                forUpdate: jest.fn(async () => [heldAnchor, unheldSibling]),
+              };
+              return q;
+            }
+            const q = { where: jest.fn(async () => []) };
+            return q;
+          });
+          trx.raw = jest.fn(async () => ({}));
+          return fn(trx);
+        });
+        jest.doMock('../models/db', () => mockDb);
+        const PayCombined = require('../services/pay-combined');
+        try {
+          await PayCombined.settleCombinedPaymentIntent({
+            id: 'pi_comb_hold',
+            status: 'succeeded',
+            amount: 15000,
+            amount_received: 15000,
+            metadata: {
+              waves_invoice_id: 'inv-a',
+              combined_allocation: PayCombined.encodeAllocation([
+                { invoiceId: 'inv-a', cents: 10000 },
+                { invoiceId: 'inv-b', cents: 5000 },
+              ]),
+              card_surcharge: '0',
+            },
+          }, { paymentMethod: 'us_bank_account', cardBrand: null, cardLastFour: '1234', receiptUrl: null }, { rejectHeldInvoices: true });
+        } catch (err) {
+          rejectedErr = err;
+        }
+      });
+      expect(rejectedErr).toBeTruthy();
+      expect(rejectedErr.code).toBe('INVOICE_CHEMICAL_ADDON_HOLD');
+    });
+
+    test('webhookInvoiceRefusesEnrollment locks all combined PI invoices and refuses when anchor is held even if sibling is unheld', async () => {
+      let refused = false;
+      const lockedIds = [];
+      await jest.isolateModulesAsync(async () => {
+        const trx = jest.fn((table) => {
+          if (table === 'invoices') {
+            const q = {
+              whereIn: jest.fn((_col, ids) => { lockedIds.push(...ids); return q; }),
+              orderBy: jest.fn(() => q),
+              forUpdate: jest.fn(() => q),
+              select: jest.fn(async () => [
+                { id: 'inv-1-anchor', scheduled_send_error: 'chemical_addon_review:svc-1' },
+                { id: 'inv-2-sibling', scheduled_send_error: null },
+              ]),
+            };
+            return q;
+          }
+          const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => ({ id: 'cust-1' })) };
+          return q;
+        });
+        jest.doMock('../services/visit-completion-packets', () => ({
+          invoicePayerOwnedNow: jest.fn(async () => false),
+        }));
+        const { _webhookInvoiceRefusesEnrollment } = require('../routes/stripe-webhook');
+        refused = await _webhookInvoiceRefusesEnrollment(trx, 'inv-2-sibling', 'cust-1', {
+          extraInvoiceIds: ['inv-1-anchor', 'inv-2-sibling'],
+        });
+      });
+      expect(lockedIds).toEqual(['inv-1-anchor', 'inv-2-sibling']);
+      expect(refused).toBe(true);
     });
   });
 

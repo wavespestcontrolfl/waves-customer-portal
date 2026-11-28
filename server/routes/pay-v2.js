@@ -24,12 +24,15 @@ const {
   isInvoiceCollectibleStatus, invoiceAmountDue, invoiceHeldForChemicalReview,
 } = require('../services/invoice-helpers');
 
+const PAY_READ_ALLOWED_WHEN_HELD_STATUSES = new Set(['paid', 'prepaid', 'processing']);
+
 function rejectUnavailablePayReadInvoice(data, res) {
   if (data.payer_statement_id) {
     res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
     return true;
   }
-  if (invoiceHeldForChemicalReview(data)) {
+  const status = String(data.status || '').toLowerCase();
+  if (invoiceHeldForChemicalReview(data) && !PAY_READ_ALLOWED_WHEN_HELD_STATUSES.has(status)) {
     res.status(409).json({
       error: 'This invoice is held for office billing review of a chemical area add-on',
       code: 'INVOICE_CHEMICAL_ADDON_HOLD',
