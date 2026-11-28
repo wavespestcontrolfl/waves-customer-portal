@@ -516,12 +516,6 @@ function loginAttestedPrefs(lockedRow, phones, attested) {
   if (attested === true) {
     const attestedKeys = [...new Set((phones || []).map((p) => phoneKeyOf(p)).filter((k) => k.length >= 10))];
     prefs.login_attested_phone_keys = attestedKeys;
-    if (Array.isArray(prefs.unconsented_slot_phone_keys) && attestedKeys.length) {
-      const attestedSet = new Set(attestedKeys);
-      const remaining = prefs.unconsented_slot_phone_keys.filter((k) => !attestedSet.has(k));
-      if (remaining.length) prefs.unconsented_slot_phone_keys = remaining;
-      else delete prefs.unconsented_slot_phone_keys;
-    }
   } else if (Object.prototype.hasOwnProperty.call(prefs, 'login_attested_phone_keys')) {
     delete prefs.login_attested_phone_keys;
   } else {
