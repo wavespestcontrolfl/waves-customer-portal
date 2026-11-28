@@ -127,9 +127,32 @@ export const UNKNOWN_TECH_REFETCH_MS = 60_000;
 // reconnect right after them): they collapse into one board re-read.
 export const RESYNC_DEBOUNCE_MS = 300;
 
+function nextTechsMapForJobChange(prevMap, prevJob, nextJob) {
+  const oldTech = prevJob?.technician_id || null;
+  const newTech = nextJob?.technician_id || null;
+  const oldDone = prevJob?.status === 'completed';
+  const newDone = nextJob?.status === 'completed';
+  if (oldTech === newTech && oldDone === newDone && Boolean(prevJob) === Boolean(nextJob)) return prevMap;
+  let changed = false;
+  const nextMap = new Map(prevMap);
+  const bump = (tid, dTotal, dDone) => {
+    if (!tid || (!dTotal && !dDone)) return;
+    const t = nextMap.get(tid);
+    if (!t) return;
+    changed = true;
+    nextMap.set(tid, {
+      ...t,
+      today_total: Math.max(0, (Number(t.today_total) || 0) + dTotal),
+      today_completed: Math.max(0, (Number(t.today_completed) || 0) + dDone),
+    });
+  };
+  if (prevJob && oldTech) bump(oldTech, -1, oldDone ? -1 : 0);
+  if (nextJob && newTech) bump(newTech, 1, newDone ? 1 : 0);
+  return changed ? nextMap : prevMap;
+}
+
 export function useDispatchBoard() {
-  const [techsMap, setTechsMap] = useState(() => new Map());
-  const [jobs, setJobs] = useState([]);
+  const [{ techsMap, jobs }, setBoardState] = useState(() => ({ techsMap: new Map(), jobs: [] }));
   const [selectedTechId, setSelectedTechId] = useState(null);
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -167,12 +190,10 @@ export function useDispatchBoard() {
     // Patch in place via a fresh Map (React notices via reference
     // change). The tech object itself is replaced so React.memo on
     // the matching <TechCard> sees a new prop reference.
-    setTechsMap((prev) => {
+    setBoardState((prevState) => {
+      const prev = prevState.techsMap;
       const existing = prev.get(payload.tech_id);
-      // A tech the roster does not carry is never synthesized from this
-      // stream: it has no out_today (Codex r7 P2 on #4678), so the live
-      // handler re-reads /board instead (handleTechStatus below).
-      if (!existing) return prev;
+      if (!existing) return prevState;
       const next = new Map(prev);
       next.set(payload.tech_id, {
         ...existing,
@@ -184,52 +205,33 @@ export function useDispatchBoard() {
         updated_at: payload.updated_at,
         location_updated_at: payload.location_updated_at || existing.location_updated_at || null,
       });
-      return next;
-    });
-  }, []);
-
-  const adjustTechCounts = useCallback((prevJob, nextJob) => {
-    const oldTech = prevJob?.technician_id || null;
-    const newTech = nextJob?.technician_id || null;
-    const oldDone = prevJob?.status === 'completed';
-    const newDone = nextJob?.status === 'completed';
-    if (oldTech === newTech && oldDone === newDone && Boolean(prevJob) === Boolean(nextJob)) return;
-    setTechsMap((prevMap) => {
-      let changed = false;
-      const nextMap = new Map(prevMap);
-      const bump = (tid, dTotal, dDone) => {
-        if (!tid || (!dTotal && !dDone)) return;
-        const t = nextMap.get(tid);
-        if (!t) return;
-        changed = true;
-        nextMap.set(tid, {
-          ...t,
-          today_total: Math.max(0, (Number(t.today_total) || 0) + dTotal),
-          today_completed: Math.max(0, (Number(t.today_completed) || 0) + dDone),
-        });
-      };
-      if (prevJob && oldTech) bump(oldTech, -1, oldDone ? -1 : 0);
-      if (nextJob && newTech) bump(newTech, 1, newDone ? 1 : 0);
-      return changed ? nextMap : prevMap;
+      return { ...prevState, techsMap: next };
     });
   }, []);
 
   const applyJobUpdate = useCallback((payload) => {
     if (!payload || !payload.job_id) return;
     if (BOARD_HIDDEN_STATUSES.has(payload.status) || payload.board_visible === false) {
-      setJobs((prev) => {
-        const existing = prev.find((j) => j.id === payload.job_id) || null;
-        if (existing) adjustTechCounts(existing, null);
-        return prev.filter((j) => j.id !== payload.job_id);
+      setBoardState((prevState) => {
+        const existing = prevState.jobs.find((j) => j.id === payload.job_id) || null;
+        if (!existing) return prevState;
+        return {
+          techsMap: nextTechsMapForJobChange(prevState.techsMap, existing, null),
+          jobs: prevState.jobs.filter((j) => j.id !== payload.job_id),
+        };
       });
       return;
     }
-    setJobs((prev) => {
+    setBoardState((prevState) => {
+      const prev = prevState.jobs;
       const idx = prev.findIndex((j) => j.id === payload.job_id);
       if (idx === -1) {
         const created = boardJobFromPayload(payload);
-        if (created) adjustTechCounts(null, created);
-        return created ? [...prev, created] : prev;
+        if (!created) return prevState;
+        return {
+          techsMap: nextTechsMapForJobChange(prevState.techsMap, null, created),
+          jobs: [...prev, created],
+        };
       }
       const next = prev.slice();
       function pick(field) {
@@ -250,10 +252,12 @@ export function useDispatchBoard() {
         customer_id: pick('customer_id'),
       };
       next[idx] = updated;
-      adjustTechCounts(prev[idx], updated);
-      return next;
+      return {
+        techsMap: nextTechsMapForJobChange(prevState.techsMap, prev[idx], updated),
+        jobs: next,
+      };
     });
-  }, [adjustTechCounts]);
+  }, []);
 
   // ---- on-demand tech refresh (see header comment) ----
   //
@@ -319,8 +323,10 @@ export function useDispatchBoard() {
       // omits is gone from the board too — never retained from an earlier
       // read (Codex r5 P2 on #4678). Socket events buffered meanwhile are
       // replayed on top by the finally block.
-      setTechsMap(new Map((data.techs || []).map((t) => [t.id, t])));
-      setJobs(data.jobs || []);
+      setBoardState({
+        techsMap: new Map((data.techs || []).map((t) => [t.id, t])),
+        jobs: data.jobs || [],
+      });
       hydratedRef.current = true;
       setError(null);
       setLoading(false);

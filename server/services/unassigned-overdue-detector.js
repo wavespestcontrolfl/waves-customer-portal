@@ -103,7 +103,7 @@ async function runInner() {
         WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
           AND s.scheduled_date <= ((NOW() AT TIME ZONE 'America/New_York')::date)
           AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show', 'rescheduled')
-          AND (s.track_state IS NULL OR s.track_state NOT IN ('completed', 'cancelled'))
+          AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
           AND (s.customer_id IS NOT NULL OR s.reservation_expires_at IS NULL)
           AND s.technician_id IS NULL
           AND s.window_start IS NOT NULL
