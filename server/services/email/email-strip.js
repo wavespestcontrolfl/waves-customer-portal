@@ -123,7 +123,15 @@ function emailPlainText(row) {
         includeLinkUrls: false,
         attributionPatterns: HISTORY_HEADERS,
       });
-      if (parsed.hasQuoteContainer) return parsed.text || text;
+      if (parsed.hasQuoteContainer) {
+        if (!parsed.text) return text;
+        const plainPrefix = stripQuotedAndSignature(text);
+        const norm = (s) => s.replace(/\s*\((?:https?:\/\/|mailto:)[^)\s]+\)/gi, '').replace(/\s+/g, ' ').trim();
+        if (plainPrefix && !norm(parsed.text).includes(norm(plainPrefix))) {
+          return `${plainPrefix}\n${parsed.text}`;
+        }
+        return parsed.text;
+      }
     } catch {
       // Fall back to the existing plain-text part on pathological HTML.
     }

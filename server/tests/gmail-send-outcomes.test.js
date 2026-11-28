@@ -197,8 +197,14 @@ test('emailPlainText preserves a staff reply below an attributed quote container
   }));
   expect(wrappedInGmailQuote).toBe('Please reschedule to Thursday.');
 
+  const wrappedWithTrailing = stripQuotedAndSignature(emailPlainText({
+    body_text: 'Please reschedule to Thursday.\n> Old thread\nThanks',
+    body_html: '<div class="gmail_quote"><p>Please reschedule to Thursday.</p><blockquote>Old thread</blockquote></div><p>Thanks</p>',
+  }));
+  expect(wrappedWithTrailing).toBe('Please reschedule to Thursday.\nThanks');
+
   const linkedReply = stripQuotedAndSignature(emailPlainText({
-    body_text: 'Check the estimate here.\n> Old thread',
+    body_text: 'Check the estimate (https://portal.wavespestcontrol.com/e/1) here.\n> Old thread',
     body_html: '<p>Check the <a href="https://portal.wavespestcontrol.com/e/1">estimate</a> here.</p><blockquote>Old thread</blockquote>',
   }));
   expect(linkedReply).toBe('Check the estimate here.');
