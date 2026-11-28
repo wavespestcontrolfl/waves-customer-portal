@@ -151,4 +151,21 @@ describe('workspace navigation', () => {
     view.rerender(<Fixture enabled={false} />);
     expect(screen.queryByRole('navigation', { name: 'Admin workspaces' })).not.toBeInTheDocument();
   });
+
+  it('toggles dark mode from the sidebar footer for both admin and technician', () => {
+    try {
+      render(<Fixture />);
+      const toggle = screen.getByRole('switch', { name: 'Dark mode' });
+      expect(toggle).toHaveAttribute('aria-checked', 'false');
+      expect(document.documentElement.dataset.adminTheme).toBeUndefined();
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute('aria-checked', 'true');
+      expect(document.documentElement.dataset.adminTheme).toBe('dark');
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute('aria-checked', 'false');
+      expect(document.documentElement.dataset.adminTheme).toBeUndefined();
+    } finally {
+      delete document.documentElement.dataset.adminTheme;
+    }
+  });
 });
