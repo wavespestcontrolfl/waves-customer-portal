@@ -47,15 +47,23 @@ const performedCompleted = (alias) => `
 // sibling record is flagged, it counts when some sibling is completed with a performed outcome, and ONE canonical
 // record (the newest such sibling, id as the tie break) supplies its date, category and technician before any
 // source is looked up.
-function callbackSide({ distinctVisits, performedSourcesOnly, start, endDate }) {
+function callbackSide({ distinctVisits, performedSourcesOnly, excludeInternalTests, start, endDate }) {
+  const notInternalTest = (alias) => (excludeInternalTests
+    ? `\n           AND NOT (${require('./completion-record-invariants')._private.internalTestVisitSql(alias)})`
+    : '');
   if (!distinctVisits) {
-    return { from: 'service_records', where: `cb.is_callback = true${performedSourcesOnly ? performedCompleted('cb') : ''}`, visit: 'NULL', params: [] };
+    return {
+      from: 'service_records',
+      where: `cb.is_callback = true${performedSourcesOnly ? performedCompleted('cb') : ''}${notInternalTest('cb')}`,
+      visit: 'NULL',
+      params: [],
+    };
   }
   return {
     from: `(SELECT DISTINCT ON (${visitKey('x')}) x.id, x.customer_id, x.service_type, x.technician_id, x.service_date, x.created_at, x.scheduled_service_id
           FROM service_records x
          WHERE ${visitKey('x')} IN (SELECT ${visitKey('y')} FROM service_records y WHERE y.service_date >= ? AND y.service_date <= ?)
-           AND ${VISIT_IS_CALLBACK_SQL('x')}${performedSourcesOnly ? performedCompleted('x') : ''}
+           AND ${VISIT_IS_CALLBACK_SQL('x')}${performedSourcesOnly ? performedCompleted('x') : ''}${notInternalTest('x')}
          ORDER BY ${visitKey('x')}, x.created_at DESC, x.id DESC)`,
     where: 'TRUE',
     visit: visitKey('cb'),
@@ -67,16 +75,18 @@ function callbackSide({ distinctVisits, performedSourcesOnly, start, endDate }) 
 
 /**
  * Callback counts by credited technician for callbacks dated start..endDate
- * (YYYY-MM-DD, inclusive). Two opt-in options for the Tech Rewards score, off for every other reader:
+ * (YYYY-MM-DD, inclusive). Opt-in options for the Tech Rewards score, off for every other reader:
  * distinctVisits resolves each scheduled service as ONE visit (a callback when any sibling record is flagged;
  * one canonical record, the newest performed sibling, gives its date, category and technician before any source
- * is chosen; a callback visit is never a source), and performedSourcesOnly requires completed records with a
- * performed outcome (the shared non-performed list in visit-outcomes.js) for callbacks and sources. Returns a
- * Map: technician id (string) or null
- * (no technician anywhere) -> count.
+ * is chosen; a callback visit is never a source), performedSourcesOnly requires completed records with a
+ * performed outcome (the shared non-performed list in visit-outcomes.js) for callbacks and sources, and
+ * excludeInternalTests leaves out internal test customer records so test re-services never penalize a real score.
+ * Returns a Map: technician id (string) or null (no technician anywhere) -> count.
  */
-async function callbackCreditByTechnician(conn, { start, endDate, distinctVisits = false, performedSourcesOnly = false }) {
-  const side = callbackSide({ distinctVisits, performedSourcesOnly, start, endDate });
+async function callbackCreditByTechnician(conn, {
+  start, endDate, distinctVisits = false, performedSourcesOnly = false, excludeInternalTests = false,
+}) {
+  const side = callbackSide({ distinctVisits, performedSourcesOnly, excludeInternalTests, start, endDate });
   const result = await conn.raw(`
     SELECT cb.id AS callback_id,
            cb.service_type AS callback_type,

@@ -5298,6 +5298,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
               carry the action name. */}
           <a
             className="gc-section-cta"
+            data-glass-pill=""
             href={preview ? undefined : `${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf${scope === 'one_time' ? '?scope=one_time' : ''}`}
             target={preview ? undefined : '_blank'}
             rel={preview ? undefined : 'noopener noreferrer'}
@@ -5312,6 +5313,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
             <button
               type="button"
               className="gc-section-cta"
+              data-glass-pill=""
               disabled={!preview && (disabled || state.status === 'sending')}
               onClick={preview ? undefined : () => send('email')}
               aria-label="Email me the PDF"
@@ -5325,6 +5327,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
             <button
               type="button"
               className="gc-section-cta"
+              data-glass-pill=""
               disabled={!preview && (disabled || state.status === 'sending')}
               onClick={preview ? undefined : () => send('sms')}
               aria-label="Text me the link"

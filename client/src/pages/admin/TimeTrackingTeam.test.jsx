@@ -4,7 +4,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { TeamTab, resolveStaffTab } from './TimeTrackingPage';
+import { resolveStaffTab } from './TimeTrackingPage';
+import { TeamTab } from './staff/TeamTab';
 
 function apiResponse(body) {
   return {

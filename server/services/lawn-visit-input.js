@@ -460,10 +460,14 @@ const scale2Variant = (version, system, schema) => {
 
 // The composed system prompt and the response schema, digested once per mode.
 // The prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
-// FALSE_PRECISION_RULE): editing one changes what the
-// model sees without a PROMPT_VERSION bump here, so the context hash seeds
-// with what was actually sent, not only the version label.
-const digestOf = (system, schema) => crypto.createHash('sha256').update(system).update('\n').update(JSON.stringify(schema)).digest('hex');
+// FALSE_PRECISION_RULE): editing one changes what the model sees without a
+// PROMPT_VERSION bump here, so the context hash seeds with what was actually
+// sent, not only the version label. Also stamps the Gemini system-instruction
+// wire channel (`systemInstruction` vs legacy user-content folding) so replays
+// never equate pre- and post-channel-split Gemini reads.
+const GEMINI_SYSTEM_CHANNEL = 'channel:gemini=systemInstruction';
+const digestOf = (system, schema) => crypto.createHash('sha256')
+  .update(system).update('\n').update(JSON.stringify(schema)).update('\n').update(GEMINI_SYSTEM_CHANNEL).digest('hex');
 const PROMPT_DIGEST = digestOf(SYSTEM_PROMPT, RESPONSE_SCHEMA);
 const SHOT_LIST_PROMPT_DIGEST = digestOf(SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA);
 const LIGHTING_PROMPT_DIGEST = digestOf(LIGHTING_SYSTEM_PROMPT, LIGHTING_RESPONSE_SCHEMA);
@@ -536,5 +540,5 @@ function contextHash({ photos = [], photoZones = [], visionContext = {}, shotLis
 }
 
 module.exports = {
-  GATE, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION, LIGHTING_PROMPT_VERSION, SHOT_LIST_LIGHTING_PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA, LIGHTING_RESPONSE_SCHEMA, SHOT_LIST_LIGHTING_RESPONSE_SCHEMA, LIGHTING_SYSTEM_PROMPT, SHOT_LIST_LIGHTING_SYSTEM_PROMPT, PROMPT_DIGEST, SHOT_LIST_PROMPT_DIGEST, LIGHTING_PROMPT_DIGEST, SHOT_LIST_LIGHTING_PROMPT_DIGEST, SCALE2_SUFFIX, SCALE2_VARIANTS, promptFor, variantOfVersion, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
+  GATE, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION, LIGHTING_PROMPT_VERSION, SHOT_LIST_LIGHTING_PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA, LIGHTING_RESPONSE_SCHEMA, SHOT_LIST_LIGHTING_RESPONSE_SCHEMA, LIGHTING_SYSTEM_PROMPT, SHOT_LIST_LIGHTING_SYSTEM_PROMPT, GEMINI_SYSTEM_CHANNEL, PROMPT_DIGEST, SHOT_LIST_PROMPT_DIGEST, LIGHTING_PROMPT_DIGEST, SHOT_LIST_LIGHTING_PROMPT_DIGEST, SCALE2_SUFFIX, SCALE2_VARIANTS, promptFor, variantOfVersion, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
 };

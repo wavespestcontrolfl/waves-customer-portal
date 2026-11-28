@@ -50,4 +50,38 @@ describe('SafeMarkdown', () => {
     expect(container).toHaveTextContent('<script>alert(1)</script>');
     expect(container).toHaveTextContent('[click](javascript:alert(1))');
   });
+
+  it('renders markdown pipe tables as accessible HTML tables', () => {
+    const { container } = render(
+      <SafeMarkdown markdown={'| Week | Pay |\n|---|---|\n| Slow | **$920** |\n| Strong | $1,210 |'} />,
+    );
+    expect(container.querySelectorAll('table thead th')).toHaveLength(2);
+    expect(container.querySelectorAll('table tbody tr')).toHaveLength(2);
+    expect(container.querySelector('table tbody strong')).toHaveTextContent('$920');
+  });
+
+  it('preserves escaped pipes inside markdown table cells without dropping trailing cells', () => {
+    const { container } = render(
+      <SafeMarkdown markdown={'| Rule | Formula | Notes |\n|---|---|---|\n| Pay | $23/hr \\| 22% | Final cell |'} />,
+    );
+    const cells = [...container.querySelectorAll('table tbody td')].map((td) => td.textContent);
+    expect(cells).toEqual(['Pay', '$23/hr | 22%', 'Final cell']);
+  });
+
+  it('falls back to literal text when a table exceeds the rendered cell budget', () => {
+    const headers = Array.from({ length: 10 }, (_, i) => `C${i}`).join(' | ');
+    const sep = Array.from({ length: 10 }, () => '---').join(' | ');
+    const rows = Array.from({ length: 105 }, () => '| x |').join('\n');
+    const { container } = render(<SafeMarkdown markdown={`| ${headers} |\n| ${sep} |\n${rows}`} />);
+    expect(container.querySelector('table')).toBeNull();
+    expect(container).toHaveTextContent('C0 | C1');
+  });
+
+  it('falls back to literal text when a body row has more cells than the header row', () => {
+    const { container } = render(
+      <SafeMarkdown markdown={'| A | B |\n|---|---|\n| 1 | 2 | kept-third-cell |'} />,
+    );
+    expect(container.querySelector('table')).toBeNull();
+    expect(container).toHaveTextContent('kept-third-cell');
+  });
 });

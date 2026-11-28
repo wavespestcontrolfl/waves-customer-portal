@@ -49,6 +49,7 @@ jest.setTimeout(120000);
       draft_was_empty boolean NOT NULL DEFAULT false, verdict varchar(20) NOT NULL, scores jsonb, notes text,
       model varchar(80), prompt_version varchar(40), judged_at timestamptz DEFAULT now())`);
     await require('../models/migrations/20261025000000_shadow_judgments_judge_v2').up(database);
+    await require('../models/migrations/20261128030000_message_drafts_post_visit_revision').up(database);
   });
   afterAll(async () => {
     jest.restoreAllMocks();
@@ -87,8 +88,14 @@ jest.setTimeout(120000);
     expect((await database('shadow_draft_judgments').where({ draft_id: draftId }).first()).could_send).toBe('yes_with_edit');
   });
 
-  test('writer: persists judge_version j2 and could_send; prompt_version unchanged', async () => {
+  test('writer: persists judge_version j2 and could_send; prompt_version unchanged; skips post_visit_closeout revisions', async () => {
     const draftId = await seedPair();
+    const orig = await database('message_drafts').where({ id: draftId }).first();
+    await database('message_drafts').insert({
+      customer_id: orig.customer_id, inbound_message: orig.inbound_message, draft_response: 'Updated after visit.',
+      intent: 'GENERAL', status: 'shadow', sms_log_id: orig.sms_log_id, created_at: orig.created_at,
+      prompt_version: 'house_voice_v12', draft_trigger: 'post_visit_closeout', supersedes_draft_id: draftId,
+    });
     mockAnthropicCreate.mockResolvedValue(judgeReply({ could_send_instead: 'yes_with_edit' }));
     const { judgeShadowDrafts } = require('../services/sms-shadow-judge');
     expect((await judgeShadowDrafts({ batchLimit: 5 })).judged).toBe(1);

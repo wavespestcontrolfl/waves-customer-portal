@@ -635,7 +635,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const january = await lawn({ date: '2027-01-10' });
       await spray(january.customerId, january.property.id, '2026-12-20');
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: january.visit.id })))
-        .resolves.toEqual(expect.stringMatching(/only 21 days since last app \(min 42\)/));
+        .resolves.toEqual([{ kind: 'limit', message: expect.stringMatching(/only 21 days since last app \(min 42\)/) }]);
       const february = await lawn({ date: '2027-02-05' });
       await spray(february.customerId, february.property.id, '2026-12-20');
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: february.visit.id }))).resolves.toBeUndefined();
@@ -647,7 +647,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await spray(late.customerId, late.property.id, '2026-05-01');
       expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: late.visit.id })).toMatch(/only 17 days before the next recorded app on 5\/1\/2026 \(min 42\)\. Latest allowed before it: 3\/20\/2026\./);
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: late.visit.id })))
-        .resolves.toEqual(expect.any(String));
+        .resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
       const full = await lawn({ date: '2026-04-14', bermuda: true });
       await spray(full.customerId, full.property.id, '2026-06-20');
       await spray(full.customerId, full.property.id, '2026-08-20');
@@ -713,20 +713,20 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         await spray(f, '2026-04-20');
         expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/LIMIT REACHED/);
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
-          .resolves.toEqual(expect.any(String));
+          .resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
       });
     });
 
-    test('the switch turned on after the preflight: the pair rule is enforced again in the transaction', async () => {
+    test('the switch turned on after the preflight: the pair rule returns a typed pair warning in the transaction instead of blocking (owner 2026-11-26)', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-20' });
       // Preflight: the visit does not carry the step yet, so a lone Fusilade II passes.
       expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: f.visit.id })).toBeNull();
       await knex('customer_turf_profiles').where({ customer_id: f.customerId, active: true }).update({ bermuda_removal: true });
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id })))
-        .rejects.toMatchObject({ code: 'lawn_bermuda_pair_required', message: expect.stringMatching(/without Recognition/) });
+        .resolves.toEqual([{ kind: 'pair', message: expect.stringMatching(/without Recognition/) }]);
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id })))
-        .rejects.toMatchObject({ code: 'lawn_bermuda_pair_required', message: expect.stringMatching(/Recognition goes on with Fusilade II/) });
+        .resolves.toEqual([{ kind: 'pair', message: expect.stringMatching(/Recognition goes on with Fusilade II/) }]);
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
     });
 
@@ -753,7 +753,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         const f = await asService(await lawn({ date: '2026-04-14', bermuda: true }), 'Pest Control Quarterly');
         await spray(f, '2026-03-01');
         await spray(f, '2026-03-02');
-        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id }))).resolves.toEqual(expect.any(String));
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id }))).resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
       });
 
       test('the in-transaction check returns the cap message instead of throwing (owner 2026-11-26); the not-configured refusal still throws', async () => {
@@ -762,7 +762,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         await spray(f, '2026-03-01');
         await spray(f, '2026-03-02');
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id })))
-          .resolves.toEqual(expect.stringMatching(/LIMIT REACHED|min 42/));
+          .resolves.toEqual([{ kind: 'limit', message: expect.stringMatching(/LIMIT REACHED|min 42/) }]);
       });
 
       test('a lawn visit pinned to 2026.05 is not a step visit; pinned to v13 or unpinned it is, and is enforced', async () => {
@@ -779,9 +779,12 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
           expect(await bermudaPairViolation(knex, submitted(rec), { serviceId: f.visit.id })).toMatch(/with Fusilade II/);
           await spray(f, '2026-03-01');
           await spray(f, '2026-03-02');
-          // Fusilade II alone on a step visit is the pair rule's refusal; the complete pair meets the cap.
-          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).rejects.toMatchObject({ code: 'lawn_bermuda_pair_required' });
-          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toEqual(expect.any(String));
+          // Fusilade II alone on a 3rd step visit returns BOTH pair and locked cap warnings; the complete pair meets the cap warning.
+          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).resolves.toEqual([
+            { kind: 'pair', message: expect.stringMatching(/without Recognition/) },
+            { kind: 'limit', message: expect.stringMatching(/LIMIT REACHED|days since last app/) },
+          ]);
+          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
         }
       });
     });
@@ -798,16 +801,19 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         expect(await bermudaPairViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
       });
 
-      test('the in-transaction caps apply on that step visit: a third spray is warned, and Fusilade II alone is capped there too', async () => {
+      test('the in-transaction caps apply on that step visit: a third spray is warned, and Fusilade II alone on a 3rd spray returns BOTH pair and limit warnings', async () => {
         setGates();
         const f = await zoysia();
         await spray(f, '2026-03-01');
         await spray(f, '2026-03-02'); // Recognition x2: the year's quota used (and < 42 days apart)
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
-          .resolves.toEqual(expect.any(String));
-        // Fusilade II alone on a step visit is the pair rule's refusal in the transaction (it is bed work only where the step is not carried).
+          .resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
+        // Fusilade II alone on a 3rd step visit returns BOTH the pair warning AND the locked cap warning (P1-3).
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id })))
-          .rejects.toMatchObject({ code: 'lawn_bermuda_pair_required' });
+          .resolves.toEqual([
+            { kind: 'pair', message: expect.stringMatching(/without Recognition/) },
+            { kind: 'limit', message: expect.stringMatching(/LIMIT REACHED|days since last app/) },
+          ]);
         expect(await bermudaLimitViolation(knex, submitted(fus), { serviceId: f.visit.id })).toMatch(/LIMIT REACHED|days since last app/);
       });
 
@@ -1085,7 +1091,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
       const warned = results.map((r) => r.value).filter(Boolean);
       expect(warned).toHaveLength(1);
-      expect(warned[0]).toMatch(/LIMIT REACHED|days since last app/);
+      expect(warned[0]).toEqual([{ kind: 'limit', message: expect.stringMatching(/LIMIT REACHED|days since last app/) }]);
       const sprays = await knex('property_application_history').where({ customer_id: f.customerId, product_id: rec.id });
       expect(sprays).toHaveLength(3); // the prior one plus both
     });
@@ -1097,7 +1103,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
       await priorSpray(f, '2026-04-20'); // a concurrent completion commits its spray
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
-        .resolves.toEqual(expect.stringMatching(/2\/2 applications this year — LIMIT REACHED/));
+        .resolves.toEqual([{ kind: 'limit', message: expect.stringMatching(/2\/2 applications this year — LIMIT REACHED/) }]);
     });
 
     test('no step product submitted and gate off are untouched; a different property\'s sprays never count', async () => {
@@ -1127,14 +1133,14 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         // ...then the account changed. The in-transaction check still refuses the third spray.
         await change(f);
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
-          .resolves.toEqual(expect.stringMatching(/LIMIT REACHED/));
+          .resolves.toEqual([{ kind: 'limit', message: expect.stringMatching(/LIMIT REACHED/) }]);
       }
       // Any month: a May lawn visit that never carried the step is capped too.
       const may = await lawn({ date: '2026-05-12' });
       await priorSpray(may, '2026-03-01');
       await priorSpray(may, '2026-04-20');
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: may.visit.id })))
-        .resolves.toEqual(expect.any(String));
+        .resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
       // Fusilade II alone on a visit that does not carry the step is bed work: consumes and is refused nothing.
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: may.visit.id }))).resolves.toBeUndefined();
     });
@@ -1165,7 +1171,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const f = await lawn({ date: '2026-06-20', bermuda: true });
       await priorSpray(f, '2026-03-01');
       await priorSpray(f, '2026-04-20');
-      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id }))).resolves.toEqual(expect.any(String));
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id }))).resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
     });
 
@@ -1210,7 +1216,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const results = await Promise.allSettled([first, run(explicit)]);
       // Owner 2026-11-26: a cap is a warning. The lock still serializes them: both record, and the one that waited gets the cap warning.
       expect(results[0]).toMatchObject({ status: 'fulfilled', value: undefined });
-      expect(results[1]).toMatchObject({ status: 'fulfilled', value: expect.any(String) });
+      expect(results[1]).toMatchObject({ status: 'fulfilled', value: [{ kind: 'limit', message: expect.any(String) }] });
     });
 
     test('the propertyless visit is judged against that sole property\'s history', async () => {

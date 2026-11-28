@@ -52,6 +52,7 @@ import {
 import useIsMobile from '../hooks/useIsMobile';
 import useAppNotifications from '../hooks/useAppNotifications';
 import { isNativeApp, nativePlatform } from '../native/platform';
+import { dismissVisibleDialog, minimizeOrExitAndroidApp, registerBackButtonHandler } from '../native/nativeBackButton';
 import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
@@ -966,7 +967,7 @@ function BeforeAfterSlider({ beforeAfter }) {
         paddingBottom: 16,
       }}>
         <div style={{
-          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
           <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>
@@ -990,7 +991,7 @@ function BeforeAfterSlider({ beforeAfter }) {
         transition: dragging.current ? 'none' : 'clip-path 0.05s ease-out',
       }}>
         <div style={{
-          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
           <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>
@@ -1452,6 +1453,12 @@ function oneTapTime12(value) {
   return `${hour}:${String(m || 0).padStart(2, '0')} ${suffix}`;
 }
 
+function oneTapArrivalWindow(windowStart) {
+  if (!windowStart) return '';
+  const end = arrivalWindowEnd(windowStart);
+  return end ? `${oneTapTime12(windowStart)}–${oneTapTime12(end)}` : oneTapTime12(windowStart);
+}
+
 function oneTapDayLabel(date) {
   const [y, m, d] = String(date || '').split('-').map(Number);
   const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1, 12));
@@ -1832,6 +1839,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     );
   };
 
+  const desktopScrimBlur = compact ? 'none' : 'blur(5px)';
+
   // Portaled to <body>: the launch button lives inside a data-glass card
   // whose backdrop-filter makes it the fixed-position containing block —
   // rendered in place, the overlay pins to the card instead of the viewport
@@ -1840,7 +1849,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
       background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
-      backdropFilter: compact ? 'none' : 'blur(5px)',
+      backdropFilter: desktopScrimBlur,
+      WebkitBackdropFilter: desktopScrimBlur,
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',
@@ -1870,7 +1880,6 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
         <header style={{
           flexShrink: 0,
           background: 'rgba(255,255,255,0.96)',
-          backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           padding: compact
             ? 'calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 12px calc(14px + env(safe-area-inset-left, 0px))'
@@ -1979,7 +1988,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
                         }}
                       >
                         <span style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
-                          Arrival {oneTapTime12(slot.windowStart)}–{oneTapTime12(slot.windowEnd)}
+                          Arrival {oneTapArrivalWindow(slot.windowStart)}
                         </span>
                         {slot.routeOptimal && (
                           <span style={{
@@ -2007,7 +2016,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
                 {priceRows(init.pricing, init.perVisit)}
                 <div style={{ height: 6 }} />
                 {summaryRow('First visit', selectedSlot
-                  ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`
+                  ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapArrivalWindow(selectedSlot.windowStart)}`
                   : '—')}
               </div>
               {existingServicesBox(init.pricing)}
@@ -2076,7 +2085,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
                 {result?.firstVisit?.date ? (
                   <>
                     <div style={{ height: 6 }} />
-                    {summaryRow('First visit', `${oneTapDayLabel(result.firstVisit.date)}${result.firstVisit.windowStart ? `, ${oneTapTime12(result.firstVisit.windowStart)}–${oneTapTime12(result.firstVisit.windowEnd)}` : ''}`)}
+                    {summaryRow('First visit', `${oneTapDayLabel(result.firstVisit.date)}${result.firstVisit.windowStart ? `, ${oneTapArrivalWindow(result.firstVisit.windowStart)}` : ''}`)}
                   </>
                 ) : null}
               </div>
@@ -2942,9 +2951,9 @@ function SavedHomeView({ customer, entry, identity, property }) {
           padding: '12px 16px', paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
           display: 'flex', alignItems: 'center', gap: 10,
         }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <img src="/waves-logo.png" alt="" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Waves</div>
             <div role="status" data-testid="portal-updating" style={{ fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.3 }}>Updating…</div>
           </div>
         </div>
@@ -2973,10 +2982,15 @@ function SavedVisitDetails({ visits }) {
     {visits.map(visit => <li key={visit.id} style={{ marginBottom: 12 }}>
       <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
       {visit.propertyAddress && <div>{visit.propertyAddress}</div>}
-      <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
-      {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
-      {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
-      {!visit.windowStart && visit.day_only && visit.arrival_note && <div>{visit.arrival_note}</div>}
+      <div>{visit.customerPickBy ? PICK_DAY_LABEL : parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
+      {visit.customerPickBy ? (
+        <div>Pick a time</div>
+      ) : visit.windowStart ? (
+        <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>
+      ) : visit.day_only && visit.arrival_note ? (
+        /* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */
+        <div>{visit.arrival_note}</div>
+      ) : null}
     </li>)}
   </ul>;
 }
@@ -3011,6 +3025,109 @@ function rememberPetNameAskDone(customerId) {
     const ids = JSON.parse(localStorage.getItem(PET_NAME_ASK_DONE_KEY) || '[]').filter((id) => id !== customerId);
     localStorage.setItem(PET_NAME_ASK_DONE_KEY, JSON.stringify([...ids, customerId].slice(-20)));
   } catch { /* storage unavailable: the card hides for this visit to Home only */ }
+}
+
+function dashboardDaysUntil(nextService) {
+  if (!nextService || nextService.customerPickBy) return null;
+  return daysUntilEtDate(nextService.date);
+}
+
+function dashboardNextDateLabel({ nextServiceStatus, nextService, nextDate }) {
+  if (nextServiceStatus === 'loading') return 'Checking schedule';
+  if (nextServiceStatus === 'error') return 'Schedule unavailable';
+  if (nextService?.customerPickBy) return PICK_DAY_LABEL;
+  if (nextDate && !isNaN(nextDate)) {
+    return nextDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+  return 'No visit scheduled';
+}
+
+function isReadOnlyVisitCustomer(customer) {
+  return !!(customer?.cancelled || customer?.actor?.kind === 'contact');
+}
+
+function customerPickDeadlineNote(pickBy, { canPickNow = true, nowMs = Date.now() } = {}) {
+  const at = new Date(pickBy);
+  const label = formatPickBy(pickBy);
+  if (!Number.isNaN(at.getTime()) && at.getTime() <= nowMs) {
+    return canPickNow
+      ? `The pick-by time passed (${label}). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before.`
+      : `The pick-by time passed (${label}). Overnight we'll book the best open time and text you 3 days before.`;
+  }
+  return canPickNow
+    ? `Pick a new time by ${label}. If you don't, we'll book the best open time and text you 3 days before.`
+    : `The pick-by time is ${label}. If no time is picked, we'll book the best open time and text you 3 days before.`;
+}
+
+function CustomerPickDeadlineNote({ pickBy, canPickNow = true }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const at = new Date(pickBy).getTime();
+    if (Number.isNaN(at)) return undefined;
+    const remaining = at - Date.now();
+    if (remaining <= 0) return undefined;
+    const timer = setTimeout(() => setTick((n) => n + 1), Math.min(remaining, 2147483647));
+    return () => clearTimeout(timer);
+  }, [pickBy, tick]);
+  return <>{customerPickDeadlineNote(pickBy, { canPickNow })}</>;
+}
+
+function renderDashboardNextVisitMeta(nextService, customer, muted) {
+  if (!nextService) return null;
+  if (nextService.customerPickBy) {
+    const canPickNow = Boolean(nextService.rescheduleUrl && !isReadOnlyVisitCustomer(customer));
+    return (
+      <>
+        <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Pick a time</div>
+        <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
+          <CustomerPickDeadlineNote pickBy={nextService.customerPickBy} canPickNow={canPickNow} />
+        </div>
+      </>
+    );
+  }
+  if (nextService.windowStart) {
+    return (
+      <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+        {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
+      </div>
+    );
+  }
+  if (nextService.day_only && nextService.arrival_note) {
+    return (
+      <div data-testid="next-visit-day-only-note" style={{ marginTop: 2, fontSize: 14, color: muted }}>
+        {nextService.arrival_note}
+      </div>
+    );
+  }
+  return null;
+}
+
+function renderDashboardPickLink(nextService, customer, buttonStyle) {
+  if (!nextService?.rescheduleUrl || isReadOnlyVisitCustomer(customer)) return null;
+  return (
+    <a href={nextService.rescheduleUrl} data-glass-accent="" data-glass-size="primary" style={{
+      ...buttonStyle,
+      textDecoration: 'none',
+      position: 'relative',
+    }}>Pick a time</a>
+  );
+}
+
+function renderDashboardPickBar(nextService, customer, primaryStyle, secondaryStyle, onOpenPrepPhotos) {
+  const pickLink = renderDashboardPickLink(nextService, customer, primaryStyle);
+  const prepBtn = nextService?.prepPhotos?.eligible ? (
+    <button type="button" onClick={() => onOpenPrepPhotos(nextService.id)} data-glass-accent="" style={{
+      ...secondaryStyle,
+      position: 'relative',
+    }}>Send photos</button>
+  ) : null;
+  if (!pickLink && !prepBtn) return null;
+  return (
+    <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+      {pickLink}
+      {prepBtn}
+    </div>
+  );
 }
 
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, onOpenAccess, onRescheduleRequest, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
@@ -3311,15 +3428,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
   const currentBalance = balanceReady ? Number(balance.currentBalance || 0) : 0;
   const hasBalance = balanceReady && currentBalance > 0;
   const nextDate = nextService ? parseDate(nextService.date) : null;
-  const daysUntilNextService = nextService ? daysUntilEtDate(nextService.date) : null;
+  const daysUntilNextService = dashboardDaysUntil(nextService);
   const nextServiceReady = nextServiceStatus === 'ready';
-  const nextDateLabel = nextServiceStatus === 'loading'
-    ? 'Checking schedule'
-    : nextServiceStatus === 'error'
-      ? 'Schedule unavailable'
-      : nextDate && !isNaN(nextDate)
-        ? nextDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-        : 'No visit scheduled';
+  const nextDateLabel = dashboardNextDateLabel({ nextServiceStatus, nextService, nextDate });
   const onBalanceTap = balanceError ? loadBalance : () => onSwitchTab?.('billing');
   const balanceLabel = balancePending
     ? 'Checking balance'
@@ -3442,17 +3553,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
                 <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
                 </div>
-                {nextService?.windowStart && (
-                  <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                    {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
-                  </div>
-                )}
-                {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
-                {!nextService?.windowStart && nextService?.day_only && nextService.arrival_note && (
-                  <div data-testid="next-visit-day-only-note" style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                    {nextService.arrival_note}
-                  </div>
-                )}
+                {renderDashboardNextVisitMeta(nextService, customer, muted)}
               </div>
             </div>
             {daysUntilNextService != null && (
@@ -3464,7 +3565,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
               </div>
             )}
           </div>
-          {nextService ? (
+          {nextService?.customerPickBy ? (
+            renderDashboardPickBar(nextService, customer, dashboardPrimaryButton, dashboardSecondaryButton, setVisitPrepSheetFor)
+          ) : nextService ? (
             <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
               {!nextService.customerConfirmed ? (
                 <button type="button" disabled={confirmingVisit} onClick={async () => {
@@ -5990,10 +6093,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     // GATE_DAY_ONLY_PROMISE: the time line above already says the window is texted the day before.
     if (s.day_only) return null;
     if (s.customerPickBy) {
+      const canPickNow = Boolean(s.rescheduleUrl && !readOnlyVisits);
       return (
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
-          {`Pick a new time by ${formatPickBy(s.customerPickBy)}. If you don't, we'll book the best open time and text you 3 days before.`}
-          {s.rescheduleUrl && !readOnlyVisits && (
+          <CustomerPickDeadlineNote pickBy={s.customerPickBy} canPickNow={canPickNow} />
+          {canPickNow && (
             <div style={{ marginTop: 8 }}>
               <a href={s.rescheduleUrl} data-glass-accent="" style={{
                 ...secondaryButton, padding: '9px 14px', textDecoration: 'none', fontSize: 14, display: 'inline-flex', alignItems: 'center',
@@ -8092,7 +8196,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
             {primaryOpenInvoice && (
-              <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+              <div id="billing-open-invoices" style={{ marginTop: 10, display: 'grid', gap: 8 }}>
                 <a href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, width: '100%', boxSizing: 'border-box' }} data-glass-accent="">
                   Pay {money(primaryOpenInvoice.amountDue)} now
                 </a>
@@ -8667,11 +8771,25 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
               </div>
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {primaryOpenInvoice && (
-                    <a data-glass-accent="" href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
-                      Pay {money(primaryOpenInvoice.amountDue)} now
+                  {/* Only link directly to Pay when the server verified THIS failed
+                      attempt's own open invoice (never openInvoices[0], which can
+                      belong to a different service/amount). Legacy unlinked rows
+                      offer a safe scroll to the open-invoices card instead; rows
+                      whose invoice is already settled show no Pay action. */}
+                  {p.payableInvoice?.payUrl ? (
+                    <a data-glass-accent="" href={p.payableInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
+                      Pay {money(p.payableInvoice.amountDue)} now
                     </a>
-                  )}
+                  ) : (!p.invoiceLinked && primaryOpenInvoice) ? (
+                    <button
+                      type="button"
+                      data-glass-accent=""
+                      onClick={() => document.getElementById('billing-open-invoices')?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' })}
+                      style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14, border: 'none', cursor: 'pointer' }}
+                    >
+                      View open invoices
+                    </button>
+                  ) : null}
                   {/* Cancelled accounts have no card management: the setup-
                       intent route is not on the cancelled allowlist, so this
                       second entry point must hide with the section (the pay
@@ -10591,7 +10709,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
 // 'rolling365' (the last 365 days) adds "in the last 12 months"; an older response without the field, or 'calendar_year', reads as before.
 export const weedTreatmentsLine = (stats) => {
   if (stats?.celsiusApplicationsThisYear == null) return null;
-  return `${stats.celsiusApplicationsThisYear} weed treatments${stats.celsiusWindow === 'rolling365' ? ' in the last 12 months' : ''}`;
+  const count = stats.celsiusApplicationsThisYear;
+  const noun = Number(count) === 1 ? 'weed treatment' : 'weed treatments';
+  return `${count} ${noun}${stats.celsiusWindow === 'rolling365' ? ' in the last 12 months' : ''}`;
 };
 
 // The Celsius tip follows the program: the stats route's celsiusMaxPerYear (2 under the v13 lawn
@@ -12215,6 +12335,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         zIndex: 180,
         background: 'rgba(15,23,42,0.48)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex',
         alignItems: compact ? 'flex-end' : 'center',
         justifyContent: 'center',
@@ -17087,6 +17208,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
   if (!open) return null;
 
+  const overlayBackdropBlur = compact ? 'none' : 'blur(5px)';
+
   return (
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
@@ -17094,7 +17217,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       // Mobile: full-screen sheet — keep the backdrop clear so the glass
       // modal frosts the portal scene instead of an opaque tan wash.
       background: compact ? 'transparent' : 'rgba(15,23,42,0.48)',
-      backdropFilter: compact ? 'none' : 'blur(5px)',
+      backdropFilter: overlayBackdropBlur,
+      WebkitBackdropFilter: overlayBackdropBlur,
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',
@@ -17133,8 +17257,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       >
         <header style={{
           flexShrink: 0,
-          background: 'rgba(255,255,255,0.35)',
-          backdropFilter: 'blur(12px)',
+          background: 'rgba(255,255,255,0.88)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           // Full-screen overlay: keep the header below the iOS status bar / notch.
           padding: compact
@@ -17659,8 +17782,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
             <footer style={{
               flexShrink: 0,
               borderTop: '1px solid rgba(255,255,255,0.65)',
-              background: 'rgba(255,255,255,0.35)',
-              backdropFilter: 'blur(12px)',
+              background: 'rgba(255,255,255,0.88)',
               padding: compact
                 ? '10px calc(14px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))'
                 : '14px 18px',
@@ -17862,20 +17984,21 @@ function MyRequestsCard({ focusRequestId } = {}) {
 // =========================================================================
 // MAIN PORTAL
 // =========================================================================
-// Bottom nav pins the five most-used destinations; the rest live behind a
-// "More" sheet. Short labels picked specifically for the 5-across layout.
+// Bottom nav pins the four primary destinations plus "More" (5 items across,
+// matching Apple HIG / Material 3 mobile bar limits); the rest live behind the
+// "More" sheet. Desktop keeps all tabs via [...PRIMARY_TABS, ...MORE_TABS].
 const PRIMARY_TABS = [
   { id: 'dashboard', label: 'Home', icon: 'home' },
-  { id: 'plan', label: 'Plan', icon: 'plan' },
   { id: 'visits', label: 'Visits', icon: 'calendar' },
   { id: 'billing', label: 'Billing', icon: 'card' },
-  { id: 'refer', label: 'Refer', icon: 'gift' },
+  { id: 'plan', label: 'Plan', icon: 'plan' },
 ];
 const MORE_TABS = [
   // Listed only while the server offers it (usePortalMessagesGate answers 200).
   { id: 'messages', label: 'Messages', icon: 'message', description: 'Questions and answers with our team' },
   { id: 'documents', label: 'Documents', icon: 'document', description: 'Reports, invoices, and agreements' },
   { id: 'property', label: 'My Property', icon: 'house', description: 'Property details and service notes' },
+  { id: 'refer', label: 'Refer', icon: 'gift', description: 'Share Waves with friends and neighbors' },
   { id: 'learn', label: 'Learn', icon: 'bulb', description: 'Local tips, articles, and FAQs' },
 ];
 // C4: the read-only surfaces a cancelled customer keeps — plan (cancelled
@@ -17963,7 +18086,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef,
       left: 'calc(10px + env(safe-area-inset-left, 0px))',
       right: 'calc(10px + env(safe-area-inset-right, 0px))',
       zIndex: 98,
-      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
+      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
       borderRadius: 8,
       boxShadow: '0 14px 32px rgba(15,23,42,0.16)',
@@ -18031,6 +18154,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
         position: 'fixed', inset: 0, zIndex: 150,
         background: 'rgba(15,23,42,0.42)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
@@ -18223,6 +18347,7 @@ function WavesChatSheet({ onClose, onUnread, firstName }) {
         ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
         background: 'rgba(15,23,42,0.42)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
         padding: compact ? 0 : 24,
         boxSizing: 'border-box',
@@ -18617,7 +18742,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
     <div data-glass-scrim="" style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, top: 0, zIndex: 200,
       ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
-      background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)',
+      background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)', WebkitBackdropFilter: 'blur(5px)',
       display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
       padding: compact ? 0 : 24,
     }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -18659,7 +18784,6 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           background: 'rgba(255,255,255,0.96)',
-          backdropFilter: 'blur(12px)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <img src="/waves-logo.png" alt="Waves" style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }} />
@@ -18792,6 +18916,25 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
 // on screen, unlocked and with no sheet open, before the app asks.
 const APP_RATING_ASK_DELAY_MS = 8000;
 
+function usePendingProfileState(customer) {
+  const customerId = customer?.id;
+  const activeIdRef = useRef(customerId);
+  activeIdRef.current = customerId;
+  const [state, setState] = useState({ ownerId: null, email: '', notice: '' });
+  const isOwner = state.ownerId === customerId;
+  const setEmail = useCallback((nextEmail) => {
+    const originId = customerId;
+    if (activeIdRef.current !== originId) return;
+    setState((prev) => ({ ownerId: originId, email: nextEmail, notice: prev.ownerId === originId ? prev.notice : '' }));
+  }, [customerId]);
+  const setNotice = useCallback((nextNotice) => {
+    const originId = customerId;
+    if (activeIdRef.current !== originId) return;
+    setState((prev) => ({ ownerId: originId, email: prev.ownerId === originId ? prev.email : '', notice: nextNotice }));
+  }, [customerId]);
+  return [isOwner ? state.email : '', setEmail, isOwner ? state.notice : '', setNotice];
+}
+
 export default function PortalPage() {
   const { customer, customerSaved = false, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
@@ -18867,6 +19010,7 @@ export default function PortalPage() {
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
   const [showMenu, setShowMenu] = useState(false);
+  const [pendingProfileEmail, setPendingProfileEmail, pendingProfileNotice, setPendingProfileNotice] = usePendingProfileState(customer);
   const accountMenuDialogRef = useModalFocus(showMenu, () => setShowMenu(false));
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
@@ -19096,6 +19240,30 @@ export default function PortalPage() {
     };
   }, [showMenu]);
 
+  // Android hardware / gesture Back button: dismiss topmost portal sheet or
+  // menu first, then return from a secondary tab to Home before allowing the
+  // native back handler to minimize the app.
+  useEffect(() => registerBackButtonHandler(() => {
+    if (showReportIssue) { setShowReportIssue(false); setReportIssuePrefill(null); return true; }
+    if (showChat) { setShowChat(false); setChatPrompt(null); return true; }
+    if (showWavesChat) { setShowWavesChat(false); return true; }
+    if (showPhotoId) { setShowPhotoId(false); return true; }
+    if (showMoreSheet) { setShowMoreSheet(false); return true; }
+    if (showMenu) { setShowMenu(false); return true; }
+    // Give any active accessible modal inside the current tab (e.g. DocumentPreview,
+    // Reschedule, Cancel) first chance to dismiss before switching tabs to Home.
+    if (dismissVisibleDialog()) return true;
+    if (activeTab !== homeTab) {
+      switchTab(homeTab);
+      return true;
+    }
+    // Already at the resolved home tab (including ?tab=visits / ?tab=plan for
+    // cancelled or contact sessions): minimize cleanly instead of falling back
+    // to window.history.back(), which can ping-pong back to a previous tab.
+    void minimizeOrExitAndroidApp();
+    return true;
+  }), [showReportIssue, showChat, showWavesChat, showPhotoId, showMoreSheet, showMenu, activeTab, homeTab]);
+
   if (!customer) return null;
 
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}` || 'W';
@@ -19282,9 +19450,9 @@ export default function PortalPage() {
         position: 'sticky', top: 0, zIndex: 100,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 0 }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <img src="/waves-logo.png" alt="" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Waves</div>
           </div>
         </div>
         {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
@@ -19425,7 +19593,14 @@ export default function PortalPage() {
                     </div>
                   </div>
                   {/* Edit own name and email (GATE_CUSTOMER_PROFILE_EDIT): /auth/me profileEdit is true only while the gate is on. */}
-                  <ProfileEditCard customer={customer} refreshCustomer={refreshCustomer} />
+                  <ProfileEditCard
+                    customer={customer}
+                    refreshCustomer={refreshCustomer}
+                    pendingEmail={pendingProfileEmail}
+                    onPendingEmailChange={setPendingProfileEmail}
+                    notice={pendingProfileNotice}
+                    onNoticeChange={setPendingProfileNotice}
+                  />
                 </div>
                 {propertiesError && (
                   <div role="alert" style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}`, background: '#FFF7ED' }}>
@@ -19671,7 +19846,7 @@ export default function PortalPage() {
                     onClick={async () => {
                       setShowMenu(false);
                       const confirmed = await showCustomerConfirm(
-                        'This permanently removes your access to the app and your portal account. For questions about active service or billing, please contact us first — this can’t be undone from the app.',
+                        `This permanently removes your app and portal login. Deleting your account here does not cancel active service plans, upcoming visits, or Auto Pay — cancel your plan or contact us at ${WAVES_SUPPORT_PHONE_DISPLAY} first if you want service or billing stopped. This can’t be undone from the app.`,
                         { title: 'Delete your Waves account?', confirmLabel: 'Delete account', danger: true },
                       );
                       if (!confirmed) return;

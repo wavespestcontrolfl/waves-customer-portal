@@ -72,7 +72,7 @@ describe('RainOutSheet: stops a rest-of-route move would land outside the shift'
     todayRow.routeConflicts = [{ isRouteSelfCollision: true, windowStart: '15:00', windowEnd: '16:00' }];
     await open();
     restOfRoute();
-    expect(screen.getByText(/the schedule will block this move\. Pick a different time\./)).toBeInTheDocument();
+    expect(screen.getByText(/moving here will double-book this slot and still text the customer if checked\. Pick a different time to avoid stacking\./)).toBeInTheDocument();
     expect(screen.getByText("⚠️ With the rest of the route, 1 stop lands outside the technician's shift hours (5:00 PM-6:00 PM). Shift hours alone do not block this move.")).toBeInTheDocument();
     expect(screen.queryByText(/still allowed/)).not.toBeInTheDocument();
   });

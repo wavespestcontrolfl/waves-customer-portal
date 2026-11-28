@@ -667,7 +667,14 @@ function palmCountGateFor(row, carriedCount) {
   return { confirmedPalmCount, palmCountCleared: cleared && confirmedPalmCount == null };
 }
 
-function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ...palmCountGate } = {}) {
+function assertShareLinkPresent(estimate, requireShareLink) {
+  if (!requireShareLink || String(estimate.token || '').trim()) return;
+  const err = new Error('This estimate has no customer link token, so there is nothing to send. Rebuild it in the estimate tool to mint a shareable link.');
+  err.statusCode = 400;
+  throw err;
+}
+
+function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, requireShareLink = true, ...palmCountGate } = {}) {
   assertBidSendDate(estimate);
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
@@ -753,11 +760,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ..
   // Without this gate the customer link is built by template literal and the
   // SMS/email ships a literal /estimate/null — a dead link — while the
   // estimate still gets stamped `sent`.
-  if (!String(estimate.token || '').trim()) {
-    const err = new Error('This estimate has no customer link token, so there is nothing to send. Rebuild it in the estimate tool to mint a shareable link.');
-    err.statusCode = 400;
-    throw err;
-  }
+  assertShareLinkPresent(estimate, requireShareLink);
   if (!SENDABLE_ESTIMATE_STATUSES.has(String(estimate.status || 'draft'))) {
     const err = new Error(`Estimate status ${estimate.status || 'unknown'} cannot be sent.`);
     err.statusCode = 400;

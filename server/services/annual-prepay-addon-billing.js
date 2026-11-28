@@ -274,6 +274,13 @@ class CoveredVisitCloseout {
         await this.alert('the visit is billed on its grouped closeout', { addonTotal: read.extras.total });
         return;
       }
+      if (this.ctx.unrecordedChemicalAddOnHold) {
+        await this.alert('a chemical area add-on had no recorded product application — confirm with the technician before billing', {
+          addonTotal: read.extras.total,
+          reasonCode: 'area_addon_application_required',
+        });
+        return;
+      }
       try {
         await this.mint(read);
         return;
@@ -440,15 +447,22 @@ class CoveredVisitCloseout {
       || listed.some((inv) => inv.status === 'void' && classifyCoveredVisitInvoice(inv, addons).otherCharges);
     const listing = listed.map((inv) => `${invoiceLabel(inv)} (${inv.status})`).join(', ');
     const invoiceIds = listed.map((inv) => inv.id);
+    const chemHold = Boolean(this.ctx.unrecordedChemicalAddOnHold);
     if (voidedCharges) {
       await this.alert(`its invoices (${listing}) include a voided one that charged more than the covered visit; re-bill whatever it charged besides the covered visit that no other invoice covers`, { invoiceIds });
-    } else if ((this.billable && addons.owed) || outcome.kind === 'kept') {
-      // Owed add-ons beside an existing invoice, or an office bill for just
-      // the add-ons kept as the office made it (its price may have changed
-      // since — even to free): the office checks it; the completion never
-      // collects it.
-      const one = listed.length === 1;
-      await this.alert(`the visit already has ${one ? 'invoice' : 'invoices'} ${listing} and the completion collected none; check ${one ? 'it' : 'them'} against the add-ons as they stand now — bill what is missing, adjust what changed, and send`, { invoiceIds });
+    } else if (outcome.kind === 'kept' || (this.billable && (addons.owed || (chemHold && this.ctx.heldExistingInvoice)))) {
+      // Owed add-ons beside an existing invoice, an office bill for just
+      // the add-ons kept as the office made it, or an existing open invoice
+      // withheld under an unrecorded chemical add-on hold: the office reviews
+      // it; the completion never collects it.
+      const [noun, pronoun] = listed.length === 1 ? ['invoice', 'it'] : ['invoices', 'them'];
+      const [chemNote, extra] = chemHold
+        ? [' (a chemical area add-on had no recorded product application — confirm with the technician before billing)', { reasonCode: 'area_addon_application_required' }]
+        : ['', {}];
+      await this.alert(`the visit already has ${noun} ${listing} and the completion collected none${chemNote}; check ${pronoun} against the add-ons as they stand now — bill what is missing, adjust what changed, and send`, {
+        invoiceIds,
+        ...extra,
+      });
     }
   }
 
@@ -464,19 +478,34 @@ class CoveredVisitCloseout {
       this.hold(err, 'add-on rows');
       return;
     }
-    const lines = require('./invoice')._parseInvoiceLineItems(this.invoice?.line_items);
+    const target = this.invoice || this.ctx.heldExistingInvoice;
+    const lines = require('./invoice')._parseInvoiceLineItems(target?.line_items);
     const carried = new Set(lines.map((li) => li.client_id));
+    if (this.ctx.unrecordedChemicalAddOnHold && target && !['paid', 'prepaid'].includes(target.status)) {
+      await this.alert(`a chemical area add-on had no recorded product application, so collection on issued invoice ${invoiceLabel(target)} (${target.status || 'unknown'}) was held — confirm with the technician before collecting`, {
+        invoiceId: target.id || null,
+        reasonCode: 'area_addon_application_required',
+      });
+      return;
+    }
     if ([...addons.owedClientIds].every((id) => carried.has(id))) return;
-    await this.alert(`the office issued invoice ${invoiceLabel(this.invoice)} (${this.invoice?.status || 'unknown'}) without every add-on on the visit; bill the add-ons it does not charge`, { invoiceId: this.invoice?.id || null });
+    await this.alert(`the office issued invoice ${invoiceLabel(target)} (${target?.status || 'unknown'}) without every add-on on the visit; bill the add-ons it does not charge`, { invoiceId: target?.id || null });
   }
 
   async run() {
     await this.resolveGate();
     if (this.lookupError) return this.outcome();
     // Dark: today's behavior — only an open invoice's covered base, and an
-    // issued invoice is never touched.
+    // issued invoice is never touched. If an open invoice was withheld under an
+    // unrecorded chemical add-on hold, still raise the office review alert.
     if (!this.live) {
       if (this.invoice?.id && !this.ctx.issuedInvoiceCloseout) await this.reconcileWithOfficeInvoices([]);
+      if (this.ctx.unrecordedChemicalAddOnHold && this.ctx.heldExistingInvoice && this.billable) {
+        await this.alert(`a chemical area add-on had no recorded product application, so collection on invoice ${invoiceLabel(this.ctx.heldExistingInvoice)} (${this.ctx.heldExistingInvoice.status || 'unknown'}) was held — confirm with the technician before collecting`, {
+          invoiceId: this.ctx.heldExistingInvoice.id,
+          reasonCode: 'area_addon_application_required',
+        });
+      }
       return this.outcome();
     }
     // The completion's own invoice lookups failed: an invoice may exist that
@@ -499,7 +528,7 @@ class CoveredVisitCloseout {
     }
     // The invoice the completion selected for the visit (a same-estimate
     // sibling, say) is history too, even when it is not linked to the visit.
-    const known = [this.invoice, this.ctx.terminalCompletionInvoice]
+    const known = [this.invoice, this.ctx.heldExistingInvoice, this.ctx.terminalCompletionInvoice]
       .filter((inv) => inv?.id && !history.some((h) => h.id === inv.id));
     const evidence = [...history, ...known];
     if (evidence.length) {

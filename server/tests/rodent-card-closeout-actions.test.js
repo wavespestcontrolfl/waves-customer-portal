@@ -37,7 +37,7 @@ describe('rodent card close-out actions', () => {
     for (const n of [3, 6, 7]) {
       const steps = protocols.rodent.visits.find((v) => v.visit === n).primary.split('\n');
       const bats = steps.findIndex((line) => /^Check for bats/.test(line));
-      const seal = steps.findIndex((line) => /^Seal every numbered entry|^A failed seal/.test(line));
+      const seal = steps.findIndex((line) => /^Seal each numbered entry|^Failed seal/.test(line));
       expect([n, bats >= 0, bats < seal]).toEqual([n, true, true]);
     }
   });

@@ -198,16 +198,19 @@ async function promiseLevelFacts(trx, deps, { id, dateStr }) {
  * `toStart` is checked as well as the current start: a visit may not be moved INTO the 24-hour reach either.
  */
 async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
+  const visitHold = require('../visit-hold');
   const row = await trx('scheduled_services').where({ id }).first(
     'id', 'status', 'window_start', 'customer_id', 'property_id', 'visit_id', 'reservation_expires_at', 'auto_dispatch_locked', 'auto_dispatch_excluded',
     ...TOLD_ROW_COLUMNS,
+    ...visitHold.heldColumn(),
   );
   if (!row) throw coded('NOT_MOVABLE', 'the visit no longer exists');
+  if (visitHold.rowIsHeld(row)) throw Object.assign(coded('NOT_MOVABLE', 'the visit is no longer movable: on_hold'), { why: 'on_hold' });
   const live = (q) => q.whereNotIn('status', deps.excludedStatuses);
   const mate = row.visit_id != null
     ? await live(trx('scheduled_services').where({ visit_id: row.visit_id }).whereNot({ id })).first('id') : null;
   const sameCustomer = row.customer_id != null
-    ? await live(trx('scheduled_services').where({ customer_id: row.customer_id, scheduled_date: dateStr }).whereNot({ id }))
+    ? await visitHold.excludeHeld(live(trx('scheduled_services').where({ customer_id: row.customer_id, scheduled_date: dateStr }).whereNot({ id })), 'scheduled_services')
       .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())').first('id') : null;
   const reminder = await trx('appointment_reminders').where({ scheduled_service_id: id })
     .first('reminder_24h_sent');
@@ -259,6 +262,7 @@ async function writeMoves(trx, deps, { dateStr, moves, initiator = INITIATOR, re
       .where({
         id: move.id, scheduled_date: dateStr, status: row.status, technician_id: row.technician_id ?? null,
         window_start: row.window_start, window_end: row.window_end ?? null,
+        ...(require('../visit-hold').visitHoldLive() ? { held_at: null } : {}),
       })
       .update({
         window_start: start,

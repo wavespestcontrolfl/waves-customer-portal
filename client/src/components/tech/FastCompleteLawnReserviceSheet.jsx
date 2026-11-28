@@ -54,7 +54,7 @@ import {
   LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition,
 } from '../../lib/lawn-targets';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, RecoveredCompletion, refusalWithoutContext, startMethodFor, submissionHolds, ProductTileButton, SavedView,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, RecoveredCompletion, refusalWithoutContext, startMethodFor, submissionHolds, ProductTileButton, SavedView, useFastCompleteCloseGuard,
   SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import {
@@ -496,20 +496,24 @@ export default function FastCompleteLawnReserviceSheet({ service, request, opera
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
   // unknown or refused (it may have saved).
-  const close = useCallback(() => {
-    if (submitting || wrapChecking) return;
+  const performClose = useCallback(() => {
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff.
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, wrapChecking, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  const { requestClose: close, frameProps } = useFastCompleteCloseGuard({
+    blocked: submitting || wrapChecking,
+    skipConfirm: Boolean(done || ctx.blockedReason || submission.failure || submission.restored),
+    onClose: performClose,
+  });
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
   const locked = submissionHolds(submission) || wrapChecking;
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended} {...frameProps}>
       <SheetHeader titleId={titleId} title={done ? 'Lawn re-service complete' : 'Complete lawn re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting || wrapChecking} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onWrapChecking={setWrapChecking} />
     </FastCompleteFrame>

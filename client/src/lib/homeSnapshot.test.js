@@ -187,4 +187,28 @@ describe('saved home reads', () => {
     writeHomeRead(identity, 'cust-1:p1', 'latest-service', { services: [] }, Date.now());
     expect(Object.keys(readHomeReads(identity, 'cust-1:p1'))).toEqual(['latest-service']);
   });
+
+  it('preserves customerPickBy on a saved next-visit and drops pre-upgrade windowless entries missing the field', () => {
+    const pickVisitRow = { id: 'v2', serviceType: 'Pest Control', date: '2026-12-08', windowStart: null, customerPickBy: '2026-12-05T01:00:00.000Z', rescheduleUrl: '/reschedule/secret' };
+    writeHomeRead(identity, 'cust-1:p1', 'next-visit', { next: pickVisitRow }, Date.now());
+    const reads = readHomeReads(identity, 'cust-1:p1');
+    expect(reads['next-visit'].data.next).toEqual({
+      id: 'v2', serviceType: 'Pest Control', date: '2026-12-08', windowStart: null, customerPickBy: '2026-12-05T01:00:00.000Z',
+    });
+    expect(localStorage.getItem(HOME_READS_KEY)).not.toContain('secret');
+
+    // A pre-upgrade saved windowless next-visit lacked customerPickBy and could hold a placeholder date.
+    const stored = JSON.parse(localStorage.getItem(HOME_READS_KEY));
+    delete stored.reads['next-visit'].data.next.customerPickBy;
+    localStorage.setItem(HOME_READS_KEY, JSON.stringify(stored));
+    expect(readHomeReads(identity, 'cust-1:p1')['next-visit']).toBeUndefined();
+
+    // A pre-upgrade day_only visit has a real date and arrival note even without windowStart/customerPickBy.
+    const dayOnlyVisit = { id: 'v3', serviceType: 'Pest Control', date: '2026-12-10', windowStart: null, day_only: true, arrival_note: 'We text your 2-hour window the day before.' };
+    writeHomeRead(identity, 'cust-1:p1', 'next-visit', { next: dayOnlyVisit }, Date.now());
+    const storedDayOnly = JSON.parse(localStorage.getItem(HOME_READS_KEY));
+    delete storedDayOnly.reads['next-visit'].data.next.customerPickBy;
+    localStorage.setItem(HOME_READS_KEY, JSON.stringify(storedDayOnly));
+    expect(readHomeReads(identity, 'cust-1:p1')['next-visit'].data.next).toEqual(dayOnlyVisit);
+  });
 });

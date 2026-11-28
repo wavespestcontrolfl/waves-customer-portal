@@ -33,6 +33,11 @@ function asSentSmsText(text) {
   return normalizeGsmPunctuation(stripSmsUrlScheme(text));
 }
 
+const {
+  checkExistingEstimatesForLead,
+  verifyLeadSmsQuotedPrices,
+} = require('./lead-estimate-pricing');
+
 // Authority comes from the server's assigned session, never model arguments.
 async function resolveLeadSubject(input, context, conn = db, lock = false) {
   if (!context?.leadId || !context?.customerId) return { error: 'Missing assigned lead context', validationError: true };
@@ -91,6 +96,120 @@ function agentVisibleExtractedData(raw) {
 // redacted like every bell body.
 const HELD_DRAFT_WHY = 'The AI wrote a reply but held it for you; its draft and reason are in the full text.';
 const HELD_DRAFT_REPLY_WITHIN = { urgent: '15 minutes', normal: '1 hour', low: '4 hours' };
+
+async function persistAndAlertHeldDraft(input, context, { draftResponse, reason, urgency, toolUseId }) {
+  const effectiveToolUseId = toolUseId || context?.toolUseId;
+  if (!context?.sessionId || !effectiveToolUseId) {
+    return { error: 'Missing queue invocation identity', validationError: true };
+  }
+  const queued = await db.transaction(async trx => {
+    const current = await resolveLeadSubject(input, context, trx, true);
+    if (current.error) return current;
+    const existing = await trx('lead_activities')
+      .where({ lead_id: context.leadId, activity_type: 'draft_queued' })
+      .whereRaw("metadata->>'sessionId' = ? AND metadata->>'toolUseId' = ?", [context.sessionId, effectiveToolUseId])
+      .first();
+    const metadata = existing
+      ? (typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : existing.metadata)
+      : { draftResponse, reason, urgency, sessionId: context.sessionId, toolUseId: effectiveToolUseId };
+    if (existing && ['notified', 'sent', 'suppressed'].includes(metadata.alertStatus)) {
+      return { id: existing.id, replayed: true, alertStatus: metadata.alertStatus };
+    }
+    if (existing && new Date(metadata.alertLeaseUntil).getTime() > Date.now()) {
+      return { id: existing.id, replayed: true, alertStatus: 'pending', nextAllowedAt: metadata.alertLeaseUntil };
+    }
+    const [activity] = existing ? [existing] : await trx('lead_activities').insert({
+      lead_id: context.leadId,
+      activity_type: 'draft_queued',
+      description: `Queued for Adam: ${reason}`,
+      performed_by: 'lead_agent',
+      metadata: JSON.stringify(metadata),
+    }).returning('id');
+    const alertClaimToken = randomUUID();
+    await trx('lead_activities').where({ id: activity.id }).update({ metadata: JSON.stringify({
+      ...metadata, alertClaimToken, alertLeaseUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    }) });
+    return { id: activity.id, customer: current.customer, metadata, alertClaimToken, replayed: !!existing };
+  });
+  if (queued.error) return queued;
+  if (!queued.alertClaimToken) {
+    return {
+      queued: true,
+      activityId: queued.id,
+      replayed: true,
+      alertStatus: queued.alertStatus,
+      ...(queued.alertStatus === 'pending' ? { retryable: true, nextAllowedAt: queued.nextAllowedAt } : {}),
+    };
+  }
+  let alertStatus = 'failed';
+  try {
+    alertStatus = heldDraftAlertStatus(await ringHeldDraft(context.leadId, queued.customer, queued.metadata));
+  } catch { /* stays 'failed': the draft is kept and a retry rings again */ }
+
+  await db('lead_activities').where({ id: queued.id })
+    .whereRaw("metadata->>'alertClaimToken' = ?", [queued.alertClaimToken])
+    .update({ metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'alertClaimToken' - 'alertLeaseUntil') || jsonb_build_object('alertStatus', ?::text)", [alertStatus]) });
+
+  logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
+  return {
+    queued: true,
+    activityId: queued.id,
+    alertStatus,
+    replayed: queued.replayed,
+    reason: queued.metadata.reason,
+    urgency: queued.metadata.urgency || 'normal',
+    ...(alertStatus === 'failed' ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}),
+  };
+}
+
+async function holdUnverifiedPriceDraft(input, context, customer, message, code, blockReason) {
+  const queueReason = `Price check held draft for review (${code})`;
+  let queued = null;
+  if (context?.sessionId && context?.toolUseId) {
+    try {
+      queued = await persistAndAlertHeldDraft(input, context, {
+        draftResponse: message,
+        reason: queueReason,
+        urgency: 'normal',
+        toolUseId: `${context.toolUseId}:price_review`,
+      });
+    } catch (err) {
+      logger.warn('[lead-agent] Failed to queue held price draft', { leadId: context?.leadId, error: err.message });
+      return {
+        sent: false,
+        blocked: true,
+        queuedForReview: false,
+        failed: true,
+        retryable: true,
+        error: 'Outgoing price was blocked, and queuing the draft for review failed.',
+        code,
+        reason: blockReason,
+        name: customer.first_name,
+      };
+    }
+  }
+  const saved = queued?.queued === true;
+  return {
+    sent: false,
+    blocked: true,
+    ...(saved ? {
+      queued: true,
+      queuedForReview: true,
+      activityId: queued.activityId,
+      alertStatus: queued.alertStatus,
+      replayed: queued.replayed,
+      urgency: queued.urgency || 'normal',
+    } : {
+      queuedForReview: false,
+      queueRequired: true,
+    }),
+    ...(queued?.failed ? { failed: true, retryable: !!queued.retryable, error: queued.error } : {}),
+    ...(queued?.error && !saved ? { failed: true, error: queued.error } : {}),
+    code,
+    reason: blockReason,
+    name: customer.first_name,
+  };
+}
 
 async function ringHeldDraft(leadId, customer, metadata) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
@@ -206,89 +325,10 @@ async function executeLeadTool(toolName, input, context) {
     }
 
     case 'check_existing_estimates': {
-      const customerId = input.customer_id;
-
-      // Only rows the customer can actually OPEN are listed (uncapped codex
-      // P1 r33 on #3750): an expired, send-failed, never-published, or
-      // linkage-invalidated row is refused by the public page, so its price,
-      // bearer token, and URL never reach the agent — it would quote a dead
-      // offer or send a dead link. Viewability is a predicate the query can't
-      // express, so the candidates are PAGED until five viewable rows are in
-      // hand or the candidates run out (a filter applied after a limit lets
-      // newer hidden rows mask an older estimate the customer still holds —
-      // the composer-customer-links.js pattern). Hidden rows are counted so
-      // the agent can offer a fresh quote without quoting the old one.
-      const { isEstimateCustomerViewable } = require('../routes/estimate-public');
-      const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-      // The public data route's verdict is viewability AND the durable
-      // call-side block (uncapped codex P1 r34): an engine draft whose call
-      // is missing, reprocessing, quarantined, or repointed is refused by the
-      // page even when the row itself looks open. Any failure to read that
-      // verdict hides the row (fail closed).
-      const customerCanOpen = async (row) => {
-        if (!isEstimateCustomerViewable(row)) return false;
-        try {
-          const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
-          return !(await callSideBlockForEstimateData(db, data, { estimateStatus: row.status }));
-        } catch (err) {
-          logger.warn('[lead-tools] check_existing_estimates: call-side verdict unavailable, row hidden', { estimateId: row.id, error: err.message });
-          return false;
-        }
-      };
-      const LIMIT = 5;
-      const PAGE = 15;
-      const viewable = [];
-      let hiddenCount = 0;
-      for (let offset = 0; ; offset += PAGE) {
-        const rows = await db('estimates').where({ customer_id: customerId })
-          .orderBy('created_at', 'desc').offset(offset).limit(PAGE);
-        for (const row of rows) {
-          // Rows past the cap are neither evaluated nor counted (uncapped
-          // codex P1 r36): the hidden count reports only rows the
-          // customer cannot open, never valid estimates beyond the limit.
-          if (viewable.length >= LIMIT) break;
-          if (await customerCanOpen(row)) viewable.push(row);
-          else hiddenCount += 1;
-        }
-        if (viewable.length >= LIMIT || rows.length < PAGE) break;
-      }
-
-      if (!viewable.length) {
-        return { hasEstimates: false, estimates: [], ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}) };
-      }
-
-      // The agent may quote these URLs to the customer, so a link (and the
-      // bearer token behind it) is handed out ONLY for a viewable row that
-      // passes the group-aware pricing-authority verdict while the gate is on
-      // (#3750, uncapped codex P0 r24) — the same rule every guarded send
-      // funnel applies. Withheld rows still list, with the reason.
-      return {
-        hasEstimates: true,
-        ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}),
-        estimates: await Promise.all(viewable.map(async (e) => {
-          const authorityOk = await estimateDeliverableUnderGate(db, e);
-          const linkable = authorityOk && !!e.token;
-          // A row the verdict refuses shows NO price either (uncapped codex P0
-          // r25): the agent quotes what it is given, and an unverified
-          // dollar figure must never reach a customer by any rail.
-          return {
-            id: e.id,
-            status: e.status,
-            ...(authorityOk ? { total: e.monthly_total || e.total_amount } : { totalWithheld: 'pricing-authority-not-server' }),
-            serviceInterest: e.service_interest,
-            sentAt: e.sent_at,
-            viewedAt: e.viewed_at,
-            token: linkable ? e.token : null,
-            viewUrl: linkable
-              ? await shortenOrPassthrough(
-                  `https://portal.wavespestcontrol.com/estimate/${e.token}`,
-                  { kind: 'estimate', entityType: 'estimates', entityId: e.id, customerId: e.customer_id || null }
-                )
-              : null,
-            ...(linkable ? {} : { viewUrlWithheld: !e.token ? 'no-token' : 'pricing-authority-not-server' }),
-          };
-        })),
-      };
+      return checkExistingEstimatesForLead(db, subject, {
+        estimateDeliverableUnderGate,
+        shortenOrPassthrough,
+      });
     }
 
     // ── Availability & pest context ─────────────────────────────
@@ -363,6 +403,22 @@ async function executeLeadTool(toolName, input, context) {
       const message = stripTrailingSignature(input.message, { addresseeFirstName: customer.first_name });
       if (!message) return { error: 'Message is empty once the sign-off is removed', validationError: true };
 
+      // Dispatch-boundary price verification: any price in an automated lead
+      // text must match a current server-verified amount, unit, and service on
+      // a delivered estimate bound to this lead. Mismatches are queued for
+      // Adam's review without spending the phone's first-touch claim.
+      const preflightPriceCheck = await verifyLeadSmsQuotedPrices(message, db, subject, { estimateDeliverableUnderGate });
+      if (!preflightPriceCheck.ok) {
+        return holdUnverifiedPriceDraft(
+          input,
+          context,
+          customer,
+          message,
+          'UNVERIFIED_PRICE_IN_MESSAGE',
+          `Outgoing price could not be verified (${preflightPriceCheck.reason}); call queue_for_adam or wait for staff review.`,
+        );
+      }
+
       // Owner ruling 2026-09-26: exactly one automated text ever reaches a
       // new website lead — the agent's reply replaces the standard
       // lead_auto_reply_biz reply, and inherits its once-per-person-ever
@@ -429,6 +485,15 @@ async function executeLeadTool(toolName, input, context) {
           const current = await resolveLeadSubject(input, context, trx, 'send');
           if (current.error || current.customer.phone !== customer.phone) {
             return { ok: false, code: 'LEAD_SUBJECT_CHANGED', reason: 'Assigned lead or contact changed before dispatch' };
+          }
+          if (preflightPriceCheck.hasPrice) {
+            const livePriceCheck = await verifyLeadSmsQuotedPrices(message, trx, current, {
+              estimateDeliverableUnderGate,
+              lockQuotedEstimate: true,
+            });
+            if (!livePriceCheck.ok) {
+              return { ok: false, code: 'PRICE_CHANGED_BEFORE_DISPATCH', reason: `Quoted price failed send-time verification (${livePriceCheck.reason})` };
+            }
           }
           return dispatch(trx);
         }),
@@ -562,6 +627,9 @@ async function executeLeadTool(toolName, input, context) {
       //   `failed: true` + `error` so isToolFailure() catches it AND the
       //   breaker bumps.
       if (result.blocked) {
+        if (result.code === 'PRICE_CHANGED_BEFORE_DISPATCH') {
+          return holdUnverifiedPriceDraft(input, context, customer, message, result.code, result.reason);
+        }
         return {
           sent: false,
           blocked: true,
@@ -583,55 +651,12 @@ async function executeLeadTool(toolName, input, context) {
     }
 
     case 'queue_for_adam': {
-      if (!context.sessionId || !context.toolUseId) return { error: 'Missing queue invocation identity', validationError: true };
-      const queued = await db.transaction(async trx => {
-        const current = await resolveLeadSubject(input, context, trx, true);
-        if (current.error) return current;
-        const existing = await trx('lead_activities')
-          .where({ lead_id: context.leadId, activity_type: 'draft_queued' })
-          .whereRaw("metadata->>'sessionId' = ? AND metadata->>'toolUseId' = ?", [context.sessionId, context.toolUseId])
-          .first();
-        const metadata = existing
-          ? (typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : existing.metadata)
-          : { draftResponse: input.draft_response, reason: input.reason, urgency: input.urgency,
-            sessionId: context.sessionId, toolUseId: context.toolUseId };
-        if (existing && ['notified', 'sent', 'suppressed'].includes(metadata.alertStatus)) {
-          return { id: existing.id, replayed: true, alertStatus: metadata.alertStatus };
-        }
-        if (existing && new Date(metadata.alertLeaseUntil).getTime() > Date.now()) {
-          return { id: existing.id, replayed: true, alertStatus: 'pending', nextAllowedAt: metadata.alertLeaseUntil };
-        }
-        const [activity] = existing ? [existing] : await trx('lead_activities').insert({
-          lead_id: context.leadId,
-          activity_type: 'draft_queued',
-          description: `Queued for Adam: ${input.reason}`,
-          performed_by: 'lead_agent',
-          metadata: JSON.stringify(metadata),
-        }).returning('id');
-        // Extend this draft's replay state with a bounded alert claim. No
-        // database connection stays pinned while the notification sends.
-        const alertClaimToken = randomUUID();
-        await trx('lead_activities').where({ id: activity.id }).update({ metadata: JSON.stringify({
-          ...metadata, alertClaimToken, alertLeaseUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        }) });
-        return { id: activity.id, customer: current.customer, metadata, alertClaimToken, replayed: !!existing };
+      return persistAndAlertHeldDraft(input, context, {
+        draftResponse: input.draft_response,
+        reason: input.reason,
+        urgency: input.urgency,
+        toolUseId: context.toolUseId,
       });
-      if (queued.error) return queued;
-      if (!queued.alertClaimToken) return { queued: true, activityId: queued.id, replayed: true, alertStatus: queued.alertStatus,
-        ...(queued.alertStatus === 'pending' ? { retryable: true, nextAllowedAt: queued.nextAllowedAt } : {}) };
-      let alertStatus = 'failed';
-      try {
-        alertStatus = heldDraftAlertStatus(await ringHeldDraft(context.leadId, queued.customer, queued.metadata));
-      } catch { /* stays 'failed': the draft is kept and a retry rings again */ }
-
-      await db('lead_activities').where({ id: queued.id })
-        .whereRaw("metadata->>'alertClaimToken' = ?", [queued.alertClaimToken])
-        .update({ metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'alertClaimToken' - 'alertLeaseUntil') || jsonb_build_object('alertStatus', ?::text)", [alertStatus]) });
-
-      logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
-      return { queued: true, activityId: queued.id, alertStatus, replayed: queued.replayed,
-        reason: queued.metadata.reason, urgency: queued.metadata.urgency || 'normal',
-        ...(alertStatus === 'failed' ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}) };
     }
 
     // ── Pipeline & follow-up ────────────────────────────────────

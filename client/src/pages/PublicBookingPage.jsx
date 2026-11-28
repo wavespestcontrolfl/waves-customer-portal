@@ -16,6 +16,7 @@ import { api } from '../utils/api';
 import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { parseServiceParam } from '../lib/booking-service-param';
+import { etDateString, addETDays } from '../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -23,10 +24,29 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // ("+1 (941) 555-1234") is 11 digits — drop the US country code so the same
 // input the gate accepts is also accepted by the contact step, the existing-
 // customer lookup, intent capture and confirm (they previously disagreed).
+const NANP_PHONE_RE = /^[2-9]\d{2}[2-9]\d{6}$/;
+
 const phoneDigits = (raw) => {
-  const d = String(raw || '').replace(/\D/g, '');
-  return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  const d = trimmed.replace(/\D/g, '');
+  if (trimmed.startsWith('+')) {
+    // Only +1 E.164 US/NANP numbers (11 digits starting with 1) strip the
+    // country code; foreign prefixes like +44 stay invalid instead of turning
+    // into 10 domestic digits.
+    const nat = trimmed.startsWith('+1') && d.length === 11 && d.startsWith('1') ? d.slice(1) : '';
+    return NANP_PHONE_RE.test(nat) ? nat : '';
+  }
+  const nat = d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+  if (nat.length === 10 && !NANP_PHONE_RE.test(nat)) return '';
+  return nat;
 };
+
+const isContactPhoneInvalid = (existingCustomerId, rawPhone, normalizedDigits) => (
+  !existingCustomerId && String(rawPhone || '').trim().length > 0 && normalizedDigits.length !== 10
+);
+
+const confirmSubmittedPhone = (rawPhone) => phoneDigits(rawPhone) || String(rawPhone || '').trim();
 
 function bookingOfferAddress(address = {}) {
   return Object.fromEntries(Object.entries({
@@ -80,6 +100,12 @@ function arrivalEndLabel(start24) {
   const suffix = hour >= 12 ? 'PM' : 'AM';
   const hour12 = hour % 12 || 12;
   return `${hour12}:${String(total % 60).padStart(2, '0')} ${suffix}`;
+}
+
+function formatSelectedSlotTime(slot) {
+  if (!slot?.start_label) return '';
+  const end = arrivalEndLabel(slot.start_time || slot.startTime24);
+  return end ? `${slot.start_label} – ${end}` : slot.start_label;
 }
 
 // Capture paid-click attribution from the current URL + Meta cookies so a direct
@@ -472,7 +498,7 @@ export default function PublicBookingPage() {
       ...c,
       firstName: customer.first_name || '',
       lastName: customer.last_name || '',
-      phone: customer.phone || '',
+      phone: customer.phone || c.phone || '',
       email: customer.email || '',
     }));
   }, []);
@@ -706,7 +732,7 @@ export default function PublicBookingPage() {
           new_customer: {
             first_name: contact.firstName,
             last_name: contact.lastName,
-            phone: phoneDigits(contact.phone),
+            phone: confirmSubmittedPhone(contact.phone),
             email: contact.email,
             address_line1: address.line1,
             address_line2: address.line2 || undefined,
@@ -766,7 +792,7 @@ export default function PublicBookingPage() {
   const contactPhoneDigits = phoneDigits(contact.phone);
   // Inline message instead of a silently disabled Confirm: only once the
   // visitor has typed something, never on the empty field.
-  const contactPhoneInvalid = !existingCustomerId && contactPhoneDigits.length > 0 && contactPhoneDigits.length !== 10;
+  const contactPhoneInvalid = isContactPhoneInvalid(existingCustomerId, contact.phone, contactPhoneDigits);
   const handleGateSendCode = async () => {
     if (gateDigits.length !== 10 || gateSending) return;
     setGateSending(true);
@@ -804,11 +830,9 @@ export default function PublicBookingPage() {
     fontSize: 14, fontWeight: 500, color: COLORS.slate600,
     display: 'block', marginBottom: 6,
   };
-  // ── custom date/time finder helpers ──
-  const pad2 = (n) => String(n).padStart(2, '0');
-  const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-  const browseMin = toYmd(new Date());
-  const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
+  // ── custom date/time finder helpers (Florida ET, never browser-local) ──
+  const browseMin = etDateString(new Date());
+  const browseMax = etDateString(addETDays(new Date(), 90));
 
   const selectSlot = (date, slot) => { setSelectedDate(date); setSelectedSlot({ ...slot, date }); track(FUNNEL_EVENTS.BOOKING_SLOT_SELECTED, { date }); };
 
@@ -905,8 +929,6 @@ export default function PublicBookingPage() {
     || (browseDays || []).find((d) => d.date === selectedDate)
     || (searchResult?.days || []).find((d) => d.date === selectedDate)
   )?.fullDate;
-  // Slot length follows the service (60 → "1-hour", else "<n>-minute").
-  const slotLenLabel = service?.duration === 60 ? '1-hour' : `${service?.duration}-minute`;
   // A pending custom-date lookup will replace the picker (and clear the
   // selection) when it lands — Continue waits for it.
   const continueDisabled = !selectedSlot || browseLoading || aiSearching;
@@ -1206,7 +1228,7 @@ export default function PublicBookingPage() {
               Find a time
             </h1>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
-              Pick a day and we'll show the open {slotLenLabel} windows. Days where a tech is already working nearby are marked.
+              Pick a day and we'll show the open 2-hour arrival windows. Days where a tech is already working nearby are marked.
             </p>
 
             {loading && (
@@ -1237,7 +1259,7 @@ export default function PublicBookingPage() {
                   onSelectSlot={(slot) => (slot ? selectSlot(slot.date, slot) : setSelectedSlot(null))}
                   intro={pickedDayObj && !pickedDayObj.nearby
                     ? "No route near you that day yet — here's what's close."
-                    : `Tap a time — each is a ${slotLenLabel} window.`}
+                    : 'Tap a time — each is a 2-hour arrival window.'}
                   slotDetail={(slot) => slot.reason || null}
                   empty={searchResult ? (
                     <div style={{ marginBottom: 16, fontSize: 14, color: COLORS.slate600 }}>
@@ -1372,7 +1394,7 @@ export default function PublicBookingPage() {
                 Your selected time
               </div>
               <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.glassNavy }}>
-                {selectedSlot?.fullDate || selectedDayLabel} · {selectedSlot?.start_label}
+                {selectedSlot?.fullDate || selectedDayLabel} · {formatSelectedSlotTime(selectedSlot)}
               </div>
               <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 2 }}>
                 {service?.label}
@@ -1599,26 +1621,14 @@ export default function PublicBookingPage() {
                 <div>{selectedSlot?.fullDate || selectedDayLabel}</div>
                 {/* Arrival window = start + 2h (owner rule) — never the
                     job-duration end_label the scheduler blocked out. */}
-                <div>
-                  {selectedSlot?.start_label}
-                  {(() => {
-                    const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
-                    return end ? ` – ${end}` : '';
-                  })()}
-                </div>
+                <div>{formatSelectedSlotTime(selectedSlot)}</div>
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>
             {vanScene ? (
               <VanScene
                 title="Here's the van to look for in your driveway"
-                stamp={(() => {
-                  // Same day · full arrival window the recap above quotes —
-                  // never the bare start (the window is the promise).
-                  const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
-                  const window = selectedSlot?.start_label ? `${selectedSlot.start_label}${end ? ` – ${end}` : ''}` : null;
-                  return [selectedSlot?.fullDate || selectedDayLabel, window].filter(Boolean).join(' · ') || null;
-                })()}
+                stamp={[selectedSlot?.fullDate || selectedDayLabel, formatSelectedSlotTime(selectedSlot)].filter(Boolean).join(' · ') || null}
                 style={{ marginBottom: 20, borderRadius: 12, border: `1px solid ${COLORS.slate200}` }}
               />
             ) : null}

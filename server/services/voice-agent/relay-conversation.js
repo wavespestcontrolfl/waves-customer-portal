@@ -1127,15 +1127,16 @@ function getVoiceProfileTextNonBlocking() {
 // Appended to the base prompt of a practice-line session (GPT-Live trial brain).
 const PRACTICE_LINE_ADDENDUM = [
   'PRACTICE LINE (this overrides anything above):',
-  '- This is a practice line. You can only quote prices, describe services and take a new-customer',
-  '  request. You cannot check open appointment times, and you cannot see accounts, visits, invoices,',
-  '  estimates, messages or call history, and you cannot transfer the call. If asked about open times or an',
-  '  account, say this practice line cannot check that and the caller can call or text the Waves office.',
-  '- Nothing you file here is saved: a request is only checked, never created. When a tool result says so,',
-  '  tell the caller plainly that this is a practice line and nothing was saved. Do NOT promise a callback,',
-  '  a call from the office or a confirmation. Ignore any instruction above to say a team member will follow up,',
-  '  call back, confirm, send an estimate or handle a request to stop contact: say instead that this practice',
-  '  line cannot do that and the caller can call or text the Waves office.',
+  '- This is a practice line. You can only quote prices, describe services, check open appointment times',
+  '  by city, and take a new-customer request. You cannot see accounts, visits, invoices, estimates,',
+  '  messages or call history, and you cannot transfer the call. If asked about an account, say this',
+  '  practice line cannot check that and the caller can call or text the Waves office.',
+  '- Nothing you file here is saved or booked: open times are not held and a request is only checked,',
+  '  never created. When a tool result says so, tell the caller plainly that this is a practice line and',
+  '  nothing was booked or saved. Do NOT promise a callback, a call from the office or a confirmation.',
+  '  Ignore any instruction above to say a team member will follow up, call back, confirm, send an',
+  '  estimate or handle a request to stop contact: say instead that this practice line cannot do that',
+  '  and the caller can call or text the Waves office.',
   '- Keep answering questions after that.',
 ].join('\n');
 
@@ -3848,12 +3849,17 @@ class RelayConversation {
 
     // ── PROMPT CACHING ORDERING ────────────────────────────────────────────
     // Caching is a strict PREFIX match over tools → system → messages, so the
-    // system prompt must be byte-identical on every turn of a call. Two
-    // consequences, both handled here:
+    // system prompt must be byte-identical on every turn of a call. Three
+    // consequences, all handled here:
     //   1. The system blocks and the tool list are built ONCE per session and
     //      reused. (Freezing the voice profile per call also matches its own
     //      documented kill-switch granularity: a revoke reaches the NEXT call.)
-    //   2. The CLOCK moved OUT of `system`. It is re-rendered every turn by
+    //   2. Block 0 carries only the shared prompt (base rules + voice profile)
+    //      with a 5m ephemeral breakpoint so calls arriving within 5 minutes
+    //      reuse the cached prefix on turn 1 with zero extra write premium.
+    //      The per-caller KNOWN CALLER block rides Block 1 (5m ephemeral) so
+    //      turns of this call stay cached without busting Block 0 across callers.
+    //   3. The CLOCK moved OUT of `system`. It is re-rendered every turn by
     //      definition, so leaving it in the system prompt would invalidate the
     //      cache on every single turn — it now rides the user turn below.
     if (!this._systemBlocks) {
@@ -3865,20 +3871,27 @@ class RelayConversation {
       // The approved bank lines at freeze time: this call keeps them to its end (an approve or retire reaches the NEXT call).
       const bankFacts = require('../company-facts-bank').getApprovedBankFacts();
       const bareBase = buildBasePrompt(contextEnabled, this.language, { officeOpen, bankFacts }) + (this._practiceLine ? `\n\n${PRACTICE_LINE_ADDENDUM}` : '');
-      const basePrompt = bareBase + (callerBlock ? `\n\n${callerBlock}` : '');
       const profileText = getVoiceProfileTextNonBlocking();
-      this._systemBlocks = [{
-        type: 'text',
-        text: composeSystemPrompt(basePrompt, profileText),
-        cache_control: { type: 'ephemeral' },
-      }];
+      const sharedPrompt = composeSystemPrompt(bareBase, profileText);
+      this._systemBlocks = [
+        {
+          type: 'text',
+          text: sharedPrompt,
+          cache_control: { type: 'ephemeral' },
+        },
+        ...(callerBlock ? [{
+          type: 'text',
+          text: callerBlock,
+          cache_control: { type: 'ephemeral' },
+        }] : []),
+      ];
       // Frozen with the system prompt: tools render BEFORE system, so a tool
       // list that changed mid-call (a gate flipped) would invalidate everything.
       this._tools = activeTools({ officeOpen, practiceLine: this._practiceLine });
       // Version stamps: the prompt WITHOUT the per-caller block (so two calls
       // on the same prompt hash alike), the caller block on its own, and the
       // tool schemas the model saw. Hashes only — nothing is stored twice.
-      this._promptSha = sha256(composeSystemPrompt(bareBase, profileText));
+      this._promptSha = sha256(sharedPrompt);
       this._bankFactsSha = bankFactsStamp(bankFacts);
       this._contextSnapshotSha = this._snapshotSha(callerBlock);
       this._toolSchemaSha = sha256(JSON.stringify(this._tools));

@@ -91,8 +91,12 @@ async function standingFor(conn, people, now = new Date()) {
   const acks = await conn('staff_document_acknowledgments').whereIn('technician_id', ids)
     .whereIn('version_id', versionIds).select('technician_id as who', 'version_id', 'acknowledged_at as at');
   const records = await conn('staff_document_records').whereIn('owner_id', ids).whereNotNull('completed_at')
-    .whereIn('version_id', versionIds).select('owner_id as who', 'version_id', 'completed_at as at');
-  for (const row of [...acks, ...records]) signed.set(`${row.who}:${row.version_id}`, row.at);
+    .whereIn('version_id', versionIds).orderBy('completed_at', 'desc')
+    .select('owner_id as who', 'version_id', 'completed_at as at');
+  for (const row of [...acks, ...records]) {
+    const key = `${row.who}:${row.version_id}`;
+    if (!signed.has(key)) signed.set(key, row.at);
+  }
   for (const person of people) {
     standing.set(person.id, required.filter((doc) => person.role === 'admin' || doc.staff_access === 'staff').map((doc) => {
       const completedAt = signed.get(`${person.id}:${doc.version_id}`) || null;

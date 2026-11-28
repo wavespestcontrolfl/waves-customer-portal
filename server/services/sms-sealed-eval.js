@@ -144,8 +144,30 @@ const V12_PAYMENT_OPTIONS_MARKER = '- Payment options:';
 // same as V12_FACTS_MARKER, so it is required by the numeric identity token (see below).
 const RESERVICE_FACTS_MARKER = 'FREE RE-SERVICE:';
 
+// Gemini switched from folding `system` into `contents` to native
+// `systemInstruction`. Scope a distinct, <=40-char run identity ONLY to the
+// `gemini` leg so pre-systemInstruction Gemini runs cannot be resumed or
+// reported as current while anthropic/openai/opus/fable stay byte-identical.
+const GEMINI_SYSTEM_PREFIX = 'hv_g_';
+const HOUSE_VOICE_PREFIX = 'house_voice_';
+function examVersionForLeg(version, providerLeg) {
+  if (!version || providerLeg !== 'gemini') return version;
+  if (version.startsWith(HOUSE_VOICE_PREFIX)) {
+    return `${GEMINI_SYSTEM_PREFIX}${version.slice(HOUSE_VOICE_PREFIX.length)}`;
+  }
+  return `g:${version}`.slice(0, 40);
+}
+function normalizeExamPromptVersion(promptVersion) {
+  if (typeof promptVersion !== 'string') return promptVersion;
+  if (promptVersion.startsWith(GEMINI_SYSTEM_PREFIX)) {
+    return `${HOUSE_VOICE_PREFIX}${promptVersion.slice(GEMINI_SYSTEM_PREFIX.length)}`;
+  }
+  return promptVersion.startsWith('g:') ? promptVersion.slice(2) : promptVersion;
+}
+
 function isV12PromptVersion(promptVersion) {
-  return typeof promptVersion === 'string' && promptVersion.startsWith('house_voice_v12');
+  const normalized = normalizeExamPromptVersion(promptVersion);
+  return typeof normalized === 'string' && normalized.startsWith('house_voice_v12');
 }
 
 // Follow-up #4 (Codex r7): compatibility is the FULL fact contract of the
@@ -204,19 +226,20 @@ function suffixTokenMarkers(token) {
   return VERSION_SUFFIX_FACT_MARKERS[token] || [];
 }
 function versionSuffixTokens(promptVersion) {
-  const base = String(promptVersion).split('+')[0];
+  const base = String(normalizeExamPromptVersion(promptVersion)).split('+')[0];
   if (!base.startsWith(REAL_ANSWERS_BASE_VERSION)) return [];
   // "2_cf" → ["2", "cf"]; a token glued to the base ("answers2") is split off first.
   return base.slice(REAL_ANSWERS_BASE_VERSION.length).replace(/^(\d+)/, '$1_').split('_').filter(Boolean);
 }
 function requiredFactMarkers(promptVersion) {
-  if (!isV12PromptVersion(promptVersion)) return [];
+  const normalized = normalizeExamPromptVersion(promptVersion);
+  if (!isV12PromptVersion(normalized)) return [];
   // The category tags only: a prompt-patch tag ('A', GATE_SMS_PROMPT_AUTOPROMOTE) changes the
   // prompt text, never the fact contract the frozen items must satisfy.
-  const { tags } = splitPromptVersion(promptVersion);
+  const { tags } = splitPromptVersion(normalized);
   return [...new Set([
     V12_FACTS_MARKER,
-    ...versionSuffixTokens(promptVersion).flatMap(suffixTokenMarkers),
+    ...versionSuffixTokens(normalized).flatMap(suffixTokenMarkers),
     ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean),
   ])];
 }
@@ -783,8 +806,9 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   // at the per-item grain instead of the whole-run grain. Refuse rather
   // than record a mismatched result; the item stays pending for a resume,
   // which (via the same guard) retires the run instead of continuing to mix.
-  if (promptVersion !== run.prompt_version) {
-    logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under prompt ${promptVersion} but run ${String(run.id).slice(0, 8)} is pinned to ${run.prompt_version} — refusing result`);
+  const itemVersion = examVersionForLeg(promptVersion, run.provider_leg);
+  if (itemVersion !== run.prompt_version) {
+    logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under prompt ${itemVersion} but run ${String(run.id).slice(0, 8)} is pinned to ${run.prompt_version} — refusing result`);
     return false;
   }
 
@@ -938,7 +962,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   // comment in sms-shadow-drafter.js).
   // EXAM-ONLY patch (GATE_SMS_PROMPT_AUTOPROMOTE): the run examines the candidate rules on top
   // of the current gates, under the candidate's own identity. The live drafter never sees them.
-  const currentVersion = expectedRunVersion(promptPatch);
+  const currentVersion = expectedRunVersion(promptPatch, providerLeg);
   if (!currentVersion) {
     const err = new Error('the prompt patch was built on another prompt identity, or its tag does not fit the prompt_version columns — examine a new candidate');
     err.code = 'PATCH_BASE_MISMATCH';
@@ -1186,11 +1210,12 @@ async function loadRunPatch(run, dbi) {
 // examined on the live prompt: it was built on another base identity (its letter is unique only
 // within that base, so stamping it here could share an identity with a different patch), or its
 // tagged identity would not fit the prompt_version columns.
-function expectedRunVersion(runPatch) {
+function expectedRunVersion(runPatch, providerLeg = null) {
   const drafter = require('./sms-shadow-drafter');
-  if (!runPatch) return drafter.currentPromptVersion();
+  if (!runPatch) return examVersionForLeg(drafter.currentPromptVersion(), providerLeg);
   const base = drafter.currentPromptVersionBase();
-  return runPatch.baseVersion === base ? stampPatchVersion(base, runPatch.tag) : null;
+  const stamped = runPatch.baseVersion === base ? stampPatchVersion(base, runPatch.tag) : null;
+  return stamped ? examVersionForLeg(stamped, providerLeg) : null;
 }
 
 /**
@@ -1216,7 +1241,7 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
     // reflects the same way a code-level bump would — would draft the
     // remaining items under the NEW version and record them beneath the old
     // label; refuse and start a fresh run instead.
-    const currentVersion = expectedRunVersion(await loadRunPatch(run, dbi));
+    const currentVersion = expectedRunVersion(await loadRunPatch(run, dbi), run.provider_leg);
     if (run.prompt_version !== currentVersion) {
       const movedTo = currentVersion || 'another prompt identity';
       // A run stranded 'running' across the prompt-bump deploy must be
@@ -1462,7 +1487,7 @@ async function getSealedExamSummary({ dbi = db } = {}) {
   const [runs, ...legRows] = await Promise.all([
     dbi('sms_sealed_eval_runs').orderBy('started_at', 'desc').limit(20),
     ...EXAM_LEGS.map((leg) => dbi('sms_sealed_eval_runs')
-      .where({ provider_leg: leg, status: 'complete', prompt_version: currentVersion })
+      .where({ provider_leg: leg, status: 'complete', prompt_version: examVersionForLeg(currentVersion, leg) })
       .whereRaw('COALESCE(voice_profile_version, -1) = ?', [profilePin ?? -1])
       .orderBy('started_at', 'desc')
       .first()),
@@ -1478,8 +1503,12 @@ async function getSealedExamSummary({ dbi = db } = {}) {
   const coverage = versionNeedsMissedCases(currentVersion)
     ? missedVisitCoverage(currentVersion, await dbi('sms_sealed_eval_items').where('active', true).select('facts_block'))
     : null;
+  const currentVersionsByLeg = Object.fromEntries(
+    EXAM_LEGS.map((leg) => [leg, examVersionForLeg(currentVersion, leg)]),
+  );
   return {
     currentVersion,
+    currentVersionsByLeg,
     items: { active: Number(counts?.active) || 0, total: Number(counts?.total) || 0 },
     ...(coverage ? { missedVisitCoverage: { ...coverage, short: coverage.have < coverage.need } } : {}),
     legs,
@@ -1601,7 +1630,7 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
       // resume still ran on purpose: it finishes the paid cohort and frees
       // the one-running index so the loop can create the current-profile
       // run in THIS sweep, not tomorrow's.
-      if (inFlight.prompt_version === currentVersion
+      if (inFlight.prompt_version === examVersionForLeg(currentVersion, inFlight.provider_leg)
           && (inFlight.voice_profile_version ?? null) === (sweepProfilePin ?? null)) {
         if (result && result.status === 'complete') {
           legs[inFlight.provider_leg] = { outcome: 'resumed_stranded', runId: inFlight.id };
@@ -1743,6 +1772,7 @@ module.exports = {
   sealEvalItems,
   createExamRun,
   runSealedExam,
+  examVersionForLeg,
   expectedRunVersion,
   loadRunPatch,
   finalizeRun,

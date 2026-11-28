@@ -82,15 +82,19 @@ describe('saved home screen in the portal', () => {
     .filter(([, fn]) => typeof fn === 'function' && fn.mock && fn.mock.calls.length > 0)
     .map(([name]) => name);
 
-  it('shows "Updating…" in the header only while the account is saved', async () => {
+  it('shows "Updating…" and the Waves header only while the account is saved', async () => {
     const { unmount } = view();
     expect(await screen.findByTestId('portal-updating')).toHaveTextContent('Updating…');
+    expect(screen.getByText('Waves')).toBeInTheDocument();
+    expect(screen.queryByText('Customer Portal')).toBeNull();
     unmount();
     auth.saved = false;
     auth.customer = FRESH_CUSTOMER;
     view();
     await screen.findByText(/hello pat/i);
     expect(screen.queryByTestId('portal-updating')).not.toBeInTheDocument();
+    expect(screen.getByText('Waves')).toBeInTheDocument();
+    expect(screen.queryByText('Customer Portal')).toBeNull();
   });
 
   it('offers Call and Text links to the office on the Updating screen', async () => {

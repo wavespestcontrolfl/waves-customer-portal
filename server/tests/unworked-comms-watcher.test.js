@@ -46,6 +46,11 @@ const request = (over = {}) => ({
   urgency: 'routine', status: 'new', created_at: '2026-08-04T12:00:00Z',
   customer_name: 'Test Customerfour', customer_id: 'cu-2', ...over,
 });
+const digitalLead = (over = {}) => ({
+  id: 'l1', lead_type: 'form_submission', first_name: 'Test', last_name: 'Leadfive',
+  phone: '+19415550199', email: 'lead5@example.com', service_interest: 'Quarterly Pest Control',
+  first_contact_at: '2026-08-05T15:00:00Z', estimate_id: 'e1', customer_id: 'cu-5', ...over,
+});
 
 describe('composeUnworkedCommsDigest', () => {
   test('itemKeys are lane-prefixed so ids from different tables never collide', () => {
@@ -210,6 +215,24 @@ describe('composeUnworkedCommsDigest', () => {
     expect(composed.summary).toBeNull();
   });
 
+  test('unworked digital leads compose their own section with channel label, pipeline deep-link, and lead: itemKeys', () => {
+    const composed = composeUnworkedCommsDigest({
+      digitalLeads: [
+        digitalLead({ id: 'l1', lead_type: 'form_submission', total_count: 2 }),
+        digitalLead({ id: 'l2', lead_type: 'email_inquiry', first_name: null, last_name: null, email: 'inbox@example.com', service_interest: 'Ants', total_count: 2 }),
+      ],
+    });
+    expect(composed.subject).toBe('ACT: 2 unworked comms at end of day — 0 callbacks, 0 follow-ups, 0 unanswered texts, 0 open requests, 2 unworked leads');
+    expect(composed.digitalLeads).toBe(2);
+    expect(composed.headline).toBe('Comms — 2 unworked leads');
+    expect(composed.summary).toBeNull();
+    expect(composed.itemKeys).toEqual(['lead:l1', 'lead:l2']);
+    expect(composed.text).toContain('Digital leads waiting >30 min with no human reply');
+    expect(composed.text).toContain('Test Leadfive [web form]');
+    expect(composed.text).toContain('inbox@example.com [email]');
+    expect(composed.html).toContain('/admin/pipeline?lead=l1');
+  });
+
   test('a lane failure gets no headline/summary — the ops-digest.js FIX default (engineering, Activity-only) applies', () => {
     const composed = composeUnworkedCommsDigest(
       { unanswered: [thread()] },
@@ -244,6 +267,7 @@ describe('runUnworkedCommsWatcher', () => {
     loadDroppedFollowUps: async () => [],
     loadUnansweredThreads: async () => [],
     loadOpenServiceRequests: async () => [],
+    loadUnworkedDigitalLeads: async () => [],
     sentRecently: never,
     stampSendMarker: noop,
     ...over,
@@ -323,6 +347,7 @@ describe('runUnworkedCommsWatcher', () => {
       loadDroppedFollowUps: boom,
       loadUnansweredThreads: boom,
       loadOpenServiceRequests: boom,
+      loadUnworkedDigitalLeads: boom,
     }));
     expect(result).toEqual({ skipped: 'query_failed' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
@@ -400,5 +425,107 @@ describe('lane SQL binding integrity', () => {
       expect(maxPlaceholder).toBe(native.bindings.length);
       for (const value of native.bindings) expect(value).toBeDefined();
     }
+  });
+
+  test('loadUnworkedDigitalLeads pages through all candidates, requires proven human estimate sends, preserves manual reopens, and scrubs PII bindings', async () => {
+    const t0 = '2026-11-27T10:00:00Z';
+    const t1 = '2026-11-27T11:00:00Z';
+    const t1Ms = Date.parse(t1);
+    const page1 = Array.from({ length: 200 }, (_, i) => ({
+      id: `lead-p1-${i}`, lead_type: 'form_submission', first_name: 'Contacted', last_name: `User${i}`,
+      phone: `+1941555${String(1000 + i).slice(-4)}`, email: `u${i}@example.com`,
+      first_contact_at: t0, cursor_at: t0, customer_id: `cust-p1-${i}`, estimate_id: null,
+    }));
+    const page2 = [
+      // Cleared by proven human staff estimate send (not automated)
+      { id: 'lead-staff-est', lead_type: 'quote_wizard', first_name: 'Ben', last_name: 'Jones', phone: '+19415550102', email: 'ben@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-1', estimate_id: 'est-staff' },
+      // Automated-only quote delivery (autoSend): MUST NOT clear the lead!
+      { id: 'lead-auto-est', lead_type: 'form_submission', first_name: 'Cara', last_name: 'Lee', phone: '+19415550103', email: 'cara@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-2', estimate_id: 'est-auto' },
+      // Manually reopened by staff (no timestamp): MUST stay visible even if it had an earlier estimate send!
+      { id: 'lead-reopened', lead_type: 'email_inquiry', first_name: 'Eve', last_name: 'Ray', phone: '+19415550105', email: 'eve@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-3', estimate_id: 'est-reopened' },
+      // Manually reopened at t1, then sent a human staff estimate AFTER t1: MUST clear!
+      { id: 'lead-reopened-cleared', lead_type: 'form_submission', first_name: 'Fay', last_name: 'Kim', phone: '+19415550106', email: 'fay@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-5', estimate_id: 'est-reopened-cleared' },
+      // Same person submitting a second form on Dan's phone: grouped as 1 waiting person, both IDs kept in all_ids.
+      { id: 'lead-unworked-dup', lead_type: 'form_submission', first_name: 'Dan', last_name: 'Ng', phone: '(941) 555-0104', email: 'dan@example.com', first_contact_at: t1, cursor_at: t1, customer_id: 'cust-4', estimate_id: null },
+      // Truly unworked lead past the 200-row first page (proves keyset paging!)
+      { id: 'lead-unworked', lead_type: 'voicemail', first_name: 'Dan', last_name: 'Ng', phone: '+19415550104', email: 'dan@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-4', estimate_id: null },
+    ];
+    let leadPageCall = 0;
+    jest.doMock('../models/db', () => {
+      const makeChain = () => {
+        const chain = {
+          whereNull: () => chain,
+          whereNotNull: () => chain,
+          where: () => chain,
+          whereIn: () => chain,
+          whereNotIn: () => chain,
+          whereRaw: () => chain,
+          orderBy: () => chain,
+          limit: () => chain,
+          select: () => {
+            leadPageCall += 1;
+            return Promise.resolve(leadPageCall === 1 ? page1 : page2);
+          },
+        };
+        return chain;
+      };
+      const dbMock = () => makeChain();
+      dbMock.raw = (sql, bindings) => ({ sql, bindings });
+      return dbMock;
+    });
+    const t2Ms = Date.parse('2026-11-27T11:30:00Z');
+    const judgeLeads = jest.fn(async (_db, batch, opts) => {
+      expect(opts).toEqual({ humanOnlyCalls: true, allowPostReopenContact: true });
+      const m = new Map();
+      for (const l of batch) {
+        if (l.id.startsWith('lead-p1-')) m.set(l.id, { evidenceType: 'staff_text', evidenceId: `sms-${l.id}`, at: new Date(t1) });
+        else if (l.id === 'lead-reopened') m.set(l.id, { skip: 'reopened_by_person' });
+        else if (l.id === 'lead-reopened-cleared') m.set(l.id, { skip: 'reopened_by_person', reopenedAt: t1Ms });
+        else m.set(l.id, { skip: 'no_contact_evidence' });
+      }
+      return m;
+    });
+    const { estimateItems: realEstimateItems } = require('../services/lead-reach-stats');
+    const estimateSends = jest.fn(async (_db, eligibleLeads) => {
+      // Reopened leads without a reopen timestamp must never be passed into estimateSends.
+      expect(eligibleLeads.map((l) => l.id)).not.toContain('lead-reopened');
+      return [
+        { leadId: 'lead-staff-est', at: t1Ms, lastAt: t1Ms, automated: false, groupAutomated: false, autoUnresolved: false, deliveries: 1, autoDeliveries: 0, personSends: [] },
+        { leadId: 'lead-auto-est', at: t1Ms, lastAt: t1Ms, automated: true, groupAutomated: false, autoUnresolved: false, deliveries: 1, autoDeliveries: 1, personSends: [] },
+        { leadId: 'lead-reopened-cleared', at: t2Ms, lastAt: t2Ms, automated: false, groupAutomated: false, autoUnresolved: false, deliveries: 1, autoDeliveries: 0, personSends: [] },
+      ];
+    });
+    jest.doMock('../services/lead-contact-sync', () => ({ judgeLeads }));
+    jest.doMock('../services/lead-reach-stats', () => ({
+      estimateSends,
+      estimateItems: realEstimateItems,
+    }));
+
+    let loaders;
+    jest.isolateModules(() => {
+      ({ _private: loaders } = require('../services/unworked-comms-watcher'));
+    });
+
+    const rows = await loaders.loadUnworkedDigitalLeads(new Date('2026-11-27T12:00:00Z'));
+    expect(leadPageCall).toBe(2);
+    expect(judgeLeads).toHaveBeenCalledTimes(2);
+    expect(estimateSends).toHaveBeenCalledTimes(1);
+    // Dan's two leads share a phone -> grouped to 1 waiting person (3 distinct people, 4 underlying lead IDs).
+    expect(rows.map((r) => r.id)).toEqual(['lead-auto-est', 'lead-reopened', 'lead-unworked-dup']);
+    expect(rows[0].total_count).toBe(3);
+    expect(rows[0].all_ids).toEqual(['lead-auto-est', 'lead-reopened', 'lead-unworked-dup', 'lead-unworked']);
+
+    // PII binding scrub: a Knex error carrying phone/email bindings must never surface in err.message.
+    judgeLeads.mockRejectedValueOnce(Object.assign(
+      new Error('select * from sms_log where to_phone = ANY({9415550199}) — secret@example.com'),
+      { code: '57014' },
+    ));
+    leadPageCall = 0;
+    await expect(loaders.loadUnworkedDigitalLeads(new Date('2026-11-27T12:00:00Z')))
+      .rejects.toThrow('digital leads query failed (57014)');
+
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/lead-contact-sync');
+    jest.dontMock('../services/lead-reach-stats');
   });
 });

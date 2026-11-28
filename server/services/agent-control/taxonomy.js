@@ -140,7 +140,7 @@ const FAILURE_RULES = [
   // not get to call it a success (Codex r7 on #3846). `openai_failed` /
   // `openai_cancelled`: a Responses body that ended in a provider-side
   // terminal state (not the model's output cut off).
-  ['provider', /^(no_key|all_providers_failed|session_error_event|session_stream_eof|openai_(failed|cancelled)|cloudflare_unsuccessful)$|_(5\d\d|429|529|503|401|403|404)$/],
+  ['provider', /^(no_key|all_providers_failed|invalid_response|session_error_event|session_stream_eof|openai_(failed|cancelled)|cloudflare_unsuccessful)$|_(5\d\d|429|529|503|401|403|404)$/],
   // status-qualified 408s (Codex r13) and the adapters' own deadlines —
   // `<provider>_timeout` from llm/call.js providerErrorReason (Codex on #3793).
   ['timeout', /^(timeout_budget_exhausted|timeout)$|_(408|timeout)$/],

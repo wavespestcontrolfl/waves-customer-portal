@@ -21,6 +21,32 @@ import { useLayoutEffect } from 'react';
 import { attachGlassMotion } from './glass-motion';
 import './glass-theme.css';
 
+let sharedScene = null;
+let stillUsers = 0;
+
+const SCENE_HTML_BACKGROUND = [
+  'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
+  'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
+  'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
+  'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
+  'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
+  'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
+].join(',');
+
+function applySceneDom(html, scene) {
+  html.setAttribute('data-glass-theme', '');
+  // One scene for every customer page (owner 2026-09-03: invoices, receipts
+  // and statements look like the estimate — the quieter wash is gone).
+  html.style.background = SCENE_HTML_BACKGROUND;
+  document.body.style.setProperty('background', 'transparent', 'important');
+  if (scene.root) {
+    scene.root.style.position = 'relative';
+    scene.root.style.zIndex = '1';
+  }
+  if (!scene.orbs.isConnected) document.body.prepend(scene.orbs);
+  if (!scene.grain.isConnected) document.body.appendChild(scene.grain);
+}
+
 /**
  * Mounts the one scene: html attribute, mesh background, the parallax orbs
  * + film grain. Returns the orb container for pointer FX
@@ -30,30 +56,14 @@ import './glass-theme.css';
  */
 export function applyGlassScene({ motion = true } = {}) {
   const html = document.documentElement;
-  const prevHtmlBg = html.style.background;
-  const prevBodyBg = document.body.style.background;
-  html.setAttribute('data-glass-theme', '');
-  // One scene for every customer page (owner 2026-09-03: invoices, receipts
-  // and statements look like the estimate — the quieter wash is gone).
-  html.style.background = [
-    'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
-    'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
-    'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
-    'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
-    'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
-    'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
-  ].join(',');
-  document.body.style.setProperty('background', 'transparent', 'important');
-  const root = document.getElementById('root');
-  if (root) {
-    root.style.position = 'relative';
-    root.style.zIndex = '1';
-  }
+  if (!sharedScene) {
+    const prevHtmlBg = html.style.background;
+    const prevBodyBg = document.body.style.background;
+    const root = document.getElementById('root');
+    const prevRootPosition = root ? root.style.position : '';
+    const prevRootZIndex = root ? root.style.zIndex : '';
 
-  let orbs = null;
-  let grain = null;
-  {
-    orbs = document.createElement('div');
+    const orbs = document.createElement('div');
     orbs.className = 'glass-scene-orbs';
     orbs.setAttribute('aria-hidden', 'true');
     orbs.innerHTML = [
@@ -66,26 +76,52 @@ export function applyGlassScene({ motion = true } = {}) {
       .map((b) => `<div class="glass-orb" style="position:absolute;left:${b[0]};top:${b[1]};width:${b[2]};height:${b[2]};border-radius:50%;background:${b[3]};filter:blur(70px);will-change:transform;"></div>`)
       .join('')
       + '<div style="position:absolute;inset:-10%;background:radial-gradient(circle, rgba(4,57,94,.28) 0 1px, transparent 1.4px);background-size:24px 24px;opacity:.14;"></div>';
-    document.body.prepend(orbs);
 
     const grainSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncA type="linear" slope="0.055"/></feComponentTransfer></filter><rect width="180" height="180" filter="url(%23n)"/></svg>';
-    grain = document.createElement('div');
+    const grain = document.createElement('div');
     grain.className = 'glass-scene-grain';
     grain.setAttribute('aria-hidden', 'true');
     grain.style.backgroundImage = `url("data:image/svg+xml;utf8,${encodeURIComponent(grainSvg).replace(/%2523/g, '%23')}")`;
-    document.body.appendChild(grain);
+
+    sharedScene = {
+      users: 0,
+      orbs,
+      grain,
+      prevHtmlBg,
+      prevBodyBg,
+      root,
+      prevRootPosition,
+      prevRootZIndex,
+    };
+    applySceneDom(html, sharedScene);
+  } else if (!sharedScene.orbs?.isConnected || !sharedScene.grain?.isConnected || !html.hasAttribute('data-glass-theme')) {
+    // Repair the active singleton in place so earlier consumers retain the
+    // original style snapshot and never tear down a later consumer's mount.
+    applySceneDom(html, sharedScene);
   }
 
+  const scene = sharedScene;
+  scene.users += 1;
   const detachMotion = motion ? attachGlassMotion() : () => {};
+  let cleaned = false;
   const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     detachMotion();
-    if (orbs) orbs.remove();
-    if (grain) grain.remove();
+    scene.users = Math.max(0, scene.users - 1);
+    if (scene.users > 0 || sharedScene !== scene) return;
+    if (scene.orbs) scene.orbs.remove();
+    if (scene.grain) scene.grain.remove();
     html.removeAttribute('data-glass-theme');
-    html.style.background = prevHtmlBg;
-    document.body.style.background = prevBodyBg;
+    html.style.background = scene.prevHtmlBg;
+    document.body.style.background = scene.prevBodyBg;
+    if (scene.root) {
+      scene.root.style.position = scene.prevRootPosition;
+      scene.root.style.zIndex = scene.prevRootZIndex;
+    }
+    sharedScene = null;
   };
-  return { orbs, cleanup };
+  return { orbs: scene.orbs, cleanup };
 }
 
 /**
@@ -102,15 +138,24 @@ export function applyGlassScene({ motion = true } = {}) {
  * :hover element renders its ::before, so a single global pair positions
  * the shine correctly.
  */
-export function attachGlassPointerFx(html, orbs, reduced) {
-  if (!orbs) return () => {};
+const pointerFxByOrbs = new WeakMap();
+
+function createPointerFxEntry(html, orbs, initialReduced) {
   const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
-  let motionReduced = reduced;
+  const orbEls = orbs.querySelectorAll('.glass-orb');
+  let users = 0;
   let raf = 0;
-  let lastEvt = null;
+  let pendingEvt = null;
   let px = 0;
   let py = 0;
-  const orbEls = orbs.querySelectorAll('.glass-orb');
+  let motionReduced = initialReduced;
+
+  const resetVisuals = () => {
+    orbEls.forEach((orb) => orb.style.removeProperty('transform'));
+    html.style.removeProperty('--mx');
+    html.style.removeProperty('--my');
+  };
+
   const parallax = () => {
     if (motionReduced) return;
     const sy = window.scrollY;
@@ -120,23 +165,33 @@ export function attachGlassPointerFx(html, orbs, reduced) {
       c.style.transform = `translate(${px * -46 * ((i + 1) / orbEls.length) + drift}px, ${sy * f + py * -34 * ((i + 1) / orbEls.length)}px)`;
     });
   };
-  const onMove = (e) => {
-    lastEvt = e;
-    if (raf) return;
-    raf = requestAnimationFrame(() => {
-      raf = 0;
-      const t = lastEvt.target instanceof Element ? lastEvt.target.closest('[data-glass],[data-glass-accent]') : null;
+
+  const flushFrame = () => {
+    raf = 0;
+    if (pendingEvt) {
+      const evt = pendingEvt;
+      pendingEvt = null;
+      const t = evt.target instanceof Element ? evt.target.closest('[data-glass],[data-glass-accent]') : null;
       if (t) {
         const r = t.getBoundingClientRect();
-        html.style.setProperty('--mx', `${((lastEvt.clientX - r.left) / r.width) * 100}%`);
-        html.style.setProperty('--my', `${((lastEvt.clientY - r.top) / r.height) * 100}%`);
+        html.style.setProperty('--mx', `${((evt.clientX - r.left) / r.width) * 100}%`);
+        html.style.setProperty('--my', `${((evt.clientY - r.top) / r.height) * 100}%`);
       }
-      px = lastEvt.clientX / window.innerWidth - 0.5;
-      py = lastEvt.clientY / window.innerHeight - 0.5;
-      parallax();
-    });
+      px = evt.clientX / window.innerWidth - 0.5;
+      py = evt.clientY / window.innerHeight - 0.5;
+    }
+    parallax();
   };
-  const onScroll = () => requestAnimationFrame(parallax);
+
+  const scheduleFrame = () => {
+    if (!raf) raf = requestAnimationFrame(flushFrame);
+  };
+  const onMove = (e) => {
+    pendingEvt = e;
+    scheduleFrame();
+  };
+  const onScroll = () => scheduleFrame();
+
   // Under reduced motion the pointer listener is never registered. Gating only
   // `parallax()` left `--mx`/`--my` tracking the cursor, so the specular
   // highlight went on sliding across every card — motion the user asked not to
@@ -144,28 +199,61 @@ export function attachGlassPointerFx(html, orbs, reduced) {
   const syncPreference = () => {
     document.removeEventListener('pointermove', onMove);
     window.removeEventListener('scroll', onScroll);
-    if (!motionReduced) {
+    if (!motionReduced && users > 0) {
       document.addEventListener('pointermove', onMove, { passive: true });
       window.addEventListener('scroll', onScroll, { passive: true });
-    } else {
-      if (raf) cancelAnimationFrame(raf);
-      raf = 0;
-      orbEls.forEach((orb) => orb.style.removeProperty('transform'));
-      html.style.removeProperty('--mx');
-      html.style.removeProperty('--my');
+      return;
     }
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    pendingEvt = null;
+    resetVisuals();
   };
-  const onPreference = () => { motionReduced = preference.matches; syncPreference(); };
-  syncPreference();
+
+  const onPreference = () => {
+    motionReduced = preference.matches;
+    syncPreference();
+  };
   preference.addEventListener('change', onPreference);
 
+  return {
+    addOwner(reduced) {
+      users += 1;
+      if (!reduced) motionReduced = preference.matches;
+      syncPreference();
+    },
+    removeOwner() {
+      users = Math.max(0, users - 1);
+      return users;
+    },
+    destroy() {
+      document.removeEventListener('pointermove', onMove);
+      window.removeEventListener('scroll', onScroll);
+      preference.removeEventListener('change', onPreference);
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      pendingEvt = null;
+      resetVisuals();
+    },
+  };
+}
+
+export function attachGlassPointerFx(html, orbs, reduced) {
+  if (!orbs) return () => {};
+  let entry = pointerFxByOrbs.get(orbs);
+  if (!entry) {
+    entry = createPointerFxEntry(html, orbs, reduced);
+    pointerFxByOrbs.set(orbs, entry);
+  }
+  entry.addOwner(reduced);
+
+  let detached = false;
   return () => {
-    document.removeEventListener('pointermove', onMove);
-    window.removeEventListener('scroll', onScroll);
-    preference.removeEventListener('change', onPreference);
-    if (raf) cancelAnimationFrame(raf);
-    html.style.removeProperty('--mx');
-    html.style.removeProperty('--my');
+    if (detached) return;
+    detached = true;
+    if (entry.removeOwner() > 0) return;
+    if (pointerFxByOrbs.get(orbs) === entry) pointerFxByOrbs.delete(orbs);
+    entry.destroy();
   };
 }
 
@@ -216,10 +304,16 @@ export function useGlassSurface(active, { motion = true } = {}) {
     // data-glass-still on <html> so the CSS drops the hover lift. The static
     // scene stays exactly as it is for every other surface.
     const detachFx = motion ? attachGlassPointerFx(html, orbs, reduced) : () => {};
-    if (!motion) html.setAttribute('data-glass-still', '');
+    if (!motion) {
+      stillUsers += 1;
+      html.setAttribute('data-glass-still', '');
+    }
     return () => {
       detachFx();
-      html.removeAttribute('data-glass-still');
+      if (!motion) {
+        stillUsers = Math.max(0, stillUsers - 1);
+        if (stillUsers === 0) html.removeAttribute('data-glass-still');
+      }
       cleanup();
     };
   }, [active, motion]);

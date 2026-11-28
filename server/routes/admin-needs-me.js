@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const { listNeedsMe, decodeCursor } = require('../services/needs-me');
 const { AREAS, WHO } = require('../services/admin-alert-compose');
 
@@ -11,6 +12,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // Everything open, in the shape of docs/admin-notifications.md section 2. Scoped to the
 // caller's role exactly as the bell list is (a technician sees tech-visible rows only, and
 // with GATE_TECH_LOGIN_PRIVACY only its own customers' rows: the bell's technician id rule).
+// Owner-only rows (metadata.ownerOnly) are returned only to the owner login (`ibFullAccess`).
 router.get('/', async (req, res, next) => {
   try {
     const { who, area, limit } = req.query;
@@ -20,7 +22,7 @@ router.get('/', async (req, res, next) => {
     if (who !== undefined && !WHO.includes(who)) return res.status(400).json({ error: `who must be one of: ${WHO.join(', ')}` });
     if (area !== undefined && !AREAS.includes(area)) return res.status(400).json({ error: `area must be one of: ${AREAS.join(', ')}` });
     res.set('Cache-Control', 'no-store');
-    res.json(await listNeedsMe({ who, area, limit, after, role: req.techRole, technicianId: req.technicianId }));
+    res.json(await listNeedsMe({ who, area, limit, after, role: req.techRole, technicianId: req.technicianId, fullAccess: ibFullAccess(req) }));
   } catch (err) { next(err); }
 });
 

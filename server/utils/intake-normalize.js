@@ -531,6 +531,7 @@ function normalizeAdminAddressInput({ address, addressLine1, addressLine2, city,
 }
 
 module.exports = {
+  SECONDARY_CONTACT_ROLES,
   normalizeWebAdditionalProperties,
   EMAIL_RE,
   cleanText,

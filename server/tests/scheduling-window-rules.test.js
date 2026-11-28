@@ -166,7 +166,7 @@ describe('probeSlotOverlap (unconditional advisory probe)', () => {
         .resolves.toEqual([]);
       expect(trx.raw.mock.calls.some(([sql, b]) => /pg_advisory_xact_lock/.test(sql) && b?.includes('occupancy:2099-01-15'))).toBe(true);
       expect(findConflictingVisits.mock.calls[0][0]).toMatchObject({
-        excludeServiceIds: ['x'], excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+        excludeServiceIds: ['x'], excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
       });
     });
   });

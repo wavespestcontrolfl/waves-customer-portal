@@ -465,10 +465,11 @@ describe('reschedule-public wiring', () => {
 
   test('Confirm checks the limits after the idempotent replay and refuses MOVE_LIMIT', () => {
     const commit = src.slice(src.indexOf("router.post('/:token', commitLimiter"));
-    const replay = commit.indexOf('replayed: true');
+    const replay = commit.indexOf('buildReplayResponse(');
     const check = commit.indexOf('await assertMoveLimitAllows(svc, elig, range, config, date);');
     expect(replay).toBeGreaterThan(-1);
     expect(check).toBeGreaterThan(replay);
+    expect(src.slice(src.indexOf('async function buildReplayResponse('), src.indexOf("router.post('/:token', commitLimiter"))).toContain('replayed: true');
     const asserts = src.slice(src.indexOf('async function assertMoveLimitAllows('));
     const body = asserts.slice(0, asserts.indexOf('\n}\n'));
     expect(body).toMatch(/!blocked && limit\?\.lastDate && date > limit\.lastDate/);

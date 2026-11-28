@@ -278,9 +278,10 @@ describe('safeSendAppointment partial fan-out across the send-window boundary', 
     expect(failingInsert).toHaveBeenCalledTimes(3);
     expect(notifyAdmin).toHaveBeenCalledWith(
       'comms',
-      'Held appointment notice needs a manual send',
+      'Comms — send a held appointment notice manually',
       expect.any(String),
       expect.objectContaining({
+        bell: true,
         metadata: expect.objectContaining({ reason: 'held_notice_contact_enqueue_failed' }),
       }),
     );

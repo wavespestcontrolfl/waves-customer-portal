@@ -87,8 +87,9 @@ function installTransaction(chains, { activeTimer } = {}) {
   const trx = jest.fn((table) => {
     if (table === 'time_entries') return activeTimers;
     if (table === 'audit_log') return audit;
+    if (table === 'tech_voice_pins') return makeChain();
     if (table === 'scheduled_services as s') return makeChain({ rows: [] });
-    if (table === 'scheduled_services' || table === 'service_records' || table === 'review_incentive_payouts') return makeChain({ first: undefined });
+    if (['scheduled_services', 'service_records', 'review_incentive_payouts', 'payroll_checks', 'payroll_pay_lines', 'payroll_time_off', 'payroll_w4_elections'].includes(table)) return makeChain({ first: undefined });
     if (table === 'technician_capabilities') {
       // createTechnician seeds the five dispatch categories on the same trx.
       const seed = makeChain();
@@ -214,15 +215,16 @@ describe('owner (full-access) staff row lifecycle is owner-only', () => {
     expect(chains[2].update).not.toHaveBeenCalled();
   });
 
-  test('a non-owner admin can still edit other fields of the owner row (status unchanged)', async () => {
+  test('a non-owner admin cannot edit ANY field of the owner row (even with status unchanged)', async () => {
     const chains = [
       makeChain({ first: ownerRow }), makeChain(),
       makeChain({ first: { ...ownerRow, field_dispatchable: false } }),
     ];
     installTransaction(chains);
     const res = await invoke(updateTechnician, reqFor(ownerRow, { body: { fieldDispatchable: false, employmentStatus: 'active' } }));
-    expect(res.statusCode).toBe(200);
-    expect(chains[1].update).toHaveBeenCalled();
+    expect(res.statusCode).toBe(403);
+    expect(res.body.error).toMatch(/Only the owner account/);
+    expect(chains[1].update).not.toHaveBeenCalled();
   });
 
   test('control: the existing email guard still refuses a non-owner email change', async () => {

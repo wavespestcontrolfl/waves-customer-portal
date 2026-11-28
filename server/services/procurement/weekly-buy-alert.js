@@ -216,4 +216,4 @@ async function runWeeklyBuyList({ knex = require('../../models/db'), now = new D
   return { weekStart: built.weekStart, ...(await syncWeeklyBuyAlerts({ list: built, io: io || defaultIo(knex), notify: sink })) };
 }
 
-module.exports = { runWeeklyBuyList, syncWeeklyBuyAlerts, specFor, detailFor, whyFor, growth, keyFor };
+module.exports = { runWeeklyBuyList, syncWeeklyBuyAlerts, specFor, detailFor, whyFor, growth, keyFor, raiseOn };
