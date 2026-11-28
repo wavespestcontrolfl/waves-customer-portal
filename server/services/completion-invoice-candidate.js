@@ -129,8 +129,8 @@ async function completionNewestLiveInvoiceLookup(conn, { serviceRecordId = null,
 // OLDER row via service_record_id while a newer live row hangs off
 // scheduled_service_id. A refunded row alone (no live row) parks exactly
 // as before; no refunded row → the chain's row stands untouched.
-function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
-  if (!refunded) return { existing, terminal: null, liveBeside: null };
+function reconcileLiveVsRefunded(existing, refunded, newestLive = null, { preserveExisting = false } = {}) {
+  if (!refunded || (preserveExisting && existing)) return { existing, terminal: null, liveBeside: null };
   return { existing: null, terminal: refunded, liveBeside: newestLive || existing || null };
 }
 

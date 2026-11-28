@@ -10001,6 +10001,9 @@ const InvoiceService = {
       status: db.raw(
         "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
       ),
+      // A first delivery after the bill's due day takes the send day (e.g.
+      // deferred after-hours completion SMS finalized the next morning, #7741).
+      due_date: require("./invoice-helpers").firstDeliveryDueDate(db, etDateString()),
       ...require('./messaging/billing-prior-delivery').invoiceDeliveryStampUpdates(db, {
         deduped, eventVisibleAt, smsEventVisibleAt, emailEventVisibleAt, sms, email, now,
       }),

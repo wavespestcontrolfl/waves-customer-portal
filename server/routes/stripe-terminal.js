@@ -22,7 +22,49 @@ const {
   planCardPresentSurcharge,
   SURCHARGE_API_VERSION,
 } = require('../services/stripe-pricing');
-const { invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+const { invoiceAmountDue, invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview } = require('../services/invoice-helpers');
+
+const TERMINAL_UNCOLLECTIBLE_STATUSES = ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'];
+const TERMINAL_CHEMICAL_HOLD_ERROR = 'This invoice is held for office billing review of a chemical area add-on';
+
+function terminalHandoffRefusal(invoice) {
+  if (!invoice) return { status: 404, body: { error: 'Invoice not found' } };
+  const status = String(invoice.status || '').toLowerCase();
+  if (status === 'paid') return { status: 400, body: { error: 'Invoice already paid' } };
+  if (status === 'prepaid') return { status: 400, body: { error: 'Invoice is already prepaid' } };
+  if (status === 'processing') return { status: 409, body: { error: 'Bank payment is already processing' } };
+  if (['void', 'refunded', 'canceled', 'cancelled'].includes(status)) {
+    return { status: 400, body: { error: `Invoice is ${status} and cannot be paid` } };
+  }
+  if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
+    return { status: 400, body: { error: 'Invoice is billed to a third-party payer — do not collect in person' } };
+  }
+  if (invoiceHeldForChemicalReview(invoice)) {
+    return { status: 409, body: { error: TERMINAL_CHEMICAL_HOLD_ERROR, code: 'INVOICE_CHEMICAL_ADDON_HOLD' } };
+  }
+  return null;
+}
+
+function terminalCollectionRefusal(invoice) {
+  if (!invoice) return { status: 409, body: { error: 'Invoice not found', code: 'invoice_status_changed' } };
+  const status = String(invoice.status || '').toLowerCase();
+  if (TERMINAL_UNCOLLECTIBLE_STATUSES.includes(status)) {
+    return { status: 409, body: { error: `Invoice is ${invoice.status}`, code: 'invoice_status_changed' } };
+  }
+  if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
+    return {
+      status: 409,
+      body: {
+        error: 'Invoice is billed to a third-party payer — do not collect in person',
+        code: 'invoice_withdrawn_from_customer',
+      },
+    };
+  }
+  if (invoiceHeldForChemicalReview(invoice)) {
+    return { status: 409, body: { error: TERMINAL_CHEMICAL_HOLD_ERROR, code: 'INVOICE_CHEMICAL_ADDON_HOLD' } };
+  }
+  return null;
+}
 const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
 const {
   assertNoInvoiceChargeReconciliationPending,
@@ -272,22 +314,11 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // existence. Runs before any credit-apply side effect.
     if (!(await technicianMayCollectInvoice(req, invoice))) return res.status(404).json({ error: 'Invoice not found' });
 
-    // Status + Bill-To guards run FIRST — before any Stripe cancellation or
-    // credit-apply side effect — so we never cancel a payer's PaymentIntent (or
-    // touch a terminal invoice) only to then reject the in-person collection.
-    if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
-    if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
-    if (invoice.status === 'processing') return res.status(409).json({ error: 'Bank payment is already processing' });
-    // Third-party Bill-To: never mint an in-person collection handoff for a
-    // payer-billed invoice — the tech must not collect the AP's invoice from the
-    // service recipient. AR routes to the payer AP inbox.
-    if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) {
-      // A WITHDRAWN combined-visit invoice keeps payer_id NULL and a
-      // collectible status — the Bill-To move is recorded only in its stamp
-      // (Codex #4311 r31 P1) — so a payer_id-only guard let a technician mint
-      // a card-present charge against debt the payer now owes.
-      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — do not collect in person' });
-    }
+    // Status, Bill-To, and chemical-review hold guards run FIRST — before any
+    // Stripe cancellation or credit-apply side effect — so we never cancel a
+    // payer's PaymentIntent or touch a terminal/held invoice only to reject.
+    const handoffRefusal = terminalHandoffRefusal(invoice);
+    if (handoffRefusal) return res.status(handoffRefusal.status).json(handoffRefusal.body);
 
     // Apply available account credit before pricing the handoff so the tech
     // collects amount due (total − applied credit), not the gross total — on this
@@ -307,17 +338,23 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // annual-prepay term sync) are deferred and run after commit.
     const { autoApplyAccountCreditIfEnabled, runPostFullCoverageSideEffects } = require('../services/customer-credit');
     let handoffCreditResult = null;
+    let lockedHandoffRefusal = null;
     const ownershipHeld = await db.transaction(async (trx) => {
       // Billing lock order (invoice → customer → visit), the order the credit
       // apply and saved-card collection take, so a concurrent collection
       // cannot deadlock against this ownership check (pre-push P1). The
       // credit apply below re-locks the same rows within this transaction.
-      await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
+      const lockedInv = await trx('invoices').where({ id: invoice_id }).forUpdate().first();
+      if (lockedInv) {
+        lockedHandoffRefusal = terminalHandoffRefusal(lockedInv);
+        if (lockedHandoffRefusal) return true;
+      }
       if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;
       handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true });
       return true;
     });
+    if (lockedHandoffRefusal) return res.status(lockedHandoffRefusal.status).json(lockedHandoffRefusal.body);
     if (!ownershipHeld) return res.status(404).json({ error: 'Invoice not found' });
     handoffAppliedCredit = handoffCreditResult?.applied || 0;
     if (handoffCreditResult?.fullyCovered) {
@@ -680,10 +717,10 @@ router.post('/validate-handoff', async (req, res) => {
     // From here on the DB row is the authoritative source for invoice_id,
     // amount_cents, and tech_user_id. Stop reading from `claims` for those.
     const invoice = await db('invoices').where({ id: handoffRow.invoice_id }).first();
-    // A Bill-To move committed between the mint and this validation is the
-    // same refusal as a status change (r31 P1): the stamp is the only record.
-    if (!invoice || invoiceWithdrawnFromCustomer(invoice)
-      || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
+    // A Bill-To move, chemical-review hold, or status change committed between
+    // mint and validation refuses collection.
+    const validateRefusal = terminalCollectionRefusal(invoice);
+    if (validateRefusal) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: handoffRow.invoice_id || null,
@@ -692,10 +729,7 @@ router.post('/validate-handoff', async (req, res) => {
         ip_address: ip,
         user_agent: ua,
       });
-      return res.status(409).json({
-        error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
-        code: 'invoice_status_changed',
-      });
+      return res.status(validateRefusal.status).json(validateRefusal.body);
     }
 
     // Compare the CURRENT invoice total against the mint-time amount stored
@@ -1383,18 +1417,8 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     // office, or adjusted. These checks run against the current invoice
     // state and the mint-time snapshot in handoff.amount_cents.
     const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
-    if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
-      return res.status(409).json({
-        error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
-        code: 'invoice_status_changed',
-      });
-    }
-    if (invoiceWithdrawnFromCustomer(invoice)) {
-      return res.status(409).json({
-        error: 'Invoice is billed to a third-party payer — do not collect in person',
-        code: 'invoice_withdrawn_from_customer',
-      });
-    }
+    const preCreateRefusal = terminalCollectionRefusal(invoice);
+    if (preCreateRefusal) return res.status(preCreateRefusal.status).json(preCreateRefusal.body);
     const currentAmountCents = Math.round(invoiceAmountDue(invoice) * 100);
     if (currentAmountCents !== Number(handoff.amount_cents)) {
       return res.status(409).json({
@@ -1463,14 +1487,8 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       // gap before Terminal binds its card-present PI.
       await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'collecting at the terminal' });
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-      if (!locked || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(locked.status)) {
-        return { ok: false, status: locked ? locked.status : null };
-      }
-      // The withdrawal re-read UNDER THE LOCK, like every other money seam:
-      // a Bill-To assignment can commit while this transaction waits here.
-      if (invoiceWithdrawnFromCustomer(locked)) {
-        return { ok: false, withdrawn: true, status: locked.status };
-      }
+      const lockedRefusal = terminalCollectionRefusal(locked);
+      if (lockedRefusal) return { ok: false, refusal: lockedRefusal };
       // Amount agreement under the lock. Partial account credit can land between
       // the unlocked pre-create check and here WITHOUT flipping the invoice
       // terminal (it stays collectible at a reduced amount due), so the status
@@ -1579,11 +1597,8 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       if (bound.chargeFence) {
         return res.status(409).json({ ...bound.chargeFence, newHandoffRequired: true });
       }
-      if (bound.withdrawn) {
-        return res.status(409).json({
-          error: 'Invoice is billed to a third-party payer — do not collect in person',
-          code: 'invoice_withdrawn_from_customer',
-        });
+      if (bound.refusal) {
+        return res.status(bound.refusal.status).json(bound.refusal.body);
       }
       if (bound.piGuard) {
         // The customer's own pay-page payment is already settling (or could not
@@ -1689,12 +1704,8 @@ router.post('/apply-surcharge', terminalAuthenticate, async (req, res) => {
     // Terminal PI was minted but before the technician confirms it.
     return await db.transaction(async (trx) => {
       const invoice = await trx('invoices').where({ id: handoff.invoice_id }).forUpdate().first();
-      if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
-        return res.status(409).json({
-          error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
-          code: 'invoice_status_changed',
-        });
-      }
+      const surchargeRefusal = terminalCollectionRefusal(invoice);
+      if (surchargeRefusal) return res.status(surchargeRefusal.status).json(surchargeRefusal.body);
       const baseCents = Number(handoff.amount_cents);
       if (Math.round(invoiceAmountDue(invoice) * 100) !== baseCents) {
         return res.status(409).json({ error: 'Invoice amount changed since handoff', code: 'invoice_amount_changed' });

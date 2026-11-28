@@ -742,6 +742,9 @@ router.get('/balance', async (req, res, next) => {
       .where(function withdrawnExcluded() {
         this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
       })
+      .where(function chemicalHoldExcluded() {
+        this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'chemical_addon_review:%');
+      })
       // Outstanding balance = amount DUE (total − applied account credit − part payments), not the
       // raw total, so the portal balance matches what Stripe/Terminal actually charge.
       .select(db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) AS total'))

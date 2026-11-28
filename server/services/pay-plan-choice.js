@@ -33,6 +33,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { acceptMintEstimateId } = require('./invoice-notes');
 const { portalUrl } = require('../utils/portal-url');
+const { invoiceHeldForChemicalReview, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 
 // A bill the customer can still pay (invoice.js isInvoiceCollectibleStatus
 // minus 'processing': money in flight is never offered a different plan).
@@ -59,6 +60,7 @@ function acceptEstimateForChoice(invoice) {
   if (!isEnabled('payPlanChoice')) return null;
   if (!invoice?.id || !invoice.customer_id || !invoice.scheduled_service_id || !invoice.invoice_number) return null;
   if (invoice.annual_prepay_term_id || invoice.payer_id || invoice.payer_statement_id) return null;
+  if (invoiceWithdrawnFromCustomer(invoice) || invoiceHeldForChemicalReview(invoice)) return null;
   // Money already recorded on it (an out-of-band part payment leaves the
   // invoice open): which plan that money belongs to is the office's call.
   if (invoice.payment_recorded_at) return null;
