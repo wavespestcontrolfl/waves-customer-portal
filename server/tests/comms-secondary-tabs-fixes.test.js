@@ -32,7 +32,7 @@ const adminCommsRouter = require('../routes/admin-communications');
 function makeChain(result = []) {
   const calls = [];
   const q = { _calls: calls };
-  for (const m of ['where', 'whereNot', 'orWhereNull', 'leftJoin', 'joinRaw', 'select', 'groupBy', 'orderBy', 'limit', 'update', 'count']) {
+  for (const m of ['where', 'whereNot', 'whereRaw', 'orWhereNull', 'leftJoin', 'joinRaw', 'select', 'groupBy', 'orderBy', 'limit', 'update', 'count']) {
     q[m] = jest.fn((...args) => {
       calls.push([m, ...args]);
       return q;
