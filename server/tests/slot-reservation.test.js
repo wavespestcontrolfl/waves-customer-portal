@@ -3057,4 +3057,28 @@ describe('global estimate cache invalidation on hold lifecycle writes', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(1);
   });
+
+  test('nested savepoint rollback does not flush caches even when the outer transaction commits', async () => {
+    let resolveOuter;
+    let rejectSavepoint;
+    const outerPromise = new Promise((resolve) => { resolveOuter = resolve; });
+    const savepointPromise = new Promise((_resolve, reject) => { rejectSavepoint = reject; });
+    const outerTrx = { isTransaction: true, executionPromise: outerPromise };
+    const savepointTrx = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      del: jest.fn().mockResolvedValue(1),
+    }));
+    savepointTrx.isTransaction = true;
+    savepointTrx.executionPromise = savepointPromise;
+    savepointTrx.parentTransaction = outerTrx;
+
+    await slotReservation.releaseEstimateHolds({ estimateId: 'est-sp', database: savepointTrx });
+    rejectSavepoint(new Error('savepoint rolled back'));
+    resolveOuter();
+    await outerPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(estimateSlotAvailability.invalidateAllEstimates).not.toHaveBeenCalled();
+  });
 });

@@ -1881,15 +1881,18 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         bindings: ['9415551234', '19415551234'],
       });
 
-      // Unsupported non-US / malformed phone formats are rejected with 400 before
-      // account creation so they can never attach to another customer via last-10 suffix.
-      whereRawCalls.length = 0;
-      const badPhoneRes = await createSelfBooking(confirmPayload(sig, {
-        new_customer: { lat: LAT, lng: LNG, phone: '+449415551234', first_name: 'Pat', last_name: 'Lee' },
-      }));
-      expect(badPhoneRes).toMatchObject({ ok: false, status: 400 });
-      expect(badPhoneRes.error).toMatch(/valid 10-digit US phone/i);
-      expect(whereRawCalls).toHaveLength(0);
+      // Unsupported non-US / malformed phone formats (including a foreign +44 E.164
+      // number with 10 total digits) are rejected with 400 before identity recovery
+      // or account creation so they can never match another customer.
+      for (const badPhone of ['+449415551234', '+4420123456', '1941555123']) {
+        whereRawCalls.length = 0;
+        const badPhoneRes = await createSelfBooking(confirmPayload(sig, {
+          new_customer: { lat: LAT, lng: LNG, phone: badPhone, first_name: 'Pat', last_name: 'Lee' },
+        }));
+        expect(badPhoneRes).toMatchObject({ ok: false, status: 400 });
+        expect(badPhoneRes.error).toMatch(/valid 10-digit US phone/i);
+        expect(whereRawCalls).toHaveLength(0);
+      }
     });
 
     test('ensureCustomerAccount with exactUsPhone: true uses exact US IN matching instead of LIKE suffix', async () => {
@@ -1979,14 +1982,16 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         bindings: ['9415551234', '19415551234'],
       });
 
-      // International/malformed number sharing the 10-digit suffix must not match.
-      whereRawCalls.length = 0;
-      let badBody;
-      const badReq = { query: { phone: '+449415551234', address: '123 Main St', zip: '34231' } };
-      const badRes = { json: jest.fn((payload) => { badBody = payload; return badRes; }) };
-      await handler(badReq, badRes, jest.fn((err) => { if (err) throw err; }));
-      expect(badBody).toEqual({ customer: null });
-      expect(whereRawCalls).toHaveLength(0);
+      // International/malformed numbers (including a 10-digit +44 E.164 number) must not match.
+      for (const badPhone of ['+449415551234', '+4420123456']) {
+        whereRawCalls.length = 0;
+        let badBody;
+        const badReq = { query: { phone: badPhone, address: '123 Main St', zip: '34231' } };
+        const badRes = { json: jest.fn((payload) => { badBody = payload; return badRes; }) };
+        await handler(badReq, badRes, jest.fn((err) => { if (err) throw err; }));
+        expect(badBody).toEqual({ customer: null });
+        expect(whereRawCalls).toHaveLength(0);
+      }
     });
   });
 });

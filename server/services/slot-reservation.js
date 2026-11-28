@@ -2624,12 +2624,9 @@ function invalidateSlotAvailabilityAfterCommit(conn, estimateId = null, { all = 
   const flush = () => invalidateSlotAvailabilityCache(estimateId, { all });
   if (conn && (conn.isTransaction || conn.executionPromise)) {
     try {
-      const { outermostTransaction } = require('./customer-credit');
-      const scope = outermostTransaction(conn);
-      if (scope && scope.executionPromise && typeof scope.executionPromise.then === 'function') {
-        scope.executionPromise.then(flush, () => {});
-        return;
-      }
+      const { afterCommit } = require('./customer-credit');
+      afterCommit(conn, flush);
+      return;
     } catch { /* fall through to immediate best-effort flush */ }
   }
   flush();

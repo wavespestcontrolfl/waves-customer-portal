@@ -962,10 +962,22 @@ async function findAccountPropertyByAddress(customer, { address, zip, unit }, co
   return (accountRows || []).find(row => addressMatchesCustomer(row, address, zip, unit)) || null;
 }
 
+const { nanpNationalDigits, isValidNanpNumber } = require('../utils/phone');
+
 function normalizeUsPhoneLast10(raw) {
-  const digits = String(raw || '').replace(/\D/g, '');
-  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
-  return digits.length === 10 ? digits : '';
+  if (!isValidNanpNumber(raw)) return '';
+  return nanpNationalDigits(raw) || '';
+}
+
+function consumedHandoffContactMatches(submitted, consumedCust) {
+  const rawPhone = submitted?.phone ? String(submitted.phone).trim() : '';
+  const submitted10 = normalizeUsPhoneLast10(rawPhone);
+  if (rawPhone) {
+    const onFile10 = normalizeUsPhoneLast10(consumedCust?.phone);
+    return !!submitted10 && submitted10 === onFile10;
+  }
+  const submittedEmail = String(submitted?.email || '').trim().toLowerCase();
+  return !!submittedEmail && submittedEmail === String(consumedCust?.email || '').trim().toLowerCase();
 }
 
 function queryActiveCustomerByPhone(rawDigits) {
@@ -3180,7 +3192,11 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
-    const phoneDigits = new_customer?.phone ? String(new_customer.phone).replace(/\D/g, '') : '';
+    const rawSubmittedPhone = new_customer?.phone ? String(new_customer.phone).trim() : '';
+    const phoneDigits = rawSubmittedPhone ? rawSubmittedPhone.replace(/\D/g, '') : '';
+    if (!custId && rawSubmittedPhone && !normalizeUsPhoneLast10(rawSubmittedPhone)) {
+      return { ok: false, status: 400, error: 'Please enter a valid 10-digit US phone number.' };
+    }
     // Customer-less draft replay recovery — GATE-INDEPENDENT (Codex #3500):
     // when the quote's customer mirror failed, the first signed booking
     // created the customer and consumed the draft; an identical retry must
@@ -3204,30 +3220,20 @@ async function createSelfBooking(payload = {}) {
             // slot tuple must not resolve someone else's identity and pull
             // their confirmation/notes/card URL through the replay. The
             // SUBMITTED contact must match the consuming booking's
-            // customer (same last-10-phone / email rule as
-            // bindGateEstimate) before the replay identity is assigned.
+            // customer (exact validated NANP digits / email) before the
+            // replay identity is assigned.
             const consumedCust = await db('customers')
               .where({ id: consumed.customer_id })
               .first('phone', 'email');
-            const last10 = (v) => {
-              const digits = String(v || '').replace(/\D/g, '');
-              return digits.length >= 10 ? digits.slice(-10) : '';
-            };
-            const submitted10 = last10(new_customer?.phone);
-            const submittedEmail = String(new_customer?.email || '').trim().toLowerCase();
-            const contactMatches = submitted10
-              ? submitted10 === last10(consumedCust?.phone)
-              : (!!submittedEmail
-                && submittedEmail === String(consumedCust?.email || '').trim().toLowerCase());
-            if (contactMatches) custId = consumed.customer_id;
+            if (consumedHandoffContactMatches(new_customer, consumedCust)) custId = consumed.customer_id;
           }
         }
       } catch (err) {
         logger.warn(`[booking:confirm] consumed-handoff customer recovery failed (continuing): ${err.message}`);
       }
     }
-    if (!custId && phoneDigits) {
-      const phoneMatch = await resolveSelfBookingPhoneOwner(phoneDigits, customer_id);
+    if (!custId && rawSubmittedPhone) {
+      const phoneMatch = await resolveSelfBookingPhoneOwner(rawSubmittedPhone, customer_id);
       if (phoneMatch.error) return phoneMatch.error;
       if (phoneMatch.custId) custId = phoneMatch.custId;
     }
@@ -3478,7 +3484,7 @@ async function createSelfBooking(payload = {}) {
       const account = await ensureCustomerAccount(db, {
         firstName: new_customer.first_name,
         lastName: new_customer.last_name || '',
-        phone: normalizeUsPhoneLast10(phoneDigits) || phoneDigits,
+        phone: normalizeUsPhoneLast10(rawSubmittedPhone) || phoneDigits,
         email: new_customer.email || null,
         exactUsPhone: true,
       });

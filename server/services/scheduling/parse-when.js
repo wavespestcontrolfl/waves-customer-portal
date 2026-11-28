@@ -214,9 +214,8 @@ function fallbackParse(query, now) {
   }
 
   // Explicit weekday ("next tuesday", "on friday", "thursday") — never match a
-  // negated weekday like "except wednesday", "not monday", or "can't do friday".
-  const negatedWeekday = new RegExp(`\\b(?:except|not|no|other than|besides|can'?t(?:\\s+do)?|cannot(?:\\s+do)?|don'?t(?:\\s+want)?)\\s+(?:on\\s+)?(?:${WEEKDAY_PATTERN})\\b`).test(q);
-  const dayMatch = negatedWeekday
+  // negated or excluded weekday ("except wednesday", "can't do next friday") on fallback.
+  const dayMatch = NEGATION_CONSTRAINT_RE.test(q)
     ? null
     : q.match(new RegExp(`\\b(next\\s+)?(${WEEKDAY_PATTERN})\\b`));
   if (dayMatch) {
