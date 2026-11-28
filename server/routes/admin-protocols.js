@@ -94,6 +94,7 @@ const PROGRAM_KEYS = [
   'flea',
   'bed_bug',
   'termite',
+  'mosquito_misting',
 ];
 
 function programSummary(key, program) {
@@ -2246,6 +2247,7 @@ router.get('/programs', async (req, res, next) => {
       flea: programSummary('flea', protocols.flea),
       bed_bug: programSummary('bed_bug', protocols.bed_bug),
       termite: programSummary('termite', protocols.termite),
+      mosquito_misting: programSummary('mosquito_misting', protocols.mosquito_misting),
     }));
   } catch (err) { next(err); }
 });

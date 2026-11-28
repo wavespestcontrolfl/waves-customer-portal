@@ -1,9 +1,50 @@
 import React from "react";
 import { mixTable } from "../../lib/protocol-mix-amounts";
 
+function productMatchForRow(row, products) {
+  if (row?.productId) {
+    const byId = products.find((p) => String(p?.id) === String(row.productId));
+    if (byId) return byId;
+  }
+  const target = String(row?.product || "").trim().toLowerCase();
+  if (target.length < 4) return null;
+  const normalized = (p) => String(p?.name || "").trim().toLowerCase();
+  return (
+    products.find((p) => normalized(p) === target) ||
+    products.find((p) => {
+      const name = normalized(p);
+      return name.length >= 4 && (name.includes(target) || target.includes(name));
+    }) ||
+    null
+  );
+}
+
+function rowWarningInfo(row, products) {
+  const liveCard = Array.isArray(products);
+  const match = liveCard ? productMatchForRow(row, products) : null;
+  const missingCheck = liveCard && !match && !row?.labelRateMissing && Boolean(row?.perGallon || row?.dose);
+  const rawParts = [
+    row?.labelWarning,
+    match?.amountNote,
+    match?.verdict && match.verdict !== "ok" ? match.verdictReason : null,
+    match?.verdictAction,
+    missingCheck ? "Product check unavailable on this Job Card — verify spray check and label before mixing." : null,
+  ]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+  const parts = rawParts.filter(
+    (s, i) => !rawParts.some((other, j) => j !== i && (other === s ? j < i : other.includes(s))),
+  );
+  if (!parts.length) return null;
+  return {
+    isHold: match?.verdict === "hold",
+    text: parts.join(" · "),
+  };
+}
+
 // The card's mix amounts: one row per product, one column per sprayer the card uses. `sprayers`: the card's own tanks
 // (Tree & Shrub), else the pest cards' three. A row's `condition` is the visit's own "only if" line.
-export default function ProtocolMixTable({ mixRates, sprayers }) {
+export default function ProtocolMixTable({ mixRates, sprayers, products = null }) {
   const { rows, columns } = mixTable(mixRates, sprayers);
   if (!rows.length) return null;
   return (
@@ -36,6 +77,14 @@ export default function ProtocolMixTable({ mixRates, sprayers }) {
                   </td>
                 ))}
                 <td className="px-3 py-1.5 text-ink-secondary">
+                  {(() => {
+                    const warning = rowWarningInfo(row, products);
+                    return warning ? (
+                      <div role="alert" className={warning.isHold ? "text-alert-fg font-medium" : "text-warn-fg font-medium"}>
+                        Warning: {warning.text}
+                      </div>
+                    ) : null;
+                  })()}
                   {row.labelRateMissing ? <div className="text-alert-fg">Label rate not on file</div> : null}
                   {row.dose ? <div>Dose, not a tank mix: <span className="font-mono u-nums">{row.dose}</span></div> : null}
                   {row.note ? <div>{row.note}</div> : null}

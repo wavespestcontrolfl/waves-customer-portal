@@ -2,15 +2,17 @@ import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
+import ProtocolMixTable from './ProtocolMixTable';
 import TreeShrubFieldGuide from './TreeShrubFieldGuide';
 
-function ProcedureText({ procedure, D, full = false }) {
+function ProcedureText({ procedure, D, full = false, products = null }) {
   return <>
     <p style={{ color: D.muted, margin: '0 0 4px' }}>{procedure.source}</p>
     <h3 style={{ fontSize: 18, fontWeight: 500, margin: '0 0 12px' }}>{procedure.name}</h3>
     <p>{procedure.title}</p>
     {procedure.objective && <p style={{ padding: 12, background: D.bg }}>{procedure.objective}</p>}
     {procedure.visitNotes.map((note, i) => <p key={i} style={{ padding: 12, background: D.bg }}>{note}</p>)}
+    {!full && procedure.mixRates?.length > 0 && <ProtocolMixTable mixRates={procedure.mixRates} products={products} />}
     <ol style={{ paddingLeft: 24 }}>
       {procedure.steps.map((step, i) => <li key={i} style={{ padding: '8px 0 8px 4px' }}>{step}</li>)}
     </ol>
@@ -71,7 +73,7 @@ export default function VisitProtocol({ card, D, onJobCard }) {
   return <div style={{ fontSize: 14, lineHeight: 1.6, color: D.heading, overflowWrap: 'anywhere' }}>
     <button type="button" onClick={onJobCard} style={{ minHeight: 44, padding: '8px 12px', border: `1px solid ${D.border}`, background: D.card, color: D.heading }}>View product checks and mixing amounts</button>
     {card.planBlocks.length > 0 && <div role="alert" style={{ color: D.red, padding: '12px 0' }}>
-      <p>Resolve the Job Card blocks before application.</p>
+      <p>Check these warnings before application.</p>
       {card.planBlocks.map((block, i) => <p key={i}>{block.message}</p>)}
     </div>}
     {lines.map((line, i) => <section key={i} style={{ borderBottom: `1px solid ${D.border}`, padding: '20px 0' }}>
@@ -79,7 +81,7 @@ export default function VisitProtocol({ card, D, onJobCard }) {
       {line.procedure ? <>
         {line.procedure.fieldGuide
           ? <TreeShrubFieldGuide guide={line.procedure.fieldGuide} mode="tech" safetyRules={line.procedure.safetyRules} />
-          : <ProcedureText procedure={line.procedure} D={D} />}
+          : <ProcedureText procedure={line.procedure} D={D} products={Array.isArray(card.products) ? card.products : []} />}
         <button type="button" onClick={() => setSheet(line.procedure)} style={{ minHeight: 44, padding: '8px 16px', background: D.heading, color: D.white, border: `1px solid ${D.heading}` }}>Read SOP</button>
       </> : <p>{line.note || 'No published procedure is available for this booked service.'}</p>}
     </section>)}

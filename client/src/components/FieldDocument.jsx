@@ -65,7 +65,7 @@ export function FieldDocumentBody({ children, className = '', style }) {
   );
 }
 
-export function FieldMasthead({ licenseLine = WAVES_FL_LICENSE_LINE, variant = 'customer' }) {
+export function FieldMasthead({ licenseLine = WAVES_FL_LICENSE_LINE, variant = 'customer', subtitle = 'Employee Record & Policy' }) {
   const staff = variant === 'staff';
   return (
     <header className={FIELD_DOCUMENT_CLASSES.masthead}>
@@ -79,7 +79,7 @@ export function FieldMasthead({ licenseLine = WAVES_FL_LICENSE_LINE, variant = '
       {staff ? (
         <div className="field-document-contact">
           <div className="field-document-phone">Waves Pest Control, LLC</div>
-          <div>Employee Record &amp; Policy</div>
+          <div>{subtitle}</div>
         </div>
       ) : (
         <div className="field-document-contact">

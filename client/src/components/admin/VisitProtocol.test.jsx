@@ -72,6 +72,86 @@ it('shows a procedure Safety section on the card and in the SOP, and writes it i
   vi.restoreAllMocks();
 });
 
+it('shows mix amounts on the procedure card when provided and renders warning text', () => {
+  const withMix = {
+    ...procedure,
+    mixRates: [
+      { product: 'Atticus Antapex WSG', where: 'Inside cracks', perGallon: { amount: 10, unit: 'g' }, sprayers: ['bg_1_gal', 'flowzone_4_gal'] },
+    ],
+  };
+  render(<VisitProtocol card={{ ...card, protocol: { procedure: withMix, addons: [] } }} D={D} onJobCard={() => {}} />);
+  expect(screen.getByText('Mix Amounts')).toBeVisible();
+  expect(screen.getByText('Atticus Antapex WSG')).toBeVisible();
+  expect(screen.getByText('10 g')).toBeVisible();
+  expect(screen.getByText('40 g')).toBeVisible();
+  expect(screen.getByText('Check these warnings before application.')).toBeVisible();
+});
+
+it('keeps mix amounts visible and shows matching spray check warnings for primary and add-on procedures', () => {
+  const mosquitoProc = {
+    ...procedure,
+    name: 'Mosquito Control Protocol',
+    mixRates: [
+      { product: 'Suspend Polyzone', where: 'Shaded foliage', perGallon: { amount: 1.1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'] },
+    ],
+  };
+  const addonProc = {
+    ...procedure,
+    name: 'Fire Ant Yard Add-On',
+    mixRates: [
+      { product: 'Topchoice Granular Insecticide', where: 'Lawn broadcast', dose: '2 lb per 1,000 sq ft' },
+    ],
+  };
+  const withSprayWarnings = {
+    ...card,
+    planBlocks: [],
+    products: [
+      {
+        id: 'p-poly',
+        name: 'Suspend PolyZone',
+        verdict: 'hold',
+        verdictReason: 'Wind 18 mph exceeds 15 mph PolyZone limit.',
+        amountNote: 'Spray hold: Wind 18 mph exceeds 15 mph PolyZone limit.',
+      },
+      {
+        id: 'p-topchoice',
+        name: 'Topchoice Granular Insecticide',
+        verdict: 'ok',
+      },
+    ],
+    protocol: {
+      procedure: {
+        ...mosquitoProc,
+        mixRates: [
+          ...mosquitoProc.mixRates,
+          { product: 'Taurus SC', where: 'Foundation', perGallon: { amount: 0.4, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
+        ],
+      },
+      addons: [{
+        name: 'Fire Ant Yard',
+        procedure: {
+          ...addonProc,
+          mixRates: [{
+            product: 'Topchoice Granular Insecticide',
+            productId: 'p-topchoice',
+            labelWarning: 'Label rate not yet verified',
+            where: 'Lawn broadcast',
+            dose: '2 lb per 1,000 sq ft',
+          }],
+        },
+        note: null,
+      }],
+    },
+  };
+  render(<VisitProtocol card={withSprayWarnings} D={D} onJobCard={() => {}} />);
+  expect(screen.getByText('4.4 fl oz')).toBeVisible();
+  expect(screen.getByText(/Wind 18 mph exceeds 15 mph PolyZone limit/)).toBeVisible();
+  expect(screen.getByText(/0\.4 fl oz/)).toBeVisible();
+  expect(screen.getByText(/Product check unavailable on this Job Card/)).toBeVisible();
+  expect(screen.getByText('2 lb per 1,000 sq ft')).toBeVisible();
+  expect(screen.getByText(/Label rate not yet verified/)).toBeVisible();
+});
+
 it('a procedure without safety rules renders no Safety section', () => {
   render(<VisitProtocol card={card} D={D} onJobCard={() => {}} />);
   expect(screen.queryByText('Safety')).not.toBeInTheDocument();

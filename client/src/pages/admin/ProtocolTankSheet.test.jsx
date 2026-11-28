@@ -153,6 +153,7 @@ describe("110-gallon tank reference", () => {
       expect(within(surface).getByText("Spreader")).toBeInTheDocument();
       expect(within(surface).queryByText("Separate single-product tank")).not.toBeInTheDocument();
       expect(within(surface).queryByText(/Apply alone|Mixing: follow/)).not.toBeInTheDocument();
+      expect(within(surface).queryByText(/Mixing directions are not on file/)).not.toBeInTheDocument();
     }
   });
 

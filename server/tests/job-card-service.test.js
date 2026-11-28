@@ -3517,4 +3517,39 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const combinedFollow = await card({ serviceType: 'Rodent Exclusion & Trapping Service', serviceKey: 'rodent_exclusion', isFollowup: true });
     expect([combinedFollow.visit.visit, combinedFollow.lines]).toEqual([4, []]);
   });
+
+  test('procedure.mixRates resolves catalog productId and attaches labelWarning when label_verified_at is missing', async () => {
+    const proto = {
+      mosquito: {
+        name: 'Mosquito Control Protocol',
+        safety_rules: ['No spray above 15 mph wind.'],
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Spray barrier',
+          secondary: '',
+          notes: '',
+          mixRates: [
+            { product: 'Suspend Polyzone', where: 'Shaded foliage', perGallon: { amount: 1.1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'] },
+            { product: 'Tekko Pro IGR', where: 'Same tank', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'] },
+          ],
+        }],
+      },
+    };
+    const catalog = [
+      { id: 'cat-poly', name: 'Suspend PolyZone', label_verified_at: null },
+      { id: 'cat-tekko', name: 'Tekko Pro IGR', label_verified_at: '2026-08-01T00:00:00Z' },
+    ];
+    const out = await jobCard.resolveVisitProducts({
+      facts: { isLawn: false, serviceType: 'Mosquito Treatment - IGR', scheduledDate: '2026-09-04' },
+      protocols: proto,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect(out.procedure.mixRates).toEqual([
+      expect.objectContaining({ product: 'Suspend Polyzone', productId: 'cat-poly', labelWarning: 'Label rate not yet verified' }),
+      expect.objectContaining({ product: 'Tekko Pro IGR', productId: 'cat-tekko' }),
+    ]);
+    expect(out.procedure.mixRates[1].labelWarning).toBeUndefined();
+  });
 });

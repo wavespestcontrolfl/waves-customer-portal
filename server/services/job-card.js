@@ -1478,18 +1478,42 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
 // program (they keep their procedure). Flea and bed bug are indoor sprays: people and pets out until dry, fish tanks covered, nothing
 // fogged. Mosquito: the wind limit, the strips from water and storm drains, and no fogger (owner 2026-11-25, D7). Rodent: gloves, the
 // bleach spray before bagging, the P100 fit test, no glue boards, bats before sealing (D9). Palm injection: PPE, no food palms, disinfect the bit between palms (D8).
-const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent', 'palm_injection'];
+const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent', 'palm_injection', 'cockroach'];
 function mistingSafetyField(program, effectiveProgramKey) {
   if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};
   return { safety: program.safety_rules.map((rule) => String(rule)) };
 }
 
+function matchMixRateProduct(name, catalog) {
+  if (!name || !Array.isArray(catalog) || !catalog.length) return null;
+  return resolveCatalogProductForName(name, catalog)
+    || matchCatalogProduct({ raw: name, catalogProductHints: [name] }, catalog)
+    || null;
+}
+
+function procedureMixRatesField(visit, catalog) {
+  if (!Array.isArray(visit.mixRates) || !visit.mixRates.length) return {};
+  return {
+    mixRates: visit.mixRates.map((row) => {
+      const matched = matchMixRateProduct(String(row?.product || '').trim(), catalog);
+      const hasAmount = Boolean(row?.perGallon || row?.dose);
+      const labelWarning = matched && hasAmount && !matched.label_verified_at ? 'Label rate not yet verified' : null;
+      return {
+        ...row,
+        ...(matched ? { productId: matched.id } : {}),
+        ...(labelWarning ? { labelWarning } : {}),
+      };
+    }),
+  };
+}
+
 // isFollowup: the visit was booked as a follow-up of a finished visit (it carries that visit's name), so it gets the program's follow-up card.
 function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { programKey = null, serviceKey = null, isFollowup } = {}) {
   const match = followupVisitMatch(matchServiceProtocol(protocols, serviceType, { serviceKey }), isFollowup);
-  const program = programKey ? (protocols?.[programKey] || null) : match?.program;
-  const ruleVisit = !programKey || match?.programKey === programKey ? match?.matchedVisit : null;
-  const visit = seasonalVisit(program, scheduledDate) || ruleVisit || program?.visits?.[0] || null;
+  const program = programKey ? protocols?.[programKey] : match?.program;
+  if (!program) return { visit: null, lines: [] };
+  const ruleVisit = match && (!programKey || match.programKey === programKey) ? match.matchedVisit : null;
+  const visit = seasonalVisit(program, scheduledDate) || ruleVisit || program.visits?.[0];
   if (!visit) return { visit: null, lines: [] };
   const lines = linesFromLineMeta(visit, catalog);
   // Protocol visits without lineMeta (tree & shrub, termite …) name their
@@ -1506,6 +1530,7 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   return { visit, lines, procedure: {
     name: program.name,
     ...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),
+    ...(fieldGuide ? {} : procedureMixRatesField(visit, catalog)),
     // The misting program has no field guide, so its weather-shutdown, nozzle-placement and exposure-response rules ride the generic
     // procedure as a Safety section (the SOP and its text download). Keyed to the misting program on purpose: other programs that
     // declare safety_rules without a field guide get it only when SAFETY_ON_CARD_PROGRAMS lists them.
