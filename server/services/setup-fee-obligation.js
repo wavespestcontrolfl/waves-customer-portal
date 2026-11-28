@@ -616,7 +616,11 @@ async function resolveInvoiceVisitId(conn, row, cache) {
 function scopeEvidenceMatches(candidate, scope) {
   if (!candidate) return null;
   if (scope.propertyId && candidate.propertyId) return String(candidate.propertyId) === scope.propertyId;
-  if (scope.streetKey && candidate.streetKey) return require('./estimate-property-linkage').sameScopeKey(candidate.streetKey, scope.streetKey);
+  if (scope.streetKey && candidate.streetKey) {
+    const { sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
+    return sameScopeKey(candidate.streetKey, scope.streetKey)
+      && scopeKeysShareLocality(candidate.streetKey, scope.streetKey);
+  }
   return null;
 }
 
@@ -685,21 +689,54 @@ async function loadPartiallyRefundedInvoiceIds(conn, customerId, candidateRows) 
   return result;
 }
 
+async function resolveTermPropertyScope(conn, term) {
+  const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+  const cache = { props: new Map(), visits: new Map(), records: new Map() };
+  const acc = { propertyId: null, streetKey: null };
+  if (term.source_estimate_id) {
+    const termEst = await loadEstimateScopeRow(conn, term.source_estimate_id);
+    if (termEst?.property_id) acc.propertyId = String(termEst.property_id);
+    if (termEst?.address) acc.streetKey = normalizedEstimateStreet(termEst.address);
+    if (acc.propertyId || acc.streetKey) return acc;
+  }
+  const linkedRows = await conn('scheduled_services')
+    .where({ annual_prepay_term_id: term.id })
+    .select(
+      'id', 'property_id', 'recurring_parent_id', 'source_estimate_id',
+      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+    )
+    .catch(() => []);
+  for (const row of linkedRows || []) {
+    await fillScopeFromServiceRow(conn, row, acc, cache);
+    if (acc.propertyId && acc.streetKey) break;
+  }
+  if (!acc.propertyId && !acc.streetKey && term.invoice_id) {
+    const inv = await loadEstimateScopeRowFromInvoice(conn, term.invoice_id, cache);
+    if (inv) return inv;
+  }
+  return acc.propertyId || acc.streetKey ? acc : null;
+}
+
+async function loadEstimateScopeRowFromInvoice(conn, invoiceId, cache) {
+  try {
+    const inv = await conn('invoices').where({ id: invoiceId }).first('id', 'scheduled_service_id', 'service_record_id', 'notes');
+    if (!inv) return null;
+    const visitId = await resolveInvoiceVisitId(conn, inv, cache);
+    if (visitId) return resolveVisitScope(conn, visitId, cache);
+    return null;
+  } catch { return null; }
+}
+
 async function termMatchesPropertyScope(conn, term, scope, sourceEstimateId) {
   if (!term) return false;
   if (!scope.propertyId && !scope.streetKey) return true;
-  if (!term.source_estimate_id) return true;
-  if (sourceEstimateId && String(term.source_estimate_id).toLowerCase() === String(sourceEstimateId).toLowerCase()) return true;
-  let termEst = null;
-  try {
-    termEst = await conn('estimates').where({ id: term.source_estimate_id }).first('property_id', 'address');
-  } catch { return true; }
-  if (!termEst) return true;
-  if (scope.propertyId && termEst.property_id) return String(termEst.property_id) === scope.propertyId;
-  const { normalizedEstimateStreet, sameScopeKey } = require('./estimate-property-linkage');
-  const termStreet = termEst.address ? normalizedEstimateStreet(termEst.address) : null;
-  if (scope.streetKey && termStreet) return sameScopeKey(termStreet, scope.streetKey);
-  return true;
+  if (term.source_estimate_id && sourceEstimateId
+    && String(term.source_estimate_id).toLowerCase() === String(sourceEstimateId).toLowerCase()) {
+    return true;
+  }
+  const termScope = await resolveTermPropertyScope(conn, term);
+  const verdict = scopeEvidenceMatches(termScope, scope);
+  return verdict === true;
 }
 
 async function findMatchingCoveredPrepayTerm(conn, { customerId, visitDate, scope, sourceEstimateId }) {
@@ -710,7 +747,7 @@ async function findMatchingCoveredPrepayTerm(conn, { customerId, visitDate, scop
   if (!scope.propertyId && !scope.streetKey) {
     return baseQ.first('t.id', 't.source_estimate_id');
   }
-  const terms = await baseQ.select('t.id', 't.source_estimate_id');
+  const terms = await baseQ.select('t.id', 't.source_estimate_id', 't.invoice_id');
   for (const term of terms || []) {
     if (await termMatchesPropertyScope(conn, term, scope, sourceEstimateId)) return term;
   }

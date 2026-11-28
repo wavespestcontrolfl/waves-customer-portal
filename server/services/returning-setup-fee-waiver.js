@@ -379,7 +379,7 @@ async function resolveRowPropertyEvidence(database, row, cache) {
 }
 
 async function rowMatchesQuotedProperty(database, row, scope, cache, opts = {}) {
-  const { sameScopeKey } = require('./estimate-property-linkage');
+  const { sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
   const requirePositiveMatch = Boolean(opts && opts.requirePositiveMatch);
   const directPropId = row.property_id || row.parent_property_id;
   if (scope.propertyId && directPropId) return String(directPropId) === scope.propertyId;
@@ -387,7 +387,11 @@ async function rowMatchesQuotedProperty(database, row, scope, cache, opts = {}) 
   if (scope.propertyId && propId) return String(propId) === scope.propertyId;
   const candidateStreet = street || (!requirePositiveMatch ? scope.customerPrimaryStreet : null);
   if (!candidateStreet) return !street && !requirePositiveMatch;
-  return Boolean(scope.estimateStreet && sameScopeKey(candidateStreet, scope.estimateStreet));
+  return Boolean(
+    scope.estimateStreet
+    && sameScopeKey(candidateStreet, scope.estimateStreet)
+    && scopeKeysShareLocality(candidateStreet, scope.estimateStreet),
+  );
 }
 
 async function filterRowsToQuotedProperty(database, rows, scope, cache, opts) {
@@ -414,21 +418,27 @@ async function hasActivePlanAtQuotedAddress(database, customer, { address = null
 // Property B from the returning-customer waiver, while an active plan on the quoted property itself
 // still defers to the existing-member waiver.
 async function hasActivePlanAtQuotedProperty(database, customerId, customer, scope, cache) {
-  const { isMembershipCustomerRow, TERMINAL_STATUSES } = require('./waveguard-existing-services');
-  const { sameScopeKey } = require('./estimate-property-linkage');
+  const { isMembershipCustomerRow, isLiveObligationRow, TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  const { sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
+  const { etDateString } = require('../utils/datetime-et');
+  const today = etDateString();
   const accountHasActiveTier = Boolean(customer && customer.active !== false && isMembershipCustomerRow(customer));
-  const activeRows = await database('scheduled_services')
+  const rawActiveRows = await database('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNotIn('status', TERMINAL_STATUSES)
     .select(
-      'id', 'property_id', 'source_estimate_id',
+      'id', 'status', 'scheduled_date', 'is_callback', 'followup_included', 'source',
+      'property_id', 'source_estimate_id',
       'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
     );
-  const matchingActive = await filterRowsToQuotedProperty(database, activeRows || [], scope, cache);
+  const activeRows = (rawActiveRows || []).filter((r) => isLiveObligationRow(r, today));
+  const matchingActive = await filterRowsToQuotedProperty(database, activeRows, scope, cache);
   if (matchingActive.length > 0) return true;
-  if ((activeRows || []).length > 0) return false; // active plan rows exist only on other property(ies)
+  if (activeRows.length > 0) return false; // active plan rows exist only on other property(ies)
   if (!accountHasActiveTier) return false;
-  if (scope.customerPrimaryStreet && scope.estimateStreet && !sameScopeKey(scope.customerPrimaryStreet, scope.estimateStreet)) {
+  if (scope.customerPrimaryStreet && scope.estimateStreet
+    && !(sameScopeKey(scope.customerPrimaryStreet, scope.estimateStreet)
+      && scopeKeysShareLocality(scope.customerPrimaryStreet, scope.estimateStreet))) {
     return false;
   }
   return true;
@@ -692,7 +702,8 @@ function restoreFallbackSetupFeeOnData(data, row) {
   const holder = data.result && typeof data.result === 'object' ? data.result : data;
   const oneTime = holder.oneTime && typeof holder.oneTime === 'object' ? holder.oneTime : null;
   if (oneTime && Number(oneTime.membershipFee) > 0) return {};
-  const priorTotal = oneTime ? Number(oneTime.total) || 0 : Number(row?.onetime_total || 0);
+  const hasNestedTotal = oneTime && oneTime.total != null && oneTime.total !== '' && Number.isFinite(Number(oneTime.total));
+  const priorTotal = hasNestedTotal ? Number(oneTime.total) : Number(row?.onetime_total || 0);
   const nextTotal = Math.round((priorTotal + fee) * 100) / 100;
   holder.oneTime = oneTime
     ? Object.assign(oneTime, { membershipFee: fee, total: nextTotal })
@@ -745,6 +756,7 @@ async function recomputeTotalsAfterWaiverStrip(data, row, now) {
     if (nextOneTime != null) patch.onetime_total = nextOneTime;
     return patch;
   } catch (err) {
+    if (err?.status || err?.statusCode || err?.failClosed) throw err;
     logger.warn(`[estimate-extension] recompute after stripping stale returning waiver failed for ${row?.id}: ${err.message}`);
     return restoreFallbackSetupFeeOnData(data, row);
   }

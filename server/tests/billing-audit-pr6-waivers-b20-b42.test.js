@@ -552,7 +552,7 @@ describe('B-42: Admin create/revise strips forged waivers & estimate-public fall
         join: jest.fn(() => q),
         select: jest.fn(async () => {
           if (table === 'scheduled_services') {
-            return [{ id: 'ss-prop-a', property_id: 'prop-a', service_address_line1: '100 Oak St', service_address_city: 'Testville', service_address_zip: '34200' }];
+            return [{ id: 'ss-prop-a', status: 'scheduled', scheduled_date: '2099-01-01', property_id: 'prop-a', service_address_line1: '100 Oak St', service_address_city: 'Testville', service_address_zip: '34200' }];
           }
           if (table.startsWith('scheduled_services as s')) {
             return [{
@@ -597,5 +597,14 @@ describe('B-42: Admin create/revise strips forged waivers & estimate-public fall
     } finally {
       delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
     }
+
+    // Same street in another city (with only street on one side -> no shared locality) does NOT trigger active-plan match.
+    expect(await Returning.hasActivePlanAtQuotedAddress(conn, {
+      ...customer, waveguard_tier: null, monthly_rate: 0,
+    }, { address: '100 Oak St, Othertown, FL 33999' })).toBe(false);
+
+    // Pre-existing oneTime.items without oneTime.total preserves row.onetime_total ($150 + $99 = $249).
+    const legacyWithItems = { recurring: { services: [{ name: 'Pest Control', frequency: 'quarterly', mo: 45 }] }, oneTime: { items: [{ price: 150 }] } };
+    expect(Returning.restoreFallbackSetupFeeOnData(legacyWithItems, { onetime_total: 150 })).toEqual({ onetime_total: 249 });
   });
 });
