@@ -10,9 +10,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockFamily = {
+  LIVE_FAMILY_STAGES: Object.freeze(['active_customer', 'won', 'at_risk']),
+  sameHomeAddress: jest.fn((a, b) => Boolean(a?.address_line1 && b?.address_line1 && a.address_line1 === b.address_line1)),
   familyMembers: jest.fn(),
   linkFamily: jest.fn(),
   unlinkFamily: jest.fn(),
+  alertFamilyDropBelowTwo: jest.fn(async () => 0),
   lockFamilyChanges: jest.fn(async () => {}),
 };
 jest.mock('../services/multi-home-family', () => mockFamily);
@@ -73,9 +76,9 @@ beforeEach(() => {
   order = [];
   extraRows = {};
   customers = [
-    { id: A, first_name: 'Robin', last_name: 'Sample', company_name: null, address_line1: '100 Test Ln', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34201', active: true, deleted_at: null },
-    { id: B, first_name: 'Casey', last_name: 'Sample', company_name: null, address_line1: '200 Demo Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231', active: true, deleted_at: null },
-    { id: C, first_name: 'Jordan', last_name: 'Example', company_name: null, address_line1: '300 Mock Rd', address_line2: null, city: 'Venice', state: 'FL', zip: '34285', active: true, deleted_at: null },
+    { id: A, first_name: 'Robin', last_name: 'Sample', company_name: null, address_line1: '100 Test Ln', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34201', active: true, pipeline_stage: 'active_customer', deleted_at: null },
+    { id: B, first_name: 'Casey', last_name: 'Sample', company_name: null, address_line1: '200 Demo Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231', active: true, pipeline_stage: 'active_customer', deleted_at: null },
+    { id: C, first_name: 'Jordan', last_name: 'Example', company_name: null, address_line1: '300 Mock Rd', address_line2: null, city: 'Venice', state: 'FL', zip: '34285', active: true, pipeline_stage: 'active_customer', deleted_at: null },
   ];
   families = {};
   mockFamily.familyMembers.mockImplementation(async (_conn, id) => (families[id] ? { familyId: families[id], members: membersOf(families[id]) } : { familyId: null, members: [] }));

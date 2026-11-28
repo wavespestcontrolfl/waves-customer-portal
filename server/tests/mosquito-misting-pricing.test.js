@@ -30,8 +30,32 @@ describe('priceMosquitoMisting install price', () => {
       refillsBilledPerApplication: true,
       visitsPerYear: 12,
     });
-    expect(r.installation.price).toBe(4195);
-    expect(r.installation.retailValue).toBe(4195);
+    // At 30 nozzles, Essential ($2,795 + 20 x $75 = $4,295) sets the Smart floor so Smart never undercuts Essential.
+    expect(r.installation.price).toBe(4295);
+    expect(r.installation.retailValue).toBe(4295);
+  });
+
+  test('smart tier never prices below essential at any nozzle or riser count', () => {
+    // 28 nozzles: Essential = $4,145 < Smart $4,195 (Smart keeps its base $4,195).
+    expect(priceMosquitoMisting(PROPERTY, { tier: 'smart', nozzles: 28 }).installation.price).toBe(4195);
+    expect(priceMosquitoMisting(PROPERTY, { tier: 'essential', nozzles: 28 }).installation.price).toBe(4145);
+    // 29 nozzles: Essential = $4,220 > Smart raw $4,195 -> Smart lifts to $4,220.
+    expect(priceMosquitoMisting(PROPERTY, { tier: 'smart', nozzles: 29 }).installation.price).toBe(4220);
+    expect(priceMosquitoMisting(PROPERTY, { tier: 'essential', nozzles: 29 }).installation.price).toBe(4220);
+    // 30+ nozzles: Smart always >= Essential, including with risers.
+    for (const [nozzles, risers] of [[30, 0], [35, 6], [40, 12], [60, 0]]) {
+      const smart = priceMosquitoMisting(PROPERTY, { tier: 'smart', nozzles, risers });
+      const essential = priceMosquitoMisting(PROPERTY, { tier: 'essential', nozzles, risers });
+      expect(smart.installation.price).toBeGreaterThanOrEqual(essential.installation.price);
+    }
+  });
+
+  test('legacy smart knobs without essentialTierPrice replay verbatim at $4,195', () => {
+    const legacy = priceMosquitoMisting(PROPERTY, { tier: 'smart', nozzles: 30 });
+    const legacyKnobs = { ...legacy.pricingKnobs };
+    delete legacyKnobs.essentialTierPrice;
+    delete legacyKnobs.essentialIncludedNozzles;
+    expect(priceMosquitoMisting(PROPERTY, { tier: 'smart', nozzles: 30, knobs: legacyKnobs }).installation.price).toBe(4195);
   });
 
   test('essential tier price', () => {
@@ -48,10 +72,10 @@ describe('priceMosquitoMisting install price', () => {
   });
 
   test('risers: none are included, each one adds $75', () => {
-    expect(priceMosquitoMisting(PROPERTY, { risers: 0 }).installation.price).toBe(4195);
+    expect(priceMosquitoMisting(PROPERTY, { risers: 0 }).installation.price).toBe(4295);
     const r = priceMosquitoMisting(PROPERTY, { risers: 14 });
     expect(r.extraRisers).toBe(14);
-    expect(r.installation.price).toBe(4195 + 14 * 75);
+    expect(r.installation.price).toBe(4295 + 14 * 75);
   });
 
   test('install cost basis: hardware + overage + 2 techs x 6 hours of labor', () => {
@@ -61,7 +85,8 @@ describe('priceMosquitoMisting install price', () => {
     expect(r.installation.materialCost).toBe(material);
     expect(r.installation.laborCost).toBe(labor);
     expect(r.installation.totalCost).toBe(material + labor);
-    const price = 4195 + 5 * 75 + 12 * 75;
+    // Essential floor lifts Smart at 35 nozzles: $2,795 + 25 x $75 + 12 x $75 = $5,570.
+    const price = 4295 + 5 * 75 + 12 * 75;
     expect(r.installation.margin).toBe(Math.round(((price - material - labor) / price) * 1000) / 1000);
   });
 });
@@ -141,13 +166,13 @@ describe('priceMosquitoMisting guards', () => {
   test('the maximum itself still prices', () => {
     const r = priceMosquitoMisting(PROPERTY, { nozzles: 80 });
     expect(r.quoteRequired).toBe(false);
-    expect(r.installation.price).toBe(4195 + 50 * 75);
+    expect(r.installation.price).toBe(4295 + 50 * 75);
   });
 
   test('unknown tier falls back to smart and records a reason', () => {
     const r = priceMosquitoMisting(PROPERTY, { tier: 'deluxe' });
     expect(r.tier).toBe('smart');
-    expect(r.installation.price).toBe(4195);
+    expect(r.installation.price).toBe(4295);
     expect(r.manualReviewReasons).toContain('mosquito_misting_unknown_tier');
     expect(r.requiresManualReview).toBe(true);
   });

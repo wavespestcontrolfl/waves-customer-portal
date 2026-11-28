@@ -684,4 +684,69 @@ describe("Portal inbox tab: answers in the portal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close them" }));
     expect(await screen.findByText("Closed 3 items.")).toBeInTheDocument();
   });
+
+  it("drops a sibling open portal message row for the same customer when answering a chat or request, lowers the count, and notifies onMutate", async () => {
+    const onCount = vi.fn();
+    const onMutate = vi.fn();
+    const siblingMsg = { ...message, id: "thread-cust-1", customer: chat.customer };
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies({ items: [chat, siblingMsg, request], total: 3 });
+      if (url === "/admin/portal-inbox/reply") return { message: { id: "m1" }, closed: true, notice: { bell: true, pushAccepted: 1, email: "not_needed" } };
+      return updated(url);
+    });
+    render(
+      <MemoryRouter initialEntries={["/admin/communications#tab=portal"]}>
+        <Routes>
+          <Route path="*" element={<PortalInboxTabV2 onCount={onCount} onMutate={onMutate} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const chatRow = await screen.findByTestId("portal-row-chat-esc-1");
+    expect(screen.getByTestId("portal-row-message-thread-cust-1")).toBeInTheDocument();
+    fireEvent.click(within(chatRow).getByRole("button", { name: "Reply in portal" }));
+    fireEvent.change(within(chatRow).getByRole("textbox", { name: "Answer in the portal" }), { target: { value: "All set!" } });
+    fireEvent.click(within(chatRow).getByRole("button", { name: "Send in portal" }));
+    await screen.findByTestId("portal-sent-note");
+    expect(screen.queryByTestId("portal-row-chat-esc-1")).toBeNull();
+    expect(screen.queryByTestId("portal-row-message-thread-cust-1")).toBeNull();
+    expect(screen.getByTestId("portal-row-request-req-1")).toBeInTheDocument();
+    await waitFor(() => expect(onCount).toHaveBeenLastCalledWith(1));
+    expect(onMutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("guards PortalReply against rapid double-click with a synchronous in-flight ref", async () => {
+    let finish;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies();
+      if (url === "/admin/portal-inbox/reply") return new Promise((resolve) => { finish = () => resolve({ message: { id: "m1" }, closed: true, notice: { bell: true, pushAccepted: 1 } }); });
+      return updated(url);
+    });
+    mount();
+    const row = await screen.findByTestId("portal-row-chat-esc-1");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply in portal" }));
+    fireEvent.change(within(row).getByRole("textbox", { name: "Answer in the portal" }), { target: { value: "On it." } });
+    const sendBtn = within(row).getByRole("button", { name: "Send in portal" });
+    fireEvent.click(sendBtn);
+    fireEvent.click(sendBtn);
+    expect(adminFetch.mock.calls.filter(([url]) => url === "/admin/portal-inbox/reply")).toHaveLength(1);
+    finish();
+    await screen.findByTestId("portal-sent-note");
+  });
+
+  it("shows a Retry button on load error and reloads when clicked", async () => {
+    let attempts = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") {
+        attempts += 1;
+        if (attempts === 1) throw new Error("HTTP 500");
+        return withReplies();
+      }
+      return updated(url);
+    });
+    mount();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Failed to load.");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Pat Synthetic")).toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
 });

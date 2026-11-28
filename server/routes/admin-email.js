@@ -263,9 +263,12 @@ router.get('/message/:id', async (req, res) => {
   }
 });
 
+const EMAIL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // GET /message/:id/attachment/:attachmentId — download attachment
 router.get('/message/:id/attachment/:attachmentId', async (req, res) => {
   try {
+    if (!EMAIL_UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Email not found' });
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Email not found' });
 
@@ -275,16 +278,18 @@ router.get('/message/:id/attachment/:attachmentId', async (req, res) => {
     if (!att) return res.status(404).json({ error: 'Attachment not found' });
 
     const data = await gmailClient.getAttachment(email.gmail_id, req.params.attachmentId);
-    const safeName = (att.filename || 'attachment').replace(/[\r\n"\\]/g, '_');
+    const safeName = (att.filename || 'attachment').replace(/[\x00-\x1f\x7f"\\/]/g, '_');
     // Log internal ids only — staff name/email and the filename are PII and
     // stay out of application logs (the id resolves the record when needed).
     logger.info(`[email] Attachment downloaded: actor=${req.technicianId || 'unknown'} email=${email.id} attachment=${req.params.attachmentId}`);
-    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.attachment(safeName);
     res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
     res.send(data);
   } catch (err) {
-    logger.error(`[email] Attachment error: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    const tag = String(err?.code || err?.name || 'Error').slice(0, 40);
+    logger.error(`[email] Attachment download failed (${tag})`);
+    res.status(500).json({ error: 'Could not download attachment.' });
   }
 });
 
@@ -296,7 +301,11 @@ router.post('/message/:id/read', async (req, res) => {
   try {
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Not found' });
-    const newRead = !email.is_read;
+    const hasExplicit = typeof req.body?.is_read === 'boolean';
+    const newRead = hasExplicit ? req.body.is_read : !email.is_read;
+    if (hasExplicit && Boolean(email.is_read) === newRead) {
+      return res.json({ is_read: newRead });
+    }
     const applied = await applyInGmail(() => (newRead
       ? gmailClient.modifyLabels(email.gmail_id, [], ['UNREAD'])
       : gmailClient.modifyLabels(email.gmail_id, ['UNREAD'], [])));
@@ -371,12 +380,15 @@ router.post('/send', async (req, res) => {
     const { to, subject, body, threadId, replyEmailId } = req.body;
     if (!to || !body) return res.status(400).json({ status: 'failed', error: 'to and body required' });
 
+    const rawKey = req.get?.('X-Idempotency-Key') || req.headers?.['x-idempotency-key'] || req.body?.idempotencyKey;
+    const idempotencyKey = typeof rawKey === 'string' && /^[\w:-]{8,128}$/.test(rawKey.trim()) ? rawKey.trim() : null;
+
     // A reply joins its conversation only with the source Message-ID in
     // In-Reply-To / References as well as the thread id (Gmail's threading
     // rules). The page sends the replied-to row's id; the header comes from
     // the stored row, as the scheduled send resolves it.
     const inReplyTo = req.body.inReplyTo || (replyEmailId ? await sourceMessageId(replyEmailId, threadId) : undefined);
-    const { status, json } = await sendEmailMessage({ to, subject, body, threadId, inReplyTo });
+    const { status, json } = await sendEmailMessage({ to, subject, body, threadId, inReplyTo, idempotencyKey });
     res.status(status).json(json);
   } catch (err) {
     // A malformed body (no req.body) is the only way here: sendEmailMessage answers its own failures.
@@ -390,6 +402,7 @@ router.post('/send', async (req, res) => {
 // ============================================
 
 const SCHEDULE_ET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SCHEDULE_MAX_DAYS = 366;
 const CANCELLABLE = ['scheduled', 'failed', 'outcome_unknown'];
 const CANCELLED_DAYS = 30;
@@ -441,7 +454,11 @@ async function consumeFailedRetry(known) {
 router.post('/schedule', async (req, res) => {
   try {
     const { to, subject, body, draftText, threadId, replyEmailId, sendAt, clientKey } = req.body || {};
-    if (!to || !body || !draftText) return res.status(400).json({ error: 'to, body and draftText required' });
+    const trimmedTo = typeof to === 'string' ? to.trim() : '';
+    if (!trimmedTo || !body || !draftText) return res.status(400).json({ error: 'to, body and draftText required' });
+    if (replyEmailId != null && replyEmailId !== '' && (typeof replyEmailId !== 'string' || !UUID_RE.test(replyEmailId))) {
+      return res.status(400).json({ error: 'replyEmailId must be a valid UUID' });
+    }
     if (typeof clientKey !== 'string' || !/^[\w-]{8,64}$/.test(clientKey)) return res.status(400).json({ error: 'clientKey required' });
     // A retried request finds its first row before any time check: by the
     // retry the chosen time may be under a minute away, or already sent.
@@ -457,7 +474,7 @@ router.post('/schedule', async (req, res) => {
       return res.status(400).json({ error, keyChecked: true });
     }
     const [row] = await db('scheduled_emails').insert({
-      to_address: String(to).trim(), subject: String(subject || '').trim() || '(no subject)', body_html: body, draft_text: draftText,
+      to_address: trimmedTo, subject: String(subject || '').trim() || '(no subject)', body_html: body, draft_text: draftText,
       thread_id: threadId || null, reply_email_id: replyEmailId || null, send_at: when, created_by: req.technicianId || null, client_key: clientKey,
     }).onConflict('client_key').ignore().returning('*');
     const saved = row || await db('scheduled_emails').where({ client_key: clientKey }).first();
@@ -761,7 +778,7 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // clears on a SUCCESSFUL cancel), so a failed Gmail restore stays
     // retryable on the next reclassify regardless of auto_action state.
     let wasQuarantined = restoredFromTrash
-      || /^spam_(quarantined|quarantine_ambiguous)/.test(email.auto_action || '')
+      || /^spam_(quarantined|quarantine_ambiguous|reclass_retry)/.test(email.auto_action || '')
       || !!email.quarantined_at;
 
     // Atomically claim a plain-quarantined row for reclassification so the
@@ -773,7 +790,7 @@ router.post('/message/:id/reclassify', async (req, res) => {
       claimedForReclass = true;
       claimedFromState = typeof restoredClaimOrigin !== 'undefined' ? restoredClaimOrigin : 'spam_trashed_after_quarantine';
     }
-    const CLAIMABLE_STATES = ['spam_quarantined', 'spam_quarantine_ambiguous'];
+    const CLAIMABLE_STATES = ['spam_quarantined', 'spam_quarantine_ambiguous', 'spam_reclass_retry'];
     if (!claimedForReclass && CLAIMABLE_STATES.includes(email.auto_action || '')) {
       claimedFromState = email.auto_action;
       const claimed = await db('emails')
@@ -811,8 +828,22 @@ router.post('/message/:id/reclassify', async (req, res) => {
       // of reporting success while the sender's Gmail filter stays active.
       wasQuarantined = true;
     }
-    const revertReclassClaim = async () => {
-      if (!claimedForReclass) return;
+    const revertReclassClaim = async ({ markRetryPending = false } = {}) => {
+      if (!claimedForReclass && !markRetryPending) return;
+      if (markRetryPending) {
+        // Post-verdict failure (unblockSender / cancelQuarantine): never put a
+        // non-spam email back into 'spam_quarantined' (sweepQuarantine could
+        // trash it when the undo window expires). Use 'spam_reclass_retry'
+        // (excluded from sweep, retryable immediately without 409, and keeps
+        // wasQuarantined true for restoredFromTrash rows). Fenced so a late
+        // failure cannot overwrite another operator's completed restore.
+        await db('emails')
+          .where({ id: email.id })
+          .whereNot('auto_action', 'quarantine_cancelled_reclassified')
+          .update({ auto_action: 'spam_reclass_retry', updated_at: new Date() })
+          .catch(() => {});
+        return;
+      }
       await db('emails').where({ id: email.id, auto_action: 'spam_reclassifying' })
         .update({ auto_action: claimedFromState || 'spam_quarantined', updated_at: new Date() })
         .catch(() => {});
@@ -856,9 +887,11 @@ router.post('/message/:id/reclassify', async (req, res) => {
         .recordStaffReclassify({ dbi: db, email, verdict: aiVerdict, pick: staffPick, staffUserId: req.technicianId });
     }
     if (classification.category === 'spam') {
-      if (restoredFromTrash) {
-        // The message is live in Gmail again — reverting to a stale trashed
-        // state would lie about reality. Give it a fresh quarantine cycle.
+      if (restoredFromTrash || claimedFromState === 'spam_reclass_retry') {
+        // The message is live in Gmail again (restoredFromTrash) or was waiting
+        // on a failed non-spam retry (spam_reclass_retry) — reverting to the
+        // prior state would lie about reality or strand it outside quarantine.
+        // Give it a fresh quarantine cycle.
         claimedForReclass = false;
         await executeAutoAction(email, classification);
       } else if (claimedForReclass) {
@@ -877,7 +910,7 @@ router.post('/message/:id/reclassify', async (req, res) => {
       // re-derived on retry; handlers are idempotent).
       const actionOutcome = await executeAutoAction(email, classification);
       if (!actionOutcome?.ok) {
-        await revertReclassClaim();
+        await revertReclassClaim({ markRetryPending: wasQuarantined });
         return res.status(502).json({ error: 'Reclassified, but the follow-up action failed — quarantine kept; run reclassify again to retry it' });
       }
     }
@@ -904,6 +937,7 @@ router.post('/message/:id/reclassify', async (req, res) => {
           const { unblockSender } = require('../services/email/spam-blocker');
           const unblock = await unblockSender(blocked.id).catch((e) => ({ error: e.message }));
           if (!unblock?.success) {
+            await revertReclassClaim({ markRetryPending: wasQuarantined });
             return res.status(502).json({ error: 'Reclassified, but the sender is still trash-filtered (Gmail unblock failed) — run reclassify again to finish the unblock' });
           }
         }
@@ -921,12 +955,19 @@ router.post('/message/:id/reclassify', async (req, res) => {
           const postAction = await db('emails').where({ id: email.id }).first();
           restoreInbox = !/^newsletter_(unsubscribed|unsub_attempted|archived|processing)/.test(postAction?.auto_action || '');
         }
-        await cancelQuarantine(email, { restoreInbox });
+        try {
+          await cancelQuarantine(email, { restoreInbox });
+        } catch (cancelErr) {
+          await revertReclassClaim({ markRetryPending: true });
+          logger.warn(`[email] cancelQuarantine failed during reclassify (${email.id}): ${cancelErr.message}`);
+          return res.status(502).json({ error: 'Reclassified, but restoring the email from quarantine in Gmail failed — quarantine kept; run reclassify again to retry' });
+        }
       }
     }
 
+    const updatedEmail = await db('emails').where({ id: email.id }).first().catch(() => null);
     logger.info(`[email] Reclassified ${email.id} as ${classification.category}`);
-    res.json({ classification });
+    res.json({ classification, ...(updatedEmail ? { email: updatedEmail } : {}) });
   } catch (err) {
     logger.error(`[email] Reclassify error: ${err.message}`);
     res.status(500).json({ error: err.message });

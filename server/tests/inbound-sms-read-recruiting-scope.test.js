@@ -87,3 +87,21 @@ test('markInboundSmsRead\'s thread cross-clear ignores unread recruiting message
   expect(chains.some((q) => orWhereNotLike(q, 'l.message_type'))).toBe(true);
   bellSpy.mockRestore();
 });
+
+test('markInboundSmsRead preserves exact readBefore cutoff for conversationIds instead of adding 1ms', async () => {
+  const { markInboundSmsRead } = require('../services/inbound-sms-read');
+  const chains = [];
+  db.mockImplementation((table) => { const q = chain([]); chains.push([table, q]); return q; });
+  const readBefore = new Date('2026-11-28T08:00:00.123Z');
+  await markInboundSmsRead({
+    messageIds: ['m-displayed'],
+    conversationIds: ['conv-1'],
+    readBefore,
+    adminUserId: 'admin-1',
+    role: 'admin',
+  });
+  const messageChains = chains.filter(([t]) => t === 'messages').map(([, q]) => q);
+  expect(messageChains.some((q) => q.whereIn.mock.calls.some((c) => c[0] === 'id' && c[1].includes('m-displayed')))).toBe(true);
+  expect(messageChains.some((q) => q.where.mock.calls.some((c) => c[0] === 'created_at' && c[1] === '<=' && c[2] === readBefore))).toBe(true);
+  expect(messageChains.some((q) => q.where.mock.calls.some((c) => c[0] === 'created_at' && c[1] === '<'))).toBe(false);
+});

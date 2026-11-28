@@ -27,7 +27,53 @@ const { techMoveRefusal, moveRefusalBody } = require('../services/scheduling/tec
 const { applyAssignable } = require('../services/technician-eligibility');
 const { seriesNoticeNameVars } = require('../services/placement-service-name');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
+const {
+  isTechnicianRequest,
+  adminOnlyFields,
+  technicianCurrentVisitFilter,
+  lockOwnedLiveVisit,
+  technicianVisitRowInScope,
+  technicianMayReadVisitAccessCodes,
+  loadActiveHomesByCustomerIds,
+  loadTechPrimaryAccessIds,
+  recheckTechFeedAccessRows,
+  collectStoredAccessCodes,
+  redactFreeTextAccessCodes,
+  stripAccessCodePrefs,
+} = require('../services/technician-visit-scope');
+
+const DISPATCH_PREF_ALERT_FIELDS = [
+  ['neighborhood_gate_code', (v) => `Gate: ${v}`],
+  ['property_gate_code', (v) => `Yard gate: ${v}`],
+  ['garage_code', (v) => `Garage: ${v}`],
+  ['lockbox_code', (v) => `Lockbox: ${v}`],
+  ['pets_secured_plan', (v) => `Pet plan: ${v}`],
+  ['access_notes', (v) => v],
+  ['side_gate_access', (v) => `Side gate: ${v}`],
+  ['parking_notes', (v) => `Parking: ${v}`],
+  ['special_instructions', (v) => v],
+];
+
+function buildDispatchPropertyAlerts(prefs, rawNotes, { redactNotes = false, knownCodes = null } = {}) {
+  const alerts = [];
+  if (prefs) {
+    for (const [key, fmt] of DISPATCH_PREF_ALERT_FIELDS) {
+      if (prefs[key]) alerts.push(fmt(prefs[key]));
+    }
+    if (prefs.pet_count > 0 || prefs.pet_details) {
+      alerts.push(`🐾 ${prefs.pet_details || `${prefs.pet_count} pet(s)`}`);
+    }
+    if (prefs.chemical_sensitivities) {
+      alerts.push(`⚠️ Chemical sensitivity: ${prefs.chemical_sensitivity_details || 'yes'}`);
+    }
+    const mowingAlert = mowingAlertText(prefs);
+    if (mowingAlert) alerts.push(mowingAlert);
+  }
+  const cleaned = stripSchedulerAuditText(rawNotes);
+  const displayNotes = redactNotes ? redactFreeTextAccessCodes(cleaned, knownCodes) : cleaned;
+  if (displayNotes) alerts.push(displayNotes);
+  return alerts;
+}
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -1531,6 +1577,10 @@ router.get('/:date?', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+        'customers.address_line1 as customer_address_line1',
+        'customers.address_line2 as customer_address_line2',
+        'customers.city as customer_city',
+        'customers.zip as customer_zip',
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.autopay_enabled', 'customers.autopay_paused_until',
         'customers.autopay_payment_method_id',
@@ -1542,6 +1592,11 @@ router.get('/:date?', async (req, res, next) => {
     // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
     const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
     // Enrich with property preferences and last service
+    const activeHomesByCustomer = isTechnicianRequest(req)
+      ? await loadActiveHomesByCustomerIds(db, services.map((s) => s.customer_id))
+      : null;
+    const techPrimaryAllowedIds = await loadTechPrimaryAccessIds(db, req, services, activeHomesByCustomer);
+    const techRecheckCandidates = [];
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -1630,29 +1685,19 @@ router.get('/:date?', async (req, res, next) => {
         .first('id', 'status', 'project_type', 'title', 'report_token', 'service_record_id', 'portal_visible')
         .catch(() => null);
 
-      // Build property notes
-      const alerts = [];
-      if (prefs?.neighborhood_gate_code) alerts.push(`Gate: ${prefs.neighborhood_gate_code}`);
-      if (prefs?.property_gate_code) alerts.push(`Yard gate: ${prefs.property_gate_code}`);
-      if (prefs?.garage_code) alerts.push(`Garage: ${prefs.garage_code}`);
-      if (prefs?.lockbox_code) alerts.push(`Lockbox: ${prefs.lockbox_code}`);
-      if (prefs?.pet_count > 0 || prefs?.pet_details) alerts.push(`🐾 ${prefs.pet_details || `${prefs.pet_count} pet(s)`}`);
-      if (prefs?.pets_secured_plan) alerts.push(`Pet plan: ${prefs.pets_secured_plan}`);
-      if (prefs?.chemical_sensitivities) alerts.push(`⚠️ Chemical sensitivity: ${prefs.chemical_sensitivity_details || 'yes'}`);
-      if (prefs?.access_notes) alerts.push(prefs.access_notes);
-      if (prefs?.side_gate_access) alerts.push(`Side gate: ${prefs.side_gate_access}`);
-      if (prefs?.parking_notes) alerts.push(`Parking: ${prefs.parking_notes}`);
-      if (prefs?.special_instructions) alerts.push(prefs.special_instructions);
-      // Mowing schedule — a cut right before/after an application undoes it,
-      // so the tech needs to know when the mower comes through.
-      const mowingAlert = mowingAlertText(prefs);
-      if (mowingAlert) alerts.push(mowingAlert);
-      // Ops sessions write scheduling-audit trails into notes; those are
-      // internal and never belong on the tech-facing alerts block.
-      const displayNotes = stripSchedulerAuditText(s.notes);
-      if (displayNotes) alerts.push(displayNotes);
+      // Build property notes — technicians receive raw entry codes only for
+      // non-ended visits in [yesterday..tomorrow] ET at the matching home.
+      const knownCodes = isTechnicianRequest(req) ? collectStoredAccessCodes(prefs, s) : null;
+      const allowTechVisitWindow = technicianMayReadVisitAccessCodes(req, s);
+      const allowTechPrimaryPrefs = !isTechnicianRequest(req) || (allowTechVisitWindow && techPrimaryAllowedIds.has(s.id));
+      const alertPrefs = allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs, knownCodes);
+      const alerts = buildDispatchPropertyAlerts(alertPrefs, s.notes, { redactNotes: !allowTechVisitWindow, knownCodes });
+      const rowNotes = allowTechVisitWindow ? (s.notes || '') : (redactFreeTextAccessCodes(s.notes || '', knownCodes) || '');
+      const rowLastNotes = previewText(
+        isTechnicianRequest(req) ? redactFreeTextAccessCodes(lastService?.technician_notes, knownCodes) : lastService?.technician_notes,
+      );
 
-      return {
+      const row = {
         id: s.id,
         routeOrder: s.route_order,
         customerName: `${s.first_name} ${s.last_name}`,
@@ -1665,13 +1710,13 @@ router.get('/:date?', async (req, res, next) => {
         windowStart: s.window_start,
         windowEnd: s.window_end,
         status: s.status,
-        notes: s.notes || '',
+        notes: rowNotes,
         createdAt: s.created_at,
         technicianId: s.technician_id,
         technicianName: s.tech_name,
         customerConfirmed: s.customer_confirmed,
         waveguardTier: s.waveguard_tier,
-        monthlyRate: parseFloat(s.monthly_rate || 0),
+        ...adminOnlyFields(req, { monthlyRate: parseFloat(s.monthly_rate || 0) }),
         isCallback: !!s.is_callback,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
@@ -1752,12 +1797,14 @@ router.get('/:date?', async (req, res, next) => {
         // scheduler-audit filter is for scheduled_services.notes (where ops
         // sessions write audit trails), and would false-positive on genuine
         // tech prose like "No SMS sent because the phone is disconnected".
-        lastServiceNotes: previewText(lastService?.technician_notes),
+        lastServiceNotes: rowLastNotes,
         // Line-scoped last visit for the service dashboards (Protocol panel):
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: lastLineService?.service_date || null,
         lastLineServiceType: lastLineService?.service_type || null,
-        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
+        lastLineServiceNotes: previewText(
+          isTechnicianRequest(req) ? redactFreeTextAccessCodes(lastLineService?.technician_notes, knownCodes) : lastLineService?.technician_notes,
+        ),
         actualStartTime: s.actual_start_time,
         actualEndTime: s.actual_end_time,
         serviceTimeMinutes: s.service_time_minutes,
@@ -1767,13 +1814,38 @@ router.get('/:date?', async (req, res, next) => {
         }) : null,
         checkInTime: s.check_in_time || s.actual_start_time,
         checkOutTime: s.check_out_time || s.actual_end_time,
-        statusLog: statusLog.map(l => ({ status: l.status, at: l.at, notes: l.notes || null })),
+        statusLog: statusLog.map(l => ({
+          status: l.status,
+          at: l.at,
+          notes: allowTechVisitWindow ? (l.notes || null) : (redactFreeTextAccessCodes(l.notes, knownCodes) || null),
+        })),
       };
+      if (isTechnicianRequest(req)) {
+        techRecheckCandidates.push({
+          visit: s, row, prefs, hadWindow: allowTechVisitWindow, hadPrimary: allowTechPrimaryPrefs,
+        });
+      }
+      return row;
     }));
+
+    const droppedIds = await recheckTechFeedAccessRows(db, req, techRecheckCandidates, (candidate, { lostWindow }) => {
+      const knownCodes = collectStoredAccessCodes(candidate.prefs, candidate.visit);
+      const safeNotes = lostWindow ? redactFreeTextAccessCodes(candidate.visit.notes || '', knownCodes) : candidate.visit.notes;
+      candidate.row.propertyAlerts = buildDispatchPropertyAlerts(stripAccessCodePrefs(candidate.prefs, knownCodes), safeNotes, { redactNotes: lostWindow, knownCodes });
+      if (lostWindow) {
+        candidate.row.notes = safeNotes || '';
+        candidate.row.lastServiceNotes = redactFreeTextAccessCodes(candidate.row.lastServiceNotes, knownCodes);
+        candidate.row.lastLineServiceNotes = redactFreeTextAccessCodes(candidate.row.lastLineServiceNotes, knownCodes);
+        if (Array.isArray(candidate.row.statusLog)) {
+          candidate.row.statusLog = candidate.row.statusLog.map((l) => ({ ...l, notes: redactFreeTextAccessCodes(l.notes, knownCodes) || null }));
+        }
+      }
+    });
+    const visibleEnriched = droppedIds.size ? enriched.filter((r) => !droppedIds.has(r.id)) : enriched;
 
     // Tech summary
     const techs = {};
-    enriched.forEach(s => {
+    visibleEnriched.forEach(s => {
       if (!s.technicianId) return;
       if (!techs[s.technicianId]) {
         techs[s.technicianId] = {
@@ -1786,7 +1858,7 @@ router.get('/:date?', async (req, res, next) => {
       if (s.status === 'completed') techs[s.technicianId].completedCount++;
     });
 
-    res.json({ date, services: enriched, techSummary: Object.values(techs) });
+    res.json({ date, services: visibleEnriched, techSummary: Object.values(techs) });
   } catch (err) { next(err); }
 });
 
@@ -2581,7 +2653,7 @@ function apptShape(apptPreview) {
     rule: apptPreview.rule,
   };
 }
-router.get('/:serviceId/card-hold', async (req, res, next) => {
+router.get('/:serviceId/card-hold', requireAdmin, async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
     const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
@@ -2706,6 +2778,11 @@ function notifyTechOfSkippedVisit({ req, svc, transition, fromStatus }) {
   });
 }
 
+function techForbiddenStatusAction(req, _svc, toStatus) {
+  if (req.techRole === 'admin') return false;
+  return toStatus === 'no_show' || toStatus === 'skipped' || toStatus === 'cancelled';
+}
+
 async function serviceStatusHandler(req, res, next) {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
@@ -2743,15 +2820,11 @@ async function serviceStatusHandler(req, res, next) {
       });
       if (ownershipError) return res.status(ownershipError.status).json(ownershipError.payload);
     }
-    // Blast-radius actions that carry money or customer comms — a whole-
-    // series/following cancel (every future sibling, recurring plan stopped)
-    // and no_show (invoice void + card-on-file fee charge) — stay admin-only
-    // even on the tech's own visit; the mobile UI never renders a manual
-    // no-show button (removed 2026-07-31) and reaches series/following cancel
-    // only from the office-facing schedule surfaces. A skip takes one visit
-    // out of a customer's plan with no make-up visit: the office's call
-    // (owner decision 2026-11-13).
-    if (req.techRole !== 'admin' && (toStatus === 'no_show' || toStatus === 'skipped' || (toStatus === 'cancelled' && ['following', 'series'].includes(scope)))) {
+    // Blast-radius actions that carry money or customer comms — cancelling any
+    // visit (even this_only — P0-5), no_show (invoice void + card-on-file fee
+    // charge), and skipped (removing a plan visit with no make-up) — stay
+    // admin-only even on the tech's own visit.
+    if (techForbiddenStatusAction(req, svc, toStatus)) {
       return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
     }
 
@@ -4851,7 +4924,7 @@ router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
 const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 async function foreignSlotCheckRefusal(req) {
-  if (!isTechnicianRequest(req) || require('../config/feature-gates').techLoginPrivacyLive?.() !== true) return null;
+  if (!isTechnicianRequest(req)) return null;
   const targets = Array.isArray(req.body?.targets) ? req.body.targets : [];
   // Every id present anywhere in the body must be a canonical hyphenated UUID. checkSlots validates with Joi.guid(),
   // which also takes braced and unhyphenated forms (and Postgres reads them), so an id in another form must never
@@ -6955,15 +7028,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
 });
 
 // GET /api/admin/dispatch/weather/tomorrow
-// GATE_TECH_LOGIN_PRIVACY on: office only. The analysis lists every visit booked
-// tomorrow with customer name, phone and tier, and no technician screen calls it
-// (audit A1). A technician gets requireAdmin's refusal; gate off: unchanged.
-router.get('/weather/tomorrow', (req, res, next) => {
-  if (req.techRole !== 'admin' && require('../config/feature-gates').techLoginPrivacyLive?.() === true) {
-    return requireAdmin(req, res, next);
-  }
-  return next();
-}, async (req, res, next) => {
+// Office only (audit A1 / P1-9): lists every visit booked tomorrow with
+// customer name, phone, and tier — no technician screen calls it.
+router.get('/weather/tomorrow', requireAdmin, async (req, res, next) => {
   try {
     const analysis = await ForecastAnalyzer.analyzeTomorrow();
     res.json(analysis);
@@ -7043,12 +7110,12 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         t.avatar_url,
         t.photo_s3_key,
         t.role,
-        ts.status,
-        ts.lat,
-        ts.lng,
+        COALESCE(ts.status, 'idle')      AS status,
+        CASE WHEN ts.location_updated_at >= NOW() - INTERVAL '24 hours' THEN ts.lat END AS lat,
+        CASE WHEN ts.location_updated_at >= NOW() - INTERVAL '24 hours' THEN ts.lng END AS lng,
         ts.current_job_id,
         ts.updated_at,
-        ts.location_updated_at,
+        CASE WHEN ts.location_updated_at >= NOW() - INTERVAL '24 hours' THEN ts.location_updated_at END AS location_updated_at,
         COALESCE(today_agg.total, 0)     AS today_total,
         COALESCE(today_agg.completed, 0) AS today_completed,
         EXISTS (
@@ -7056,7 +7123,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
           WHERE a.technician_id = t.id AND a.absence_date = ? AND a.cleared_at IS NULL
         ) AS out_today
       FROM technicians t
-      INNER JOIN tech_status ts ON ts.tech_id = t.id
+      LEFT JOIN tech_status ts ON ts.tech_id = t.id
       LEFT JOIN (
         SELECT
           technician_id,
@@ -7072,9 +7139,9 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         AND t.employment_status = 'active'
         -- Board columns are drop targets: only field-dispatchable staff
         -- (technician-eligibility.js). Prospective placeholders and
-        -- office-only admins never get a column.
+        -- office-only admins never get a column. LEFT JOIN tech_status keeps
+        -- active field techs visible even without a fresh GPS ping (P1-11).
         AND t.field_dispatchable = TRUE
-        AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
       ORDER BY t.name
       `,
       [today, today]
@@ -7223,8 +7290,9 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
   try {
     const row = await db('scheduled_services as s')
       .leftJoin('technicians as t', 's.technician_id', 't.id')
-      .innerJoin('customers as c', 's.customer_id', 'c.id')
+      .leftJoin('customers as c', 's.customer_id', 'c.id')
       .where('s.id', req.params.id)
+      .where((q) => q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at'))
       .first(
         's.id as job_id',
         's.customer_id',
@@ -7338,7 +7406,9 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
       .leftJoin('customers as c', 's.customer_id', 'c.id')
       .where('s.technician_id', tech.id)
       .where('s.scheduled_date', today)
-      .orderBy('s.window_start', 'asc')
+      .whereNotIn('s.status', ['cancelled', 'rescheduled'])
+      .modify((q) => visitHold.excludeHeld(q, 's'))
+      .orderByRaw('COALESCE(s.route_order, 999), s.window_start ASC NULLS LAST')
       .select(
         's.id as job_id',
         's.status',
@@ -7359,12 +7429,16 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
     const total = routeRows.length;
 
     // Open tech_late alerts scoped to this tech today. Used as the
-    // headline "N late" stat in the drawer header. Counts any
-    // unresolved tech_late where tech_id matches; the partial unique
-    // index keeps this O(open-rows-for-tech).
-    const lateRow = await db('dispatch_alerts')
-      .where({ type: 'tech_late', tech_id: tech.id })
-      .whereNull('resolved_at')
+    // headline "N late" stat in the drawer header. Scoped to today's visits so
+    // stale prior-day alerts never inflate today's count (P2).
+    const lateRow = await db('dispatch_alerts as a')
+      .leftJoin('scheduled_services as s', 'a.job_id', 's.id')
+      .where({ 'a.type': 'tech_late', 'a.tech_id': tech.id })
+      .whereNull('a.resolved_at')
+      .where((q) => {
+        q.where('s.scheduled_date', today)
+          .orWhereRaw("(a.job_id IS NULL AND (a.created_at AT TIME ZONE 'America/New_York')::date = ?)", [today]);
+      })
       .count({ count: '*' })
       .first();
 
@@ -7458,31 +7532,39 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
         't.name as tech_name',
         'c.first_name as customer_first_name',
         'c.last_name as customer_last_name',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip',
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
         's.service_type',
         's.scheduled_date',
         's.window_start',
         's.window_end'
       )
-      // Newest first; alerts written in one transaction share created_at
-      // (now() is per-transaction), so a tech-out batch orders by its own
-      // bump_order (#1 first). Rows without one keep pure recency.
-      .orderByRaw("a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST")
+      // Critical severity and decision-only cards surface ahead of lower-priority
+      // warnings/info so high-backlog info follow-ups never bury urgent work past LIMIT 50 (P1-17).
+      .orderByRaw((() => {
+        const { DECISION_ONLY_ALERT_TYPES } = require('../services/dispatch-alerts');
+        const decisionTypes = (Array.isArray(DECISION_ONLY_ALERT_TYPES) && DECISION_ONLY_ALERT_TYPES.length
+          ? DECISION_ONLY_ALERT_TYPES
+          : ['visit_not_closed_out']).filter((t) => /^[a-z0-9_]+$/i.test(String(t)));
+        const list = decisionTypes.map((t) => `'${t}'`).join(', ');
+        return `CASE WHEN a.severity = 'critical' THEN 0 WHEN a.type IN (${list}) THEN 1 WHEN a.severity = 'warn' THEN 2 ELSE 3 END ASC, a.created_at DESC, NULLIF(a.payload->>'bump_order', '')::int ASC NULLS LAST`;
+      })())
       .limit(limit);
 
-    if (unresolved) q.whereNull('a.resolved_at');
+    const countQ = db('dispatch_alerts as a');
+    if (unresolved) {
+      q.whereNull('a.resolved_at');
+      countQ.whereNull('a.resolved_at');
+    }
 
-    let countQ = db('dispatch_alerts as a');
-    if (unresolved) countQ = countQ.whereNull('a.resolved_at');
-    const [rows, countRow] = await Promise.all([
+    const [rows, totalRow] = await Promise.all([
       q,
-      countQ.count('* as count').first(),
+      countQ.count({ count: '*' }).first(),
     ]);
-    const total = parseInt(countRow?.count || rows.length, 10);
+    const total = Number(totalRow?.count ?? rows.length);
 
     const alerts = rows.map((r) => {
       // Address normalization, same shape as /board and /jobs/:id.

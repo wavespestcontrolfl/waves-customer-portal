@@ -470,8 +470,9 @@ function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
     // A ringing refresh clears the done fields (below), so a relevance
     // retirement stamp on the row is stale: dropped, or the sweep would never
     // judge this row again (admin-alert-relevance.js candidateQuery).
-    // The same for the quiet fall-off's Reopen hold (rungAt, stamped below, now says when the row last had news).
-    const { retired: _retired, [QUIET_HOLD_KEY]: _hold, ...standing } = existingMeta;
+    // The same for the quiet fall-off's Reopen hold (rungAt, stamped below, now says when the row last had news)
+    // and lateReRungAt (so a customer follow-up is eligible for a fresh 1-hour re-ring).
+    const { retired: _retired, [QUIET_HOLD_KEY]: _hold, lateReRungAt: _lateReRungAt, ...standing } = existingMeta;
     const merged = { ...standing, ...metadata, rungAt: new Date().toISOString() };
     // A DEFINED non-owner audience only — a caller outside ops-digest.js
     // (most refreshOnDedupe dedupe rows) never sets `audience` at all, and
@@ -1382,7 +1383,15 @@ const NotificationService = {
     const sids = [...(twilioSids || []), ...(twilioSid ? [twilioSid] : [])].filter(Boolean);
     if (!customerId && !sids.length) return 0;
     let q = scopeAdminFeedToRole(
-      db('notifications').where({ recipient_type: 'admin', category: 'inbound_sms' }),
+      db('notifications')
+        .where({ recipient_type: 'admin' })
+        .where((b) => b
+          .where('category', 'inbound_sms')
+          .orWhere((nl) => nl
+            .where('category', 'new_lead')
+            .where((smsOnly) => smsOnly
+              .where('link', 'like', `${'/admin/communications'}%`)
+              .orWhereRaw("COALESCE(metadata->>'dedupeKey', '') LIKE 'sms-tracking-thread:%'")))),
       role,
     )
       .whereNull('read_at')

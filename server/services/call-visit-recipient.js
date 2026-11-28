@@ -301,7 +301,7 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
   });
 }
 
-const { lineageSql, stoppedSql } = require('./reminder-stop-sql');
+const { lineageWithMergeSql, stoppedSql } = require('./reminder-stop-sql');
 
 // A database failure here answers with its code only: the bound phone key never reaches a log.
 function codeOnly(err) {
@@ -324,9 +324,14 @@ async function stoppedOnList(customerId, phoneKey, conn) {
 async function effectiveStops(customerId, phoneKeys, conn) {
   const out = new Map();
   if (!phoneKeys.length) return out;
-  const rows = await conn(`${REMINDER_TABLE} as st`).whereIn('st.phone_key', phoneKeys).whereNotNull('st.texts_stopped_at')
-    .whereRaw(`st.customer_id IN (${lineageSql('?')})`, [customerId])
-    .whereRaw(`(st.customer_id = ?::uuid OR st.texts_stopped_at > COALESCE((SELECT o.texts_restarted_at FROM ${REMINDER_TABLE} o WHERE o.customer_id = ?::uuid AND o.phone_key = st.phone_key), '-infinity'::timestamptz))`, [customerId, customerId])
+  const rows = await conn(`${REMINDER_TABLE} as st`)
+    .whereIn('st.phone_key', phoneKeys)
+    .whereNotNull('st.texts_stopped_at')
+    .whereRaw(
+      `EXISTS (SELECT 1 FROM (${lineageWithMergeSql('?')}) lin WHERE lin.id = st.customer_id `
+      + `AND (st.customer_id = ?::uuid OR GREATEST(st.texts_stopped_at, lin.merged_at) > COALESCE((SELECT o.texts_restarted_at FROM ${REMINDER_TABLE} o WHERE o.customer_id = ?::uuid AND o.phone_key = st.phone_key), '-infinity'::timestamptz)))`,
+      [customerId, customerId, customerId],
+    )
     .orderBy('st.texts_stopped_at', 'asc').select('st.phone_key', 'st.texts_stopped_at', 'st.texts_stopped_by');
   for (const r of rows) if (!out.has(r.phone_key)) out.set(r.phone_key, r);
   return out;

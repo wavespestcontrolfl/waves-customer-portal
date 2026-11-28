@@ -77,7 +77,7 @@ jest.mock('../models/db', () => {
       await tick();
       if (state.failReads > 0) { state.failReads -= 1; throw new Error('connection terminated'); }
       return state.claimed
-        ? { card_pause: state.cardPause ? JSON.parse(JSON.stringify(state.cardPause)) : null, status: state.callStatus, ended_at: state.endedAt, hold_phase: state.holdPhase }
+        ? { card_pause: state.cardPause ? JSON.parse(JSON.stringify(state.cardPause)) : null, status: state.callStatus, ended_at: state.endedAt, hold_phase: state.holdPhase, dial_call_sid: state.dialCallSid || null }
         : undefined;
     }));
     q.update = jest.fn(pooled(inTx, async (patch) => {
@@ -1257,5 +1257,18 @@ describe('the star-key hold resumes through this lease (resumeOutsideCardWindow)
     expect(db.__state.cardPause.sender.token).toBe('other');
     db.__state.cardPause = { sender: { token: 'other', until: Date.now() - 1 } };
     expect(await cardPause.resumeOutsideCardWindow(CALL, resume)).toEqual({ sent: true, ok: true });
+  });
+
+  test('C2-35: falls back to classic <Dial> child dial_call_sid when parentCallSid returns 20404', async () => {
+    const CHILD = `CA${'d'.repeat(32)}`;
+    db.__state.dialCallSid = CHILD;
+    mockUpdate.mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 20404, status: 404 }));
+    mockUpdate.mockResolvedValueOnce({});
+    const out = await cardPause.onUtteranceStored({ callSid: CALL, text: 'Here is my credit card number', panMasked: false });
+    expect(out.action).toBe('pause');
+    expect(mockCalls).toHaveBeenNthCalledWith(1, CALL);
+    expect(mockCalls).toHaveBeenNthCalledWith(2, CHILD);
+    expect(db.__state.cardPause.pending).toBeNull();
+    db.__state.dialCallSid = null;
   });
 });

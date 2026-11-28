@@ -20,17 +20,22 @@ import { adminFetch } from "../../utils/admin-fetch";
 import useVisiblePageRefresh from "../../hooks/useVisiblePageRefresh";
 
 const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  heading: "#09090B",
-  text: "#27272A",
-  muted: "#71717A",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  blue: "#1D4ED8",
-  zinc: "#18181B",
+  bg: "var(--surface-page, #F4F4F5)",
+  card: "var(--surface-primary, #FFFFFF)",
+  border: "var(--border-default, #E4E4E7)",
+  heading: "var(--text-primary, #09090B)",
+  onHeading: "var(--surface-page, #FFFFFF)",
+  text: "var(--text-primary, #27272A)",
+  muted: "var(--text-secondary, #71717A)",
+  green: "var(--status-green, #15803D)",
+  greenBg: "var(--status-green-bg, #DCFCE7)",
+  amber: "var(--status-amber, #A16207)",
+  amberBg: "var(--status-amber-bg, #FEF3C7)",
+  red: "var(--status-red, #991B1B)",
+  redBg: "var(--status-red-bg, #FEE2E2)",
+  blue: "var(--status-blue, #1D4ED8)",
+  blueBg: "var(--status-blue-bg, #DBEAFE)",
+  zinc: "var(--text-primary, #18181B)",
 };
 
 const AGENT_ICONS = {
@@ -44,22 +49,22 @@ const AGENT_ICONS = {
 };
 
 function statusTone(status) {
-  if (status === "blocked") return { bg: "#FEE2E2", fg: D.red, label: "Blocked" };
-  if (status === "needs_review") return { bg: "#FEF3C7", fg: D.amber, label: "Needs review" };
-  if (status === "active") return { bg: "#DBEAFE", fg: D.blue, label: "Active" };
+  if (status === "blocked") return { bg: D.redBg, fg: D.red, label: "Blocked" };
+  if (status === "needs_review") return { bg: D.amberBg, fg: D.amber, label: "Needs review" };
+  if (status === "active") return { bg: D.blueBg, fg: D.blue, label: "Active" };
   return { bg: D.bg, fg: D.muted, label: "Idle" };
 }
 
 function priorityTone(priority) {
-  if (priority === "critical" || priority === "high") return { bg: "#FEE2E2", fg: D.red, label: priority === "critical" ? "Critical" : "High" };
-  if (priority === "medium") return { bg: "#FEF3C7", fg: D.amber, label: "Medium" };
+  if (priority === "critical" || priority === "high") return { bg: D.redBg, fg: D.red, label: priority === "critical" ? "Critical" : "High" };
+  if (priority === "medium") return { bg: D.amberBg, fg: D.amber, label: "Medium" };
   return { bg: D.bg, fg: D.muted, label: "Low" };
 }
 
 function sourceTone(status) {
-  if (status === "ok") return { bg: "#DCFCE7", fg: D.green, Icon: CheckCircle2, label: "OK" };
+  if (status === "ok") return { bg: D.greenBg, fg: D.green, Icon: CheckCircle2, label: "OK" };
   if (status === "missing") return { bg: D.bg, fg: D.muted, Icon: CircleDashed, label: "Missing" };
-  return { bg: "#FEE2E2", fg: D.red, Icon: AlertTriangle, label: "Error" };
+  return { bg: D.redBg, fg: D.red, Icon: AlertTriangle, label: "Error" };
 }
 
 function Chip({ children, tone }) {
@@ -120,11 +125,11 @@ function AgentCard({ agent, active, onSelect }) {
         padding: 14,
         minHeight: 154,
         cursor: "pointer",
-        boxShadow: active ? "0 0 0 1px #09090B inset" : "none",
+        boxShadow: active ? `0 0 0 1px ${D.heading} inset` : "none",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-        <div style={{ width: 36, height: 36, borderRadius: 6, background: D.zinc, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <div style={{ width: 36, height: 36, borderRadius: 6, background: D.zinc, color: D.onHeading, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
           <Icon size={17} strokeWidth={1.9} />
         </div>
         <div style={{ minWidth: 0, flex: 1 }}>
@@ -163,7 +168,7 @@ function ActionButton({ item, action, pending, onAction }) {
     borderRadius: 6,
     border: isPrimary ? `1px solid ${D.heading}` : `1px solid ${isGhost ? "transparent" : D.border}`,
     background: isPrimary ? D.heading : D.card,
-    color: isPrimary ? "#fff" : D.heading,
+    color: isPrimary ? D.onHeading : D.heading,
     fontSize: 12,
     fontWeight: 700,
     textDecoration: "none",
@@ -442,7 +447,7 @@ export default function AgentOpsPage({ embedded = false } = {}) {
 
       <div className="agent-ops-wrap">
         {error && (
-          <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }} role="alert">
+          <div style={{ background: D.redBg, border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }} role="alert">
             <span>{error}</span>
             {readError && !actionError && (
               <button type="button" onClick={load} disabled={loading || !!pendingAction} style={{ border: `1px solid ${D.red}`, borderRadius: 6, background: D.card, color: D.red, padding: "6px 10px", font: "inherit", cursor: loading ? "default" : "pointer" }}>
@@ -452,7 +457,7 @@ export default function AgentOpsPage({ embedded = false } = {}) {
           </div>
         )}
         {notice && (
-          <div style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700, display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+          <div style={{ background: D.greenBg, border: `1px solid ${D.green}`, color: D.green, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700, display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
             <span>{notice}</span>
             {noticeAction?.url && (
               <Link to={noticeAction.url} style={{ color: D.green, textDecoration: "underline", whiteSpace: "nowrap" }}>

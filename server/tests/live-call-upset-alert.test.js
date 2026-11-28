@@ -323,4 +323,23 @@ describe('a call that is no longer live', () => {
     await expect(upset.checkCall(SID)).resolves.toEqual({ checked: true, alerted: false });
     expect(mockRaise).not.toHaveBeenCalled();
   });
+
+  test('C2-31: warm transfer taken by owner skips upset alert even when forward_acceptance still names CSR', async () => {
+    setCall({
+      extra: {
+        conference_path: { hold: { transfer: { n: 1, status: 'accepted' } } },
+      },
+    });
+    await expect(upset.checkCall(SID)).resolves.toEqual({ checked: false, reason: 'owner_on_call' });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('C2-20: customer_id rides in alert metadata so internal test customers are suppressed', async () => {
+    db.__state.call.customer_id = 'cust-test-9';
+    await expect(upset.checkCall(SID)).resolves.toEqual({ checked: true, alerted: true });
+    expect(mockRaise).toHaveBeenCalledWith('live_call_upset', expect.any(Object), expect.objectContaining({
+      metadata: { customerId: 'cust-test-9' },
+    }));
+  });
 });

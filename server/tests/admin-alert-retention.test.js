@@ -113,8 +113,10 @@ describe('re-ring list', () => {
     expect(retention.ringRiskFor(keyed('payroll-mercury-key')).kind).toBe('periodic');
     expect(retention.ringRiskFor(keyed('payroll-mercury-key-send')).emitter).toBe('payroll-mercury-key-send');
     expect(retention.ringRiskFor(keyed('portal-message:thread-1')).emitter).toBe('portal-message');
+    expect(retention.ringRiskFor(keyed('call-extraction-outage:60m')).emitter).toBe('call-extraction-outage');
     expect(retention.ringRiskFor(keyed('booking-funnel-canary:fast')).kind).toBe('periodic');
     expect(retention.ringRiskFor(keyed('onetime-plan-offer:price-settings')).kind).toBe('periodic');
+    expect(retention.ringRiskFor(keyed('inventory-margin-watchdog:daily')).kind).toBe('periodic');
     expect(retention.ringRiskFor(keyed('something-else:1'))).toBeNull();
     expect(retention.ringRiskFor(row())).toBeNull();
   });

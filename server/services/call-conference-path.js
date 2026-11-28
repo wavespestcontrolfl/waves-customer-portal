@@ -307,6 +307,23 @@ function scheduleNoAnswerBackstop(callSid, ringTimeoutSec) {
   return timer;
 }
 
+// List open conference rooms for a call across explicit Twilio statuses (since Sept 30, 2026
+// Twilio's GET /Conferences.json without a status filter defaults to 'in-progress' only, omitting 'init').
+async function listOpenRooms(api, callSid, statuses = ['in-progress', 'init']) {
+  const friendlyName = roomFor(callSid);
+  const batches = await Promise.all(statuses.map((status) => api.conferences.list({ friendlyName, status, limit: 5 })));
+  const seen = new Set();
+  const open = [];
+  for (const rooms of batches) {
+    for (const room of rooms || []) {
+      if (!room || room.status === 'completed' || (room.sid && seen.has(room.sid))) continue;
+      if (room.sid) seen.add(room.sid);
+      open.push(room);
+    }
+  }
+  return open;
+}
+
 // The winning staff call ended. End the room: the caller's <Dial> then runs /call-complete, as a
 // bridged call does today when the staff hang up first. No open room, or it will not end: hang up
 // the caller, so no one is left alone in it.
@@ -314,8 +331,7 @@ async function endRoomAfterStaffHangup(callSid, state) {
   if (state.closed_at) return 'caller_gone';
   const api = client();
   try {
-    const rooms = await api.conferences.list({ friendlyName: roomFor(callSid), limit: 5 });
-    const open = rooms.filter((room) => room.status !== 'completed');
+    const open = await listOpenRooms(api, callSid, ['in-progress', 'init']);
     for (const room of open) await api.conferences(room.sid).update({ status: 'completed' });
     if (open.length) return 'room_ended';
   } catch (err) {
@@ -399,8 +415,8 @@ async function recoverStaffEnd(row) {
   const api = client();
   const leg = await api.calls(state.accepted_leg_sid).fetch();
   if (!TERMINAL_LEG_STATUSES.has(String(leg?.status || ''))) return false;
-  const rooms = await api.conferences.list({ friendlyName: roomFor(callSid), limit: 5 });
-  if (!(rooms || []).some((room) => room.status !== 'completed')) return false;
+  const open = await listOpenRooms(api, callSid, ['in-progress', 'init']);
+  if (!open.length) return false;
   logger.warn(`[conference] the staff leg of ${masked(callSid)} is over and its room is still open: the sweep ends it`);
   return (await onWinnerLegEnded(callSid, state, state.accepted_leg_sid)) !== 'not_winner';
 }
@@ -483,7 +499,7 @@ async function recoverUnansweredRings() {
           closed += 1;
           continue;
         }
-        const rooms = await api.conferences.list({ friendlyName: roomFor(callSid), limit: 5 });
+        const rooms = await api.conferences.list({ friendlyName: roomFor(callSid), status: 'init', limit: 5 });
         if (!(rooms || []).some((room) => room.status !== 'completed')) continue;
         logger.warn(`[conference] ${masked(callSid)} rang out with no voicemail (a lost backstop): the sweep sends it to voicemail`);
         if ((await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected') voicemail += 1;

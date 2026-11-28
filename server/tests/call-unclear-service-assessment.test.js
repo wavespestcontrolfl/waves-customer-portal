@@ -271,10 +271,10 @@ describe('gate wiring', () => {
   });
 
   test('no gate-specific decision version exists: the write chokepoint refreshes instead (codex r5 P1)', () => {
-    expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
+    expect(V2_DECISION_VERSION).toBe('v2-1.51.0');
     expect(V2_DECISION_VERSIONS.some((v) => v.includes('+'))).toBe(false);
     expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
-    expect(buildRouteDecision({ callLogId: 'c1', extraction: extraction(), routingResult: { allowed: true }, action: 'auto_route' }).decision_version).toBe('v2-1.50.0');
+    expect(buildRouteDecision({ callLogId: 'c1', extraction: extraction(), routingResult: { allowed: true }, action: 'auto_route' }).decision_version).toBe('v2-1.51.0');
   });
 });
 

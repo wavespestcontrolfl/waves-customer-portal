@@ -152,8 +152,10 @@ describe('recurring mosquito above 2 acres: no system send path sends it', () =>
       context: { phone: '+19415550100', extraction: { quote_promised: true } },
       draftPhone: '+19415550100', laneReasons: out.reasons,
     });
-    expect(verdict.verdict).toBe('would_hold');
-    expect(verdict.reasons).toContain('lane_review_reason');
+    // Call auto-send shadow rules are narrowed to { booked_on_call, termite_hold, commercial_hold }
+    // (owner 2026-11-27); classifyLane above still parks this draft in YELLOW with STAFF_TEXT.
+    expect(verdict.verdict).toBe('would_send');
+    expect(verdict.reasons).toEqual([]);
   });
 
   test('lead automation: a NEW draft carries no 2-acre hand-price reason (the 1-acre-and-up review still parks it), and auto-send refuses it', async () => {

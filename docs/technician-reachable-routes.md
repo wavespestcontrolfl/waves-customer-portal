@@ -59,7 +59,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/customers/:id/contact-notification-prefs` | admin-customers |
 | GET | `/api/admin/customers/:id/estimates-summary` | admin-customers |
 | GET | `/api/admin/customers/:id/latest-scheduled-service` | admin-customers |
-| POST | `/api/admin/customers/at-address` | admin-customers |
 | GET | `/api/admin/discounts` | admin-discounts |
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
@@ -72,7 +71,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/dispatch/:reportNoteServiceId/pest-recap/report-note` | admin-dispatch |
 | GET | `/api/admin/dispatch/:reserviceAsksServiceId/reservice-asks` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/blog-posts` | admin-dispatch |
-| GET | `/api/admin/dispatch/:serviceId/card-hold` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/complete` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/complete-preview` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/completion-profile` | admin-dispatch |
@@ -250,8 +248,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/schedule/:id/home-note` | admin-schedule |
 | PUT | `/api/admin/schedule/:id/home-note` | admin-schedule |
 | POST | `/api/admin/schedule/:id/invoice` | admin-schedule |
-| DELETE | `/api/admin/schedule/:id/prepaid` | admin-schedule |
-| POST | `/api/admin/schedule/:id/prepaid` | admin-schedule |
 | GET | `/api/admin/schedule/:id/series-summary` | admin-schedule |
 | PUT | `/api/admin/schedule/:id/status` | admin-schedule |
 | GET | `/api/admin/schedule/:id/visit-brief` | admin-schedule |
@@ -271,15 +267,12 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/schedule/list` | admin-schedule |
 | GET | `/api/admin/schedule/month` | admin-schedule |
 | GET | `/api/admin/schedule/next-visit` | admin-schedule |
-| GET | `/api/admin/schedule/recommend-slots` | admin-schedule |
 | GET | `/api/admin/schedule/services-dropdown` | admin-schedule |
 | GET | `/api/admin/schedule/vehicle-location` | admin-schedule |
 | GET | `/api/admin/schedule/week` | admin-schedule |
-| GET | `/api/admin/schedule/zone-density` | admin-schedule |
 | GET | `/api/admin/sms-templates` | admin-sms-templates |
 | GET | `/api/admin/sms-templates/:id` | admin-sms-templates |
 | GET | `/api/admin/sms-templates/:templateKey/variants` | admin-sms-templates |
-| GET | `/api/admin/sms-templates/issues` | admin-sms-templates |
 | GET | `/api/admin/technicians` | index.js |
 | GET | `/api/admin/timetracking` | admin-timetracking |
 | GET | `/api/admin/timetracking/technicians` | admin-timetracking |
@@ -394,16 +387,9 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | Method | Path | Router |
 |---|---|---|
 | GET | `/api/admin/assessment-analytics/tech-context/:customerId` | admin-assessment-analytics |
-| POST | `/api/admin/communications/call` | admin-communications |
-| GET | `/api/admin/communications/collections-voice-status` | admin-communications |
-| GET | `/api/admin/communications/compliance-export` | admin-communications |
-| POST | `/api/admin/communications/contact-compliance-checks` | admin-communications |
 | POST | `/api/admin/communications/messages/:id/like` | admin-communications |
 | POST | `/api/admin/communications/messages/read-all` | admin-communications |
 | POST | `/api/admin/communications/schedule-sms` | admin-communications |
-| GET | `/api/admin/communications/scheduled` | admin-communications |
-| DELETE | `/api/admin/communications/scheduled/:id` | admin-communications |
-| GET | `/api/admin/communications/template-performance` | admin-communications |
 | GET | `/api/admin/dashboard-ops/field-leads` | admin-dashboard-ops |
 | GET | `/api/admin/dashboard-ops/inbox` | admin-dashboard-ops |
 | POST | `/api/admin/dashboard-ops/inbox/:id/read` | admin-dashboard-ops |
@@ -411,8 +397,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/dashboard-ops/photos/:id/approve` | admin-dashboard-ops |
 | POST | `/api/admin/dashboard-ops/photos/:id/flag` | admin-dashboard-ops |
 | GET | `/api/admin/dashboard-ops/recent-photos` | admin-dashboard-ops |
-| POST | `/api/admin/discounts/calculate` | admin-discounts |
-| GET | `/api/admin/discounts/stats` | admin-discounts |
 | GET | `/api/admin/drafts` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | PUT | `/api/admin/drafts/:id/approve` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
 | PUT | `/api/admin/drafts/:id/reject` | admin-drafts (router exemption gate: admin-only unless its named staff exemption applies) |
@@ -460,39 +444,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/equipment/equipment/:id/calibration` | admin-equipment |
 | POST | `/api/admin/equipment/equipment/:id/maintenance` | admin-equipment |
 | POST | `/api/admin/equipment/tank-mixes/:id/recalculate` | admin-equipment |
-| GET | `/api/admin/estimates` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| DELETE | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| PATCH | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| PUT | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/acceptance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/archive` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/call-outcome` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/edit-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/extend` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/follow-up` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/follow-up-draft` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/group` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/mark-accepted` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/pricing-audit` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/proposal` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| PUT | `/api/admin/estimates/:id/proposal` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/proposal.pdf` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/proposal/bid-form.pdf` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/proposal/generated` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/schedule-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/send` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/send-booking-link` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/send-preview` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/slot-debug` | admin-estimate-slots |
-| PUT | `/api/admin/estimates/:id/sold-by` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/unarchive` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/actuals-variance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/customer-spend/:customerId` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/lead-auto-send/preview` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/sold-by/options` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/source-performance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/win-loss-slices` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimator/calculate-estimate` | property-lookup-v2 |
 | POST | `/api/admin/estimator/property-lookup` | property-lookup-v2 |
 | GET | `/api/admin/estimator/property-lookup/provider-accuracy` | property-lookup-v2 |
@@ -581,41 +532,17 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/lookup/satellite-ai` | admin-property-lookup |
 | GET | `/api/admin/needs-me` | admin-needs-me |
 | GET | `/api/admin/notification-events` | admin-notification-events |
-| GET | `/api/admin/requests` | admin-requests |
-| PATCH | `/api/admin/requests/:id` | admin-requests |
-| GET | `/api/admin/requests/:id/photos` | admin-requests |
 | GET | `/api/admin/review-requests` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/stats` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/tech-voice-drafts` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/sms-templates/preview` | admin-sms-templates |
-| GET | `/api/admin/triage` | admin-triage |
-| POST | `/api/admin/triage/:id/apply-property-roles` | admin-triage |
-| POST | `/api/admin/triage/:id/attach-contact` | admin-triage |
-| POST | `/api/admin/triage/:id/confirm-email` | admin-triage |
-| PUT | `/api/admin/triage/:id/dismiss` | admin-triage |
-| POST | `/api/admin/triage/:id/new-customer` | admin-triage |
-| PUT | `/api/admin/triage/:id/resolve` | admin-triage |
-| POST | `/api/admin/triage/:id/save-contact-note` | admin-triage |
-| POST | `/api/admin/triage/:id/verdict` | admin-triage |
-| GET | `/api/admin/triage/auto-routed` | admin-triage |
-| POST | `/api/admin/triage/auto-routed/:callLogId/verdict` | admin-triage |
 | PATCH | `/api/admin/turf-height/:id/resolve` | admin-turf-height |
 | GET | `/api/admin/turf-height/review` | admin-turf-height |
-| GET | `/api/ai/admin/conversations` | ai-assistant |
-| GET | `/api/ai/admin/conversations/:id/messages` | ai-assistant |
-| POST | `/api/ai/admin/conversations/:id/reply` | ai-assistant |
-| GET | `/api/ai/admin/escalations` | ai-assistant |
-| PUT | `/api/ai/admin/escalations/:id` | ai-assistant |
 | GET | `/api/ai/admin/stats` | ai-assistant |
 | GET | `/api/badges/admin/customer/:customerId` | badges |
 | GET | `/api/badges/admin/definitions` | badges |
 | GET | `/api/badges/admin/stats` | badges |
-| POST | `/api/dispatch/csr/slots` | dispatch |
 | POST | `/api/dispatch/jobs/:id/cancel` | dispatch |
-| POST | `/api/dispatch/jobs/:id/score` | dispatch |
-| POST | `/api/dispatch/match/simulate` | dispatch |
-| POST | `/api/dispatch/sync` | dispatch |
-| GET | `/api/dispatch/techs` | dispatch |
 | POST | `/api/knowledge/queries/:id/file-back` | knowledge |
 | POST | `/api/knowledge/queries/:id/rate` | knowledge |
 | POST | `/api/knowledge/query` | knowledge |

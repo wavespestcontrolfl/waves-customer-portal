@@ -159,7 +159,15 @@ const SCHEDULE_GUARDS = [
   { check: (c) => !c.to || !c.cleanBody || !c.scheduledFor, status: 400, error: 'to, body, scheduledFor required' },
   // A retained "Text back" context on a recruiting row makes this an applicant reply whatever customer is
   // selected (Codex r30 P1, same rule as the immediate /sms path): refused before the customer bypass below.
-  { check: (c) => c.hooks.recruitingReplyContext?.(c.replyToMessageId, c.to), status: 409, error: APPLICANT_REFUSAL },
+  // A recognized recruiting row whose application phone changed also refuses with 409.
+  {
+    check: async (c) => {
+      const ctx = await c.hooks.recruitingReplyContext?.(c.replyToMessageId, c.to);
+      if (!ctx) return false;
+      if (ctx.conflict) return { status: 409, error: ctx.error, extra: { code: 'RECRUITING_PHONE_MISMATCH' } };
+      return { status: 409, error: APPLICANT_REFUSAL };
+    },
+  },
   // Explicit customer context is validated FIRST (Codex r28 P2): a customerId the operator selected, whose phone
   // matches `to`, is a customer text even when an open application shares the phone (Codex r16 P1). The
   // no-customerId fallback (single customer on the phone) is NOT explicit context and does not bypass the

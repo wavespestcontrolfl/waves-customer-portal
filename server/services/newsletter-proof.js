@@ -38,7 +38,7 @@ const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE } = require('
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
-const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
+const { newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
 const { issueContextForSend, moveIssueForSend } = require('./pest-insider/schedule');
 const { ensureFlagshipAudience, warmPhaseNote } = require('./newsletter-weekly-audience');
 
@@ -1170,16 +1170,14 @@ async function maybeHandleProofApproval(email) {
     return true;
   }
 
-  // The Pest Insider kill switch governs APPROVAL, not only proofing. A
-  // proof that went out while GATE_PEST_INSIDER_PROOF was on must not be
-  // approvable once the gate is off: off means draft-only. The draft and
-  // its proof are left untouched, so turning the gate back on and replying
-  // again approves the same proof.
-  if (send.newsletter_type === PEST_INSIDER_TYPE && !pestInsiderProofLive()) {
-    logger.info(`[newsletter-proof] send ${send.id} is a Pest Insider issue and GATE_PEST_INSIDER_PROOF is off — approval refused, draft untouched`);
+  // Pest Insider issues run only through the planned auto-send flow
+  // (GATE_PEST_INSIDER_AUTO_SEND, handled above via handlePlannedIssueReply);
+  // an APPROVED reply never sends an unplanned Pest Insider draft.
+  if (send.newsletter_type === PEST_INSIDER_TYPE) {
+    logger.info(`[newsletter-proof] send ${send.id} is a Pest Insider issue — APPROVED reply refused, draft untouched`);
     await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
-      errors: ['Approved, but Pest Insider proof approval is switched off — nothing sent and the draft is unchanged. Turn the switch back on and reply APPROVED again, or send the issue from the Newsletter page.'],
+      errors: ['Approved, but an APPROVED reply does not send a Waves Pest Insider issue — nothing sent and the draft is unchanged.'],
     });
     return true;
   }

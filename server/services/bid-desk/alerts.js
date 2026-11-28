@@ -15,7 +15,7 @@ const CATEGORY = 'lead';
 const STATUS_LABEL = { new: 'no decision yet', bid: 'marked as bid' };
 const WINDOW_LABEL = { '14d': '14-day', '7d': '7-day', '2d': '2-day' };
 
-const linkFor = (bid) => `/admin/bid-desk?bid=${bid.id}`;
+const linkFor = (bid) => `/admin/bids?bid=${bid.id}`;
 const subjectFor = (bid) => ({ type: 'lead', id: bid.id });
 
 function dueWords(bid) {

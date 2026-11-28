@@ -15,6 +15,7 @@ import { AGREEMENT_TERMS, AUTOPAY_PAYMENT_TERMS, INVOICE_PAYMENT_TERMS, NET60_PA
 import { formatETDateOnly, formatETDateTime } from '../../lib/timezone';
 import { PROGRAM_TEMPLATES } from '../../lib/commercialProgramTemplates';
 import useIsMobile from '../../hooks/useIsMobile';
+import { useUnsavedLeaveGuard } from '../../hooks/useUnsavedLeaveGuard';
 
 // Commercial proposal builder — the full-page surface for authoring the
 // multi-building, per-line-item commercial bid on an estimate (HOAs,
@@ -479,7 +480,9 @@ function CommercialProposalEditor() {
   // was in flight — otherwise a slow connection would silently discard
   // keystrokes made after clicking Save (codex #3297 r5).
   const editGenRef = React.useRef(0);
+  const saveInFlightRef = React.useRef(false);
   const markEdit = () => { editGenRef.current += 1; setDirty(true); };
+  useUnsavedLeaveGuard(dirty, 'Leave this proposal with unsaved changes?');
   // Building-ITEMIZATION edits specifically — generation's authored-lines
   // guard keys on this, never on the global dirty flag (an unrelated
   // title/scope edit must not block program generation — codex 1A-ii r2).
@@ -652,10 +655,11 @@ function CommercialProposalEditor() {
 
   const reload = useCallback(() => {
     // adminFetch resolves 2xx to parsed JSON and throws with the server's
-    // error message otherwise.
+    // error message otherwise. Surface post-action refresh failures inline so
+    // a transient blip after Send/Mark-won does not wipe the open editor.
     return adminFetch(`/admin/estimates/${estimateId}/proposal`)
       .then(applyLoaded)
-      .catch((e) => setLoadError(e.message));
+      .catch((e) => setError(`Saved, but could not refresh the proposal: ${e.message}`));
   }, [estimateId, applyLoaded]);
 
   useEffect(() => {
@@ -1318,8 +1322,12 @@ function CommercialProposalEditor() {
     if (editGenRef.current !== genAtClick) throw new Error('The proposal changed while the form was being prepared. Review the form row for each line and download again.');
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = url; link.download = `${options.template}-bid-form.pdf`; link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    link.href = url;
+    link.download = `${options.template}-bid-form.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL?.(url), 10000);
   };
 
   // Returns true ONLY when the persisted proposal equals the on-screen
@@ -1327,6 +1335,8 @@ function CommercialProposalEditor() {
   // newer keystrokes sit unsaved would let them act on a stale snapshot
   // (codex #3297 r5 P0). Mid-save edits re-save in a bounded loop.
   const save = async () => {
+    if (saveInFlightRef.current) return false;
+    saveInFlightRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -1383,7 +1393,7 @@ function CommercialProposalEditor() {
         // The version THIS save committed keys every later save and the
         // delivery review — never a version observed on the reload, which
         // could belong to another editor's save (pre-push codex P1 r3).
-        const committedVersion = committed?.editVersion || null;
+        const committedVersion = committed?.editVersion;
         if (committedVersion) loadedVersionRef.current = committedVersion;
         // What this PUT just persisted is now the server-side truth — a
         // retry (concurrent edit) must guard against discarding it even
@@ -1419,6 +1429,7 @@ function CommercialProposalEditor() {
       setError(e.message);
       return false;
     } finally {
+      saveInFlightRef.current = false;
       setSaving(false);
     }
   };
@@ -1453,7 +1464,7 @@ function CommercialProposalEditor() {
       document.body.appendChild(link);
       link.click();
       link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setTimeout(() => URL.revokeObjectURL?.(url), 10000);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -1513,11 +1524,15 @@ function CommercialProposalEditor() {
     }
   };
 
-  const copyLink = () => {
+  const copyLink = async () => {
     if (!estimate?.token) return;
-    navigator.clipboard?.writeText(`${window.location.origin}/estimate/${estimate.token}`);
-    setLinkCopied(true);
-    setTimeout(() => setLinkCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(`${window.location.origin}/estimate/${estimate.token}`);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      setError('Could not copy the estimate link. Open the preview to copy it instead.');
+    }
   };
 
   if (loading) {
@@ -1550,7 +1565,18 @@ function CommercialProposalEditor() {
         title={`Commercial proposal — ${estimate?.customerName || 'Estimate'}`}
         icon={Building2}
         actions={[
-          { key: 'back', label: 'Estimates', size: 'sm', variant: 'ghost', icon: ArrowLeft, onClick: () => navigate('/admin/estimates') },
+          {
+            key: 'back',
+            label: 'Estimates',
+            size: 'sm',
+            variant: 'ghost',
+            icon: ArrowLeft,
+            onClick: () => {
+              if (!dirty || window.confirm('Leave this proposal with unsaved changes?')) {
+                navigate('/admin/estimates');
+              }
+            },
+          },
         ]}
       />
       <div className="flex flex-wrap items-center gap-3 mb-5">

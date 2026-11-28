@@ -98,6 +98,8 @@ const TECH_LIST_STRIPPED_FIELDS = [
   // Stored coordinates are the map's office-only input; a technician already
   // gets the address text for assigned customers and needs nothing more.
   'lat', 'lng',
+  // Sibling property count reveals multi-property portfolio size (office-only).
+  'propertyCount',
 ];
 
 function techSafeListRow(mapped) {
@@ -159,12 +161,14 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
-// Access codes and free-text access notes. The visit card (schedule feed) is the only place a technician sees
-// them (owner 2026-10-05, 2026-11-04); Customer 360 reaches any customer with a visit from 7 days back to any
-// future date, so it never carries them to a technician.
+// Access codes, free-text access notes, and absence/blackout dates. The visit
+// card (schedule feed) is the only place a technician sees them (owner
+// 2026-10-05, 2026-11-04); Customer 360 reaches any customer with a visit from
+// 7 days back to any future date, so it never carries them to a technician.
 const TECH_360_STRIPPED_PREFERENCE_FIELDS = [
   'property_gate_code', 'neighborhood_gate_code', 'garage_code', 'lockbox_code',
-  'side_gate_access', 'parking_notes', 'access_notes',
+  'side_gate_access', 'parking_notes', 'access_notes', 'special_instructions',
+  'away_mode_until', 'blackout_start', 'blackout_end',
 ];
 
 // Technician Customer 360 is a field-context view, not a raw database-row
@@ -190,7 +194,7 @@ const TECH_360_SCHEDULED_FIELDS = [
   'id', 'customer_id', 'technician_id', 'property_id', 'service_id', 'visit_id',
   'scheduled_date', 'window_start', 'window_end', 'service_type',
   'service_key_snapshot', 'service_category_snapshot', 'status', 'notes',
-  'internal_notes', 'customer_confirmed', 'confirmed_at', 'field_confirmed_at',
+  'customer_confirmed', 'confirmed_at', 'field_confirmed_at',
   'technician_name', 'tech_name', 'is_recurring', 'recurring_parent_id',
   'recurring_pattern', 'recurring_ongoing', 'recurring_nth',
   'recurring_weekday', 'recurring_interval_days', 'skip_weekends',
@@ -252,16 +256,24 @@ function techSafeStructuredNotes(value) {
   return safe;
 }
 
-function techSafeServiceRecord(record) {
+function techSafeServiceRecord(record, knownCodes = null) {
   const safe = pickFields(record, TECH_360_SERVICE_FIELDS);
+  const { redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
+  if (typeof safe.technician_notes === 'string') safe.technician_notes = redactFreeTextAccessCodes(safe.technician_notes, knownCodes);
+  if (typeof safe.notes === 'string') safe.notes = redactFreeTextAccessCodes(safe.notes, knownCodes);
   if (record && Object.prototype.hasOwnProperty.call(record, 'structured_notes')) {
     safe.structured_notes = techSafeStructuredNotes(record.structured_notes);
   }
   return safe;
 }
 
-function techSafeScheduledService(service) {
-  return pickFields(service, TECH_360_SCHEDULED_FIELDS);
+function techSafeScheduledService(service, knownCodes = null) {
+  const safe = pickFields(service, TECH_360_SCHEDULED_FIELDS);
+  if (typeof safe.notes === 'string') {
+    const { redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
+    safe.notes = redactFreeTextAccessCodes(safe.notes, knownCodes);
+  }
+  return safe;
 }
 
 // Appointment history for the customer-detail payload (`scheduled`): past +
@@ -273,9 +285,11 @@ function techSafeScheduledService(service) {
 // rows (24-visit fixed series) — proximity keeps the current visit and the
 // recent past in every case.
 const SCHEDULED_HISTORY_LIMIT = 50;
-function customerScheduledHistoryQuery(dbConn, customerId, today = etDateString()) {
-  return dbConn('scheduled_services')
-    .where({ customer_id: customerId })
+function customerScheduledHistoryQuery(dbConn, customerId, today = etDateString(), { technicianId = null } = {}) {
+  const q = dbConn('scheduled_services')
+    .where({ customer_id: customerId });
+  if (technicianId) q.where({ technician_id: technicianId });
+  return q
     .orderByRaw('abs(scheduled_date - ?::date) asc', [today])
     .orderBy('scheduled_date', 'desc')
     .orderBy('window_start', 'desc')
@@ -286,14 +300,19 @@ function customerScheduledHistoryQuery(dbConn, customerId, today = etDateString(
 // than the cap's worth of nearer rows would otherwise drop it from
 // `scheduled` and the drawer loses its "Current" row, so it is fetched
 // explicitly (same customer only) and appended when the window missed it.
-async function customerScheduledHistory(dbConn, customerId, { today = etDateString(), focusServiceId = null } = {}) {
-  const rows = await customerScheduledHistoryQuery(dbConn, customerId, today);
+async function customerScheduledHistory(dbConn, customerId, { today = etDateString(), focusServiceId = null, technicianId = null, req = null } = {}) {
+  const scopedTechId = technicianId || (req?.techRole === 'technician' ? req.technicianId : null);
+  const rows = await customerScheduledHistoryQuery(dbConn, customerId, today, { technicianId: scopedTechId });
   if (!focusServiceId || rows.some((r) => String(r.id) === String(focusServiceId))) return rows;
-  const focus = await dbConn('scheduled_services').where({ id: focusServiceId, customer_id: customerId }).first();
+  const focusQ = dbConn('scheduled_services').where({ id: focusServiceId, customer_id: customerId });
+  if (scopedTechId) focusQ.where({ technician_id: scopedTechId });
+  const focus = await focusQ.first();
   return focus ? [...rows, focus] : rows;
 }
 
-function techSafe360Payload(payload) {
+function techSafe360Payload(payload, { technicianId = null } = {}) {
+  const { collectStoredAccessCodes, redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
+  const knownCodes = collectStoredAccessCodes(payload.preferences, payload.customer);
   const out = { ...payload };
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
@@ -304,10 +323,22 @@ function techSafe360Payload(payload) {
   if (payload.preferences) {
     out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
     for (const field of TECH_360_STRIPPED_PREFERENCE_FIELDS) delete out.preferences[field];
+    if (typeof out.preferences.pets_secured_plan === 'string') {
+      out.preferences.pets_secured_plan = redactFreeTextAccessCodes(out.preferences.pets_secured_plan, knownCodes);
+    }
+    if (typeof out.preferences.pet_details === 'string') {
+      out.preferences.pet_details = redactFreeTextAccessCodes(out.preferences.pet_details, knownCodes);
+    }
+    if (typeof out.preferences.chemical_sensitivity_details === 'string') {
+      out.preferences.chemical_sensitivity_details = redactFreeTextAccessCodes(out.preferences.chemical_sensitivity_details, knownCodes);
+    }
   }
-  out.services = (payload.services || []).map(techSafeServiceRecord);
-  out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
-  out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
+  out.services = (payload.services || []).map((r) => techSafeServiceRecord(r, knownCodes));
+  const ownOnly = (rows) => (technicianId
+    ? (rows || []).filter((s) => String(s?.technician_id || '') === String(technicianId))
+    : (rows || []));
+  out.scheduled = ownOnly(payload.scheduled).map((s) => techSafeScheduledService(s, knownCodes));
+  out.upcomingScheduled = ownOnly(payload.upcomingScheduled).map((s) => techSafeScheduledService(s, knownCodes));
   return out;
 }
 
@@ -1518,6 +1549,49 @@ function compactServiceContactSlots(updates, before = {}) {
   }
 
   return updates;
+}
+
+const SERVICE_CONTACT_ALL_COLS = SERVICE_CONTACT_SLOT_FIELDS.flat();
+
+function snapshotServiceContactPatch(updates, ibRoles) {
+  const raw = Object.fromEntries(
+    SERVICE_CONTACT_ALL_COLS.filter((col) => updates[col] !== undefined).map((col) => [col, updates[col]]),
+  );
+  const active = Object.keys(raw).length > 0 || Object.keys(ibRoles || {}).length > 0;
+  return { raw, active };
+}
+
+function assertPartialSlotIdentityUnchanged(contactPatch, before, lockedBefore) {
+  if (!before || !lockedBefore) return;
+  for (const [n, p, e] of SERVICE_CONTACT_SLOT_FIELDS) {
+    const provided = [n, p, e].filter((col) => contactPatch.raw[col] !== undefined);
+    if (provided.length === 0) continue;
+    const norm = (row) => [row[n], row[p], row[e]].map((v) => String(v || '').trim().toLowerCase());
+    if (JSON.stringify(norm(before)) !== JSON.stringify(norm(lockedBefore))) {
+      throw Object.assign(new Error('Service contact slots changed while saving. Reload the customer and try again.'), {
+        statusCode: 409, isOperational: true, code: 'contact_slot_changed',
+      });
+    }
+  }
+}
+
+function applyLockedServiceContactCompaction(updates, contactPatch, ibRoles, lockedBefore, preLockBefore = null) {
+  if (!contactPatch.active) return;
+  assertPartialSlotIdentityUnchanged(contactPatch, preLockBefore, lockedBefore);
+  for (const col of SERVICE_CONTACT_ALL_COLS) {
+    if (contactPatch.raw[col] !== undefined) updates[col] = contactPatch.raw[col];
+    else delete updates[col];
+  }
+  delete updates.service_contacts_consent_at;
+  delete updates.service_contacts_consent_source;
+  delete updates.service_contacts_consent_text_version;
+  Object.assign(updates, ibRoles);
+  compactServiceContactSlots(updates, lockedBefore);
+  const CustomerContact = require('../services/customer-contact');
+  const survivingPhones = CustomerContact.getServiceContactSlots({ ...lockedBefore, ...updates })
+    .map((s) => s.phone).filter(Boolean);
+  const prunedPrefs = CustomerContact.pruneRemovedUnconsentedSlotKeys(lockedBefore, survivingPhones, null);
+  if (prunedPrefs) updates.service_preferences = JSON.stringify(prunedPrefs);
 }
 
 function applyCustomerListFilters(query, filters, healthColumns) {
@@ -2851,11 +2925,13 @@ router.get('/', async (req, res, next) => {
       total: totalCount, page, limit,
       totalPages: Math.max(1, Math.ceil(totalCount / limit)),
       pipelineCounts: isTechRequest ? {} : pipelineMap,
-      filters: {
-        tags: isTechRequest ? [] : allTags.map(t => t.tag),
-        sources: isTechRequest ? [] : allSources.map(s => s.lead_source).filter(Boolean),
-        areas: allAreas.map(a => a.city).filter(Boolean),
-      },
+      filters: isTechRequest
+        ? { tags: [], sources: [], areas: [] }
+        : {
+          tags: allTags.map(t => t.tag),
+          sources: allSources.map(s => s.lead_source).filter(Boolean),
+          areas: allAreas.map(a => a.city).filter(Boolean),
+        },
     });
   } catch (err) { next(err); }
 });
@@ -2908,6 +2984,8 @@ const REMINDER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 router.get('/:id/reminder-contacts', requireAdmin, async (req, res, next) => {
   try {
     if (!REMINDER_ID.test(String(req.params.id))) return res.status(400).json({ error: 'Invalid customer id' });
+    const exists = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first('id');
+    if (!exists) return res.status(404).json({ error: 'Customer not found' });
     const VisitRecipient = require('../services/call-visit-recipient');
     res.json({ reminderContacts: await VisitRecipient.listReminderContacts(req.params.id) });
   } catch (err) { next(err); }
@@ -3519,7 +3597,7 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
         .select(
           'id', 'status', 'token', 'service_interest', 'decline_reason',
           'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at',
+          'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at', 'archived_at',
         ),
       db('messages')
         .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
@@ -3543,7 +3621,7 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
       total: estimates.length,
       accepted: accepted.length,
       declined: declined.length,
-      open: estimates.filter((e) => ['draft', 'sent', 'viewed'].includes(e.status)).length,
+      open: estimates.filter((e) => !e.archived_at && ['draft', 'sent', 'viewed'].includes(e.status)).length,
       conversionRate: decided > 0 ? Math.round((accepted.length / decided) * 100) / 100 : null,
       acceptedLifetimeMonthly: Math.round(acceptedLifetimeMonthly * 100) / 100,
     };
@@ -3598,9 +3676,8 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
 // Registered above /:id so the literal path is not read as a customer id.
 // POST with the address in the body — a street address is PII and a GET
 // query string would land in the Morgan request log (AGENTS.md P1).
-router.post('/at-address', async (req, res, next) => {
+router.post('/at-address', requireAdmin, async (req, res, next) => {
   try {
-    if (req.techRole === 'technician') return res.status(403).json({ error: 'Admin access required' });
     const address = String(req.body?.address || '').trim();
     const exclude = req.body?.excludeCustomerId ? String(req.body.excludeCustomerId) : null;
     if (address.length < 6) return res.json({ customers: [] });
@@ -3747,12 +3824,13 @@ router.get('/:id', async (req, res, next) => {
       // account updater replaced keeps its old number on earlier payments.
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payments.card_brand, payment_methods.card_brand) as card_brand'), db.raw('COALESCE(payments.card_last_four, payment_methods.last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       lifetimeRevenueFor(db, c.id).then(net => ({ net })).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
-      customerScheduledHistory(db, c.id, { focusServiceId }),
+      customerScheduledHistory(db, c.id, { focusServiceId, req }),
       // Upcoming, active-only — drives Customer 360's next appointment.
       db('scheduled_services as ss')
         .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
         .select('ss.*', 'tech.name as technician_name')
         .where('ss.customer_id', c.id)
+        .modify((q) => { if (req.techRole === 'technician' && req.technicianId) q.where('ss.technician_id', req.technicianId); })
         .where('ss.scheduled_date', '>=', etDateString())
         .whereNotIn('ss.status', ['cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show'])
         .orderBy('ss.scheduled_date')
@@ -4129,7 +4207,7 @@ router.get('/:id', async (req, res, next) => {
       },
       customerDiscounts: customerDiscounts || [],
     };
-    res.json(req.techRole === 'technician' ? techSafe360Payload(payload) : payload);
+    res.json(req.techRole === 'technician' ? techSafe360Payload(payload, { technicianId: req.technicianId }) : payload);
   } catch (err) { next(err); }
 });
 
@@ -4531,6 +4609,10 @@ const customerUpdateHandler = async (req, res, next) => {
       // too. (member_since/churned_at aren't editable fields, so no clobber.)
       Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
     }
+    // Snapshot raw contact slot fields before pre-lock compaction so the
+    // locked transaction below can re-compact deterministically against
+    // lockedBefore instead of a stale pre-lock read (P1-E3).
+    const contactPatch = snapshotServiceContactPatch(updates, req.ibServiceContactRoles);
     // req.ibServiceContactRoles is set only by setServiceContactsFromBar (never an HTTP field): the relationship the bar
     // card recorded, as role columns ({ service_contact2_role: 'tenant' }), applied before compaction so it travels with
     // its person, as the call pipeline's explicit role does.
@@ -4667,6 +4749,10 @@ const customerUpdateHandler = async (req, res, next) => {
           // invoice FOR UPDATE; service-contact-tools.js lockedPlanCheck: the locked contact slots) and throws
           // preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
           if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
+          // Re-compact service contact slots against the LOCKED row (P1-E3) and
+          // prune removed keys from unconsented_slot_phone_keys (P1-E2) so
+          // concurrent saves never lose roles or leave stale unconsented keys.
+          applyLockedServiceContactCompaction(updates, contactPatch, req.ibServiceContactRoles, lockedBefore, before);
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
           // phone; a save that moved the number and marked it since keeps its
@@ -5283,11 +5369,15 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       ...Object.fromEntries(Object.values(ContactPrefs.CONTACT_CHANNEL_KEY_BY_COLUMN).map((key) => [key, Joi.string().valid(...ContactPrefs.CONTACT_CHANNEL_VALUES)])),
       smsEnabled: Joi.boolean(),
       emailEnabled: Joi.boolean(),
+      expectedPhoneKey: Joi.string().trim().max(32).allow('', null),
     }).min(1);
     const { value: updates, error } = schema.validate(req.body || {});
     if (error) return res.status(400).json({ error: error.message });
-    const patch = ContactPrefs.contactPrefPatchFromBody(updates);
+    const { expectedPhoneKey, ...prefUpdates } = updates;
+    if (!Object.keys(prefUpdates).length) return res.status(400).json({ error: 'At least one notification preference must be provided' });
+    const patch = ContactPrefs.contactPrefPatchFromBody(prefUpdates);
     const asksEmailOnly = Object.values(patch).includes('email');
+    const asksEmailOn = prefUpdates.emailEnabled === true;
     // Every input the save depends on is read under the comms lock, as the
     // contact's own PUT reads it (codex #6364 r1 P2): the slot (a holder
     // replacing it meanwhile must not have the pruned row recreated), the
@@ -5299,7 +5389,8 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       const slots = getServiceContactSlots(customer);
       const slot = slots[slotNo - 1];
       if (!slot || !slot.phone) return { code: 'no_slot' };
-      if (asksEmailOnly && !contactEmailOnFile(slots, phoneKeyOf(slot.phone))) return { code: 'email_unavailable' };
+      if (expectedPhoneKey && phoneKeyOf(slot.phone) !== phoneKeyOf(expectedPhoneKey)) return { code: 'slot_changed' };
+      if ((asksEmailOnly || asksEmailOn) && !contactEmailOnFile(slots, phoneKeyOf(slot.phone))) return { code: 'email_unavailable' };
       const [existing, accountRow] = await Promise.all([
         ContactPrefs.getContactPrefRow(req.params.id, slot.phone, { dbh: trx }),
         trx('notification_prefs').where({ customer_id: req.params.id }).first().catch(() => null),
@@ -5309,13 +5400,16 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       if (ContactPrefs.textPathsOpened(accountRow, existing, patch) && !existing?.consent_attested_at) return { code: 'consent_required' };
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.params.id, slot.phone, patch);
       await auditCustomerMutation(req, 'customer.contact_notification_prefs.update', req.params.id,
-        { slot: slotNo, fields: Object.keys(updates).sort() }, false, trx);
+        { slot: slotNo, fields: Object.keys(prefUpdates).sort() }, false, trx);
       return { code: 'saved' };
     });
     if (outcome.code === 'not_found') return res.status(404).json({ error: 'Customer not found' });
     if (outcome.code === 'no_slot') return res.status(404).json({ error: 'No contact with a phone number in that slot' });
+    if (outcome.code === 'slot_changed') {
+      return res.status(409).json({ error: 'That contact slot changed while saving. Reload the customer and try again.' });
+    }
     if (outcome.code === 'email_unavailable') {
-      return res.status(400).json({ error: 'This contact has no email address on file, so email-only delivery cannot be chosen.' });
+      return res.status(400).json({ error: 'This contact has no email address on file, so email notifications or email-only delivery cannot be chosen.' });
     }
     if (outcome.code === 'consent_required') {
       return res.status(400).json({
@@ -5907,9 +6001,13 @@ async function customerArchiveHandler(req, res, next) {
     // the rest, the ordering every termite writer follows) — no separate
     // lock session that could be lost while deleted_at commits.
     const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+    const Family = require('../services/multi-home-family');
     let relink;
     try {
       relink = await withCustomerDeletionGate(req.params.id, async (trx) => {
+        // Take the family-changes advisory lock BEFORE customers FOR UPDATE so
+        // archive and link/unlink follow the same global lock order.
+        await Family.lockFamilyChanges(trx);
         if (req.archiveAlsoLock) {
           // A caller that also depends on a second customer row (the bar's
           // duplicate delete reads its retained twin) locks both rows in ONE
@@ -5939,14 +6037,16 @@ async function customerArchiveHandler(req, res, next) {
           throw err;
         }
         // Billing was just wound down by churnGuardForRow on this same
-        // transaction — only deleted_at is left to stamp here.
+        // transaction — stamp deleted_at and unlink any Same-Family membership
+        // (cleaning up a 1-member orphan so surviving homes are not stranded).
         await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
+        const familyUnlink = await Family.unlinkMemberInExistingTx(trx, req.params.id, req.technicianId, { reason: 'customer_archived' });
         const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
         await auditCustomerMutation(req, 'customer.archive', req.params.id, {
           previousDeletedAt: customer.deleted_at || null,
           newsletterRelinked: result.relinked,
         }, true, trx);
-        return result;
+        return { ...result, familyUnlink };
       });
     } catch (e) {
       if (e && e.churnBlocked) return res.status(409).json(e.payload);
@@ -5957,6 +6057,13 @@ async function customerArchiveHandler(req, res, next) {
         });
       }
       throw e;
+    }
+    if (relink.familyUnlink?.removed && relink.familyUnlink.formerMemberIds?.length) {
+      await Family.alertFamilyDropBelowTwo(db, {
+        formerMemberIds: relink.familyUnlink.formerMemberIds,
+        departedCustomerId: req.params.id,
+        reason: 'archived',
+      });
     }
     logger.info(`[customers] Soft-deleted customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
@@ -7289,6 +7396,8 @@ router._private = {
   addMonthsDateOnly,
   cadenceFromEstimateLine,
   compactServiceContactSlots,
+  snapshotServiceContactPatch,
+  applyLockedServiceContactCompaction,
   customerSearchTerms,
   defaultAnnualPrepayTermStart,
   hasMembership,

@@ -2043,14 +2043,13 @@ router.post('/sealed-eval/runs', requireAdmin, async (req, res, next) => {
           // A resolved lock skip is not a rejection. lease_held means the
           // original holder is still working the run. no_connection means
           // THIS pod ran nothing — but the row is not provably ours to
-          // retire: another pod's stranded-run recovery (runAutoExamSweep)
-          // or a concurrent resume can take the fleet-wide lease and start
-          // processing it right after this pod bailed, and an unguarded
-          // status flip would mark that live run failed and let a second
-          // paid experiment start. The existing recovery path resumes a
-          // stranded 'running' row; surface the miss and leave it there.
+          // retire: a concurrent manual resume can take the fleet-wide lease
+          // and start processing it right after this pod bailed, and an
+          // unguarded status flip would mark that live run failed and let a
+          // second paid experiment start. Surface the miss and leave the
+          // stranded 'running' row for manual resume.
           if (outcome && outcome.skipped === true && outcome.reason === 'no_connection') {
-            logger.warn(`[sealed-eval] background run ${String(runId).slice(0, 8)} could not start on this pod (${outcome.reason}) — resume it or let the auto exam sweep recover it`);
+            logger.warn(`[sealed-eval] background run ${String(runId).slice(0, 8)} could not start on this pod (${outcome.reason}) — resume it manually`);
           }
         })
         .catch((err) => logger.error(`[sealed-eval] background run ${String(runId).slice(0, 8)} failed: ${err.message}`));

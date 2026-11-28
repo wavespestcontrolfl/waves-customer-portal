@@ -851,8 +851,8 @@ async function reconcilePendingDrafts(now = new Date()) {
       // this module.
       if (n && !hasDraft && !hasNewerSent && redraftEligible(row)) {
         try {
-          const { draftReplyForEmail } = require('./email-actions');
-          const customer = await db('customers').where('email', normalizeAddress(row.from_address)).first();
+          const { draftReplyForEmail, findUniqueLiveCustomerByEmail } = require('./email-actions');
+          const customer = await findUniqueLiveCustomerByEmail(row.from_address);
           // Returns a real draft id only when a Gmail draft was created —
           // null covers gate-off and internally handled failures; counting
           // those would report recoveries that never happened.

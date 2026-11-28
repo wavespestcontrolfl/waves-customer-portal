@@ -182,8 +182,6 @@ beforeEach(() => {
 
 describe('schedule per-visit ownership (technician role)', () => {
   const denials = [
-    ['POST', '/api/admin/schedule/svc-other/prepaid', { amount: 50, method: 'cash' }],
-    ['DELETE', '/api/admin/schedule/svc-other/prepaid', undefined],
     ['POST', '/api/admin/schedule/svc-other/invoice', {}],
     ['PUT', '/api/admin/schedule/svc-other/status', { status: 'completed' }],
     ['GET', '/api/admin/schedule/svc-other/wdo-brief', undefined],
@@ -200,8 +198,8 @@ describe('schedule per-visit ownership (technician role)', () => {
     expect(db.__state.writes).toHaveLength(0);
   });
 
-  test('a nonexistent visit id also 404s (no existence oracle)', async () => {
-    const { status } = await call('POST', '/api/admin/schedule/svc-nope/prepaid', { amount: 50 });
+  test('a nonexistent visit id also 404s on tech-reachable invoice route (no existence oracle)', async () => {
+    const { status } = await call('POST', '/api/admin/schedule/svc-nope/invoice', {});
     expect(status).toBe(404);
     expect(db.__state.writes).toHaveLength(0);
   });
@@ -214,12 +212,18 @@ describe('schedule per-visit ownership (technician role)', () => {
   });
 
   test.each([
+    ['POST', '/api/admin/schedule/svc-other/prepaid', { amount: 50, method: 'cash' }],
+    ['DELETE', '/api/admin/schedule/svc-other/prepaid', undefined],
+    ['POST', '/api/admin/schedule/svc-own/prepaid', { amount: 50, method: 'cash' }],
+    ['DELETE', '/api/admin/schedule/svc-own/prepaid', undefined],
     ['POST', '/api/admin/schedule/svc-other/regenerate-brief', {}],
     ['POST', '/api/admin/schedule/svc-own/regenerate-brief', {}],
     ['POST', '/api/admin/schedule/optimize', {}],
     ['POST', '/api/admin/schedule/optimize-route', {}],
     ['GET', '/api/admin/schedule/recurring-alerts', undefined],
     ['POST', '/api/admin/schedule/recurring-alerts/alert-1/action', { action: 'renew' }],
+    ['GET', '/api/admin/schedule/zone-density', undefined],
+    ['GET', '/api/admin/schedule/recommend-slots?date=2026-12-01', undefined],
   ])('%s %s is admin-only (dispatch/office function)', async (method, path, body) => {
     const { status, body: res } = await call(method, path, body);
     expect(status).toBe(403);
@@ -244,11 +248,11 @@ describe('schedule per-visit ownership (technician role)', () => {
       amount: 360, method: 'cash', applyToSeries: true,
     });
     expect(stamp.status).toBe(403);
-    expect(stamp.body.error).toMatch(/series/i);
+    expect(stamp.body.error).toMatch(/admin access required/i);
 
     const clear = await call('DELETE', '/api/admin/schedule/svc-own/prepaid?series=1', undefined);
     expect(clear.status).toBe(403);
-    expect(clear.body.error).toMatch(/series/i);
+    expect(clear.body.error).toMatch(/admin access required/i);
 
     expect(db.__state.writes).toHaveLength(0);
   });
@@ -466,20 +470,48 @@ describe('techSafe360Payload: access codes', () => {
   const prefs = {
     property_gate_code: '0000', neighborhood_gate_code: '1111', garage_code: '2222', lockbox_code: '3333',
     side_gate_access: 'Latch on left', parking_notes: 'Park on street', access_notes: 'Ring bell',
+    away_mode_until: '2026-12-31', blackout_start: '2026-12-01', blackout_end: '2026-12-15',
     pet_details: 'Small dog', special_instructions: 'Call first',
   };
 
-  test('a technician gets no gate, garage or lockbox codes and no access notes; other preferences stay', () => {
+  test('a technician gets no gate, garage or lockbox codes, access notes, special_instructions, or absence/blackout dates; other preferences stay', () => {
     const out = techSafe360Payload({ customer: { id: 'c1' }, preferences: { ...prefs } });
     for (const field of TECH_360_STRIPPED_PREFERENCE_FIELDS) expect(out.preferences).not.toHaveProperty(field);
-    expect(out.preferences).toEqual({ pet_details: 'Small dog', special_instructions: 'Call first' });
+    expect(out.preferences).toEqual({ pet_details: 'Small dog' });
   });
 
-  test('the strip covers every access field the schema stores', () => {
+  test('the strip covers every access and absence field the schema stores', () => {
     expect([...TECH_360_STRIPPED_PREFERENCE_FIELDS].sort()).toEqual([
-      'access_notes', 'garage_code', 'lockbox_code', 'neighborhood_gate_code',
+      'access_notes', 'away_mode_until', 'blackout_end', 'blackout_start',
+      'garage_code', 'lockbox_code', 'neighborhood_gate_code',
       'parking_notes', 'property_gate_code', 'side_gate_access',
+      'special_instructions',
     ]);
+  });
+
+  test('techSafe360Payload filters foreign technician visits, strips internal_notes, and redacts access codes in notes', () => {
+    const out = techSafe360Payload({
+      customer: { id: 'c1' },
+      services: [
+        { id: 'sr-1', technician_notes: 'Gate code 4499 on left keypad', notes: 'Lockbox code 8877 behind planter' },
+      ],
+      scheduled: [
+        { id: 'v-own', technician_id: 'tech-1', notes: 'Public note; garage code 2233', internal_notes: 'Office secret' },
+        { id: 'v-other', technician_id: 'tech-2', notes: 'Other tech stop' },
+      ],
+      upcomingScheduled: [
+        { id: 'u-own', technician_id: 'tech-1', notes: 'Entry pin 5566', internal_notes: 'Office secret 2' },
+        { id: 'u-other', technician_id: 'tech-2' },
+      ],
+    }, { technicianId: 'tech-1' });
+    expect(out.services[0].technician_notes).not.toContain('4499');
+    expect(out.services[0].notes).not.toContain('8877');
+    expect(out.scheduled.map((v) => v.id)).toEqual(['v-own']);
+    expect(out.scheduled[0]).not.toHaveProperty('internal_notes');
+    expect(out.scheduled[0].notes).not.toContain('2233');
+    expect(out.upcomingScheduled.map((v) => v.id)).toEqual(['u-own']);
+    expect(out.upcomingScheduled[0]).not.toHaveProperty('internal_notes');
+    expect(out.upcomingScheduled[0].notes).not.toContain('5566');
   });
 
   test('stripping does not change the caller\'s preferences object', () => {

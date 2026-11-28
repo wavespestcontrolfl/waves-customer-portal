@@ -1064,4 +1064,34 @@ describe("PipelineAnalytics call-list cards", () => {
     fireEvent.click(card);
     expect(onFilterChange).toHaveBeenCalledWith("call_today");
   });
+
+  it("classifies commercial_tree_shrub service lines and shows monthly unit when priced", () => {
+    const unpriced = aggregateServiceLineRows([
+      estimate({
+        status: "sent",
+        serviceLines: [{ key: "commercial_tree_shrub", amount: 0, amountBasis: "monthly" }],
+      }),
+    ]);
+    expect(unpriced).toHaveLength(1);
+    expect(unpriced[0]).toMatchObject({
+      key: "commercial_tree_shrub",
+      label: "Commercial tree & shrub",
+      avgTicket: 0,
+      ticketSuffix: "manual quote",
+    });
+
+    const priced = aggregateServiceLineRows([
+      estimate({
+        status: "sent",
+        serviceLines: [{ key: "commercial_tree_shrub", amount: 450, amountBasis: "monthly" }],
+      }),
+    ]);
+    expect(priced).toHaveLength(1);
+    expect(priced[0]).toMatchObject({
+      key: "commercial_tree_shrub",
+      label: "Commercial tree & shrub",
+      avgTicket: 450,
+      ticketSuffix: "/mo recurring",
+    });
+  });
 });
