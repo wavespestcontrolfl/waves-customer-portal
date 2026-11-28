@@ -3044,23 +3044,26 @@ function isReadOnlyVisitCustomer(customer) {
   return !!(customer?.cancelled || customer?.actor?.kind === 'contact');
 }
 
-function customerPickDeadlineNote(pickBy) {
+function customerPickDeadlineNote(pickBy, { canPickNow = true } = {}) {
   const at = new Date(pickBy);
   const label = formatPickBy(pickBy);
   if (!Number.isNaN(at.getTime()) && at.getTime() <= Date.now()) {
-    return `The pick-by time passed (${label}). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before.`;
+    return canPickNow
+      ? `The pick-by time passed (${label}). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before.`
+      : `The pick-by time passed (${label}). Overnight we'll book the best open time and text you 3 days before.`;
   }
   return `Pick a new time by ${label}. If you don't, we'll book the best open time and text you 3 days before.`;
 }
 
-function renderDashboardNextVisitMeta(nextService, muted) {
+function renderDashboardNextVisitMeta(nextService, customer, muted) {
   if (!nextService) return null;
   if (nextService.customerPickBy) {
+    const canPickNow = Boolean(nextService.rescheduleUrl && !isReadOnlyVisitCustomer(customer));
     return (
       <>
         <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Pick a time</div>
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
-          {customerPickDeadlineNote(nextService.customerPickBy)}
+          {customerPickDeadlineNote(nextService.customerPickBy, { canPickNow })}
         </div>
       </>
     );
@@ -3533,7 +3536,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
                 <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
                 </div>
-                {renderDashboardNextVisitMeta(nextService, muted)}
+                {renderDashboardNextVisitMeta(nextService, customer, muted)}
               </div>
             </div>
             {daysUntilNextService != null && (
@@ -6073,10 +6076,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     // GATE_DAY_ONLY_PROMISE: the time line above already says the window is texted the day before.
     if (s.day_only) return null;
     if (s.customerPickBy) {
+      const canPickNow = Boolean(s.rescheduleUrl && !readOnlyVisits);
       return (
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
-          {customerPickDeadlineNote(s.customerPickBy)}
-          {s.rescheduleUrl && !readOnlyVisits && (
+          {customerPickDeadlineNote(s.customerPickBy, { canPickNow })}
+          {canPickNow && (
             <div style={{ marginTop: 8 }}>
               <a href={s.rescheduleUrl} data-glass-accent="" style={{
                 ...secondaryButton, padding: '9px 14px', textDecoration: 'none', fontSize: 14, display: 'inline-flex', alignItems: 'center',

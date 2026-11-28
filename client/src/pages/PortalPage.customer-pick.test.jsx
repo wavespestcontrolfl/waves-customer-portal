@@ -12,6 +12,7 @@ vi.mock('../utils/api', () => ({
   default: {
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
+    getContactNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
     getPropertyPreferences: vi.fn(),
     getPropertyRecommendations: vi.fn(),
@@ -94,6 +95,22 @@ describe('ScheduleTab — visit waiting for the customer to pick a day', () => {
       "The pick-by time passed (Wed, Nov 4 at 8 PM). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before."
     )).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Pick a time' })).toHaveAttribute('href', waiting.rescheduleUrl);
+  });
+
+  it('shows neutral automatic-booking wording after the deadline when no pick link is available or the session is read-only', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-05T02:00:00.000Z').getTime());
+    await renderSchedule({ ...waiting, rescheduleUrl: null });
+    expect(screen.getByText(
+      "The pick-by time passed (Wed, Nov 4 at 8 PM). Overnight we'll book the best open time and text you 3 days before."
+    )).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
+
+    cleanup();
+    await renderSchedule(waiting, { ...customer, actor: { kind: 'contact', id: 'c-1' } });
+    expect(screen.getByText(
+      "The pick-by time passed (Wed, Nov 4 at 8 PM). Overnight we'll book the best open time and text you 3 days before."
+    )).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
   });
 
   it('omits the link when the visit has no reschedule link', async () => {
