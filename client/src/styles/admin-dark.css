@@ -189,8 +189,14 @@
   html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-900:not([class*="!bg-"]).text-white, .bg-zinc-900:not([class*="!bg-"]) .text-white:not([class*="bg-"])) {
     color: #111315;
   }
-  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) :is(.text-white\/70, .text-zinc-200, .text-zinc-300, .text-zinc-400) {
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) [style*="color: rgb(255, 255, 255)"]:not([class*="bg-"]):not(:is(.bg-zinc-700, .bg-zinc-800, .bg-zinc-950, .bg-alert-fg) *) {
+    color: #111315 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) :is(.text-white\/65, .text-white\/70, .text-white\/80, .text-zinc-200, .text-zinc-300, .text-zinc-400) {
     color: #3f3f46;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) [style*="color: rgba(255, 255, 255"]:not([class*="bg-"]):not(:is(.bg-zinc-700, .bg-zinc-800, .bg-zinc-950, .bg-alert-fg) *) {
+    color: #3f3f46 !important;
   }
   html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) .text-red-200 {
     color: #b91c1c;

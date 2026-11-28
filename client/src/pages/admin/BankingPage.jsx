@@ -295,12 +295,12 @@ function PayoutsTab() {
                 onClick={() => toggleExpand(p.id)}
                 style={{
                   cursor: "pointer",
-                  background: expanded === p.id ? "#F4F4F5" : "transparent",
+                  background: expanded === p.id ? "var(--surface-hover, #F4F4F5)" : "transparent",
                   transition: "background 0.15s",
                 }}
                 onMouseEnter={(e) => {
                   if (expanded !== p.id)
-                    e.currentTarget.style.background = "#FFFFFF88";
+                    e.currentTarget.style.background = "var(--surface-hover, #FFFFFF88)";
                 }}
                 onMouseLeave={(e) => {
                   if (expanded !== p.id)
@@ -410,7 +410,7 @@ function PayoutsTab() {
                   <TD
                     colSpan={7}
                     style={{
-                      background: "#F4F4F5",
+                      background: "var(--surface-hover, #F4F4F5)",
                     }}
                   >
                     <div className="px-0 py-3 min-[1101px]:px-5">
@@ -1695,7 +1695,8 @@ function PayoutModal({
                     display: "block",
                     marginTop: 4,
                     fontSize: 14,
-                    color: selected ? "#FFFFFF" : "#71717A",
+                    color: selected ? "currentColor" : "var(--text-tertiary, #71717A)",
+                    opacity: selected ? 0.85 : 1,
                   }}
                 >
                   {disabled ? "Unavailable" : note}
@@ -1737,7 +1738,7 @@ function PayoutModal({
             {isInstant ? "Instant available" : "Available"}:{" "}
             <span className="u-nums"
               style={{
-                color: methodLimit > 0 ? "#18181B" : "#C8312F",
+                color: methodLimit > 0 ? "var(--text-primary, #18181B)" : "var(--status-red, #C8312F)",
               }}
             >
               {fmtM(methodLimit)}
@@ -1746,7 +1747,7 @@ function PayoutModal({
         </div>
         <div
           style={{
-            background: "#F4F4F5",
+            background: "var(--surface-hover, #F4F4F5)",
             borderRadius: 10,
             padding: 14,
             marginBottom: 20,
@@ -1762,7 +1763,7 @@ function PayoutModal({
             <span
               style={{
                 fontSize: 14,
-                color: "#71717A",
+                color: "var(--text-tertiary, #71717A)",
               }}
             >
               Amount
@@ -1770,7 +1771,7 @@ function PayoutModal({
             <span className="u-nums"
               style={{
                 fontSize: 14,
-                color: "#27272A",
+                color: "var(--text-primary, #27272A)",
               }}
             >
               {fmtM(parsedAmount)}
@@ -1786,7 +1787,7 @@ function PayoutModal({
             <span
               style={{
                 fontSize: 14,
-                color: "#71717A",
+                color: "var(--text-tertiary, #71717A)",
               }}
             >
               {isInstant ? "Instant fee estimate" : "Instant fee"}
@@ -1794,7 +1795,7 @@ function PayoutModal({
             <span className="u-nums"
               style={{
                 fontSize: 14,
-                color: isInstant ? "#52525B" : "#18181B",
+                color: isInstant ? "var(--text-secondary, #52525B)" : "var(--text-primary, #18181B)",
               }}
             >
               {fmtM(fee)}
@@ -1802,7 +1803,7 @@ function PayoutModal({
           </div>{" "}
           <div
             style={{
-              borderTop: "1px solid #E4E4E7",
+              borderTop: "1px solid var(--border-default, #E4E4E7)",
               paddingTop: 6,
               display: "flex",
               justifyContent: "space-between",
@@ -1812,7 +1813,7 @@ function PayoutModal({
               style={{
                 fontSize: 14,
                 fontWeight: 500,
-                color: "#09090B",
+                color: "var(--text-primary, #09090B)",
               }}
             >
               Net Transfer
@@ -1821,7 +1822,7 @@ function PayoutModal({
               style={{
                 fontSize: 15,
                 fontWeight: 500,
-                color: "#18181B",
+                color: "var(--text-primary, #18181B)",
               }}
             >
               {fmtM(net)}
