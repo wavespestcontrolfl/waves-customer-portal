@@ -250,8 +250,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/schedule/:id/home-note` | admin-schedule |
 | PUT | `/api/admin/schedule/:id/home-note` | admin-schedule |
 | POST | `/api/admin/schedule/:id/invoice` | admin-schedule |
-| DELETE | `/api/admin/schedule/:id/prepaid` | admin-schedule |
-| POST | `/api/admin/schedule/:id/prepaid` | admin-schedule |
 | GET | `/api/admin/schedule/:id/series-summary` | admin-schedule |
 | PUT | `/api/admin/schedule/:id/status` | admin-schedule |
 | GET | `/api/admin/schedule/:id/visit-brief` | admin-schedule |
@@ -271,11 +269,9 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/schedule/list` | admin-schedule |
 | GET | `/api/admin/schedule/month` | admin-schedule |
 | GET | `/api/admin/schedule/next-visit` | admin-schedule |
-| GET | `/api/admin/schedule/recommend-slots` | admin-schedule |
 | GET | `/api/admin/schedule/services-dropdown` | admin-schedule |
 | GET | `/api/admin/schedule/vehicle-location` | admin-schedule |
 | GET | `/api/admin/schedule/week` | admin-schedule |
-| GET | `/api/admin/schedule/zone-density` | admin-schedule |
 | GET | `/api/admin/sms-templates` | admin-sms-templates |
 | GET | `/api/admin/sms-templates/:id` | admin-sms-templates |
 | GET | `/api/admin/sms-templates/:templateKey/variants` | admin-sms-templates |
@@ -607,9 +603,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/ai/admin/escalations` | ai-assistant |
 | PUT | `/api/ai/admin/escalations/:id` | ai-assistant |
 | GET | `/api/ai/admin/stats` | ai-assistant |
-| GET | `/api/badges/admin/customer/:customerId` | badges |
-| GET | `/api/badges/admin/definitions` | badges |
-| GET | `/api/badges/admin/stats` | badges |
 | POST | `/api/dispatch/csr/slots` | dispatch |
 | POST | `/api/dispatch/jobs/:id/cancel` | dispatch |
 | POST | `/api/dispatch/jobs/:id/score` | dispatch |

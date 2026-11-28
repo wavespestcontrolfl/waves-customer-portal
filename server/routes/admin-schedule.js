@@ -538,6 +538,203 @@ function discountProvenanceProjection(req, s) {
 // and lead score are office-only, as Customer 360 already treats them. Rows
 // are shared by reference with techSummary / unassigned, so this mutates in
 // place and returns nothing. Admin rows are never touched.
+function stripTechMonthMoney(req, weeks) {
+  if (!isTechnicianRequest(req)) return;
+  for (const week of weeks) {
+    for (const day of week) {
+      delete day.estimatedRevenue;
+      for (const svc of day.services) delete svc.prepaidAmount;
+    }
+  }
+}
+
+function parseAdminExtraLine(e) {
+  const description = String(e?.description || '').slice(0, 200);
+  const quantity = Number(e?.quantity) || 1;
+  const rawUnitPrice = Number(e?.unit_price) || 0;
+  const rawAmount = Number(e?.amount) || 0;
+  const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (quantity !== 0 ? rawAmount / quantity : 0);
+  if (!description || !Number.isFinite(unit_price)) return null;
+  return {
+    description,
+    quantity,
+    unit_price,
+    amount: rawAmount || quantity * unit_price,
+    category: e?.category ? String(e.category).slice(0, 100) : null,
+    discount_id: e?.discount_id ? String(e.discount_id) : null,
+  };
+}
+
+function parseOptionalNumber(val) {
+  return (val == null || val === '') ? 0 : Number(val);
+}
+
+function resolveTechExtraLineMoney(e, quantity) {
+  const rawUnitPrice = parseOptionalNumber(e?.unit_price);
+  const rawAmount = parseOptionalNumber(e?.amount);
+  if (!Number.isFinite(rawUnitPrice) || !Number.isFinite(rawAmount)) {
+    return { error: 'Extra line item amount exceeds field checkout limit' };
+  }
+  const expectedCents = Math.round(quantity * rawUnitPrice * 100);
+  if (rawUnitPrice !== 0 && rawAmount !== 0 && Math.abs(Math.round(rawAmount * 100) - expectedCents) > 1) {
+    return { error: 'Extra line item amount does not match quantity and unit price' };
+  }
+  const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (rawAmount / quantity);
+  const billedCents = Math.round(quantity * unit_price * 100);
+  if (!Number.isFinite(unit_price) || !Number.isFinite(billedCents) || Math.abs(billedCents) > 500000) {
+    return { error: 'Extra line item amount exceeds field checkout limit' };
+  }
+  return {
+    billedCents,
+    unit_price: rawUnitPrice !== 0 ? rawUnitPrice : (billedCents / 100) / quantity,
+    amount: billedCents / 100,
+  };
+}
+
+function parseTechExtraLine(e) {
+  const description = String(e?.description || '').slice(0, 200);
+  if (!description) return { skip: true };
+  const quantity = e?.quantity == null ? 1 : Number(e.quantity);
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 25) {
+    return { error: 'Invalid extra line item quantity' };
+  }
+  const money = resolveTechExtraLineMoney(e, quantity);
+  if (money.error) return money;
+  const discount_id = e?.discount_id ? String(e.discount_id) : null;
+  if (money.billedCents < 0 || money.unit_price < 0 || discount_id) {
+    return { error: 'Technicians cannot apply discounts or negative adjustments during field checkout' };
+  }
+  return {
+    billedCents: money.billedCents,
+    line: {
+      description,
+      quantity,
+      unit_price: money.unit_price,
+      amount: money.amount,
+      category: e?.category ? String(e.category).slice(0, 100) : null,
+      discount_id: null,
+    },
+  };
+}
+
+function parseAndValidateExtraLines(req, rawExtras) {
+  const extras = Array.isArray(rawExtras) ? rawExtras : [];
+  if (!isTechnicianRequest(req)) {
+    return { error: null, extraLines: extras.map(parseAdminExtraLine).filter(Boolean) };
+  }
+  if (extras.length > 20) return { error: 'Too many extra line items', extraLines: [] };
+  const extraLines = [];
+  let totalCents = 0;
+  for (const e of extras) {
+    const parsed = parseTechExtraLine(e);
+    if (parsed.error) return { error: parsed.error, extraLines: [] };
+    if (parsed.skip) continue;
+    totalCents += Math.abs(parsed.billedCents);
+    if (totalCents > 1000000) return { error: 'Extra line item amount exceeds field checkout limit', extraLines: [] };
+    extraLines.push(parsed.line);
+  }
+  return { error: null, extraLines };
+}
+
+function stripTechScheduleListBilling(req, rows) {
+  if (!isTechnicianRequest(req)) return;
+  const today = etDateString();
+  for (const row of rows) {
+    const isToday = dateOnly(row.scheduledDate) === today;
+    delete row.monthlyRate;
+    delete row.leadScore;
+    if (!isToday) delete row.estimatedPrice;
+    delete row.primaryLinePrice;
+    delete row.prepaidAmount;
+    delete row.prepaidMethod;
+    delete row.prepaidAt;
+    delete row.payerId;
+    delete row.poNumber;
+    delete row.selfPayOverride;
+  }
+}
+
+const EMPTY_CHECKOUT_INVOICE_FIELDS = {
+  checkoutInvoiceId: null,
+  checkoutInvoiceStatus: null,
+  checkoutInvoiceTotal: null,
+  checkoutInvoiceNumber: null,
+  checkoutInvoiceLines: [],
+  checkoutInvoiceCreditApplied: 0,
+  checkoutInvoiceAmountPaid: 0,
+  checkoutInvoicePrepaidApplied: 0,
+  checkoutInvoicePayerBilled: false,
+};
+
+function serializeAdminCheckoutInvoice(checkoutInvoice, checkoutInvoicePrepaidApplied) {
+  if (!checkoutInvoice) return { ...EMPTY_CHECKOUT_INVOICE_FIELDS, checkoutInvoicePrepaidApplied };
+  return {
+    checkoutInvoiceId: checkoutInvoice.id || null,
+    checkoutInvoiceStatus: checkoutInvoice.status || null,
+    checkoutInvoiceTotal: checkoutInvoice.total != null ? Number(checkoutInvoice.total) : null,
+    checkoutInvoiceNumber: checkoutInvoice.invoice_number || null,
+    checkoutInvoiceLines: compactCheckoutInvoiceLines(checkoutInvoice.line_items),
+    checkoutInvoiceCreditApplied: checkoutInvoice.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+    checkoutInvoiceAmountPaid: checkoutInvoice.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
+    checkoutInvoicePrepaidApplied,
+    checkoutInvoicePayerBilled: !!checkoutInvoice.payer_id,
+  };
+}
+
+function serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoicePrepaidApplied) {
+  if (!isTechnicianRequest(req)) {
+    return serializeAdminCheckoutInvoice(checkoutInvoice, checkoutInvoicePrepaidApplied);
+  }
+  if (!checkoutInvoice || dateOnly(s.scheduled_date) !== etDateString()) {
+    return { ...EMPTY_CHECKOUT_INVOICE_FIELDS };
+  }
+  const netDue = Math.max(0, Math.round((Number(checkoutInvoice.total || 0) - Number(checkoutInvoice.credit_applied || 0) - Number(checkoutInvoice.amount_paid || 0)) * 100) / 100);
+  return {
+    ...EMPTY_CHECKOUT_INVOICE_FIELDS,
+    checkoutInvoiceId: checkoutInvoice.id,
+    checkoutInvoiceStatus: checkoutInvoice.status || null,
+    checkoutInvoiceTotal: netDue,
+    checkoutInvoiceNumber: checkoutInvoice.invoice_number || null,
+    checkoutInvoicePayerBilled: !!checkoutInvoice.payer_id,
+  };
+}
+
+function techSafeEstimateSourcePayload(payload) {
+  const prepayCoversVisit = payload.payment?.annualPrepay?.coversThisVisit === true;
+  return {
+    linked: true,
+    estimateId: payload.estimateId,
+    estimateSlug: payload.estimateSlug,
+    linkedSeriesCount: payload.linkedSeriesCount,
+    estimateStatus: payload.estimateStatus,
+    createdAt: payload.createdAt,
+    lines: (payload.lines || []).map((line) => ({
+      estimateLabel: line.estimateLabel || null,
+      name: line.name || null,
+      service: line.service || null,
+      serviceKey: line.serviceKey || null,
+      cadence: line.cadence || null,
+      intervalDays: line.intervalDays ?? null,
+      source: line.source || null,
+      frequency: line.frequency || null,
+      visitsPerYear: line.visitsPerYear ?? null,
+    })),
+    deposit: payload.deposit?.payerBilled ? { payerBilled: true } : null,
+    payment: prepayCoversVisit ? { annualPrepayCovered: true } : null,
+  };
+}
+
+function stripTechInvoiceResponse(req, body) {
+  if (isTechnicianRequest(req)) delete body.token;
+  return body;
+}
+
+function technicianTodayLiveVisitFilter(req, q) {
+  technicianLiveVisitFilter(req, q);
+  if (isTechnicianRequest(req)) q.where('scheduled_services.scheduled_date', etDateString());
+  return q;
+}
+
 function stripTechOwnerOnlyMoney(req, rows) {
   if (!isTechnicianRequest(req)) return;
   for (const row of rows) {
@@ -5724,22 +5921,24 @@ function formatServiceDisplay(primaryType, addons = []) {
   return `${names[0]} + ${names.length - 1} more`;
 }
 
-function mapAddonRow(row) {
+function mapAddonRow(row, { forTech = false } = {}) {
   return {
     id: row.id,
     serviceId: row.service_id || null,
     serviceName: row.service_name,
     serviceKey: row.service_key_snapshot || null,
     serviceCategory: row.service_category_snapshot || null,
-    excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
     estimatedDuration: row.estimated_duration_minutes ?? null,
-    basePrice: row.base_price != null ? Number(row.base_price) : null,
-    estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
-    discountId: row.discount_id || null,
-    discountName: row.discount_name || null,
-    discountType: row.discount_type || null,
-    discountAmount: row.discount_amount != null ? Number(row.discount_amount) : null,
-    discountDollars: row.discount_dollars != null ? Number(row.discount_dollars) : null,
+    ...(forTech ? {} : {
+      excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
+      basePrice: row.base_price != null ? Number(row.base_price) : null,
+      estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
+      discountId: row.discount_id || null,
+      discountName: row.discount_name || null,
+      discountType: row.discount_type || null,
+      discountAmount: row.discount_amount != null ? Number(row.discount_amount) : null,
+      discountDollars: row.discount_dollars != null ? Number(row.discount_dollars) : null,
+    }),
     recurringPattern: row.recurring_pattern || null,
     recurringIntervalDays: row.recurring_interval_days ?? null,
     recurringNth: row.recurring_nth ?? null,
@@ -5749,7 +5948,7 @@ function mapAddonRow(row) {
   };
 }
 
-async function loadAddonsByServiceId(serviceIds) {
+async function loadAddonsByServiceId(serviceIds, { forTech = false } = {}) {
   const ids = (serviceIds || []).filter(Boolean);
   if (!ids.length) return new Map();
   try {
@@ -5763,7 +5962,7 @@ async function loadAddonsByServiceId(serviceIds) {
     for (const row of rows) {
       const key = row.scheduled_service_id;
       if (!map.has(key)) map.set(key, []);
-      map.get(key).push(mapAddonRow(row));
+      map.get(key).push(mapAddonRow(row, { forTech }));
     }
     return map;
   } catch (e) {
@@ -6852,7 +7051,7 @@ router.get('/', async (req, res, next) => {
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
-    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id), { forTech: isTechnicianRequest(req) });
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
     // Neighborhood gate-code directory:
     // the shared entry for a visit whose customer has no gate code. A failed
@@ -7258,19 +7457,7 @@ router.get('/', async (req, res, next) => {
             name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
           }
           : null,
-        checkoutInvoiceId: checkoutInvoice?.id || null,
-        checkoutInvoiceStatus: checkoutInvoice?.status || null,
-        checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
-        checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
-        checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
-        checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
-        checkoutInvoiceAmountPaid: checkoutInvoice?.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
-        checkoutInvoicePrepaidApplied,
-        // The INVOICE's own Bill-To: a payer-billed invoice survives the
-        // visit's payer being cleared/deactivated, and the Charge-now reuse
-        // path refuses it — the sheets must not present it as collectible
-        // even when the visit itself resolves self-pay.
-        checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
+        ...serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoicePrepaidApplied),
         completionProfile: projectCompletionContext.completionProfile || null,
         // Dispatch V2 completes from this payload — the closeout promise
         // checkbox renders only on true (Codex #3178 r21 P1).
@@ -7684,7 +7871,7 @@ router.get('/week', async (req, res, next) => {
 
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
-      const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+      const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id), { forTech: isTechnicianRequest(req) });
       const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
       // Same trace-eligibility flag the day feed carries (codex P2 r2):
       // the mobile Week view opens the shared CompletionPanel straight off
@@ -7964,16 +8151,7 @@ router.get('/week', async (req, res, next) => {
               name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
             }
             : null,
-          checkoutInvoiceId: checkoutInvoice?.id || null,
-          checkoutInvoiceStatus: checkoutInvoice?.status || null,
-          checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
-          checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
-          checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
-          checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
-          checkoutInvoiceAmountPaid: checkoutInvoice?.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
-          checkoutInvoicePrepaidApplied,
-          // Same invoice-level Bill-To flag as the day payload (see there).
-          checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
+          ...serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoicePrepaidApplied),
           completionProfile: projectCompletionContext.completionProfile || null,
           // Same field as the day view above — both feed the V2 closeout.
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
@@ -8169,7 +8347,7 @@ router.get('/month', async (req, res, next) => {
       .orderBy('scheduled_services.scheduled_date')
       .orderByRaw('COALESCE(scheduled_services.route_order, 999)');
 
-    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id), { forTech: isTechnicianRequest(req) });
 
     // Group by date
     const byDate = {};
@@ -8267,6 +8445,7 @@ router.get('/month', async (req, res, next) => {
       }
       weeks.push(week);
     }
+    stripTechMonthMoney(req, weeks);
 
     // Month summary stats
     const monthServices = services.filter(s => {
@@ -11422,7 +11601,7 @@ router.get('/list', async (req, res, next) => {
     // Add-on lines so the Edit appointment modal opened from the list view
     // knows the full visit composition (primary + add-ons) and edits totals
     // correctly rather than rebasing the visit price down to the primary line.
-    const listAddonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    const listAddonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id), { forTech: isTechnicianRequest(req) });
 
     const mapped = services.map(s => ({
       id: s.id,
@@ -11475,6 +11654,7 @@ router.get('/list', async (req, res, next) => {
       ...(s._approximate ? { approximate: true, matchReasons: s._matchReasons } : {}),
     }));
 
+    stripTechScheduleListBilling(req, mapped);
     // GATE_DAY_ONLY_PROMISE part E: the list, and the client search that reads it, open the same edit window as the day feed.
     await attachOfficeToldFields(req, mapped);
     res.json({
@@ -19790,7 +19970,7 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
 // and we split it evenly across every non-completed sibling so each visit
 // completes against its own slice — the per-visit invoice-skip logic keeps
 // working unchanged.
-router.post('/:id/prepaid', async (req, res, next) => {
+router.post('/:id/prepaid', requireAdmin, async (req, res, next) => {
   try {
     // Ownership before money: a technician must not be able to stamp
     // prepayments (or mint receipts) onto another tech's visits, nor onto
@@ -19927,7 +20107,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
 // `?series=1` is passed, every eligible sibling in the recurring family is
 // cleared too — symmetry with the POST flow so the operator doesn't have to
 // hunt down each prepaid visit individually if the customer asks for a refund.
-router.delete('/:id/prepaid', async (req, res, next) => {
+router.delete('/:id/prepaid', requireAdmin, async (req, res, next) => {
   try {
     if (!(await technicianOwnsScheduledService(req, req.params.id, { forMutation: true }))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
@@ -20061,7 +20241,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // svc row the transaction works from is one the tech was authorized
     // for at read time.
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
-      .modify((q) => technicianLiveVisitFilter(req, q))
+      .modify((q) => technicianTodayLiveVisitFilter(req, q))
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select('scheduled_services.*',
         'customers.monthly_rate as cust_monthly_rate',
@@ -20128,7 +20308,9 @@ router.post('/:id/invoice', async (req, res, next) => {
       if (!isTechnicianRequest(req)) return;
       const still = await technicianLiveVisitFilter(
         req,
-        trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
+        trx('scheduled_services')
+          .where({ 'scheduled_services.id': svc.id })
+          .where('scheduled_services.scheduled_date', etDateString()),
       ).forUpdate().first('scheduled_services.id');
       if (!still) {
         const e = new Error('Scheduled service not found');
@@ -20331,7 +20513,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       // into tender selection for a $0 charge.
       const alreadyPaid = ['paid', 'prepaid'].includes(existing.status)
         || invoiceAmountDue(existing) <= 0;
-      return res.json({
+      return res.json(stripTechInvoiceResponse(req, {
         success: true,
         reused: true,
         invoiceId: existing.id,
@@ -20345,7 +20527,7 @@ router.post('/:id/invoice', async (req, res, next) => {
         token: existing.token,
         status: existing.status,
         alreadyPaid,
-      });
+      }));
     }
 
     // Mobile checkout sheet can append extra services + discount lines before
@@ -20368,12 +20550,14 @@ router.post('/:id/invoice', async (req, res, next) => {
     // the check entirely — byte-identical to before.
     const expectedDiscountStacking = req.body?.expected_discount_stacking;
     const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
-    // P0-6: Technicians may collect at the server-calculated visit total only —
+    // Technicians may collect at the server-calculated visit total only —
     // never add custom services, negative lines, or discounts during checkout.
     if (extras.length > 0 && isTechnicianRequest(req)) {
       return res.status(403).json({ error: 'Only admins can add extra items or discounts during checkout.' });
     }
-    const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extras, amount);
+    const { error: techExtraErr, extraLines } = parseAndValidateExtraLines(req, extras);
+    if (techExtraErr) return res.status(400).json({ error: techExtraErr });
+    const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extraLines, amount);
 
     const extrasTotal = invoiceExtraLines.reduce((s, e) => s + e.amount, 0);
     if (!(amount > 0) && extrasTotal <= 0) {
@@ -20467,7 +20651,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // nothing to collect — never hand the parent a $0 tender flow.
     const mintAlreadyPaid = ['paid', 'prepaid'].includes(invoice.status)
       || invoiceAmountDue(invoice) <= 0;
-    res.json({
+    res.json(stripTechInvoiceResponse(req, {
       success: true,
       reused: minted.reused,
       invoiceId: invoice.id,
@@ -20479,7 +20663,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       token: invoice.token,
       status: invoice.status,
       alreadyPaid: mintAlreadyPaid,
-    });
+    }));
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
@@ -24842,7 +25026,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
 });
 
 // GET /api/admin/schedule/zone-density
-router.get('/zone-density', async (req, res, next) => {
+router.get('/zone-density', requireAdmin, async (req, res, next) => {
   try {
     const date = req.query.date || etDateString();
     const density = await db('scheduled_services')
@@ -25355,17 +25539,10 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         .catch(() => []);
       lines = scheduleLinesFromEstimate(est, indexServicesForSchedule(serviceRows));
     } catch { lines = []; }
-    res.json({
+    const fullPayload = {
       linked: true,
       estimateId: est.id,
-      // Owner-only: est.token is the permanent public bearer credential for
-      // the unauthenticated /api/estimates/:token router (view, PDF, resend,
-      // change-request) — admin-customers.js already strips 'estimates' from
-      // the tech 360 for exactly this reason. Never hand it to a technician
-      // token, which outlives the 7-day tech access window and any
-      // reassignment/termination (ADMIN-BUG-R40). No tech client reads this
-      // field.
-      ...(isTechnicianRequest(req) ? {} : { estimateToken: est.token }),
+      estimateToken: est.token,
       // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
@@ -25380,7 +25557,8 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       lines,
       deposit,
       payment,
-    });
+    };
+    res.json(isTechnicianRequest(req) ? techSafeEstimateSourcePayload(fullPayload) : fullPayload);
   } catch (err) { next(err); }
 });
 
@@ -28518,8 +28696,10 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let typedFallbackNextSteps = [];
     let treeShrubReviewGrounding = null;
     if (scheduledServiceId) {
-      const svc = await db('scheduled_services')
-        .where({ id: scheduledServiceId })
+      const svcQ = db('scheduled_services')
+        .where({ 'scheduled_services.id': scheduledServiceId });
+      technicianCurrentVisitFilter(req, svcQ);
+      const svc = await svcQ
         // is_callback feeds the pressure-suppression rule below — without it
         // in the projection the flag reads undefined and callback visits on
         // one-time keys would ground differently than /complete scores them
@@ -29430,7 +29610,7 @@ router.get('/services-dropdown', async (req, res, next) => {
 });
 
 // GET /api/admin/schedule/recommend-slots — smart slot recommendations
-router.get('/recommend-slots', async (req, res, next) => {
+router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
   try {
     const { customerId, serviceType, date, serviceId } = req.query;
     if (!date) return res.status(400).json({ error: 'date required' });

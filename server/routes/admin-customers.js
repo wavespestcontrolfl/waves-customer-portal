@@ -2956,15 +2956,34 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
 
 router.get('/:id/cards', async (req, res, next) => {
   try {
-    // Payment methods stay visible to the tech checkout/project flows, but
-    // only for customers with a visit assigned to this tech.
-    if (!(await technicianServicesCustomer(req, req.params.id))) {
-      return res.status(404).json({ error: 'Customer not found' });
+    const isTech = req.techRole === 'technician';
+    if (isTech) {
+      // Technicians see saved cards ONLY while GATE_TECH_CARD_ON_FILE is live,
+      // only for a live (non-deleted) customer with a visit assigned to them
+      // today (ET), and only card methods (never ACH bank accounts).
+      const { techCardOnFileLive } = require('../config/feature-gates');
+      if (!techCardOnFileLive()) {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+      const { TECH_DEAD_ASSIGNMENT_STATUSES } = require('../services/technician-visit-scope');
+      const ownToday = await db('scheduled_services')
+        .join('customers', 'scheduled_services.customer_id', 'customers.id')
+        .where({
+          'scheduled_services.customer_id': req.params.id,
+          'scheduled_services.technician_id': req.technicianId,
+          'scheduled_services.scheduled_date': etDateString(),
+        })
+        .whereNotIn('scheduled_services.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+        .whereNull('customers.deleted_at')
+        .first('scheduled_services.id');
+      if (!ownToday) return res.status(404).json({ error: 'Customer not found' });
     }
-    const cards = await db('payment_methods')
+    const query = db('payment_methods')
       .where({ customer_id: req.params.id })
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
+    if (isTech) query.whereRaw("LOWER(COALESCE(method_type, '')) = 'card'");
+    const cards = await query;
     res.json({
       cards: cards.map((c) => ({
         id: c.id,
@@ -2973,7 +2992,7 @@ router.get('/:id/cards', async (req, res, next) => {
         last_four: c.last_four,
         exp_month: c.exp_month,
         exp_year: c.exp_year,
-        bank_name: c.bank_name,
+        ...(isTech ? {} : { bank_name: c.bank_name }),
         is_default: !!c.is_default,
       })),
     });

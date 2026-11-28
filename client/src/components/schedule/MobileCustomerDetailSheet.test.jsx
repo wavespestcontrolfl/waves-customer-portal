@@ -54,4 +54,20 @@ describe('MobileCustomerDetailSheet', () => {
     expect(label.parentElement.textContent).toContain('1');
     expect(label.parentElement.textContent).not.toContain('4');
   });
+
+  it('hides Edit and Payment on file for technicians and shows them for admins', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    render(<MobileCustomerDetailSheet customerId="c1" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('Far visit')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: 'Edit customer' })).toBeNull();
+    expect(screen.queryByText('Payment on file')).toBeNull();
+    cleanup();
+
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    render(<MobileCustomerDetailSheet customerId="c1" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText('Far visit')).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Edit customer' })).toBeTruthy();
+    expect(screen.getByText('Payment on file')).toBeTruthy();
+    localStorage.removeItem('waves_admin_user');
+  });
 });

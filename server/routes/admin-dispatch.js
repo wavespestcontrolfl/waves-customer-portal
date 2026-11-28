@@ -1498,6 +1498,19 @@ router.post('/recap-preview', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function stripTechDispatchBillingFields(req, row) {
+  if (!isTechnicianRequest(req)) return row;
+  for (const field of [
+    'monthlyRate', 'autopayActive', 'autopayEnabled', 'estimatedPrice',
+    'prepaidAmount', 'prepaidMethod', 'prepaidNote', 'prepaidAt',
+    'prepaidSeriesContext', 'createInvoiceOnComplete',
+    'checkoutInvoiceId', 'checkoutInvoiceStatus', 'checkoutInvoiceTotal',
+  ]) {
+    delete row[field];
+  }
+  return row;
+}
+
 // GET /api/admin/dispatch/today (or /:date)
 router.get('/:date?', async (req, res, next) => {
   try {
@@ -1652,7 +1665,7 @@ router.get('/:date?', async (req, res, next) => {
       const displayNotes = stripSchedulerAuditText(s.notes);
       if (displayNotes) alerts.push(displayNotes);
 
-      return {
+      return stripTechDispatchBillingFields(req, {
         id: s.id,
         routeOrder: s.route_order,
         customerName: `${s.first_name} ${s.last_name}`,
@@ -1768,7 +1781,7 @@ router.get('/:date?', async (req, res, next) => {
         checkInTime: s.check_in_time || s.actual_start_time,
         checkOutTime: s.check_out_time || s.actual_end_time,
         statusLog: statusLog.map(l => ({ status: l.status, at: l.at, notes: l.notes || null })),
-      };
+      });
     }));
 
     // Tech summary

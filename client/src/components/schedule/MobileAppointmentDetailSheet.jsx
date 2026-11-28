@@ -125,6 +125,12 @@ function cancelPermissionsFor(service, adminActions, canCompleteService) {
   };
 }
 
+function formatDetailMoney(amount, { adminActions, rawPrice, service, visitInvoice }) {
+  const unavailable = !adminActions && rawPrice == null && !service.isCallback
+    && !service.billingLane?.prediction && !visitInvoice;
+  return unavailable ? '—' : `$${amount.toFixed(2)}`;
+}
+
 export default function MobileAppointmentDetailSheet({
   service,
   onClose,
@@ -813,7 +819,7 @@ export default function MobileAppointmentDetailSheet({
               </div>
             </div>
             <div className="u-nums text-zinc-900 font-medium" style={{ fontSize: 15 }}>
-              ${displayBasePrice.toFixed(2)}
+              {formatDetailMoney(displayBasePrice, { adminActions, rawPrice, service, visitInvoice })}
             </div>
           </div>
 
@@ -842,7 +848,7 @@ export default function MobileAppointmentDetailSheet({
             </span>
             <span className="text-right">
               <span className="u-nums text-zinc-900 font-medium block" style={{ fontSize: 16 }}>
-                ${displayTotal.toFixed(2)}
+                {formatDetailMoney(displayTotal, { adminActions, rawPrice, service, visitInvoice })}
               </span>
               {prepaidCovered && (
                 <span className="text-ink-secondary block" style={{ fontSize: 14 }}>

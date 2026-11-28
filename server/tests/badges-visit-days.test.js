@@ -5,7 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/auth', () => ({ authenticate: (req, _res, next) => { req.customerId = 'customer-1'; next(); } }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
-  requireTechOrAdmin: (_req, _res, next) => next(),
+  requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
 
 const express = require('express');

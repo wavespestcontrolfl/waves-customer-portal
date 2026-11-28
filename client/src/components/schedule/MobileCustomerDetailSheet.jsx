@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { adminFetch } from '../../lib/adminFetch';
+import { useIsStaffAdmin } from '../../hooks/useStaffRole';
 import CallBridgeLink from '../admin/CallBridgeLink';
 import { upcomingAppointments, previousAppointments } from './customerAppointments';
 
@@ -52,6 +53,7 @@ function money(n) {
 
 export default function MobileCustomerDetailSheet({ customerId, focusServiceId = null, adminActions = true, onClose }) {
   const navigate = useNavigate();
+  const isAdmin = useIsStaffAdmin();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
@@ -126,7 +128,7 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
         >
           ✕
         </button>
-        {adminActions && (
+        {isAdmin && adminActions && (
           <button
             type="button"
             onClick={() => { if (c?.id) navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`); }}
@@ -203,16 +205,16 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
 
             {/* Payment on file — office-only and only rendered when cards were
                 actually returned (never falsely prints "None saved" when omitted). */}
-            <PaymentOnFileSection adminActions={adminActions} rawCards={data?.cards} />
+            <PaymentOnFileSection adminActions={isAdmin && adminActions} rawCards={data?.cards} />
 
             {/* Transactions — office-only money history */}
-            <CustomerTransactionsSection adminActions={adminActions} txns={txns} />
+            <CustomerTransactionsSection adminActions={isAdmin && adminActions} txns={txns} />
 
             <CustomerAppointmentsSection
               apptTab={apptTab}
               setApptTab={setApptTab}
               apptList={apptList}
-              adminActions={adminActions}
+              adminActions={isAdmin && adminActions}
               onViewAll={() => navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`)}
             />
           </>
@@ -360,7 +362,6 @@ function CustomerAppointmentsSection({ apptTab, setApptTab, apptList, adminActio
     </section>
   );
 }
-
 function StatCell({ label, value }) {
   return (
     <div className="flex-1 min-w-0">

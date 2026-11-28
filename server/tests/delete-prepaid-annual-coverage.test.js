@@ -134,12 +134,12 @@ postgres('r1-sched-series-2: clearing prepaid must not erase annual coverage evi
     }
   });
 
-  test('TECHNICIAN token: DELETE /:id/prepaid must not strip annual coverage from its own live visit', async () => {
+  test('TECHNICIAN token: DELETE /:id/prepaid is refused (403) and does not strip annual coverage', async () => {
     const root = await annualVisit();
     const res = await del(`/${root.id}/prepaid`, { 'x-role': 'technician', 'x-tech-id': technicianId });
     { const after = await reload(root.id);
       console.log('[repro] after TECH DELETE', { status: res.status, body: res.body, prepaid_method: after.prepaid_method, prepaid_amount: after.prepaid_amount, annual_prepay_term_id: after.annual_prepay_term_id, coversVisit: await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx) }); }
-    expect([404, 409]).toContain(res.status);
+    expect(res.status).toBe(403);
     const after = await reload(root.id);
     expect(after.prepaid_method).toBe(ANNUAL);
     expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx)).toBe(true);
