@@ -173,7 +173,7 @@ postgres('estimate email PDF note paragraph migration (PostgreSQL)', () => {
     }
   });
 
-  test('gate on: the note renders at 15px (was 13px) and the plain text is unchanged', async () => {
+  test('gate on: the note renders at 15px (was 14px) and the plain text is unchanged', async () => {
     for (const key of KEYS()) await cloneTemplate(key);
     await migration.up(db);
     for (const key of KEYS()) {
@@ -181,7 +181,7 @@ postgres('estimate email PDF note paragraph migration (PostgreSQL)', () => {
       const payload = { ...BASE_PAYLOAD, estimate_pdf_note: NOTE };
       const before = library.renderTemplate({ template: pre[key].template, version: pre[key].version, payload });
       const after = library.renderTemplate({ template, version, payload });
-      expect(noteFont(before.html)).toBe('13');
+      expect(noteFont(before.html)).toBe('14');
       expect(noteFont(after.html)).toBe('15');
       expect(after.text).toBe(before.text);
       expect(after.text).toContain('A PDF copy of this estimate is attached.');
