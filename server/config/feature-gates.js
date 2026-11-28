@@ -251,6 +251,7 @@
  *   GATE_SECOND_TECH_LOWS=true (owner 2026-10-25, second technician census lows L1 + L3: (L1) the admin dashboard tech utilization counts only assignable field staff (active and field-dispatchable) and, for each, only the days in the window they work (technicians.work_days; no list = every day), 8 hours a work day, instead of every active row on every calendar day; (L3) the four Intelligence Bar schedule-tool sites that pick a technician by name text with an unordered first() match use resolveTechnicianByName instead: assignable technicians only, and a name that fits two technicians is an error that lists them, never a guess. Strict opt-in: exactly 'true', read at call time via secondTechLowsLive(). Ships DARK; off = both paths byte-identical to before. Admin-only, sends nothing to a customer.)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
+ *   GATE_LLM_CIRCUIT_BREAKER=true (sliding-window provider circuit breaker for multi-provider dispatchWithFallback chains; trips on 429/5xx or >=15s provider timeouts and fails over while a usable backup exists; strict 'true', read at call time via llmCircuitBreakerLive(); dark by default; owner-flipped because cooldown failover can route to a pricier backup; kill = unset)
  *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
  *   GATE_AGENT_RUNS=true      (agent run ledger WRITES — services/agent-control/runs.js records work_items / agent_runs / steps / events for lanes that call it; off = every handle is inert; the /control/runs reads stay on GATE_AGENT_CONTROL_READ; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
@@ -1139,6 +1140,9 @@ const gates = {
   // Estimated AI spend: ships DARK. CALL-TIME reader is llmCostTrackingLive()
   // below; this entry is for logGateStatus only.
   llmCostTracking: process.env.GATE_LLM_COST_TRACKING === 'true',
+  // Sliding-window provider circuit breaker for dispatchWithFallback: ships
+  // DARK. CALL-TIME reader is llmCircuitBreakerLive() below.
+  llmCircuitBreaker: process.env.GATE_LLM_CIRCUIT_BREAKER === 'true',
 
   // Portal "Your yard this month" card. Map entry for logGateStatus only; the
   // canonical CALL-TIME reader is portalYardCalendarLive() below.
@@ -5323,6 +5327,13 @@ function llmCostTrackingLive() {
   return process.env.GATE_LLM_COST_TRACKING === 'true';
 }
 
+// GATE_LLM_CIRCUIT_BREAKER read at CALL time — ships DARK, off unless exactly
+// 'true'. Enables the sliding-window provider circuit breaker in
+// services/llm/circuit-breaker.js for multi-provider dispatchWithFallback chains.
+function llmCircuitBreakerLive() {
+  return process.env.GATE_LLM_CIRCUIT_BREAKER === 'true';
+}
+
 // GATE_PACKAGE_FOLLOWUP_AUTOBOOK read at CALL time — strict `=== 'true'`. Gates
 // package-followup-booking.ensurePackageFollowUpVisit (visit 2 of a cockroach /
 // flea / bed bug package booked with visit 1), the call pipeline's package
@@ -8283,6 +8294,8 @@ module.exports.laneVoiceFillLive = laneVoiceFillLive;
 module.exports.typedVoiceFillLive = typedVoiceFillLive;
 // GATE_LLM_COST_TRACKING reader, on its own line.
 module.exports.llmCostTrackingLive = llmCostTrackingLive;
+// GATE_LLM_CIRCUIT_BREAKER reader, on its own line.
+module.exports.llmCircuitBreakerLive = llmCircuitBreakerLive;
 // GATE_FAST_COMPLETE_VOICE_FILL reader, on its own line so gate PRs adding lines above
 // never touch this one.
 module.exports.fastCompleteVoiceFillLive = fastCompleteVoiceFillLive;
