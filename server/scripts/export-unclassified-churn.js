@@ -188,10 +188,10 @@ async function queryUnclassifiedRows(db, { months = 12 } = {}) {
   const clampedMonths = Math.max(1, Math.min(60, parseInt(months, 10) || 12));
   const effectiveChurnDate = "COALESCE(c.churned_at, (c.pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date)";
   // Suggest a reason ONLY from a committed whole-account cancellation case
-  // unambiguously tied to THIS churn episode (matching churn_episode_id on the
-  // linked service_request, or for legacy episode-less rows a unique committed
-  // whole-account case on the same churned_at window). Multiple conflicting
-  // matches yield NULL so ambiguous suggestions stay blank.
+  // unambiguously tied to THIS churn episode by churn_episode_id on the linked
+  // service_request. Episode-less legacy rows stay blank rather than guessing
+  // from a prior cancellation before reactivation. Multiple conflicting matches
+  // also yield NULL.
   const matchedCaseSql = `(
     SELECT CASE WHEN COUNT(DISTINCT cc.reason_code) = 1 THEN MAX(cc.reason_code) ELSE NULL END
     FROM cancellation_cases cc
@@ -200,14 +200,8 @@ async function queryUnclassifiedRows(db, { months = 12 } = {}) {
       AND cc.status = 'committed'
       AND cc.scope = '[]'::jsonb
       AND cc.reason_code IS NOT NULL
-      AND (
-        (c.churn_episode_id IS NOT NULL AND sr.metadata -> 'cancel_plan' ->> 'churnEpisodeId' = c.churn_episode_id::text)
-        OR (
-          c.churn_episode_id IS NULL
-          AND c.churned_at IS NOT NULL
-          AND ABS(((cc.created_at AT TIME ZONE 'America/New_York')::date) - c.churned_at) <= 1
-        )
-      )
+      AND c.churn_episode_id IS NOT NULL
+      AND sr.metadata -> 'cancel_plan' ->> 'churnEpisodeId' = c.churn_episode_id::text
   ) as case_reason_code`;
 
   return db('customers as c')

@@ -1156,6 +1156,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     logger.warn(`[admin-cancellation] open-scoped-repairs listing failed for ${customerId}: ${openErr.message}`);
   }
   const today = etDateString();
+  const acceptedReason = acceptance ? await acceptedCancelReason(acceptance) : null;
   return {
     previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount, endNowBlocked }),
     enabled: true,
@@ -1192,7 +1193,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     // STOP, disabled email prefs, or a malformed address must not let the
     // card promise "text + email" the send legs will refuse.
     confirmationChannels: await require('./cancellation-confirmations').confirmationChannelAvailability(customer),
-    reasonCode: input.reasonCode,
+    reasonCode: acceptedReason ? acceptedReason.code : input.reasonCode,
     reasonCodes: [...REASON_CODE_VALUES],
     note: input.note,
   };

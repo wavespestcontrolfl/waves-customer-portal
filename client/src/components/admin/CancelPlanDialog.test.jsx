@@ -361,12 +361,15 @@ describe('CancelPlanDialog', () => {
     expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).toBeDisabled();
   });
 
-  it('a repair retry previews as committable with the retry notice', async () => {
+  it('a repair retry previews as committable with the retry notice and read-only accepted reason', async () => {
     stubFetch((path) => (path.endsWith('/cancel-plan/preview')
-      ? response(previewBody({ eligible: true, repairRetry: true }))
+      ? response(previewBody({ eligible: true, repairRetry: true, reasonCode: 'price' }))
       : response({})));
     render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
     await screen.findByText(/A prior cancellation attempt left follow-up steps unfinished/);
+    expect(screen.getByText('Reason (from original cancellation)')).toBeInTheDocument();
+    expect(screen.getByText('Price')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Reason')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).not.toBeDisabled();
   });
 

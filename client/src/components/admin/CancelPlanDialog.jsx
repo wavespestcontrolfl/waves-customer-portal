@@ -57,13 +57,24 @@ const QUICK_REASON_CODES = [
   "competitor",
 ];
 
-function CancelReasonField({ reasonCode, onChange, reasonCodes, required, disabled }) {
+function CancelReasonField({ reasonCode, onChange, reasonCodes, required, disabled, repairRetry = false, acceptedReasonCode = null }) {
+  if (repairRetry) {
+    const label = acceptedReasonCode ? (REASON_LABELS[acceptedReasonCode] || acceptedReasonCode) : "None recorded";
+    return (
+      <div className="flex flex-col gap-1 sm:col-span-2">
+        <span className="text-12 uppercase tracking-label text-ink-secondary">Reason (from original cancellation)</span>
+        <div className="px-3 py-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 text-14 text-zinc-900">
+          {label}
+        </div>
+      </div>
+    );
+  }
   const available = reasonCodes?.length ? reasonCodes : Object.keys(REASON_LABELS);
   const quickCodes = QUICK_REASON_CODES.filter((code) => available.includes(code));
   return (
     <div className="flex flex-col gap-2 sm:col-span-2">
       <label htmlFor="cancel-plan-reason" className="text-12 uppercase tracking-label text-ink-secondary">
-        Reason {required ? "(required)" : "(optional on retry)"}
+        Reason {required ? "(required)" : "(optional)"}
       </label>
       {quickCodes.length > 0 && (
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Common cancellation reasons">
@@ -428,6 +439,8 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
                 reasonCodes={preview?.reasonCodes}
                 required={reasonRequired}
                 disabled={running}
+                repairRetry={preview?.repairRetry === true}
+                acceptedReasonCode={preview?.reasonCode || null}
               />
               <label className="flex flex-col gap-1 sm:col-span-2">
                 <span className="text-12 uppercase tracking-label text-ink-secondary">Note (optional)</span>

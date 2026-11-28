@@ -2131,12 +2131,15 @@ async function bulkUpdateCustomers(customerIds, updates) {
       stageStamp.active = true;
       stageStamp.churned_at = null;
       stageStamp.churn_reason = null;
+      stageStamp.churn_reason_code = null;
       stageStamp.churn_episode_id = null;
     } else if (clean.pipeline_stage === 'churned') {
       stageStamp.churned_at = db.raw(
         "CASE WHEN pipeline_stage = 'churned' THEN churned_at ELSE ? END", [etDateString()]);
       stageStamp.churn_reason = db.raw(
         "CASE WHEN pipeline_stage = 'churned' THEN churn_reason ELSE NULL END");
+      stageStamp.churn_reason_code = db.raw(
+        "CASE WHEN pipeline_stage = 'churned' THEN churn_reason_code ELSE NULL END");
     }
     // Any other non-live target (past_customer/dormant/lost/lead stages):
     // archival/lateral move — churn history preserved until a REAL
@@ -2862,6 +2865,33 @@ function cancelPlanServiceInput(input) {
   };
 }
 
+function cancelPlanPreviewRefusal(preview, reasonCode) {
+  if (!preview.eligible) {
+    return { error: 'There is no active plan, recurring service, or upcoming visit on this account to cancel.', code: 'nothing_to_cancel' };
+  }
+  if (preview.scopedSupported === false) {
+    const why = preview.scopeError === 'scope_not_owned'
+      ? 'That service is not on the plan any more.'
+      : preview.scopeError === 'scoped_covers_prepaid'
+        ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (refunded only within 90 days of its start; after that it ends at the end of paid coverage with no refund), or leave the covered service in place.'
+        : 'The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first.';
+    return { error: why, code: preview.scopeError || 'scoped_unsupported' };
+  }
+  if (preview.prepay && preview.prepay.endNowAvailable === false && preview.prepay.disposition === 'end_now_refund') {
+    return {
+      error: 'Ending now is not offered: this plan started more than 90 days ago, so no refund is owed and the paid visits stay (owner rule). Propose End of paid coverage (effective_date end_of_coverage) instead.',
+      code: 'end_now_past_refund_window',
+    };
+  }
+  if (!preview.repairRetry && !reasonCode) {
+    return {
+      error: 'Ask the operator why the customer is cancelling and pass reason_code before proposing this cancellation.',
+      code: 'reason_code_required',
+    };
+  }
+  return null;
+}
+
 async function cancelPlan(input, actionContext = {}) {
   const customerId = input.customer_id;
   if (!customerId) return { error: 'customer_id is required' };
@@ -2885,37 +2915,8 @@ async function cancelPlan(input, actionContext = {}) {
       if (err && err.code) return { error: err.message, code: err.code };
       throw err;
     }
-    // An UNEXECUTABLE preview is a tool failure, not a card: proposePendingWrite
-    // only treats `error` as failure, so a card for an ineligible account or
-    // an unsupported scope would deterministically fail on Confirm and
-    // consume a pending action (deferred P2 from #3666 r32).
-    if (!preview.eligible) {
-      return { error: 'There is no active plan, recurring service, or upcoming visit on this account to cancel.', code: 'nothing_to_cancel' };
-    }
-    if (preview.scopedSupported === false) {
-      const why = preview.scopeError === 'scope_not_owned'
-        ? 'That service is not on the plan any more.'
-        : preview.scopeError === 'scoped_covers_prepaid'
-          ? 'Upcoming visits in that selection are covered by the annual prepay term — cancel the whole plan instead (refunded only within 90 days of its start; after that it ends at the end of paid coverage with no refund), or leave the covered service in place.'
-          : 'The services that would stay cannot be priced from the plan-rate ledger — cancel the whole plan, or repair the ledger first.';
-      return { error: why, code: preview.scopeError || 'scoped_unsupported' };
-    }
-    // Owner R7: past day 90 "end now" is not offered (no
-    // refund is owed, the customer keeps the paid coverage). A card for it
-    // would fail on Confirm, so it is a tool failure here, like the other
-    // unexecutable previews above.
-    if (preview.prepay && preview.prepay.endNowAvailable === false && preview.prepay.disposition === 'end_now_refund') {
-      return {
-        error: 'Ending now is not offered: this plan started more than 90 days ago, so no refund is owed and the paid visits stay (owner rule). Propose End of paid coverage (effective_date end_of_coverage) instead.',
-        code: 'end_now_past_refund_window',
-      };
-    }
-    if (!preview.repairRetry && !serviceInput.reasonCode) {
-      return {
-        error: 'Ask the operator why the customer is cancelling and pass reason_code before proposing this cancellation.',
-        code: 'reason_code_required',
-      };
-    }
+    const refusal = cancelPlanPreviewRefusal(preview, serviceInput.reasonCode);
+    if (refusal) return refusal;
     const impact = preview.impact || {};
     return {
       preview: true,
