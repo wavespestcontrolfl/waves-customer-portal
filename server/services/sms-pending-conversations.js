@@ -74,6 +74,7 @@ async function loadPendingSmsConversations({
   since = null,
   includeExpired = true,
   limit = null,
+  dbh = db,
 } = {}) {
   const projectedContactPhone = `(CASE WHEN s.source = 'canonical' THEN
     CASE WHEN s.direction = 'inbound'
@@ -122,7 +123,7 @@ async function loadPendingSmsConversations({
     )`;
   const staffActionJoin = '\n    LEFT JOIN staff_action_inbound staff_action ON staff_action.inbound_id = li.id';
   const staffActionFilter = '\n      AND staff_action.inbound_id IS NULL';
-  const { rows = [] } = await db.raw(`
+  const { rows = [] } = await (dbh || db).raw(`
     WITH canonical_sms AS MATERIALIZED (
       SELECT 'canonical'::text AS source, m.id, m.direction, m.body AS message_body,
              m.created_at, m.twilio_sid, m.message_type AS canonical_message_type,

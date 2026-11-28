@@ -26,6 +26,7 @@ const { serviceDateOnly } = require('../utils/invoice-due-base-day');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { mediaCountFromMetadata } = require('./sms-gratitude-context');
 const { SENT_STATUSES, threadHasLiveAnswer } = require('./sms-suggest-mode');
+const { phoneMatchDigits } = require('../utils/phone');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
 
 const INBOUND_TRIGGER = 'inbound';
@@ -78,9 +79,9 @@ function pendingRowSmsLogId(row) {
   return row.legacy_id || (row.source === 'legacy' ? row.id : null);
 }
 
-async function loadSameDayPendingThreads({ customerId, start, end, doneAt }, deps = {}) {
+async function loadSameDayPendingThreads(dbh, { customerId, start, end, doneAt }, deps = {}) {
   const loadPending = deps.loadPendingSmsConversations || loadPendingSmsConversations;
-  const pending = await loadPending({ customerId, since: start, includeLegacyOnly: true });
+  const pending = await loadPending({ customerId, since: start, includeLegacyOnly: true, dbh });
   return (pending || []).filter((row) => {
     const smsLogId = pendingRowSmsLogId(row);
     if (!smsLogId) return false;
@@ -154,7 +155,7 @@ async function findEligibleInboundForPostVisitRedraft(dbh, { customerId, complet
   const { start, end } = etDayBounds(visitDateET);
   const checkLiveAnswer = deps.threadHasLiveAnswer || threadHasLiveAnswer;
 
-  const pendingRows = await loadSameDayPendingThreads({ customerId, start, end, doneAt }, deps);
+  const pendingRows = await loadSameDayPendingThreads(dbh, { customerId, start, end, doneAt }, deps);
   for (const row of pendingRows) {
     const eligible = await evaluatePendingCandidate(dbh, row, { customerId, doneAt, checkLiveAnswer });
     if (eligible) return eligible;
@@ -216,19 +217,37 @@ async function findPostVisitRedraftCandidates(dbh, { visitDateET, limit = 25, pa
   return candidates;
 }
 
+/**
+ * Rechecks active, non-deleted, non-shared phone ownership inside the lock so a reassigned
+ * or shared number can never receive a revision built from another account's visit details.
+ */
+async function loadUniquelyOwnedActiveCustomer(dbh, fromPhone, expectedCustomerId) {
+  const matchDigits = phoneMatchDigits(fromPhone);
+  if (!matchDigits.length) return null;
+  const matches = await dbh('customers')
+    .whereNull('deleted_at')
+    .whereRaw("REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits])
+    .select('*');
+  if (!Array.isArray(matches) || matches.length !== 1) return null;
+  return String(matches[0].id) === String(expectedCustomerId) ? matches[0] : null;
+}
+
 async function generateClaimedRevision({
-  dbh, customer, eligible, serviceRecordId, dayStart, draftFn, checkLiveAnswer, loadPendingFn,
+  dbh, customerId, eligible, serviceRecordId, dayStart, draftFn, checkLiveAnswer, loadPendingFn,
 }) {
   const already = await dbh('message_drafts')
     .where({ sms_log_id: eligible.smsLogId, draft_trigger: POST_VISIT_TRIGGER })
     .first('id');
   if (already) return { skipped: 'already_revised' };
 
+  const activeCustomer = await loadUniquelyOwnedActiveCustomer(dbh, eligible.fromPhone, customerId);
+  if (!activeCustomer) return { skipped: 'phone_ownership_changed' };
+
   // Re-verify inside the lock against the canonical pending conversations view so any staff
   // SMS reply, completed phone callback, booking/payment resolution, or newer inbound text
   // that landed while waiting on lock slots stops paid drafting immediately.
   const loadPending = loadPendingFn || loadPendingSmsConversations;
-  const stillPending = await loadPending({ customerId: customer.id, since: dayStart, includeLegacyOnly: true });
+  const stillPending = await loadPending({ customerId: activeCustomer.id, since: dayStart, includeLegacyOnly: true, dbh });
   if (!(stillPending || []).some((row) => String(pendingRowSmsLogId(row)) === String(eligible.smsLogId))) {
     return { skipped: 'resolved_before_lock' };
   }
@@ -237,7 +256,7 @@ async function generateClaimedRevision({
   const liveChecker = checkLiveAnswer || threadHasLiveAnswer;
   if (await liveChecker(dbh, {
     threadLast10,
-    customerId: customer.id,
+    customerId: activeCustomer.id,
     inboundCreatedAt: eligible.inboundAt,
     inboundSmsLogId: eligible.smsLogId,
   })) {
@@ -245,7 +264,7 @@ async function generateClaimedRevision({
   }
   if (await threadHasAutomatedAnswer(dbh, {
     threadLast10,
-    customerId: customer.id,
+    customerId: activeCustomer.id,
     inboundSmsLogId: eligible.smsLogId,
     inboundCreatedAt: eligible.inboundAt,
   })) {
@@ -256,7 +275,7 @@ async function generateClaimedRevision({
   const draftId = await drafter({
     inboundMessage: eligible.inboundMessage,
     fromPhone: eligible.fromPhone,
-    customer,
+    customer: activeCustomer,
     smsLogId: eligible.smsLogId,
     intent: eligible.intent,
     schedulingIntent: eligible.schedulingIntent,
@@ -277,10 +296,8 @@ async function resolveRevisionInputs({ customerId, completedAt, visitDateET, dbh
   };
   const eligible = await findEligibleInboundForPostVisitRedraft(dbh, { customerId, completedAt, visitDateET }, deps);
   if (!eligible) return { skipped: 'none_eligible' };
-  const customer = await dbh('customers').where({ id: customerId }).first();
-  if (!customer) return { skipped: 'customer_not_found' };
   const { start } = etDayBounds(visitDateET);
-  return { eligible, customer, dayStart: start };
+  return { eligible, dayStart: start };
 }
 
 async function runWithCapacityRetries(acquire, lockKey, work, { sleepFn, maxRetries = MAX_NO_CONNECTION_RETRIES } = {}) {
@@ -314,7 +331,7 @@ async function draftPostVisitRevisionIfEligible(opts = {}) {
       `sms-post-visit-redraft:${resolved.eligible.smsLogId}`,
       () => generateClaimedRevision({
         dbh,
-        customer: resolved.customer,
+        customerId,
         eligible: resolved.eligible,
         serviceRecordId,
         dayStart: resolved.dayStart,

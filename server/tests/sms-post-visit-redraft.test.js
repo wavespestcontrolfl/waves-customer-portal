@@ -186,6 +186,7 @@ describe('findEligibleInboundForPostVisitRedraft (via canonical pending conversa
     expect(loadPendingSmsConversations).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1',
       includeLegacyOnly: true,
+      dbh,
     }));
     expect(priorDraftQ.where).toHaveBeenCalledWith({
       sms_log_id: 'sms-in-1',
@@ -268,7 +269,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
     const dbh = makeDb({
       sms_log: [chain({ first: INBOUND }), chain({ first: null }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
-      customers: [chain({ first: { id: 'cust-2', first_name: 'Sam', city: 'Sarasota' } })],
+      customers: [chain({ result: [{ id: 'cust-2', first_name: 'Sam', city: 'Sarasota' }] })],
     });
     const draftFn = jest.fn(async () => 'draft-rev-2');
     const lockFn = jest.fn(async (_name, fn) => fn());
@@ -289,6 +290,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
 
     expect(lockFn).toHaveBeenCalledWith('sms-post-visit-redraft:sms-in-2', expect.any(Function), { recordHealth: false });
     expect(loadPendingFn).toHaveBeenCalledTimes(2);
+    expect(loadPendingFn).toHaveBeenLastCalledWith(expect.objectContaining({ customerId: 'cust-2', dbh }));
     expect(res).toEqual({ drafted: true, draftId: 'draft-rev-2', supersedesDraftId: 'draft-orig-2' });
     expect(draftFn).toHaveBeenCalledWith(expect.objectContaining({
       smsLogId: 'sms-in-2',
@@ -303,11 +305,33 @@ describe('draftPostVisitRevisionIfEligible', () => {
     }));
   });
 
+  test('skips paid draft when phone ownership changed or became shared before lock', async () => {
+    const sharedDb = makeDb({
+      sms_log: [chain({ first: INBOUND }), chain({ first: null })],
+      message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
+      customers: [chain({ result: [{ id: 'cust-2', first_name: 'Sam' }, { id: 'cust-other', first_name: 'Pat' }] })],
+    });
+    const draftFn = jest.fn();
+    const res = await draftPostVisitRevisionIfEligible({
+      customerId: 'cust-2',
+      completedAt: new Date('2026-11-27T17:00:00Z'),
+      visitDateET: '2026-11-27',
+      dbh: sharedDb,
+      gates: { smsPostVisitRedraftLive: () => true },
+      draftFn,
+      lockFn: async (_name, fn) => fn(),
+      loadPendingFn: async () => [PENDING],
+      threadHasLiveAnswerFn: async () => null,
+    });
+    expect(res).toEqual({ skipped: 'phone_ownership_changed' });
+    expect(draftFn).not.toHaveBeenCalled();
+  });
+
   test('skips paid draft when staff resolves thread via callback/action before lock is acquired', async () => {
     const dbh = makeDb({
       sms_log: [chain({ first: INBOUND }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
-      customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
+      customers: [chain({ result: [{ id: 'cust-2', first_name: 'Sam' }] })],
     });
     const draftFn = jest.fn();
     const loadPendingFn = jest.fn()
@@ -332,7 +356,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
     const dbh = makeDb({
       sms_log: [chain({ first: INBOUND }), chain({ first: null }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
-      customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
+      customers: [chain({ result: [{ id: 'cust-2', first_name: 'Sam' }] })],
     });
     const draftFn = jest.fn(async () => 'draft-rev-retry');
     const sleepFn = jest.fn(async () => {});
