@@ -2728,12 +2728,13 @@ async function refreshWdoSignatureStaleness(req, before, after, { connection = d
   let sig = after.wdo_signature;
   if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
   if (!sig || !sig.image) return null;
-  const newHash = wdoContentHash(after);
+  const sigFeeValues = Array.isArray(sig.fee_values) ? sig.fee_values : null;
+  const newHash = wdoContentHash(after, sigFeeValues);
   const stale = sig.content_hash
     ? sig.content_hash !== newHash
     // Legacy signature: no hash to verify a revert against, so once stale it
     // stays stale until the licensee re-signs.
-    : (Boolean(sig.content_stale) || wdoContentHash(before) !== newHash);
+    : (Boolean(sig.content_stale) || wdoContentHash(before, sigFeeValues) !== newHash);
   if (Boolean(sig.content_stale) === stale) return stale;
   await connection('projects').where({ id: after.id }).update({
     wdo_signature: JSON.stringify({ ...sig, content_stale: stale }),
