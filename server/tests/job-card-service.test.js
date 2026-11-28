@@ -3617,5 +3617,60 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(addonMosquitoProc.mixRates[1].calibrationWarnings).toEqual([
       expect.stringContaining('allows no more than 1 fl oz per 1,000 sq ft in one spray'),
     ]);
+
+    // Database-precision 0.667 gal/1,000 matches 1 gal per 1,500 sq ft cleanly when FlowZone is compatible.
+    const matchedFlowZone = {
+      mixRates: [{
+        product: 'Suspend Polyzone',
+        sprayers: ['flowzone_4_gal'],
+        perGallon: { amount: 1.1, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,500 sq ft',
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: matchedFlowZone, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 0.667 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(matchedFlowZone.mixRates[0].calibrationWarnings).toBeUndefined();
+
+    // Assigned truck rig triggers equipment mismatch (not dosage warning) on a FlowZone-only row.
+    const truckMismatch = {
+      mixRates: [{
+        product: 'Suspend Polyzone',
+        sprayers: ['flowzone_4_gal'],
+        perGallon: { amount: 1.1, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,500 sq ft',
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: truckMismatch, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(truckMismatch.mixRates[0].calibrationWarnings).toEqual([
+      'Truck Rig #1 is not an allowed sprayer for Suspend Polyzone (FlowZone 4 gal).',
+    ]);
+
+    // Assigned compatible sprayer with no usable calibration warns beside rows with sprayVolume or area limit.
+    const uncalibratedRig = {
+      mixRates: [{
+        product: 'Tekko Pro IGR',
+        sprayers: ['flowzone_4_gal'],
+        perGallon: { amount: 2, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,000 sq ft',
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: uncalibratedRig, lines: [] }],
+      { source: 'protocol_default', reason: 'No carrier rate on file', carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(uncalibratedRig.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('No carrier rate on file'),
+    ]);
   });
 });

@@ -2208,7 +2208,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   attachMixCalibrationWarnings([
     { procedure, lines: lines.filter((l) => !l.source) },
     ...addons.map((addon) => ({ procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
-  ], tank, facts.rig);
+  ], tank, facts.rig, systems);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
   const products = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];
   // Limits are judged from the appointment start (now once the window has
@@ -2536,39 +2536,64 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
 // Reuse the tank calculator's carrier-volume and one-spray area-cap checks for every
 // procedure mix row when the appointment names an assigned sprayer rig.
 const SPRAY_VOL_GAL_RE = /(\d+(?:\.\d+)?)\s*gal(?:lon)?s?\s+per\s+(\d+(?:,\d+)?)\s*sq\.?\s*ft/i;
+const SPRAYER_KEY_LABELS = { bg_1_gal: 'B&G 1 gal', flowzone_4_gal: 'FlowZone 4 gal', rig_100_gal: 'Rig 100 gal' };
+const roundDbPrecision = (v) => Math.round(Number(v) * 1000) / 1000;
+
 function sprayVolumeGalPer1000(text) {
   const m = SPRAY_VOL_GAL_RE.exec(String(text || ''));
   if (!m) return null;
   const gal = Number(m[1]);
   const sqft = Number(String(m[2]).replace(/,/g, ''));
-  return gal > 0 && sqft > 0 ? Math.round(((gal * 1000) / sqft) * 10000) / 10000 : null;
+  return gal > 0 && sqft > 0 ? roundDbPrecision((gal * 1000) / sqft) : null;
 }
 
-function calibrationWarningsForMixRow(row, lines, rigCtx) {
-  if (!rigCtx.rigCarrier || !row?.perGallon?.amount) return [];
+function rigSprayerKey(tank, assignedSys, rigName) {
+  const type = String(assignedSys?.system_type || '').toLowerCase();
+  const name = String(assignedSys?.name || rigName || '').toLowerCase();
+  const cap = Number(assignedSys?.tank_capacity_gal ?? tank?.tankCapacityGal ?? 0);
+  if (type === 'tank' || cap >= 50 || /\brig\b|truck|skid|100\s*gal|110\s*gal/.test(name)) return 'rig_100_gal';
+  if (/b\s*&?\s*g|hand\s*pump|\b1\s*gal/.test(name) || (cap > 0 && cap <= 2)) return 'bg_1_gal';
+  if (/flowzone|backpack|\b4\s*gal/.test(name) || cap >= 3 || type === 'backpack') return 'flowzone_4_gal';
+  return null;
+}
+
+function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey }) {
   const line = row.productId ? lines.find((l) => String(l.product?.id) === String(row.productId)) : null;
-  const lineCarrier = line?.labelCarrierGalPer1000 || sprayVolumeGalPer1000(row.sprayVolume);
-  const lo = Number(row.perGallon.amount);
-  const hi = Number(row.perGallon.amountMax > lo ? row.perGallon.amountMax : lo);
-  const band = lo > 0 && row.perGallon.unit ? { lo, hi, unit: String(row.perGallon.unit) } : null;
+  const rawCarrier = line?.labelCarrierGalPer1000 || sprayVolumeGalPer1000(row.sprayVolume);
+  const lineCarrier = rawCarrier ? roundDbPrecision(rawCarrier) : null;
+  const lo = Number(row?.perGallon?.amount || 0);
+  const hi = Number(row?.perGallon?.amountMax > lo ? row.perGallon.amountMax : lo);
+  const band = lo > 0 && row?.perGallon?.unit ? { lo, hi, unit: String(row.perGallon.unit) } : null;
   const capLine = areaCapOf(row.limit).areaCap ? areaCapOf(row.limit) : areaCapOf(line?.raw);
+  if (rigKey && Array.isArray(row.sprayers) && row.sprayers.length && !row.sprayers.includes(rigKey)) {
+    const allowed = row.sprayers.map((k) => SPRAYER_KEY_LABELS[k] || k).join(' or ');
+    return [`${rigCtx.rigName} is not an allowed sprayer for ${row.product} (${allowed}).`];
+  }
+  if (!rigCtx.rigCarrier) {
+    return lineCarrier || capLine.areaCap
+      ? [`${tank?.reason || 'No sprayer calibration on file'} — verify ${rigCtx.rigName} output against this row's spray volume or area limit.`]
+      : [];
+  }
   return [
     rigVolumeWarning({ lineCarrier, ...rigCtx }),
     areaCapWarning({ band, line: capLine, ...rigCtx }),
   ].filter(Boolean);
 }
 
-function attachMixCalibrationWarnings(entries, tank, rig) {
+function attachMixCalibrationWarnings(entries, tank, rig, systems = []) {
   const namedRig = Boolean(rig?.equipmentSystemId || rig?.calibrationId);
-  const rigCarrier = namedRig && tank?.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
-  if (!rigCarrier) return;
-  const rigCtx = { rigCarrier, rigName: tank.systemName || 'This rig', rigGalPer1000: tank.carrierGalPer1000 };
+  if (!namedRig) return;
+  const assignedSys = (systems || []).find((s) => rig?.equipmentSystemId && String(s.id) === String(rig.equipmentSystemId)) || null;
+  const rigCarrier = tank?.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? roundDbPrecision(tank.carrierGalPer1000) : null;
+  const rigName = tank?.systemName || assignedSys?.name || 'Assigned sprayer';
+  const rigCtx = { rigCarrier, rigName, rigGalPer1000: rigCarrier || tank?.carrierGalPer1000 };
+  const rigKey = rigSprayerKey(tank, assignedSys, rigName);
   for (const entry of entries) {
     const proc = entry?.procedure || entry;
     const procLines = entry?.lines || [];
     if (!Array.isArray(proc?.mixRates)) continue;
     proc.mixRates = proc.mixRates.map((row) => {
-      const warnings = calibrationWarningsForMixRow(row, procLines, rigCtx);
+      const warnings = calibrationWarningsForMixRow(row, procLines, { tank, rigCtx, rigKey });
       return warnings.length ? { ...row, calibrationWarnings: warnings } : row;
     });
   }
