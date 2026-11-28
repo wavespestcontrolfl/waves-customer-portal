@@ -465,6 +465,24 @@ function totalsRowsAboveTotal(facts, surcharge) {
   ].filter(Boolean);
 }
 
+function drawPaginatedTotalsRow(doc, { label, value, color, font, labelX, valueX, y }) {
+  doc.fontSize(PDF_TYPE.body).font(font);
+  const lines = wrapTextLines(doc, label, TOTALS_LABEL_WIDTH);
+  const lineH = Math.ceil(doc.currentLineHeight(true)) + 2;
+  let curY = y;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    doc.fontSize(PDF_TYPE.body).font(font).fillColor(color);
+    const renderedH = line ? Math.max(lineH, Math.ceil(doc.heightOfString(line, { width: TOTALS_LABEL_WIDTH })) + 2) : lineH;
+    curY = ensureRoom(doc, curY, renderedH);
+    doc.fontSize(PDF_TYPE.body).font(font).fillColor(color);
+    if (line) doc.text(line, labelX, curY, { width: TOTALS_LABEL_WIDTH, align: 'right' });
+    if (i === 0) doc.text(value, valueX, curY, { width: 70, align: 'right' });
+    curY += renderedH;
+  }
+  return curY + 2;
+}
+
 function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const {
     highlightTotal = true, paidStamp = false, refundAmount = 0, cashPaid = 0, customer = null, partPayments = false,
@@ -482,10 +500,15 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const valueX = x + width - 70;
 
   const row = (label, value, color = BODY, bold = false) => {
-    doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica');
+    const font = bold ? 'Helvetica-Bold' : 'Helvetica';
+    doc.fontSize(PDF_TYPE.body).font(font);
     const rowHeight = totalsRowHeightFor(doc, label);
+    if (rowHeight > PAGE_BOTTOM - 90) {
+      y = drawPaginatedTotalsRow(doc, { label, value, color, font, labelX, valueX, y });
+      return;
+    }
     y = ensureRoom(doc, y, rowHeight);
-    doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color);
+    doc.fontSize(PDF_TYPE.body).font(font).fillColor(color);
     doc.text(label, labelX, y, { width: TOTALS_LABEL_WIDTH, align: 'right' });
     doc.text(value, valueX, y, { width: 70, align: 'right' });
     y += rowHeight;

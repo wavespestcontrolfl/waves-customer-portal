@@ -466,4 +466,31 @@ describe('invoice PDF wrapped discount labels in totalsBlock (B-39)', () => {
     const lastUrlCall = urlCalls[urlCalls.length - 1];
     expect(afterUrl.y).toBeGreaterThan(lastUrlCall.y);
   });
+
+  test('paginates a >1-page discount label across pages with the discount amount aligned beside the first chunk', async () => {
+    const hugeLabel = Array.from({ length: 120 }, (_, i) => `Segment${String(i + 1).padStart(3, '0')} multi-property promotional discount detail`).join(' ');
+    const calls = await captureCalls(() => buildInvoicePDFBuffer(invoice({
+      subtotal: 200,
+      discount_amount: 50,
+      total: 150,
+      line_items: [
+        { description: 'Pest Service', quantity: 1, unit_price: 200, amount: 200 },
+        { _kind: 'discount', description: hugeLabel, quantity: 1, unit_price: -40, amount: -40 },
+        { _kind: 'discount', description: 'Loyalty Credit', quantity: 1, unit_price: -10, amount: -10 },
+      ],
+    })));
+    const firstChunk = calls.find((c) => c.text.includes('Segment001'));
+    const lastChunk = calls.find((c) => c.text.includes('Segment120'));
+    const amountCall = calls.find((c) => c.text === '- $40.00');
+    const totalCall = calls.find((c) => c.text === 'TOTAL');
+    expect(firstChunk).toBeDefined();
+    expect(lastChunk).toBeDefined();
+    expect(amountCall).toBeDefined();
+    expect(totalCall).toBeDefined();
+    expect(amountCall.page).toBe(firstChunk.page);
+    expect(amountCall.y).toBe(firstChunk.y);
+    expect(lastChunk.page).toBeGreaterThan(firstChunk.page);
+    expect(totalCall.page).toBeGreaterThanOrEqual(lastChunk.page);
+    expect(totalCall.y).toBeLessThanOrEqual(730);
+  });
 });
