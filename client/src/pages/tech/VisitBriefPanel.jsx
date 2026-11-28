@@ -1262,8 +1262,10 @@ function firstAddonPromptMember(memberBits) {
   return match ? { prompt: match.facts.addon_prompt, service: match.service } : null;
 }
 
-function AddonPromptBanner({ prompt, service, onLead }) {
-  if (!prompt) return null;
+function AddonPromptBanner({ memberBits, fallbackService, onLead }) {
+  const match = firstAddonPromptMember(memberBits);
+  if (!match) return null;
+  const { prompt, service } = match;
   return (
     <div
       data-testid="visit-brief-addon-prompt"
@@ -1280,7 +1282,7 @@ function AddonPromptBanner({ prompt, service, onLead }) {
         <button
           type="button"
           className="tf-button"
-          onClick={() => onLead(service, prompt.fieldLeadServiceType)}
+          onClick={() => onLead(service || fallbackService, prompt.fieldLeadServiceType)}
           style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
         >
           <Flag aria-hidden="true" size={14} /> Flag {prompt.targetLabel} Lead
@@ -1401,8 +1403,6 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // fetch uses (any current member id resolves the same stop server-side).
   const customerFlaggedMember = memberBits.find((m) => m.facts?.customerFlagged?.length) || null;
   const customerFlagged = customerFlaggedMember?.facts?.customerFlagged || null;
-  // Zero-price Pest <-> Lawn cross-sell prompt (owner 2026-11-27 "ok go").
-  const addonMember = firstAddonPromptMember(memberBits);
   // Estimates dedupe by id: siblings booked from ONE estimate render it
   // once; separately-quoted siblings each render their own.
   const estimates = [];
@@ -1539,7 +1539,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         </div>
       )}
 
-      <AddonPromptBanner prompt={addonMember?.prompt} service={addonMember?.service || service} onLead={onLead} />
+      <AddonPromptBanner memberBits={memberBits} fallbackService={service} onLead={onLead} />
 
       <SectionLabel>Actions</SectionLabel>
       {stop.services.map((s) => (

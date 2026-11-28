@@ -3,6 +3,7 @@
 const {
   PILLAR_PROMPTS,
   pickTechAddonPrompt,
+  loadOffCalendarOwnedKeys,
   techAddonPromptFacts,
 } = require('../services/tech-addon-prompt');
 
@@ -129,10 +130,10 @@ describe('techAddonPromptFacts', () => {
     expect(loadPlanComponents).toHaveBeenCalledWith(dbh, 'cust-1', { strictProbe: true });
   });
 
-  test('suppresses prompt for commercial property_type, commercial building_use, or commercial catalog row', async () => {
+  test('suppresses prompt for commercial property_type, nonresidential building_use, or commercial catalog row, while allowing building_use=residential', async () => {
     for (const row of [
       { ...RESIDENTIAL_CUSTOMER, property_type: 'commercial' },
-      { ...RESIDENTIAL_CUSTOMER, building_use: 'restaurant' },
+      { ...RESIDENTIAL_CUSTOMER, building_use: 'nonresidential' },
     ]) {
       const dbh = makeFakeDb({ customerRow: row });
       const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
@@ -144,6 +145,14 @@ describe('techAddonPromptFacts', () => {
       expect(prompt).toBeNull();
       expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
     }
+
+    const resDbh = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, building_use: 'residential' } });
+    const resPrompt = await techAddonPromptFacts(STAMPED_VISIT, resDbh, {
+      ...BASE_DEPS,
+      loadOwnedRecurringServiceKeys: async () => ['pest_control'],
+      loadPlanComponents: async () => [],
+    });
+    expect(resPrompt?.targetFamily).toBe('lawn_care');
 
     const dbh = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, property_type: null } });
     const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
@@ -159,6 +168,67 @@ describe('techAddonPromptFacts', () => {
     );
     expect(prompt).toBeNull();
     expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+  });
+
+  test('suppresses prompt when an off-calendar commercial plan row exists at the same premises', async () => {
+    const legacyCommercialRow = {
+      id: 'svc-legacy-comm',
+      customer_id: 'cust-1',
+      service_type: 'Commercial Lawn Care',
+      scheduled_date: '2099-01-15',
+      status: 'scheduled',
+      source: 'recurring',
+      is_recurring: null,
+      recurring_parent_id: 'parent-1',
+      is_callback: false,
+      followup_included: false,
+      service_address_line1: '100 Main St',
+      service_address_city: 'Sarasota',
+      service_address_zip: '34231',
+    };
+    let callIdx = 0;
+    const offCalDb = () => {
+      const idx = callIdx++;
+      const q = {
+        where: () => q,
+        whereNull: () => q,
+        whereNotNull: () => q,
+        select: async () => (idx === 0 ? [legacyCommercialRow] : []),
+      };
+      return q;
+    };
+    const streetScope = {
+      estimateStreet: '100mainstreet|sarasota|34231',
+      customerPrimaryStreet: '100mainstreet|sarasota|34231',
+      requireSharedLocality: true,
+    };
+    const offCalResult = await loadOffCalendarOwnedKeys(offCalDb, 'cust-1', {
+      streetScope,
+      catalogById: new Map(),
+    });
+    expect(offCalResult).toBeNull();
+
+    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      ...BASE_DEPS,
+      loadOwnedRecurringServiceKeys: async () => ['pest_control'],
+      loadOffCalendarOwnedKeys: async () => null,
+      loadPlanComponents: async () => [],
+    });
+    expect(prompt).toBeNull();
+  });
+
+  test('suppresses prompt when plan-rate ledger contains positive unattributed billed coverage', async () => {
+    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      ...BASE_DEPS,
+      loadOwnedRecurringServiceKeys: async () => ['pest_control'],
+      loadPlanComponents: async () => [
+        { family_key: 'pest_control', monthly_rate: 39 },
+        { family_key: 'unattributed', monthly_rate: 45 },
+      ],
+    });
+    expect(prompt).toBeNull();
   });
 
   test('suppresses prompt when legacy off-calendar recurring visit or active plan hold covers target family', async () => {

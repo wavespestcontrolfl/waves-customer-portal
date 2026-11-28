@@ -85,7 +85,7 @@ function pickTechAddonPrompt(ownedKeys, { isCommercial = false, planRateFamilies
 
 function isCommercialVisit(customer, svc) {
   return isCommercialProperty({ propertyType: customer.property_type })
-    || Boolean(String(customer.building_use || '').trim())
+    || String(customer.building_use || '').trim().toLowerCase() === 'nonresidential'
     || String(customer.waveguard_tier || '').trim().toLowerCase() === 'commercial'
     || isCommercialServiceRow(svc);
 }
@@ -142,7 +142,7 @@ async function loadOffCalendarOwnedKeys(dbh, customerId, { streetScope, catalogB
   const keys = new Set();
   for (const row of scoped) {
     const enriched = { ...row, ...(catalogById.get(row.id) || {}) };
-    if (isCommercialServiceRow(enriched)) continue;
+    if (isCommercialServiceRow(enriched)) return null;
     for (const key of ownershipKeysForRow(enriched)) keys.add(key);
   }
   return [...keys];
@@ -155,12 +155,22 @@ async function loadActivePlanHoldFamilies(dbh, customerId) {
   return (rows || []).map((r) => String(r.family_key || '')).filter(Boolean);
 }
 
+const DEFAULT_FACT_DEPS = Object.freeze({
+  loadCatalogFieldsByRowId,
+  loadOwnedRecurringServiceKeys,
+  loadPlanComponents: loadComponents,
+  loadOffCalendarOwnedKeys,
+  loadActivePlanHoldFamilies,
+});
+
 /**
  * Fail-closed DB loader for the Visit Brief route. Never throws; returns null on any error,
- * deleted/commercial account, secondary/unprovable premises, or ambiguous ownership state.
+ * deleted/commercial account, secondary/unprovable premises, unattributed billed coverage,
+ * or ambiguous ownership state.
  */
 async function techAddonPromptFacts(svc, dbh, deps = {}) {
   if (!svc?.customer_id || !dbh) return null;
+  const d = { ...DEFAULT_FACT_DEPS, ...deps };
   try {
     const customer = await dbh('customers')
       .where({ id: svc.customer_id })
@@ -171,34 +181,27 @@ async function techAddonPromptFacts(svc, dbh, deps = {}) {
       );
     if (!customer || customer.active === false || isCommercialVisit(customer, svc)) return null;
 
-    const loadCatalog = deps.loadCatalogFieldsByRowId || loadCatalogFieldsByRowId;
-    const catalogById = await loadCatalog(dbh, svc.customer_id);
+    const catalogById = await d.loadCatalogFieldsByRowId(dbh, svc.customer_id);
     if (!catalogById) return null;
-    const enrichedVisit = { ...svc, ...(svc.id ? (catalogById.get(svc.id) || {}) : {}) };
-    if (isCommercialServiceRow(enrichedVisit)) return null;
+    if (isCommercialServiceRow({ ...svc, ...(catalogById.get(svc.id) || {}) })) return null;
 
     const streetScope = await resolvePrimaryVisitStreetScope(svc, customer, dbh, deps);
     if (!streetScope) return null;
 
-    const loadKeys = deps.loadOwnedRecurringServiceKeys || loadOwnedRecurringServiceKeys;
-    const loadPlan = deps.loadPlanComponents || loadComponents;
-    const loadOffCal = deps.loadOffCalendarOwnedKeys || loadOffCalendarOwnedKeys;
-    const loadHolds = deps.loadActivePlanHoldFamilies || loadActivePlanHoldFamilies;
-
     const [ownedKeys, offCalKeys, planComponents, heldFamilies] = await Promise.all([
-      loadKeys(dbh, svc.customer_id, { streetScope }),
-      loadOffCal(dbh, svc.customer_id, { streetScope, catalogById }),
-      loadPlan(dbh, svc.customer_id, { strictProbe: true }),
-      loadHolds(dbh, svc.customer_id),
+      d.loadOwnedRecurringServiceKeys(dbh, svc.customer_id, { streetScope }),
+      d.loadOffCalendarOwnedKeys(dbh, svc.customer_id, { streetScope, catalogById }),
+      d.loadPlanComponents(dbh, svc.customer_id, { strictProbe: true }),
+      d.loadActivePlanHoldFamilies(dbh, svc.customer_id),
     ]);
-    const planRateFamilies = (planComponents || [])
-      .filter((row) => Number(row.monthly_rate) > 0)
-      .map((row) => String(row.family_key || ''))
-      .filter((key) => key && key !== 'unattributed');
+    if (!offCalKeys) return null;
 
-    return pickTechAddonPrompt([...new Set([...(ownedKeys || []), ...(offCalKeys || [])])], {
+    const activeRates = (planComponents || []).filter((row) => Number(row.monthly_rate) > 0);
+    if (activeRates.some((row) => !row.family_key || row.family_key === 'unattributed')) return null;
+
+    return pickTechAddonPrompt([...new Set([...(ownedKeys || []), ...offCalKeys])], {
       isCommercial: false,
-      planRateFamilies,
+      planRateFamilies: activeRates.map((row) => String(row.family_key)),
       heldFamilies,
     });
   } catch {
