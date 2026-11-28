@@ -269,9 +269,24 @@ function mixingDirectionsText(item) {
   return "Mixing directions are not on file. Consult the product label.";
 }
 
+// Product-specific safety limits stay visible above the sheet; only seasonal, blackout, county/city
+// ordinance, and fertilizer-BMP rules collapse into "Seasonal & county rules" on screen (open on print).
+const SEASONAL_COUNTY_RULE_RE = /\b(?:blackout|ordinance|county|municipal|seasonal|north port|sarasota|manatee|charlotte|pinellas|hillsborough|bmp)\b/i;
+
+function splitSafetyRules(safetyRules = []) {
+  const productRules = [];
+  const seasonalCountyRules = [];
+  for (const rule of safetyRules) {
+    if (SEASONAL_COUNTY_RULE_RE.test(String(rule || ""))) seasonalCountyRules.push(rule);
+    else productRules.push(rule);
+  }
+  return { productRules, seasonalCountyRules };
+}
+
 export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
   const equipment = plan.equipment;
   const products = (plan.items || []).filter((item) => item.product);
+  const { productRules, seasonalCountyRules } = splitSafetyRules(safetyRules);
   const renderSheet = (isPrint = false) => (
     <>
       <FieldMasthead variant="staff" subtitle="Tank & Spreader Reference" />
@@ -300,13 +315,14 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
         {[...(plan.warnings || []), ...(plan.blocks || [])].map((warning, index) => (
           <p key={`${warning.code}-${index}`} className={warning.severity === "note" ? undefined : "text-alert-fg"}>{warning.message}</p>
         ))}
-        {safetyRules.length > 0 && (
+        {productRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
+        {seasonalCountyRules.length > 0 && (
           <details open={isPrint} className="rounded-sm border border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
             <summary className="cursor-pointer text-12 font-medium text-ink-primary">
-              Seasonal &amp; county rules ({safetyRules.length})
+              Seasonal &amp; county rules ({seasonalCountyRules.length})
             </summary>
             <div className="mt-2 space-y-1.5">
-              {safetyRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
+              {seasonalCountyRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
             </div>
           </details>
         )}
@@ -370,6 +386,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
       <FieldFooter label="Tank mixing reference" reference={plan.month} />
     </>
   );
+
   return (
     <>
       <Card className="p-4">

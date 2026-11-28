@@ -648,4 +648,32 @@ describe("110-gallon tank reference", () => {
     expect(within(container).getByText("No amount")).toBeInTheDocument();
     expect(within(container).getByText("No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.")).toBeInTheDocument();
   });
+
+  it("keeps product-specific safety limits visible above the collapsed seasonal and county rules disclosure", () => {
+    const productRuleA = "SpeedZone: verify cultivar; apply only 50–85°F; NOT during spring green-up or fall transition";
+    const productRuleB = "Celsius WG: MAX 3 apps/year/property";
+    const seasonalRuleA = "N blackout Jun 1 – Sep 30";
+    const seasonalRuleB = "North Port: no Nutra-TECH June through September until the city confirms.";
+    const { container, unmount } = render(
+      <ProtocolTankSheet plan={fixture()} safetyRules={[productRuleA, productRuleB, seasonalRuleA, seasonalRuleB]} />,
+    );
+    const screenSurface = container.querySelector(".waves-field-document-body");
+    const printSurface = document.querySelector(".protocol-print-sheet .waves-field-document");
+    for (const [surface, expectOpen] of [[screenSurface, false], [printSurface, true]]) {
+      const details = surface.querySelector("details");
+      expect(details).not.toBeNull();
+      expect(details.open).toBe(expectOpen);
+      expect(within(details).getByText("Seasonal & county rules (2)")).toBeInTheDocument();
+      expect(within(details).getByText(seasonalRuleA)).toBeInTheDocument();
+      expect(within(details).getByText(seasonalRuleB)).toBeInTheDocument();
+      expect(within(details).queryByText(productRuleA)).not.toBeInTheDocument();
+      expect(within(details).queryByText(productRuleB)).not.toBeInTheDocument();
+      expect(within(surface).getByText(productRuleA)).toHaveClass("text-alert-fg");
+      expect(within(surface).getByText(productRuleB)).toHaveClass("text-alert-fg");
+    }
+    unmount();
+    const onlyProduct = render(<ProtocolTankSheet plan={fixture()} safetyRules={[productRuleA]} />);
+    expect(onlyProduct.container.querySelector("details")).toBeNull();
+    expect(within(onlyProduct.container).getByText(productRuleA)).toBeInTheDocument();
+  });
 });

@@ -3690,5 +3690,53 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(uncalibratedRig.mixRates[0].calibrationWarnings).toEqual([
       expect.stringContaining('No carrier rate on file'),
     ]);
+
+    // Crossfire finished-gallon coverage falls back to line.raw ("makes 1 gallon for 1,000 sq ft"),
+    // while minimum-volume floors ("at least 1 gal of mix per 1,000 sq ft") do not trigger mismatch warnings.
+    const crossfireProc = {
+      mixRates: [{
+        product: 'MGK Crossfire Bed Bug Concentrate',
+        productId: 'cat-crossfire',
+        sprayers: ['bg_1_gal'],
+        perGallon: { amount: 13, unit: 'fl oz' },
+        sprayVolume: '13 fl oz plus 115 fl oz of water makes 1 gal',
+      }, {
+        product: 'Acelepryn Insecticide',
+        productId: 'cat-ace',
+        sprayers: ['bg_1_gal'],
+        perGallon: { amount: 0.1, unit: 'fl oz' },
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{
+        procedure: crossfireProc,
+        lines: [
+          { product: { id: 'cat-crossfire' }, raw: 'Crossfire on mattress seams: 13 fl oz in 115 fl oz of water makes 1 gallon for 1,000 sq ft, damp not wet' },
+          { product: { id: 'cat-ace' }, raw: 'Acelepryn: at least 1 gal of mix per 1,000 sq ft' },
+        ],
+      }],
+      { source: 'rig', systemName: 'B&G #1', tankCapacityGal: 1, carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-bg' },
+      [{ id: 'sys-bg', name: 'B&G #1', system_type: 'hand_pump', tank_capacity_gal: 1 }],
+    );
+    expect(crossfireProc.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining("The card's rate is for 1 gal per 1,000 sq ft"),
+    ]);
+    expect(crossfireProc.mixRates[1].calibrationWarnings).toBeUndefined();
+
+    // sprayServicesForProduct combines host lines and add-on mixRates (keeping add-on serviceKey) without duplicates.
+    const combinedServices = jobCard._test.sprayServicesForProduct(
+      { id: 'cat-cross' },
+      [{ product: { id: 'cat-cross' }, source: null }],
+      [
+        { name: 'General Pest Control', serviceKey: 'pest_quarterly', procedure: { mixRates: [{ productId: 'cat-cross' }] } },
+        { name: 'Custom Exterior Add-On', serviceKey: 'tree_shrub_care', procedure: { mixRates: [{ productId: 'cat-cross' }] } },
+      ],
+      { serviceType: 'General Pest Control', serviceKey: 'pest_quarterly', addons: [] },
+    );
+    expect(combinedServices).toEqual([
+      { name: 'General Pest Control', serviceKey: 'pest_quarterly' },
+      { name: 'Custom Exterior Add-On', serviceKey: 'tree_shrub_care' },
+    ]);
   });
 });

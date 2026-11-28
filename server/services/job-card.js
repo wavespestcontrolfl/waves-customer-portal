@@ -1601,7 +1601,7 @@ function resolveAddOnLines({ name, category, serviceKey = null, areaAddOnScope =
   const programKey = addonProgramKey(category, name, protocols, serviceKey);
   if (!programKey) {
     const stepsOnly = procedureOnlyResolve({ category, name, serviceKey, scheduledDate: facts.scheduledDate }, protocols);
-    if (stepsOnly) return { lines: [], report: { name, products: 0, visit: { number: stepsOnly.visit.visit || null, month: stepsOnly.visit.month || null }, note: stepsOnly.note, procedure: stepsOnly.procedure } };
+    if (stepsOnly) return { lines: [], report: { name, serviceKey, products: 0, visit: { number: stepsOnly.visit.visit || null, month: stepsOnly.visit.month || null }, note: stepsOnly.note, procedure: stepsOnly.procedure } };
     return { lines: [], report: { name, products: 0, visit: null, note: `No treatment protocol for this add-on (${category || 'no catalog identity'})` } };
   }
   if (programKey === 'lawn') return { lines: [], report: { name, products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' } };
@@ -1616,6 +1616,7 @@ function resolveAddOnLines({ name, category, serviceKey = null, areaAddOnScope =
     lines,
     report: {
       name,
+      serviceKey,
       products: lines.length,
       visit: resolved.visit ? { number: resolved.visit.visit || null, month: resolved.visit.month || null } : null,
       note: resolved.visit ? noProductNote(addOnKey, lines) : 'No protocol matched this add-on',
@@ -2207,7 +2208,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
   const procedureEntries = [
     { name: facts.serviceType, serviceKey: facts.serviceKey, procedure, lines: lines.filter((l) => !l.source) },
-    ...addons.map((addon) => ({ name: addon.name, serviceKey: null, procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
+    ...addons.map((addon) => ({ name: addon.name, serviceKey: addon.serviceKey, procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
   ];
   attachMixCalibrationWarnings(procedureEntries, tank, facts.rig, systems);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
@@ -2286,7 +2287,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
     lineNote: note || null,
-    addons: addons.map(({ procedure: addonProcedure, ...addon }) => addon),
+    addons: addons.map(({ procedure: addonProcedure, serviceKey: _serviceKey, ...addon }) => addon),
     protocol: {
       enabled: true,
       procedure: procedure || null,
@@ -2538,7 +2539,7 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
 
 // Reuse the tank calculator's carrier-volume and one-spray area-cap checks for every
 // procedure mix row when the appointment names an assigned sprayer rig.
-const SPRAY_VOL_GAL_RE = /(\d+(?:\.\d+)?)\s*gal(?:lon)?s?\s+per\s+(\d+(?:,\d+)?)\s*sq\.?\s*ft/i;
+const SPRAY_VOL_GAL_RE = /(?<!at least\s)\b(\d+(?:\.\d+)?)\s*(?:(?:finished|mixed|diluted)\s+)?gal(?:lon)?s?\s+(?:of\s+(?:mix|water|finished\s+spray|spray)\s+)?(?:per|for)\s+(\d+(?:,\d+)?)\s*sq\.?\s*ft/i;
 const roundDbPrecision = (v) => Math.round(Number(v) * 1000) / 1000;
 
 function sprayVolumeGalPer1000(text) {
@@ -2567,7 +2568,7 @@ function rigAppliesToMixRow(row, rigKey) {
 }
 
 function mixRowCarrierAndBand(row, line) {
-  const rawCarrier = line?.labelCarrierGalPer1000 || sprayVolumeGalPer1000(row.sprayVolume);
+  const rawCarrier = line?.labelCarrierGalPer1000 || sprayVolumeGalPer1000(row.sprayVolume) || sprayVolumeGalPer1000(line?.raw);
   const lineCarrier = rawCarrier ? roundDbPrecision(rawCarrier) : null;
   const lo = Number(row.perGallon?.amount || 0);
   const hi = Math.max(lo, Number(row.perGallon?.amountMax || 0));
@@ -2626,13 +2627,20 @@ function mergeSprayCheckProducts(lineProducts, entries, catalog) {
 }
 
 function sprayServicesForProduct(product, lines, entries, facts) {
-  const fromLines = lines.filter((l) => l.product.id === product.id).map((l) => lineService(l, facts));
-  if (fromLines.length) return fromLines;
   const pid = String(product.id);
+  const fromLines = lines.filter((l) => String(l.product.id) === pid).map((l) => lineService(l, facts));
   const fromEntries = entries
     .filter((entry) => entry.procedure?.mixRates?.some((row) => String(row.productId) === pid))
-    .map((entry) => ({ name: entry.name, serviceKey: entry.serviceKey }));
-  return fromEntries.length ? fromEntries : [{ name: facts.serviceType, serviceKey: facts.serviceKey || null }];
+    .map((entry) => ({ name: entry.name, serviceKey: entry.serviceKey || null }));
+  const combined = [...fromLines, ...fromEntries];
+  if (!combined.length) return [{ name: facts.serviceType, serviceKey: facts.serviceKey || null }];
+  const seen = new Set();
+  return combined.filter((svc) => {
+    const key = typeof svc === 'string' ? `s:${svc}` : `o:${svc.name}|${svc.serviceKey || ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function attachMixSprayVerdicts(entries, verdicts) {
@@ -3002,5 +3010,5 @@ module.exports = {
   resolveVisitLines,
   describeLine,
   ALTERNATE_ADDRESS_BLOCK,
-  _test: { primaryProgramKey, protocolBand, fieldGuideMixWarning, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow, attachMixCalibrationWarnings, mergeSprayCheckProducts, attachMixSprayVerdicts },
+  _test: { primaryProgramKey, protocolBand, fieldGuideMixWarning, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow, attachMixCalibrationWarnings, mergeSprayCheckProducts, attachMixSprayVerdicts, sprayServicesForProduct },
 };
