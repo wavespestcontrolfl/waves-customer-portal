@@ -43,6 +43,7 @@ jest.mock('../services/stripe-invoice-state', () => ({
   isInvoiceCollectibleStatus: jest.fn(() => true),
   invoiceStatusForSuccessfulPayment: jest.fn(),
   invoiceStatusForFailedPayment: jest.fn(),
+  nextInvoiceStatusAfterFailedPayment: jest.fn(() => 'overdue'),
   INVOICE_COLLECTIBLE_STATUSES: [],
 }));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn() }));
@@ -52,6 +53,10 @@ jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => ({ id: 1 })) }));
+jest.mock('../services/notification-service', () => ({
+  create: jest.fn(async () => ({ id: 'notif-1' })),
+  notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })),
+}));
 jest.mock('../services/customer-credit', () => ({
   ...jest.requireActual('../services/customer-credit'),
   returnAppliedCreditOnRefund: jest.fn(),
@@ -101,6 +106,10 @@ function memTable(name, rows) {
     },
     whereIn(col, vals) {
       filters.push((row) => vals.includes(row[col]));
+      return q;
+    },
+    whereNotIn(col, vals) {
+      filters.push((row) => !vals.includes(row[col]));
       return q;
     },
     whereNot: () => q,
@@ -661,6 +670,61 @@ describe('B-06: single-invoice charge.refunded in-lock bounce fence', () => {
 
     expect(txCount).toBeGreaterThanOrEqual(2);
     expect(tableAccess.includes('annual_prepay_terms')).toBe(false);
+  });
+
+  test('full refund on a processing-stage PI-only ACH row preserves processing origin so a refund bounce restores live debit state instead of paid', async () => {
+    const { _handleRefundFailed: handleRefundFailed } = require('../routes/stripe-webhook');
+    payments.push({
+      id: 'pay-ach-proc-bounce',
+      customer_id: CUST_1,
+      status: 'processing',
+      amount: 100,
+      stripe_charge_id: null,
+      stripe_payment_intent_id: 'pi_ach_proc_bounce',
+      metadata: JSON.stringify({ invoice_id: INV_1 }),
+    });
+    invoices.push({
+      id: INV_1,
+      customer_id: CUST_1,
+      invoice_number: 'INV-ACH-PROC-1',
+      status: 'processing',
+      stripe_payment_intent_id: 'pi_ach_proc_bounce',
+      stripe_charge_id: null,
+    });
+
+    await handleChargeRefunded({
+      id: 'ch_ach_proc_bounce',
+      payment_intent: 'pi_ach_proc_bounce',
+      amount: 10000,
+      amount_refunded: 10000,
+      refunded: true,
+      metadata: {},
+      refunds: { data: [{ id: 're_ach_proc_bounce', amount: 10000, created: 1751000000 }] },
+    });
+
+    expect(payments[0].status).toBe('refunded');
+    expect(payments[0].stripe_charge_id).toBe('ch_ach_proc_bounce');
+    expect(JSON.parse(payments[0].metadata).payment_state).toBe('processing');
+    // Simulate invoice flipped to refunded by credit return
+    invoices[0].status = 'refunded';
+
+    // Live PI failed at the bank -> bounce must restore payment='failed' & reopen invoice (never 'paid'!)
+    mockStripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_ach_proc_bounce',
+      status: 'requires_payment_method',
+      metadata: {},
+    });
+    await handleRefundFailed({
+      id: 're_ach_proc_bounce',
+      amount: 10000,
+      charge: 'ch_ach_proc_bounce',
+      payment_intent: 'pi_ach_proc_bounce',
+      failure_reason: 'expired_or_canceled_card',
+    });
+
+    expect(payments[0].status).toBe('failed');
+    expect(invoices[0].status).not.toBe('paid');
+    expect(invoices[0].status).not.toBe('refunded');
   });
 });
 

@@ -671,7 +671,11 @@ describe('StripeService.refund', () => {
     // The invoices lookup the credit-restore block runs (by the payment's PI).
     function stubInvoiceLookup(row) {
       const original = dbMock.getMockImplementation();
-      const invoicesQuery = { where: jest.fn(() => invoicesQuery), first: jest.fn(async () => row) };
+      const invoicesQuery = {
+        where: jest.fn(() => invoicesQuery),
+        forUpdate: jest.fn(() => invoicesQuery),
+        first: jest.fn(async () => row),
+      };
       dbMock.mockImplementation((table) => (table === 'invoices' ? invoicesQuery : original(table)));
       return invoicesQuery;
     }
@@ -686,7 +690,7 @@ describe('StripeService.refund', () => {
 
     beforeEach(() => {
       order = [];
-      invoiceRow = { id: 'inv-1', status: 'paid' };
+      invoiceRow = { id: 'inv-1', status: 'paid', stripe_payment_intent_id: 'pi_abc' };
       statusSeenBySync = null;
     });
 
@@ -745,10 +749,11 @@ describe('StripeService.refund', () => {
       expect(creditMock).not.toHaveBeenCalled();
       expect(syncMock).not.toHaveBeenCalled();
       expect(reconcileMock).not.toHaveBeenCalled();
-      expect(result.refund_issued_amount).toBe(100);
+      expect(result.refund_bounced).toBe(true);
+      expect(result.refund_issued_amount).toBe(0);
     });
 
-    test('racing refund.failed between credit restore and prepay sync skips coverage clawback and setup-fee reconcile', async () => {
+    test('racing refund.failed between credit restore and prepay sync skips coverage clawback and setup-fee reconcile and reports bounce', async () => {
       stubInvoiceLookup(invoiceRow);
       const StripeService = loadWithRecorders();
       recordOrder();
@@ -765,11 +770,57 @@ describe('StripeService.refund', () => {
         return baseTx(cb);
       });
 
-      await StripeService.refund('pay-1', {});
+      const result = await StripeService.refund('pay-1', {});
 
       expect(order).toEqual(['credit']);
       expect(syncMock).not.toHaveBeenCalled();
       expect(reconcileMock).not.toHaveBeenCalled();
+      expect(result.refund_bounced).toBe(true);
+      expect(result.refund_issued_amount).toBe(0);
+    });
+
+    test('racing refund.failed inside stamp transaction aborts stamp without erasing failed_refund_ids or returning credit', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      const baseTx = dbMock.transaction.getMockImplementation();
+      let txNum = 0;
+      dbMock.transaction.mockImplementation(async (cb) => {
+        txNum += 1;
+        if (txNum === 1) {
+          // Simulate refund.failed committing its fence right before stamp tx locks payments.
+          paymentRow.metadata = JSON.stringify({ failed_refund_ids: ['re_1'] });
+        }
+        return baseTx(cb);
+      });
+
+      await expect(StripeService.refund('pay-1', {})).rejects.toThrow(/already bounced at the bank/i);
+      expect(creditMock).not.toHaveBeenCalled();
+      expect(syncMock).not.toHaveBeenCalled();
+      expect(reconcileMock).not.toHaveBeenCalled();
+      const savedMeta = JSON.parse(paymentRow.metadata);
+      expect(savedMeta.failed_refund_ids).toContain('re_1');
+      expect(paymentRow.status).toBe('paid');
+    });
+
+    test('skips returnAppliedCreditOnRefund when a replacement payment owns the locked invoice', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      const baseTx = dbMock.transaction.getMockImplementation();
+      let txNum = 0;
+      dbMock.transaction.mockImplementation(async (cb) => {
+        txNum += 1;
+        if (txNum === 2) {
+          // A replacement payment took over the invoice before credit-restore lock ran.
+          invoiceRow.stripe_payment_intent_id = 'pi_replacement';
+        }
+        return baseTx(cb);
+      });
+
+      await StripeService.refund('pay-1', {});
+      expect(creditMock).not.toHaveBeenCalled();
+      expect(invoiceRow.status).toBe('paid');
     });
 
     test('a setup-fee reconcile failure never masks the successful refund (B-43)', async () => {

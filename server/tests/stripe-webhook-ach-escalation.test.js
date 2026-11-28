@@ -840,7 +840,7 @@ describe('B-07: handleAchFailure resolves invoice even after saved-card failure 
     expect(mockState.customerUpdates).toEqual([]);
   });
 
-  test('invoice lookup DB error fails closed and skips homeowner ACH escalation and notices', async () => {
+  test('invoice lookup DB error propagates through handleAchFailure so Stripe retries before any homeowner action', async () => {
     mockState.achEmailOn = true;
     mockState.paymentRow = {
       id: 'pay-db-err',
@@ -850,7 +850,8 @@ describe('B-07: handleAchFailure resolves invoice even after saved-card failure 
     };
     mockState.invoiceLookup = () => { throw new Error('db connection reset'); };
 
-    await handleAchFailure({ id: 'pi_db_err', metadata: {} }, 'R01', 'evt_db_err');
+    await expect(handleAchFailure({ id: 'pi_db_err', metadata: {} }, 'R01', 'evt_db_err'))
+      .rejects.toThrow('db connection reset');
 
     expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();

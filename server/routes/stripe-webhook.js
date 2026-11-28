@@ -1330,19 +1330,26 @@ async function reconcileSetupFeeAlertsForInvoices(invoicesOrIds) {
  * be loaded — so callers never mutate homeowner ACH state or message a
  * homeowner for a debit whose payer cannot be verified.
  */
-async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice) {
+async function loadAchInvoiceRow(paymentIntent, ledgerId) {
+  const byPi = await db('invoices').where({ stripe_payment_intent_id: paymentIntent.id }).first()
+    || await findInvoiceForPaymentIntent(paymentIntent);
+  if (byPi || !ledgerId) return byPi || null;
+  return db('invoices').where({ id: ledgerId }).first();
+}
+
+async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice, opts) {
   const ledgerId = ledgerInvoiceId(payment);
   const directPayerId = payment.payer_id || parsePaymentMeta(payment).payer_id;
   let invoice = preResolvedInvoice || null;
   let lookupFailed = false;
   if (!invoice && !directPayerId) {
     try {
-      invoice = await db('invoices').where({ stripe_payment_intent_id: paymentIntent.id }).first()
-        || await findInvoiceForPaymentIntent(paymentIntent);
-      if (!invoice && ledgerId) {
-        invoice = await db('invoices').where({ id: ledgerId }).first();
-      }
+      invoice = await loadAchInvoiceRow(paymentIntent, ledgerId);
     } catch (err) {
+      if (opts && opts.propagateLookupErrors) {
+        logger.error(`[stripe-webhook] ACH invoice lookup failed for PI ${paymentIntent.id} — retrying event: ${err.message}`);
+        throw err;
+      }
       lookupFailed = true;
       logger.warn(`[stripe-webhook] ACH invoice lookup failed for PI ${paymentIntent.id}: ${err.message}`);
     }
@@ -1350,11 +1357,72 @@ async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice) {
   const knownInvoiceId = ledgerId || (paymentIntent.metadata && paymentIntent.metadata.waves_invoice_id);
   const invoiceId = (invoice ? invoice.id : knownInvoiceId) || null;
   const payerId = directPayerId || (invoice && invoice.payer_id);
-  const unverifiable = lookupFailed || Boolean(knownInvoiceId && !invoice);
   const skipHomeownerAchReason = payerId
     ? `payer-billed (${payerId})`
-    : (unverifiable ? `invoice ${invoiceId} unverifiable` : null);
+    : ((lookupFailed || (knownInvoiceId && !invoice)) ? `invoice ${invoiceId} unverifiable` : null);
   return { invoice, invoiceId, payerId: payerId || null, skipHomeownerAchReason };
+}
+
+/**
+ * Shared live-PI unwind classifier for bounced refunds on ACH rows that were
+ * still `processing` (unsettled) when refunded. Used by both combined and
+ * single-invoice refund.failed unwind paths so a bounced refund never marks
+ * an unsettled or failed ACH debit as `paid`.
+ */
+async function resolveBouncedAchProcessingState(row, nextMeta, fallbackPiId) {
+  let wasStillProcessing = nextMeta.payment_state === 'processing' && !nextMeta.settled_event_at;
+  let debitAlreadyTerminal = false;
+  if (!wasStillProcessing || row.status !== 'refunded') {
+    return { wasStillProcessing: false, debitAlreadyTerminal: false };
+  }
+  const livePiId = row.stripe_payment_intent_id || fallbackPiId || null;
+  const bounceStripeCheck = getStripe();
+  if (!bounceStripeCheck) {
+    throw new Error(`Refund bounce for PI ${livePiId || row.id} cannot verify the live debit (Stripe client unavailable); retry`);
+  }
+  if (livePiId) {
+    const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(livePiId);
+    if (!['processing', 'succeeded', 'requires_capture'].includes(liveBouncePi.status)) {
+      debitAlreadyTerminal = true;
+      wasStillProcessing = false;
+    } else if (liveBouncePi.status === 'succeeded') {
+      wasStillProcessing = false;
+    }
+  }
+  return { wasStillProcessing, debitAlreadyTerminal };
+}
+
+async function restoreSingleInvoiceOnRefundBounce(trx, { linkedInvoice, rowId, nextMeta, achBounceState }) {
+  const duesRestore = await require('../services/invoice').prepareMembershipDuesRestore(trx, linkedInvoice.id, { exceptPaymentId: rowId });
+  if (achBounceState.debitAlreadyTerminal) {
+    const termInvoice = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).first();
+    if (!termInvoice) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+    const reopenedStatus = nextInvoiceStatusAfterFailedPayment(termInvoice);
+    const reopened = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).update({
+      status: reopenedStatus,
+      paid_at: null,
+      stripe_payment_intent_id: null,
+      stripe_charge_id: null,
+      ach_processing_notified_at: null,
+      updated_at: new Date(),
+    });
+    if (!(reopened > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+    if (duesRestore) duesRestore.originalStatus = reopenedStatus;
+    await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
+    return { duesRestore, invoiceRestored: linkedInvoice.invoice_number || linkedInvoice.id, restoredPaidInvoiceId: null };
+  }
+  const updateFields = achBounceState.wasStillProcessing
+    ? { status: 'processing', paid_at: null, updated_at: new Date() }
+    : { status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() };
+  const flipped = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).update(updateFields);
+  if (!(flipped > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+  if (duesRestore) duesRestore.originalStatus = achBounceState.wasStillProcessing ? 'processing' : 'paid';
+  await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
+  return {
+    duesRestore,
+    invoiceRestored: linkedInvoice.invoice_number || linkedInvoice.id,
+    restoredPaidInvoiceId: achBounceState.wasStillProcessing ? null : linkedInvoice.id,
+  };
 }
 
 /**
@@ -4175,10 +4243,16 @@ async function handleChargeRefunded(charge) {
     let result = pmt;
     // Record this refund id as STAMPED (see metadataWithStampedRefund) so a
     // later bounce of it stays attributable even after newer stamps
-    // overwrite stripe_refund_id.
+    // overwrite stripe_refund_id. Preserve payment_state='processing' when an
+    // unsettled ACH row was full-refunded so a bounce unwinds via the live PI
+    // instead of blindly marking the payment/invoice paid.
     if (pmt && refundId) {
+      const nextPmtMeta = metadataWithStampedRefund(pmt.metadata, refundId);
+      if (targetStatusRow?.status === 'processing' && !nextPmtMeta.settled_event_at) {
+        nextPmtMeta.payment_state = 'processing';
+      }
       await trx('payments').where({ id: pmt.id }).update({
-        metadata: JSON.stringify(metadataWithStampedRefund(pmt.metadata, refundId)),
+        metadata: JSON.stringify(nextPmtMeta),
       });
     }
     // Keep the surcharge-returned tracker in step with refunds this app did
@@ -4512,35 +4586,7 @@ async function handleRefundFailed(refund) {
             continue;
           }
           anyUnwound = true;
-          // Rows refunded while the ACH debit was still PROCESSING restore
-          // to 'processing', not 'paid' (codex r29 P1): the refund landed
-          // before settlement, so the eventual debit outcome — not this
-          // bounce — is authoritative. Flipping them 'paid' would leave
-          // every invoice paid and coverage active even if the debit later
-          // fails (the failure path preserves paid rows).
-          let wasStillProcessing = nextMeta.payment_state === 'processing' && !nextMeta.settled_event_at;
-          let debitAlreadyTerminal = false;
-          if (wasStillProcessing && row.status === 'refunded') {
-            // The debit may ALREADY be terminal (codex r34 P1): a
-            // payment_failed/canceled delivered before this bounce skipped
-            // the then-'refunded' rows, so no later intent event remains —
-            // restoring 'processing' from stale metadata would strand the
-            // allocation non-collectible forever. The LIVE intent decides;
-            // fail closed on an unreadable read.
-            const bounceStripeCheck = getStripe();
-            // Fail CLOSED (codex r36 P1): restoring 'processing' without
-            // the live read could strand the allocation forever.
-            if (!bounceStripeCheck) {
-              throw new Error(`Refund bounce for combined PI ${row.stripe_payment_intent_id || rowPiId} cannot verify the live debit (Stripe client unavailable); retry`);
-            }
-            if (row.stripe_payment_intent_id || rowPiId) {
-              const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(row.stripe_payment_intent_id || rowPiId);
-              if (!['processing', 'succeeded', 'requires_capture'].includes(liveBouncePi.status)) {
-                debitAlreadyTerminal = true;
-                wasStillProcessing = false;
-              }
-            }
-          }
+          const { wasStillProcessing, debitAlreadyTerminal } = await resolveBouncedAchProcessingState(row, nextMeta, rowPiId);
           await trx('payments').where({ id: row.id }).update({
             refund_amount: 0,
             refund_status: null,
@@ -4957,6 +5003,12 @@ async function handleRefundFailed(refund) {
           ),
         }
       : {};
+    const achBounceState = nextRefundCents < rowPaidCents
+      ? await resolveBouncedAchProcessingState(row, nextMeta, piId)
+      : { wasStillProcessing: false, debitAlreadyTerminal: false };
+    const restoredPaymentStatus = achBounceState.debitAlreadyTerminal
+      ? 'failed'
+      : (achBounceState.wasStillProcessing ? 'processing' : 'paid');
     await trx('payments').where({ id: row.id }).update({
       ...surchargeRewind,
       refund_amount: nextRefundCents / 100,
@@ -4976,45 +5028,31 @@ async function handleRefundFailed(refund) {
         : (row.stripe_refund_id === refundId
           ? { stripe_refund_id: stampedIds.filter((id) => id !== refundId).pop() || null }
           : {})),
-      // A row terminalized to 'refunded' by a refund that never fully
-      // cleared is still (at least partly) collected money — anything
-      // short of the full paid amount reverts to 'paid', matching the
-      // charge.refunded handler's full-vs-partial convention (and the
-      // dashboard's full-refund exclusion).
-      ...(row.status === 'refunded' && nextRefundCents < rowPaidCents ? { status: 'paid' } : {}),
+      // Restore actual debit state when a full refund bounces: an unsettled
+      // processing ACH row verifies the live PaymentIntent and restores to
+      // 'processing', 'failed', or 'paid' rather than blindly marking paid.
+      ...(row.status === 'refunded' && nextRefundCents < rowPaidCents
+        ? {
+            status: restoredPaymentStatus,
+            ...(achBounceState.debitAlreadyTerminal
+              ? { failure_reason: 'ACH debit terminated before settling (refund bounced afterwards)' }
+              : {}),
+          }
+        : {}),
       metadata: JSON.stringify(nextMeta),
     });
 
-    // Restore the linked invoice: a full refund terminalized it to
-    // 'refunded' (returnAppliedCreditOnRefund) — with the money kept by
-    // Stripe that status is now false on every customer/admin surface.
-    // Status-only and mechanical (collected money is a fact); the CREDIT
-    // side of that settle stays a human decision below. The decision rides
-    // the conditional WHERE alone — NOT a pre-trx status read: this trx can
-    // wait on the payments lock while the racing charge.refunded commits
-    // the very flip to 'refunded', and a stale pre-lock 'paid' would skip
-    // the restore entirely.
     let invoiceRestored = null;
     if (linkedInvoice && nextRefundCents < rowPaidCents) {
-      // A stamped dues invoice coming back to life beside a replacement dues
-      // invoice (or a collected month): found under the dues-month lock (a TRY,
-      // THE LOCK RULE) BEFORE the flip; reconciled after the restore commits.
-      const duesRestore = await require('../services/invoice').prepareMembershipDuesRestore(trx, linkedInvoice.id, { exceptPaymentId: row.id });
-      const flipped = await trx('invoices')
-        .where({ id: linkedInvoice.id, status: 'refunded' })
-        // paid_at restored with the status (codex r11 P1, same reasoning
-        // as the combined unwind): AR and overdue alerts key on
-        // paid_at IS NULL, so a status-only restore keeps the invoice on
-        // every outstanding-balance surface.
-        .update({ status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() });
-      if (flipped > 0) {
-        duesRestoreContext = duesRestore;
-        invoiceRestored = linkedInvoice.invoice_number || linkedInvoice.id;
-        restoredInvoiceId = linkedInvoice.id;
-        // Leaving 'refunded' (codex #3591 r47 local P0): retire the
-        // refunded-transition setup side effects with the restore.
-        await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
-      }
+      const restoredOutcome = await restoreSingleInvoiceOnRefundBounce(trx, {
+        linkedInvoice,
+        rowId: row.id,
+        nextMeta,
+        achBounceState,
+      });
+      if (restoredOutcome.duesRestore) duesRestoreContext = restoredOutcome.duesRestore;
+      if (restoredOutcome.invoiceRestored) invoiceRestored = restoredOutcome.invoiceRestored;
+      if (restoredOutcome.restoredPaidInvoiceId) restoredInvoiceId = restoredOutcome.restoredPaidInvoiceId;
     }
 
     // Operator signal: the reverts above are mechanical, but the remaining
@@ -6059,6 +6097,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null, op
       paymentIntent,
       payment,
       opts?.invoice,
+      { propagateLookupErrors: true },
     );
     if (skipHomeownerAchReason) {
       logger.info(`[stripe-webhook] ACH failure (PI ${piId}, ${skipHomeownerAchReason}) — skipping homeowner ACH handling`);
