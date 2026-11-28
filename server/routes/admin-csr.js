@@ -90,6 +90,7 @@ router.put('/follow-up-tasks/:id', async (req, res, next) => {
     if (assigned_to) updates.assigned_to = assigned_to;
 
     const [task] = await db('ai_follow_up_tasks').where('id', req.params.id).update(updates).returning('*');
+    if (!task) return res.status(404).json({ error: 'Follow-up task not found' });
     res.json({ task });
   } catch (err) { next(err); }
 });
