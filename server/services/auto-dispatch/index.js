@@ -1824,11 +1824,44 @@ async function flushDeferredNoChanges(run) {
   }
 }
 
+async function logPairRecheckRefusal(entry, run, { reason_code, reason_description, markUnmoved = false }) {
+  run.claimedPairIds.add(String(entry.service.id));
+  if (markUnmoved) noteUnmoved(run, entry.service, reason_code);
+  await audit.logDecision(run.runId, {
+    action: 'no_change',
+    service: entry.service,
+    reason_code,
+    reason_description,
+    ...entry.evalResult.audit,
+  });
+}
+
 async function recheckPairEntry(entry, run) {
   const live = await revalidatePlacement(entry.service);
-  if (!live.ok) return false;
-  if (await recheckPlannedMove(entry, run)) return false;
-  if (await recheckMoveLimit(entry, run)) return false;
+  if (!live.ok) {
+    await logPairRecheckRefusal(entry, run, {
+      reason_code: 'SUPERSEDED_DURING_RUN',
+      reason_description: `Superseded by an operator during the run — ${live.reason}`,
+    });
+    return false;
+  }
+  const guardSkip = await recheckPlannedMove(entry, run);
+  if (guardSkip) {
+    await logPairRecheckRefusal(entry, run, {
+      reason_code: guardSkip.code,
+      reason_description: guardSkip.description,
+      markUnmoved: true,
+    });
+    return false;
+  }
+  const limited = await recheckMoveLimit(entry, run);
+  if (limited) {
+    await logPairRecheckRefusal(entry, run, {
+      reason_code: limited.reason_code,
+      reason_description: limited.reason_description,
+    });
+    return false;
+  }
   return true;
 }
 

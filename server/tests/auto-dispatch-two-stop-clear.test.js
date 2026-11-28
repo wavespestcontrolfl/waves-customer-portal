@@ -316,13 +316,24 @@ describe('road-check confirmPairOnRoads', () => {
   test('confirms different-day pair on real Google roads propagating travel, wait, and service times and fails closed when unavailable', async () => {
     const slotA = { [ROAD_LEGS]: { prev: P('P1'), stop: P('A'), next: P('N1'), date: '2026-12-22', startMin: 600 } };
     const slotB = { [ROAD_LEGS]: { prev: P('P2'), stop: P('B'), next: P('N2'), date: '2026-12-23', startMin: 660 } };
-    const pair = { sameDest: false, slotA, slotB, saving: 25 };
+    const pair = {
+      sameDest: false,
+      slotA,
+      slotB,
+      splitDestRoadSpecs: [
+        { date: '2026-12-22', prev: P('P1'), stop: P('A'), next: P('N1'), startMin: 600, prevDepMin: 585, baseDepMin: 585, durationMin: 90 },
+        { date: '2026-12-23', prev: P('P2'), stop: P('B'), next: P('N2'), startMin: 660, prevDepMin: 645, baseDepMin: 645, durationMin: 60 },
+      ],
+      saving: 25,
+    };
     const asked = [];
     // Source day propagation:
     //   H->A leaves at 525, takes 20 min -> arrives 545 (> 540), finishes stop 1 at 605.
     //   A->B leaves at 605, takes 15 min -> arrives 620 (> 600, ran into stop 2!), finishes stop 2 at 680.
     //   B->H leaves at 680, takes 18 min -> total source drive = 53 min.
-    // Dest A detour: 8 + 8 - 12 = 4 min. Dest B detour: 9 + 9 - 12 = 6 min. Total added = 10 min -> saving = 43 >= 20.
+    // Split dest propagation:
+    //   Dest A: P1->A@585 (8), P1->N1@585 (12), A finishes at max(593,600)+90 = 690, A->N1@690 (8) -> detour 4 min.
+    //   Dest B: P2->B@645 (9), P2->N2@645 (12), B finishes at max(654,660)+60 = 720, B->N2@720 (9) -> detour 6 min.
     const map = {
       'H->A': 20, 'A->B': 15, 'B->H': 18,
       'P1->A': 8, 'A->N1': 8, 'P1->N1': 12,
@@ -337,8 +348,8 @@ describe('road-check confirmPairOnRoads', () => {
       pair,
       road: { source_drive_minutes: 53, added_drive_minutes: 10, saving_minutes: 43, source: 'google' },
     });
-    // Source legs priced sequentially at propagated departure minutes: 525, 605, 680.
-    expect(asked.slice(0, 3).map((l) => l.departureMin)).toEqual([525, 605, 680]);
+    // Source legs priced sequentially at 525, 605, 680; split dest legs at 585/585/690 and 645/645/720.
+    expect(asked.map((l) => l.departureMin)).toEqual([525, 605, 680, 585, 585, 690, 645, 645, 720]);
     // Missing Google answer fails closed (null, never commits on straight-line estimate).
     const miss = await confirmPairOnRoads([pair], { sourceLegs, floor: 20, config: baseConfig, travel: travelFor({ 'H->A': 18 }) });
     expect(miss).toBeNull();

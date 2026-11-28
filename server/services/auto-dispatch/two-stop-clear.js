@@ -497,6 +497,65 @@ function pairNeedsOverlapCheck(aCand, bCand, sameDest) {
   return aCand.date === bCand.date && (sameDest || !multiTechConfirmLive());
 }
 
+function singleDestEvaluation(destStops, stop, cand, destHome, vanDepartureMin) {
+  if (!Array.isArray(destStops) || !destStops.length) return null;
+  const useRouteOrder = Array.isArray(cand.route_order_ids);
+  if (useRouteOrder && !routeOrderCovers(destStops, cand.route_order_ids)) return null;
+  const startMin = hhmmToMin(cand.start_time);
+  const unit = {
+    ...stop,
+    startMin,
+    window_start: cand.start_time,
+    window_end: cand.end_time || null,
+    route_order: null,
+    insertByTime: useRouteOrder,
+    ...(useRouteOrder ? { routeOrderIds: cand.route_order_ids } : {}),
+  };
+  const cost = routeCost(destStops, unit, destHome);
+  if (cost.routeTimeWithMinutes > 480) return null;
+  const phys = physicalStops(destStops);
+  const finalChain = useRouteOrder ? insertByRouteOrder(phys, unit, cand.route_order_ids) : currentOrder([...phys, unit]);
+  const located = finalChain.filter((s) => s.geo);
+  const idx = located.findIndex((s) => String(s.id) === String(stop.id));
+  if (idx < 0) return null;
+  return {
+    detour: round2(cost.detourMinutes),
+    roadSpec: { date: cand.date, ...disjointRoadEntryFor(located, idx, startMin, destHome, vanDepartureMin) },
+    signature: routeSignatureOf(destStops),
+  };
+}
+
+function buildSplitDestPair({
+  aRow, bRow, aStop, bStop, dayStopRows, ctxA, sourceInfo, vanDepartureMin, idx,
+}) {
+  const destStopsA = stopsForTechDay(dayStopRows, aRow.cand.technician_id, aRow.cand.date);
+  const destStopsB = stopsForTechDay(dayStopRows, bRow.cand.technician_id, bRow.cand.date);
+  const evA = singleDestEvaluation(destStopsA, aStop, aRow.cand, homeFor(ctxA, aRow.cand.technician_id), vanDepartureMin);
+  if (!evA) return null;
+  const evB = singleDestEvaluation(destStopsB, bStop, bRow.cand, homeFor(ctxA, bRow.cand.technician_id), vanDepartureMin);
+  if (!evB) return null;
+  const addedDrive = round2(evA.detour + evB.detour);
+  return {
+    sameDest: false,
+    slotA: aRow.cand,
+    slotB: bRow.cand,
+    scoreA: aRow.sc,
+    scoreB: bRow.sc,
+    gainA: aRow.gain,
+    gainB: bRow.gain,
+    sourceDrive: sourceInfo.driveMinutes,
+    addedDrive,
+    saving: round2(sourceInfo.driveMinutes - addedDrive),
+    sameDestRoadSpec: null,
+    splitDestRoadSpecs: [evA.roadSpec, evB.roadSpec],
+    destExpected: [
+      { techId: aRow.cand.technician_id, date: aRow.cand.date, signature: evA.signature },
+      { techId: bRow.cand.technician_id, date: bRow.cand.date, signature: evB.signature },
+    ],
+    index: idx,
+  };
+}
+
 async function evaluatePairCombinations({
   entryA, entryB, topA, topB, currentScoreA, currentScoreB, sourceInfo, ruleA, ruleB, run,
 }) {
@@ -528,28 +587,10 @@ async function evaluatePairCombinations({
       if (pairNeedsOverlapCheck(aRow.cand, bRow.cand, sameDest)
         && !occupiedOverlapCheck(a, b, aRow.cand, bRow.cand, occupiedByDate)) continue;
       if (!sameDest) {
-        const destStopsA = stopsForTechDay(dayStopRows, aRow.cand.technician_id, aRow.cand.date);
-        const destStopsB = stopsForTechDay(dayStopRows, bRow.cand.technician_id, bRow.cand.date);
-        if (!destStopsA.length || !destStopsB.length) continue;
-        const addedDrive = round2(aRow.detour + bRow.detour);
-        pairs.push({
-          sameDest: false,
-          slotA: aRow.cand,
-          slotB: bRow.cand,
-          scoreA: aRow.sc,
-          scoreB: bRow.sc,
-          gainA: aRow.gain,
-          gainB: bRow.gain,
-          sourceDrive: sourceInfo.driveMinutes,
-          addedDrive,
-          saving: round2(sourceInfo.driveMinutes - addedDrive),
-          sameDestRoadSpec: null,
-          destExpected: [
-            { techId: aRow.cand.technician_id, date: aRow.cand.date, signature: routeSignatureOf(destStopsA) },
-            { techId: bRow.cand.technician_id, date: bRow.cand.date, signature: routeSignatureOf(destStopsB) },
-          ],
-          index: idx,
+        const splitPair = buildSplitDestPair({
+          aRow, bRow, aStop, bStop, dayStopRows, ctxA: entryA.ctx, sourceInfo, vanDepartureMin: run.config.departureMinutes, idx,
         });
+        if (splitPair) pairs.push(splitPair);
         continue;
       }
       const destStops = stopsForTechDay(dayStopRows, aRow.cand.technician_id, aRow.cand.date);

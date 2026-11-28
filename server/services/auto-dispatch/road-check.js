@@ -401,6 +401,13 @@ async function sameDestRoadAdded(destSpec, travel) {
 
 async function pairAddedRoadDrive(pair, travel) {
   if (pair.sameDest) return sameDestRoadAdded(pair.sameDestRoadSpec, travel);
+  if (Array.isArray(pair.splitDestRoadSpecs) && pair.splitDestRoadSpecs.length === 2) {
+    const [specA, specB] = pair.splitDestRoadSpecs;
+    const detA = await disjointStopRoadAdded(specA.date, specA, specA.startMin, travel);
+    if (detA == null) return null;
+    const detB = await disjointStopRoadAdded(specB.date, specB, specB.startMin, travel);
+    return detB == null ? null : round2(detA + detB);
+  }
   const detA = await roadDetour(pair.slotA, travel);
   if (detA == null) return null;
   const detB = await roadDetour(pair.slotB, travel);
