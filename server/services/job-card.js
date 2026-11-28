@@ -3066,7 +3066,7 @@ function mixRowRate(row) {
   return { lo, hi, unit: normRateUnit(row.perGallon.unit) };
 }
 
-const CONDITIONAL_MIX_ROW_RE = /\b(?:if you find|if needed|if found|only when|only where|work order|live finds? only)\b/i;
+const CONDITIONAL_MIX_ROW_RE = /\b(?:if you find|if needed|if found|only when|only where|work order|live finds? only|top up where|bugs found)\b/i;
 
 function syntheticHitFromMixRow(row, baseHit = null) {
   const r = row || {};

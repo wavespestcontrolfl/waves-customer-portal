@@ -750,7 +750,12 @@ async function getProtocolProducts() {
   }));
 }
 
-async function getActiveCalibration(equipmentSystemId, { calibrationId = null, technicianId = null } = {}) {
+function calibrationAllowedForScope(row, { scopeByTechnician = false, technicianId = null } = {}) {
+  if (!scopeByTechnician) return true;
+  return !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId));
+}
+
+async function getActiveCalibration(equipmentSystemId, { calibrationId = null, scopeByTechnician = false, technicianId = null } = {}) {
   const query = db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -767,22 +772,27 @@ async function getActiveCalibration(equipmentSystemId, { calibrationId = null, t
 
   if (calibrationId) query.where('ec.id', calibrationId);
   if (equipmentSystemId) query.where('ec.equipment_system_id', equipmentSystemId);
-  if (equipmentSystemId && !calibrationId) {
+  if (scopeByTechnician && !calibrationId) {
     const rows = await query.catch(() => []);
     const list = Array.isArray(rows) ? rows : [];
-    return list.find((row) => !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId))) || null;
+    return list.find((row) => calibrationAllowedForScope(row, { scopeByTechnician, technicianId })) || null;
   }
   return query.first().catch(() => null);
 }
 
 async function loadSheetCalibration(req, scheduled) {
   const pickedRigId = req.query.equipmentSystemId || null;
-  const rigId = pickedRigId || await assignedRigId(scheduled);
-  const calibrationId = pickedRigId ? null : (scheduled?.assigned_calibration_id || null);
-  const viewerTechId = isTechnicianRequest(req) ? req.technicianId : null;
-  const technicianId = pickedRigId ? (viewerTechId || scheduled?.technician_id || null) : (scheduled?.technician_id || null);
-  const calibration = await getActiveCalibration(rigId, { calibrationId, technicianId });
-  return { rigId, calibration };
+  const assignedSystemId = await assignedRigId(scheduled);
+  const rigId = pickedRigId || assignedSystemId;
+  const rigOverridden = Boolean(pickedRigId && String(pickedRigId) !== String(assignedSystemId || ''));
+  const calibrationId = rigOverridden ? null : (scheduled?.assigned_calibration_id || null);
+  const isTech = isTechnicianRequest(req);
+  const scopeByTechnician = isTech || Boolean(scheduled);
+  const viewerTechId = isTech ? (req.technicianId || null) : null;
+  const technicianId = pickedRigId || !scheduled ? (viewerTechId || scheduled?.technician_id || null) : (scheduled.technician_id || null);
+  const calibrationScope = { scopeByTechnician, technicianId };
+  const calibration = await getActiveCalibration(rigId, { calibrationId, ...calibrationScope });
+  return { rigId, calibration, calibrationScope };
 }
 
 // The sprayer line of each other big tank the sheet names an amount for (tankOptions: no sprayer picked, the tanks differ).
@@ -821,7 +831,7 @@ const BIG_TANK_CAPACITY_GAL = 110;
 const isFlowZone4Gal = (row) => row.system_type === 'backpack' && Number(row.tank_capacity_gal) === 4 && /flow\s*zone/i.test(row.system_name || '');
 const newestTestFirst = (a, b) => (b.calibration_status === 'field_verified') - (a.calibration_status === 'field_verified')
   || new Date(b.calibrated_at || 0) - new Date(a.calibrated_at || 0);
-async function getBackpackCalibration(selected) {
+async function getBackpackCalibration(selected, scope = {}) {
   if (selected && isFlowZone4Gal(selected)) return selected;
   const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
@@ -832,7 +842,9 @@ async function getBackpackCalibration(selected) {
     .where('es.name', 'ilike', '%flow%zone%')
     .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
     .catch(() => []);
-  return (rows || []).filter(isFlowZone4Gal).sort(newestTestFirst)[0] || null;
+  return (rows || [])
+    .filter((row) => isFlowZone4Gal(row) && calibrationAllowedForScope(row, scope))
+    .sort(newestTestFirst)[0] || null;
 }
 
 // GET /api/admin/protocols/photos/relevant — context-aware photo references
@@ -1292,8 +1304,8 @@ router.get('/lawn-mix', async (req, res, next) => {
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     // The picked sprayer, else the visit's own assigned rig (scoped by assigned calibration and technician, matching the plan engine);
     // neither: every active 110 gal tank, so the sheet names each tank's amount when their numbers differ.
-    const { rigId, calibration } = await loadSheetCalibration(req, scheduled);
-    const backpack = await getBackpackCalibration(calibration);
+    const { rigId, calibration, calibrationScope } = await loadSheetCalibration(req, scheduled);
+    const backpack = await getBackpackCalibration(calibration, calibrationScope);
     const bigTanks = rigId ? [] : await getActiveBigTanks();
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
@@ -2298,6 +2310,7 @@ router._internals = {
   renderWindowSopMarkdown,
   resolveMixWith,
   loadSheetCalibration,
+  getBackpackCalibration,
 };
 
 module.exports = router;

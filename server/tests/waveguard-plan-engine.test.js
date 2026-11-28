@@ -1267,4 +1267,26 @@ describe('loadServiceCalibrations technician scoping', () => {
     );
     expect(otherOnly).toEqual([]);
   });
+
+  test('selecting a different rig clears the visit calibration pin instead of intersecting rig B with rig A calibration', async () => {
+    const whereCalls = [];
+    const knex = () => {
+      const q = {
+        join: () => q,
+        where: (...args) => { whereCalls.push(args); return q; },
+        select: () => q,
+        orderBy: () => q,
+        then: (res, rej) => Promise.resolve([{ id: 'cal-b', equipment_system_id: 'rig-b', technician_id: null, carrier_gal_per_1000: 2 }]).then(res, rej),
+      };
+      return q;
+    };
+    const out = await loadServiceCalibrations(
+      knex,
+      { assigned_equipment_system_id: 'rig-a', assigned_calibration_id: 'cal-a', technician_id: 'tech-a' },
+      { equipmentSystemId: 'rig-b' },
+    );
+    expect(out.map((r) => r.id)).toEqual(['cal-b']);
+    expect(whereCalls).toContainEqual(['ec.equipment_system_id', 'rig-b']);
+    expect(whereCalls).not.toContainEqual(['ec.id', 'cal-a']);
+  });
 });

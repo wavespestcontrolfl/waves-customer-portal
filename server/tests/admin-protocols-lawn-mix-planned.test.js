@@ -450,7 +450,7 @@ describe('resolveMixWith: the tank sheet ties a mix by product id, from the plan
 });
 
 describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like the plan engine', () => {
-  const { loadSheetCalibration } = adminProtocolsRouter._internals;
+  const { loadSheetCalibration, getBackpackCalibration } = adminProtocolsRouter._internals;
 
   test('system-only visit assignment excludes another technician calibration and keeps shared or assigned technician rows', async () => {
     const otherTechRow = { id: 'cal-b', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_name: 'Truck #1', carrier_gal_per_1000: 2.5 };
@@ -462,7 +462,16 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
       { query: {}, admin: { role: 'admin' } },
       { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
     );
-    expect(rejected).toEqual({ rigId: 'sys-1', calibration: null });
+    expect(rejected).toMatchObject({ rigId: 'sys-1', calibration: null, calibrationScope: { scopeByTechnician: true, technicianId: 'tech-a' } });
+
+    // The backpack fallback obeys the same technician scope so a rejected FlowZone calibration is not reloaded.
+    backpackCalibration = [{ id: 'bp-b', equipment_system_id: 'bp-sys', technician_id: 'tech-b', system_name: 'FlowZone Typhoon 3.0', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.5 }];
+    expect(await getBackpackCalibration(rejected.calibration, rejected.calibrationScope)).toBeNull();
+    backpackCalibration = [
+      ...backpackCalibration,
+      { id: 'bp-a', equipment_system_id: 'bp-sys', technician_id: 'tech-a', system_name: 'FlowZone Typhoon 3.0', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.2 },
+    ];
+    expect(await getBackpackCalibration(rejected.calibration, rejected.calibrationScope)).toMatchObject({ id: 'bp-a' });
 
     calibration = [otherTechRow, ownTechRow];
     const matchedOwn = await loadSheetCalibration(
@@ -479,7 +488,14 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
     expect(matchedShared.calibration).toEqual(sharedRow);
   });
 
-  test('explicit assigned_calibration_id queries that calibration directly', async () => {
+  test('admin explicit rig pick on the reference tab (no scheduled visit) honors technician-owned calibrations', async () => {
+    const techOwnedRow = { id: 'cal-b', equipment_system_id: 'sys-b', technician_id: 'tech-b', system_name: 'Truck #2', carrier_gal_per_1000: 2.5 };
+    calibration = [techOwnedRow];
+    const picked = await loadSheetCalibration({ query: { equipmentSystemId: 'sys-b' }, admin: { role: 'admin' } }, null);
+    expect(picked).toMatchObject({ rigId: 'sys-b', calibration: techOwnedRow, calibrationScope: { scopeByTechnician: false } });
+  });
+
+  test('explicit assigned_calibration_id queries that calibration directly, and overriding to a different rig clears the stale pin', async () => {
     const pinned = { id: 'cal-pinned', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_name: 'Truck #1', carrier_gal_per_1000: 2.2 };
     const whereCalls = [];
     db.mockImplementation((table) => {
@@ -494,8 +510,16 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
       { query: {}, admin: { role: 'admin' } },
       { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: 'cal-pinned', technician_id: 'tech-a' },
     );
-    expect(out).toEqual({ rigId: 'sys-1', calibration: pinned });
+    expect(out).toMatchObject({ rigId: 'sys-1', calibration: pinned });
     expect(whereCalls).toContainEqual(['ec.id', 'cal-pinned']);
+
+    whereCalls.length = 0;
+    await loadSheetCalibration(
+      { query: { equipmentSystemId: 'sys-2' }, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: 'cal-pinned', technician_id: 'tech-a' },
+    );
+    expect(whereCalls).not.toContainEqual(['ec.id', 'cal-pinned']);
+    expect(whereCalls).toContainEqual(['ec.equipment_system_id', 'sys-2']);
   });
 });
 

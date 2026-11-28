@@ -4445,6 +4445,27 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     ]);
     expect(taurusConflict100.warnings.join(' ')).toContain('Termite Liquid Trench & Rod: Label tank table: 78 fl oz for a 100 gal tank');
 
+    // Bed-bug follow-up visits list CimeXa only to top up where dust was removed; zero stock stays conditional and never puts dispatch on hold.
+    const cimexa = { id: 'cimexa', name: 'CimeXa Insecticide Dust', epa_reg_number: '73079-12', application_method: 'dust', inventory_on_hand: 0, inventory_unit: 'oz', label_verified_at: '2027-12-01', active: true };
+    const bedBugFollowupDb = dbFor({
+      scheduled_services: [{ id: 'svc28', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Bed Bug Treatment', service_category: 'specialty', service_key: 'bed_bug_treatment', followup_source_service_id: 'svc-prior', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [cimexa],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const bedBugReadiness = await jobCard.buildJobCard('svc28', {
+      dbh: bedBugFollowupDb,
+      readinessOnly: true,
+      deps: { getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(bedBugReadiness.issues.some((i) => i.kind === 'stock')).toBe(false);
+    const bedBugCimexaCalc = await jobCard.mixForProduct('cimexa', 1, { serviceId: 'svc28', dbh: bedBugFollowupDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(bedBugCimexaCalc.context.conditional).toBe(true);
+
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
       products_catalog: [tristar],

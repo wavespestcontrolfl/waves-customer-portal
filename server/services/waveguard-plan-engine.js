@@ -1781,8 +1781,9 @@ async function getActiveCalibrations(knex, filters = {}, { strict = false } = {}
 }
 
 async function loadServiceCalibrations(knex, service, options = {}, { strict = false } = {}) {
+  const rigOverridden = Boolean(options.equipmentSystemId && String(options.equipmentSystemId) !== String(service.assigned_equipment_system_id || ''));
   const equipmentSystemId = options.equipmentSystemId || service.assigned_equipment_system_id;
-  const calibrationId = options.calibrationId || service.assigned_calibration_id;
+  const calibrationId = options.calibrationId || (rigOverridden ? null : service.assigned_calibration_id);
   const rows = await getActiveCalibrations(knex, { equipmentSystemId, calibrationId }, { strict });
   if (!equipmentSystemId || calibrationId) return rows;
   const technicianId = options.equipmentSystemId ? (options.technicianId || service.technician_id || null) : (service.technician_id || null);
