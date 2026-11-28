@@ -25,22 +25,6 @@ const MUTED = 'var(--muted)';
 const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
 
-// Typed findings the dashboard already renders (hero counts, activity state,
-// bait consumption, location). Every OTHER typed field — activity signs,
-// bait/station issues and actions, conducive conditions, the full
-// recommendation list — still prints in the typed findings card, so a
-// flooded station or a cartridge replacement never drops out of the customer
-// record when the dashboard mounts (codex P1 #3600 r1).
-export const TERMITE_V2_DASHBOARD_FIELD_KEYS = new Set([
-  'total_stations',
-  'stations_checked',
-  'stations_inaccessible',
-  'stations_with_activity',
-  'termite_activity',
-  'active_station_location',
-  'bait_consumption',
-]);
-
 // Status tone → accent + soft wash (same triad as pest/mosquito V2 — one family).
 const TONE = {
   good: { color: COLORS.glassNavy, wash: 'rgba(4, 57, 94, 0.08)', border: 'rgba(4, 57, 94, 0.35)' },

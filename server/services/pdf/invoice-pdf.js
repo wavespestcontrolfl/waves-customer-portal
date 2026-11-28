@@ -4,7 +4,8 @@ const {
   WAVES_WEBSITE_HOST,
   WAVES_SUPPORT_PHONE_DISPLAY,
 } = require('../../constants/business');
-const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
+const { dateOnlyString, formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
+const { etDateString } = require('../../utils/datetime-et');
 
 // Unified document tokens — print twin of the web document palette (see
 // pdf-tokens.js for provenance). Navy is the canonical customer ink
@@ -292,9 +293,11 @@ function groupedLineItemsTable(doc, groups, x, y, width) {
   return y;
 }
 
-function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
+function lineItemsTable(doc, lineItems, x, y, width, totalsHeight = 170) {
   const visibleLineItems = visibleInvoiceLines(lineItems);
   const propertyGroups = groupInvoiceLinesByProperty(lineItems);
+  // Scope graphics-state save/restore strictly to the single-page header so a
+  // later page break in the rows or totals never emits an unmatched restore.
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 8;
@@ -305,19 +308,19 @@ function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
   doc.text('AMOUNT', x + width - 70, y, { width: 70, align: 'right', characterSpacing: 1.2 });
   y += 14;
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
+  doc.restore();
   y += 6;
 
   doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(INK);
   if (propertyGroups) {
     y = groupedLineItemsTable(doc, propertyGroups, x, y, width);
-    // The totals block that follows advances the same absolute y: reserve its
-    // height (plus a receipt's surcharge row) so a long grouped table never
-    // leaves TOTAL below the page.
-    y = ensureRoom(doc, y, 170 + extraTotalsHeight);
   } else {
     for (const item of visibleLineItems) y = drawLineItemRow(doc, item, x, y, width);
   }
-  doc.restore();
+  // Keep a totals block together on the current page whenever its measured
+  // height fits; when it exceeds a single page, totalsBlock paginates row by row.
+  const maxSinglePageTotals = PAGE_BOTTOM - 90;
+  y = ensureRoom(doc, y, totalsHeight <= maxSinglePageTotals ? totalsHeight : 40);
   return y;
 }
 
@@ -379,11 +382,47 @@ function invoiceBreakdownRows(invoice, customer = null) {
   ].filter(Boolean).map(([label, value]) => `${label}: ${value}`);
 }
 
-// totalsBlock prints each totals row this tall. A grouped table reserves the block's usual height; a receipt's surcharge row
-// and every discount row past the first are extra.
+// totalsBlock prints each totals row at least this tall (wrapping long labels
+// onto extra lines when needed). A grouped table reserves the block's usual
+// height; a receipt's surcharge row and any wrapped or extra discount rows
+// reserve their measured height so TOTAL never runs off the page.
 const TOTALS_ROW_HEIGHT = 14;
-function extraDiscountRowsHeight(invoice, customer) {
-  return Math.max(0, invoiceTotalsFacts(invoice, customer).discountRows.length - 1) * TOTALS_ROW_HEIGHT;
+const TOTALS_LABEL_WIDTH = 160;
+const TOTAL_SECTION_HEIGHT = (highlightTotal) => (highlightTotal ? 34 : 14);
+function totalsRowHeightFor(doc, label) {
+  const labelHeight = doc.heightOfString(String(label || ''), { width: TOTALS_LABEL_WIDTH });
+  return Math.max(TOTALS_ROW_HEIGHT, Math.ceil(labelHeight) + 4);
+}
+function totalsBlockHeight(doc, invoice, opts = {}) {
+  const {
+    highlightTotal = true, paidStamp = false, refundAmount = 0, customer = null, partPayments = false, surcharge = null,
+    trailingNoteHeight = 0,
+  } = opts;
+  const facts = invoiceTotalsFacts(invoice, customer);
+  doc.save();
+  doc.fontSize(PDF_TYPE.body).font('Helvetica');
+  // 8pt gap before totalsBlock + 10pt after top rule
+  let height = 18;
+  for (const [label] of totalsRowsAboveTotal(facts, surcharge)) {
+    height += totalsRowHeightFor(doc, label);
+  }
+  height += TOTAL_SECTION_HEIGHT(highlightTotal);
+  const amountPaid = partPayments ? facts.amountPaid : 0;
+  if (facts.creditApplied > 0) height += totalsRowHeightFor(doc, 'Account credit applied');
+  if (amountPaid > 0) height += totalsRowHeightFor(doc, 'Paid so far');
+  if (facts.creditApplied > 0 || amountPaid > 0) {
+    doc.font('Helvetica-Bold');
+    height += totalsRowHeightFor(doc, 'Amount due');
+    doc.font('Helvetica');
+  }
+  if (refundAmount > 0) {
+    doc.font('Helvetica-Bold');
+    height += totalsRowHeightFor(doc, 'Refunded') + totalsRowHeightFor(doc, 'Net paid');
+  }
+  if (paidStamp) height += 46;
+  if (trailingNoteHeight > 0) height += trailingNoteHeight;
+  doc.restore();
+  return height;
 }
 
 // A receipt's credit card surcharge row (Visa Core Rules: shown separately on the front of the receipt, same type and size as the
@@ -426,12 +465,32 @@ function totalsRowsAboveTotal(facts, surcharge) {
   ].filter(Boolean);
 }
 
+function drawPaginatedTotalsRow(doc, { label, value, color, font, labelX, valueX, y }) {
+  doc.fontSize(PDF_TYPE.body).font(font);
+  const lines = wrapTextLines(doc, label, TOTALS_LABEL_WIDTH);
+  const lineH = Math.ceil(doc.currentLineHeight(true)) + 2;
+  let curY = y;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    doc.fontSize(PDF_TYPE.body).font(font).fillColor(color);
+    const renderedH = line ? Math.max(lineH, Math.ceil(doc.heightOfString(line, { width: TOTALS_LABEL_WIDTH })) + 2) : lineH;
+    curY = ensureRoom(doc, curY, renderedH);
+    doc.fontSize(PDF_TYPE.body).font(font).fillColor(color);
+    if (line) doc.text(line, labelX, curY, { width: TOTALS_LABEL_WIDTH, align: 'right' });
+    if (i === 0) doc.text(value, valueX, curY, { width: 70, align: 'right' });
+    curY += renderedH;
+  }
+  return curY + 2;
+}
+
 function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const {
     highlightTotal = true, paidStamp = false, refundAmount = 0, cashPaid = 0, customer = null, partPayments = false,
   } = opts;
-  doc.save();
-  doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
+  // Never wrap multi-row totals across doc.save()/doc.restore(): a page break
+  // inside ensureRoom would strand the save on the previous page and leave an
+  // unmatched restore on the new page.
+  doc.save().moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke().restore();
   y += 10;
 
   const facts = invoiceTotalsFacts(invoice, customer);
@@ -441,16 +500,27 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const valueX = x + width - 70;
 
   const row = (label, value, color = BODY, bold = false) => {
-    doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color);
-    doc.text(label, labelX, y, { width: 160, align: 'right' });
+    const font = bold ? 'Helvetica-Bold' : 'Helvetica';
+    doc.fontSize(PDF_TYPE.body).font(font);
+    const rowHeight = totalsRowHeightFor(doc, label);
+    if (rowHeight > PAGE_BOTTOM - 90) {
+      y = drawPaginatedTotalsRow(doc, { label, value, color, font, labelX, valueX, y });
+      return;
+    }
+    y = ensureRoom(doc, y, rowHeight);
+    doc.fontSize(PDF_TYPE.body).font(font).fillColor(color);
+    doc.text(label, labelX, y, { width: TOTALS_LABEL_WIDTH, align: 'right' });
     doc.text(value, valueX, y, { width: 70, align: 'right' });
-    y += TOTALS_ROW_HEIGHT;
+    y += rowHeight;
   };
 
   for (const [label, value] of totalsRowsAboveTotal(facts, opts.surcharge)) row(label, value);
 
+  // Reserve room for the separator rule and TOTAL line together so TOTAL and
+  // its dollar amount never split across pages (shared with totalsBlockHeight).
+  y = ensureRoom(doc, y, TOTAL_SECTION_HEIGHT(highlightTotal));
   y += 2;
-  doc.moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
+  doc.save().moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke().restore();
   y += 8;
 
   if (highlightTotal) {
@@ -484,9 +554,9 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
     row('Refunded', deduction(refundAmount), RED, true);
     row('Net paid', currency(Math.max(0, netBasis - refundAmount)), NAVY, true);
   }
-  doc.restore();
 
   if (paidStamp) {
+    y = ensureRoom(doc, y, 46);
     doc.save();
     const stampY = y + 6;
     doc.roundedRect(x, stampY, 130, 32, 4)
@@ -581,6 +651,68 @@ function footerBar(doc, tagline) {
   });
 }
 
+function splitLongWord(doc, word, maxWidth) {
+  if (doc.widthOfString(word) <= maxWidth) return [word];
+  const parts = [];
+  let chunk = '';
+  for (const ch of word) {
+    if (chunk && doc.widthOfString(chunk + ch) > maxWidth) {
+      parts.push(chunk);
+      chunk = ch;
+    } else {
+      chunk += ch;
+    }
+  }
+  if (chunk) parts.push(chunk);
+  return parts;
+}
+
+function wrapTextLines(doc, text, maxWidth) {
+  const lines = [];
+  for (const para of String(text || '').split(/\r?\n/)) {
+    const rawWords = para.split(/\s+/).filter(Boolean);
+    if (!rawWords.length) {
+      lines.push('');
+      continue;
+    }
+    const words = rawWords.flatMap((w) => splitLongWord(doc, w, maxWidth));
+    let current = words[0];
+    for (let i = 1; i < words.length; i += 1) {
+      const candidate = `${current} ${words[i]}`;
+      if (doc.widthOfString(candidate) <= maxWidth) {
+        current = candidate;
+      } else {
+        lines.push(current);
+        current = words[i];
+      }
+    }
+    lines.push(current);
+  }
+  return lines;
+}
+
+function drawPaginatedNotes(doc, customerNotes, x, y, width) {
+  doc.fontSize(PDF_TYPE.body).font('Helvetica');
+  const lines = wrapTextLines(doc, customerNotes, width);
+  if (!lines.length) return y;
+  const lineH = Math.ceil(doc.currentLineHeight(true)) + 3;
+  const firstH = lines[0] ? Math.max(lineH, Math.ceil(doc.heightOfString(lines[0], { width })) + 3) : lineH;
+  // Keep NOTES heading together with at least its first line.
+  y = ensureRoom(doc, y + 10, 12 + firstH);
+  doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(MUTED)
+    .text('NOTES', x, y, { characterSpacing: 1.2 });
+  y += 12;
+  for (const line of lines) {
+    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY);
+    const renderedH = line ? Math.max(lineH, Math.ceil(doc.heightOfString(line, { width })) + 3) : lineH;
+    y = ensureRoom(doc, y, renderedH);
+    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY);
+    if (line) doc.text(line, x, y, { width });
+    y += renderedH;
+  }
+  return y;
+}
+
 function generateInvoicePDF(invoice, res) {
   const customer = invoice.customer || {};
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
@@ -595,9 +727,8 @@ function generateInvoicePDF(invoice, res) {
   const isPrepaid = invoice.status === 'prepaid';
   const isPaid = invoice.status === 'paid';
   const isSettled = isPaid || isPrepaid;
-  const isOverdue = !isSettled
-    && invoice.due_date
-    && new Date(invoice.due_date).getTime() < Date.now();
+  const dueYmd = dateOnlyString(invoice.due_date);
+  const isOverdue = !isSettled && !!dueYmd && dueYmd < etDateString();
 
   const statusLabel = isPaid ? 'Paid' : isPrepaid ? 'Prepaid' : isOverdue ? 'Overdue' : 'Due';
   const statusColor = isSettled ? GREEN : isOverdue ? RED : WAVES_BLUE;
@@ -611,17 +742,13 @@ function generateInvoicePDF(invoice, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);
-  y = lineItemsTable(doc, invoice.line_items, L, y, W, extraDiscountRowsHeight(invoice, customer));
-  y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer, partPayments: true });
+  const invoiceTotalsOpts = { highlightTotal: true, paidStamp: isPaid, customer, partPayments: true };
+  y = lineItemsTable(doc, invoice.line_items, L, y, W, totalsBlockHeight(doc, invoice, invoiceTotalsOpts));
+  y = totalsBlock(doc, invoice, L, y + 8, W, invoiceTotalsOpts);
   if (!isSettled) y = previousBalanceBlock(doc, invoice.previous_balance, L, y, W);
 
   const customerNotes = customerVisibleInvoiceNotes(invoice.notes);
-  if (customerNotes) {
-    y += 10;
-    doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(MUTED).text('NOTES', L, y, { characterSpacing: 1.2 });
-    y += 12;
-    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY).text(customerNotes, L, y, { width: W, lineGap: 3 });
-  }
+  if (customerNotes) drawPaginatedNotes(doc, customerNotes, L, y, W);
 
   footerBar(doc, isPaid ? 'Paid — thank you' : isPrepaid ? 'Covered by account credit — thank you' : 'Thank you for choosing Waves');
   doc.end();
@@ -659,25 +786,35 @@ function generateReceiptPDF(invoice, payment, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   const surcharge = receiptSurchargeFacts(payment);
-  y = lineItemsTable(doc, invoice.line_items, L, y, W,
-    (surcharge ? TOTALS_ROW_HEIGHT : 0) + extraDiscountRowsHeight(invoice, customer));
-  y = totalsBlock(doc, invoiceWithSurchargedTotal(invoice, surcharge), L, y + 8, W, {
+  const receiptInvoice = invoiceWithSurchargedTotal(invoice, surcharge);
+  // Commercial-only recordkeeping note. Most residential receipts don't
+  // need this boilerplate, but commercial accounts often want explicit
+  // language about keeping the receipt for accounting.
+  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+  const commercialNoteText = `Keep this receipt for your records. For questions, reply to your receipt email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
+  let commercialNoteHeight = 0;
+  if (isCommercial) {
+    doc.save();
+    doc.fontSize(PDF_TYPE.caption).font('Helvetica');
+    commercialNoteHeight = 14 + Math.ceil(doc.heightOfString(commercialNoteText, { width: W, lineGap: 3 })) + 4;
+    doc.restore();
+  }
+  const receiptTotalsOpts = {
     highlightTotal: true,
     paidStamp: !refundAmount,
     refundAmount,
     cashPaid,
     customer,
     surcharge,
-  });
+    trailingNoteHeight: commercialNoteHeight,
+  };
+  y = lineItemsTable(doc, invoice.line_items, L, y, W, totalsBlockHeight(doc, receiptInvoice, receiptTotalsOpts));
+  y = totalsBlock(doc, receiptInvoice, L, y + 8, W, receiptTotalsOpts);
 
-  // Commercial-only recordkeeping note. Most residential receipts don't
-  // need this boilerplate, but commercial accounts often want explicit
-  // language about keeping the receipt for accounting.
-  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
   if (isCommercial) {
-    y += 14;
+    y = ensureRoom(doc, y + 14, commercialNoteHeight - 14);
     doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(MUTED).text(
-      `Keep this receipt for your records. For questions, reply to your receipt email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+      commercialNoteText,
       L, y, { width: W, lineGap: 3 },
     );
   }

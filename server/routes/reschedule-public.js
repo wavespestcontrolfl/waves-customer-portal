@@ -275,10 +275,12 @@ function applyMoveLimit(limit, full, shown, range) {
 async function visitChangedSince(svc, database = db) {
   let current = null;
   try { current = await loadById(svc.id, database); } catch { /* unreadable = changed */ }
+  const visitHold = require('../services/visit-hold');
   return !current
     || apptDateStr(current.scheduled_date) !== apptDateStr(svc.scheduled_date)
     || hhmm(current.window_start) !== hhmm(svc.window_start)
     || current.status !== svc.status
+    || visitHold.rowIsHeld(current) !== visitHold.rowIsHeld(svc)
     || cadenceChangedSince(svc, current);
 }
 
@@ -509,8 +511,12 @@ async function eligibilityAsync(svc, now = new Date(), database = db) {
 // apply to it. Kept OUT of services/reschedule-eligibility.js: that module
 // is shared with the call-driven promised-link worker, which the notice
 // rule must not reach (self-serve only).
+function isUnheldMoveNoticeBlocked(svc, now = new Date()) {
+  return !require('../services/visit-hold').rowIsHeld(svc) && visitInsideMoveNoticeWindow(svc, now);
+}
+
 function withSelfServeNotice(elig, svc, now = new Date()) {
-  if (elig.ok && !elig.missed && visitInsideMoveNoticeWindow(svc, now)) {
+  if (elig.ok && !elig.missed && isUnheldMoveNoticeBlocked(svc, now)) {
     return { ok: false, reason: 'self_serve_notice' };
   }
   return elig;
@@ -579,7 +585,8 @@ function selectSvc(column, value, database = db) {
       // C4 (codex GH r4 P1): the account's activity gates every mutation on
       // this tokenized page — a cancelled customer's portal is read-only,
       // and a surviving visit's reschedule link must not stay a side door.
-      'c.active as customer_active'
+      'c.active as customer_active',
+      ...require('../services/visit-hold').heldColumn('s.'),
     );
 }
 
@@ -1171,6 +1178,85 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   }
 });
 
+function holdTimestampMs(value) {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? String(value) : ms;
+}
+
+async function findConcurrentHoldReplay(conn, { svc, locked, date, startTime }) {
+  const visitHold = require('../services/visit-hold');
+  const activeStatus = ['pending', 'confirmed'].includes(String(locked?.status || '').toLowerCase());
+  if (!visitHold.rowIsHeld(svc) || visitHold.rowIsHeld(locked) || !activeStatus) return null;
+  if (apptDateStr(locked?.scheduled_date) !== date || hhmm(locked?.window_start) !== startTime) return null;
+  const recentLog = await conn('reschedule_log')
+    .where({ scheduled_service_id: svc.id, initiated_by: 'customer_self_serve' })
+    .where('created_at', '>=', svc.held_at)
+    .orderBy('created_at', 'desc')
+    .first('new_date', 'new_window');
+  const loggedStart = String(recentLog?.new_window || '').slice(0, 5);
+  return recentLog && apptDateStr(recentLog.new_date) === date && loggedStart === startTime ? locked : null;
+}
+
+// Concurrent hold-state guard inside officeApprovalRecheck (GATE_VISIT_HOLD):
+// any hold change between the unlocked read and row lock (new hold placed by
+// staff, replaced hold, or cleared hold) stops the move — except when the row
+// started held, is now unheld and still active on the exact requested slot,
+// AND has a committed self-serve move log row for that slot (clean replay).
+async function assertLockedHoldState({ trx, svc, locked, date, startTime }) {
+  const visitHold = require('../services/visit-hold');
+  if (!visitHold.visitHoldLive()) return;
+  if (holdTimestampMs(locked?.held_at) === holdTimestampMs(svc.held_at)) return;
+  if (await findConcurrentHoldReplay(trx, { svc, locked, date, startTime })) {
+    throw Object.assign(new Error('Already rescheduled'), { code: 'HOLD_RELEASE_REPLAY', locked });
+  }
+  throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
+    statusCode: 409, isOperational: true, code: 'SLOT_TAKEN',
+  });
+}
+
+// Shared idempotent-replay builder for POST /:token (both pre-check replay and
+// a concurrent same-slot hold release whose winner already cleared held_at).
+async function buildReplayResponse(svc, date, startTime) {
+  let replaySeriesShifted = false;
+  let replayPlacementDays = null;
+  if (isSeriesVisit(svc)) {
+    try {
+      const lastLog = await db('reschedule_log')
+        .where({ scheduled_service_id: svc.id })
+        .orderBy('created_at', 'desc')
+        .first('reason_code', 'new_date');
+      replaySeriesShifted = !!lastLog
+        && String(lastLog.reason_code || '').endsWith('_series')
+        && apptDateStr(lastLog.new_date) === date;
+      if (replaySeriesShifted) {
+        const move = await db('series_moves')
+          .where({ anchor_service_id: svc.id, new_date: date, status: 'committed' })
+          .orderBy('created_at', 'desc').first('result');
+        replayPlacementDays = move?.result?.futurePlacementDays || null;
+      }
+    } catch (err) {
+      logger.warn(`[reschedule-public] replay series-log lookup failed for ${svc.id}: ${err.message}`);
+    }
+  }
+  try {
+    await require('../services/reschedule-link-promises').resolveUsedLink(db, svc.id);
+  } catch (err) {
+    logger.warn(`[reschedule-public] promise resolve failed on replay for ${svc.id}: ${err.code || err.name || 'error'}`);
+  }
+  return {
+    success: true,
+    replayed: true,
+    originalDate: svc.scheduled_date,
+    newDate: date,
+    window: { start: startTime, end: hhmm(svc.window_end) },
+    startLabel: label12(startTime),
+    endLabel: label12(svc.window_end),
+    seriesShifted: replaySeriesShifted,
+    futurePlacementDays: replayPlacementDays,
+  };
+}
+
 router.post('/:token', commitLimiter, async (req, res, next) => {
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -1196,56 +1282,12 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // target matches the visit's current date + start already succeeded —
     // committing again would duplicate the reschedule_log row, re-send the
     // reschedule notice, and count toward the escalation threshold.
-    if (apptDateStr(svc.scheduled_date) === date && hhmm(svc.window_start) === startTime) {
-      // If the commit this retry replays was a series re-anchor, the success
-      // card must still say the following visits moved — recover the flag
-      // from the reschedule_log row the original commit wrote (series
-      // commits log reason_code '<reason>_series').
-      let replaySeriesShifted = false;
-      let replayPlacementDays = null;
-      if (isSeriesVisit(svc)) {
-        try {
-          const lastLog = await db('reschedule_log')
-            .where({ scheduled_service_id: svc.id })
-            .orderBy('created_at', 'desc')
-            .first('reason_code', 'new_date');
-          // apptDateStr handles pg DATE columns arriving as JS Dates —
-          // String() on a Date is a locale string that never matches.
-          replaySeriesShifted = !!lastLog
-            && String(lastLog.reason_code || '').endsWith('_series')
-            && apptDateStr(lastLog.new_date) === date;
-          if (replaySeriesShifted) {
-            const move = await db('series_moves')
-              .where({ anchor_service_id: svc.id, new_date: date, status: 'committed' })
-              .orderBy('created_at', 'desc').first('result');
-            replayPlacementDays = move?.result?.futurePlacementDays || null;
-          }
-        } catch (err) {
-          logger.warn(`[reschedule-public] replay series-log lookup failed for ${svc.id}: ${err.message}`);
-        }
-      }
-      // The original commit's promise hook is best-effort — if it failed, the
-      // retry that lands here is the next chance to close the linked cards
-      // (the background sweep is the last one). Idempotent per promise row,
-      // and evidence-gated: a POST of the CURRENT date/time that never moved
-      // anything finds no customer_self_serve reschedule_log row and closes
-      // nothing (codex #4293 r2 P2).
-      try {
-        await require('../services/reschedule-link-promises').resolveUsedLink(db, svc.id);
-      } catch (err) {
-        logger.warn(`[reschedule-public] promise resolve failed on replay for ${svc.id}: ${err.code || err.name || 'error'}`);
-      }
-      return res.json({
-        success: true,
-        replayed: true,
-        originalDate: svc.scheduled_date,
-        newDate: date,
-        window: { start: startTime, end: hhmm(svc.window_end) },
-        startLabel: label12(startTime),
-        endLabel: label12(svc.window_end),
-        seriesShifted: replaySeriesShifted,
-        futurePlacementDays: replayPlacementDays,
-      });
+    // A held visit (GATE_VISIT_HOLD) is off the route: picking its old slot
+    // must still check availability and commit through the rebooker to release
+    // the hold rather than replaying as a no-op.
+    const visitHold = require('../services/visit-hold');
+    if (!visitHold.rowIsHeld(svc) && apptDateStr(svc.scheduled_date) === date && hhmm(svc.window_start) === startTime) {
+      return res.json(await buildReplayResponse(svc, date, startTime));
     }
 
     // Self-serve MOVE notice window (owner ruling 2026-09-23; split from the
@@ -1258,7 +1300,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // (not the generic reason above) so the client renders the specific
     // call-us guidance (ScheduleFlowPage.jsx falls back to body.error
     // verbatim for an unrecognized code).
-    if (!elig.missed && visitInsideMoveNoticeWindow(svc)) {
+    if (!withSelfServeNotice(elig, svc).ok) {
       return res.status(409).json({
         error: 'This visit starts too soon to move online — call (941) 297-5749 and our team can help.',
         code: 'SELF_SERVE_NOTICE',
@@ -1273,9 +1315,19 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
 
     // Customer move limits (GATE_RESCHEDULE_MOVE_LIMITS). After the replay
-    // above: a retry of a move that already committed still replays. The
-    // page reloads on MOVE_LIMIT and shows what GET now offers.
-    await assertMoveLimitAllows(svc, elig, range, config, date);
+    // above: a retry of a move that already committed still replays. For a
+    // held visit racing a concurrent winner that just used the final daily
+    // move, replay the winner instead of returning MOVE_LIMIT.
+    try {
+      await assertMoveLimitAllows(svc, elig, range, config, date);
+    } catch (limitErr) {
+      if (limitErr?.code === 'MOVE_LIMIT' && visitHold.rowIsHeld(svc)) {
+        const fresh = await loadById(svc.id);
+        const replayedRow = fresh ? await findConcurrentHoldReplay(db, { svc, locked: fresh, date, startTime }) : null;
+        if (replayedRow) return res.json(await buildReplayResponse({ ...svc, ...replayedRow }, date, startTime));
+      }
+      throw limitErr;
+    }
 
     // Shared SLOT_TAKEN recovery response (Codex round 1 P2 on PR #5267,
     // PRRT_kwDOR3YQi86mzgqa): the anti-forgery miss below AND a capacity
@@ -1365,7 +1417,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // that waited across the boundary is refused, missed exemption
     // preserved. Same code/message as the pre-check.
     const noticeRecheck = async () => {
-      if (!elig.missed && visitInsideMoveNoticeWindow(svc)) {
+      if (!elig.missed && isUnheldMoveNoticeBlocked(svc)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
         });
@@ -1404,9 +1456,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     };
     const officeApprovalRecheck = async ({ trx }) => {
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
-        .first('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days', 'customer_pick_by', 'technician_id',
+        .first('scheduled_date', 'window_start', 'window_end', 'status', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days', 'customer_pick_by', 'technician_id',
+          ...visitHold.heldColumn(),
           'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',
           'date_exception', 'date_exception_cadence_date');
+      await assertLockedHoldState({ trx, svc, locked, date, startTime });
       // Both movers save the offered slot's technician (offerTechnicianScope kept the one this request read):
       // a staff reassignment since then refuses on the LOCKED row, missed visits too, never overwritten.
       if (String(locked?.technician_id || '') !== String(svc.technician_id || '')) {
@@ -1425,7 +1479,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         });
       }
       if (elig.missed) return;
-      if (visitInsideMoveNoticeWindow(locked)) {
+      if (isUnheldMoveNoticeBlocked(locked)) {
         throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
           statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
         });
@@ -1518,6 +1572,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       // SAME recovery response, not the bare error line SLOT_UNAVAILABLE
       // would otherwise fall through to (ScheduleFlowPage only clears the
       // stale selection and refreshes the calendar on SLOT_TAKEN).
+      if (err?.code === 'HOLD_RELEASE_REPLAY') {
+        return res.json(await buildReplayResponse({ ...svc, ...err.locked }, date, startTime));
+      }
       if (err?.code === 'SLOT_UNAVAILABLE') {
         return slotTakenResponse();
       }

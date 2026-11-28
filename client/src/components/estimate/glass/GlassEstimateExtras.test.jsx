@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GlassStickyBookBar, GlassTechChip } from './GlassEstimateExtras';
+import { GlassScarcityBadge, GlassSectionCta, GlassStickyBookBar, GlassTechChip } from './GlassEstimateExtras';
 
 afterEach(() => cleanup());
 
@@ -57,5 +57,25 @@ describe('GlassTechChip', () => {
   it('renders nothing before a slot is picked', () => {
     const { container } = render(<GlassTechChip slotMeta={null} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe('Glass pill controls and scarcity icon', () => {
+  it('tags sticky approve button and section CTA with data-glass-pill so the 999px pill radius survives global button rules', () => {
+    render(
+      <>
+        <GlassStickyBookBar show slotMeta={null} onApprove={vi.fn()} />
+        <GlassSectionCta label="Lock it in" onClick={vi.fn()} />
+      </>,
+    );
+    expect(screen.getByRole('button', { name: 'Approve my plan →' })).toHaveAttribute('data-glass-pill', '');
+    expect(screen.getByRole('button', { name: 'Lock it in' })).toHaveAttribute('data-glass-pill', '');
+  });
+
+  it('renders an SVG clock icon in GlassScarcityBadge with no raw emoji', () => {
+    const { container } = render(<GlassScarcityBadge info={{ label: '2 spots left this week' }} />);
+    expect(screen.getByText('2 spots left this week')).toBeInTheDocument();
+    expect(container.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('⏳');
   });
 });

@@ -6,6 +6,8 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_SMS_POST_VISIT_REDRAFT=true (owner 2026-11-27, Decision 4D: when a visit completes and the customer sent an unanswered inbound SMS earlier that same ET day whose original house_voice draft predated closeout, generates ONE linked post_visit_closeout revision draft with fresh visit findings — never alters the original draft, never auto-sends, never enters the nightly judge baseline. Paid Anthropic draft+verify call on Railway [est. 1-2/day x ~$0.02 = ~$0.02-0.04/day, ~$0.60-1.20/mo; findPostVisitRedraftCandidates is a read-only discovery helper for a future Mac runner], so ships 100% DARK. Requires smsPromptB1Live() [GATE_SMS_PROMPT_B1 + GATE_SMS_REAL_ANSWERS] so visit findings actually load. Strict `=== 'true'`, read at call time via smsPostVisitRedraftLive(). Off = zero DB queries, zero API cost. Kill: unset.)
+ *   GATE_NEW_LEAD_DRIP_EXTENDED=true (owner 2026-11-27 "ok go", Decision 2: extends the residential new-lead drip with Email Steps 3 [Day 10] and 4 [Day 21] in automation_steps [stored enabled=false, checked by all 7 stops in new-lead-drip-stops.js] plus Day 2 and Day 5 SMS follow-ups for phone-only residential unquoted leads [new-lead-phone-sms-drip.js, 8 AM-8 PM ET, fail-closed suppression check, canonical sendCustomerMessage]. Emails and texts leads and carries small SMS cost (~$0.34/mo), so it ships 100% DARK and requires explicit owner flip. Strict `=== 'true'`, read at call time via newLeadDripExtendedLive(). Off = Steps 3 & 4 never load and phone-only SMS drip returns immediately with zero queries. Kill: unset.)
  *   GATE_ACCOUNTING_GL=true (owner 2026-11-27, QuickBooks-style double-entry General Ledger core: exposes /api/admin/accounting/* and /admin/accounting with Chart of Accounts, balanced Journal Entries, Statement Reconciliation, Period Locks, Vendor 1099 Master, Subledger Sync, Trial Balance, Accrual & Cash P&L, Balance Sheet, and Statement of Cash Flows; all accounting mutations require full owner access and log critical audit_log entries; sends nothing to customers. Strict `=== 'true'`, read at call time via accountingGlLive(); dark by default. Off = /api/admin/accounting/status returns {enabled:false} and every other /api/admin/accounting route answers 404 {enabled:false}. Kill: unset.)
  *   GATE_CUSTOMER_PROFILE_EDIT=true (owner 2026-11-26 "yes do all these fixes": a signed-in account holder edits their own first name, last name and email in the Waves app and the portal, from the Account menu (PUT /api/customer/profile). A phone number can never be changed there (it is the login). It has a gate because a change emails the customer: an email change sends an "account updated" notice to the OLD address and to the NEW address, so a takeover shows; a name-only change sends one notice to the current address. A contact login and a cancelled account are refused. Off, the route answers 404 {enabled:false} and /api/auth/me reports profileEdit:false, so the app hides the Edit control. Strict `=== 'true'`, read at call time via customerProfileEditLive(); dark by default. Kill: unset.)
  *   GATE_SMS_THREAD_CONTINUITY=true (owner 2026-11-27: carries short scheduling follow-up texts like "Anytime works" or "Tuesday afternoon" across confirmed sent same-sender SMS turns within 72h so OPEN TIMES and job sizing follow the conversation. Off = short replies are judged on their own text alone. Strict `=== 'true'`, read at call time via smsThreadContinuityLive(); dark by default. Kill: unset.)
@@ -1482,6 +1484,9 @@ const gates = {
   // reply a human actually sent. Burns one Anthropic call per inbound
   // customer SMS, so prod requires explicit opt-in.
   smsShadowDrafts: isProd ? process.env.GATE_SMS_SHADOW_DRAFTS === 'true' : true,
+  // Post-visit SMS revision drafting on Railway (owner 2026-11-27, Decision 4D). Ships 100% DARK: strict 'true'.
+  // Read at call time via smsPostVisitRedraftLive(). Kill switch: unset.
+  smsPostVisitRedraft: process.env.GATE_SMS_POST_VISIT_REDRAFT === 'true',
 
   // SMS private-profile capture + existing admin exception bells. Runtime reads the gate again before writes. Activation
   // also requires GATE_SMS_OPERATIONAL_ACTIONS_SINCE (an offset ISO instant)
@@ -4791,6 +4796,10 @@ const gates = {
   // The new_lead drip's steps 1 and 2 (owner 2026-11-24). Ships DARK: exactly 'true'. It emails customers. This entry is for
   // logGateStatus only: automation-runner.js reads GATE_NEW_LEAD_DRIP_STEPS at call time via newLeadDripStepsLive(). Kill switch: unset.
   newLeadDripSteps: process.env.GATE_NEW_LEAD_DRIP_STEPS === 'true',
+
+  // Extended new_lead drip: Email Steps 3 (Day 10) & 4 (Day 21) + phone-only residential SMS Days 2 & 5 (owner 2026-11-27).
+  // Ships 100% DARK: strict 'true'. Read at call time via newLeadDripExtendedLive(). Kill switch: unset.
+  newLeadDripExtended: process.env.GATE_NEW_LEAD_DRIP_EXTENDED === 'true',
 
   // The engagement engine's follow-up emails: the reply pause counts only messages since the estimate was made, for a person who has been sent no other
   // estimate (owner 2026-11-21; the text stages, the deferred text replay and the payment-step follow-up keep 14 days). Ships DARK:
@@ -9284,3 +9293,24 @@ function emailUnifiedReplyContextLive() {
 }
 // GATE_EMAIL_UNIFIED_REPLY_CONTEXT reader, on its own line so gate PRs never conflict.
 module.exports.emailUnifiedReplyContextLive = emailUnifiedReplyContextLive;
+
+// GATE_SMS_POST_VISIT_REDRAFT read at CALL time (owner 2026-11-27, Decision 4D): strict 'true', dark by default.
+// Also requires smsPromptB1Live() (GATE_SMS_PROMPT_B1 + GATE_SMS_REAL_ANSWERS) so fresh visit findings actually load.
+// Paid Anthropic draft+verify call on visit closeout when an unanswered same-day SMS had a pre-closeout house_voice draft
+// (est. 1-2/day x ~$0.02 = ~$0.60-1.20/mo on Railway; findPostVisitRedraftCandidates is a read-only discovery helper).
+// Never sends SMS. Off = returns immediately with zero DB reads and $0 API cost. Kill = unset.
+function smsPostVisitRedraftLive() {
+  return process.env.GATE_SMS_POST_VISIT_REDRAFT === 'true' && smsPromptB1Live();
+}
+// GATE_SMS_POST_VISIT_REDRAFT reader, on its own line so gate PRs never conflict.
+module.exports.smsPostVisitRedraftLive = smsPostVisitRedraftLive;
+
+// GATE_NEW_LEAD_DRIP_EXTENDED read at CALL time (owner 2026-11-27, Decision 2): strict 'true', dark by default.
+// Extends new_lead email sequence with Day 10 & Day 21 steps (stored enabled=false) and enables Day 2 & Day 5 SMS follow-ups
+// for phone-only residential unquoted leads (new-lead-phone-sms-drip.js). Sends customer comms + ~$0.34/mo SMS cost.
+// Off = Steps 3 & 4 never load and phone-only SMS drip returns immediately with zero queries. Kill = unset.
+function newLeadDripExtendedLive() {
+  return process.env.GATE_NEW_LEAD_DRIP_EXTENDED === 'true';
+}
+// GATE_NEW_LEAD_DRIP_EXTENDED reader, on its own line so gate PRs never conflict.
+module.exports.newLeadDripExtendedLive = newLeadDripExtendedLive;

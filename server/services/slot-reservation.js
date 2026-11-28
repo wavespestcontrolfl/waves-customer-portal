@@ -1118,6 +1118,26 @@ async function moveMakeRoomStops(client, { row, estimate, serviceProfile, effect
   return writeChainOrRefuse(client, { row, scheduledDate });
 }
 
+// Seasonal (Feb–Oct) redemption & commit guard: the slot list is season-filtered
+// for a seasonal mosquito selection, but the offer HMAC does not bind the
+// frequency (and /accept can post seasonal9 on a reservation made under
+// monthly12). Both reserveSlot and commitReservation call this so a prohibited
+// Nov–Jan visit never reserves or commits under a seasonal program.
+function assertSeasonalSelectionInSeason(serviceProfile, date, slotId = null) {
+  const seasonalSelection = !!serviceProfile
+    && typeof estimateSlotAvailability.seasonalSelectionProfile === 'function'
+    && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile);
+  if (seasonalSelection
+    && typeof estimateSlotAvailability.inMosquitoSeason === 'function'
+    && !estimateSlotAvailability.inMosquitoSeason(date)) {
+    const err = new Error('This seasonal program runs February through October — pick an in-season date.');
+    err.code = 'SLOT_UNAVAILABLE';
+    if (slotId != null) err.slotId = slotId;
+    throw err;
+  }
+  return seasonalSelection;
+}
+
 async function reserveSlot({
   estimateId,
   slotId,
@@ -1443,26 +1463,7 @@ async function reserveSlot({
           serviceCadences,
           durationMinutes,
         }, trx);
-      // Seasonal (Feb–Oct) redemption re-check (codex r8 P1): the slot LIST
-      // is season-filtered for a seasonal mosquito selection, but the offer
-      // HMAC does not bind the frequency — a list fetched under monthly12
-      // (where winter dates are legitimately offered) could be redeemed with
-      // selectedFrequency seasonal9, and the converter would then seed the
-      // series from a Nov–Jan parent, counting a prohibited winter visit
-      // toward the nine. Office/admin bookings don't come through this route.
-      // Guarded like resolveEstimateSlotProfile above — suites mock the
-      // availability module down to the functions they assert on.
-      const seasonalSelection = !!serviceProfile
-        && typeof estimateSlotAvailability.seasonalSelectionProfile === 'function'
-        && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile);
-      if (seasonalSelection
-        && typeof estimateSlotAvailability.inMosquitoSeason === 'function'
-        && !estimateSlotAvailability.inMosquitoSeason(date)) {
-        const err = new Error('This seasonal program runs February through October — pick an in-season date.');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = slotId;
-        throw err;
-      }
+      const seasonalSelection = assertSeasonalSelectionInSeason(serviceProfile, date, slotId);
       // Deferred horizon adjudication (see the pre-txn note): standard callers
       // keep the 90-day ceiling; a seasonal selection may reach the extended
       // winter-gap horizon its slot list was generated with.
@@ -2336,6 +2337,7 @@ async function commitReservation({
       );
     }
     const scheduledDate = dateOnly(row.scheduled_date);
+    assertSeasonalSelectionInSeason(serviceProfile, scheduledDate);
     const windowStart = row.window_start;
     const windowEnd = effectiveDurationMinutes && scheduledDate && windowStart
       ? addMinutesToTime(windowStart, effectiveDurationMinutes)

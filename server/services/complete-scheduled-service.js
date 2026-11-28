@@ -16909,6 +16909,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
     await queueServiceReportEmailIfEligible();
 
+    // Post-visit SMS re-draft revision (owner 2026-11-27, Decision 4D): non-blocking, never sends.
+    require('./sms-post-visit-redraft').triggerOnVisitComplete({ isBackfillCompletion, isIncompleteVisit, svc, record });
+
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
     // Legacy mode is SMS-only, so no phone = no ask. Cadence mode has its own

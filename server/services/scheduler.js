@@ -5234,6 +5234,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN — Phone-only residential new-lead SMS follow-up drip (Day 2 & Day 5).
+  // Ships 100% DARK behind GATE_NEW_LEAD_DRIP_EXTENDED; exits BEFORE acquiring DB lock while off.
+  cron.schedule('*/15 * * * *', async () => {
+    if (require('../config/feature-gates').newLeadDripExtendedLive?.() !== true) return;
+    try {
+      await runExclusive('new-lead-phone-sms-drip', async () => {
+        const { processPhoneOnlyLeadSmsDrip } = require('./new-lead-phone-sms-drip');
+        await processPhoneOnlyLeadSmsDrip();
+      });
+    } catch (err) {
+      logger.error(`[new-lead-phone-sms-drip] tick failed: ${err.code || err.name || 'error'}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY MIN — booked lead calls: the
   // 15-minute reminder, the press-1 ring at the booked time, and the 8 AM
   // bell for a time question never answered (lead-callback-scheduler.js).

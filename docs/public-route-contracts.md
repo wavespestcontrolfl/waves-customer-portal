@@ -1082,7 +1082,9 @@ code. Each route's 409 body, unchanged:
 - `POST /api/public/estimates/:token/reserve/:scheduledServiceId/extend`:
   `{ error, code: 'SLOT_UNAVAILABLE', slotId }`.
 - `PUT /api/estimates/:token/accept` with a held time (checked on the final
-  window): `{ error, code: 'SLOT_UNAVAILABLE' }`.
+  window, and for a seasonal Feb–Oct mosquito selection whose held date falls
+  in Nov–Jan even if the reservation was originally minted under `monthly12`):
+  `{ error, code: 'SLOT_UNAVAILABLE' }`.
 - The portal's one-tap purchase, which holds and confirms through the same
   two functions (`POST /api/one-tap/:purchaseId/reserve` and
   `POST /api/one-tap/:purchaseId/confirm`): `{ error, code:
@@ -8385,13 +8387,23 @@ into a book window and a move window 2026-09-28, `SELF_SERVE_MOVE_NOTICE_HOURS`,
 default 24, independent of `SELF_SERVE_NOTICE_HOURS` — no fallback to it):
 GET answers `not_reschedulable` with reason `self_serve_notice` for a visit
 that itself currently starts within the MOVE window (a MISSED visit is being
-rebooked and is exempt, and so is a visit whose
+rebooked and is exempt; a visit on hold under `GATE_VISIT_HOLD` —
+`scheduled_services.held_at IS NOT NULL` — is already off the route and is
+also exempt from the original-visit MOVE window; and so is a visit whose
 `scheduled_services.office_move_approved_for` equals its current start — the
 admin composer stamps that when the office inserts the reschedule link inside
-the window, owner 2026-10-06, and any move ends it); no offered target/destination starts within the
-BOOK window (`SELF_SERVE_NOTICE_HOURS`, default 24); and POST refuses such a
-visit with 409 code
-`SELF_SERVE_NOTICE`. The find-slots refusal for the same visit keeps its
+the window, owner 2026-10-06, and any move ends it). The destination/target slot STILL requires the BOOK window (`SELF_SERVE_NOTICE_HOURS`,
+default 24) even for missed and held visits: no offered target/destination
+starts within the BOOK window, so a POST targeting a slot already inside the
+BOOK window misses the availability rebuild and answers 409 `SLOT_TAKEN`,
+while a POST whose original visit is inside the MOVE window or whose target
+crosses into the BOOK window while waiting for the lock answers 409 code
+`SELF_SERVE_NOTICE`. For a held visit under
+`GATE_VISIT_HOLD`, picking the visit's prior date and start bypasses
+idempotent replay so the commit re-checks live availability and releases
+`held_at` atomically (fenced on the observed `held_at`; a concurrent second
+submission that finds the visit already released onto the same slot replays
+as success without duplicating move logs or notices). The find-slots refusal for the same visit keeps its
 existing 409 `{ error, reason: 'self_serve_notice' }` shape (no code added);
 the page treats that reason as a state change and reloads, so the old times
 leave the page, as Confirm's `SELF_SERVE_NOTICE` handling already does. POST is a WRITE with two owner-authorized

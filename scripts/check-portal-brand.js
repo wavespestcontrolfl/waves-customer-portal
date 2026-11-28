@@ -110,8 +110,6 @@ const LEGACY_BASELINE = {
   'client/src/components/estimate/CustomerReviews.jsx': { 'emoji': 1 },
   'client/src/components/estimate/GoogleProfilesCard.jsx': { 'emoji': 1 },
   'client/src/components/estimate/InlineAutoPayCapture.jsx': { 'emoji': 1, 'font-family-literal': 1 },
-  'client/src/components/estimate/PriceCard.jsx': { 'banned-font-size': 1 },
-  'client/src/components/estimate/ProposalDetailCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 3 },
   'client/src/components/estimate/tokens.js': { 'local-palette': 1 },
   'client/src/index.css': { 'banned-font-size': 2 },
