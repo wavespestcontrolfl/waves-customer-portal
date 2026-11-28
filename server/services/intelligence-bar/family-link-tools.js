@@ -347,6 +347,7 @@ async function commit(toolName, input, actionContext) {
     formerMemberIds,
     departedCustomerId: plan.customer_id,
     reason: 'unlinked',
+    includeDeparted: true,
   });
   logger.info(`[intelligence-bar:family-link] ${toolName} done for ${plan.customer_id}`);
   if (toolName === 'link_customer_family') {

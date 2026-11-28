@@ -20,7 +20,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // family links and Multi-Home eligibility; leads/lost/churned and internal
 // test accounts are excluded, and two profiles at the same address cannot link.
 const LIVE_FAMILY_STAGES = Object.freeze(['active_customer', 'won', 'at_risk']);
-const DEAD_VISIT_STATUSES = ['cancelled', 'canceled', 'completed', 'skipped', 'no_show'];
 
 function familyError(message, statusCode) {
   return Object.assign(new Error(message), { statusCode, status: statusCode, isOperational: true, code: 'multi_home_family' });
@@ -329,7 +328,7 @@ async function countUpcomingMultiHomeDiscountedVisits(conn, customerId) {
   const row = await conn('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '>=', today)
-    .whereIn('status', ['pending', 'confirmed'])
+    .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
     .where((q) => {
       q.where('discount_id', preset.id)
         .orWhere('line_discount_id', preset.id)
@@ -349,8 +348,9 @@ async function countUpcomingMultiHomeDiscountedVisits(conn, customerId) {
 // homes (unlink, archive, or cancellation) while a surviving member still
 // carries an active Multi-Home discount on upcoming visits, raise an office
 // review alert. Never auto-changes prices and never texts/emails customers.
-async function alertFamilyDropBelowTwo(conn, { formerMemberIds = [], departedCustomerId = null, reason = 'unlinked' } = {}) {
-  const ids = [...new Set((formerMemberIds || []).map((id) => normalizeId(id)).filter((id) => id && id !== normalizeId(departedCustomerId || '')))];
+async function alertFamilyDropBelowTwo(conn, { formerMemberIds = [], departedCustomerId = null, reason = 'unlinked', includeDeparted = false } = {}) {
+  const departedNorm = normalizeId(departedCustomerId || '');
+  const ids = [...new Set((formerMemberIds || []).map((id) => normalizeId(id)).filter((id) => id && (includeDeparted || id !== departedNorm)))];
   if (!ids.length) return 0;
   let alerted = 0;
   const { raiseAdminAlert } = require('./admin-alert-compose');
@@ -420,6 +420,7 @@ async function unlinkFamily(conn, { customerId, actorId = null } = {}) {
       formerMemberIds: [...res.formerMemberIds, mine],
       departedCustomerId: mine,
       reason: 'unlinked',
+      includeDeparted: true,
     });
   }
   return familyMembers(conn, mine);
