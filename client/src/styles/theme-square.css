@@ -37,7 +37,8 @@
 @media not print {
   html.admin-app[data-admin-theme="dark"],
   html.admin-app[data-admin-theme="dark"] .admin-shell-v2,
-  html.admin-app[data-admin-theme="dark"] .tech-field {
+  html.admin-app[data-admin-theme="dark"] .tech-field,
+  html.admin-app[data-admin-theme="dark"] .tech-visit-surface {
     color-scheme: dark;
 
     /* Surfaces — calm obsidian neutrals */
@@ -86,5 +87,9 @@
     --tfx-ok-tint: rgba(4, 120, 87, 0.22);
     --tfx-amber-tint: rgba(217, 119, 6, 0.2);
     --tfx-red-tint: rgba(200, 49, 47, 0.2);
+    --tech-warn-bg: rgba(217, 119, 6, 0.2);
+    --tech-warn-line: rgba(252, 211, 77, 0.45);
+    --tech-warn-text: #fcd34d;
+    --tech-error-text: #f87171;
   }
 }

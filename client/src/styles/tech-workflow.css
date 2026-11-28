@@ -115,14 +115,14 @@
 .ui-control.tech-visit-control::placeholder { color: var(--tech-faint); }
 .ui-action.tech-visit-action { font-family: inherit; font-size: 14px; font-weight: 500; border-radius: 4px; color: var(--tech-text); border: 0.5px solid var(--tech-border-strong); background: var(--tech-card); }
 .ui-action.tech-visit-action:hover:where(:not(:disabled)) { background: var(--tech-subtle); }
-.ui-action.tech-visit-primary { background: var(--tech-accent); border-color: var(--tech-accent); color: #fff; }
+.ui-action.tech-visit-primary { background: var(--tech-accent); border-color: var(--tech-accent); color: var(--tfx-on-accent, #fff); }
 .ui-action.tech-visit-primary:hover:where(:not(:disabled)) { background: var(--tech-accent); opacity: .9; }
 .ui-action.tech-visit-wide { width: 100%; }
 .ui-action.tech-visit-action:focus-visible { outline: 2px solid var(--tech-accent); outline-offset: 2px; }
 .ui-action.tech-visit-action[aria-pressed='true'],
-.ui-action.tech-visit-action[aria-pressed='true']:hover:where(:not(:disabled)) { background: var(--tech-accent); border-color: var(--tech-accent); color: #fff; }
+.ui-action.tech-visit-action[aria-pressed='true']:hover:where(:not(:disabled)) { background: var(--tech-accent); border-color: var(--tech-accent); color: var(--tfx-on-accent, #fff); }
 .ui-action.tech-visit-close { flex-shrink: 0; width: 48px; padding: 0; background: transparent; border-color: transparent; font-size: 24px; }
-.ui-action.tech-visit-complete { flex: 1; background: var(--tech-accent); border-color: var(--tech-accent); color: #fff; }
+.ui-action.tech-visit-complete { flex: 1; background: var(--tech-accent); border-color: var(--tech-accent); color: var(--tfx-on-accent, #fff); }
 .ui-action.tech-visit-complete:hover:where(:not(:disabled)) { background: var(--tech-accent); opacity: .9; }
 .tech-visit-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .tech-visit-products { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }

@@ -171,6 +171,16 @@
     background-color: #d1d6de;
   }
 
+  /* Selected chips & primary buttons in technician Fast Complete / visit sheets */
+  html.admin-app[data-admin-theme="dark"] :is(.ui-action.tech-visit-primary, .ui-action.tech-visit-complete, .ui-action.tech-visit-action[aria-pressed="true"], .ui-action.tech-visit-action[aria-pressed="true"]:hover:where(:not(:disabled))) {
+    background-color: #f4f5f6;
+    border-color: #f4f5f6;
+    color: #111315;
+  }
+  html.admin-app[data-admin-theme="dark"] [style*="color: rgb(9, 9, 11)"] {
+    color: #f4f5f6 !important;
+  }
+
   /* Workspace navigation & action menus (ui-workspace.css) */
   html.admin-app[data-admin-theme="dark"] .ui-action-menu {
     background-color: #181b1f;
@@ -285,10 +295,8 @@
     color: #60a5fa;
   }
 
-  /* Form controls */
-  html.admin-app[data-admin-theme="dark"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
-  html.admin-app[data-admin-theme="dark"] textarea,
-  html.admin-app[data-admin-theme="dark"] select {
+  /* Form controls (:where keeps specificity below :focus and :disabled) */
+  html.admin-app[data-admin-theme="dark"] :where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]), textarea, select) {
     background-color: #14171a;
     color: #f4f5f6;
     border-color: #3d4450;
@@ -339,6 +347,9 @@
   html.admin-app[data-admin-theme="dark"] .recharts-default-tooltip {
     background-color: #181b1f !important;
     border-color: #3d4450 !important;
+    color: #f4f5f6 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .recharts-default-tooltip :is(.recharts-tooltip-label, .recharts-tooltip-item, .recharts-tooltip-item-name, .recharts-tooltip-item-value, .recharts-tooltip-item-unit) {
     color: #f4f5f6 !important;
   }
 
