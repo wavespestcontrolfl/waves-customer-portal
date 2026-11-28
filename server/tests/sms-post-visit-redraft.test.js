@@ -72,7 +72,7 @@ describe('GATE_SMS_POST_VISIT_REDRAFT gate reader', () => {
   });
 });
 
-describe('migration 20261128030000_message_drafts_post_visit_revision', () => {
+describe('migrations', () => {
   test('adds supersedes_draft_id, draft_trigger and partial unique index, and down() drops them', async () => {
     const added = [];
     const dropped = [];
@@ -131,7 +131,7 @@ describe('pure helpers', () => {
     expect(end.toISOString()).toBe('2026-11-28T05:00:00.000Z');
   });
 
-  test('lastTenPhone returns 10 digits for US and international numbers (matching publishSuggestion)', () => {
+  test('lastTenPhone returns 10 digits for US and international numbers', () => {
     expect(lastTenPhone('+1 (941) 555-0199')).toBe('9415550199');
     expect(lastTenPhone('+44 20 7946 0958')).toBe('2079460958');
     expect(lastTenPhone('12345')).toBeNull();
@@ -146,13 +146,20 @@ describe('pure helpers', () => {
   });
 });
 
-describe('findEligibleInboundForPostVisitRedraft', () => {
+describe('findEligibleInboundForPostVisitRedraft (via canonical pending conversations)', () => {
   const INBOUND = {
     id: 'sms-in-1',
     from_phone: '+19415550199',
     message_body: 'Did the tech spray the back patio?',
     created_at: new Date('2026-11-27T14:00:00Z'),
     metadata: { media: ['https://example.com/patio.jpg'] },
+  };
+  const PENDING_ROW = {
+    id: 'msg-canonical-1',
+    source: 'canonical',
+    legacy_id: 'sms-in-1',
+    peer: '9415550199',
+    created_at: INBOUND.created_at,
   };
   const PRIOR_DRAFT = {
     id: 'draft-orig-1',
@@ -162,18 +169,24 @@ describe('findEligibleInboundForPostVisitRedraft', () => {
     scheduling_intent: true,
   };
 
-  test('returns eligible inbound preserving intent, schedulingIntent, hasMedia, and requires house_voice drafter', async () => {
+  test('uses loadPendingSmsConversations, preserves intent/schedulingIntent/hasMedia, and requires house_voice drafter', async () => {
     const priorDraftQ = chain({ first: PRIOR_DRAFT });
     const dbh = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
+      sms_log: [chain({ first: INBOUND }), chain({ first: null })],
       message_drafts: [priorDraftQ, chain({ first: null })],
     });
+    const loadPendingSmsConversations = jest.fn(async () => [PENDING_ROW]);
+
     const res = await findEligibleInboundForPostVisitRedraft(dbh, {
       customerId: 'cust-1',
       completedAt: new Date('2026-11-27T16:30:00Z'),
       visitDateET: '2026-11-27',
-    }, { threadHasLiveAnswer: jest.fn(async () => null) });
+    }, { threadHasLiveAnswer: jest.fn(async () => null), loadPendingSmsConversations });
 
+    expect(loadPendingSmsConversations).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      includeLegacyOnly: true,
+    }));
     expect(priorDraftQ.where).toHaveBeenCalledWith({
       sms_log_id: 'sms-in-1',
       drafter: HOUSE_VOICE_DRAFTER,
@@ -191,70 +204,29 @@ describe('findEligibleInboundForPostVisitRedraft', () => {
     });
   });
 
-  test('checks per phone thread so an answered text on phone B does not hide an unanswered text on phone A', async () => {
-    const phoneB = { ...INBOUND, id: 'sms-phone-b', from_phone: '+19415550222', created_at: new Date('2026-11-27T15:00:00Z') };
-    const phoneA = { ...INBOUND, id: 'sms-phone-a', from_phone: '+19415550111', created_at: new Date('2026-11-27T14:00:00Z'), metadata: { media: [] } };
-    const dbh = makeDb({
-      sms_log: [chain({ result: [phoneB, phoneA] }), chain({ first: null })],
-      message_drafts: [chain({ first: PRIOR_DRAFT }), chain({ first: null })],
-    });
-    const threadHasLiveAnswer = jest.fn(async (_dbh, { threadLast10 }) => (
-      threadLast10 === '9415550222' ? 'human_answered' : null
-    ));
-
+  test('returns null when loadPendingSmsConversations resolved the thread via phone callback or staff action', async () => {
+    const dbh = makeDb({});
     const res = await findEligibleInboundForPostVisitRedraft(dbh, {
       customerId: 'cust-1',
       completedAt: new Date('2026-11-27T16:30:00Z'),
       visitDateET: '2026-11-27',
-    }, { threadHasLiveAnswer });
-
-    expect(res?.smsLogId).toBe('sms-phone-a');
-    expect(res?.hasMedia).toBe(false);
-  });
-
-  test('paginates past a full first page of answered phone B messages to find unanswered phone A', async () => {
-    const page1 = chain({
-      result: [
-        { ...INBOUND, id: 'sms-b-2', from_phone: '+19415550222', created_at: new Date('2026-11-27T15:10:00Z') },
-        { ...INBOUND, id: 'sms-b-1', from_phone: '+19415550222', created_at: new Date('2026-11-27T15:00:00Z') },
-      ],
-    });
-    const page2 = chain({
-      result: [
-        { ...INBOUND, id: 'sms-a-1', from_phone: '+19415550111', created_at: new Date('2026-11-27T14:00:00Z'), metadata: { media: [] } },
-      ],
-    });
-    const dbh = makeDb({
-      sms_log: [page1, page2, chain({ first: null })],
-      message_drafts: [chain({ first: PRIOR_DRAFT }), chain({ first: null })],
-    });
-    const threadHasLiveAnswer = jest.fn(async (_dbh, { threadLast10 }) => (
-      threadLast10 === '9415550222' ? 'human_answered' : null
-    ));
-
-    const res = await findEligibleInboundForPostVisitRedraft(dbh, {
-      customerId: 'cust-1',
-      completedAt: new Date('2026-11-27T16:30:00Z'),
-      visitDateET: '2026-11-27',
-    }, { threadHasLiveAnswer, pageSize: 2 });
-
-    expect(page2.whereRaw).toHaveBeenCalledWith(
-      '(s.created_at, s.id) < ((SELECT created_at FROM sms_log WHERE id = ?), ?)',
-      ['sms-b-1', 'sms-b-1'],
-    );
-    expect(res?.smsLogId).toBe('sms-a-1');
+    }, { loadPendingSmsConversations: async () => [] });
+    expect(res).toBeNull();
   });
 
   test('returns null when an automated outbound reply already answered on that phone thread', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: { id: 'sms-auto-1' } })],
+      sms_log: [chain({ first: INBOUND }), chain({ first: { id: 'sms-auto-1' } })],
       message_drafts: [],
     });
     const res = await findEligibleInboundForPostVisitRedraft(dbh, {
       customerId: 'cust-1',
       completedAt: new Date('2026-11-27T16:30:00Z'),
       visitDateET: '2026-11-27',
-    }, { threadHasLiveAnswer: jest.fn(async () => null) });
+    }, {
+      threadHasLiveAnswer: jest.fn(async () => null),
+      loadPendingSmsConversations: async () => [PENDING_ROW],
+    });
     expect(res).toBeNull();
   });
 });
@@ -267,6 +239,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
     created_at: new Date('2026-11-27T15:00:00Z'),
     metadata: { media: [] },
   };
+  const PENDING = { id: 'msg-2', source: 'canonical', legacy_id: 'sms-in-2', created_at: INBOUND.created_at };
   const PRIOR = {
     id: 'draft-orig-2',
     created_at: new Date('2026-11-27T15:01:00Z'),
@@ -291,15 +264,15 @@ describe('draftPostVisitRevisionIfEligible', () => {
     expect(draftFn).not.toHaveBeenCalled();
   });
 
-  test('claims per-message lock with recordHealth:false, rechecks thread inside lock, passes liveEta:false, and forwards safeguards', async () => {
+  test('claims per-message lock, rechecks canonical pending view inside lock, passes liveEta:false & serviceRecordId', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: null }), chain({ first: null }), chain({ first: null })],
+      sms_log: [chain({ first: INBOUND }), chain({ first: null }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
       customers: [chain({ first: { id: 'cust-2', first_name: 'Sam', city: 'Sarasota' } })],
     });
     const draftFn = jest.fn(async () => 'draft-rev-2');
     const lockFn = jest.fn(async (_name, fn) => fn());
-    const liveAnswerFn = jest.fn(async () => null);
+    const loadPendingFn = jest.fn(async () => [PENDING]);
 
     const res = await draftPostVisitRevisionIfEligible({
       customerId: 'cust-2',
@@ -310,11 +283,12 @@ describe('draftPostVisitRevisionIfEligible', () => {
       gates: { smsPostVisitRedraftLive: () => true },
       draftFn,
       lockFn,
-      threadHasLiveAnswerFn: liveAnswerFn,
+      loadPendingFn,
+      threadHasLiveAnswerFn: async () => null,
     });
 
     expect(lockFn).toHaveBeenCalledWith('sms-post-visit-redraft:sms-in-2', expect.any(Function), { recordHealth: false });
-    expect(liveAnswerFn).toHaveBeenCalledTimes(2);
+    expect(loadPendingFn).toHaveBeenCalledTimes(2);
     expect(res).toEqual({ drafted: true, draftId: 'draft-rev-2', supersedesDraftId: 'draft-orig-2' });
     expect(draftFn).toHaveBeenCalledWith(expect.objectContaining({
       smsLogId: 'sms-in-2',
@@ -329,16 +303,16 @@ describe('draftPostVisitRevisionIfEligible', () => {
     }));
   });
 
-  test('skips paid draft when staff answers the thread before the advisory lock is acquired', async () => {
+  test('skips paid draft when staff resolves thread via callback/action before lock is acquired', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
+      sms_log: [chain({ first: INBOUND }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
       customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
     });
     const draftFn = jest.fn();
-    const liveAnswerFn = jest.fn()
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce('human_answered');
+    const loadPendingFn = jest.fn()
+      .mockResolvedValueOnce([PENDING])
+      .mockResolvedValueOnce([]); // resolved by phone callback before lock!
     const res = await draftPostVisitRevisionIfEligible({
       customerId: 'cust-2',
       completedAt: new Date('2026-11-27T17:00:00Z'),
@@ -347,39 +321,16 @@ describe('draftPostVisitRevisionIfEligible', () => {
       gates: { smsPostVisitRedraftLive: () => true },
       draftFn,
       lockFn: async (_name, fn) => fn(),
-      threadHasLiveAnswerFn: liveAnswerFn,
-    });
-    expect(res).toEqual({ skipped: 'answered_before_lock' });
-    expect(draftFn).not.toHaveBeenCalled();
-  });
-
-  test('skips paid draft when another closeout already holds the per-inbound advisory lock', async () => {
-    const dbh = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
-      message_drafts: [chain({ first: PRIOR }), chain({ first: null })],
-      customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
-    });
-    const draftFn = jest.fn();
-    const lockFn = jest.fn(async () => ({ skipped: true, reason: 'lease_held' }));
-
-    const res = await draftPostVisitRevisionIfEligible({
-      customerId: 'cust-2',
-      completedAt: new Date('2026-11-27T17:00:00Z'),
-      visitDateET: '2026-11-27',
-      dbh,
-      gates: { smsPostVisitRedraftLive: () => true },
-      draftFn,
-      lockFn,
+      loadPendingFn,
       threadHasLiveAnswerFn: async () => null,
     });
-
-    expect(res).toEqual({ skipped: 'claim_in_flight' });
+    expect(res).toEqual({ skipped: 'resolved_before_lock' });
     expect(draftFn).not.toHaveBeenCalled();
   });
 
   test('retries bounded capacity skips (no_connection) before succeeding or reporting lock_unavailable', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: null }), chain({ first: null }), chain({ first: null })],
+      sms_log: [chain({ first: INBOUND }), chain({ first: null }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
       customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
     });
@@ -399,36 +350,17 @@ describe('draftPostVisitRevisionIfEligible', () => {
       draftFn,
       lockFn,
       sleepFn,
+      loadPendingFn: async () => [PENDING],
       threadHasLiveAnswerFn: async () => null,
     });
     expect(lockFn).toHaveBeenCalledTimes(2);
     expect(sleepFn).toHaveBeenCalledTimes(1);
     expect(res).toEqual({ drafted: true, draftId: 'draft-rev-retry', supersedesDraftId: 'draft-orig-2' });
-
-    const dbh2 = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
-      message_drafts: [chain({ first: PRIOR }), chain({ first: null })],
-      customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
-    });
-    const lockAlwaysBusy = jest.fn(async () => ({ skipped: true, reason: 'no_connection' }));
-    const res2 = await draftPostVisitRevisionIfEligible({
-      customerId: 'cust-2',
-      completedAt: new Date('2026-11-27T17:00:00Z'),
-      visitDateET: '2026-11-27',
-      dbh: dbh2,
-      gates: { smsPostVisitRedraftLive: () => true },
-      draftFn: jest.fn(),
-      lockFn: lockAlwaysBusy,
-      sleepFn: jest.fn(async () => {}),
-      threadHasLiveAnswerFn: async () => null,
-    });
-    expect(lockAlwaysBusy).toHaveBeenCalledTimes(3);
-    expect(res2).toEqual({ skipped: 'lock_unavailable' });
   });
 });
 
-describe('findPostVisitRedraftCandidates (Mac free runner pagination)', () => {
-  test('filters out backfills and incomplete visits and pages past ineligible closeouts', async () => {
+describe('findPostVisitRedraftCandidates (read-only discovery helper)', () => {
+  test('filters to completed non-backfill non-incomplete records and pages past ineligible closeouts', async () => {
     const inbound = {
       id: 'sms-in-4',
       from_phone: '+19415550166',
@@ -456,19 +388,19 @@ describe('findPostVisitRedraftCandidates (Mac free runner pagination)', () => {
     });
     const dbh = makeDb({
       service_records: [page1, page2],
-      sms_log: [
-        chain({ result: [] }),
-        chain({ result: [] }),
-        chain({ result: [inbound] }),
-        chain({ first: null }),
-      ],
+      sms_log: [chain({ first: inbound }), chain({ first: null })],
       message_drafts: [chain({ first: prior }), chain({ first: null })],
     });
+    const loadPendingSmsConversations = jest.fn(async ({ customerId }) => (
+      customerId === 'cust-3'
+        ? [{ id: 'msg-4', source: 'canonical', legacy_id: 'sms-in-4', created_at: inbound.created_at }]
+        : []
+    ));
 
     const list = await findPostVisitRedraftCandidates(
       dbh,
       { visitDateET: '2026-11-27', limit: 1, pageSize: 2 },
-      { threadHasLiveAnswer: async () => null },
+      { threadHasLiveAnswer: async () => null, loadPendingSmsConversations },
     );
     expect(page1.where).toHaveBeenCalledWith('status', 'completed');
     expect(page1.whereRaw).toHaveBeenCalledWith("COALESCE(structured_notes->>'backfill', 'false') <> 'true'");

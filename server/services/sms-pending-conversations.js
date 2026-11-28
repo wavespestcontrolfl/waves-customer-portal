@@ -356,7 +356,7 @@ async function loadPendingSmsConversations({
       GROUP BY by_peer.peer
       HAVING count(*) = 1
     )
-    SELECT li.id, li.source, li.peer, li.endpoint, li.message_body, li.created_at,
+    SELECT li.id, li.source, li.legacy_id, li.peer, li.endpoint, li.message_body, li.created_at,
            li.enriched_metadata AS metadata, li.media,
            prior_context.message_body AS prior_outbound_body,
            customer_match.id AS customer_id,

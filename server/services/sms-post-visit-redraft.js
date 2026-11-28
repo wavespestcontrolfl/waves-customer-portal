@@ -3,17 +3,18 @@
 /**
  * Post-Visit SMS Re-Draft Revision Service (owner 2026-11-27 "ok go", Decision 4D).
  *
- * When a non-backfill, completed visit closes out (`service_records` saved), checks each
- * phone thread on the account for an unanswered inbound SMS earlier the SAME ET calendar day
- * whose original `house_voice` draft predated closeout. If found, generates ONE linked shadow
- * revision row (`draft_trigger = 'post_visit_closeout'`, `supersedes_draft_id = priorDraft.id`)
- * with fresh post-closeout visit findings — preserving intent, schedulingIntent, and fail-closed
- * media safeguards, WITHOUT modifying the original draft/card and WITHOUT auto-sending.
+ * When a non-backfill, completed visit closes out (`service_records` saved), checks the
+ * canonical pending-conversations view (`loadPendingSmsConversations`) for an unanswered
+ * same-ET-day inbound SMS on the account whose original `house_voice` draft predated closeout.
+ * Delegating to `loadPendingSmsConversations` selects the newest inbound per phone thread in
+ * PostgreSQL (no row cutoff) AND respects SMS replies, completed staff phone callbacks,
+ * staff booking/payment resolution actions, and opt-outs.
  *
  * Spend discipline: live Railway drafting is gated behind `GATE_SMS_POST_VISIT_REDRAFT`
- * (`smsPostVisitRedraftLive()`, strict `=== 'true'`, dark by default). While off,
- * `draftPostVisitRevisionIfEligible()` returns `{ skipped: 'gate_off' }` with zero DB reads
- * and $0 API cost. `findPostVisitRedraftCandidates()` is a read-only discovery helper
+ * (`smsPostVisitRedraftLive()`, strict `=== 'true'`, also requires `smsPromptB1Live()`, dark by
+ * default). Revisions pass `liveEta: false` so Distance Matrix is never called outside budget,
+ * never modify the original draft/card, never auto-send, and stay isolated from nightly judging
+ * and shadow score totals. `findPostVisitRedraftCandidates()` is a read-only discovery helper
  * available for a future free Mac Max-plan runner (not yet wired into `sms-late-drafter.js`).
  */
 
@@ -25,12 +26,14 @@ const { serviceDateOnly } = require('../utils/invoice-due-base-day');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { mediaCountFromMetadata } = require('./sms-gratitude-context');
 const { SENT_STATUSES, threadHasLiveAnswer } = require('./sms-suggest-mode');
+const { loadPendingSmsConversations } = require('./sms-pending-conversations');
 
 const INBOUND_TRIGGER = 'inbound';
 const POST_VISIT_TRIGGER = 'post_visit_closeout';
 const HOUSE_VOICE_DRAFTER = 'house_voice';
 const AUTOMATED_REPLY_TYPES = ['ai_autosent', 'ai_gratitude'];
-const IGNORED_INBOUND_TYPES = ['opt_out', 'opt_in', 'sms_reaction'];
+const DEFAULT_LOCK_RETRY_MS = 150;
+const MAX_NO_CONNECTION_RETRIES = 2;
 
 function etDayBounds(visitDateET) {
   const raw = String(visitDateET || '').trim();
@@ -41,18 +44,11 @@ function etDayBounds(visitDateET) {
   return { day, start, end };
 }
 
-/**
- * Matches `publishSuggestion`'s last-10 phone normalization (works for US and international numbers).
- */
 function lastTenPhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
-/**
- * Fail-closed media check matching `sms-late-drafter.js`: only a confirmed zero-attachment
- * metadata payload sets `hasMedia = false`; missing/null/empty metadata fails closed to `true`.
- */
 function inboundHasMedia(metadata) {
   return mediaCountFromMetadata(metadata) !== 0;
 }
@@ -77,23 +73,47 @@ async function threadHasAutomatedAnswer(dbh, { threadLast10, customerId, inbound
   return Boolean(row);
 }
 
-async function evaluateInboundCandidate(dbh, inbound, { customerId, doneAt, checkLiveAnswer }) {
-  const threadLast10 = lastTenPhone(inbound.from_phone);
-  const liveAnswer = await checkLiveAnswer(dbh, {
-    threadLast10,
-    customerId,
-    inboundCreatedAt: inbound.created_at,
-    inboundSmsLogId: inbound.id,
-  });
-  if (liveAnswer) return null;
+function pendingRowSmsLogId(row) {
+  if (!row) return null;
+  return row.legacy_id || (row.source === 'legacy' ? row.id : null);
+}
 
-  const autoAnswered = await threadHasAutomatedAnswer(dbh, {
+async function loadSameDayPendingThreads({ customerId, start, end, doneAt }, deps = {}) {
+  const loadPending = deps.loadPendingSmsConversations || loadPendingSmsConversations;
+  const pending = await loadPending({ customerId, since: start, includeLegacyOnly: true });
+  return (pending || []).filter((row) => {
+    const smsLogId = pendingRowSmsLogId(row);
+    if (!smsLogId) return false;
+    const at = new Date(row.created_at).getTime();
+    return Number.isFinite(at) && at >= start.getTime() && at < end.getTime() && at <= doneAt.getTime();
+  });
+}
+
+async function evaluatePendingCandidate(dbh, pendingRow, { customerId, doneAt, checkLiveAnswer }) {
+  const smsLogId = pendingRowSmsLogId(pendingRow);
+  const inbound = await dbh('sms_log')
+    .where({ id: smsLogId, customer_id: customerId, direction: 'inbound' })
+    .first('id', 'from_phone', 'message_body', 'created_at', 'metadata');
+  if (!inbound || !String(inbound.message_body || '').trim()) return null;
+
+  const threadLast10 = lastTenPhone(inbound.from_phone);
+  if (await checkLiveAnswer(dbh, {
+    threadLast10,
+    customerId,
+    inboundCreatedAt: inbound.created_at,
+    inboundSmsLogId: inbound.id,
+  })) {
+    return null;
+  }
+
+  if (await threadHasAutomatedAnswer(dbh, {
     threadLast10,
     customerId,
     inboundSmsLogId: inbound.id,
     inboundCreatedAt: inbound.created_at,
-  });
-  if (autoAnswered) return null;
+  })) {
+    return null;
+  }
 
   const priorDraft = await dbh('message_drafts')
     .where({ sms_log_id: inbound.id, drafter: HOUSE_VOICE_DRAFTER, draft_trigger: INBOUND_TRIGGER })
@@ -123,50 +143,21 @@ async function evaluateInboundCandidate(dbh, inbound, { customerId, doneAt, chec
 }
 
 /**
- * Paginates same-ET-day inbound SMS on `customerId` by `(created_at, id)` and checks the
- * newest message per distinct phone thread so high volume on one answered thread can never
- * hide an unanswered text from another contact on the account.
+ * Finds the newest eligible unanswered same-ET-day inbound SMS across ALL phone threads on
+ * `customerId` via `loadPendingSmsConversations` (which performs `DISTINCT ON (peer, endpoint)`
+ * in PostgreSQL and excludes SMS replies, staff phone callbacks, and staff booking/payment actions).
  */
 async function findEligibleInboundForPostVisitRedraft(dbh, { customerId, completedAt, visitDateET }, deps = {}) {
   if (!dbh || !customerId) return null;
   const doneAt = completedAt instanceof Date ? completedAt : new Date(completedAt || Date.now());
   if (Number.isNaN(doneAt.getTime())) return null;
   const { start, end } = etDayBounds(visitDateET);
-  const pageSize = Number(deps.pageSize) > 0 ? Math.min(200, Number(deps.pageSize)) : 50;
-  const maxPages = Number(deps.maxPages) > 0 ? Number(deps.maxPages) : 10;
   const checkLiveAnswer = deps.threadHasLiveAnswer || threadHasLiveAnswer;
-  const seenThreads = new Set();
-  let cursorId = null;
 
-  for (let page = 0; page < maxPages; page += 1) {
-    let q = dbh('sms_log as s')
-      .where('s.customer_id', customerId)
-      .where('s.direction', 'inbound')
-      .where('s.created_at', '>=', start)
-      .where('s.created_at', '<', end)
-      .where('s.created_at', '<=', doneAt)
-      .where((w) => w.whereNull('s.message_type').orWhereNotIn('s.message_type', IGNORED_INBOUND_TYPES))
-      .whereRaw("COALESCE(s.message_type, '') NOT LIKE 'job\\_%'")
-      .whereRaw("TRIM(COALESCE(s.message_body, '')) <> ''")
-      .orderBy('s.created_at', 'desc')
-      .orderBy('s.id', 'desc')
-      .limit(pageSize);
-    if (cursorId) {
-      q = q.whereRaw('(s.created_at, s.id) < ((SELECT created_at FROM sms_log WHERE id = ?), ?)', [cursorId, cursorId]);
-    }
-    const inbounds = await q.select('s.id', 's.from_phone', 's.message_body', 's.created_at', 's.metadata');
-    if (!inbounds.length) break;
-
-    for (const inbound of inbounds) {
-      const threadKey = lastTenPhone(inbound.from_phone) || `row:${inbound.id}`;
-      if (seenThreads.has(threadKey)) continue;
-      seenThreads.add(threadKey);
-      const eligible = await evaluateInboundCandidate(dbh, inbound, { customerId, doneAt, checkLiveAnswer });
-      if (eligible) return eligible;
-    }
-
-    if (inbounds.length < pageSize) break;
-    cursorId = inbounds[inbounds.length - 1].id;
+  const pendingRows = await loadSameDayPendingThreads({ customerId, start, end, doneAt }, deps);
+  for (const row of pendingRows) {
+    const eligible = await evaluatePendingCandidate(dbh, row, { customerId, doneAt, checkLiveAnswer });
+    if (eligible) return eligible;
   }
   return null;
 }
@@ -225,31 +216,22 @@ async function findPostVisitRedraftCandidates(dbh, { visitDateET, limit = 25, pa
   return candidates;
 }
 
-async function threadHasNewerInbound(dbh, { threadLast10, customerId, inboundSmsLogId, inboundCreatedAt }) {
-  const after = inboundSmsLogId && typeof dbh.raw === 'function'
-    ? dbh.raw('(SELECT created_at FROM sms_log WHERE id = ?)', [inboundSmsLogId])
-    : inboundCreatedAt;
-  const row = await dbh('sms_log')
-    .where({ customer_id: customerId, direction: 'inbound' })
-    .whereNot({ id: inboundSmsLogId })
-    .where((w) => {
-      if (threadLast10) {
-        w.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);
-      }
-    })
-    .where((w) => w.whereNull('message_type').orWhereNotIn('message_type', IGNORED_INBOUND_TYPES))
-    .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
-    .whereRaw("TRIM(COALESCE(message_body, '')) <> ''")
-    .where('created_at', '>', after)
-    .first('id');
-  return Boolean(row);
-}
-
-async function generateClaimedRevision({ dbh, customer, eligible, serviceRecordId, draftFn, checkLiveAnswer }) {
+async function generateClaimedRevision({
+  dbh, customer, eligible, serviceRecordId, dayStart, draftFn, checkLiveAnswer, loadPendingFn,
+}) {
   const already = await dbh('message_drafts')
     .where({ sms_log_id: eligible.smsLogId, draft_trigger: POST_VISIT_TRIGGER })
     .first('id');
   if (already) return { skipped: 'already_revised' };
+
+  // Re-verify inside the lock against the canonical pending conversations view so any staff
+  // SMS reply, completed phone callback, booking/payment resolution, or newer inbound text
+  // that landed while waiting on lock slots stops paid drafting immediately.
+  const loadPending = loadPendingFn || loadPendingSmsConversations;
+  const stillPending = await loadPending({ customerId: customer.id, since: dayStart, includeLegacyOnly: true });
+  if (!(stillPending || []).some((row) => String(pendingRowSmsLogId(row)) === String(eligible.smsLogId))) {
+    return { skipped: 'resolved_before_lock' };
+  }
 
   const threadLast10 = lastTenPhone(eligible.fromPhone);
   const liveChecker = checkLiveAnswer || threadHasLiveAnswer;
@@ -268,14 +250,6 @@ async function generateClaimedRevision({ dbh, customer, eligible, serviceRecordI
     inboundCreatedAt: eligible.inboundAt,
   })) {
     return { skipped: 'answered_before_lock' };
-  }
-  if (await threadHasNewerInbound(dbh, {
-    threadLast10,
-    customerId: customer.id,
-    inboundSmsLogId: eligible.smsLogId,
-    inboundCreatedAt: eligible.inboundAt,
-  })) {
-    return { skipped: 'superseded_by_newer_inbound' };
   }
 
   const drafter = draftFn || ((args) => require('./sms-shadow-drafter').draftShadowReply(args));
@@ -296,17 +270,18 @@ async function generateClaimedRevision({ dbh, customer, eligible, serviceRecordI
   return { drafted: Boolean(draftId), draftId: draftId || null, supersedesDraftId: eligible.priorDraftId };
 }
 
-async function resolveRevisionInputs({ customerId, completedAt, visitDateET, dbh, threadHasLiveAnswerFn }) {
-  const deps = threadHasLiveAnswerFn ? { threadHasLiveAnswer: threadHasLiveAnswerFn } : {};
+async function resolveRevisionInputs({ customerId, completedAt, visitDateET, dbh, threadHasLiveAnswerFn, loadPendingFn }) {
+  const deps = {
+    ...(threadHasLiveAnswerFn ? { threadHasLiveAnswer: threadHasLiveAnswerFn } : {}),
+    ...(loadPendingFn ? { loadPendingSmsConversations: loadPendingFn } : {}),
+  };
   const eligible = await findEligibleInboundForPostVisitRedraft(dbh, { customerId, completedAt, visitDateET }, deps);
   if (!eligible) return { skipped: 'none_eligible' };
   const customer = await dbh('customers').where({ id: customerId }).first();
   if (!customer) return { skipped: 'customer_not_found' };
-  return { eligible, customer };
+  const { start } = etDayBounds(visitDateET);
+  return { eligible, customer, dayStart: start };
 }
-
-const DEFAULT_LOCK_RETRY_MS = 150;
-const MAX_NO_CONNECTION_RETRIES = 2;
 
 async function runWithCapacityRetries(acquire, lockKey, work, { sleepFn, maxRetries = MAX_NO_CONNECTION_RETRIES } = {}) {
   const sleep = sleepFn || ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -319,19 +294,18 @@ async function runWithCapacityRetries(acquire, lockKey, work, { sleepFn, maxRetr
   return { skipped: 'lock_unavailable' };
 }
 
-/**
- * Post-commit hook for visit completion. Never throws, never sends any customer message.
- * Gated behind GATE_SMS_POST_VISIT_REDRAFT (dark by default, also requires GATE_SMS_PROMPT_B1
- * so findings actually load) and claims a per-inbound advisory lock (`recordHealth: false`)
- * with bounded retry on lock-slot saturation (`no_connection`).
- */
 async function draftPostVisitRevisionIfEligible(opts = {}) {
-  const { customerId, serviceRecordId = null, completedAt, visitDateET, dbh = db, gates, draftFn, lockFn, sleepFn, threadHasLiveAnswerFn } = opts;
+  const {
+    customerId, serviceRecordId = null, completedAt, visitDateET,
+    dbh = db, gates, draftFn, lockFn, sleepFn, threadHasLiveAnswerFn, loadPendingFn,
+  } = opts;
   if (!customerId) return { skipped: 'missing_customer' };
   const featureGates = gates || require('../config/feature-gates');
   if (featureGates.smsPostVisitRedraftLive?.() !== true) return { skipped: 'gate_off' };
 
-  const resolved = await resolveRevisionInputs({ customerId, completedAt, visitDateET, dbh, threadHasLiveAnswerFn });
+  const resolved = await resolveRevisionInputs({
+    customerId, completedAt, visitDateET, dbh, threadHasLiveAnswerFn, loadPendingFn,
+  });
   if (resolved.skipped) return resolved;
 
   try {
@@ -343,8 +317,10 @@ async function draftPostVisitRevisionIfEligible(opts = {}) {
         customer: resolved.customer,
         eligible: resolved.eligible,
         serviceRecordId,
+        dayStart: resolved.dayStart,
         draftFn,
         checkLiveAnswer: threadHasLiveAnswerFn,
+        loadPendingFn,
       }),
       { sleepFn },
     );
@@ -355,9 +331,6 @@ async function draftPostVisitRevisionIfEligible(opts = {}) {
   }
 }
 
-/**
- * Fire-and-forget wrapper invoked from `complete-scheduled-service.js` after visit commit.
- */
 function triggerOnVisitComplete({ isBackfillCompletion, isIncompleteVisit, svc, record } = {}) {
   if (isBackfillCompletion || isIncompleteVisit || !svc?.customer_id || !record?.id) return;
   draftPostVisitRevisionIfEligible({
