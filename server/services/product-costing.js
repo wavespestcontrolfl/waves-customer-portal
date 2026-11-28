@@ -390,6 +390,7 @@ module.exports = {
   normalizeQuantityToOz,
   normalizeUnit,
   numberOrNull,
+  packageMeasure,
   packageMeasureClash,
   parsePackCount,
   parsePackSize,
