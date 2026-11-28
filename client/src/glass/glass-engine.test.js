@@ -47,6 +47,29 @@ describe('applyGlassScene', () => {
     expect(document.body.style.background).toBe('rgb(4, 5, 6)');
   });
 
+  it('reference-counts overlapping scenes so duplicate orbs never mount and cleanup waits for the last owner', () => {
+    document.documentElement.style.background = 'rgb(1, 2, 3)';
+    document.body.style.background = 'rgb(4, 5, 6)';
+
+    const first = applyGlassScene();
+    const second = applyGlassScene();
+    expect(second.orbs).toBe(first.orbs);
+    expect(document.querySelectorAll('.glass-scene-orbs')).toHaveLength(1);
+    expect(document.querySelectorAll('.glass-scene-grain')).toHaveLength(1);
+
+    first.cleanup();
+    first.cleanup(); // idempotent
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.querySelectorAll('.glass-scene-orbs')).toHaveLength(1);
+
+    second.cleanup();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
+    expect(document.querySelector('.glass-scene-orbs')).toBeNull();
+    expect(document.querySelector('.glass-scene-grain')).toBeNull();
+    expect(document.documentElement.style.background).toBe('rgb(1, 2, 3)');
+    expect(document.body.style.background).toBe('rgb(4, 5, 6)');
+  });
+
 });
 
 describe('attachGlassPointerFx', () => {
