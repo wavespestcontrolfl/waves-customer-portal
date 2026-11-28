@@ -780,19 +780,26 @@ async function getActiveCalibration(equipmentSystemId, { calibrationId = null, s
   return query.first().catch(() => null);
 }
 
+function sheetTechnicianScope(req, scheduled, pickedRigId) {
+  const isTech = isTechnicianRequest(req);
+  const visitTechId = scheduled?.technician_id || null;
+  const scopeByTechnician = isTech || Boolean(scheduled && (!pickedRigId || visitTechId));
+  const viewerTechId = isTech ? (req.technicianId || null) : null;
+  const technicianId = !pickedRigId && scheduled ? visitTechId : (viewerTechId || visitTechId);
+  return { scopeByTechnician, technicianId };
+}
+
 async function loadSheetCalibration(req, scheduled) {
-  const visit = scheduled || {};
   const pickedRigId = req.query.equipmentSystemId || null;
   const assignedSystemId = await assignedRigId(scheduled);
   const rigId = pickedRigId || assignedSystemId;
-  const keepPin = Boolean(visit.assigned_calibration_id && (!pickedRigId || !assignedSystemId || String(pickedRigId) === String(assignedSystemId)));
-  const calibrationId = keepPin ? visit.assigned_calibration_id : null;
-  const isTech = isTechnicianRequest(req);
-  const scopeByTechnician = isTech || Boolean(scheduled && (!pickedRigId || visit.technician_id));
-  const viewerTechId = isTech ? req.technicianId : null;
-  const technicianId = (!pickedRigId && scheduled ? visit.technician_id : (viewerTechId || visit.technician_id)) || null;
-  const calibrationScope = { scopeByTechnician, technicianId };
-  const calibration = await getActiveCalibration(rigId, { calibrationId, ...calibrationScope });
+  const storedPin = scheduled?.assigned_calibration_id || null;
+  const keepPin = Boolean(storedPin && (!pickedRigId || !assignedSystemId || String(pickedRigId) === String(assignedSystemId)));
+  const calibrationId = keepPin ? storedPin : null;
+  const techScope = sheetTechnicianScope(req, scheduled, pickedRigId);
+  const calibration = await getActiveCalibration(rigId, { calibrationId, ...techScope });
+  const unresolvedPinRigId = calibrationId && !calibration ? (rigId || '__unknown__') : null;
+  const calibrationScope = { ...techScope, ...(unresolvedPinRigId ? { unresolvedPinRigId } : {}) };
   return { rigId, calibration, calibrationScope };
 }
 
@@ -835,6 +842,7 @@ const newestTestFirst = (a, b) => (b.calibration_status === 'field_verified') - 
   || new Date(b.calibrated_at || 0) - new Date(a.calibrated_at || 0);
 async function getBackpackCalibration(selected, scope = {}) {
   if (selected && isFlowZone4Gal(selected)) return selected;
+  if (scope.unresolvedPinRigId === '__unknown__') return null;
   const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -844,8 +852,12 @@ async function getBackpackCalibration(selected, scope = {}) {
     .where('es.name', 'ilike', '%flow%zone%')
     .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
     .catch(() => []);
-  return (rows || [])
-    .filter((row) => isFlowZone4Gal(row) && calibrationAllowedForScope(row, scope))
+  const backpacks = (rows || []).filter(isFlowZone4Gal);
+  if (scope.unresolvedPinRigId && backpacks.some((row) => String(row.equipment_system_id) === String(scope.unresolvedPinRigId))) {
+    return null;
+  }
+  return backpacks
+    .filter((row) => calibrationAllowedForScope(row, scope))
     .sort(newestTestFirst)[0] || null;
 }
 

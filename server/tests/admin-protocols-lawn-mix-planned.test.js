@@ -528,5 +528,19 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
     expect(whereCalls).not.toContainEqual(['ec.id', 'cal-pinned']);
     expect(whereCalls).toContainEqual(['ec.equipment_system_id', 'sys-2']);
   });
+
+  test('an unresolved/superseded FlowZone calibration pin suppresses replacement FlowZone fills in getBackpackCalibration', async () => {
+    calibration = [];
+    backpackCalibration = [
+      { id: 'bp-replacement', equipment_system_id: 'bp-sys', technician_id: null, system_name: 'FlowZone Typhoon 3.0', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.5 },
+    ];
+    const sheetCal = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'bp-sys', assigned_calibration_id: 'bp-old-superseded', technician_id: 'tech-a' },
+    );
+    expect(sheetCal.calibration).toBeNull();
+    expect(sheetCal.calibrationScope.unresolvedPinRigId).toBe('bp-sys');
+    expect(await getBackpackCalibration(sheetCal.calibration, sheetCal.calibrationScope)).toBeNull();
+  });
 });
 

@@ -1316,4 +1316,21 @@ describe('loadServiceCalibrations technician scoping', () => {
     expect(out.map((r) => r.id)).toEqual(['cal-a']);
     expect(whereCalls).toContainEqual(['ec.id', 'cal-a']);
   });
+
+  test('a caller-selected calibrationId owned by another technician is filtered out unless it matches the visit stored pin', async () => {
+    const otherRow = { id: 'cal-other', equipment_system_id: 'rig-b', technician_id: 'tech-b', carrier_gal_per_1000: 2.5 };
+    const rejected = await loadServiceCalibrations(
+      stubKnex([otherRow]),
+      { assigned_equipment_system_id: 'rig-a', assigned_calibration_id: 'cal-pin', technician_id: 'tech-a' },
+      { calibrationId: 'cal-other', technicianId: 'tech-a' },
+    );
+    expect(rejected).toEqual([]);
+
+    const storedPin = await loadServiceCalibrations(
+      stubKnex([otherRow]),
+      { assigned_equipment_system_id: 'rig-b', assigned_calibration_id: 'cal-other', technician_id: 'tech-a' },
+      { calibrationId: 'cal-other', technicianId: 'tech-a' },
+    );
+    expect(storedPin.map((r) => r.id)).toEqual(['cal-other']);
+  });
 });
