@@ -387,6 +387,14 @@ function candidateRouteOrderIds(opts, fit, targetId, options, context) {
   return { route_order_ids: active.map((id) => (id === targetId ? '__candidate__' : String(id))) };
 }
 
+async function loadCapacityBlackoutDates(dateFrom, dateTo, { includeBlackoutDates, strictBlackout } = {}) {
+  if (includeBlackoutDates) return new Set();
+  const { getBlackoutDates } = require('./blackout-dates') || {};
+  return typeof getBlackoutDates === 'function'
+    ? getBlackoutDates(dateFrom, dateTo, undefined, { strict: strictBlackout === true })
+    : new Set();
+}
+
 async function findCapacitySlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 30, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
@@ -402,7 +410,7 @@ async function findCapacitySlots(opts) {
   const inactive = opts.arrivalWindow?.serviceId ? []
     : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
   const inactiveTechs = new Set(inactive.map(row => row.technician_id));
-  const blackout = opts.includeBlackoutDates ? new Set() : (await getBlackoutLayers(dateFrom, dateTo)).dates;
+  const blackout = await loadCapacityBlackoutDates(dateFrom, dateTo, opts);
   const today = etDateString(now);
   const parts = etParts(now);
   const travel = require('../route-optimizer').createSchedulingTravel(travelAllowance(opts));

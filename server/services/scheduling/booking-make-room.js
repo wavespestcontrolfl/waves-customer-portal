@@ -453,7 +453,10 @@ async function routeKeepsWindows(candidate, { conn, env, request, caches }) {
   if (!env.arrivalWindowsOn()) return 'arrival_windows_off';
   const context = await cached(caches.routes, `${candidate.dateStr}|${candidate.techId}`, () => env.loadArrivalRouteContext({
     conn, date: candidate.dateStr, technicianId: candidate.techId, now: request.now,
-    prospective: { lat: request.point.lat, lng: request.point.lng, estimated_duration_minutes: candidate.durationMin },
+    prospective: {
+      lat: request.point.lat, lng: request.point.lng, estimated_duration_minutes: candidate.durationMin,
+      ...(request.prospectiveService || {}),
+    },
     ...(request.estimateId ? { excludeEstimateId: request.estimateId } : {}),
   }));
   if (!context) return 'route_unverified';
@@ -518,18 +521,25 @@ async function moveBlockedReason(move, { conn, env, day, techId, budget = NO_LIM
   let prefs;
   let pref;
   try {
-    if (budget.spent()) return TIMED_OUT;
-    // On the caller's connection: inside a reserve or extend that is the hold's transaction, never a second pool read.
-    prefs = await env.getReminderPrefs(row.customer_id, { scheduledServiceId: row.id, conn });
-    if (!remindersOn(prefs)) return 'reminders_off';
-    // true, false, or TIMED_OUT (passed on as it is).
-    const byText = await remindersByText(prefs, row, env, conn, budget);
-    if (byText !== true) return byText || 'reminders_not_text';
-    if (budget.spent()) return TIMED_OUT;
-    pref = await env.loadPref(conn, row);
+    const { savepointRead } = require('./savepoint-read');
+    const loaded = await savepointRead(conn, async (dbh) => {
+      if (budget.spent()) return { blocked: TIMED_OUT };
+      // On the caller's connection: inside a reserve or extend that is the hold's transaction, never a second pool read.
+      const p = await env.getReminderPrefs(row.customer_id, { scheduledServiceId: row.id, conn: dbh });
+      if (!remindersOn(p)) return { blocked: 'reminders_off' };
+      // true, false, or TIMED_OUT (passed on as it is).
+      const byText = await remindersByText(p, row, env, dbh, budget);
+      if (byText !== true) return { blocked: byText || 'reminders_not_text' };
+      if (budget.spent()) return { blocked: TIMED_OUT };
+      return { prefs: p, pref: await env.loadPref(dbh, row) };
+    });
+    if (loaded.blocked) return loaded.blocked;
+    prefs = loaded.prefs;
+    pref = loaded.pref;
   } catch {
     return 'prefs_unreadable';
   }
+  void prefs;
   return pref && !(move.toMin >= pref.startMin && move.toMin < pref.endMin) ? 'preference' : null;
 }
 
@@ -888,7 +898,7 @@ async function loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, z
   return { env, dayRows, open, caps };
 }
 
-async function findMakeRoom(report, { conn, pool, point, durationMin, candidateExpectedMinutes, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, budget, deps, offerOnly = false }) {
+async function findMakeRoom(report, { conn, pool, point, durationMin, candidateExpectedMinutes, prospectiveService = null, estimateId, capabilityRows, zoneSlug, dateFrom, dateTo, admit, placement, now, budget, deps, offerOnly = false }) {
   const dates = datesFor({ dateFrom, dateTo, pool });
   report.dates = dates.length;
   // The setup reads run under the same budget as every later read.
@@ -898,7 +908,7 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, candidateE
   const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
   report.free = { count: pool.length, best: bestFree };
   // otherChains: the page's offer also skips a chain another live make-room hold takes (otherHoldTakesChain).
-  const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap: caps.detourCap, candidateExpectedMinutes, otherChains: offerOnly };
+  const request = { point, durationMin, admit, placement, now, bestFree, estimateId, detourCap: caps.detourCap, candidateExpectedMinutes, prospectiveService, otherChains: offerOnly };
   // Both passes share what the reads return. The saving pass (the approved offer rule) runs first and unchanged; the
   // log-only sooner pass gets what is left of the budget.
   const caches = { blocks: new Map(), routes: new Map(), days: new Map(), moved: new Map() };
@@ -977,7 +987,7 @@ async function recordMakeRoomCheck(args = {}) {
 }
 
 // The check itself, without its log row: { report, knex, budget }.
-async function runCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, candidateExpectedMinutes, capabilityRows, zoneSlug,
+async function runCheck({ mode, surface = 'estimate', estimateId = null, pool, coords, durationMinutes, candidateExpectedMinutes, prospectiveService = null, capabilityRows, zoneSlug,
   dateFrom, dateTo, admit, placement, now = new Date(), conn, deps, budgetMs = DEFAULT_BUDGET_MS, offerOnly = false } = {}) {
   const startedAt = Date.now();
   const budget = makeBudget(startedAt + budgetMs);
@@ -990,7 +1000,7 @@ async function runCheck({ mode, surface = 'estimate', estimateId = null, pool, c
     else if (typeof admit !== 'function' || typeof placement !== 'function' || !dateFrom || !dateTo) report.skipped = 'no_request';
     else {
       await findMakeRoom(report, {
-        conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, candidateExpectedMinutes, estimateId,
+        conn: knex, pool: Array.isArray(pool) ? pool : [], point, durationMin: report.durationMin, candidateExpectedMinutes, prospectiveService, estimateId,
         capabilityRows, zoneSlug,
         dateFrom, dateTo, admit, placement, now, budget, deps, offerOnly,
       });
@@ -1078,7 +1088,7 @@ async function findMakeRoomOffers(args = {}) {
  *   candidateExpectedMinutes, capabilityRows, zoneSlug, admit, placement (the same two functions the offer used)
  * @returns {Promise<{ shiftMin, moves: Array<{ id, from, to, widthMin }> } | { reason }>} never throws
  */
-async function verifyMakeRoomHour({ conn, date, startMin, techId, durationMinutes, point, estimateId = null, candidateExpectedMinutes, capabilityRows, zoneSlug,
+async function verifyMakeRoomHour({ conn, date, startMin, techId, durationMinutes, point, estimateId = null, candidateExpectedMinutes, prospectiveService, capabilityRows, zoneSlug,
   admit, placement, now = new Date(), deps, budgetMs = VERIFY_BUDGET_MS } = {}) {
   const budget = makeBudget(Date.now() + budgetMs);
   const timedOut = { reason: 'timed_out' };
@@ -1095,7 +1105,7 @@ async function verifyMakeRoomHour({ conn, date, startMin, techId, durationMinute
     if (!facts) return timedOut;
     const { env, dayRows, open, caps } = facts;
     if (!open(date, techId)) return { reason: 'tech_day_closed' };
-    const request = { point: pin, durationMin: plannedMinutes(durationMinutes), admit, placement, now, bestFree: null, estimateId, detourCap: caps.detourCap, soonerCap: caps.soonerCap, candidateExpectedMinutes };
+    const request = { point: pin, durationMin: plannedMinutes(durationMinutes), admit, placement, now, bestFree: null, estimateId, detourCap: caps.detourCap, soonerCap: caps.soonerCap, candidateExpectedMinutes, prospectiveService };
     const { day, reason: dayReason } = dayFacts({ dateStr: date, rows: dayRows.get(date), techId, env, request });
     if (!day) return { reason: dayReason };
     const hour = tryHour({ day, startMin, env, request });

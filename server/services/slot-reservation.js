@@ -892,12 +892,21 @@ function makeRoomMovesPayload({ date, techId, shiftMin, moves }) {
   return { v: 1, date, techId: techId || null, shiftMin, moves: moves.map(({ id, from, to, widthMin }) => ({ id, from, to, widthMin })) };
 }
 
+function heldProspectiveService(row) {
+  const mix = row?.reservation_service_mix;
+  const combined = Array.isArray(mix?.services) && mix.services.length > 1;
+  return {
+    ...(row?.service_type ? { service_type: row.service_type } : {}),
+    ...(combined ? { combined_services: true } : {}),
+  };
+}
+
 // The hold's proof of its make-room hour on the data as it is now, under the caller's locks: { moves, payload }, or
 // { reason }. Never throws.
-async function proveMakeRoomHour(trx, { estimate, serviceProfile = null, serviceMix = null, estimateZone, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes }) {
+async function proveMakeRoomHour(trx, { estimate, serviceProfile = null, prospectiveService = null, serviceMix = null, estimateZone, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes }) {
   if (typeof estimateSlotAvailability.verifyMakeRoomOffer !== 'function') return { reason: 'unavailable' };
   const proof = await estimateSlotAvailability.verifyMakeRoomOffer({
-    conn: trx, estimate, serviceProfile, serviceMix, estimateZone, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes,
+    conn: trx, estimate, serviceProfile, prospectiveService, serviceMix, estimateZone, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes,
   });
   if (!proof || !Array.isArray(proof.moves) || !proof.moves.length) return { reason: proof?.reason || 'unproven' };
   return { moves: proof.moves, payload: makeRoomMovesPayload({ date, techId, shiftMin: proof.shiftMin, moves: proof.moves }) };
@@ -998,7 +1007,7 @@ async function extendMakeRoomState(trx, { row, estimate, rowUnderCapacity, sched
   let extendZone = null;
   try { extendZone = await resolveEstimateZone(trx, estimate); } catch { /* the proof reads no zone rule it cannot do without */ }
   const proof = await proveMakeRoomHour(trx, {
-    estimate, serviceMix: row.reservation_service_mix || null, estimateZone: extendZone,
+    estimate, serviceMix: row.reservation_service_mix || null, prospectiveService: heldProspectiveService(row), estimateZone: extendZone,
     coords: row.lat != null && row.lng != null ? { lat: Number(row.lat), lng: Number(row.lng) } : null,
     date: scheduledDate, windowStart, techId: row.technician_id, durationMinutes: heldMinutes,
     candidateExpectedMinutes: await candidateExpectedMinutesFromRow(trx, row, heldMinutes),

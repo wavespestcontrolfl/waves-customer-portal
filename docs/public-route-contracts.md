@@ -8298,8 +8298,12 @@ code, error code, message text, limiter, signature or token changes.
   missing diagnosis, and starts not checked in time all stay. Each start is checked
   at its own minute and technician. Order, slot shapes and signed offers
   (`slot_sig`) of the kept starts are unchanged.
-- Floor: if the removals would leave no offered start dated today through
-  today+6 (Eastern), the whole list is served unchanged. The check runs
+- Floor: if the input list contains any offered start dated today through
+  today+6 (Eastern) and removals would leave none in that window, the whole
+  list is served unchanged. When the input list itself starts after today+6
+  (e.g. a week-two search, future move-in date, or funneled days), partial
+  removals stand and the floor keeps the list whole only if removals would
+  leave zero starts at all. The check runs
   after every eligibility filter (time of day, lead time, season, notice
   window, last start, zone day), so the floor is judged on the list the
   customer could actually be shown: a morning-only search whose morning starts
