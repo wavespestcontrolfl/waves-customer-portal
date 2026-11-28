@@ -664,6 +664,21 @@ function buildServiceRecordProjectCompletionUpdate({
   };
 }
 
+async function linkCompletedProjectInvoice(knex, link) {
+  if (!link) return;
+  await knex('invoices')
+    .where({ id: link.invoiceId })
+    .whereNull('service_record_id')
+    .update({
+      service_record_id: link.serviceRecordId,
+      technician_id: link.technicianId,
+      updated_at: knex.fn.now(),
+    })
+    .catch((err) => {
+      logger.warn(`[project-completion] invoice link failed for ${link.invoiceId}: ${err.message}`);
+    });
+}
+
 async function completeProjectBackedService({
   projectId,
   actorId = null,
@@ -1121,19 +1136,7 @@ async function completeProjectBackedService({
     };
   });
 
-  if (postCommitInvoiceLink) {
-    await knex('invoices')
-      .where({ id: postCommitInvoiceLink.invoiceId })
-      .whereNull('service_record_id')
-      .update({
-        service_record_id: postCommitInvoiceLink.serviceRecordId,
-        technician_id: postCommitInvoiceLink.technicianId,
-        updated_at: knex.fn.now(),
-      })
-      .catch((err) => {
-        logger.warn(`[project-completion] invoice link failed for ${postCommitInvoiceLink.invoiceId}: ${err.message}`);
-      });
-  }
+  await linkCompletedProjectInvoice(knex, postCommitInvoiceLink);
 
   // A performed project closeout of a street-level hold's visit confirms its address (the shared
   // transition stamped it); release the hold now. A no-op for every other visit; best-effort.

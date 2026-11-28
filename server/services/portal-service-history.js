@@ -177,9 +177,9 @@ async function listPortalServiceHistory(customerId, {
     const structuredNotes = parseJsonObject(svc.structured_notes);
     const suppressCustomerArtifacts = await isServiceRecordArtifactSuppressed(structuredNotes, database, {
       serviceRecordId: svc.id,
-      scheduledServiceId: svc.scheduled_service_id || null,
-      serviceType: svc.service_type || null,
-      reportTemplateVersion: svc.report_template_version || null,
+      scheduledServiceId: svc.scheduled_service_id,
+      serviceType: svc.service_type,
+      reportTemplateVersion: svc.report_template_version,
     });
 
     const products = suppressCustomerArtifacts
