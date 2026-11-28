@@ -2512,7 +2512,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
       warnings: serviceWarnings,
     }),
     single: () => {
-      const dose = perGallon ? perGallonDose({ band: perGallon, volume, lineCarrier, tankOverrides: protocolLine?.tankOverrides, ...rigCtx }) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume });
+      const dose = perGallon ? perGallonDose({ band: perGallon, volume, lineCarrier, tankOverrides: lineBand ? protocolLine?.tankOverrides : [], ...rigCtx }) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume });
       // At another spray volume the tank covers the rig's own area, and the card's volume would cover another: both are said, neither read as the other's.
       const coverage = dose.labelCoversSqft ? `${rigCtx.rigName} sprays ${fmtGal(dose.rigSprayGalPer1000)} gal per 1,000 sq ft, so this tank covers ${dose.coversSqft.toLocaleString('en-US')} sq ft. At the card's ${fmtGal(dose.sprayVolumeGalPer1000)} gal per 1,000 sq ft the same tank would cover ${dose.labelCoversSqft.toLocaleString('en-US')} sq ft` : null;
       return {
@@ -2892,7 +2892,7 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     const useNotes = Array.isArray(line.doseUseNotes) ? line.doseUseNotes : [];
     const warning = [...lineConditions(line), ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx }), ...useNotes];
     if (!used || line.directDoseOnly) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: warning, ...(line.conditional ? { conditional: true } : {}) };
-    const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier, tankOverrides: line.tankOverrides });
+    const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier, tankOverrides: band ? line.tankOverrides : [] });
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
     return {
       service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band),
@@ -2991,7 +2991,7 @@ function syntheticHitFromMixRow(row) {
   const declaredRate = mixRowRate(row);
   const condText = [row?.condition, row?.where, row?.limit].filter(Boolean).join('; ');
   const conditional = CONDITIONAL_MIX_ROW_RE.test(condText);
-  const raw = [row?.where, row?.sprayVolume, row?.limit].filter(Boolean).join('; ');
+  const raw = [row?.condition, row?.where, row?.sprayVolume, row?.limit].filter(Boolean).join('; ');
   return { raw, selected: !conditional, ...(declaredRate ? { declaredRate } : {}) };
 }
 
@@ -3009,6 +3009,24 @@ function mixedMethodUseNotes(tankRow, directRows) {
   return [...notes, ...directDoseNotes(directRows)];
 }
 
+function expandedMixRowLabel(serviceName, row, relevant) {
+  const duplicateWhere = Boolean(row.where) && relevant.filter((r) => r.where === row.where).length > 1;
+  if (!duplicateWhere && row.where) return `${serviceName} — ${row.where}`;
+  const detail = [row.product, row.condition || row.where].filter(Boolean).join(' · ');
+  return detail ? `${serviceName} — ${detail}` : serviceName;
+}
+
+function expandedMixRowHit(c, row, relevant, directRows, directDoseOnly) {
+  return {
+    c: { ...c, name: expandedMixRowLabel(c.name, row, relevant) },
+    hit: syntheticHitFromMixRow(row),
+    mixRows: [row],
+    doseUseNotes: directDoseOnly ? directDoseNotes([row]) : mixedMethodUseNotes(row, directRows),
+    directDoseOnly,
+    useSpecific: true,
+  };
+}
+
 function candidateProtocolHits(c, resolved, product) {
   const pid = String(product.id);
   const hit = resolved.lines.find((l) => String(l.product.id) === pid) || null;
@@ -3019,19 +3037,7 @@ function candidateProtocolHits(c, resolved, product) {
   const directDoseOnly = !tankRows.length && directRows.length > 0;
   const relevant = tankRows.length ? tankRows : mixRows;
   if (relevant.length > 1) {
-    return relevant.map((row) => {
-      const rate = mixRowRate(row);
-      const label = row.where ? `${c.name} — ${row.where}` : c.name;
-      const baseHit = hit || syntheticHitFromMixRow(row);
-      return {
-        c: { ...c, name: label },
-        hit: rate ? { ...baseHit, declaredRate: rate } : baseHit,
-        mixRows: [row],
-        doseUseNotes: directDoseOnly ? directDoseNotes([row]) : mixedMethodUseNotes(row, directRows),
-        directDoseOnly,
-        useSpecific: true,
-      };
-    });
+    return relevant.map((row) => expandedMixRowHit(c, row, relevant, directRows, directDoseOnly));
   }
   const singleRow = relevant[0] || null;
   const doseUseNotes = directDoseOnly ? directDoseNotes(directRows) : (tankRows.length && directRows.length ? mixedMethodUseNotes(singleRow, directRows) : []);
@@ -3146,15 +3152,16 @@ const governedRateOf = (governed, scope) => (Number(governed?.ratePer1000) > 0 &
   } : {});
 
 // The per-gallon band the matched card line gives the mix, or null (the label band stands). A rate read from the line's text is clipped
-// to the label band. A rate the card DECLARES governs when it is on the label's unit and not above the label band's top: a card may mix
+// to the label band. A rate the card DECLARES governs when its unit is compatible with the label's and not above the label band's top: a card may mix
 // weaker than the label (the flea growth regulator shares a tank sprayed at a higher volume), never stronger.
 function protocolBand(label, protocolLine) {
   if (!label || !protocolLine?.rate) return null;
   if (!protocolLine.declared) return narrowBand(label, protocolLine.rate);
-  const sameUnit = String(label.unit).toLowerCase() === String(protocolLine.rate.unit).toLowerCase();
+  const convHi = convertRateUnit(protocolLine.rate.hi, protocolLine.rate.unit, label.unit);
+  if (convHi == null) return null;
   // The label's own rate for this card's pest stands in for the catalog band (see declaredTankRate).
-  if (protocolLine.labelUse) return sameUnit ? protocolLine.rate : null;
-  return sameUnit && protocolLine.rate.hi <= label.hi ? protocolLine.rate : null;
+  if (protocolLine.labelUse) return protocolLine.rate;
+  return convHi <= label.hi + 1e-6 ? protocolLine.rate : null;
 }
 
 // Whether the services that name one product disagree enough to keep a row each. A rate, a stated spray volume, or a
@@ -3221,12 +3228,14 @@ function conflictText(product, label, conflictLines) {
   return `${product.name} is on more than one service on this visit, each with its own rate or conditions: ${each.join('; ')}`;
 }
 
-// The protocol band clipped to the verified label band, on one unit.
+// The protocol band clipped to the verified label band, converting compatible mass/volume units.
 function narrowBand(label, line) {
-  if (String(label.unit).toLowerCase() !== String(line.unit).toLowerCase()) return null;
-  const lo = Math.max(label.lo, line.lo);
-  const hi = Math.min(label.hi, line.hi);
-  return lo <= hi ? { lo, hi, unit: label.unit } : null;
+  const convLo = convertRateUnit(line.lo, line.unit, label.unit);
+  const convHi = convertRateUnit(line.hi, line.unit, label.unit);
+  if (convLo == null || convHi == null) return null;
+  const lo = Math.max(label.lo, convLo);
+  const hi = Math.min(label.hi, convHi);
+  return lo <= hi + 1e-6 ? { lo, hi, unit: label.unit } : null;
 }
 
 

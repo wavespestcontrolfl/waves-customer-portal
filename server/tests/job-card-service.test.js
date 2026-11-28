@@ -4141,6 +4141,49 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const unassignedCalc = await jobCard.mixForProduct('oil', 4, { serviceId: 'svc13', technicianId: 'tech-b', dbh: unassignedDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
     expect(unassignedCalc.tank.source).toBeNull();
 
+    // Tank-table overrides apply only when the protocol rate governs (if catalog ceiling rejects 0.8 fl oz, 100 gal falls back to catalog band, never 78 fl oz).
+    const cappedTaurus = { ...taurus, default_rate: '0.2-0.5', default_unit: 'fl_oz/gal' };
+    const cappedTaurusDb = dbFor({
+      scheduled_services: [{ id: 'svc14', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [cappedTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const capped100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc14', dbh: cappedTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(capped100).toMatchObject({ rateSource: 'catalog', amount: 20, amountMax: 50, unit: 'fl_oz' });
+
+    // February TriTek 1% and 1.5% share placement text and EPA; each keeps its distinct condition label and conditional warning.
+    const febOil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const febOilDb = dbFor({
+      scheduled_services: [{ id: 'svc15', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-02-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [febOil],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const febOilCalc = await jobCard.mixForProduct('oil', 4, { serviceId: 'svc15', dbh: febOilDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-02-10T15:00:00Z') });
+    expect(febOilCalc.serviceAmounts.map((r) => r.service)).toEqual([
+      'Tree & Shrub Care — TriTek 1% · If you find: Live scale crawlers, nymphs or mites',
+      'Tree & Shrub Care — TriTek 1.5% · If you find: Heavy scale or mites',
+    ]);
+    expect(febOilCalc.warnings.join(' ')).toContain('Heavy scale or mites');
+
+    // Compatible cross-unit rates (10 g/gal protocol vs 0.35-1.05 oz/gal catalog) keep the protocol's 10 g/gal dose in the calculator.
+    const antapexOz = { id: 'antapex-oz', name: 'Atticus Antapex WSG', epa_reg_number: '91234-401', default_rate: '0.35-1.05', default_unit: 'oz/gal', label_verified_at: '2027-12-01', active: true };
+    const antapexDb = dbFor({
+      scheduled_services: [{ id: 'svc16', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
+      products_catalog: [antapexOz],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const antapexCalc = await jobCard.mixForProduct('antapex-oz', 4, { serviceId: 'svc16', dbh: antapexDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(antapexCalc).toMatchObject({ rateSource: 'protocol', amount: 40, amountMax: null, unit: 'g' });
+
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
       products_catalog: [tristar],
