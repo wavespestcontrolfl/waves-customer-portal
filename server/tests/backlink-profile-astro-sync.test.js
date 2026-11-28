@@ -105,7 +105,12 @@ describe('getVerifiedProfilesByOffice', () => {
       { live_url: 'https://citysquares.com/b/waves-pest-control-north-port-1234', location: 'venice' },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-north-venice-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-south-venice-fl/', location: null },
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-venice-gardens-fl/', location: null },
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-springs-fl/', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-lakewood-ranch-99999', location: 'sarasota' },
+      // Competing office claim on a Sarasota-named URL -> omitted completely
+      { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-77777', location: 'sarasota' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-77777', location: 'venice' },
       { live_url: 'https://sub.reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-bradenton-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota/posts/123', location: 'sarasota' },
@@ -143,5 +148,18 @@ describe('getVerifiedProfilesByOffice', () => {
       'https://nextdoor.com/pages/waves-pest-control-venice-venice-fl-9crfqd/',
       'https://reviews.birdeye.com/waves-pest-control-venice-176686916548706',
     ]);
+  });
+
+  test('picks a deterministic URL spelling across duplicate rows regardless of DB row order', async () => {
+    const forward = [
+      { live_url: 'https://n49.com/biz/12345/waves-pest-control-venice', location: 'venice' },
+      { live_url: 'https://www.n49.com/biz/12345/waves-pest-control-venice/', location: 'venice' },
+    ];
+    mockRows(forward);
+    const out1 = await getVerifiedProfilesByOffice();
+    mockRows([...forward].reverse());
+    const out2 = await getVerifiedProfilesByOffice();
+    expect(out1['venice-fl']).toEqual(out2['venice-fl']);
+    expect(out1['venice-fl']).toHaveLength(1);
   });
 });

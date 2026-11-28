@@ -87,7 +87,11 @@ const EXPLICIT_OFFICE_URLS = new Map([
 ]);
 
 const OFFICE_CITY_KEYS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
-const SERVICE_AREA_CITY_PATTERN = Object.keys(REVIEW_CITY_TO_LOCATION || {})
+const EXTRA_NON_OFFICE_LOCALITIES = ['venice gardens', 'sarasota springs'];
+const SERVICE_AREA_CITY_PATTERN = [...new Set([
+  ...Object.keys(REVIEW_CITY_TO_LOCATION || {}),
+  ...EXTRA_NON_OFFICE_LOCALITIES,
+])]
   .filter((c) => !OFFICE_CITY_KEYS.has(c))
   .map((c) => c.trim().replace(/\s+/g, '[-_]?'))
   .sort((a, b) => b.length - a.length)
@@ -211,28 +215,33 @@ async function getVerifiedProfilesByOffice() {
     const url = String(r.live_url || '').trim();
     if (!/^https:\/\/\S+$/.test(url)) continue;
     if (sameAsRejectReason(url)) { refused++; continue; }
-    const slug = officeSlugForRow(r.location, url);
-    if (!slug) { dropped++; continue; }
     const hp = urlHostAndPath(url);
     const key = hp ? `${hp.host}${hp.path}` : url.toLowerCase();
     let entry = byNormalized.get(key);
     if (!entry) {
-      entry = { offices: new Map() };
+      entry = { claimedOffices: new Set(), resolvedOffices: new Set(), urls: new Set() };
       byNormalized.set(key, entry);
     }
-    if (!entry.offices.has(slug)) entry.offices.set(slug, url);
+    if (r.location && r.location !== 'default' && LOCATION_TO_OFFICE_SLUG[r.location]) {
+      entry.claimedOffices.add(LOCATION_TO_OFFICE_SLUG[r.location]);
+    }
+    const slug = officeSlugForRow(r.location, url);
+    if (slug) entry.resolvedOffices.add(slug);
+    entry.urls.add(url);
   }
   const byOffice = {};
   for (const slug of OFFICE_SLUGS) byOffice[slug] = new Set();
   for (const entry of byNormalized.values()) {
-    // A single profile URL claimed by multiple offices is ambiguous (brand/shared
-    // listing), so omit it from every office's LocalBusiness sameAs.
-    if (entry.offices.size !== 1) {
-      dropped += entry.offices.size;
+    // Reject if multiple offices explicitly claim the URL or resolve to different
+    // offices, or if no valid single office could be determined.
+    if (entry.claimedOffices.size > 1 || entry.resolvedOffices.size !== 1) {
+      dropped++;
       continue;
     }
-    const [[slug, url]] = entry.offices.entries();
-    byOffice[slug].add(url);
+    const [slug] = entry.resolvedOffices;
+    // Choose a deterministic representative spelling across identical normalized rows.
+    const canonicalUrl = [...entry.urls].sort()[0];
+    byOffice[slug].add(canonicalUrl);
   }
   if (dropped) logger.warn(`[backlink-sync] dropped ${dropped} listing(s) with an unknown or ambiguous office location`);
   if (refused) logger.info(`[backlink-sync] kept ${refused} verified link(s) out of sameAs (not an allowlisted office profile page)`);
