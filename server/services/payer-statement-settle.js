@@ -68,6 +68,31 @@ async function withStatementMoneyLock(statementId, fn, { database = db } = {}) {
   return database === db ? db.transaction(run) : run(database);
 }
 
+const NON_SETTLEABLE_CHILD_STATUSES = [
+  'void', 'paid', 'prepaid', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'disputed', 'processing',
+];
+
+async function prepareSettleableStatementChildren(database, statementId) {
+  const { invoiceHeldForChemicalReview } = require('./invoice-helpers');
+  const childRows = await database('invoices')
+    .where({ payer_statement_id: statementId })
+    .whereNot('status', 'void')
+    .select('id', 'invoice_number', 'customer_id', 'status', 'scheduled_send_error', 'visit_completion_packet_id');
+  const blockedChild = (childRows || []).find((row) => (
+    ['processing', 'disputed'].includes(String(row?.status || '').toLowerCase())
+    || invoiceHeldForChemicalReview(row)
+  ));
+  if (blockedChild) {
+    const err = new Error(
+      `Cannot settle statement S-${statementId}: child invoice ${blockedChild.invoice_number || blockedChild.id} is held or has a payment in flight.`,
+    );
+    err.statusCode = 409;
+    throw err;
+  }
+  return (childRows || []).filter((row) => row.visit_completion_packet_id != null
+    && !NON_SETTLEABLE_CHILD_STATUSES.includes(String(row.status || '').toLowerCase()));
+}
+
 /**
  * Cascade-settle a statement to `paid`. MUST run inside the caller's transaction
  * (webhook or admin reconcile). Idempotent: a statement already `paid` is a
@@ -143,28 +168,7 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   // Guard + cascade (B-34): refuse settlement if any linked child invoice is
   // processing, disputed, or held for chemical add-on review; and never flip
   // refunded, canceled, prepaid, or already-settled children to 'paid'.
-  const NON_SETTLEABLE_CHILD_STATUSES = [
-    'void', 'paid', 'prepaid', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'disputed', 'processing',
-  ];
-  const { invoiceHeldForChemicalReview } = require('./invoice-helpers');
-  const childRows = await database('invoices')
-    .where({ payer_statement_id: statementId })
-    .whereNot('status', 'void')
-    .select('id', 'invoice_number', 'customer_id', 'status', 'scheduled_send_error', 'visit_completion_packet_id');
-  const blockedChild = (childRows || []).find((row) => (
-    ['processing', 'disputed'].includes(String(row?.status || '').toLowerCase())
-    || invoiceHeldForChemicalReview(row)
-  ));
-  if (blockedChild) {
-    const err = new Error(
-      `Cannot settle statement S-${statementId}: child invoice ${blockedChild.invoice_number || blockedChild.id} is held or has a payment in flight.`,
-    );
-    err.statusCode = 409;
-    throw err;
-  }
-
-  const packetChildren = (childRows || []).filter((row) => row.visit_completion_packet_id != null
-    && !NON_SETTLEABLE_CHILD_STATUSES.includes(String(row.status || '').toLowerCase()));
+  const packetChildren = await prepareSettleableStatementChildren(database, statementId);
   const cascadeQuery = database('invoices')
     .where({ payer_statement_id: statementId })
     .whereNotIn('status', NON_SETTLEABLE_CHILD_STATUSES);
