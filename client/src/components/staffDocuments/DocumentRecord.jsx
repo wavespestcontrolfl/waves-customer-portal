@@ -6,7 +6,7 @@ import { box, row, D, inputStyle, primaryStyle, buttonStyle, Field, request, dat
 // fields that are still empty, or that still hold the value the last prefill put there (owner change).
 // A typed value always wins. A failed prefill is silent: the form just stays empty.
 function usePrefill({ detail, canWrite, record, owner, setAnswers }) {
-  const enabled = Boolean(detail.prefill && canWrite && !record); const versionId = detail.version.id;
+  const enabled = Boolean(detail.prefill && detail.rendered?.kind === 'form' && canWrite && !record); const versionId = detail.version.id;
   const [prefilled, setPrefilled] = useState({});
   const applied = useRef({});
   useEffect(() => {
@@ -174,11 +174,15 @@ function RecordIntro({ canWrite, isSignatureForm, locked }) {
   );
 }
 
-function RecordMetaControls({ visible, assignable, owner, setOwner, due, setDue }) {
+function RecordMetaControls({ visible, assignable, record, owner, setOwner, due, setDue }) {
   if (!visible) return null;
+  const missingOwner = Boolean(record?.owner_id) && !assignable.some(person => person.id === record.owner_id);
   return (
     <div style={row}>
-      <Field label="Record owner"><select required style={inputStyle} value={owner} onChange={e => setOwner(e.target.value)}>{assignable.map(person => <option key={person.id} value={person.id}>{person.name}</option>)}</select></Field>
+      <Field label="Record owner"><select required style={inputStyle} value={owner} onChange={e => setOwner(e.target.value)}>
+        {missingOwner && <option value={record.owner_id}>{record.owner_name || `Former staff (${record.owner_id.slice(0, 8)})`}</option>}
+        {assignable.map(person => <option key={person.id} value={person.id}>{person.name}</option>)}
+      </select></Field>
       <Field label="Next action due (Eastern)"><input required type="datetime-local" style={inputStyle} value={due} onChange={e => setDue(e.target.value)} /></Field>
     </div>
   );
@@ -247,7 +251,7 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
     <SavedRecordsPicker visible={manage || !state.isSignatureForm || state.selectableRecords.length > 0} record={record} records={state.selectableRecords} canWrite={canWrite} isSignatureForm={state.isSignatureForm} onSelect={selectRecord} />
     {error && <p role="alert" style={{ padding: '10px 12px', background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', borderRadius: 6 }}>{error}</p>}
     <fieldset disabled={busy || state.locked} style={{ border: 0, padding: 0, minWidth: 0 }}>
-      <RecordMetaControls visible={manage || !state.isSignatureForm} assignable={assignable} owner={owner} setOwner={setOwner} due={due} setDue={setDue} />
+      <RecordMetaControls visible={manage || !state.isSignatureForm} assignable={assignable} record={record} owner={owner} setOwner={setOwner} due={due} setDue={setDue} />
       <ProcedureSteps kind={rendered.kind} sections={rendered.sections} steps={steps} setSteps={setSteps} />
       <RecordFields fields={rendered.metadata.fields} answers={answers} setAnswers={setAnswers} assigningOther={!state.locked && state.isSignatureForm && owner !== selfId} />
       {state.isSignatureForm && !state.locked && state.signedName.trim() && !state.signatureReady && <p style={{ color: '#991B1B', fontSize: 14, marginTop: -8 }}>Enter both your first and last name to sign.</p>}

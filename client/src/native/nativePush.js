@@ -45,6 +45,17 @@ let pushPluginPromise = null;
 // so a quick logout→login re-subscribe can't reach the server first and then
 // be deactivated when the older unsubscribe lands.
 let inflightDeactivation = null;
+// Serializes concurrent postToken() calls so two registrations for the same
+// device never race each other on the wire.
+let registrationQueue = Promise.resolve();
+// Monotonic epoch incremented whenever logout begins so any in-flight
+// registration awaiting async plugin work (e.g. listChannels) aborts before
+// touching the server, or cleans up with its captured JWT if it was already
+// on the wire when logout ran.
+let registrationEpoch = 0;
+// Captures the signing-out session JWT so any registration callback arriving
+// *during* logout is also refused until a different authenticated session starts.
+let signingOutJwt = null;
 const registrationWaiters = new Set();
 
 function finishRegistration(state) {
@@ -72,7 +83,51 @@ function authToken() {
   return localStorage.getItem('waves_token') || '';
 }
 
-async function postToken(token) {
+async function readDisabledAndroidChannels() {
+  if (nativePlatform() !== 'android') return null;
+  try {
+    const { PushNotifications } = await pushPlugin();
+    if (typeof PushNotifications?.listChannels !== 'function') return null;
+    const res = await PushNotifications.listChannels();
+    if (!Array.isArray(res?.channels)) return null;
+    const known = new Set(ANDROID_NOTIFICATION_CHANNELS.map((c) => c.id));
+    return res.channels
+      .filter((ch) => known.has(ch?.id) && Number(ch?.importance) === 0)
+      .map((ch) => ch.id)
+      .sort();
+  } catch {
+    return null;
+  }
+}
+
+function postToken(token) {
+  rememberToken(token);
+  const jwt = authToken();
+  if (!jwt) {
+    // Not authenticated yet — hold the token; the login flow flushes it.
+    pendingToken = token;
+    return Promise.resolve(false);
+  }
+  const epoch = registrationEpoch;
+  if (registrationAborted(epoch, jwt)) return Promise.resolve(false);
+  const run = registrationQueue.catch(() => {}).then(() => postTokenSerialized(token, epoch));
+  registrationQueue = run;
+  return run;
+}
+
+function isSigningOutSession(jwt) {
+  if (!signingOutJwt || !jwt) return false;
+  if (jwt === signingOutJwt) return true;
+  const a = tokenSessionIdentity(jwt);
+  const b = tokenSessionIdentity(signingOutJwt);
+  return Boolean(a && b && sameRequestSession(a, b));
+}
+
+function registrationAborted(epoch, jwt = authToken()) {
+  return epoch !== registrationEpoch || !jwt || isSigningOutSession(jwt);
+}
+
+async function postTokenSerialized(token, epoch) {
   rememberToken(token);
   const jwt = authToken();
   if (!jwt) {
@@ -80,24 +135,53 @@ async function postToken(token) {
     pendingToken = token;
     return false;
   }
+  if (registrationAborted(epoch, jwt)) return false;
   // Post the real platform so the backend routes iOS tokens to APNs and Android
   // tokens to FCM. (On Android, Capacitor's 'registration' event delivers an FCM
   // token here.) Default to 'ios' for anything non-Android (this only runs on a
   // native platform — initNativePush gates on isNativeApp).
   const platform = nativePlatform() === 'android' ? 'android' : 'ios';
+  const disabledChannels = platform === 'android' ? await readDisabledAndroidChannels() : null;
+  if (registrationAborted(epoch)) return false;
   try {
     if (inflightDeactivation) await inflightDeactivation;
+    // Re-check after awaiting deactivation (and listChannels above): if logout
+    // started in the meantime, abort cleanly so we never reactivate the prior
+    // customer's notifications after unsubscribe.
+    if (registrationAborted(epoch)) return false;
     await api.request('/push/native-subscribe', {
       method: 'POST',
-      body: JSON.stringify({ platform, token, deviceInfo: `${platform} · WavesApp` }),
+      body: JSON.stringify({
+        platform,
+        token,
+        deviceInfo: `${platform} · WavesApp`,
+        // Send disabledChannels ONLY when listChannels() succeeded (including []
+        // to clear prior mutes); omit on lookup failure so the server preserves
+        // any previously reported mutes.
+        ...(disabledChannels !== null ? { disabledChannels } : {}),
+      }),
     });
-    if (authToken() !== jwt && !sameRequestSession(tokenSessionIdentity(jwt), tokenSessionIdentity(authToken()))) return false;
+    if (registrationAborted(epoch, jwt)) {
+      // Logout started while /push/native-subscribe was already on the wire and
+      // may have cleared localStorage tokens. Await cleanup inside the serialized
+      // registration queue so a quick same-account re-login never starts a fresh
+      // subscribe before this late unsubscribe finishes.
+      await api.request('/push/native-unsubscribe', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ token }),
+      }).catch(() => {});
+      return false;
+    }
+    const currentJwt = authToken();
+    if (currentJwt !== jwt && !sameRequestSession(tokenSessionIdentity(jwt), tokenSessionIdentity(currentJwt))) return false;
     pendingToken = null;
     // The Lock Screen visit card rides on this registration: the server keeps the card's start token on
     // the row this request just wrote. iPhone only; a no-op in an app version without the card.
     if (platform === 'ios') void reportVisitCard(token);
     return true;
   } catch (err) {
+    if (epoch !== registrationEpoch) return false;
     console.warn('[nativePush] token registration failed:', err?.message || err);
     pendingToken = token; // retry on next flush
     return false;
@@ -117,7 +201,48 @@ function pushPlugin() {
   return pushPluginPromise;
 }
 
+const ANDROID_NOTIFICATION_CHANNELS = [
+  {
+    id: 'waves_service_updates',
+    name: 'Service & Arrival Updates',
+    description: 'Appointment reminders, technician on-the-way alerts, and completed service reports.',
+    importance: 4,
+    vibration: true,
+    visibility: 1,
+  },
+  {
+    id: 'waves_billing',
+    name: 'Billing & Receipts',
+    description: 'Invoice reminders, payment confirmations, and Auto Pay notices.',
+    importance: 3,
+    vibration: true,
+    visibility: 0,
+  },
+  {
+    id: 'waves_messages',
+    name: 'Messages from Waves',
+    description: 'Replies and updates from the Waves team.',
+    importance: 4,
+    vibration: true,
+    visibility: 1,
+  },
+];
+
+const createdAndroidChannels = new Set();
+async function ensureAndroidChannels(PushNotifications) {
+  if (nativePlatform() !== 'android') return;
+  if (typeof PushNotifications?.createChannel !== 'function') return;
+  const missing = ANDROID_NOTIFICATION_CHANNELS.filter((ch) => !createdAndroidChannels.has(ch.id));
+  if (!missing.length) return;
+  await Promise.all(
+    missing.map((ch) => PushNotifications.createChannel(ch)
+      .then(() => { createdAndroidChannels.add(ch.id); })
+      .catch(() => {})),
+  );
+}
+
 async function bindPushListeners(PushNotifications) {
+  await ensureAndroidChannels(PushNotifications);
   if (listenersBound) return;
   listenersBound = true;
   try {
@@ -282,16 +407,7 @@ export async function initNativePush() {
 // the remembered token on success instead of re-arming it — re-posting a
 // token the OS will never present would just re-open the silent-drop gap.
 // On failure the memory stays, so the next app launch retries.
-async function revokeRegistrationForDeniedPermission() {
-  const token = rememberedToken();
-  if (!token) return; // this device never registered — nothing to release
-  // Mark the revocation as owed BEFORE any early return — a signed-out
-  // cold launch can't release the row, and login only calls
-  // flushNativePushToken(); the marker is what makes that flush retry us.
-  try { localStorage.setItem(PENDING_REVOKE_KEY, '1'); } catch { /* storage unavailable */ }
-  let refreshJwt = null;
-  try { refreshJwt = localStorage.getItem('waves_refresh_token'); } catch { /* storage unavailable */ }
-  if (!authToken() && !refreshJwt) return;
+async function sendDeniedPermissionUnsubscribe(token) {
   try {
     const res = await api.request('/push/native-unsubscribe', {
       method: 'POST',
@@ -315,12 +431,44 @@ async function revokeRegistrationForDeniedPermission() {
   }
 }
 
+async function revokeRegistrationForDeniedPermission({ insideDeactivationLatch = false } = {}) {
+  // Invalidate any in-flight registration (e.g. awaiting Android listChannels)
+  // as soon as OS permission is lost, so it cannot reactivate a silent token
+  // after this revocation unsubscribes the device.
+  registrationEpoch += 1;
+  const token = rememberedToken();
+  if (!token) return; // this device never registered — nothing to release
+  // Mark the revocation as owed BEFORE any early return — a signed-out
+  // cold launch can't release the row, and login only calls
+  // flushNativePushToken(); the marker is what makes that flush retry us.
+  try { localStorage.setItem(PENDING_REVOKE_KEY, '1'); } catch { /* storage unavailable */ }
+  let refreshJwt = null;
+  try { refreshJwt = localStorage.getItem('waves_refresh_token'); } catch { /* storage unavailable */ }
+  if (!authToken() && !refreshJwt) return;
+  if (insideDeactivationLatch) {
+    await sendDeniedPermissionUnsubscribe(token);
+    return;
+  }
+  const prev = inflightDeactivation;
+  const chained = prev
+    ? prev.catch(() => {}).then(() => sendDeniedPermissionUnsubscribe(token))
+    : sendDeniedPermissionUnsubscribe(token);
+  inflightDeactivation = chained;
+  try {
+    await chained;
+  } finally {
+    if (inflightDeactivation === chained) inflightDeactivation = null;
+  }
+}
+
 /**
  * Flush a token captured before login. Call from the auth flow once a JWT is
  * present (see hooks/useAuth.jsx). No-op on web or when nothing is pending.
  */
 export function flushNativePushToken() {
   if (!isNativeApp()) return;
+  // A fresh sign-in is flushing credentials: lift the signing-out session block.
+  signingOutJwt = null;
   // A revocation owed from a signed-out/offline denied-permission launch
   // retries now that credentials exist. Two ordering rules:
   //   1. CHAIN onto any in-flight logout unsubscribe rather than replacing
@@ -362,7 +510,7 @@ async function retryPendingRevocation() {
       try { localStorage.removeItem(PENDING_REVOKE_KEY); } catch { /* storage unavailable */ }
       return;
     }
-    await revokeRegistrationForDeniedPermission();
+    await revokeRegistrationForDeniedPermission({ insideDeactivationLatch: true });
   } catch (err) {
     console.warn('[nativePush] pending revocation retry failed:', err?.message || err);
   }
@@ -378,6 +526,11 @@ async function retryPendingRevocation() {
  */
 export async function deactivateNativePushToken() {
   if (!isNativeApp()) return;
+  // Invalidate any registration already awaiting async plugin work (such as
+  // Android listChannels) AND block new registrations for this signing-out
+  // session until a fresh sign-in calls flushNativePushToken().
+  registrationEpoch += 1;
+  signingOutJwt = authToken() || signingOutJwt;
   // The access JWT can be expired at logout while the 30-day refresh token
   // is still valid (7d vs 30d defaults) — so this goes through the api
   // client, whose 401→refresh→retry path recovers that case. A raw fetch
@@ -400,9 +553,11 @@ export async function deactivateNativePushToken() {
   pendingToken = token;
   const request = (async () => {
     try {
-      // api.request throws on non-OK, so a failed unsubscribe lands in the
-      // catch — pendingToken stays armed and the next login's flush re-points
-      // the subscription (which supersedes the old row server-side).
+      // Send /push/native-unsubscribe immediately while logout credentials are
+      // still live (never block behind a slow registration that could outlast
+      // logout's credential cleanup window). Any already-in-flight subscribe
+      // that finishes later sees epoch !== registrationEpoch and cleans up
+      // with its own captured JWT.
       await api.request('/push/native-unsubscribe', {
         method: 'POST',
         body: JSON.stringify({ token }),

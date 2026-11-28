@@ -18,6 +18,7 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technicianId = req.headers['x-test-admin'] || null;
     req.techRole = 'admin';
+    req.technician = { role: 'admin', email: req.headers['x-test-email'] ?? 'contact@wavespestcontrol.com' };
     next();
   },
   requireAdmin: (_req, _res, next) => next(),

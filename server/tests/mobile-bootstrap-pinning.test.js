@@ -222,4 +222,87 @@ describe('native customer-app bootstrap reproducibility', () => {
       && !APP_LINK_PATH_PREFIXES.some((prefix) => `${route}/`.startsWith(prefix)));
     expect(unclaimed).toEqual([]);
   });
+
+  test('native shell uses slim native-shell webDir, wires server.errorPath, and configures Android edge-to-edge + StatusBar', () => {
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'client/capacitor.config.json'), 'utf8'));
+    expect(config.webDir).toBe('native-shell');
+    expect(config.server.errorPath).toBe('index.html');
+    const shellHtml = fs.readFileSync(path.join(root, 'client/native-shell/index.html'), 'utf8');
+    expect(Buffer.byteLength(shellHtml, 'utf8')).toBeLessThan(20 * 1024);
+    expect(shellHtml).toContain('document.referrer');
+    expect(shellHtml).toContain('parsed.origin === PORTAL_ORIGIN');
+    expect(shellHtml).toContain("window.addEventListener('online', retryNavigation)");
+    expect(config.android).toMatchObject({
+      backgroundColor: '#E5EFF7',
+      adjustMarginsForEdgeToEdge: 'auto',
+    });
+    expect(config.plugins.StatusBar).toMatchObject({
+      style: 'LIGHT',
+      backgroundColor: '#E5EFF7',
+    });
+    for (const script of ['bootstrap-ios.sh', 'bootstrap-android.sh']) {
+      const source = fs.readFileSync(path.join(root, 'scripts/mobile', script), 'utf8');
+      expect(source).not.toMatch(/^npm run build$/m);
+      expect(source).toContain('test -f native-shell/index.html');
+    }
+  });
+
+  test('bootstrap-android installs Waves launcher/adaptive icons, monochrome notification icon, splash, and idempotent FCM manifest metadata', () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-android-assets-'));
+    const resRoot = path.join(fixture, 'res');
+    const manifestPath = path.join(fixture, 'AndroidManifest.xml');
+    try {
+      fs.mkdirSync(path.join(resRoot, 'drawable-port-xxhdpi'), { recursive: true });
+      fs.writeFileSync(
+        manifestPath,
+        '<?xml version="1.0" encoding="utf-8"?>\n<manifest>\n    <application>\n        <activity android:name=".MainActivity" />\n    </application>\n</manifest>\n',
+      );
+      const run = () => spawnSync('bash', [path.join(root, 'scripts/mobile/bootstrap-android.sh'), '--assets-only'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, WAVES_ANDROID_RES_ROOT: resRoot, WAVES_ANDROID_MANIFEST: manifestPath },
+      });
+
+      const first = run();
+      expect(first.status).toBe(0);
+      expect(first.stdout).toContain('Waves launcher & adaptive icons installed');
+      // Running twice against the same AndroidManifest.xml must replace — never
+      // duplicate — the three FCM <meta-data> entries (even though @drawable/...
+      // and @color/... values contain forward slashes).
+      const second = run();
+      expect(second.status).toBe(0);
+      const manifestAfterTwoRuns = fs.readFileSync(manifestPath, 'utf8');
+      for (const name of [
+        'com.google.firebase.messaging.default_notification_icon',
+        'com.google.firebase.messaging.default_notification_color',
+        'com.google.firebase.messaging.default_notification_channel_id',
+      ]) {
+        const matches = manifestAfterTwoRuns.match(new RegExp(name.replace(/\./g, '\\.'), 'g')) || [];
+        expect(matches).toHaveLength(1);
+      }
+      expect(manifestAfterTwoRuns).toContain('android:resource="@drawable/ic_stat_waves"');
+      expect(manifestAfterTwoRuns).toContain('android:resource="@color/waves_notification_color"');
+      expect(manifestAfterTwoRuns).toContain('android:value="waves_service_updates"');
+
+      for (const bucket of ['mipmap-mdpi', 'mipmap-hdpi', 'mipmap-xhdpi', 'mipmap-xxhdpi', 'mipmap-xxxhdpi']) {
+        for (const file of ['ic_launcher.png', 'ic_launcher_round.png', 'ic_launcher_foreground.png']) {
+          const p = path.join(resRoot, bucket, file);
+          expect(fs.existsSync(p)).toBe(true);
+          expect(fs.statSync(p).size).toBeGreaterThan(100);
+        }
+      }
+      expect(fs.readFileSync(path.join(resRoot, 'mipmap-anydpi-v26/ic_launcher.xml'), 'utf8')).toContain('<adaptive-icon');
+      expect(fs.readFileSync(path.join(resRoot, 'values/ic_launcher_background.xml'), 'utf8')).toContain('#1299DE');
+      expect(fs.readFileSync(path.join(resRoot, 'drawable/ic_stat_waves.xml'), 'utf8')).toContain('<vector');
+      expect(fs.readFileSync(path.join(resRoot, 'values/waves_colors.xml'), 'utf8')).toContain('#04395E');
+      expect(fs.existsSync(path.join(resRoot, 'drawable/splash.png'))).toBe(true);
+      expect(fs.existsSync(path.join(resRoot, 'drawable-port-xxhdpi/splash.png'))).toBe(true);
+
+      const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-android.sh'), 'utf8');
+      expect(source).toContain('WAVES_ANDROID_VERSION_NAME');
+      expect(source).toContain('WAVES_ANDROID_VERSION_CODE');
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
 });

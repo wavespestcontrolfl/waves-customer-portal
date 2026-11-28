@@ -453,10 +453,12 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
   const runsById = new Map(runs.map((r) => [r.id, r]));
   const inFlight = runs.find((r) => r.status === "running") || null;
   // A failed run keeps every result already paid for — offer to resume it
-  // instead of re-billing a fresh run. Only current-version failures: the
+  // instead of re-billing a fresh run. Only current-version failures (per leg,
+  // because Gemini carries a distinct systemInstruction channel tag): the
   // server refuses stale-version resumes (one run = one drafter version).
+  const expectedVersionForLeg = (leg) => exam.currentVersionsByLeg?.[leg] ?? exam.currentVersion;
   const resumableFailure = !inFlight
-    ? runs.find((r) => r.status === "failed" && r.promptVersion === exam.currentVersion) || null
+    ? runs.find((r) => r.status === "failed" && r.promptVersion === expectedVersionForLeg(r.providerLeg)) || null
     : null;
   const items = exam.items || { active: 0, total: 0 };
   return (

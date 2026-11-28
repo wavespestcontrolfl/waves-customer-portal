@@ -372,6 +372,7 @@ async function reportDecoderDown(reasons) {
 async function fetchDecoderWithFallback(prompt) {
   const { dispatchWithFallback } = require('./llm/call');
   const res = await dispatchWithFallback(DECODER_ROUTE(), {
+    laneId: 'contact_dictation',
     text: prompt,
     jsonMode: true,
     temperature: 0,

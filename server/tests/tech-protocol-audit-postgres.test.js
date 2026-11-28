@@ -149,6 +149,18 @@ describe('pickSample (pure)', () => {
       t.integer('sort_order').defaultTo(0);
       t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
     });
+    await db.schema.withSchema(mockSchema).createTable('audit_log', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.string('actor_type', 32).notNullable();
+      t.uuid('actor_id');
+      t.string('action', 96).notNullable();
+      t.string('resource_type', 48);
+      t.uuid('resource_id');
+      t.jsonb('metadata').defaultTo('{}');
+      t.string('ip_address', 64);
+      t.text('user_agent');
+      t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(db.fn.now());
+    });
     await require('../models/migrations/20261120150000_tech_rewards_scores').up(db);
     await require('../models/migrations/20261120190000_tech_protocol_audit_evidence').up(db);
     audit = require('../services/tech-protocol-audit');
@@ -164,6 +176,7 @@ describe('pickSample (pure)', () => {
   });
 
   beforeEach(async () => {
+    await db('audit_log').del();
     await db('tech_protocol_audits').del();
     await db('service_products').del();
     await db('service_photos').del();

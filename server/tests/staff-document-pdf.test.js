@@ -100,6 +100,38 @@ test('long controlled wording keeps complete clauses, citations, signature evide
   expect(options.footerTemplate).toContain('class="totalPages"');
 });
 
+test('form PDF renders checkbox answers cleanly, shows staff name, and closes the page', async () => {
+  const page = { route: jest.fn(), setContent: jest.fn(), pdf: jest.fn().mockResolvedValue(Buffer.from('pdf')), close: jest.fn().mockResolvedValue() };
+  launchBrowser.mockResolvedValue({ newPage: jest.fn().mockResolvedValue(page), close: jest.fn().mockResolvedValue() });
+  const recordDetail = {
+    ...detail,
+    rendered: {
+      ...detail.rendered,
+      kind: 'form',
+      sections: [{ id: 'scope', number: 1, title: 'Scope', html: '<p>QA</p>' }],
+      metadata: {
+        citations: [],
+        fields: [
+          { id: 'agree', label: 'Agreed', type: 'checkbox', required: true },
+          { id: 'optin', label: 'Opt in', type: 'checkbox', required: false },
+        ],
+      },
+    },
+  };
+  await renderStaffDocumentPdf(recordDetail, {
+    record: {
+      id: 'record-cb', owner_id: 'tech-cb', owner_name: 'Sample Tech', content_hash: 'c'.repeat(64),
+      due_at: '2027-01-15T14:00:00Z', completed_at: '2027-01-15T15:00:00Z',
+      completed_steps: [], answers: { agree: true, optin: false },
+    },
+  });
+  const html = page.setContent.mock.calls[0][0];
+  expect(html).toContain('Sample Tech (tech-cb)');
+  expect(html).toContain('[x] Yes — confirmed');
+  expect(html).toContain('[ ] No');
+  expect(page.close).toHaveBeenCalledTimes(1);
+});
+
 test('completed signature forms render Yes/No checkboxes, staff name, and an electronic signature block', async () => {
   const page = { route: jest.fn(), setContent: jest.fn(), pdf: jest.fn().mockResolvedValue(Buffer.from('pdf')) };
   launchBrowser.mockResolvedValue({ newPage: jest.fn().mockResolvedValue(page), close: jest.fn() });

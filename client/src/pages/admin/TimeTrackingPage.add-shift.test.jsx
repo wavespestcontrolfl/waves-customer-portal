@@ -8,7 +8,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EntriesTab } from "./TimeTrackingPage";
+import { EntriesTab } from "./staff/EntriesTab";
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status,

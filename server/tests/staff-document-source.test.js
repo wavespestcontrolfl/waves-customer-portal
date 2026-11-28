@@ -200,3 +200,13 @@ test('titles resolve policy bindings and block unresolved decisions or unsupport
   draft.title = '{{unknown.title}}';
   expect(() => renderSource(draft, values)).toThrow(/binding/);
 });
+
+test('form records trim leading and trailing whitespace on text fields before strict validation', () => {
+  const version = {
+    staff_metadata: { fields: [{ id: 'signed-name', label: 'Typed name', type: 'text', required: true }] },
+    content_snapshot: { kind: 'form', sections: [{ id: 'review' }] },
+  };
+  expect(recordAnswers(version, { answers: { 'signed-name': '  Sample Tech  ' }, completed_steps: [], complete: true }).answers)
+    .toBe('{"signed-name":"Sample Tech"}');
+  expect(() => recordAnswers(version, { answers: { 'signed-name': '   ' }, completed_steps: [], complete: true })).toThrow();
+});

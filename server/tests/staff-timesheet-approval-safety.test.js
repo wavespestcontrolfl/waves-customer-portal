@@ -598,6 +598,11 @@ describe('weekly timesheet approval safety', () => {
           },
         ],
       },
+      {
+        table: 'time_entries',
+        label: 'overnightCoveringShifts',
+        thenValue: [],
+      },
     ], [], events);
     timeTracking.lockStaffWeek.mockResolvedValue('2020-01-06');
 
@@ -1471,5 +1476,146 @@ describe('weekly timesheet approval safety', () => {
       expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
       expect(raise).not.toHaveBeenCalled();
     });
+  });
+
+  test('allows an early Monday job covered by a Sunday-to-Monday overnight shift', async () => {
+    const events = [];
+    const overnightShift = {
+      id: 'shift-sun',
+      entry_type: 'shift',
+      status: 'completed',
+      approval_status: 'approved',
+      clock_in: new Date('2020-01-06T03:00:00.000Z'), // Sun 10 PM ET
+      clock_out: new Date('2020-01-06T10:00:00.000Z'), // Mon 5 AM ET
+      duration_minutes: 420,
+    };
+    const entries = [{
+      id: 'job-mon-early',
+      entry_type: 'job',
+      status: 'completed',
+      approval_status: 'pending',
+      clock_in: new Date('2020-01-06T06:00:00.000Z'), // Mon 1 AM ET
+      clock_out: new Date('2020-01-06T07:00:00.000Z'), // Mon 2 AM ET
+      duration_minutes: 60,
+    }];
+    const dailies = [{ id: 'daily-1', work_date: '2020-01-06', total_shift_minutes: 0, job_count: 1, status: 'pending' }];
+    const weekly = { id: 'weekly-1', status: 'pending', week_start: '2020-01-06', total_shift_minutes: 0, job_count: 1 };
+    const signed = { ...weekly, tech_signed_at: new Date('2020-01-13T12:00:00.000Z'), tech_signature: 'Tech One' };
+    installDatabase([
+      { table: 'time_entries', label: 'entries', thenValue: entries },
+      { table: 'time_entries', label: 'overnightCoveringShifts', thenValue: [overnightShift] },
+      { table: 'time_entry_daily_summary', label: 'dailiesBefore', thenValue: dailies },
+      { table: 'time_entry_daily_summary', label: 'dailiesAfter', thenValue: dailies },
+      { table: 'time_weekly_summary', label: 'signUpdate', returningValue: [signed] },
+    ], [], events);
+    timeTracking.lockStaffWeek.mockResolvedValue('2020-01-06');
+    timeTracking.computeDailySummaryInTransaction.mockResolvedValue();
+    timeTracking.computeWeeklySummaryInTransaction.mockResolvedValue(weekly);
+    const reviewToken = approval._test.reviewSnapshotToken({ weekly, dailies, entries });
+
+    await expect(approval.signWeek({
+      technicianId: 'tech-1',
+      weekStart: '2020-01-06',
+      signature: 'Tech One',
+      reviewToken,
+    })).resolves.toEqual({ weekly: signed, alreadySigned: false });
+  });
+
+  test('neutralizes spreadsheet formula prefixes and quotes special characters in payroll CSV', async () => {
+    const events = [];
+    installDatabase([
+      { table: 'time_entry_daily_summary', label: 'dailyCandidates', thenValue: [{ technician_id: 'tech-1' }] },
+      { table: 'time_entries', label: 'entryCandidates', thenValue: [{ technician_id: 'tech-1' }] },
+      {
+        table: 'time_weekly_summary',
+        label: 'payrollRows',
+        thenValue: [{
+          id: 'weekly-1',
+          technician_id: 'tech-1',
+          tech_name: '=CMD("calc"), "Bob"',
+          week_start: new Date('2020-01-06T00:00:00.000Z'),
+          regular_minutes: 2400,
+          overtime_minutes: 0,
+          unpaid_meal_minutes: 0,
+          job_count: 1,
+          status: 'approved',
+        }],
+      },
+    ], [], events);
+
+    const csv = await approval.generateWeeklyPayrollExport('2020-01-06');
+    const dataRow = csv.split('\n')[1];
+    expect(dataRow.startsWith('"\'=CMD(""calc""), ""Bob""",2020-01-06,')).toBe(true);
+  });
+
+  test('bulkApproveWeeks settles the week bell once after approving multiple technicians', async () => {
+    const events = [];
+    const makeTechSpecs = (techId) => {
+      const entries = [{ id: `shift-${techId}`, status: 'completed', approval_status: 'pending', clock_in: WEEK_CLOCK_IN }];
+      const dailies = [{ id: `daily-${techId}`, status: 'pending', work_date: '2020-01-06' }];
+      const pendingWeekly = { id: `weekly-${techId}`, status: 'pending', week_start: '2020-01-06' };
+      const approvedWeekly = { ...pendingWeekly, status: 'approved' };
+      const token = approval._test.reviewSnapshotToken({ weekly: pendingWeekly, dailies, entries });
+      return {
+        token,
+        pendingWeekly,
+        trxSpecs: [
+          { table: 'time_entries', label: `entries-${techId}`, thenValue: entries },
+          { table: 'time_entry_daily_summary', label: `d1-${techId}`, thenValue: dailies },
+          { table: 'time_entry_daily_summary', label: `d2-${techId}`, thenValue: dailies },
+          { table: 'time_entry_daily_summary', label: `d3-${techId}`, thenValue: dailies },
+          { table: 'time_entries', label: `uE-${techId}`, thenValue: 1 },
+          { table: 'time_entry_daily_summary', label: `uD-${techId}`, thenValue: 1 },
+          { table: 'time_weekly_summary', label: `uW-${techId}`, returningValue: [approvedWeekly] },
+        ],
+        directSpecs: detailSpecs(approvedWeekly, dailies, entries),
+      };
+    };
+    const t1 = makeTechSpecs('tech-1');
+    const t2 = makeTechSpecs('tech-2');
+    installDatabase(
+      [...t1.trxSpecs, ...t2.trxSpecs],
+      [...t1.directSpecs, ...t2.directSpecs],
+      events,
+    );
+    timeTracking.lockStaffWeek.mockResolvedValue('2020-01-06');
+    timeTracking.computeDailySummaryInTransaction.mockResolvedValue();
+    timeTracking.computeWeeklySummaryInTransaction
+      .mockResolvedValueOnce(t1.pendingWeekly)
+      .mockResolvedValueOnce(t2.pendingWeekly);
+
+    const res = await approval.bulkApproveWeeks({
+      technicianIds: ['tech-1', 'tech-2'],
+      weekStart: '2020-01-06',
+      adminId: 'admin-1',
+      reviewTokens: { 'tech-1': t1.token, 'tech-2': t2.token },
+    });
+
+    expect(res).toEqual({ approved: 2, failed: [] });
+    expect(timesheetBells.settleWeekBell).toHaveBeenCalledTimes(1);
+    expect(timesheetBells.settleWeekBell).toHaveBeenCalledWith('2020-01-06');
+  });
+
+  test('normalizes Date work_date values in getWeekDetail dailies to YYYY-MM-DD', async () => {
+    const events = [];
+    const weekly = {
+      id: 'weekly-1',
+      technician_id: 'tech-1',
+      week_start: new Date('2020-01-06T00:00:00.000Z'),
+      week_end: new Date('2020-01-12T00:00:00.000Z'),
+      status: 'approved',
+      total_shift_minutes: 480,
+    };
+    const dailies = [{ id: 'daily-1', work_date: new Date('2020-01-06T00:00:00.000Z'), status: 'approved', total_shift_minutes: 480 }];
+    const entries = [{
+      id: 'shift-1', entry_type: 'shift', status: 'completed', approval_status: 'approved',
+      clock_in: WEEK_CLOCK_IN, clock_out: new Date('2020-01-06T22:00:00.000Z'), duration_minutes: 480,
+    }];
+    installDatabase([], detailSpecs(weekly, dailies, entries), events);
+
+    const detail = await approval.getWeekDetail('tech-1', '2020-01-06');
+    expect(detail.weekly.week_start).toBe('2020-01-06');
+    expect(detail.weekly.week_end).toBe('2020-01-12');
+    expect(detail.dailies[0].work_date).toBe('2020-01-06');
   });
 });

@@ -858,4 +858,36 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       expect(collections.primary.model).toBe(expected);
     });
   });
+
+  it('marks inbound Gemini lanes that lack a separated system prompt with geminiFoldsSystem', () => {
+    const savedGate = process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+    delete process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+    try {
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const byId = Object.fromEntries(lanes.map((l) => [l.id, l]));
+      for (const id of [
+        'pest_id', 'lawn_assess', 'tree_shrub', 'treatment_zone', 'turf_ocr',
+        'satellite', 'property_trio', 'property_v2_vision', 'lawn_diag_vision',
+        'address_recovery', 'call_extraction_v1', 'transcription',
+        'contact_dictation', 'photo_scoring', 'ts_watch_signals', 'call_sound_check', 'call_research', 'call_extraction',
+      ]) {
+        expect(byId[id].inbound).toBe(true);
+        expect(byId[id].geminiFoldsSystem).toBe(true);
+      }
+      // Every lane flagged geminiFoldsSystem must also be inbound so the Models tab warning never skips it.
+      expect(lanes.filter((l) => l.geminiFoldsSystem && !l.inbound).map((l) => l.id)).toEqual([]);
+      for (const id of ['pest_id_app', 'plant_id_app', 'plant_id', 'lawn_visit_assessment', 'lawn_paired_recheck', 'sms_draft']) {
+        expect(byId[id].inbound).toBe(true);
+        expect(byId[id].geminiFoldsSystem).toBe(false);
+      }
+      process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = 'true';
+      jest.resetModules();
+      const withGate = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'call_extraction');
+      expect(withGate.geminiFoldsSystem).toBe(false);
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+      else process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = savedGate;
+    }
+  });
 });

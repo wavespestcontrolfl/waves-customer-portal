@@ -110,12 +110,17 @@ describe('prompt input digest', () => {
     const crypto = require('crypto');
     const sha = (...parts) => { const h = crypto.createHash('sha256'); for (const part of parts) h.update(part); return h.digest('hex'); };
     // A shared rubric block edited without a version bump changes the digest, so a replay can never claim it rebuilt the original input.
-    expect(visit.PROMPT_DIGEST).toBe(sha(visit.SYSTEM_PROMPT, '\n', JSON.stringify(visit.RESPONSE_SCHEMA)));
+    // The digest also stamps GEMINI_SYSTEM_CHANNEL so replays distinguish native Gemini systemInstruction from legacy folded prompts.
+    const legacyDigest = sha(visit.SYSTEM_PROMPT, '\n', JSON.stringify(visit.RESPONSE_SCHEMA));
+    expect(visit.PROMPT_DIGEST).toBe(sha(visit.SYSTEM_PROMPT, '\n', JSON.stringify(visit.RESPONSE_SCHEMA), '\n', visit.GEMINI_SYSTEM_CHANNEL));
+    expect(visit.PROMPT_DIGEST).not.toBe(legacyDigest);
     expect(visit.SYSTEM_PROMPT).toContain(require('../services/lawn-diagnostic-prompt').CURATED_REFERENCE);
     const context = { season: 'peak', month: null, region: null, grassType: null, turfHeightIn: null, irrigation: null, technicianNotes: null, priorSummary: null };
     // …and the rendered user text (its instructions and formatting), so a wording change without a version bump changes the hash.
     const expected = sha(visit.PROMPT_VERSION, '\n', visit.PROMPT_DIGEST, '\n', sha(visit.buildUserText(1, { season: 'peak' })), '\n', JSON.stringify(context), '\n', '0:front:image/jpeg:', sha('a'), '\n');
+    const legacyContextHash = sha(visit.PROMPT_VERSION, '\n', legacyDigest, '\n', sha(visit.buildUserText(1, { season: 'peak' })), '\n', JSON.stringify(context), '\n', '0:front:image/jpeg:', sha('a'), '\n');
     expect(visit.contextHash({ photos: [photo('a')], photoZones: ['front'], visionContext: { season: 'peak' } })).toBe(expected);
+    expect(visit.contextHash({ photos: [photo('a')], photoZones: ['front'], visionContext: { season: 'peak' } })).not.toBe(legacyContextHash);
   });
 
   test('the context hash changes with the photos, their media types, their zones, and the visit context — not with unrelated fields', () => {

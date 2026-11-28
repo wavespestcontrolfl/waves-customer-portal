@@ -311,7 +311,7 @@ describe('Florida RT-6', () => {
     expect(line(out.rt6, '3').value).toBe(150000);
     expect(line(out.rt6, '4').value).toBe(50000);
     expect(line(out.rt6, '5').value).toBe(1350);
-    expect(out.rt6.employees).toEqual([{ name: 'Sample Employee', grossCents: 200000, taxableCents: 50000, ssn: FROM_RECORDS }]);
+    expect(out.rt6.employees).toEqual([{ technicianId: 'tech-1', name: 'Sample Employee', grossCents: 200000, taxableCents: 50000, ssn: FROM_RECORDS }]);
   });
 
   test('line 5 is line 4 times the rate, rounded once (pre-push audit P1): three $100.10 checks owe $8.11, not $8.10', () => {

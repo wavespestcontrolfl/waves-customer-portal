@@ -265,6 +265,113 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
   };
 }
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OPEN_PORTAL_STATUSES = new Set(['sent', 'viewed', 'overdue']);
+
+function unsupersededFailedDraftIds(facts) {
+  const { isNeverAttemptedDeferral, metadataInvoiceId } = require('./failed-payments');
+  const carrying = facts?.balanceCarryingInvoiceIds || new Set();
+  const ids = (facts?.rows || [])
+    .filter((r) => !isNeverAttemptedDeferral(r))
+    .map(metadataInvoiceId)
+    .filter((id) => id && UUID_SHAPE.test(id) && !carrying.has(id));
+  return new Set(ids);
+}
+
+function queryPortalPayableCandidates(customerId, eligibleDraftIds, { invoiceIds, invoiceNumbers, limit, offset = 0, database }) {
+  const query = database('invoices')
+    .where({ customer_id: customerId })
+    .where(function openOrEligibleDraft() {
+      this.whereIn('status', ['sent', 'viewed', 'overdue']);
+      if (eligibleDraftIds.size) {
+        this.orWhere(function eligibleDraft() {
+          this.where('status', 'draft').whereIn('id', [...eligibleDraftIds]);
+        });
+      }
+    })
+    .whereNull('payer_id')
+    .whereNull('payer_statement_id')
+    .where(function withdrawnExcluded() {
+      this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .whereRaw('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0');
+
+  if (invoiceIds?.length || invoiceNumbers?.length) {
+    query.where((qb) => {
+      if (invoiceIds?.length) qb.orWhereIn('id', invoiceIds);
+      if (invoiceNumbers?.length) qb.orWhereIn('invoice_number', invoiceNumbers);
+    });
+  }
+  query.orderBy('created_at', 'asc');
+  if (limit) query.limit(limit);
+  if (offset > 0) query.offset(offset);
+
+  return query.select(
+    'id', 'status', 'token', 'invoice_number', 'due_date',
+    'total', 'credit_applied', 'amount_paid', 'scheduled_service_id', 'service_record_id',
+  );
+}
+
+function formatPayablePortalRow(row, eligibleDraftIds) {
+  if (!row.token) return null;
+  if (row.status && !OPEN_PORTAL_STATUSES.has(row.status) && !(row.status === 'draft' && eligibleDraftIds.has(String(row.id)))) {
+    return null;
+  }
+  const amountDue = invoiceAmountDue(row);
+  if (!(amountDue > 0)) return null;
+  return {
+    id: row.id != null ? String(row.id) : null,
+    payUrl: `/pay/${row.token}`,
+    amountDue,
+    invoiceNumber: row.invoice_number || null,
+    dueDate: row.due_date ?? null,
+  };
+}
+
+/**
+ * Shared portal payable-invoice read used by BOTH GET /api/billing/balance
+ * (openInvoices) and listPortalPayments (failed-row payableInvoice links) so
+ * the two surfaces on the Billing tab can never disagree about whether an
+ * invoice is self-pay and payable.
+ */
+async function listPayablePortalInvoices(customerId, {
+  failedFacts = null,
+  invoiceIds = null,
+  invoiceNumbers = null,
+  limit = null,
+  database = db,
+} = {}) {
+  const { loadFailedPaymentFacts } = require('./failed-payments');
+  const { invoicePayerOwnership } = require('./invoice-payer-ownership');
+  const facts = failedFacts || await loadFailedPaymentFacts(customerId, database);
+  const eligibleDraftIds = unsupersededFailedDraftIds(facts);
+
+  const payable = [];
+  const pageSize = limit || MAX_OPEN_INVOICES;
+  for (let offset = 0; offset < MAX_OPEN_INVOICES; offset += pageSize) {
+    const rows = await queryPortalPayableCandidates(customerId, eligibleDraftIds, {
+      invoiceIds, invoiceNumbers, limit: limit ? pageSize : null, offset, database,
+    });
+    for (const row of rows) {
+      const formatted = formatPayablePortalRow(row, eligibleDraftIds);
+      if (!formatted) continue;
+      // Resolve live payer ownership via invoicePayerOwnership (covering direct
+      // scheduled_service_id, service_record_id -> scheduled_service_id, and
+      // customer default payer; fails closed when unverifiable).
+      const owner = await invoicePayerOwnership({
+        ...row,
+        customer_id: row.customer_id || customerId,
+        service_record_id: row.service_record_id ?? null,
+      }, database);
+      if (owner !== null) continue;
+      payable.push(formatted);
+      if (limit && payable.length >= limit) return payable;
+    }
+    if (!limit || rows.length < pageSize) break;
+  }
+  return payable;
+}
+
 module.exports = {
   // the shared open-self-pay definition (also the cash forecast's open invoices)
-  applyOpenSelfPayPredicates, openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };
+  applyOpenSelfPayPredicates, openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, listPayablePortalInvoices, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };

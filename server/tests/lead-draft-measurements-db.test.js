@@ -112,7 +112,7 @@ maybeDescribe('lead draft background re-price (live Postgres)', () => {
     const automation = automationOf(after);
     expect(automation.draftEstimateAutomation).toMatchObject({
       sizeSource: 'county_assessed',
-      measurements: { source: 'county_assessed', homeSqFt: 1850, lotSqFt: 9200 },
+      measurements: { source: 'county_assessed', homeSqFt: 1850, lotSqFt: 9200, propertyType: 'Single Family' },
       engineInput: expect.objectContaining({ homeSqFt: 1850, lotSqFt: 9200, lotSizeMeasured: true }),
     });
     expect(automation.leadEstimateAutomation.review).toContain('property_measurements_from_county');

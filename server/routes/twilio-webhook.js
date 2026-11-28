@@ -730,6 +730,15 @@ router.post('/sms', async (req, res) => {
         await fireContactCorrection(optOutSmsLogId);
       }
 
+      await mirrorApplicantSmsCompliance({
+        from: From,
+        body: Body,
+        messageSid: MessageSid,
+        stage: 'applicant_opt_out',
+        code: optCommand.reason,
+        revokeOfferConsent: true,
+      });
+
       return res.type('text/xml').send(
         optOut.applied
           ? `<Response><Message>You've been unsubscribed from Waves SMS. Reply START to re-subscribe.</Message></Response>`
@@ -899,6 +908,12 @@ router.post('/sms', async (req, res) => {
             description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
           }).catch(() => {});
         }
+        await mirrorApplicantSmsCompliance({
+          from: From,
+          body: Body,
+          messageSid: MessageSid,
+          stage: 'applicant_opt_in',
+        });
       }
 
       // A START/opt-in can still CONTAIN a correction ("START. My email
@@ -1521,6 +1536,7 @@ router.post('/sms', async (req, res) => {
         inboundBody: Body,
         inboundSmsLogId: smsLogEntry?.id || null,
         fromPhone: From,
+        liveWebhook: true,
       }).catch((err) => logger.warn(`[sms-scheduling-decide] async decide failed: ${err.message}`));
     }
 
@@ -2221,6 +2237,51 @@ router._internals = {
   lastOutboundAskedQuestion,
   isAffirmativeReactionToAutomatedText,
   AUTOMATED_VISIT_TEXT_TYPES,
+  mirrorApplicantSmsCompliance,
 };
+
+async function mirrorApplicantSmsCompliance({ from, body, messageSid, stage, code = null, revokeOfferConsent = false }) {
+  try {
+    const { phoneMatchDigits } = require('../utils/phone');
+    const variants = phoneMatchDigits(from);
+    if (!variants.length) return;
+    const openApps = await db('job_applications')
+      .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
+      .whereIn('status', ['new', 'reviewed', 'interview', 'offer'])
+      .select('id', 'comms_history');
+    if (!openApps.length) return;
+    const { appendCommsHistory, maskPhone: maskRecruitPhone } = require('../services/recruiting-comms');
+    const { redactOfferLinks } = require('../utils/offer-link-redaction');
+    const crypto = require('crypto');
+    for (const app of openApps) {
+      const hist = Array.isArray(app.comms_history) ? app.comms_history : [];
+      if (messageSid && hist.some((e) => e && e.twilio_sid === messageSid)) continue;
+      await appendCommsHistory(app.id, [{
+        id: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        stage,
+        channel: 'sms',
+        to: maskRecruitPhone(from),
+        outcome: 'received',
+        code,
+        body: redactOfferLinks(body || ''),
+        by: 'applicant',
+        twilio_sid: messageSid || null,
+      }]);
+    }
+    if (revokeOfferConsent) {
+      await db('job_offers')
+        .whereIn('application_id', openApps.map((a) => a.id))
+        .whereIn('status', ['sent', 'date_requested'])
+        .whereNotNull('text_consent_at')
+        .update({ text_consent_at: null, updated_at: new Date() })
+        .catch(() => {});
+    }
+  } catch (recErr) {
+    if (!recErr || recErr.code !== '42P01') {
+      logger.warn(`[twilio-webhook] recruiting compliance mirror failed (${stage}): ${recErr && recErr.message}`);
+    }
+  }
+}
 
 module.exports = router;

@@ -1765,6 +1765,7 @@ module.exports = {
   // plan-restart mint (C4) applies the same guard the panel does before
   // recomputing, so it is a real export, not a test hook.
   missingPropertyFor,
+  pestPhotoFactsFor,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
   _private: { resolvePropertyContext, missingPropertyFor, PEST_PHOTO_FACT_READS },
