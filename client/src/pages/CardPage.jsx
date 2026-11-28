@@ -163,7 +163,7 @@ const SMS_ICON = (
 
 function CardTerminalScene({ status, scene, onRetry }) {
   return (
-    <main id="main-content" tabIndex={-1} style={scene}>
+    <div style={scene}>
       {status === 'loading' && (
         <div role="status" style={{
           marginTop: 60,
@@ -201,7 +201,7 @@ function CardTerminalScene({ status, scene, onRetry }) {
           <a href="https://wavespestcontrol.com" style={{ color: AQUA }}>wavespestcontrol.com</a>.
         </PublicStateCard>
       )}
-    </main>
+    </div>
   );
 }
 
@@ -285,8 +285,6 @@ export default function CardPage() {
   return (
     <div className="wcard-scene" style={scene}>
       <style>{`
-        .wcard-skip { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
-        .wcard-skip:focus-visible { position: fixed; left: 16px; top: 16px; width: auto; height: auto; padding: 10px 14px; border-radius: 10px; background: #04395E; color: #FFFFFF; border: 2px solid ${AQUA}; font-size: 14px; font-weight: 600; z-index: 200; text-decoration: none; }
         .wcard-tap { transition: transform 140ms ease, filter 140ms ease; }
         @media (prefers-reduced-motion: no-preference) {
           .wcard-tap:hover { filter: brightness(1.08); }
@@ -309,9 +307,8 @@ export default function CardPage() {
           .wcard-surface { background: #04395E !important; box-shadow: none !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
         }
       `}</style>
-      <a className="wcard-skip" href="#main-content">Skip to card</a>
 
-      <main id="main-content" tabIndex={-1} className="wcard-surface" data-glass-motion="card" style={{
+      <div className="wcard-surface" data-glass-motion="card" style={{
         position: 'relative',
         width: 'min(378px, 100%)',
         borderRadius: 32,
@@ -528,9 +525,9 @@ export default function CardPage() {
           </>
         )}
 
-        <footer role="contentinfo" style={{ fontSize: 14, color: 'rgba(255,255,255,0.78)', textAlign: 'center' }}>
+        <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.78)', textAlign: 'center' }}>
           wavespestcontrol.com · {WAVES_FL_LICENSE_LINE}
-        </footer>
+        </div>
 
         {copied && (
           <div role="status" style={{
@@ -542,7 +539,7 @@ export default function CardPage() {
             Referral link copied
           </div>
         )}
-      </main>
+      </div>
     </div>
   );
 }

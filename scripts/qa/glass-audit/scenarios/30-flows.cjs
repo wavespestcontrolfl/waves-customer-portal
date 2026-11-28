@@ -54,7 +54,6 @@ const apptHandle = (payload, confirmRes) => ({ method, path }) => {
 const appointment = {
   id: 'appointment', family: 'flow', surface: 'customer', role: 'public token', route: '/appointment/:token',
   url: `/appointment/${HEX64_A}`, ready: 'Confirm this appointment', extraWidths: true, settle: 900,
-  sheet: { sheetH1Min: 22 },
   handle: apptHandle(APPT_BASE),
   states: [
     {

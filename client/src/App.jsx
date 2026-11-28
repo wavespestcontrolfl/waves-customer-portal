@@ -754,7 +754,7 @@ export default function App() {
           <Route path="/careers/offer/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><CareersOfferPage /></WavesShell></Suspense>} />
           {/* Digital business card — navy glass scene, so the fallback wash
               matches the scene instead of the light doc wash. */}
-          <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><CardPage /></Suspense>} />
+          <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><WavesShell><CardPage /></WavesShell></Suspense>} />
           {/* New-home postcard page (QR code on a mailer; strangers, no account). Browser-only: /h is in BROWSER_ONLY_PATH_ROOTS. */}
           <Route path="/h/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><MailHomePage /></WavesShell></Suspense>} />
           <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />

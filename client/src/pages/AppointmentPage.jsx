@@ -456,7 +456,7 @@ export default function AppointmentPage() {
   return (
     <Page>
       <Card style={{ borderTop: `3px solid ${WEATHER_BLUE}` }}>
-        <h1 data-gt="h3x" style={{ margin: 0, fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
           {/* No greeting by name. The token is per-VISIT, not per-recipient:
               appointment notifications fan out to a spouse, tenant, buyer or
               other service contact, each SMS personalized to THAT contact,

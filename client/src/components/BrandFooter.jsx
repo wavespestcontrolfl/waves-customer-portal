@@ -130,10 +130,10 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
         borderTop: `1px solid ${borderColor || B.grayLight}`,
         background: CUSTOMER_SURFACE.page,
       }}>
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, justifyContent: 'center', marginBottom: 16 }}>
           {SOCIAL_ICON_PATHS.map(s => (
             <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={s.name} style={{
-              width: 44, height: 44, borderRadius: '50%',
+              width: 44, height: 44, flexShrink: 0, borderRadius: '50%',
               background: CUSTOMER_SURFACE.chrome, border: `1px solid ${CUSTOMER_SURFACE.border}`, color: B.navy,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               textDecoration: 'none',
@@ -273,10 +273,10 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
         <div style={{ fontSize: 14, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, lineHeight: 1.5 }}>
           Real jobs. Real results. Follow along.
         </div>
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'center' }}>
         {socials.map(s => (
           <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={s.name} style={{
-            width: 44, height: 44, borderRadius: '50%',
+            width: 44, height: 44, flexShrink: 0, borderRadius: '50%',
             background: socialBg, color: socialFg,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             textDecoration: 'none',

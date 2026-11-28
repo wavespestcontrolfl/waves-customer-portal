@@ -19,6 +19,8 @@ describe('BrandFooter', () => {
     const facebook = screen.getByRole('link', { name: 'Facebook' });
     expect(facebook.style.width).toBe('44px');
     expect(facebook.style.height).toBe('44px');
+    expect(facebook.style.flexShrink).toBe('0');
+    expect(facebook.parentElement.style.flexWrap).toBe('wrap');
 
     const copyright = screen.getByText(/All rights reserved/i);
     expect(copyright.style.color).toBe('rgb(63, 74, 101)');
@@ -29,5 +31,7 @@ describe('BrandFooter', () => {
     const instagram = screen.getByRole('link', { name: 'Instagram' });
     expect(instagram.style.width).toBe('44px');
     expect(instagram.style.height).toBe('44px');
+    expect(instagram.style.flexShrink).toBe('0');
+    expect(instagram.parentElement.style.flexWrap).toBe('wrap');
   });
 });
