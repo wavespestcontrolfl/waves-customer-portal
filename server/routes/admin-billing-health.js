@@ -189,7 +189,7 @@ function rateChangedBody(currentAmount, confirmedCents) {
   };
 }
 
-function chargeableCustomerRefusal(customer) {
+async function chargeableCustomerRefusal(customer) {
   if (!customer) return { status: 404, body: { error: 'Customer not found' } };
   if (customer.deleted_at) {
     return { status: 409, body: { error: 'This customer record is archived — cannot charge.', customer_inactive: true } };
@@ -198,7 +198,15 @@ function chargeableCustomerRefusal(customer) {
     return { status: 409, body: { error: 'This customer account is inactive — cannot charge.', customer_inactive: true } };
   }
   if (customer.payer_id) {
-    return { status: 400, body: { error: 'This customer is billed to a third-party payer — do not charge the service recipient directly.', payer_billed: true } };
+    // Payer deactivation preserves customers.payer_id; only an active payer
+    // (or an unresolved/missing payer row, failing closed) blocks direct charges.
+    const payersQ = db('payers');
+    const payerRow = payersQ && typeof payersQ.where === 'function'
+      ? await payersQ.where({ id: customer.payer_id }).first('id', 'active').catch(() => null)
+      : null;
+    if (payerRow?.active !== false) {
+      return { status: 400, body: { error: 'This customer is billed to a third-party payer — do not charge the service recipient directly.', payer_billed: true } };
+    }
   }
   return null;
 }
@@ -217,13 +225,38 @@ function buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount) {
 }
 
 async function isManualChargeAlreadyLogged(lockOutcome, customerId, eventType) {
+  if (lockOutcome?.replayed) return true;
   if (!lockOutcome?.hasCallerKey || !lockOutcome.payment?.id) return false;
-  const q = db('autopay_logs');
+  const q = db('autopay_log');
   if (!q || typeof q.where !== 'function') return false;
   const existing = await q
     .where({ customer_id: customerId, payment_id: lockOutcome.payment.id, event_type: eventType })
     .first('id');
   return Boolean(existing);
+}
+
+async function claimManualReceiptDelivery(customer, paymentId, lockOutcome) {
+  if (!customer?.phone) return false;
+  if (!lockOutcome?.hasCallerKey || !paymentId) return true;
+  if (lockOutcome.replayed) return false;
+  const q = db('sms_messages');
+  if (!q || typeof q.where !== 'function') return true;
+  const existing = await q
+    .whereRaw("metadata->>'source' = 'admin_manual_charge' AND metadata->>'paymentId' = ?", [String(paymentId)])
+    .first('id')
+    .catch(() => null);
+  return !existing;
+}
+
+async function findRecordedCallerKeyedPayment(customerId, idempotencyKey) {
+  const q = db('payments');
+  if (!q || typeof q.where !== 'function' || typeof q.whereRaw !== 'function') return null;
+  return q
+    .where({ customer_id: customerId })
+    .whereIn('status', ['paid', 'processing'])
+    .whereRaw("metadata->>'idempotency_key' = ?", [idempotencyKey])
+    .first()
+    .catch(() => null);
 }
 
 // Inside the billing lock, just before the dues charge: re-read customer state
@@ -234,7 +267,7 @@ async function assertMonthlyCustomerInLock(customerId, chargeAmount, confirmedCe
   const current = await db('customers')
     .where({ id: customerId })
     .first('id', 'active', 'deleted_at', 'payer_id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'billing_day');
-  const customerRefusal = chargeableCustomerRefusal(current);
+  const customerRefusal = await chargeableCustomerRefusal(current);
   if (customerRefusal) {
     const err = new Error(customerRefusal.body.error);
     err.code = 'CHARGE_REFUSED';
@@ -435,20 +468,30 @@ async function runExplicitChargeInLock(req, { customerId, chargeAmount, desc, se
   const lockedCustomer = await db('customers')
     .where({ id: customerId })
     .first('id', 'active', 'deleted_at', 'payer_id');
-  const customerRefusal = chargeableCustomerRefusal(lockedCustomer);
+  const customerRefusal = await chargeableCustomerRefusal(lockedCustomer);
   if (customerRefusal) return { response: customerRefusal };
 
   const { key: idempotencyKey, hasCallerKey } = buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount);
+  if (hasCallerKey) {
+    // Check recorded operation key under the exclusive customer billing lock
+    // BEFORE calling Stripe so late retries after Stripe's 24h key TTL never
+    // mint a duplicate PaymentIntent.
+    const existing = await findRecordedCallerKeyedPayment(customerId, idempotencyKey);
+    if (existing) return { payment: existing, hasCallerKey: true, replayed: true };
+  }
   try {
+    const metadata = hasCallerKey
+      ? { initiated_by: 'machine', idempotency_key: idempotencyKey }
+      : { initiated_by: 'machine' };
     const payment = await service.chargeOneTime(
       customerId,
       chargeAmount,
       desc,
       idempotencyKey,
-      { initiated_by: 'machine' },
+      metadata,
       { operatorOverride: true, overrideTrail: chargeNowOverrideTrail(req) },
     );
-    return { payment, hasCallerKey };
+    return { payment, hasCallerKey, replayed: false };
   } catch (err) {
     return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };
   }
@@ -478,7 +521,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     if (confirmed.error) return res.status(400).json({ error: confirmed.error });
 
     const customer = await db('customers').where({ id: customerId }).first();
-    const preRefusal = chargeableCustomerRefusal(customer);
+    const preRefusal = await chargeableCustomerRefusal(customer);
     if (preRefusal) return res.status(preRefusal.status).json(preRefusal.body);
 
     if (amount == null) {
@@ -526,17 +569,16 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     const payment = lockOutcome.payment;
     const eventType = payment?.status === 'paid' ? 'manual_charge' : 'manual_charge_processing';
 
-    // Deduplicate manual-charge logging and receipt SMS on caller-keyed replays
-    // so retrying after a lost response produces one log and one receipt.
-    if (await isManualChargeAlreadyLogged(lockOutcome, customerId, eventType)) {
-      return res.json({ success: true, payment });
+    // Deduplicate manual-charge logging and receipt SMS separately: logging checks
+    // autopay_log, while receipt SMS uses claimManualReceiptDelivery so a crash
+    // between log and SMS still delivers once without double-sending on replays.
+    if (!(await isManualChargeAlreadyLogged(lockOutcome, customerId, eventType))) {
+      await logAutopay(customerId, eventType, {
+        amountCents: Math.round(Number(payment?.amount) * 100),
+        paymentId: payment?.id || null,
+        details: { source: 'manual_charge', description: desc, admin_id: req.technicianId || null },
+      });
     }
-
-    await logAutopay(customerId, eventType, {
-      amountCents: Math.round(Number(payment?.amount) * 100),
-      paymentId: payment?.id || null,
-      details: { source: 'manual_charge', description: desc, admin_id: req.technicianId || null },
-    });
 
     // An accepted bank payment is not evidence of a completed charge.
     if (payment?.status !== 'paid') return res.json({ success: true, payment });
@@ -549,7 +591,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       receiptUrl = meta.stripe_receipt_url || null;
     } catch (_) {}
 
-    if (customer.phone) {
+    if (await claimManualReceiptDelivery(customer, payment?.id, lockOutcome)) {
       try {
         const receiptLine = receiptUrl ? ` View receipt: ${receiptUrl}` : '';
         const body = await renderRequiredSmsTemplate('manual_payment_receipt', {

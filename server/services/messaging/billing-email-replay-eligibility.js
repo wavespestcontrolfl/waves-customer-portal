@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
 const { isPaused, getChargeableAutopayMethod, isBankMethodType } = require('../autopay-eligibility');
+const { billingDaysForDate } = require('../billing-helpers');
 const { resolveBillingLane } = require('../billing-lane');
 
 const INVOICE_GUARDS = new Set([
@@ -23,7 +24,7 @@ async function prechargeRefusal(meta, database) {
   const customer = await database('customers').where({ id: meta.customer_id }).first();
   if (!customer || customer.deleted_at || customer.active !== true || customer.autopay_enabled !== true
     || !(Number(customer.monthly_rate) > 0) || resolveBillingLane(customer).mode !== 'monthly_membership'
-    || Number(customer.billing_day) !== Number(meta.charge_date.slice(-2))
+    || !billingDaysForDate(new Date(`${meta.charge_date}T12:00:00Z`)).includes(Number(customer.billing_day))
     || isPaused(customer, new Date(`${meta.charge_date}T12:00:00Z`))) {
     return refused('precharge-no-longer-eligible');
   }

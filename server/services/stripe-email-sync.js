@@ -176,6 +176,12 @@ async function lockStripeEmailSync(trx, customerIds) {
   }
 }
 
+async function lockStripeEmailSyncOnEmailChange(trx, customerId, previousEmail, nextEmail) {
+  if (nextEmail === undefined) return;
+  if (normEmail(nextEmail) === normEmail(previousEmail)) return;
+  await lockStripeEmailSync(trx, customerId);
+}
+
 async function scheduleJobLater(trx, jobId, minutes, patch = {}) {
   const updated = await trx(TABLE).where({ id: jobId }).update({
     ...patch,
@@ -401,4 +407,4 @@ async function drainOnce({ limit = 20 } = {}) {
   return counts;
 }
 
-module.exports = { enqueue, processJob, drainDue, lockStripeEmailSync, MAX_ATTEMPTS, TABLE };
+module.exports = { enqueue, processJob, drainDue, lockStripeEmailSync, lockStripeEmailSyncOnEmailChange, MAX_ATTEMPTS, TABLE };

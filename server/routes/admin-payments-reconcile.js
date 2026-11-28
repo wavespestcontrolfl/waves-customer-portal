@@ -161,11 +161,17 @@ async function verifyStripeChargeForReconcile(invoice, stripeChargeId) {
     };
   }
   const chargeAmt = chargeAmtCents / 100;
-  if (Math.abs(chargeAmt - amountDue) > 1) {
+  const owedCents = Math.round(amountDue * 100);
+  const isPartialCapture = chargeDetails.amount_captured != null
+    && Number(chargeDetails.amount_captured) < Number(chargeDetails.amount);
+  const amountMatches = isPartialCapture
+    ? chargeAmtCents === owedCents
+    : Math.abs(chargeAmt - amountDue) <= 1;
+  if (!amountMatches) {
     return {
       refusal: {
         status: 400,
-        error: `Amount mismatch — charge is $${chargeAmt.toFixed(2)} but invoice amount due is $${amountDue.toFixed(2)}`,
+        error: `Amount mismatch — captured $${chargeAmt.toFixed(2)} but invoice amount due is $${amountDue.toFixed(2)}`,
       },
     };
   }
