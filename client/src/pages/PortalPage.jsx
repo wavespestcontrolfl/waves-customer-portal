@@ -1453,6 +1453,12 @@ function oneTapTime12(value) {
   return `${hour}:${String(m || 0).padStart(2, '0')} ${suffix}`;
 }
 
+function oneTapArrivalWindow(windowStart) {
+  if (!windowStart) return '';
+  const end = arrivalWindowEnd(windowStart);
+  return end ? `${oneTapTime12(windowStart)}–${oneTapTime12(end)}` : oneTapTime12(windowStart);
+}
+
 function oneTapDayLabel(date) {
   const [y, m, d] = String(date || '').split('-').map(Number);
   const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1, 12));
@@ -1980,7 +1986,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
                         }}
                       >
                         <span style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
-                          Arrival {oneTapTime12(slot.windowStart)}–{oneTapTime12(slot.windowEnd)}
+                          Arrival {oneTapArrivalWindow(slot.windowStart)}
                         </span>
                         {slot.routeOptimal && (
                           <span style={{
@@ -2008,7 +2014,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
                 {priceRows(init.pricing, init.perVisit)}
                 <div style={{ height: 6 }} />
                 {summaryRow('First visit', selectedSlot
-                  ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`
+                  ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapArrivalWindow(selectedSlot.windowStart)}`
                   : '—')}
               </div>
               {existingServicesBox(init.pricing)}
@@ -2077,7 +2083,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
                 {result?.firstVisit?.date ? (
                   <>
                     <div style={{ height: 6 }} />
-                    {summaryRow('First visit', `${oneTapDayLabel(result.firstVisit.date)}${result.firstVisit.windowStart ? `, ${oneTapTime12(result.firstVisit.windowStart)}–${oneTapTime12(result.firstVisit.windowEnd)}` : ''}`)}
+                    {summaryRow('First visit', `${oneTapDayLabel(result.firstVisit.date)}${result.firstVisit.windowStart ? `, ${oneTapArrivalWindow(result.firstVisit.windowStart)}` : ''}`)}
                   </>
                 ) : null}
               </div>
@@ -3014,6 +3020,63 @@ function rememberPetNameAskDone(customerId) {
   } catch { /* storage unavailable: the card hides for this visit to Home only */ }
 }
 
+function dashboardDaysUntil(nextService) {
+  if (!nextService || nextService.customerPickBy) return null;
+  return daysUntilEtDate(nextService.date);
+}
+
+function dashboardNextDateLabel({ nextServiceStatus, nextService, nextDate }) {
+  if (nextServiceStatus === 'loading') return 'Checking schedule';
+  if (nextServiceStatus === 'error') return 'Schedule unavailable';
+  if (nextService?.customerPickBy) return PICK_DAY_LABEL;
+  if (nextDate && !isNaN(nextDate)) {
+    return nextDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+  return 'No visit scheduled';
+}
+
+function renderDashboardNextVisitMeta(nextService, muted) {
+  if (!nextService) return null;
+  if (nextService.customerPickBy) {
+    return (
+      <>
+        <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Pick a time</div>
+        <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
+          {`Pick a new time by ${formatPickBy(nextService.customerPickBy)}. If you don't, we'll book the best open time and text you 3 days before.`}
+        </div>
+      </>
+    );
+  }
+  if (nextService.windowStart) {
+    return (
+      <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
+        {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
+      </div>
+    );
+  }
+  if (nextService.day_only && nextService.arrival_note) {
+    return (
+      <div data-testid="next-visit-day-only-note" style={{ marginTop: 2, fontSize: 14, color: muted }}>
+        {nextService.arrival_note}
+      </div>
+    );
+  }
+  return null;
+}
+
+function renderDashboardPickAction(nextService, customer, buttonStyle) {
+  if (!nextService?.rescheduleUrl || customer?.cancelled || customer?.contactSession) return null;
+  return (
+    <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+      <a href={nextService.rescheduleUrl} data-glass-accent="" data-glass-size="primary" style={{
+        ...buttonStyle,
+        textDecoration: 'none',
+        position: 'relative',
+      }}>Pick a time</a>
+    </div>
+  );
+}
+
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, onOpenAccess, onRescheduleRequest, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
@@ -3312,15 +3375,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
   const currentBalance = balanceReady ? Number(balance.currentBalance || 0) : 0;
   const hasBalance = balanceReady && currentBalance > 0;
   const nextDate = nextService ? parseDate(nextService.date) : null;
-  const daysUntilNextService = nextService ? daysUntilEtDate(nextService.date) : null;
+  const daysUntilNextService = dashboardDaysUntil(nextService);
   const nextServiceReady = nextServiceStatus === 'ready';
-  const nextDateLabel = nextServiceStatus === 'loading'
-    ? 'Checking schedule'
-    : nextServiceStatus === 'error'
-      ? 'Schedule unavailable'
-      : nextDate && !isNaN(nextDate)
-        ? nextDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-        : 'No visit scheduled';
+  const nextDateLabel = dashboardNextDateLabel({ nextServiceStatus, nextService, nextDate });
   const onBalanceTap = balanceError ? loadBalance : () => onSwitchTab?.('billing');
   const balanceLabel = balancePending
     ? 'Checking balance'
@@ -3443,17 +3500,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
                 <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
                 </div>
-                {nextService?.windowStart && (
-                  <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                    {formatTime(nextService.windowStart)} - {formatTime(arrivalWindowEnd(nextService.windowStart))}
-                  </div>
-                )}
-                {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
-                {!nextService?.windowStart && nextService?.day_only && nextService.arrival_note && (
-                  <div data-testid="next-visit-day-only-note" style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                    {nextService.arrival_note}
-                  </div>
-                )}
+                {renderDashboardNextVisitMeta(nextService, muted)}
               </div>
             </div>
             {daysUntilNextService != null && (
@@ -3465,7 +3512,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
               </div>
             )}
           </div>
-          {nextService ? (
+          {nextService?.customerPickBy ? (
+            renderDashboardPickAction(nextService, customer, dashboardPrimaryButton)
+          ) : nextService ? (
             <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
               {!nextService.customerConfirmed ? (
                 <button type="button" disabled={confirmingVisit} onClick={async () => {

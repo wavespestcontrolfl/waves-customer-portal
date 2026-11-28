@@ -569,4 +569,17 @@ describe('PublicBookingPage ?service= names', () => {
     expect(chip('Pest Control')).not.toBeInTheDocument();
     expect(screen.queryByText('Pick your service.')).not.toBeInTheDocument();
   });
+
+  it('quotes 2-hour arrival windows on step 2 and step 3 even for 60-min and 90-min services', async () => {
+    stubFetch({ config: { enabled: true, multi_service: false } });
+    renderAt('/book?service=termite');
+    await fillAddress();
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    expect(await screen.findByText(/open 2-hour arrival windows/i)).toBeInTheDocument();
+    expect(screen.getByText(/each is a 2-hour arrival window/i)).toBeInTheDocument();
+    expect(screen.queryByText(/1-hour|90-minute/i)).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /^Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+    expect(await screen.findByText(/Thursday, July 30 · 9:00 AM – 11:00 AM/)).toBeInTheDocument();
+  });
 });

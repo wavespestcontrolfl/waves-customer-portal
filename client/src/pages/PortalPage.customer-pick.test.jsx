@@ -13,9 +13,27 @@ vi.mock('../utils/api', () => ({
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
+    getPropertyPreferences: vi.fn(),
+    getPropertyRecommendations: vi.fn(),
+    getPropertyAlerts: vi.fn(),
+    getPropertyScore: vi.fn(),
+    getWeather: vi.fn(),
+    getTodayTracker: vi.fn(),
+    getAutopay: vi.fn(),
+    getBalance: vi.fn(),
+    getServiceStats: vi.fn(),
+    getGoogleReviewCard: vi.fn(),
+    getReferrals: vi.fn(),
+    getBlogPosts: vi.fn(),
+    getNewsletterPosts: vi.fn(),
+    getMistingSystem: vi.fn(),
+    getYardWrapped: vi.fn(),
+    getPetNameAsk: vi.fn(),
+    getLawnHealth: vi.fn(),
     getNextService: vi.fn(),
     getServices: vi.fn(),
     getRequests: vi.fn(),
+    confirmAppointment: vi.fn(),
   },
 }));
 vi.mock('../components/brand/CustomerDialogHost', () => ({
@@ -24,7 +42,7 @@ vi.mock('../components/brand/CustomerDialogHost', () => ({
 }));
 
 import api from '../utils/api';
-import { ScheduleTab } from './PortalPage';
+import { DashboardTab, ScheduleTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -94,5 +112,56 @@ describe('ScheduleTab — ordinary windowless visit', () => {
     expect(screen.queryByText('New day: your pick')).not.toBeInTheDocument();
     expect(screen.queryByText(/Pick a new time by/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
+  });
+});
+
+describe('DashboardTab — visit waiting for the customer to pick a day', () => {
+  const waiting = { ...baseVisit, customerPickBy: '2026-11-05T01:00:00.000Z' };
+
+  async function renderDashboard(nextVisit, cust = customer) {
+    api.getNextService.mockResolvedValue({ next: nextVisit });
+    api.getServices.mockResolvedValue({ services: [] });
+    api.getServiceStats.mockResolvedValue({});
+    api.getBalance.mockResolvedValue({ currentBalance: 0 });
+    api.getAutopay.mockResolvedValue({ state: 'disabled' });
+    api.getTodayTracker.mockResolvedValue({ tracker: null });
+    api.getGoogleReviewCard.mockResolvedValue({ card: null });
+    api.getReferrals.mockResolvedValue({ stats: null });
+    api.getBlogPosts.mockResolvedValue({ posts: [] });
+    api.getNewsletterPosts.mockResolvedValue({ posts: [] });
+    api.getMistingSystem.mockResolvedValue({ system: null });
+    api.getYardWrapped.mockResolvedValue({ enabled: false });
+    api.getPetNameAsk.mockResolvedValue({ ask: false });
+    api.getLawnHealth.mockResolvedValue(null);
+    api.getPropertyRecommendations.mockResolvedValue({ available: false, cards: [] });
+    api.getPropertyAlerts.mockResolvedValue({ alerts: [] });
+    api.getPropertyScore.mockResolvedValue(null);
+    render(<DashboardTab customer={cust} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    await screen.findByText('Quarterly Pest Control');
+  }
+
+  it('replaces broken Confirm Visit + countdown with Pick a time link and pick-by copy', async () => {
+    await renderDashboard(waiting);
+    expect(screen.getByText('New day: your pick')).toBeInTheDocument();
+    expect(screen.getByText(
+      "Pick a new time by Wed, Nov 4 at 8 PM. If you don't, we'll book the best open time and text you 3 days before.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick a time' })).toHaveAttribute('href', waiting.rescheduleUrl);
+    expect(screen.queryByRole('button', { name: 'Confirm Visit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Reschedule' })).not.toBeInTheDocument();
+    expect(screen.queryByText('days')).not.toBeInTheDocument();
+  });
+
+  it('omits the Pick a time link for cancelled or read-only contact sessions', async () => {
+    await renderDashboard(waiting, { ...customer, cancelled: true, cancelledAt: '2026-08-22' });
+    expect(screen.getByText('New day: your pick')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm Visit' })).not.toBeInTheDocument();
+
+    cleanup();
+    await renderDashboard(waiting, { ...customer, contactSession: { id: 'c-1' } });
+    expect(screen.getByText('New day: your pick')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm Visit' })).not.toBeInTheDocument();
   });
 });
