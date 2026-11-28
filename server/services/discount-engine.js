@@ -355,45 +355,64 @@ const DiscountEngine = {
   },
 
   /**
-   * Validate and apply a promo code to a customer.
+   * Validate and apply a promo code to a customer atomically under the
+   * discount row lock (enforcing max uses including pending customer holds
+   * and preventing cross-channel double redemption).
    */
-  async applyPromoCode(customerId, code) {
-    const disc = await db('discounts')
-      .where({ promo_code: code.toUpperCase().trim(), is_active: true })
-      .first();
-    if (!disc) return { success: false, error: 'Invalid promo code' };
+  async applyPromoCode(customerId, code, { appliedBy = 'promo' } = {}) {
+    if (!customerId) return { success: false, error: 'Customer is required' };
+    const normalizedCode = String(code || '').trim().toUpperCase();
+    if (!normalizedCode) return { success: false, error: 'Invalid promo code' };
 
-    // Check expiry
-    if (disc.promo_code_expiry && new Date(disc.promo_code_expiry) < new Date()) {
-      return { success: false, error: 'Promo code has expired' };
+    const Promo = require('./estimate-promo-code');
+    try {
+      return await db.transaction(async (trx) => {
+        const disc = await trx('discounts')
+          .where({ promo_code: normalizedCode, is_active: true })
+          .forUpdate()
+          .first();
+        if (!disc) return { success: false, error: 'Invalid promo code' };
+
+        if (disc.promo_code_expiry && new Date(disc.promo_code_expiry) < new Date()) {
+          return { success: false, error: 'Promo code has expired' };
+        }
+        if (!(await Promo.usesLeft(trx, disc))) {
+          return { success: false, error: 'Promo code has reached maximum uses' };
+        }
+        if (await Promo.customerAlreadyUsed(trx, customerId, disc.id)) {
+          return { success: false, error: 'Promo code already applied to this account' };
+        }
+        if (await Promo.customerHasPendingPromoHold(trx, customerId, disc.id)) {
+          return { success: false, error: 'Promo code already pending on this account' };
+        }
+
+        const incremented = await trx('discounts')
+          .where({ id: disc.id })
+          .where(function underCap() {
+            this.whereNull('promo_code_max_uses')
+              .orWhere('promo_code_max_uses', '<=', 0)
+              .orWhereRaw('COALESCE(promo_code_current_uses, 0) < promo_code_max_uses');
+          })
+          .update({ promo_code_current_uses: trx.raw('COALESCE(promo_code_current_uses, 0) + 1') });
+        if (!incremented) {
+          return { success: false, error: 'Promo code has reached maximum uses' };
+        }
+
+        await trx('customer_discounts').insert({
+          customer_id: customerId,
+          discount_id: disc.id,
+          applied_reason: `Promo code: ${normalizedCode}`,
+          applied_by: appliedBy || 'promo',
+        });
+
+        return { success: true, discount: { name: disc.name, discount_type: disc.discount_type, amount: Number(disc.amount) } };
+      });
+    } catch (err) {
+      if (err && err.code === '23505') {
+        return { success: false, error: 'Promo code already applied to this account' };
+      }
+      throw err;
     }
-    // Check max uses
-    if (disc.promo_code_max_uses && disc.promo_code_current_uses >= disc.promo_code_max_uses) {
-      return { success: false, error: 'Promo code has reached maximum uses' };
-    }
-
-    // Check if already assigned
-    const existing = await db('customer_discounts')
-      .where({ customer_id: customerId, discount_id: disc.id })
-      .first();
-    // A code the customer already redeemed as an account credit on an
-    // accepted estimate counts as applied (services/estimate-promo-code.js).
-    if (existing || await require('./estimate-promo-code').customerRedeemedPromoCredit(db, customerId, disc.id)) {
-      return { success: false, error: 'Promo code already applied to this account' };
-    }
-
-    // Assign to customer
-    await db('customer_discounts').insert({
-      customer_id: customerId,
-      discount_id: disc.id,
-      applied_reason: `Promo code: ${code}`,
-      applied_by: 'promo',
-    });
-
-    // Increment usage
-    await db('discounts').where({ id: disc.id }).increment('promo_code_current_uses', 1);
-
-    return { success: true, discount: { name: disc.name, discount_type: disc.discount_type, amount: Number(disc.amount) } };
   },
 
   /**

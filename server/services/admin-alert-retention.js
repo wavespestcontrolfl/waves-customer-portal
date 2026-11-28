@@ -176,6 +176,8 @@ const RERING = [
     decision: 'expire, capped: while a vendor cost spike or modeled margin breach still holds, the next daily watchdog sweep raises one fresh row' },
   { emitter: 'family-drop-below-two', files: ['services/multi-home-family.js'], prefixes: ['family-drop-below-two:'], kind: 'event',
     decision: 'expire: only another family unlink, archive, or cancellation that drops a family below 2 active homes raises it again' },
+  { emitter: 'call-extraction-outage', files: ['services/call-hygiene-guards.js'], prefixes: ['call-extraction-outage:'], kind: 'event',
+    decision: 'expire: only a new burst of 3+ call extraction failures in 60 minutes raises it again' },
 ];
 
 const parseMeta = (metadata) => {
