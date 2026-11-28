@@ -245,8 +245,9 @@ test('bindingQuote: a tie for latest that runs to the end of a page that may not
   // The list page as served: canLoadMore true (more orders exist), false (the last page) or not said.
   const page = (orders, canLoadMore) => { const routes = history(orders); routes['GET /api/orders'] = { orders: routes['GET /api/orders'].orders, ...(canLoadMore === undefined ? {} : { canLoadMore }) }; return quote(routes); };
   const tied = [other('N', '2026-10-01T00:00:00Z'), o('A', '2026-09-01T00:00:00Z'), o('B', '2026-09-01T00:00:00Z')];
-  // More orders to load (or not said): an order of this item past the page could be on its way, so it parks whatever the tie.
-  const pastPage = { cents: 10000, source: 'order A', outstanding: { number: null, why: 'unchecked' } };
+  // More orders to load (or not said): an order of the same moment could carry another total past
+  // the page, so both the price and source are withheld alongside the unchecked outstanding marker.
+  const pastPage = { cents: null, source: null, outstanding: { number: null, why: 'unchecked' } };
   expect(await page(tied, false)).toEqual({ cents: 10000, source: 'order A' }); // the last page: the whole tie was read
   expect(await page(tied, true)).toEqual(pastPage); // more orders exist: one of the same moment could carry another total
   expect(await page(tied, undefined)).toEqual(pastPage); // not said: not known to be the last page

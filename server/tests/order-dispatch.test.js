@@ -44,7 +44,7 @@ const mockState = { request: null, vendor: null, product: null, pricing: null, l
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
+    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify', 'limit']) q[m] = () => q;
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
     q.where = (w) => { q._where = w; return q; };
     q.whereRaw = (sql, bindings) => { (q._raws = q._raws || []).push([sql, bindings]); return q; };
@@ -69,6 +69,7 @@ jest.mock('../models/db', () => {
       return null;
     };
     q.sum = () => q;
+    q.pluck = async () => mockState.receivedOrders || [];
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
     q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && row.status && mockState.parkThrowsOnce) { mockState.parkThrowsOnce = false; throw new Error('park lost connection'); } if (table === 'vendor_orders' && typeof row.evidence === 'string') { try { const v = JSON.parse(row.evidence).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } } mockState.updates.push({ table, row, ...(q._raws ? { raws: q._raws } : {}) }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
@@ -81,7 +82,7 @@ jest.mock('../models/db', () => {
       return [saved];
     };
     q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }), merge: () => ({ whereRaw: () => ({ returning }), returning }) }), returning }; };
-    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : (table.startsWith('product_restock_requests') ? (mockState.dispatchable || []) : [])).then(ok, err);
+    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : (table.startsWith('product_restock_requests') ? (mockState.dispatchable || []) : table === 'product_inventory_movements' ? (mockState.countRows || []) : [])).then(ok, err);
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
@@ -162,12 +163,34 @@ test('placed: claim first, then ledger placed + request ordered + audit, no bell
   expect(r.status).toBe('placed');
   expect(r.externalOrderNumber).toBe('SM-1');
   expect(mockState.ledgerRows[0]).toMatchObject({ status: 'placing', adapter: 'stickermule', restock_request_id: 'req-1' });
-  expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500 });
+  expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500, since: null, countedAt: null, receivedOrders: [] });
   expect(a.place).toHaveBeenCalledWith(expect.objectContaining({ vendorSku: '4242', quantity: 500, quoteCents: 31400 }));
   expect(ledgerStatus()).toBe('placed');
   expect(requestStatus()).toBe('ordered');
   expect(auditVendorOrder).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', amount_cents: 31400, external_order_number: 'SM-1' }));
   expect(notify).not.toHaveBeenCalled();
+});
+
+test('bindingQuote returning an outstanding order parks vendor_order_outstanding before cap reservation', async () => {
+  mockState.countRows = [{ id: 'm1', movement_type: 'correction', metadata: { source: 'owner_count', countedAt: '2026-11-17T09:00:00Z' }, created_at: new Date('2026-11-18T12:00:00Z') }];
+  mockState.receivedOrders = ['SM-5'];
+  mockState.request = { ...baseRequest(), created_at: new Date('2026-11-20T15:00:00Z') };
+  const a = {
+    ...mockAdapter(),
+    preSubmitTotal: 'history',
+    bindingQuote: jest.fn(async () => ({ cents: 31400, source: 'order SM-7', outstanding: { number: 'SM-7', why: 'coming' } })),
+  };
+  try {
+    const r = await run(a);
+    expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500, since: '2026-11-20T15:00:00.000Z', countedAt: '2026-11-17T09:00:00.000Z', receivedOrders: ['SM-5'] });
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'vendor_order_outstanding' });
+    expect(a.place).not.toHaveBeenCalled();
+    const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review')?.row;
+    expect(JSON.parse(parked.evidence)).toMatchObject({ outstandingOrder: { number: 'SM-7', why: 'coming' } });
+    expect(parked.error).toMatch(/^vendor_order_outstanding: Sticker Mule order SM-7 holds item 4242/);
+  } finally {
+    Object.assign(mockState, { countRows: null, receivedOrders: null });
+  }
 });
 
 test('a conflicting claim skips without calling the adapter', async () => {

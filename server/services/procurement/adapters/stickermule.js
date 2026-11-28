@@ -230,6 +230,14 @@ async function outstandingOrder(page, orders, { vendorSku, since, counted, read 
   return page?.canLoadMore === false ? null : { number: null, why: 'unchecked' };
 }
 
+function resolvedLast(last, page, stamps) {
+  if (!last) return null;
+  // The tie for latest ran to the end of a page that is not known to be the last one: an order of
+  // the same moment with another total could sit on the next page. Withhold price and source.
+  if (page?.canLoadMore !== false && stamps[stamps.length - 1] === last.at) return null;
+  return last;
+}
+
 async function bindingQuote({ vendorSku, quantity, since = null, countedAt = null, receivedOrders = [] }, { fetchImpl = fetch, now = Date.now } = {}) {
   if (!configured()) return null;
   const qty = Math.round(Number(quantity));
@@ -246,17 +254,12 @@ async function bindingQuote({ vendorSku, quantity, since = null, countedAt = nul
     if (!readOrders.has(listed?.number)) readOrders.set(listed?.number, await readListedOrder(listed, get));
     return readOrders.get(listed?.number);
   };
-  const last = await latestIdentical(orders, { vendorSku, qty, read });
+  const last = resolvedLast(await latestIdentical(orders, { vendorSku, qty, read }), page, stamps);
   // An order of this item that may already cover the request is returned whatever the price match
   // found (cents null when none binds): the dispatcher parks it, never buys, and its alert names it.
   const outstanding = await outstandingOrder(page, orders, { vendorSku, since, counted: { countedAt, receivedOrders }, read });
   if (outstanding) return { cents: last?.cents ?? null, source: last ? `order ${last.number}` : null, outstanding };
-  if (!last) return null;
-  // The tie for latest ran to the end of a page that is not known to be the last one: an order of
-  // the same moment with another total could sit on the next page. Refuse.
-  if (page?.canLoadMore !== false && stamps[stamps.length - 1] === last.at) return null;
-  // The LATEST identical order binds: canceled, unpaid or unreadable refuses (null), never an older one.
-  return last.cents == null ? null : { cents: last.cents, source: `order ${last.number}` };
+  return last?.cents == null ? null : { cents: last.cents, source: `order ${last.number}` };
 }
 
 // Right before the POST: the order list as it is now. Defense-in-depth check: Sticker Mule's API

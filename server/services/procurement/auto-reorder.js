@@ -92,11 +92,15 @@ async function findLowStockCandidates(conn = db) {
 // order (Codex r4 P2, r8 P1). Runs inside the caller's transaction, so a
 // failure propagates — swallowing it would leave the transaction aborted
 // and the next write failing anyway (Codex r10 P2); the sweep's per-product
-// catch records it.
-async function vendorPricingFor(conn, productId, vendorId) {
+// catch records it. Shared by history-order-policy.js with deterministic
+// tie-breaking (is_best_price, updated_at, id) so approval and sweep always
+// pick the exact same SKU.
+async function vendorPricingFor(conn, productId, vendorId, now = new Date()) {
   if (!vendorId) return null;
-  return eligibleVendorPricing(conn('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }))
+  return eligibleVendorPricing(conn('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }), now)
     .orderBy('is_best_price', 'desc')
+    .orderBy('updated_at', 'desc')
+    .orderBy('id', 'asc')
     .first();
 }
 
@@ -340,6 +344,9 @@ async function handleLiveRequest(ctx, p, existing) {
   // retired since must not ring "order manually" on top of it (hook r27
   // P0). Reconciliation — receive or revoke — is what reopens the lane.
   if (await require('./order-dispatch').findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
+  // Parked because a vendor order may already cover it: its alert names that order and says check the
+  // account first. A plain "order by hand" hand-off must not replace it (a gate or vendor changed since).
+  if (await require('./order-dispatch').outstandingVendorOrder(ctx.conn, request.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'vendor_order_outstanding' }); return; }
   // A pre-submit park (no_price, dry_run, …) left this request a versioned
   // ledger bell that already says "order manually": the generic hand-off
   // must not ring beside it. Settle the ledger's bell first; when that

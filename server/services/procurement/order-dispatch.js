@@ -392,6 +392,15 @@ async function settleRequestLedgerBells(trx, requestId) {
   await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
 }
 
+// A request parked because a vendor order may already cover it (evidence.outstandingOrder): its alert
+// names that order and says check the account first. The sweep never rings a plain "order by hand"
+// hand-off beside it, whatever gate or vendor changed since; receiving or cancelling the request is
+// what ends it.
+async function outstandingVendorOrder(conn, requestId) {
+  const row = await conn('vendor_orders').where({ restock_request_id: requestId, status: 'needs_review' }).whereNull('placed_at').whereRaw("evidence->'outstandingOrder' IS NOT NULL").first('id');
+  return !!row;
+}
+
 // Unlocked read for a pre-check (the IB tool's confirmation card); the
 // locked guard above is what a receive transaction relies on.
 async function landedAfterReceiveFor(conn, requestId) {
@@ -1045,10 +1054,56 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
 // never placed for: resolveBindingTotal parks its request with the last identical order's figure,
 // and the order is placed by hand on the vendor's own site.
 const neverPlacedFor = (adapter) => adapter?.preSubmitTotal !== 'vendor';
+// What proves a delivered vendor order is already in the product's stock count. countedAt: the
+// product's last PHYSICAL count (inventory-count-guard's own classification and effective time),
+// ISO text or null. receivedOrders: the numbers of this vendor's portal-placed orders (placed_at +
+// external_order_number, unrevoked, not awaiting a second receipt via landedAfterReceive) whose
+// request was received. A manual receipt on a parked request records no vendor order number, so an
+// unlinked candidate named in evidence.outstandingOrder is NEVER treated as received here.
+async function deliveryEvidence(conn, { productId, vendorId }) {
+  const count = await require('../inventory-count-guard').latestCount(conn, productId);
+  const placedNumbers = await conn('vendor_orders as vo')
+    .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
+    .where({ 'prr.product_id': productId, 'prr.status': 'received', 'vo.vendor_id': vendorId })
+    .whereNotNull('vo.placed_at')
+    .whereNotNull('vo.external_order_number')
+    .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
+    .whereRaw("NULLIF(vo.evidence->>'landedAfterReceive', '') IS NULL")
+    .pluck('vo.external_order_number');
+  const receivedOrders = (placedNumbers || []).filter((n) => n != null).map(String);
+  return { countedAt: count?.countedAt ? new Date(count.countedAt).toISOString() : null, receivedOrders };
+}
+const requestSince = (request) => (request?.created_at ? new Date(request.created_at).toISOString() : null);
+
+function outstandingMessage(vendorName, vendorSku, { number, why }) {
+  const order = `${vendorName} order ${number || '(no number)'}`;
+  const check = `Check the ${vendorName} account before any reorder.`;
+  const text = {
+    coming: `${order} holds item ${vendorSku} and is not complete and delivered yet, so it may already cover this request. ${check} If it covers the need, receive this request when it arrives, then record a stock count so the robot knows that order is counted.`,
+    since: `${order} holds item ${vendorSku}, was placed after this request was raised and shows delivered: it may be this request's stock, bought by hand. ${check} If it is, receive this request now, then record a stock count so the robot knows that order is counted.`,
+    arrived: `${order} holds item ${vendorSku} and was delivered after the last stock count, or at a time ${vendorName} does not show: it may not be in the stock count yet. ${check} If it covers this request, receive this request now, then record a stock count. If it was already counted and stock is still low, record a stock count, order by hand on ${vendorName}, then mark this request ordered.`,
+    conflict: `${order} holds item ${vendorSku}, and ${vendorName}'s order list and the order itself disagree on its state, so it may still be open. ${check} Reorder by hand only if it has arrived and was received.`,
+    unreadable: `${order} could not be read in full, so it may hold item ${vendorSku}. ${check} Reorder by hand only if no order of the item is open or arrived unreceived.`,
+    unchecked: `${vendorName} has more orders than the newest 50 the robot reads, so an older order of item ${vendorSku} may still be open. ${check} Reorder by hand only if none is.`,
+  };
+  return text[why] || text.unreadable;
+}
+
 async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quantity, now, env }) {
   let bq;
-  try { bq = await adapter.bindingQuote({ vendorSku, quantity }); }
+  try { bq = await adapter.bindingQuote({ vendorSku, quantity, since: requestSince(ctx.request), ...(await deliveryEvidence(conn, { productId: ctx.request.product_id, vendorId: vendor.id })) }); }
   catch (err) { return { parked: await park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: `binding total lookup failed: ${err.message}` }) }; }
+  if (bq?.outstanding) {
+    return {
+      parked: await park(conn, {
+        ...ctx,
+        reason: 'vendor_order_outstanding',
+        message: outstandingMessage(vendor.name, vendorSku, bq.outstanding),
+        amountCents: positiveCents(bq.cents),
+        evidence: { outstandingOrder: { number: bq.outstanding.number ?? null, why: bq.outstanding.why } },
+      }),
+    };
+  }
   if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no usable prior order of item ${vendorSku} at ${quantity}: there is none among its newest orders, or the latest one is not paid yet, was canceled, or cannot be read. So there is no binding total to cap.` }) };
   const quoteCents = bq.cents;
   const cap = await reserveUnderCaps(conn, ctx.ledger.id, quoteCents, { env });
@@ -1057,8 +1112,8 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
     // A historical charge is not a vendor-confirmed current total: price,
     // tax or shipping may have moved since, and a cap can only be
     // enforced BEFORE money moves. Park with everything the office needs
-    // for a one-minute manual reorder (pre-push audit P0; owner ruling
-    // pending on accepting history-total placement).
+    // for a one-minute manual reorder (pre-push audit P0; PR 2 wires
+    // history-order-policy.js for DB-backed auto-ordering).
     return { parked: await park(conn, { ...ctx, reason: 'no_vendor_confirmed_total', message: `${vendor.name}'s API confirms no current total before ordering; the last identical order (${bq.source || 'history'}) was ${dollars(quoteCents)}, which fits the caps. A reorder by hand is item ${vendorSku} × ${quantity}.`, amountCents: quoteCents }) };
   }
   return { quoteCents };
@@ -1771,6 +1826,7 @@ module.exports = {
   reringPendingBells,
   dispatchRestockOrder,
   canAutoOrder,
+  outstandingVendorOrder,
   reserveUnderCaps,
   monthlySpentCents,
   findDispatchable,

@@ -19,7 +19,7 @@
  *     unless an alert says the request parked or auto-reorder is turned off.
  */
 const db = require('../../models/db');
-const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
+const { vendorPricingFor } = require('./auto-reorder');
 const { auditHistoryOrderPolicyChange } = require('../audit-log');
 
 const POLICY_KEY = 'procurement.history_total_auto_order';
@@ -177,13 +177,7 @@ async function listEligibleHistoryItems(conn = db, { now = new Date() } = {}) {
   const items = [];
   for (const r of rows) {
     const adapterKey = adapterByCode[Number(r.vendor_code)];
-    const pricing = await eligibleVendorPricing(
-      conn('vendor_pricing').where({ product_id: r.id, vendor_id: r.vendor_id }),
-      now
-    )
-      .orderBy('is_best_price', 'desc')
-      .orderBy('updated_at', 'desc')
-      .first('vendor_sku', 'price_amount', 'price', 'quantity', 'unit');
+    const pricing = await vendorPricingFor(conn, r.id, r.vendor_id, now);
     const vendorSku = pricing?.vendor_sku ? String(pricing.vendor_sku).trim() : null;
     const itemKey = vendorSku ? parseItemKey(`${adapterKey}:${vendorSku}`) : null;
     const unitPrice = numOrNull(pricing?.price_amount ?? pricing?.price);
