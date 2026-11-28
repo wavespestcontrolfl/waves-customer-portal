@@ -35,7 +35,7 @@ const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection, renderSmsBankFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
 const portalCancelFact = require('./sms-portal-cancel-fact');
-const { namedDayMatcher } = require('./sms-open-times-intent');
+const { namedDayMatcherForThread } = require('./sms-open-times-intent');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
 const promptPatch = require('./sms-prompt-patch');
 const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
@@ -6353,9 +6353,13 @@ function openTimesWithheldReason({ timesAsked, missedVisitListed, missedRebook, 
 
 // What draftShadowReply stores from the OPEN TIMES outcome: the intended_actions key open_times_withheld ({} when times were shown
 // or never asked for). Empty for a frozen replay and with the real-answers gate off.
-function openTimesStampFor({ frozen, ...withheldInputs }) {
-  const withheld = frozen || !gateEnvValue('GATE_SMS_REAL_ANSWERS') ? null : openTimesWithheldReason(withheldInputs);
-  return withheld ? { open_times_withheld: withheld } : {};
+function openTimesStampFor({ frozen, threadCarryReason = null, ...withheldInputs }) {
+  if (frozen || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return {};
+  const withheld = openTimesWithheldReason(withheldInputs);
+  return {
+    ...(withheld ? { open_times_withheld: withheld } : {}),
+    ...(threadCarryReason ? { open_times_from_thread: threadCarryReason } : {}),
+  };
 }
 
 // B1: the free re-service booking page's own openings for a covered pest report that decides the reply. { block, days, offer } with
@@ -6470,10 +6474,23 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // A text linked to an estimate prices the estimate's service, so the missed visit's own times cannot be told apart from it: that draft
   // keeps today's hand-off (OPEN TIMES withheld for the whole reply).
   const missedRebook = missedVisitListed && smsPromptB1Live() && !estimateId;
-  const timesAsked = Boolean(schedulingIntent)
+  const openTimesIntent = require('./sms-open-times-intent');
+  const directTimesAsked = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
     || pestReportSignal(inboundMessage, context);
+  const threadFollowUp = openTimesIntent.resolveThreadSchedulingContext({
+    frozen: Boolean(presetFactsBlock),
+    liveOpenTimes,
+    directTimesAsked,
+    realAnswersOn: gateEnvValue('GATE_SMS_REAL_ANSWERS'),
+    continuityOn: require('../config/feature-gates').smsThreadContinuityLive(),
+    inboundMessage,
+    inboundPhone,
+    context,
+    asOf,
+  });
+  const timesAsked = threadFollowUp.timesAsked;
   const needsOpenTimes = missedRebook || (!missedVisitListed && timesAsked);
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
@@ -6499,9 +6516,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const identity = willFetchOpenTimes && !estimateId
-    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(inboundMessage, context, { openEstimate }))
+  const identityText = openTimesIntent.buildThreadIdentityInput(threadFollowUp, inboundMessage);
+  const rawIdentity = willFetchOpenTimes && !estimateId
+    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(identityText, context, { openEstimate }))
     : { serviceType: liveServiceType(context), certain: true };
+  const identity = openTimesIntent.disambiguateThreadIdentity(threadFollowUp, rawIdentity, context, openEstimate);
   const serviceType = identity.serviceType;
   const pricingEstimateId = estimateId || identity.estimateId || null;
   // An estimate pins the service itself; otherwise an uncertain identity
@@ -6529,7 +6548,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
-      schedulerOffer, namedDay: namedDayMatcher(inboundMessage),
+      schedulerOffer, namedDay: namedDayMatcherForThread(inboundMessage, threadFollowUp),
     });
   const openTimesFetch = { block: openTimesBlock, withheld: openTimesWithheldFetch };
   // B1: a covered pest report offers the free re-service booking page's own openings (a section of its own, never OPEN TIMES)
@@ -6541,6 +6560,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const openTimesStamp = openTimesStampFor({
     frozen: Boolean(presetFactsBlock), timesAsked, missedVisitListed, missedRebook, reserviceLaneDecides,
     reserviceOpeningsShown: Boolean(reserviceOpenings.block), willFetchOpenTimes, identityCertain, identityReason: identity.reason, fetched: openTimesFetch,
+    threadCarryReason: threadFollowUp.carryReason,
   });
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
   const reserviceBooked = reserviceState ? reserviceState.booked : {};
@@ -7004,6 +7024,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);
       return null;
     }
+    // Carried scheduling follow-ups inherit the same scheduling delivery safeguards
+    // and stored scheduling_intent flag as direct scheduling texts.
+    schedulingIntent = require('./sms-open-times-intent').effectiveSchedulingIntent(schedulingIntent, openTimesStamp);
 
     const intentName = intent?.intent || 'GENERAL';
     // factsForDraft is the EXACT block generateGroundedDraft drafted and
