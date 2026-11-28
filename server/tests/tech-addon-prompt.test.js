@@ -194,11 +194,14 @@ describe('techAddonPromptFacts', () => {
     }
   });
 
-  test('includes recurring add-ons on scoped visits (respecting cadence) and suppresses duplicate pitch', async () => {
-    expect(isRecurringAddonRow({ recurring_pattern: 'quarterly' })).toBe(true);
-    expect(isRecurringAddonRow({ recurring_pattern: null })).toBe(true);
-    expect(isRecurringAddonRow({ recurring_pattern: 'one_time' })).toBe(false);
-    expect(isRecurringAddonRow({ recurring_pattern: 'none' })).toBe(false);
+  test('includes recurring add-ons on scoped visits (respecting cadence and shared isOneTimeOnlyAddonKey) and suppresses duplicate pitch', async () => {
+    expect(isRecurringAddonRow({ recurring_pattern: 'quarterly', service_key: 'pest-quarterly' })).toBe(true);
+    expect(isRecurringAddonRow({ recurring_pattern: null, service_key: 'pest-quarterly' })).toBe(true);
+    expect(isRecurringAddonRow({ recurring_pattern: 'one_time', service_key: 'pest-quarterly' })).toBe(false);
+    expect(isRecurringAddonRow({ recurring_pattern: 'none', service_key: 'pest-quarterly' })).toBe(false);
+    expect(isRecurringAddonRow({ recurring_pattern: null, service_key: 'area_addon_lawn_insect_spot' })).toBe(false);
+    expect(isRecurringAddonRow({ recurring_pattern: null, service_key: 'mosquito_misting_refill' })).toBe(false);
+    expect(isRecurringAddonRow({ recurring_pattern: null, service_key: 'waveguard_membership' })).toBe(false);
 
     const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
     const loadScopedVisitAddonKeys = jest.fn(async () => ['pest_control']);
@@ -212,25 +215,12 @@ describe('techAddonPromptFacts', () => {
     expect(prompt).toBeNull();
   });
 
-  test('applies recurring_template_overrides + catalog resolution on ongoing series roots', async () => {
+  test('applies recurring_template_overrides under scheduler gate and preserves root catalog identity on price-only overrides', async () => {
+    const featureGates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(featureGates, 'isEnabled');
     const rootId = '11111111-1111-4111-8111-111111111111';
     const lawnSvcId = '22222222-2222-4222-8222-222222222222';
-    const oldRoot = {
-      id: rootId,
-      customer_id: 'cust-1',
-      service_type: 'Quarterly Pest Control',
-      is_recurring: true,
-      recurring_ongoing: true,
-      recurring_parent_id: null,
-      service_address_line1: '100 Main St',
-      service_address_city: 'Sarasota',
-      service_address_zip: '34231',
-      recurring_template_overrides: JSON.stringify({
-        service_type: 'Lawn Care',
-        service_id: lawnSvcId,
-      }),
-    };
-    const mockDb = (table) => {
+    const makeRootDb = (rootRow) => (table) => {
       if (table === 'scheduled_services') {
         const q = {
           columnInfo: async () => ({ recurring_ongoing: true, recurring_template_overrides: true }),
@@ -238,7 +228,7 @@ describe('techAddonPromptFacts', () => {
           whereNull: () => q,
           whereIn: () => q,
           pluck: async () => [rootId],
-          select: async () => [oldRoot],
+          select: async () => [rootRow],
         };
         return q;
       }
@@ -256,11 +246,40 @@ describe('techAddonPromptFacts', () => {
       customerPrimaryStreet: '100mainstreet|sarasota|34231',
       requireSharedLocality: true,
     };
-    const resolved = await loadScopedOngoingRootRows(mockDb, 'cust-1', {
-      streetScope,
-      catalogById: new Map([[rootId, { service_key: 'pest-quarterly', service_category: 'pest' }]]),
-    });
-    expect(collectResidentialKeysOrNull(resolved)).toEqual(['lawn_care']);
+    const serviceEditedRoot = {
+      id: rootId, customer_id: 'cust-1', service_type: 'Quarterly Pest Control',
+      is_recurring: true, recurring_ongoing: true, recurring_parent_id: null,
+      service_address_line1: '100 Main St', service_address_city: 'Sarasota', service_address_zip: '34231',
+      recurring_template_overrides: JSON.stringify({ service_type: 'Lawn Care', service_id: lawnSvcId }),
+    };
+    const priceOnlyRoot = {
+      ...serviceEditedRoot,
+      service_type: 'Quarterly Pest Control',
+      recurring_template_overrides: JSON.stringify({ estimated_price: 95 }),
+    };
+    try {
+      gateSpy.mockImplementation((name) => name === 'editApptPriceServiceScope');
+      const resolvedOn = await loadScopedOngoingRootRows(makeRootDb(serviceEditedRoot), 'cust-1', {
+        streetScope,
+        catalogById: new Map([[rootId, { service_key: 'pest-quarterly', service_category: 'pest' }]]),
+      });
+      expect(collectResidentialKeysOrNull(resolvedOn)).toEqual(['lawn_care']);
+
+      const resolvedPriceOnly = await loadScopedOngoingRootRows(makeRootDb(priceOnlyRoot), 'cust-1', {
+        streetScope,
+        catalogById: new Map([[rootId, { service_key: 'lawn-care', service_category: 'lawn', service_name: 'Lawn Care' }]]),
+      });
+      expect(collectResidentialKeysOrNull(resolvedPriceOnly)).toEqual(['lawn_care']);
+
+      gateSpy.mockReturnValue(false);
+      const resolvedOff = await loadScopedOngoingRootRows(makeRootDb(serviceEditedRoot), 'cust-1', {
+        streetScope,
+        catalogById: new Map([[rootId, { service_key: 'pest-quarterly', service_category: 'pest' }]]),
+      });
+      expect(collectResidentialKeysOrNull(resolvedOff)).toEqual(['pest_control']);
+    } finally {
+      gateSpy.mockRestore();
+    }
   });
 
   test('suppresses prompt on commercial row, paid prepay coverage, unattributed ledger, plan hold, or secondary property', async () => {

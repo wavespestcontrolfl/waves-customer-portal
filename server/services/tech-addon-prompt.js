@@ -36,7 +36,12 @@ const {
 } = require('./waveguard-existing-services');
 const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
 const { eligibleSeriesParentIds } = require('./recurring-series-topup');
-const { parseTemplateOverrides } = require('./recurring-template-overrides');
+const {
+  PRICE_SERVICE_SERVICE_KEYS,
+  isOneTimeOnlyAddonKey,
+  parseTemplateOverrides,
+  overlayRecurringTemplateOverrides,
+} = require('./recurring-template-overrides');
 const { isCommercialServiceRow } = require('./self-booking-plan-sync');
 const { OFFER_LADDER } = require('./service-report/cross-sell');
 const { planStartBlocker } = require('./plan-start-eligibility');
@@ -130,6 +135,8 @@ function collectResidentialKeysOrNull(rows, catalogById = null) {
 }
 
 function isRecurringAddonRow(addon) {
+  const effectiveKey = addon?.service_key || addon?.service_key_snapshot || null;
+  if (effectiveKey && isOneTimeOnlyAddonKey(effectiveKey)) return false;
   const pattern = String(addon?.recurring_pattern || '').trim().toLowerCase();
   if (pattern && ONE_TIME_ADDON_PATTERNS.has(pattern)) return false;
   return true;
@@ -137,7 +144,7 @@ function isRecurringAddonRow(addon) {
 
 /**
  * Loads recurring add-ons attached to scoped recurring visits (respecting each add-on's
- * cadence — explicit one-time add-ons do not count as recurring coverage).
+ * cadence and excluding sold-once keys via shared `isOneTimeOnlyAddonKey`).
  */
 async function loadScopedVisitAddonKeys(dbh, visitIds) {
   const ids = [...new Set((visitIds || []).filter(Boolean))];
@@ -155,6 +162,7 @@ async function loadScopedVisitAddonKeys(dbh, visitIds) {
     if (!isRecurringAddonRow(addon)) continue;
     const normalized = {
       service_type: addon.service_name,
+      service_name: addon.catalog_name || addon.service_name || null,
       service_key: addon.service_key || addon.service_key_snapshot || null,
       service_category: addon.service_category || addon.service_category_snapshot || null,
       catalog_name: addon.catalog_name || null,
@@ -189,23 +197,27 @@ async function loadScopedOffCalendarRows(dbh, customerId, { streetScope, catalog
   return scoped.map((row) => ({ ...row, ...(catalogById.get(row.id) || {}) }));
 }
 
-async function resolveSeriesRootTemplateRow(row, catalogById, overrideCatalogById) {
-  const overrides = parseTemplateOverrides(row.recurring_template_overrides);
-  if (!overrides) return { ...row, ...(catalogById.get(row.id) || {}) };
-  const merged = { ...row, ...overrides };
+function resolveSeriesRootTemplateRow(row, cols, catalogById, overrideCatalogById) {
+  const baseCatalog = catalogById.get(row.id) || {};
+  const overlaid = overlayRecurringTemplateOverrides(row, cols);
+  if (overlaid === row) return { ...row, ...baseCatalog };
+  const overrides = parseTemplateOverrides(row.recurring_template_overrides) || {};
+  const hasServiceOverride = PRICE_SERVICE_SERVICE_KEYS.some((k) => k in overrides);
+  if (!hasServiceOverride) return { ...overlaid, ...baseCatalog };
   const svcCatalog = overrides.service_id && overrideCatalogById.get(overrides.service_id);
   return {
-    ...merged,
+    ...overlaid,
     service_key: svcCatalog?.service_key || overrides.service_key_snapshot || null,
     service_category: svcCatalog?.category || overrides.service_category_snapshot || null,
+    service_name: svcCatalog?.name || null,
     catalog_name: svcCatalog?.name || null,
   };
 }
 
 /**
- * Loads ongoing series roots between visits (`eligibleSeriesParentIds`) and applies current
- * `recurring_template_overrides` + catalog lookup so a series edited from Pest -> Lawn
- * classifies under its current effective service.
+ * Loads ongoing series roots between visits (`eligibleSeriesParentIds`) and applies
+ * `overlayRecurringTemplateOverrides` (honoring the scheduler's edit-scope feature gate)
+ * while preserving original catalog identity on price-only overrides.
  */
 async function loadScopedOngoingRootRows(dbh, customerId, { streetScope, catalogById }) {
   const parentIds = await eligibleSeriesParentIds(dbh, { customerId });
@@ -221,6 +233,8 @@ async function loadScopedOngoingRootRows(dbh, customerId, { streetScope, catalog
   const scoped = await filterRowsToStreet(dbh, roots, streetScope);
   const overrideServiceIds = [...new Set(
     scoped
+      .map((r) => overlayRecurringTemplateOverrides(r, cols))
+      .filter((r, i) => r !== scoped[i])
       .map((r) => parseTemplateOverrides(r.recurring_template_overrides)?.service_id)
       .filter((id) => UUID_SHAPE.test(String(id || ''))),
   )];
@@ -228,7 +242,7 @@ async function loadScopedOngoingRootRows(dbh, customerId, { streetScope, catalog
     ? await dbh('services').whereIn('id', overrideServiceIds).select('id', 'service_key', 'category', 'name')
     : [];
   const overrideCatalogById = new Map(overrideCatalogRows.map((s) => [s.id, s]));
-  return Promise.all(scoped.map((row) => resolveSeriesRootTemplateRow(row, catalogById, overrideCatalogById)));
+  return scoped.map((row) => resolveSeriesRootTemplateRow(row, cols, catalogById, overrideCatalogById));
 }
 
 async function loadActivePrepayCoveredFamilies(dbh, customerId) {
@@ -300,12 +314,12 @@ async function techAddonPromptFacts(svc, dbh, deps = {}) {
       d.loadPlanComponents(dbh, svc.customer_id, { strictProbe: true }),
       d.loadActivePlanHoldFamilies(dbh, svc.customer_id),
     ]);
-    const allScopedRows = [...(liveRows || []), ...(offCalRows || []), ...(ongoingRows || [])];
+    const allScopedRows = [liveRows, offCalRows, ongoingRows].flat().filter(Boolean);
     const visitKeys = collectResidentialKeysOrNull(allScopedRows);
     const addonKeys = await d.loadScopedVisitAddonKeys(dbh, allScopedRows.map((r) => r.id));
     if (!visitKeys || !addonKeys || !prepayFamilies) return null;
 
-    const activeRates = (planComponents || []).filter((row) => Number(row.monthly_rate) > 0);
+    const activeRates = planComponents.filter((row) => Number(row.monthly_rate) > 0);
     if (activeRates.some((row) => !row.family_key || row.family_key === 'unattributed')) return null;
 
     return pickTechAddonPrompt([...new Set([...visitKeys, ...addonKeys])], {
