@@ -112,15 +112,9 @@ const EXCLUDED_STATEMENT_INVOICE_STATUSES = [
 
 function applyCollectibleStatementChildFilter(query, alias = '') {
   const prefix = alias ? `${alias}.` : '';
-  if (typeof query.whereNotIn === 'function') {
-    query.whereNotIn(`${prefix}status`, EXCLUDED_STATEMENT_INVOICE_STATUSES);
-  } else {
-    for (const s of EXCLUDED_STATEMENT_INVOICE_STATUSES) query.whereNot(`${prefix}status`, s);
-  }
-  if (typeof query.whereRaw === 'function') {
-    query.whereRaw(`(${prefix}scheduled_send_error IS NULL OR ${prefix}scheduled_send_error NOT LIKE 'chemical_addon_review:%')`);
-  }
-  return query;
+  return query
+    .whereNotIn(`${prefix}status`, EXCLUDED_STATEMENT_INVOICE_STATUSES)
+    .whereRaw(`(${prefix}scheduled_send_error IS NULL OR ${prefix}scheduled_send_error NOT LIKE 'chemical_addon_review:%')`);
 }
 
 async function rollupStatement(statementId, database = db) {
@@ -185,22 +179,20 @@ async function finalizeStatement(statementId, { database = db, date = new Date()
   }
 
   // Detach any non-void non-collectible children (held for chemical add-on review
-  // or already paid/prepaid/refunded/canceled/disputed/processing) before freezing
-  // so they can never stay attached to a finalized statement.
-  const detachQ = database('invoices')
+  // or already paid/prepaid/refunded/canceled/disputed/processing/partial) before
+  // freezing so they can never stay attached to a finalized statement.
+  await database('invoices')
     .where({ payer_statement_id: statementId })
-    .whereNot('status', 'void');
-  if (typeof detachQ.where === 'function' && typeof detachQ.update === 'function') {
-    detachQ.where(function nonCollectibleChild() {
-      if (typeof this.whereIn === 'function') this.whereIn('status', EXCLUDED_STATEMENT_INVOICE_STATUSES);
-      if (typeof this.orWhereRaw === 'function') this.orWhereRaw("scheduled_send_error LIKE 'chemical_addon_review:%'");
-    });
-    await detachQ.update({
+    .whereNot('status', 'void')
+    .where(function nonCollectibleChild() {
+      this.whereIn('status', EXCLUDED_STATEMENT_INVOICE_STATUSES)
+        .orWhereRaw("scheduled_send_error LIKE 'chemical_addon_review:%'");
+    })
+    .update({
       payer_statement_id: null,
       payer_id: database.raw('COALESCE(payer_id, ?)', [stmt.payer_id]),
       updated_at: database.fn.now(),
     });
-  }
 
   // Final rollup from attached non-void invoices while still open.
   await rollupStatement(statementId, database);

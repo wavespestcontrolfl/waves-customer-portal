@@ -77,7 +77,7 @@ async function prepareSettleableStatementChildren(database, statementId, { lock 
   const childQ = database('invoices')
     .where({ payer_statement_id: statementId })
     .whereNot('status', 'void');
-  if (lock && typeof childQ.forUpdate === 'function') childQ.forUpdate();
+  if (lock) childQ.forUpdate();
   const childRows = await childQ
     .select('id', 'invoice_number', 'customer_id', 'status', 'scheduled_send_error', 'visit_completion_packet_id');
   const blockedChild = (childRows || []).find((row) => (
@@ -223,13 +223,10 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     updated_at: paidAt,
   });
 
-  const cascadeQuery = database('invoices')
+  const childrenSettled = await database('invoices')
     .where({ payer_statement_id: statementId })
-    .whereNotIn('status', NON_SETTLEABLE_CHILD_STATUSES);
-  if (typeof cascadeQuery.whereRaw === 'function') {
-    cascadeQuery.whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'chemical_addon_review:%')");
-  }
-  const childrenSettled = await cascadeQuery
+    .whereNotIn('status', NON_SETTLEABLE_CHILD_STATUSES)
+    .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'chemical_addon_review:%')")
     .update({ status: 'paid', paid_at: paidAt, updated_at: paidAt });
   if (childCount > 0 && Number.isFinite(childrenSettled) && childrenSettled < childCount) {
     const err = new Error(`Cannot settle statement S-${statementId}: expected to settle ${childCount} child invoice(s), settled ${childrenSettled}.`);
