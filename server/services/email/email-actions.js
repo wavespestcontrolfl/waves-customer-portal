@@ -419,6 +419,18 @@ async function executeAutoAction(email, classification) {
       // commits on the outcome must not read it as a retryable failure.
       return { ok: true, skipped: true };
     }
+    // Non-destructive categories only: destructive categories (spam,
+    // marketing_newsletter) already check aligned authentication in
+    // shouldSkipAutoAction above, so spoofed spam bearing Google's From and
+    // Subject still reaches quarantine.
+    if (!DESTRUCTIVE_CATEGORIES.has(classification.category) && isGoogleLsaCallReceipt(email.from_address, email.subject)) {
+      await db('emails').where({ id: email.id }).update({
+        auto_action: 'lead_skipped_automated_sender',
+        updated_at: new Date(),
+      });
+      logger.info(`[email-actions] Skipped auto-action for Google LSA call receipt (email ${email.id})`);
+      return { ok: true, skipped: true };
+    }
     switch (classification.category) {
       case 'spam':
         await handleSpam(email);
@@ -624,6 +636,15 @@ const LEAD_HARD_SKIP_SENDERS = [
   '@twimlets.com', // Twilio voicemail relay robots
 ];
 
+// Google Local Services Ads automated call-receipt notifications ("New call
+// from a potential customer" / "Missed call from a potential customer"):
+// caller details live behind a dashboard link, and the inbound Twilio call
+// already creates the real lead and bell. Scoped to call-receipt subjects so
+// non-call LSA messages still reach the automated-sender contact/review guards.
+// Owner ruling 2026-11-27.
+const GOOGLE_LSA_RECEIPT_SENDER = 'localservices-noreply@google.com';
+const GOOGLE_LSA_CALL_RECEIPT_SUBJECT_RE = /^\s*(?:new|missed)\s+call\s+from\s+a\s+potential\s+customer\b/i;
+
 // Lead-marketplace solicitors (pay-to-unlock model, e.g. Bark): their
 // "X is looking for pest control" notifications NEVER contain the
 // prospect's real contact — the phone/email in the body is the
@@ -646,6 +667,11 @@ const LEAD_MARKETPLACE_SOLICITOR_DOMAINS = ['bark.com', 'thumbtack.com'];
 // contact — but the automated from_address must never be stored as the
 // lead's email.
 const AUTOMATED_SENDER_LOCAL_PARTS = ['do-not-reply', 'no-reply', 'noreply', 'donotreply', 'notifications'];
+// Matches prefixed/suffixed no-reply mailboxes (e.g. localservices-noreply@,
+// billing.no-reply@, alerts_donotreply@, noreply-leads@) on token boundaries
+// against the base local part (before any +tag) so human addresses like
+// alex+noreply@example.com stay unaffected.
+const AUTOMATED_NOREPLY_TOKEN_RE = /(?:^|[._-])(?:do[-_.]?not[-_.]?reply|no[-_.]?reply|noreply|donotreply)(?:$|[._-])/i;
 const AUTOMATED_RELAY_DOMAINS = [];
 
 // Subject of the Waves auto-acknowledgment automation email
@@ -665,21 +691,36 @@ function leadMinConfidence() {
   return Number.isFinite(parsed) ? parsed : DEFAULT_LEAD_MIN_CONFIDENCE;
 }
 
-function isHardSkippedLeadSender(fromAddress) {
+function isGoogleLsaCallReceipt(fromAddress, subject) {
+  return normalizeAddress(fromAddress) === GOOGLE_LSA_RECEIPT_SENDER
+    && GOOGLE_LSA_CALL_RECEIPT_SUBJECT_RE.test(String(subject || ''));
+}
+
+function isHardSkippedLeadSender(fromAddress, subject = null) {
   const normalized = normalizeAddress(fromAddress);
   if (!normalized) return false;
+  if (isGoogleLsaCallReceipt(normalized, subject)) return true;
   if (LEAD_HARD_SKIP_SENDERS.some((entry) => (
     entry.startsWith('@') ? normalized.endsWith(entry) : normalized === entry
   ))) return true;
   return domainMatches(domainFromAddress(normalized), LEAD_MARKETPLACE_SOLICITOR_DOMAINS);
 }
 
+function isNoReplyAddress(address) {
+  const normalized = normalizeAddress(address);
+  const at = normalized.lastIndexOf('@');
+  if (at < 1) return false;
+  const baseLocalPart = normalized.slice(0, at).split('+')[0];
+  return AUTOMATED_NOREPLY_TOKEN_RE.test(baseLocalPart);
+}
+
 function isAutomatedSender(fromAddress) {
   const normalized = normalizeAddress(fromAddress);
   const at = normalized.lastIndexOf('@');
   if (at < 1) return false;
-  const localPart = normalized.slice(0, at);
-  if (AUTOMATED_SENDER_LOCAL_PARTS.includes(localPart)) return true;
+  const baseLocalPart = normalized.slice(0, at).split('+')[0];
+  if (AUTOMATED_SENDER_LOCAL_PARTS.includes(baseLocalPart)) return true;
+  if (AUTOMATED_NOREPLY_TOKEN_RE.test(baseLocalPart)) return true;
   return domainMatches(normalized.slice(at + 1), AUTOMATED_RELAY_DOMAINS);
 }
 
@@ -785,7 +826,7 @@ async function handleLeadInquiry(email, classification) {
   const extracted = classification.extracted || {};
 
   // Guard: hard-skip senders are pure machine noise — never a lead (silent).
-  if (isHardSkippedLeadSender(email.from_address)) {
+  if (isHardSkippedLeadSender(email.from_address, email.subject)) {
     await db('emails').where({ id: email.id }).update({
       auto_action: 'lead_skipped_automated_sender',
       updated_at: new Date(),
@@ -1223,6 +1264,25 @@ const DRAFT_TONE_RULES = Object.freeze({
   lead: 'This is a NEW CUSTOMER INQUIRY from someone who is not a Waves customer yet. Thank them for reaching out, answer only what the COMPANY FACTS answer, and ask only for what Waves still needs to quote: the service address if the message has none, and a phone number if the message has none. Never quote a price, a visit date or a time.',
 });
 
+// Resolves the actionable reply recipient for an auto-draft, or null when the
+// message should never get a draft (self-sent/self-targeted or addressed to a
+// no-reply mailbox with no real Reply-To). Uses isNoReplyAddress rather than
+// the broader isAutomatedSender so reply-enabled ticketing mailboxes like
+// notifications+ticket123@example.com keep getting service/complaint drafts.
+function resolveDraftReplyAddress(email) {
+  if (isGoogleLsaCallReceipt(email.from_address, email.subject)) return null;
+  const ownAddress = ownMailboxAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  if (ownMailboxAddress(email.from_address) === ownAddress) return null;
+  const replyAddress = email.reply_to || email.from_address;
+  if (!replyAddress
+    || ownMailboxAddress(replyAddress) === ownAddress
+    || isInternalEmailRecipient(replyAddress)
+    || isNoReplyAddress(replyAddress)) {
+    return null;
+  }
+  return replyAddress;
+}
+
 async function draftReplyForEmail(email, { customer = null, tone = 'service' } = {}) {
   if (!emailAutoDraftsEnabled()) return null;
   // INBOUND mail only: the sync ingests the whole mailbox, so Waves-authored
@@ -1232,10 +1292,8 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   if (typeof labels === 'string') { try { labels = JSON.parse(labels); } catch { labels = []; } }
   labels = Array.isArray(labels) ? labels : [];
   if (labels.includes('SENT') || labels.includes('DRAFT')) return null;
-  // Both sides read as the base mailbox: a tag on the sender or on the
-  // configured address is the same contact@ mailbox.
-  const ownAddress = ownMailboxAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
-  if (ownMailboxAddress(email.from_address) === ownAddress) return null;
+  const replyAddress = resolveDraftReplyAddress(email);
+  if (!replyAddress) return null;
   // ATOMIC idempotency claim in Postgres — the in-memory row is stale by the
   // time reclassification (which runs auto-actions twice with the same
   // object) or a concurrent worker gets here. Only the caller that flips
@@ -1415,10 +1473,6 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       logger.warn(`[email-actions] post-LLM thread re-check failed (email ${email.id}) — claim retained: ${e.message}`);
       return null;
     }
-    // Reply-To (validated to a single plain mailbox at parse time) beats
-    // From — relayed mail (contact forms, ticketing) carries the actionable
-    // recipient there while From is a provider-owned no-reply mailbox.
-    const replyAddress = email.reply_to || email.from_address;
     let draft;
     try {
       draft = await gmailClient.createDraft(
@@ -1564,6 +1618,7 @@ module.exports = {
   // Exported for unit testing the lead-creation guards
   handleLeadInquiry,
   EMAIL_LEAD_SOURCE_TYPE,
+  isGoogleLsaCallReceipt,
   isHardSkippedLeadSender,
   isAutomatedSender,
   isWavesAutoAckReply,

@@ -195,23 +195,25 @@ else
   echo "    Android push (FCM) will be inert until you add it (see step 5)."
 fi
 
-# Google Play target-API-level policy: releases must target Android 16 (API 36)
-# by Aug 31, 2026. The Capacitor 7 template generates the project at SDK 35, and
-# client/android persists across bootstraps, so pin the SDK levels here — this
-# script is the source of truth (same replacement-idempotent pattern as the App
-# Links block below). compileSdk 36 needs AGP >= 8.9.1 (the template's 8.7.x tops
-# out at 35); the template's Gradle 8.11.1 wrapper already satisfies AGP 8.9.
-# Remove these pins once the Capacitor template itself reaches SDK 36.
+# Google Play policies:
+# - Play automatic protection requires minSdkVersion >= 24 (the Capacitor 7
+#   template defaults to 23 and Play Console refuses the bundle at upload).
+# - Releases must target Android 16 (API 36) by Aug 31, 2026 (template is 35).
+# compileSdk 36 needs AGP >= 8.9.1 (the template's 8.7.x tops out at 35);
+# client/android persists across bootstraps, so pin all SDK levels here.
+ANDROID_MIN_SDK=24
 ANDROID_TARGET_SDK=36
 ANDROID_AGP_VERSION=8.9.2
+perl -pi -e "s/^(\s*minSdkVersion = )\d+/\${1}$ANDROID_MIN_SDK/" android/variables.gradle
 perl -pi -e "s/^(\s*(?:compileSdkVersion|targetSdkVersion) = )\d+/\${1}$ANDROID_TARGET_SDK/" android/variables.gradle
 perl -pi -e "s/(com\.android\.tools\.build:gradle:)[0-9.]+/\${1}$ANDROID_AGP_VERSION/" android/build.gradle
-if grep -q "compileSdkVersion = $ANDROID_TARGET_SDK" android/variables.gradle \
+if grep -q "minSdkVersion = $ANDROID_MIN_SDK" android/variables.gradle \
+   && grep -q "compileSdkVersion = $ANDROID_TARGET_SDK" android/variables.gradle \
    && grep -q "targetSdkVersion = $ANDROID_TARGET_SDK" android/variables.gradle \
    && grep -q "gradle:$ANDROID_AGP_VERSION" android/build.gradle; then
-  echo "==> Pinned compile/target SDK $ANDROID_TARGET_SDK + AGP $ANDROID_AGP_VERSION ✓"
+  echo "==> Pinned min SDK $ANDROID_MIN_SDK + compile/target SDK $ANDROID_TARGET_SDK + AGP $ANDROID_AGP_VERSION ✓"
 else
-  echo "==> ERROR: could not pin SDK $ANDROID_TARGET_SDK / AGP $ANDROID_AGP_VERSION —"
+  echo "==> ERROR: could not pin SDK $ANDROID_MIN_SDK/$ANDROID_TARGET_SDK / AGP $ANDROID_AGP_VERSION —"
   echo "    check android/variables.gradle and android/build.gradle by hand."
   exit 1
 fi

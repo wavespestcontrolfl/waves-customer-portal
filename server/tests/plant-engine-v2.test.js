@@ -2622,3 +2622,135 @@ describe('plant-engine — real catalog', () => {
     }
   });
 });
+
+describe('customer-provided facts stay out of systemInstruction', () => {
+  let dispatch;
+  let engine;
+  const origKey = process.env.GEMINI_API_KEY;
+  const origFetch = global.fetch;
+
+  beforeEach(() => {
+    ({ dispatch, engine } = loadFixtureEngine());
+  });
+
+  afterEach(() => {
+    unloadFixtureEngine();
+    if (origKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = origKey;
+    global.fetch = origFetch;
+  });
+
+  test('chips and account context ride Gemini contents (user turn), never systemInstruction', async () => {
+    const okQuality = { usable: true, issue: 'none' };
+    dispatch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: okQuality, shows: 'plant', turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', group_id: null, confidence: 0.9 }], weeds: [], host: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: { candidates: [{ slug: 'fixture-st-augustine', confidence: 0.9, cues_visible: [1], cues_not_visible: [] }] },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: { quality: okQuality, observed_terms: ['browning'], candidates: [{ slug: 'fixture-large-patch', confidence: 0.5, elements_visible: [1], signs_visible: [], symptoms_visible: [] }] },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: okQuality, shows: 'plant', turf: [], weeds: [], host: [], observed_terms: ['browning'], conditions: [{ slug: 'fixture-large-patch', confidence: 0.85, elements_visible: [1], signs_visible: [], symptoms_visible: [] }],
+        },
+      });
+
+    const chipToken = 'IGNORE_PREVIOUS_INSTRUCTIONS_CHIP';
+    const ctxToken = 'CUSTOMER_CONTEXT_MARKER';
+    const res = await engine.identifyPlantV2({
+      photos: [{ data: 'AA==', mimeType: 'image/jpeg' }],
+      subject: 'lawn',
+      chips: { light: chipToken },
+      context: { grass_type_on_file: ctxToken },
+    });
+    expect(res.ok).toBe(true);
+
+    const payloads = dispatch.mock.calls.map(([, payload]) => payload);
+    const condPayload = payloads.find((p) => String(p.promptVersion).endsWith(':conditions'));
+    const escPayload = payloads.find((p) => String(p.promptVersion).endsWith(':escalation'));
+    expect(condPayload).toBeDefined();
+    expect(escPayload).toBeDefined();
+
+    for (const payload of payloads) {
+      expect(String(payload.system || '')).not.toContain(chipToken);
+      expect(String(payload.system || '')).not.toContain(ctxToken);
+    }
+    expect(condPayload.text).toContain(chipToken);
+    expect(condPayload.text).toContain(ctxToken);
+    expect(escPayload.text).toContain(chipToken);
+    expect(escPayload.text).toContain(ctxToken);
+
+    // Wire-level verification through real callGemini(): chip values land only in contents.
+    process.env.GEMINI_API_KEY = 'test-gemini-key';
+    let capturedBody = null;
+    global.fetch = jest.fn(async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: '{}' }] } }] }) };
+    });
+    const { callGemini } = jest.requireActual('../services/llm/call');
+    await callGemini({
+      model: 'gemini-3.8-flash-test',
+      system: condPayload.system,
+      text: condPayload.text,
+      images: condPayload.images,
+    });
+    expect(capturedBody).not.toBeNull();
+    expect(JSON.stringify(capturedBody.systemInstruction)).not.toContain(chipToken);
+    expect(JSON.stringify(capturedBody.systemInstruction)).not.toContain(ctxToken);
+    expect(JSON.stringify(capturedBody.contents)).toContain(chipToken);
+    expect(JSON.stringify(capturedBody.contents)).toContain(ctxToken);
+  });
+
+  test('referee disagreement with off_catalog_name keeps earlier model answers in user text, never system', async () => {
+    const savedReferee = process.env.GATE_PLANT_ID_REFEREE;
+    process.env.GATE_PLANT_ID_REFEREE = 'true';
+    try {
+      const okQuality = { usable: true, issue: 'none' };
+      const injectedName = 'IGNORE_INSTRUCTIONS_WEED_SPECIMEN';
+      dispatch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: {
+            quality: okQuality, shows: 'plant', turf: [], weeds: [], host: [{ slug: '', off_catalog_name: injectedName, group_id: 'shrubs-trees', confidence: 0.72 }],
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: {
+            quality: okQuality, shows: 'plant', turf: [], weeds: [], host: [{ slug: 'fixture-citrus', off_catalog_name: '', group_id: null, confidence: 0.85, cues_visible: [1], cues_not_visible: [] }], observed_terms: [], conditions: [],
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: {
+            quality: okQuality, shows: 'plant', turf: [], weeds: [], host: [{ slug: 'fixture-citrus', off_catalog_name: '', group_id: null, confidence: 0.9, cues_visible: [1], cues_not_visible: [] }], observed_terms: [], conditions: [],
+          },
+        });
+
+      const res = await engine.identifyPlantV2({
+        photos: [{ data: 'AA==', mimeType: 'image/jpeg' }],
+        subject: 'tree_shrub',
+        mode: 'identify',
+      });
+      expect(res.ok).toBe(true);
+      const refereeCall = dispatch.mock.calls.find(([, payload]) => String(payload?.promptVersion).endsWith(':referee'));
+      expect(refereeCall).toBeDefined();
+      const [, refereePayload] = refereeCall;
+      expect(String(refereePayload.system || '')).toContain('third, independent look');
+      expect(String(refereePayload.system || '')).not.toContain(injectedName);
+      expect(String(refereePayload.text || '')).toContain(injectedName);
+    } finally {
+      if (savedReferee === undefined) delete process.env.GATE_PLANT_ID_REFEREE;
+      else process.env.GATE_PLANT_ID_REFEREE = savedReferee;
+    }
+  });
+});

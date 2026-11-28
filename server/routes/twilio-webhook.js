@@ -1536,6 +1536,7 @@ router.post('/sms', async (req, res) => {
         inboundBody: Body,
         inboundSmsLogId: smsLogEntry?.id || null,
         fromPhone: From,
+        liveWebhook: true,
       }).catch((err) => logger.warn(`[sms-scheduling-decide] async decide failed: ${err.message}`));
     }
 

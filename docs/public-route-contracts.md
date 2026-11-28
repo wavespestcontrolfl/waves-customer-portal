@@ -4852,9 +4852,13 @@ on that phone-and-line conversation, a move was logged since the offer, a
 staff schedule-change request or an unanswered reminder reply-1/2 offer is
 open, or the booking is under office review or dispatch-owned. A move sends
 the customer the standard `appointment_rescheduled` text (the series text for
-a series move), subject to STOP and the send window: after hours it is held
-and the confirmation sweep sends it at 8:00 AM. The webhook response and
-status codes are unchanged by either gate.
+a series move), subject to STOP and the send window: for a live webhook reply
+from the account holder's verified US primary phone (re-checked at dispatch in
+canonical US E.164 format), the account holder's confirmation sends immediately
+even outside the 8:00 AM–8:00 PM ET quiet-hours fence (owner rulings 2026-11-02
+and 2026-11-27, `resched A`); other contacts, non-US numbers, recovered sweep
+replies, and delayed series-reconciler retries remain held until 8:00 AM ET.
+The webhook response and status codes are unchanged by either gate.
 The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
 confirmed to four hours only after actual bell/push delivery evidence and a
 durable legacy receipt. Committed bells keep immutable message keys so lost
@@ -5099,6 +5103,19 @@ lead"). Any other value (absent, `false`, the string `"true"`, `1`) is a
 no-op; no other form sends it, and a page must leave it out of a request it
 saves to replay later (nobody is there to use the hand-off, and the lead
 would get no draft). The server's own rule must agree (`quizContinuesToPrice`,
+and both accept OPTIONAL pool-cage micro-tap pricing inputs `poolCage` /
+`pool_cage` (`true`/`false`/`"yes"`/`"no"`) and `poolCageSize` /
+`pool_cage_size` (`"small"` | `"medium"` | `"large"` | `"oversized"`,
+case-insensitive; unknown values are ignored) alongside `propertyType` /
+`property_type`. Precedence (mirrors `/api/public/quote/calculate`): explicit
+`poolCage`/`pool_cage` decides cage presence (explicit `"no"`/`false` clears a
+county-detected cage); when a cage is present and the county record carries a
+measured `poolCageSqft`, the county's assessed size and large-cage review hold
+win over `poolCageSize` (so a form `"medium"` selection can never clear a
+measured large-cage hold). Otherwise `poolCageSize` supplies the cage size:
+under `GATE_CAGE_TWO_SIZES`, `"large"` and `"oversized"` set `poolCageReview:
+true` (parking the draft for staff review) while `"small"` and `"medium"` price
+at the standard cage tier; with the gate off, all four sizes pass through),
 `server/services/lead-quiz.js`: a named problem, `property` `house` |
 `townhome` | `condo`, `timeline` `this_week` | `this_month` | `browsing`),
 and the submission must name no service key (any nonblank `serviceKey` or

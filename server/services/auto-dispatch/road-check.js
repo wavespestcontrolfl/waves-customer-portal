@@ -305,6 +305,163 @@ function settled(ranked, row, passed) {
   };
 }
 
+// Price an array of legs on real Google traffic; returns array of minutes or null if any leg has no Google answer.
+async function lookupGoogleLegs(legs, travel) {
+  if (!Array.isArray(legs) || !legs.length) return null;
+  await travel.preload(legs);
+  const mins = legs.map((leg) => travel.lookup(leg))
+    .map((a) => (a && a.source === 'google_traffic' && Number.isFinite(a.minutes) ? a.minutes : null));
+  return mins.some((m) => m == null) ? null : mins;
+}
+
+async function lookupOneGoogleLeg(leg, travel) {
+  const mins = await lookupGoogleLegs([leg], travel);
+  return mins ? mins[0] : null;
+}
+
+// Real-road drive of a 2-stop source day: home -> first -> second -> home,
+// propagating actual Google travel, window waiting, and service durations so
+// each leg is priced at its real departure minute.
+async function sourceDayRoadDrive(sourceLegs, travel) {
+  if (!sourceLegs || !sourceLegs.date) return null;
+  const { date, home, first, second } = sourceLegs;
+  const dep1 = Number.isFinite(sourceLegs.firstDepMin) ? sourceLegs.firstDepMin : sourceLegs.firstStartMin;
+  if (!Number.isFinite(dep1)) return null;
+  const leg = (from, to, departureMin) => ({ date, from, to, departureMin });
+  const t1 = await lookupOneGoogleLeg(leg(home, first, dep1), travel);
+  if (t1 == null) return null;
+  const start1 = Math.max(dep1 + t1, Number.isFinite(sourceLegs.firstStartMin) ? sourceLegs.firstStartMin : dep1 + t1);
+  const dep2 = Number.isFinite(sourceLegs.firstDurationMin)
+    ? Math.round(start1 + sourceLegs.firstDurationMin)
+    : (Number.isFinite(sourceLegs.interStopDepMin) ? sourceLegs.interStopDepMin : Math.round(start1));
+  const t2 = await lookupOneGoogleLeg(leg(first, second, dep2), travel);
+  if (t2 == null) return null;
+  const start2 = Math.max(dep2 + t2, Number.isFinite(sourceLegs.secondStartMin) ? sourceLegs.secondStartMin : dep2 + t2);
+  const dep3 = Number.isFinite(sourceLegs.secondDurationMin)
+    ? Math.round(start2 + sourceLegs.secondDurationMin)
+    : (Number.isFinite(sourceLegs.returnDepMin) ? sourceLegs.returnDepMin : Math.round(start2));
+  const t3 = await lookupOneGoogleLeg(leg(second, home, dep3), travel);
+  return t3 == null ? null : round2(t1 + t2 + t3);
+}
+
+async function advanceStopsOnRoad(date, startGeo, startDepMin, stops, travel) {
+  let cursorGeo = startGeo;
+  let clock = startDepMin;
+  let total = 0;
+  for (const stop of stops || []) {
+    const mins = await lookupOneGoogleLeg({ date, from: cursorGeo, to: stop.geo, departureMin: clock }, travel);
+    if (mins == null) return null;
+    total += mins;
+    const startAt = Math.max(clock + mins, Number.isFinite(stop.startMin) ? stop.startMin : clock + mins);
+    clock = Math.round(startAt + (Number.isFinite(stop.durationMin) ? stop.durationMin : 0));
+    cursorGeo = stop.geo;
+  }
+  return { total, cursorGeo, clock };
+}
+
+function advanceClockAfterStop(clock, driveMins, stop) {
+  const startAt = Math.max(clock + driveMins, Number.isFinite(stop.startMin) ? stop.startMin : clock + driveMins);
+  return Math.round(startAt + (Number.isFinite(stop.durationMin) ? stop.durationMin : 0));
+}
+
+async function subChainRoadAdded(date, subChain, travel) {
+  if (!subChain || !Number.isFinite(subChain.prevDepMin) || !Number.isFinite(subChain.baseDepMin)) return null;
+  const prop = await advanceStopsOnRoad(date, subChain.prev, subChain.prevDepMin, subChain.proposedStops, travel);
+  if (!prop) return null;
+  const base = await advanceStopsOnRoad(date, subChain.prev, subChain.baseDepMin, subChain.baselineStops, travel);
+  if (!base) return null;
+  let propTotal = prop.total;
+  let baseTotal = base.total;
+  let propGeo = prop.cursorGeo;
+  let baseGeo = base.cursorGeo;
+  let propClock = prop.clock;
+  let baseClock = base.clock;
+  const tail = Array.isArray(subChain.tailStops) ? subChain.tailStops : [];
+  for (let i = 0; i < tail.length; i += 1) {
+    if (i > 0 && propClock === baseClock) return Math.max(0, round2(propTotal - baseTotal));
+    const stop = tail[i];
+    const mp = await lookupOneGoogleLeg({ date, from: propGeo, to: stop.geo, departureMin: propClock }, travel);
+    if (mp == null) return null;
+    const mb = await lookupOneGoogleLeg({ date, from: baseGeo, to: stop.geo, departureMin: baseClock }, travel);
+    if (mb == null) return null;
+    propTotal += mp;
+    baseTotal += mb;
+    propClock = advanceClockAfterStop(propClock, mp, stop);
+    baseClock = advanceClockAfterStop(baseClock, mb, stop);
+    propGeo = stop.geo;
+    baseGeo = stop.geo;
+  }
+  const endGeo = subChain.home || subChain.next;
+  if (tail.length === 0 || propClock !== baseClock) {
+    const mp = await lookupOneGoogleLeg({ date, from: propGeo, to: endGeo, departureMin: propClock }, travel);
+    if (mp == null) return null;
+    const mb = await lookupOneGoogleLeg({ date, from: baseGeo, to: endGeo, departureMin: baseClock }, travel);
+    if (mb == null) return null;
+    propTotal += mp;
+    baseTotal += mb;
+  }
+  return Math.max(0, round2(propTotal - baseTotal));
+}
+
+// Real-road added detour for a pair landing on the same destination day:
+// propagates travel, waiting, and service durations across the affected sub-chain
+// (covering both adjacent and disjoint insertions, including intervening stops).
+async function sameDestRoadAdded(destSpec, travel) {
+  if (!destSpec || !destSpec.date) return null;
+  if (destSpec.subChain) return subChainRoadAdded(destSpec.date, destSpec.subChain, travel);
+  return null;
+}
+
+async function pairAddedRoadDrive(pair, travel) {
+  if (pair.sameDest) return sameDestRoadAdded(pair.sameDestRoadSpec, travel);
+  if (Array.isArray(pair.splitDestRoadSpecs) && pair.splitDestRoadSpecs.length === 2) {
+    const [specA, specB] = pair.splitDestRoadSpecs;
+    const detA = await sameDestRoadAdded(specA, travel);
+    if (detA == null) return null;
+    const detB = await sameDestRoadAdded(specB, travel);
+    return detB == null ? null : round2(detA + detB);
+  }
+  const detA = await roadDetour(pair.slotA, travel);
+  if (detA == null) return null;
+  const detB = await roadDetour(pair.slotB, travel);
+  if (detB == null) return null;
+  return round2(detA + detB);
+}
+
+/**
+ * Confirm the top qualifying 2-stop pair-clearing candidates on real Google roads.
+ * Always requires real Google confirmation (minutes-only pair moves bypass the
+ * per-visit score bar and never commit on an unconfirmed straight-line estimate).
+ */
+async function confirmPairOnRoads(pairs, { sourceLegs, floor, config, travel }) {
+  if (!Array.isArray(pairs) || !pairs.length) return null;
+  if (!config || config.roadCheckEnabled !== true || !travel) return null;
+  try {
+    const sourceDrive = await sourceDayRoadDrive(sourceLegs, travel);
+    if (sourceDrive == null) return null;
+    for (const pair of pairs.slice(0, ROAD_CHECK_SLOTS)) {
+      const addedDrive = await pairAddedRoadDrive(pair, travel);
+      if (addedDrive == null) continue;
+      const saving = round2(sourceDrive - addedDrive);
+      if (saving >= floor) {
+        return {
+          pair,
+          road: {
+            source_drive_minutes: sourceDrive,
+            added_drive_minutes: addedDrive,
+            saving_minutes: saving,
+            source: 'google',
+          },
+        };
+      }
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[auto-dispatch] pair road check failed (fail closed): ${err.message}`);
+    return null;
+  }
+}
+
 // For the run's log line: how many route-matrix legs the run bought.
 function spendOf(travel) {
   return travel && typeof travel.diagnostics === 'function' ? travel.diagnostics().elements : 0;
@@ -316,6 +473,6 @@ function roadResultOf(cand) {
 }
 
 module.exports = {
-  ROAD_LEGS, ROAD_CHECK_SLOTS, roadLegsOf, createRunTravel, deferredToApply, pass1Travel, confirmOnRoads, roadResultOf, spendOf,
-  _internals: { ROAD_RESULT, roadDetour, roadSaving, legsFor, roadCheckBudget },
+  ROAD_LEGS, ROAD_CHECK_SLOTS, roadLegsOf, createRunTravel, deferredToApply, pass1Travel, confirmOnRoads, confirmPairOnRoads, roadResultOf, spendOf,
+  _internals: { ROAD_RESULT, roadDetour, roadSaving, legsFor, roadCheckBudget, sourceDayRoadDrive, sameDestRoadAdded },
 };

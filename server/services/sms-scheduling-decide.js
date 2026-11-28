@@ -419,7 +419,7 @@ async function assessFacts(dbh, { offer, decision, customer, visitsBefore, now }
  * still applies. Returns { recorded: true, id, outcome } or
  * { recorded: false, reason }. Never throws.
  */
-async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId, fromPhone, now = new Date(), dbh = db, llm = require('./llm/call'), slotRecheck = recheckSlot } = {}) {
+async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId, fromPhone, liveWebhook, now = new Date(), dbh = db, llm = require('./llm/call'), slotRecheck = recheckSlot } = {}) {
   if (!decideLive()) return { recorded: false, reason: 'gate_off' };
   const phone = phoneLast10(fromPhone);
   if (!phone || !inboundSmsLogId || !String(inboundBody || '').trim()) return { recorded: false, reason: 'missing_input' };
@@ -431,6 +431,7 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
     const offer = pick?.offer || ctx.offers[0];
     const slot = pick?.slot || null;
     const facts = await assessFacts(dbh, { offer, decision, customer, visitsBefore: ctx.visitsBefore, now });
+    let accountHolder = facts.who;
     const base = {
       offer, slot, decision, inboundBody, customer: facts.who, fromPhone, now,
       visit: facts.visit, visitAfter: facts.visitAfter, movedSinceOffer: facts.movedSinceOffer,
@@ -445,6 +446,7 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
       // Every fence again, read after the last wait: the visit (against its
       // pre-model read), the portal request, the reminder offer, a logged move.
       const fresh = await assessFacts(dbh, { offer, decision, customer, visitsBefore: ctx.visitsBefore, now });
+      accountHolder = fresh.who;
       verdict = evaluateDecision({
         ...base, slotStillOpen, customer: fresh.who, visitAfter: fresh.visitAfter, movedSinceOffer: fresh.movedSinceOffer,
         portalRequestOpen: fresh.portalRequestOpen, reminderOfferPending: fresh.reminderOfferPending,
@@ -457,7 +459,18 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
       const act = require('./sms-scheduling-act');
       if (act.actMoveLive()) {
         // No `now`: the executor reads the clock itself, after the model's wait.
-        const done = await act.executeMove({ decisionId: recorded.id, offer, slot, visit: facts.visit, inboundSmsLogId, repliedAt: ctx.repliedAt, dbh });
+        const done = await act.executeMove({
+          decisionId: recorded.id,
+          offer,
+          slot,
+          visit: facts.visit,
+          inboundSmsLogId,
+          repliedAt: ctx.repliedAt,
+          liveWebhook: liveWebhook === true,
+          fromPhone,
+          accountHolderPhone: accountHolder.phone,
+          dbh,
+        });
         return { ...recorded, executed: done.executed === true };
       }
     }

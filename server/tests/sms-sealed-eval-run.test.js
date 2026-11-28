@@ -1441,3 +1441,55 @@ describe('missed-visit coverage is reported, not required', () => {
     expect(src).toContain('missed_visit_coverage: scenarioCoverage');
   });
 });
+
+describe('Gemini native systemInstruction sealed-eval versioning', () => {
+  test('examVersionForLeg stamps a distinct <=40-char version only for gemini while preserving fact contracts', () => {
+    const maxLenVersion = 'house_voice_v12_real_answers54_n+bcelmvA';
+    expect(maxLenVersion.length).toBe(40);
+    expect(sealedEval.examVersionForLeg(maxLenVersion, 'anthropic')).toBe(maxLenVersion);
+    expect(sealedEval.examVersionForLeg(maxLenVersion, 'openai')).toBe(maxLenVersion);
+    const gemVersion = sealedEval.examVersionForLeg(maxLenVersion, 'gemini');
+    expect(gemVersion).not.toBe(maxLenVersion);
+    expect(gemVersion.length).toBeLessThanOrEqual(40);
+    expect(sealedEval.requiredFactMarkers(gemVersion)).toEqual(sealedEval.requiredFactMarkers(maxLenVersion));
+  });
+
+  test('createExamRun stamps Gemini version, resume retires pre-systemInstruction Gemini runs, and summary ignores pre-cutover Gemini runs', async () => {
+    const baseVersion = drafter.currentPromptVersion();
+    const gemVersion = sealedEval.examVersionForLeg(baseVersion, 'gemini');
+    expect(gemVersion).not.toBe(baseVersion);
+
+    // 1. Creation stamps the Gemini-channel version.
+    const createDb = makeRunnerDb({ items: [item('i1')] });
+    const created = await sealedEval.createExamRun({ providerLeg: 'gemini', dbi: createDb });
+    expect(created.prompt_version).toBe(gemVersion);
+
+    // 2. Resuming a partial pre-systemInstruction Gemini run (carrying baseVersion) refuses and retires it.
+    const resumeDb = makeRunnerDb({
+      runs: [{
+        id: 'old-gem', status: 'running', provider_leg: 'gemini', prompt_version: baseVersion,
+        baseline_run_id: null, started_at: new Date('2026-07-18T00:00:00Z'),
+      }],
+      items: [item('i1')],
+    });
+    await expect(sealedEval.runSealedExam({ runId: 'old-gem', dbi: resumeDb })).rejects.toThrow(/start a new run/);
+    expect(resumeDb.state.runPatches.some((p) => p.id === 'old-gem' && p.patch.status === 'failed')).toBe(true);
+
+    // 3. Summary excludes a pre-cutover completed Gemini run while keeping anthropic unchanged.
+    const summaryDb = makeRunnerDb({
+      runs: [
+        { id: 'old-gem-done', status: 'complete', provider_leg: 'gemini', prompt_version: baseVersion, voice_profile_version: null, started_at: new Date('2026-07-18T00:00:00Z') },
+        { id: 'anth-done', status: 'complete', provider_leg: 'anthropic', prompt_version: baseVersion, voice_profile_version: null, started_at: new Date('2026-07-18T00:00:00Z') },
+      ],
+      items: [item('i1')],
+    });
+    const summary = await sealedEval.getSealedExamSummary({ dbi: summaryDb });
+    expect(summary.legs.gemini).toBeNull();
+    expect(summary.legs.anthropic?.id).toBe('anth-done');
+    expect(summary.currentVersionsByLeg).toMatchObject({
+      anthropic: baseVersion,
+      openai: baseVersion,
+      gemini: gemVersion,
+    });
+  });
+});
