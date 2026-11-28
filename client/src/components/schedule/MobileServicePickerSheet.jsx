@@ -40,17 +40,31 @@ export default function MobileServicePickerSheet({
   desktopVisible = false, customerId = null, onClose, onSelect }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [query, setQuery] = useState('');
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
     // Sellable rows only: a retired-for-sale row (quarterly T&S) is offered
     // just to the customer already on that plan, as the desktop pickers do.
     const params = new URLSearchParams({ is_active: 'true', sellable: 'true', limit: '500' });
     if (customerId) params.set('sellable_customer_id', String(customerId));
     adminFetch(`/admin/services?${params}`)
-      .then((d) => { setServices(d.services || []); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [customerId]);
+      .then((d) => {
+        if (cancelled) return;
+        setServices(d.services || []);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLoadError('Could not load services. Check your connection and try again.');
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [customerId, reloadNonce]);
 
   const q = query.trim().toLowerCase();
   const list = services
@@ -92,6 +106,18 @@ export default function MobileServicePickerSheet({
 
         {loading ? (
           <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>Loading…</div>
+        ) : loadError ? (
+          <div className="p-8 text-center" role="alert">
+            <div className="text-alert-fg" style={{ fontSize: 14, marginBottom: 12 }}>{loadError}</div>
+            <button
+              type="button"
+              onClick={() => setReloadNonce((n) => n + 1)}
+              className="rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
+              style={{ padding: '10px 20px', fontSize: 14 }}
+            >
+              Retry
+            </button>
+          </div>
         ) : list.length === 0 ? (
           <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>No services</div>
         ) : (

@@ -37,6 +37,7 @@ export default function MobileManualCardSheet({
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
+  const processingRef = useRef(false);
 
   const [initError, setInitError] = useState(null);
   const [formError, setFormError] = useState(null);
@@ -53,6 +54,17 @@ export default function MobileManualCardSheet({
   useEffect(() => {
     if (!invoiceToken) return;
     let cancelled = false;
+    let paymentElement = null;
+    stripeRef.current = null;
+    elementsRef.current = null;
+    saveRequiredRef.current = false;
+    setInitError(null);
+    setFormError(null);
+    setReady(false);
+    setComplete(false);
+    setQuoteData(null);
+    setAwaitingConfirm(false);
+    setSaveRequired(false);
 
     (async () => {
       try {
@@ -114,7 +126,7 @@ export default function MobileManualCardSheet({
         });
         elementsRef.current = elements;
 
-        const paymentElement = elements.create('payment', {
+        paymentElement = elements.create('payment', {
           layout: { type: 'tabs' },
           paymentMethodOrder: ['card'],
           wallets: { applePay: 'never', googlePay: 'never' },
@@ -135,12 +147,17 @@ export default function MobileManualCardSheet({
       }
     })();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      try { paymentElement?.unmount?.(); } catch { /* already unmounted */ }
+      try { paymentElement?.destroy?.(); } catch { /* ignore */ }
+    };
   }, [invoiceToken]);
 
   async function handleCharge() {
-    if (processing || !ready || !complete) return;
+    if (processingRef.current || !ready || !complete) return;
     if (!stripeRef.current || !elementsRef.current) return;
+    processingRef.current = true;
     setProcessing(true);
     setFormError(null);
     try {
@@ -180,6 +197,8 @@ export default function MobileManualCardSheet({
             body: JSON.stringify({ paymentIntentId: completedIntent.id }),
           });
         } catch { /* webhook will reconcile */ }
+        processingRef.current = false;
+        setProcessing(false);
         onChargeSuccess?.({ paymentIntentId: completedIntent.id, amount: quoteData.total ?? amount });
         onClose?.();
         return;
@@ -203,9 +222,11 @@ export default function MobileManualCardSheet({
 
       setQuoteData({ ...quote, paymentMethodId: paymentMethod.id });
       setAwaitingConfirm(true);
+      processingRef.current = false;
       setProcessing(false);
     } catch (err) {
       setFormError(err.message || 'Payment failed');
+      processingRef.current = false;
       setProcessing(false);
       setAwaitingConfirm(false);
       setQuoteData(null);
@@ -230,9 +251,10 @@ export default function MobileManualCardSheet({
       >
         <button
           type="button"
-          onClick={onClose}
+          onClick={() => { if (!processing) onClose?.(); }}
+          disabled={processing}
           aria-label="Back"
-          className="flex items-center justify-center h-11 w-11 rounded-full u-focus-ring text-zinc-900"
+          className="flex items-center justify-center h-11 w-11 rounded-full u-focus-ring text-zinc-900 disabled:opacity-50"
           style={{ background: '#F4F4F5' }}
         >
           <ArrowLeft size={20} strokeWidth={2} />

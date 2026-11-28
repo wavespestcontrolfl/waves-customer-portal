@@ -65,7 +65,7 @@ import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
   AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
-  SheetHeader, TimeOnSite, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
+  SheetHeader, TimeOnSite, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useFastCompleteCloseGuard, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
 import { CollectPayment, CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
@@ -719,20 +719,25 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
   // unknown or refused (it may have saved).
-  const close = useCallback(() => {
+  const closeNow = useCallback(() => {
     if (submitting || wrapChecking) return;
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff (the technician page ignores it).
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
   }, [submitting, wrapChecking, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  const { requestClose: close, frameProps } = useFastCompleteCloseGuard({
+    blocked: submitting || wrapChecking,
+    skipWhen: [done, ctx.blockedReason, submission.failure, submission.unverified, submission.refusal, ctx.loading, ctx.loadError],
+    onClose: closeNow,
+  });
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
   const locked = submissionHolds(submission) || wrapChecking;
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended} {...frameProps}>
       <SheetHeader titleId={titleId} title={done ? 'Tree & shrub complete' : 'Complete tree & shrub'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting || wrapChecking} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
       <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} onWrapChecking={setWrapChecking} collectOnSheet={collectOnSheet} />
     </FastCompleteFrame>

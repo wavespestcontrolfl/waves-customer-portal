@@ -69,7 +69,7 @@ import { estimateLineOf } from '../../lib/assessment-fast-complete';
 import { offersInspectionCredit } from '../../lib/pest-fast-complete';
 import { InspectionCreditToggle, PhotoStripSection, useVisitPhotos } from './FastCompleteReport';
 import {
-  Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, RecoveredCompletion, RecoveryOnlyView, SavedView, SheetHeader, VisitNote,
+  Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, RecoveredCompletion, RecoveryOnlyView, SavedView, SheetHeader, VisitNote, useFastCompleteCloseGuard,
   refusalWithoutContext, submissionHolds, toggleInSet, usePhotoManager,
 } from './FastCompleteParts';
 import TechServicePhotosModal from './TechServicePhotosModal';
@@ -193,14 +193,18 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
   // carries nothing over, so Full form waits for it, like Complete.
   const [dictationPending, setDictationPending] = useState(false);
 
-  const close = useCallback(() => {
-    if (submitting) return;
+  const performClose = useCallback(() => {
     // The completion response rides along: admin Dispatch reads it for its bookkeeping.
     if (done) onCompleted?.(done.response || null);
     // A refused or unknown completion, or a recorded read that could not be loaded
     // (the visit may have been reassigned or changed), leaves the schedule row stale.
     else onClose?.(submission.failure || recorded.error ? { refresh: true } : undefined);
-  }, [submitting, done, submission.failure, recorded.error, onClose, onCompleted]);
+  }, [done, submission.failure, recorded.error, onClose, onCompleted]);
+  const { requestClose: close, frameProps } = useFastCompleteCloseGuard({
+    blocked: submitting,
+    skipConfirm: Boolean(done || submission.failure || recorded.error || submission.restored),
+    onClose: performClose,
+  });
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form cannot resume a /complete attempt.
@@ -214,6 +218,7 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
       titleId={titleId}
       onDismiss={close}
       hiddenProps={photoManager.hiddenProps}
+      {...frameProps}
       overlay={photoManager.isOpen && (
         <TechServicePhotosModal serviceId={service?.id} customerName={service?.customerName} onClose={photoManager.close} />
       )}

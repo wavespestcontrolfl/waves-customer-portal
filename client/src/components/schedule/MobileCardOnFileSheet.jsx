@@ -7,6 +7,7 @@
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { getAdminUser } from "../../lib/adminAuth";
+import { holdReloadWhileSending } from "../../lib/reloadHolds";
 import { useCollectionHold } from "../../hooks/useCollectionHold";
 import { CollectionHoldStatus } from "../admin/CollectionHoldNotice";
 import {
@@ -76,6 +77,39 @@ function quoteAmountLabel(quote) {
     return `${formatUsd(quote.base)} + ${formatUsd(surcharge)} card fee = ${total}`;
   }
   return `Total charge ${total}`;
+}
+
+function LegacyCardLoadState({ loading, readError, cardsCount, onRetry }) {
+  if (loading) {
+    return (
+      <div className="text-ink-secondary text-center" style={{ fontSize: 14, padding: "20px 0" }}>
+        Loading cards…
+      </div>
+    );
+  }
+  if (readError) {
+    return (
+      <div role="alert" className="text-center" style={{ fontSize: 14, padding: "24px 0" }}>
+        <div className="text-alert-fg">{readError}</div>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="mt-3 rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
+          style={{ padding: "10px 20px", fontSize: 14 }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (cardsCount === 0) {
+    return (
+      <div className="text-ink-secondary text-center" style={{ fontSize: 14, padding: "24px 0" }}>
+        No cards on file for this customer.
+      </div>
+    );
+  }
+  return null;
 }
 
 export default function MobileCardOnFileSheet({
@@ -183,88 +217,90 @@ export default function MobileCardOnFileSheet({
     setChargingId(card.id);
     setError(null);
     try {
-      // ADMIN-BUG-R47: quote first — the exact base / card-fee / total that
-      // will move, including any post-credit reduction — then bind that
-      // total into the charge as expectedTotal so the server's changed-
-      // amount guard actually engages (stripe.js chargeInvoiceWithSavedCard)
-      // if the invoice moved since this quote was priced. Same contract
-      // CreateProjectModal already uses against these two endpoints.
-      const quoteResponse = await fetch(
-        `${API_BASE}/admin/invoices/${invoiceId}/charge-card-quote`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      await holdReloadWhileSending("card-on-file-charge", async () => {
+        // ADMIN-BUG-R47: quote first — the exact base / card-fee / total that
+        // will move, including any post-credit reduction — then bind that
+        // total into the charge as expectedTotal so the server's changed-
+        // amount guard actually engages (stripe.js chargeInvoiceWithSavedCard)
+        // if the invoice moved since this quote was priced. Same contract
+        // CreateProjectModal already uses against these two endpoints.
+        const quoteResponse = await fetch(
+          `${API_BASE}/admin/invoices/${invoiceId}/charge-card-quote`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+            },
+            body: JSON.stringify({ paymentMethodId: card.id }),
           },
-          body: JSON.stringify({ paymentMethodId: card.id }),
-        },
-      );
-      const quoteData = await quoteResponse.json().catch(() => ({}));
-      if (!quoteResponse.ok) {
-        throw new Error(quoteData.error || "Could not price this charge");
-      }
-      // The sheet closed (Back, or some other unmount) while the quote was
-      // in flight — stop here. Nothing has moved money yet; do not fire
-      // the charge-card POST from a closed sheet, and there is no live
-      // component left to receive the quote into state.
-      if (abortedRef.current) return;
-      const quote = quoteData.quote || {};
-      // Fail closed (pre-push fallback audit P1): a 200 with no usable
-      // total would otherwise post the charge with expectedTotal undefined
-      // — JSON.stringify drops the field and the server's changed-amount
-      // guard never engages, so money would move on an unbound, unshown
-      // figure. Refuse before anything moves. Strict: the server quotes
-      // total as a number (stripe.js quoteInvoiceSavedCardCharge), and
-      // Number(null) / Number("") coerce to 0, which would slip a null
-      // expectedTotal past the server's `!= null` guard.
-      if (typeof quote.total !== "number" || !Number.isFinite(quote.total)) {
-        throw new Error("Could not price this charge — no total was quoted");
-      }
-      setQuotes((prev) => ({ ...prev, [card.id]: quote }));
-
-      const r = await fetch(
-        `${API_BASE}/admin/invoices/${invoiceId}/charge-card`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-          },
-          body: JSON.stringify({
-            paymentMethodId: card.id,
-            expectedTotal: quote.total,
-          }),
-        },
-      );
-      const d = await r.json().catch(() => ({}));
-      // The charge already happened (or is in flight) by this point. If the
-      // sheet was removed while the POST was in flight, skip only THIS
-      // component's state — the parent must still learn the outcome
-      // (pre-push fallback audit P1): a collected charge it never hears
-      // about is a refresh it never does and an invitation to charge
-      // again; a terminal orphan/ambiguous/in-progress outcome is already
-      // raised server-side as an operator alert, so it is logged here
-      // rather than lost silently.
-      if (abortedRef.current) {
-        if (r.ok) {
-          onChargeSuccess?.(d);
-        } else if (d.orphan === true || d.ambiguous === true || d.in_progress === true) {
-          console.error(
-            `[MobileCardOnFileSheet] charge-card on invoice ${invoiceId} returned a terminal outcome after the sheet closed: ${d.error || "see server alert"} — do not charge again; the server alert carries the reconciliation`,
-          );
+        );
+        const quoteData = await quoteResponse.json().catch(() => ({}));
+        if (!quoteResponse.ok) {
+          throw new Error(quoteData.error || "Could not price this charge");
         }
-        return;
-      }
-      if (!r.ok) {
-        const terminal =
-          d.orphan === true || d.ambiguous === true || d.in_progress === true;
-        const failure = new Error(d.error || "Charge failed");
-        failure.terminal = terminal;
-        throw failure;
-      }
-      onChargeSuccess?.(d);
-      onClose?.();
+        // The sheet closed (Back, or some other unmount) while the quote was
+        // in flight — stop here. Nothing has moved money yet; do not fire
+        // the charge-card POST from a closed sheet, and there is no live
+        // component left to receive the quote into state.
+        if (abortedRef.current) return;
+        const quote = quoteData.quote || {};
+        // Fail closed (pre-push fallback audit P1): a 200 with no usable
+        // total would otherwise post the charge with expectedTotal undefined
+        // — JSON.stringify drops the field and the server's changed-amount
+        // guard never engages, so money would move on an unbound, unshown
+        // figure. Refuse before anything moves. Strict: the server quotes
+        // total as a number (stripe.js quoteInvoiceSavedCardCharge), and
+        // Number(null) / Number("") coerce to 0, which would slip a null
+        // expectedTotal past the server's `!= null` guard.
+        if (typeof quote.total !== "number" || !Number.isFinite(quote.total)) {
+          throw new Error("Could not price this charge — no total was quoted");
+        }
+        setQuotes((prev) => ({ ...prev, [card.id]: quote }));
+
+        const r = await fetch(
+          `${API_BASE}/admin/invoices/${invoiceId}/charge-card`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+            },
+            body: JSON.stringify({
+              paymentMethodId: card.id,
+              expectedTotal: quote.total,
+            }),
+          },
+        );
+        const d = await r.json().catch(() => ({}));
+        // The charge already happened (or is in flight) by this point. If the
+        // sheet was removed while the POST was in flight, skip only THIS
+        // component's state — the parent must still learn the outcome
+        // (pre-push fallback audit P1): a collected charge it never hears
+        // about is a refresh it never does and an invitation to charge
+        // again; a terminal orphan/ambiguous/in-progress outcome is already
+        // raised server-side as an operator alert, so it is logged here
+        // rather than lost silently.
+        if (abortedRef.current) {
+          if (r.ok) {
+            onChargeSuccess?.(d);
+          } else if (d.orphan === true || d.ambiguous === true || d.in_progress === true) {
+            console.error(
+              `[MobileCardOnFileSheet] charge-card on invoice ${invoiceId} returned a terminal outcome after the sheet closed: ${d.error || "see server alert"} — do not charge again; the server alert carries the reconciliation`,
+            );
+          }
+          return;
+        }
+        if (!r.ok) {
+          const terminal =
+            d.orphan === true || d.ambiguous === true || d.in_progress === true;
+          const failure = new Error(d.error || "Charge failed");
+          failure.terminal = terminal;
+          throw failure;
+        }
+        onChargeSuccess?.(d);
+        onClose?.();
+      });
     } catch (e) {
       if (abortedRef.current) return;
       setError(e.message || "Charge failed");
@@ -389,22 +425,12 @@ export default function MobileCardOnFileSheet({
 
       <div className="px-4 pt-6 pb-10 mx-auto" style={{ maxWidth: 560 }}>
         <CollectionHoldStatus hold={collectionHold} variant="charge" />
-        {loading && (
-          <div
-            className="text-ink-secondary text-center"
-            style={{ fontSize: 14, padding: "20px 0" }}
-          >
-            Loading cards…
-          </div>
-        )}
-        {!loading && cards.length === 0 && (
-          <div
-            className="text-ink-secondary text-center"
-            style={{ fontSize: 14, padding: "24px 0" }}
-          >
-            No cards on file for this customer.
-          </div>
-        )}
+        <LegacyCardLoadState
+          loading={loading}
+          readError={readError}
+          cardsCount={cards.length}
+          onRetry={() => setReadAttempt((n) => n + 1)}
+        />
         {!loading &&
           cards.map((c) => {
             const style = brandStyle(c.brand);
