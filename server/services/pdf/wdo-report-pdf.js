@@ -561,9 +561,11 @@ function resolveApplicator({ project = {}, findings = {} }) {
  *   load has no `tech_name`, so callers resolve the technician and pass it in;
  *   we fall back to the project/findings only if it's omitted.
  */
-async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride, signature, photos = [] } = {}) {
+async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride, signature, photos = [], feeValues: feeValuesOverride = null } = {}) {
   if (!project) throw new Error('project required for WDO report PDF');
-  const feeValues = await resolveProjectRecordedFeeValues(project);
+  const feeValues = Array.isArray(feeValuesOverride)
+    ? feeValuesOverride
+    : (Array.isArray(signature?.feeValues) ? signature.feeValues : await resolveProjectRecordedFeeValues(project));
   const findings = customerSafeFindings(project.findings, feeValues);
   const resolved = resolveApplicator({ project, findings });
   const applicator = {

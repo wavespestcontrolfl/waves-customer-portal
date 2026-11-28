@@ -2590,6 +2590,7 @@ function loadWdoSignature(project) {
     signedAt: sig.signed_at || null,
     contentHash: sig.content_hash || null,
     photoSetHash: sig.photo_set_hash || null,
+    feeValues: Array.isArray(sig.fee_values) ? sig.fee_values : null,
     contentStale: Boolean(sig.content_stale),
   };
 }
@@ -2615,7 +2616,7 @@ function loadWdoFilings(project) {
 // Captured onto the signature at sign time and recomputed at every
 // send/stamp, so a signed-then-edited report can never be emitted as a
 // signed FDACS-13645.
-function wdoContentHash(project) {
+function wdoContentHash(project, feeValues = null) {
   const stable = (value) => {
     if (Array.isArray(value)) return value.map(stable);
     if (value && typeof value === 'object') {
@@ -2631,7 +2632,7 @@ function wdoContentHash(project) {
     // including the recorded-value pass (codex #2817)
     findings: stable(stripInternalFindingKeys(parseFindings(project), {
       redactValues: true,
-      feeValues: projectRecordedFeeValues(project),
+      feeValues: Array.isArray(feeValues) ? feeValues : projectRecordedFeeValues(project),
       freeTextKeys: projectTypeFreeTextKeys('wdo_inspection'),
     }) || {}),
     project_date: normalizeDateOnly(project.project_date),
@@ -2643,11 +2644,12 @@ function wdoContentHash(project) {
 // content it was captured against? Legacy signatures (captured before content
 // hashing) carry no hash and are honored unless a findings edit has explicitly
 // flagged them stale (refreshWdoSignatureStaleness on PUT /:id).
-function wdoSignatureFreshness(project) {
+function wdoSignatureFreshness(project, feeValues = null) {
   const signature = loadWdoSignature(project);
   if (!signature) return { signed: false, fresh: false, signature: null };
+  const effectiveFeeValues = Array.isArray(feeValues) ? feeValues : signature.feeValues;
   const fresh = !signature.contentStale
-    && (!signature.contentHash || signature.contentHash === wdoContentHash(project));
+    && (!signature.contentHash || signature.contentHash === wdoContentHash(project, effectiveFeeValues));
   return { signed: true, fresh, signature };
 }
 
@@ -3071,7 +3073,7 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
     // The photo set the signature was captured against: a filing is only ever re-used for the same signature
     // revision (signed_at) and the same photo set, not just the same findings.
     photo_set_hash: signature?.photoSetHash || null,
-    content_hash: wdoContentHash(project),
+    content_hash: wdoContentHash(project, signature?.feeValues || null),
     // The archived binary was rendered through the customer-safe scrub
     // (buildWdoReportPDFBuffer applies customerSafeFindings) — the public
     // /fdacs-pdf gate uses this to distinguish a clean modern archive from a
@@ -4551,7 +4553,7 @@ async function resumableReleaseFiling(project, invoice) {
   const channels = typeof project.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project.delivery_channels;
   const filing = channels?.release_filing;
   const signature = loadWdoSignature(project);
-  if (!filing?.s3_key || filing.invoice_id !== invoice.id || filing.content_hash !== wdoContentHash(project)
+  if (!filing?.s3_key || filing.invoice_id !== invoice.id || filing.content_hash !== wdoContentHash(project, loadWdoSignature(project)?.feeValues || null)
     || (filing.signed_at ?? null) !== (signature?.signedAt ?? null)
     || (filing.photo_set_hash ?? null) !== (signature?.photoSetHash ?? null)) return null;
   const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: filing.s3_key }));
@@ -5109,6 +5111,7 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
     if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) });
 
     const applicator = await resolveProjectApplicator(project);
+    const feeValues = await resolveProjectRecordedFeeValues(project);
     const signature = {
       image: parsed.image,
       content_type: parsed.contentType,
@@ -5117,10 +5120,11 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
       attestation: String(req.body?.attestation || 'I certify I performed this inspection and the findings are accurate.').trim().slice(0, 500),
       signed_at: new Date().toISOString(),
       signed_by_tech_id: req.technicianId || null,
+      fee_values: feeValues,
       // Binds the signature to the content it attests — the send gates
       // recompute this hash and refuse to stamp if findings/project_date
       // changed after signing (the licensee must re-sign).
-      content_hash: wdoContentHash(project),
+      content_hash: wdoContentHash(project, feeValues),
     };
 
     // The FDACS-13645 requires the licensee's printed name AND ID-card number,

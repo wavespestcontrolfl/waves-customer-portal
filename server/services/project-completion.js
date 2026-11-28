@@ -686,6 +686,7 @@ async function completeProjectBackedService({
   // leaves the replaced appointment linked; completing it performs no
   // visit). GH codex #3996 r2 P2 ×2.
   let postCommitConsumption = null;
+  let postCommitInvoiceLink = null;
   const result = await knex.transaction(async (trx) => {
     // Project row FIRST (codex #3344 r9 P2): the combined report/invoice
     // send (resolveOrCreateProjectInvoice) holds the project FOR UPDATE and
@@ -1050,14 +1051,15 @@ async function completeProjectBackedService({
       followup: followupSuggestion,
       trx,
     });
+    // Defer the best-effort invoice service_record_id link until after commit so
+    // project closeout never acquires an invoices row lock while holding projects
+    // FOR UPDATE (preserves global invoices -> projects lock order).
     if (billing.invoice?.id && serviceRecord?.id && !billing.invoice.service_record_id) {
-      await trx('invoices').where({ id: billing.invoice.id }).update({
-        service_record_id: serviceRecord.id,
-        technician_id: scheduledService.technician_id || billing.invoice.technician_id || null,
-        updated_at: trx.fn.now(),
-      }).catch((err) => {
-        logger.warn(`[project-completion] invoice link failed for ${billing.invoice.id}: ${err.message}`);
-      });
+      postCommitInvoiceLink = {
+        invoiceId: billing.invoice.id,
+        serviceRecordId: serviceRecord.id,
+        technicianId: scheduledService.technician_id || billing.invoice.technician_id || null,
+      };
     }
 
     if (scheduledService.status !== 'completed') {
@@ -1118,6 +1120,20 @@ async function completeProjectBackedService({
       completionProfile: profile,
     };
   });
+
+  if (postCommitInvoiceLink) {
+    await knex('invoices')
+      .where({ id: postCommitInvoiceLink.invoiceId })
+      .whereNull('service_record_id')
+      .update({
+        service_record_id: postCommitInvoiceLink.serviceRecordId,
+        technician_id: postCommitInvoiceLink.technicianId,
+        updated_at: knex.fn.now(),
+      })
+      .catch((err) => {
+        logger.warn(`[project-completion] invoice link failed for ${postCommitInvoiceLink.invoiceId}: ${err.message}`);
+      });
+  }
 
   // A performed project closeout of a street-level hold's visit confirms its address (the shared
   // transition stamped it); release the hold now. A no-op for every other visit; best-effort.
