@@ -13736,14 +13736,12 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               revalidatedDue = Math.max(0, Math.round((revalidatedDue - Math.min(depositAmount, revalidatedDue)) * 100) / 100);
             }
             if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
-              const { getBalance, computeApplication } = require('../services/customer-credit');
-              // Reads ride THIS transaction's handle (Codex r17): a second
-              // pool checkout from inside a held connection can deadlock
-              // the pool under a burst of concurrent accepts.
-              const balance = await getBalance(customerId, trx);
-              const offerAmount = await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId, { dbh: trx });
-              const projection = computeApplication({ total: revalidatedDue, creditApplied: 0, balance: (balance || 0) + (offerAmount || 0) });
-              revalidatedDue = Math.max(0, Math.round((revalidatedDue - (projection.newCreditApplied || 0)) * 100) / 100);
+              // Same credit projection helper as the 402 quote step (including
+              // pending estimate promo credit), riding this transaction's handle
+              // (Codex r17) so pool checkouts never deadlock and promo-discounted
+              // annual prepay accepts match their quoted total.
+              const revalProj = await projectPrepayAcceptCredits(estimate, customerId, revalidatedDue, trx);
+              revalidatedDue = revalProj.projectedDue;
             }
             const { computeChargeAmount } = require('../services/stripe-pricing');
             const revalidated = computeChargeAmount(revalidatedDue, prepayChargePlan.method.methodType || 'card', { funding: prepayChargePlan.method.funding });
@@ -34176,11 +34174,11 @@ module.exports.resolveAcceptedFirstVisit = resolveAcceptedFirstVisit;
 module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
 module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
 module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;
-async function projectPrepayAcceptCredits(estimate, customerId, projectedDue) {
+async function projectPrepayAcceptCredits(estimate, customerId, projectedDue, conn = db) {
   const { getBalance, computeApplication } = require('../services/customer-credit');
-  const balance = (await getBalance(customerId)) || 0;
-  const offerAmount = (await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId)) || 0;
-  const promoAmount = (await require('../services/estimate-promo-code').projectPendingEstimatePromoAmount(estimate, customerId)) || 0;
+  const balance = (await getBalance(customerId, conn)) || 0;
+  const offerAmount = (await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId, { dbh: conn })) || 0;
+  const promoAmount = (await require('../services/estimate-promo-code').projectPendingEstimatePromoAmount(estimate, customerId, conn)) || 0;
   const projection = computeApplication({ total: projectedDue, creditApplied: 0, balance: balance + offerAmount + promoAmount });
   const appliedCredit = projection.newCreditApplied || 0;
   // Promo codes redeem synchronously inside the accept tx (verified by step 4

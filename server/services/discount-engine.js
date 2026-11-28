@@ -382,15 +382,7 @@ const DiscountEngine = {
         if (await Promo.customerAlreadyUsed(trx, customerId, disc.id)) {
           return { success: false, error: 'Promo code already applied to this account' };
         }
-        const pendingEstimate = await trx('estimate_promo_codes as p')
-          .join('estimates as e', 'e.id', 'p.estimate_id')
-          .where({ 'p.discount_id': disc.id, 'p.status': 'entered', 'e.customer_id': customerId })
-          .whereNull('e.archived_at')
-          .first('p.id');
-        const pendingInvoice = pendingEstimate ? null : await trx('invoice_promo_codes')
-          .where({ discount_id: disc.id, customer_id: customerId, status: 'entered' })
-          .first('id');
-        if (pendingEstimate || pendingInvoice) {
+        if (await Promo.customerHasPendingPromoHold(trx, customerId, disc.id)) {
           return { success: false, error: 'Promo code already pending on this account' };
         }
 

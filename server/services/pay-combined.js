@@ -273,9 +273,14 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     if (!candidates.length) return degrade('none');
 
     const stopped = await dunningStoppedInvoiceIds(candidates.map((inv) => inv.id), { database });
+    const pendingPromoIds = await require('./invoice-promo-code').invoiceIdsWithPendingPromo(
+      candidates.map((inv) => inv.id),
+      database,
+    );
+    const excludedIds = new Set([...stopped, ...pendingPromoIds]);
     const eligible = [];
     for (const inv of candidates) {
-      if (stopped.has(String(inv.id))) continue;
+      if (excludedIds.has(String(inv.id))) continue;
       const bound = inv.stripe_payment_intent_id ? String(inv.stripe_payment_intent_id) : null;
       // Unbound, or stamped with OUR OWN combined PI being re-set-up (page
       // reload) — siblings stamped with the anchor's current PI stay
@@ -548,6 +553,7 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     // the same packet. This is the allocation's last fence before money moves.
     if (invoiceWithdrawnFromCustomer(row)) throw staleErr(`invoice ${row.invoice_number} was withdrawn to a third-party payer`);
     if (invoiceHeldForChemicalReview(row)) throw staleErr(`invoice ${row.invoice_number} is held for chemical add-on billing review`);
+    await require('./invoice-promo-code').assertNoPendingPromoCode(row, trx);
     // LIVE payer re-resolution for EVERY row, anchor included (codex r4 P1;
     // anchor exemption removed per codex r5 P1): a payer assigned after
     // invoice creation lives on scheduled_services (or as the customer's

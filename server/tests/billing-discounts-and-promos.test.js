@@ -186,6 +186,7 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
         jest.doMock('../services/estimate-promo-code', () => ({
           usesLeft: jest.fn(async () => true),
           customerAlreadyUsed: jest.fn(async () => false),
+          customerHasPendingPromoHold: jest.fn(async () => false),
           normalizeCode: (raw) => String(raw || '').trim().toUpperCase(),
         }));
         const DiscountEngine = require('../services/discount-engine');
@@ -218,6 +219,7 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
         jest.doMock('../services/estimate-promo-code', () => ({
           usesLeft,
           customerAlreadyUsed,
+          customerHasPendingPromoHold: jest.fn(async () => false),
           normalizeCode: (raw) => String(raw || '').trim().toUpperCase(),
         }));
         const DiscountEngine = require('../services/discount-engine');
@@ -257,7 +259,7 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
     test('pay-v2 /quote and stripe.js /update-amount & /finalize wire assertNoPendingPromoCode and 409 staleBalance (B-05)', () => {
       const stripeSrc = fs.readFileSync(path.join(__dirname, '../services/stripe.js'), 'utf8');
       const matches = stripeSrc.match(/assertNoPendingPromoCode\(/g) || [];
-      expect(matches).toHaveLength(6); // updateInvoicePaymentIntentMethod (pre + combined + single), quoteInvoiceSurcharge, finalizeInvoicePayment (pre + locked)
+      expect(matches).toHaveLength(7); // updateInvoicePaymentIntentMethod (pre + combined + single), quoteInvoiceSurcharge (+ sibling helper), finalizeInvoicePayment (pre + locked)
       const payV2Src = fs.readFileSync(path.join(__dirname, '../routes/pay-v2.js'), 'utf8');
       expect(payV2Src).toContain('respondPayPhaseError');
       expect(payV2Src).toContain('err.statusCode === 409 && err.staleBalance');
@@ -431,13 +433,92 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
     test('estimate-public.js projects pending promo, keeps offerContribution scoped to inspection offers, and redeems promo before credit apply', () => {
       const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
       expect(src).toContain('projectPrepayAcceptCredits(estimate, quoteCustomerId, prepayProjectedDue)');
-      expect(src).toContain('projectPendingEstimatePromoAmount(estimate, customerId)');
+      expect(src).toContain('projectPrepayAcceptCredits(estimate, customerId, revalidatedDue, trx)');
+      expect(src).toContain('projectPendingEstimatePromoAmount(estimate, customerId, conn)');
       expect(src).toContain('redeemPromoCodeInAcceptTransaction(trx, estimate.id)');
       const redeemIdx = src.indexOf('redeemPromoCodeInAcceptTransaction(trx, estimate.id)');
       const applyIdx = src.indexOf('applyAccountCreditToInvoice({', redeemIdx);
       expect(redeemIdx).toBeGreaterThan(-1);
       expect(applyIdx).toBeGreaterThan(redeemIdx);
       expect(src).toContain('Math.min(offerAmount, Math.round((appliedCredit - balance - promoAmount) * 100) / 100)');
+    });
+
+    test('invoice-promo-code fails closed on DB error at money seams, rejects zero-applicable $0.50-min codes, uses renewalPaymentRefusal and stripe_invoice_charge_attempts', async () => {
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../config/feature-gates', () => ({ isEnabled: () => true, gates: {} }));
+        jest.doMock('../services/invoice-payer-ownership', () => ({ invoicePayerOwnership: jest.fn(async () => null) }));
+        jest.doMock('../services/stripe', () => ({
+          assertNoInvoiceChargeReconciliationPending: jest.fn(async (invId) => {
+            if (invId === 'inv-reconciling') {
+              const e = new Error('in progress');
+              e.code = 'STRIPE_CHARGE_IN_PROGRESS';
+              throw e;
+            }
+          }),
+        }));
+        jest.doMock('../services/termite-annual-renewal-charge', () => ({
+          renewalPaymentRefusal: jest.fn(async (inv) => (inv.id === 'inv-unpayable-ren' ? { reason: 'superseded' } : null)),
+        }));
+        const InvoicePromo = require('../services/invoice-promo-code');
+
+        // 1. assertNoPendingPromoCode fails CLOSED when DB throws (no silent 0).
+        const failingConn = jest.fn(() => { throw new Error('db connection reset'); });
+        await expect(InvoicePromo.assertNoPendingPromoCode({
+          id: 'inv-1', customer_id: 'c-1', status: 'sent', total: 100, credit_applied: 0, amount_paid: 0,
+        }, failingConn)).rejects.toThrow('db connection reset');
+
+        // 2. Zero-applicable $0.25 promo on $0.50 balance (Stripe min cap -> applyAmt 0) is rejected at entry
+        // and does not 409-loop assertNoPendingPromoCode.
+        const zeroConn = jest.fn((table) => {
+          const q = {
+            where: jest.fn(() => q),
+            forUpdate: jest.fn(() => q),
+            first: jest.fn(async () => {
+              if (table === 'discounts') return { id: 'd-tiny', is_active: true, promo_code: 'TINY25', discount_type: 'fixed_amount', amount: 0.25 };
+              if (table === 'invoice_promo_codes') return null;
+              return null;
+            }),
+          };
+          return q;
+        });
+        const tinyEnter = await InvoicePromo.enterPromoCodeOnInvoice({
+          invoice: { id: 'inv-50c', customer_id: 'c-1', status: 'sent', total: 0.50, credit_applied: 0, amount_paid: 0 },
+          rawCode: 'TINY25',
+        }, zeroConn);
+        expect(tinyEnter).toEqual({ ok: false, reason: 'invalid_code' });
+
+        const existingZeroConn = jest.fn(() => ({
+          where: jest.fn().mockReturnThis(),
+          first: jest.fn(async () => ({ credit_amount: 0.25 })),
+        }));
+        await expect(InvoicePromo.assertNoPendingPromoCode({
+          id: 'inv-50c', customer_id: 'c-1', status: 'sent', total: 0.50, credit_applied: 0, amount_paid: 0,
+        }, existingZeroConn)).resolves.toBeUndefined();
+
+        // 3. Pending saved-card attempt and unpayable renewal both suppress promo entry.
+        const emptyConn = jest.fn(() => ({ where: jest.fn().mockReturnThis(), first: jest.fn(async () => null) }));
+        const viewReconciling = await InvoicePromo.promoCodeViewForInvoice({
+          id: 'inv-reconciling', customer_id: 'c-1', status: 'sent', total: 100, credit_applied: 0, amount_paid: 0,
+        }, { conn: emptyConn });
+        expect(viewReconciling).toBeNull();
+
+        const viewUnpayableRen = await InvoicePromo.promoCodeViewForInvoice({
+          id: 'inv-unpayable-ren', customer_id: 'c-1', annual_prepay_term_id: 'term-1', status: 'sent', total: 100, credit_applied: 0, amount_paid: 0,
+        }, { conn: emptyConn });
+        expect(viewUnpayableRen).toBeNull();
+      });
+    });
+
+    test('PayPageV2 /quote handles 409 staleBalance by reloading and pay-combined excludes + locks pending-promo siblings', () => {
+      const payUi = fs.readFileSync(path.join(__dirname, '../../client/src/pages/PayPageV2.jsx'), 'utf8');
+      const quoteBlock = payUi.slice(payUi.indexOf('/quote'), payUi.indexOf('setDisplayedBase(quote.base)'));
+      expect(quoteBlock).toContain('handleStaleOrThrowPayPhaseError');
+      expect(payUi).toContain('if (payload?.staleBalance)');
+      expect(payUi).toContain('window.location.reload()');
+
+      const combSrc = fs.readFileSync(path.join(__dirname, '../services/pay-combined.js'), 'utf8');
+      expect(combSrc).toContain('invoiceIdsWithPendingPromo');
+      expect(combSrc).toContain('assertNoPendingPromoCode(row, trx)');
     });
   });
 

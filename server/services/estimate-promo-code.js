@@ -137,34 +137,51 @@ async function customerBlocked(conn, customerId, discount, { exceptVisit = null 
   return customerAlreadyUsed(conn, customerId, discount.id);
 }
 
+async function countActiveEstimatePromoHolds(conn, discountId, { customerId = null } = {}) {
+  const query = conn('estimate_promo_codes as p')
+    .join('estimates as e', 'e.id', 'p.estimate_id')
+    .where({ 'p.discount_id': discountId, 'p.status': 'entered' })
+    .whereNotIn('e.status', DEAD_ESTIMATE_STATUSES)
+    .whereNull('e.archived_at')
+    .where(function notExpired() {
+      this.whereNull('e.expires_at').orWhere('e.expires_at', '>', conn.fn.now());
+    });
+  if (customerId) query.where('e.customer_id', customerId);
+  const held = await query.count('* as c').first();
+  return Number(held?.c || 0);
+}
+
+async function countActiveInvoicePromoHolds(conn, discountId, { customerId = null } = {}) {
+  // Only on collectible self-pay invoices still open: a code left on a closed,
+  // payer-billed, withdrawn, or chemical-review-held invoice holds nothing.
+  const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview } = require('./invoice-helpers');
+  const query = conn('invoice_promo_codes as p')
+    .join('invoices as i', 'i.id', 'p.invoice_id')
+    .where({ 'p.discount_id': discountId, 'p.status': 'entered' })
+    .whereNotIn('i.status', CLOSED_INVOICE_STATUSES)
+    .whereNull('i.payer_id')
+    .whereNull('i.payer_statement_id');
+  if (customerId) query.where('p.customer_id', customerId);
+  const openInvoiceRows = await query.select('i.id', 'i.scheduled_send_error');
+  return openInvoiceRows.filter(
+    (inv) => !invoiceWithdrawnFromCustomer(inv) && !invoiceHeldForChemicalReview(inv),
+  ).length;
+}
+
+async function customerHasPendingPromoHold(conn, customerId, discountId) {
+  if (!customerId || !discountId) return false;
+  if (await countActiveEstimatePromoHolds(conn, discountId, { customerId }) > 0) return true;
+  return (await countActiveInvoicePromoHolds(conn, discountId, { customerId })) > 0;
+}
+
 // Uses already counted, plus codes waiting on estimates that can still be
 // accepted, plus codes entered on a pay page and not redeemed yet.
 async function usesLeft(conn, discount) {
   const max = Number(discount.promo_code_max_uses);
   if (!(max > 0)) return true;
-  const held = await conn('estimate_promo_codes as p')
-    .join('estimates as e', 'e.id', 'p.estimate_id')
-    .where({ 'p.discount_id': discount.id, 'p.status': 'entered' })
-    .whereNotIn('e.status', DEAD_ESTIMATE_STATUSES)
-    .whereNull('e.archived_at')
-    .where(function notExpired() {
-      this.whereNull('e.expires_at').orWhere('e.expires_at', '>', conn.fn.now());
-    })
-    .count('* as c').first();
-  // Only on collectible self-pay invoices still open: a code left on a closed,
-  // payer-billed, withdrawn, or chemical-review-held invoice holds nothing.
-  const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview } = require('./invoice-helpers');
-  const openInvoiceRows = await conn('invoice_promo_codes as p')
-    .join('invoices as i', 'i.id', 'p.invoice_id')
-    .where({ 'p.discount_id': discount.id, 'p.status': 'entered' })
-    .whereNotIn('i.status', CLOSED_INVOICE_STATUSES)
-    .whereNull('i.payer_id')
-    .whereNull('i.payer_statement_id')
-    .select('i.id', 'i.scheduled_send_error');
-  const activeOnInvoices = openInvoiceRows.filter(
-    (inv) => !invoiceWithdrawnFromCustomer(inv) && !invoiceHeldForChemicalReview(inv),
-  ).length;
-  return Number(discount.promo_code_current_uses || 0) + Number(held?.c || 0) + activeOnInvoices < max;
+  const activeOnEstimates = await countActiveEstimatePromoHolds(conn, discount.id);
+  const activeOnInvoices = await countActiveInvoicePromoHolds(conn, discount.id);
+  return Number(discount.promo_code_current_uses || 0) + activeOnEstimates + activeOnInvoices < max;
 }
 
 // Count one use of the code and post its credit, in the caller's transaction.
@@ -402,6 +419,7 @@ async function sweepAcceptedPromoCodes() {
 module.exports = {
   customerBlocked,
   customerAlreadyUsed,
+  customerHasPendingPromoHold,
   isRedeemableDiscount,
   usesLeft,
   mintPromoCredit,

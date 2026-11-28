@@ -5358,6 +5358,9 @@ const StripeService = {
     // this as invoiceTotal below, so /finalize matches (finalize re-derives
     // the same combined base and refuses on drift).
     const quoteCombinedCtx = await require('./pay-combined').combinedContextForInvoice(invoice);
+    if (quoteCombinedCtx) {
+      await assertCombinedSiblingsNoPendingPromo(quoteCombinedCtx.siblings);
+    }
     const baseAmount = quoteCombinedCtx ? quoteCombinedCtx.totalCents / 100 : invoiceAmountDue(invoice);
 
     const chargeInfo = computeChargeAmount(baseAmount, methodType, { funding });
@@ -6596,6 +6599,14 @@ const StripeService = {
     }
   },
 };
+
+async function assertCombinedSiblingsNoPendingPromo(siblings, conn = db) {
+  if (!Array.isArray(siblings) || !siblings.length) return;
+  const { assertNoPendingPromoCode } = require('./invoice-promo-code');
+  for (const sibling of siblings) {
+    await assertNoPendingPromoCode(sibling, conn);
+  }
+}
 
 // Map Stripe error codes/decline_codes to friendly customer-facing messages.
 // Raw Stripe error messages are logged server-side, never returned to the customer.
