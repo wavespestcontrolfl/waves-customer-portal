@@ -89,7 +89,10 @@ const SWFL_CITIES = Object.freeze([
   'holmes beach', 'bradenton beach', 'sun city center', 'ruskin', 'riverview',
   'apollo beach', 'wimauma', 'arcadia', 'cape coral', 'fort myers', 'naples', 'tampa',
 ]);
-const SWFL_CITY_RE = new RegExp(`\\b(${SWFL_CITIES.map((c) => c.replace(/\s+/g, '\\s+')).join('|')})\\b`, 'gi');
+const SWFL_CITY_RE = new RegExp(
+  `\\b(${[...SWFL_CITIES].sort((a, b) => b.length - a.length).map((c) => c.replace(/\s+/g, '\\s+')).join('|')})\\b`,
+  'gi',
+);
 const OTHER_PROPERTY_CUE_RE = /\b(?:different\s+(?:address|house|property|home|place)|another\s+(?:address|property|home|house)|rental\s+property|investment\s+property|other\s+(?:house|property|home)|my\s+(?:mom'?s|mother'?s|dad'?s|father'?s|son'?s|daughter'?s|sister'?s|brother'?s)\s+(?:house|home|place|property))\b/i;
 const SPOKEN_ZIP_RE = /\b((?:33|34)\d{3})\b/g;
 
@@ -369,18 +372,23 @@ function matchCatalogCues(text) {
 
 function matchCatalogMatches(text, catalogRows) {
   const cues = matchCatalogCues(text);
-  if (!cues.length || !Array.isArray(catalogRows) || !catalogRows.length) return { cues, rows: [] };
+  if (!cues.length) return { cues: [], rows: [], cueLines: [] };
+  const safeCatalog = Array.isArray(catalogRows) ? catalogRows : [];
   const rows = [];
   const seen = new Set();
+  const cueLines = [];
   for (const cue of cues) {
-    for (const row of matchingRowsForCue(catalogRows, cue)) {
-      if (rows.length >= MAX_CATALOG_MATCHES) return { cues, rows };
+    const matched = safeCatalog.length ? matchingRowsForCue(safeCatalog, cue) : [];
+    const line = (matched[0] && lineForCatalogRow(matched[0])) || cue.serviceLine || null;
+    if (line && !cueLines.includes(line)) cueLines.push(line);
+    for (const row of matched) {
+      if (rows.length >= MAX_CATALOG_MATCHES) break;
       if (!row || seen.has(row.id)) continue;
       seen.add(row.id);
       rows.push({ row, cue });
     }
   }
-  return { cues, rows };
+  return { cues, rows, cueLines };
 }
 
 function matchCatalogPrices(text, catalogRows) {
@@ -395,8 +403,9 @@ function resolveSlotServiceContext(matches) {
   const cues = Array.isArray(matches?.cues) ? matches.cues : [];
   const rows = Array.isArray(matches?.rows) ? matches.rows.map((m) => m.row).filter(Boolean) : [];
   const funnelKeys = [...new Set(cues.map((c) => c.funnelKey).filter(Boolean))].sort();
-  const rowLines = [...new Set(rows.map((row) => lineForCatalogRow(row)).filter(Boolean))];
-  const serviceLines = rowLines.length ? rowLines : [...new Set(cues.map((c) => c.serviceLine).filter(Boolean))];
+  const serviceLines = Array.isArray(matches?.cueLines) && matches.cueLines.length
+    ? matches.cueLines
+    : [...new Set(cues.map((c) => c.serviceLine).filter(Boolean))];
   const primaryRow = rows[0] || null;
   const rowDuration = Number(primaryRow?.default_duration_minutes) || 0;
   const isSingleSpecificRow = Boolean(primaryRow) && funnelKeys.length <= 1 && primaryRow.service_key !== 'lawn_inspection';

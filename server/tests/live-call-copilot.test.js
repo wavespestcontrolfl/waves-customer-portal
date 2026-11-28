@@ -10,7 +10,7 @@ const {
   buildLiveCallCopilot,
   matchCatalogPrices,
   buildCallChecklist,
-  _test: { resetCaches, statesDifferentProperty },
+  _test: { resetCaches, statesDifferentProperty, spokenLocationDiffers },
 } = require('../services/live-call-copilot');
 
 const CATALOG = [
@@ -566,5 +566,38 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
       serviceLines: ['mosquito', 'general'],
       paidLookups: false,
     }));
+
+    // Multi-service request where the first cue fills all 3 display rows still includes the second service's capability line
+    mockLoadBookable.mockResolvedValueOnce([
+      { id: 'l1', service_key: 'lawn_care', name: 'Lawn Care', category: 'lawn_care', base_price: 90, pricing_type: 'fixed', billing_type: 'recurring', default_duration_minutes: 60 },
+      { id: 'l2', service_key: 'lawn_fertilization', name: 'Lawn Fertilization', category: 'lawn_care', base_price: 85, pricing_type: 'fixed', billing_type: 'recurring', default_duration_minutes: 60 },
+      { id: 'l3', service_key: 'lawn_pest_knockdown', name: 'Lawn Pest Knockdown', category: 'lawn_care', base_price: 125, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 60 },
+      { id: 'p1', service_key: 'one_time_pest', name: 'One-Time Pest Control Service', category: 'pest_control', base_price: 200, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 60 },
+    ]);
+    resetCaches();
+    buildBookingAvailability.mockResolvedValueOnce({ slots: [{ date: '2026-12-05', window_start: '09:00', window_end: '11:00' }] });
+    const lawnAndAnts = await buildLiveCallCopilot({
+      call: { id: 'call-scope-4', customer_id: 'cust-termite' },
+      customer: { id: 'cust-termite', name: 'Alex Termite' },
+      meta: {},
+      lines: [{ speaker: 'caller', text: 'I need lawn care and treatment for ants inside.' }],
+      assist: null,
+    }, { ...deps, isEnabled: () => true });
+    expect(lawnAndAnts.catalog_prices).toHaveLength(3);
+    expect(buildBookingAvailability).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      duration: 120,
+      serviceKey: 'lawn_care+pest_control',
+      serviceLines: ['lawn', 'general'],
+    }));
+
+    // Longer city names ("Bradenton Beach") must match before prefix ("Bradenton")
+    expect(spokenLocationDiffers(
+      { city: 'Bradenton Beach', zip: '34217', address_line1: '100 Gulf Dr' },
+      "I'm in Bradenton Beach.",
+    )).toBe(false);
+    expect(spokenLocationDiffers(
+      { city: 'Bradenton', zip: '34202', address_line1: '100 Oak Dr' },
+      'This is for my place in Bradenton Beach.',
+    )).toBe(true);
   });
 });
