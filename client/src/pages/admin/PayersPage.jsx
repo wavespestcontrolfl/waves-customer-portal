@@ -161,11 +161,11 @@ export default function PayersPage() {
   // Open a payer's statements/AR sheet from the AR worklist (which only has an
   // id). Use the loaded row if present; otherwise fetch it (it may be filtered
   // out of the current list, e.g. inactive).
-  async function openDetailById(id) {
+  async function openDetailById(rawId) {
     const version = ++detailVersion.current;
     setDetailError("");
     setArOpen(false);
-    const found = payers.find((p) => p.id === id);
+    const found = payers.find((p) => p.id === rawId);
     if (found) {
       // The selected worklist button is about to unmount. The sheet returns
       // focus to the directory's persistent AR opener after this handoff.
@@ -174,7 +174,8 @@ export default function PayersPage() {
       return;
     }
     try {
-      const r = await adminFetch(`/admin/payers/${encodeURIComponent(id)}`);
+      const id = encodeURIComponent(rawId);
+      const r = await adminFetch(`/admin/payers/${id}`);
       const d = await r.json().catch(() => null);
       if (!mountedRef.current || version !== detailVersion.current) return;
       if (!r.ok || !d?.payer) throw new Error("Could not open payer details. Try selecting the payer again.");
@@ -213,7 +214,7 @@ export default function PayersPage() {
     try {
       const isNew = !editing?.id;
       const r = await adminFetch(
-        isNew ? "/admin/payers" : `/admin/payers/${encodeURIComponent(editing.id)}`,
+        isNew ? "/admin/payers" : `/admin/payers/${editing.id}`,
         { method: isNew ? "POST" : "PUT", body: form },
       );
       const data = await r.json().catch(() => null);

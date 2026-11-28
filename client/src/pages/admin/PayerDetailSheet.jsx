@@ -88,11 +88,23 @@ const parseCurrencyInput = (value) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
-async function readJson(path, fallbackError) {
-  const r = await adminFetch(path);
-  const d = await r.json().catch(() => null);
-  if (!r.ok) throw new Error(d?.error || fallbackError || `HTTP ${r.status}`);
-  return d;
+async function parseJsonResponse(res, fallbackError) {
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || fallbackError || `HTTP ${res.status}`);
+  return data;
+}
+
+const VALID_SEQUENCE_STATUSES = new Set(["active", "paused", "stopped", "completed"]);
+
+function extractReminderSequence(data) {
+  if (!data || typeof data !== "object" || !Object.prototype.hasOwnProperty.call(data, "sequence")) {
+    throw new Error("Could not load reminder status.");
+  }
+  const seq = data.sequence;
+  if (seq !== null && (typeof seq !== "object" || Array.isArray(seq) || !VALID_SEQUENCE_STATUSES.has(seq.status))) {
+    throw new Error("Could not load reminder status.");
+  }
+  return seq;
 }
 
 export default function PayerDetailSheet({ payer, onClose, onChanged }) {
@@ -114,7 +126,8 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
     setLoading(true);
     setStatementsError("");
     try {
-      const d = await readJson(`/admin/payers/${encodeURIComponent(payer.id)}/statements`);
+      const r = await adminFetch(`/admin/payers/${payer.id}/statements`);
+      const d = await parseJsonResponse(r);
       if (reqId !== statementsReqRef.current) return;
       if (!Array.isArray(d?.statements)) throw new Error("Could not load this payer's statements.");
       setStatements(d.statements);
@@ -132,7 +145,8 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
     setArLoading(true);
     setArError("");
     try {
-      const d = await readJson(`/admin/payers/${encodeURIComponent(payer.id)}/ar`);
+      const r = await adminFetch(`/admin/payers/${payer.id}/ar`);
+      const d = await parseJsonResponse(r);
       if (reqId !== arReqRef.current) return;
       if (!d?.summary) throw new Error("Could not load this payer's balance.");
       setAr(d);
@@ -306,7 +320,8 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
     setSequenceError("");
     setSequenceLoaded(false);
     try {
-      const d = await readJson(base, "Could not load statement visits.");
+      const r = await adminFetch(base);
+      const d = await parseJsonResponse(r, "Could not load statement visits.");
       if (reqId !== detailReqRef.current) return;
       if (!Array.isArray(d?.lines)) throw new Error("Could not load statement visits.");
       setLines(d.lines);
@@ -315,17 +330,10 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
       setLinesError(err.message || "Could not load statement visits.");
     }
     try {
-      const d2 = await readJson(`${base}/followups`, "Could not load reminder status.");
+      const r2 = await adminFetch(`${base}/followups`);
+      const d2 = await parseJsonResponse(r2, "Could not load reminder status.");
       if (reqId !== detailReqRef.current) return;
-      if (!d2 || typeof d2 !== "object" || !Object.prototype.hasOwnProperty.call(d2, "sequence")) {
-        throw new Error("Could not load reminder status.");
-      }
-      const seq = d2.sequence;
-      const validSequenceStatuses = new Set(["active", "paused", "stopped", "completed"]);
-      if (seq !== null && (typeof seq !== "object" || Array.isArray(seq) || !validSequenceStatuses.has(seq.status))) {
-        throw new Error("Could not load reminder status.");
-      }
-      setSequence(seq);
+      setSequence(extractReminderSequence(d2));
       setSequenceLoaded(true);
     } catch (err) {
       if (reqId === detailReqRef.current) {
@@ -521,7 +529,7 @@ function ReconcileForm({ total, busy, onCancel, onSubmit }) {
 function DunningControls({ base, sequence, statusLoading = false, statusUnavailable = false, busy, act }) {
   const statusPending = statusLoading || statusUnavailable;
   const st = statusPending ? null : (sequence?.status || null);
-  const actionsDisabled = !!busy || statusPending;
+  const actionsDisabled = !!busy || statusLoading;
   return (
     <div className="mt-2 pt-2 border-t border-zinc-100">
       <div className="flex flex-wrap items-center gap-2">
