@@ -72,19 +72,37 @@ function applicablePromoAmountForInvoice(faceAmount, invoice) {
   return applyAmt > 0 ? applyAmt : 0;
 }
 
-function effectivePromoCreditAmount(row, invoice) {
-  const face = round2(row.credit_amount);
-  if (!invoice) return face;
-  if (row.status === 'redeemed') {
-    const appliedOnInvoice = round2(invoice.credit_applied || 0);
-    return appliedOnInvoice > 0 ? Math.min(face, appliedOnInvoice) : face;
+async function promoDrawAmountForInvoice(invoiceId, conn) {
+  try {
+    const q = conn('customer_credit_ledger');
+    if (!q || typeof q.where !== 'function') return null;
+    const rows = await q
+      .where({ invoice_id: invoiceId, created_by: APPLIED_BY })
+      .select('amount');
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const total = rows.reduce((sum, r) => sum + Math.max(0, -Number(r.amount || 0)), 0);
+    return total > 0 ? round2(total) : null;
+  } catch {
+    return null;
   }
-  return applicablePromoAmountForInvoice(face, invoice);
 }
 
-const appliedView = (row, invoice = null) => ({
+function effectivePromoCreditAmount(row, invoice, promoDrawAmount = null) {
+  const face = round2(row.credit_amount);
+  if (row.status === 'redeemed') {
+    if (promoDrawAmount != null && promoDrawAmount > 0) return Math.min(face, round2(promoDrawAmount));
+    if (invoice) {
+      const appliedOnInvoice = round2(invoice.credit_applied || 0);
+      return appliedOnInvoice > 0 ? Math.min(face, appliedOnInvoice) : face;
+    }
+    return face;
+  }
+  return invoice ? applicablePromoAmountForInvoice(face, invoice) : face;
+}
+
+const appliedView = (row, invoice = null, promoDrawAmount = null) => ({
   code: row.code,
-  creditAmount: effectivePromoCreditAmount(row, invoice),
+  creditAmount: effectivePromoCreditAmount(row, invoice, promoDrawAmount),
   credited: row.status === 'redeemed',
 });
 
@@ -131,7 +149,11 @@ async function promoCodeViewForInvoice(invoice, { saveRequired = false, payerOwn
   if (!gateOn() || !invoice?.id) return null;
   if (payerOwnedLive) return null;
   const row = await conn('invoice_promo_codes').where({ invoice_id: invoice.id }).first();
-  if (row) return row.status === 'void' ? null : { canEnter: false, applied: appliedView(row, invoice) };
+  if (row) {
+    if (row.status === 'void') return null;
+    const promoDraw = row.status === 'redeemed' ? await promoDrawAmountForInvoice(invoice.id, conn) : null;
+    return { canEnter: false, applied: appliedView(row, invoice, promoDraw) };
+  }
   if (saveRequired || !(await invoiceEligibleForPromoEntry(invoice, conn))) return null;
   return { canEnter: true, applied: null };
 }
@@ -153,7 +175,8 @@ async function promoCodeVerdictAfterSetup(invoiceId, conn = db) {
     const invoice = await conn('invoices')
       .where({ id: invoiceId })
       .first('id', 'total', 'credit_applied', 'amount_paid', 'status');
-    return { canEnter: false, applied: appliedView(row, invoice || null) };
+    const promoDraw = await promoDrawAmountForInvoice(invoiceId, conn);
+    return { canEnter: false, applied: appliedView(row, invoice || null, promoDraw) };
   } catch (err) {
     logger.warn(`[invoice-promo-code] setup verdict not read for invoice ${invoiceId}: ${err.code || err.message}`);
     return undefined;
@@ -342,9 +365,14 @@ async function redeemAndApplyPromoCode(trx, invoice) {
       if (typeof custLockQuery.forUpdate === 'function') await custLockQuery.forUpdate().first('id');
       // Verify live third-party payer ownership inside the lock before
       // spending the homeowner's one-time promo code on a payer-owned invoice.
+      // Void confirmed payer ownership so checkout does not loop on a stale
+      // entered row; leave entered only when ownership cannot be verified.
       const liveOwner = await invoicePayerOwnership(invoice, savepoint);
+      if (liveOwner === 'payer') {
+        return voidRow(savepoint, row, 'invoice_not_payable');
+      }
       if (liveOwner !== null) {
-        throw Object.assign(new Error('promo credit blocked for payer-owned invoice'), { promoNotApplied: 'payer_owned' });
+        throw Object.assign(new Error('promo credit blocked for unverifiable payer ownership'), { promoNotApplied: liveOwner });
       }
       if (await hasActivePaymentPlan(invoice.id, savepoint)) {
         return voidRow(savepoint, row, 'payment_plan_active');

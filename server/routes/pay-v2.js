@@ -1150,20 +1150,25 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
     });
     if (!outcome) return notFound();
     if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
-    if (outcome.openPiId) {
+    // Retire any pre-promo open PaymentIntent ONLY on a newly-entered promo
+    // code (never on a retry of an already-redeemed row whose PI is already
+    // priced with the discount). Public 409 responses never expose PI IDs or
+    // upstream Stripe details.
+    if (outcome.insertedNew && outcome.openPiId) {
       const { retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
       const retireRefusal = await retireOpenPaymentIntentBeforeSettlement(
         { id: invoice.id, stripe_payment_intent_id: outcome.openPiId },
         { action: 'applying a promo code' },
       );
       if (retireRefusal) {
-        if (outcome.insertedNew) {
-          await db('invoice_promo_codes')
-            .where({ invoice_id: invoice.id, status: 'entered' })
-            .delete()
-            .catch(() => {});
-        }
-        return res.status(retireRefusal.status).json({ error: retireRefusal.error });
+        await db('invoice_promo_codes')
+          .where({ invoice_id: invoice.id, status: 'entered' })
+          .delete()
+          .catch(() => {});
+        return res.status(409).json({
+          error: 'A payment is already in progress for this invoice — please wait a moment and refresh.',
+          code: 'payment_in_flight',
+        });
       }
       await db('invoices')
         .where({ id: invoice.id, stripe_payment_intent_id: outcome.openPiId })

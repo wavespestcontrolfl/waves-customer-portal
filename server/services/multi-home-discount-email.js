@@ -582,7 +582,10 @@ function sendsFor(estimateId, groups, customers) {
     const homes = sortHomes(group.homes);
     if (homes.length > MAX_HOMES) return { key: group.key, skip: 'too_many_homes', count: homes.length };
     if (homes.some((h) => !h.address)) return { key: group.key, skip: 'no_street' };
-    return { key: group.key, args: sendArgs(estimateId, { ...group, homes }, customers) };
+    const legacyIdempotencyKey = group.payer && group.emailKey && group.key !== group.emailKey
+      ? idempotencyKeyFor(estimateId, group.emailKey)
+      : null;
+    return { key: group.key, legacyIdempotencyKey, args: sendArgs(estimateId, { ...group, homes }, customers) };
   });
 }
 
@@ -635,6 +638,19 @@ const REFUSALS = Object.freeze({
   suppressed: 'the address went on the suppression list',
 });
 
+async function legacyPayerKeyVerdict(dbh, legacyKey, holdsEarlier) {
+  if (!dbh || !legacyKey) return 'send';
+  const row = await dbh('email_messages').where({ idempotency_key: legacyKey }).first();
+  if (!row) return 'send';
+  const status = String(row.status || '').toLowerCase();
+  if (status === 'failed') {
+    const holds = holdsEarlier || require('./email-template-library').providerRetryHoldErrorForExistingMessage;
+    if (holds(row)) return 'never';
+    return (await failedRecently(dbh, legacyKey)) ? 'wait' : 'send';
+  }
+  return 'deduped';
+}
+
 async function sendGroups(dbh, run, estimate, composed, out) {
   for (const one of composed.sends) {
     if (one.skip === 'too_many_homes') {
@@ -646,6 +662,12 @@ async function sendGroups(dbh, run, estimate, composed, out) {
       logger.warn(`[multi-home-discount-email] estimate ${estimate.id}: a home has no street address on file; email to its paying address not sent`);
       out.skipped += 1;
       continue;
+    }
+    if (one.legacyIdempotencyKey) {
+      const legacy = await legacyPayerKeyVerdict(dbh, one.legacyIdempotencyKey, run.holdsEarlier);
+      if (legacy === 'deduped') { out.deduped += 1; continue; }
+      if (legacy === 'wait') { out.waiting += 1; continue; }
+      if (legacy === 'never') { out.skipped += 1; continue; }
     }
     const earlier = await earlierAttemptVerdict(dbh, one.args.idempotencyKey, run.holdsEarlier);
     if (earlier === 'wait') { out.waiting += 1; continue; }

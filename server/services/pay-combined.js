@@ -133,8 +133,8 @@ async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
   const promoCredit = promoOn
     ? await require('./invoice-promo-code').pendingPromoCredit(invoice, database)
     : 0;
-  const available = autoCredit + promoCredit;
-  return available > 0 && available >= invoiceAmountDue(invoice);
+  const availableCents = Math.round(autoCredit * 100) + Math.round(promoCredit * 100);
+  return availableCents > 0 && availableCents >= amountDueCents(invoice);
 }
 
 // Why combinedEligibleSiblings returned null (the optional onDegrade
