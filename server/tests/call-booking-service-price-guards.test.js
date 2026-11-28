@@ -13,6 +13,7 @@ const {
   isDiscountedSinglePackageTreatment,
   implicitConfirmedAgentPrice,
   recoverSttDecimalCallPrice,
+  resolveWdoDeclinedCatalogFallback,
   applyCatalogSelectionGuard,
 } = require('../services/call-booking-catalog');
 
@@ -156,6 +157,16 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
   test('unrelated negation before comma ("No treatment, we need the official WDO report") keeps WDO Inspection Service', () => {
     const transcript = 'Caller: No treatment, we need the official WDO report for closing.';
     expect(hasExplicitWdoRefusal({ transcription: transcript })).toBe(false);
+    const wdoQuestion = 'Caller: Why would I need a WDO? Wait no WDO, just do the general check please.';
+    expect(resolveWdoDeclinedCatalogFallback({
+      callBookingCatalogRow: SERVICES.find((s) => s.service_key === 'wdo_inspection'),
+      bookableCallServices: SERVICES,
+      transcription: wdoQuestion,
+    })).toMatchObject({ service_key: 'lawn_inspection', name: 'Waves Assessment' });
+
+    const wdoQuestionOnly = 'Caller: Why would I need a WDO?';
+    expect(hasExplicitWdoRefusal({ transcription: wdoQuestionOnly })).toBe(false);
+
     const svc = resolveCallBookingCatalogService({
       extracted: { specific_service_name: 'WDO Inspection Service' },
       services: SERVICES,
@@ -201,9 +212,24 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       genericBookingUnbookable: false,
     });
     expect(guardOut.genericBookingUnbookable).toBe(true);
+
+    // Also holds when general recurring is picked for one-time-only caller and the replacement row isn't bookable
+    const servicesWithoutOneTime = SERVICES.filter((s) => s.service_key !== 'one_time_pest_control');
+    const missingGeneralOneTime = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Monthly Pest Control Service' },
+      services: servicesWithoutOneTime,
+      transcription: transcript,
+    });
+    expect(missingGeneralOneTime).toBeNull();
+    expect(applyCatalogSelectionGuard({
+      callBookingCatalogRow: missingGeneralOneTime,
+      bookableCallServices: servicesWithoutOneTime,
+      extracted: { specific_service_name: 'Monthly Pest Control Service' },
+      transcription: transcript,
+    }).genericBookingUnbookable).toBe(true);
   });
 
-  test('competitor monthly service ("monthly with them") never converts One-Time Pest, while separate-sentence monthly request still promotes', () => {
+  test('competitor monthly service ("monthly with them") never converts One-Time Pest, while pivot or separate-sentence monthly request promotes', () => {
     const competitorTranscript = 'Agent: How can I help?\nCaller: I just signed up for, like, a monthly service with them now that I do not even need, I want the one-time ant spray.';
     const outCompetitor = processorTest.applyRecurringIntentDefault(
       { is_lead: true, matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' },
@@ -212,6 +238,22 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       false,
     );
     expect(outCompetitor.specific_service_name).toBe('One-Time Pest Control Service');
+
+    const pivotTranscript = 'Caller: I already have a plan with Orkin, now I want monthly service from Waves.';
+    expect(processorTest.applyRecurringIntentDefault(
+      { is_lead: true, matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' },
+      pivotTranscript,
+      SERVICES.map((s) => s.name),
+      false,
+    ).specific_service_name).toBe('Monthly Pest Control Service');
+
+    const contrastPivotTranscript = 'Caller: I already have a plan with Orkin, but I want monthly service from Waves.';
+    expect(processorTest.applyRecurringIntentDefault(
+      { is_lead: true, matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' },
+      contrastPivotTranscript,
+      SERVICES.map((s) => s.name),
+      false,
+    ).specific_service_name).toBe('Monthly Pest Control Service');
 
     const ownMonthlyTranscript = 'Caller: I already have ants. I want monthly service.';
     const outOwn = processorTest.applyRecurringIntentDefault(
@@ -258,6 +300,33 @@ describe('PR A1: final implicit confirmed agent price & STT decimal price recove
       },
     };
     expect(resolveCallBookingPrice({ quotedPrice: 2.5, catalogRow: SERVICES[1], v2Extraction: acceptedSttV2 })).toEqual({ price: 250, source: 'transcript' });
+
+    // $3.00 vs $250 fixed catalog price without spoken "hundred" wording must NOT fabricate $300
+    expect(recoverSttDecimalCallPrice({
+      quotedPrice: 3.0,
+      catalogRow: SERVICES[1],
+      v2Extraction: {
+        ...acceptedSttV2,
+        service_request: {
+          ...acceptedSttV2.service_request,
+          quoted_price_usd: 3.0,
+          price: { amount_usd: 3.0, amount_max_usd: null, stated_by: 'agent', caller_response: 'accepted', accepted: true, evidence_quote: 'That comes to $3.00.' },
+        },
+      },
+    })).toBeNull();
+
+    // per_application unit must not stamp an implicit one-time price without caller acceptance
+    expect(implicitConfirmedAgentPrice({
+      scheduling: { status: 'confirmed' },
+      service_request: {
+        specific_service_name: 'Bee / Wasp Nest Removal Service',
+        price_is_final: true,
+        price_offered_by_staff: true,
+        price_accepted_by_caller: false,
+        price: { amount_usd: 250, unit: 'per_application', stated_by: 'agent', caller_response: 'no_response', accepted: false, evidence_quote: 'Bee removal is $250 per application.' },
+        prices: [],
+      },
+    }, SERVICES[2])).toBeNull();
 
     const variableCatalogRow = { ...SERVICES[3], pricing_type: 'variable', base_price: '250.00' };
     expect(recoverSttDecimalCallPrice({ quotedPrice: 2.5, catalogRow: variableCatalogRow, v2Extraction: {
@@ -400,6 +469,61 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
         },
       },
     })).toEqual({ updated: false, reason: 'ambiguous_multiple_visits' });
+
+    // Exact matching street + city + ZIP restatement succeeds (addressCity/addressZip shape)!
+    const matchingLocalityVisit = {
+      ...pestVisit,
+      service_address_line1: '100 Main St',
+      service_address_city: 'Sarasota',
+      service_address_zip: '34232',
+    };
+    selectChain.select.mockResolvedValueOnce([matchingLocalityVisit]);
+    callLockChain.first.mockResolvedValueOnce({ id: 'call-same-locality' });
+    rowLockChain.first.mockResolvedValueOnce(matchingLocalityVisit);
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-same-locality', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      transcription: 'Caller: Confirming the price for the earlier visit at 100 Main St in Sarasota 34232 is $199.',
+      v2Extraction: {
+        scheduling: { status: 'none' },
+        property: { service_address: { street_line_1: '100 Main St', city: 'Sarasota', postal_code: '34232' } },
+        service_request: {
+          specific_service_name: 'One-Time Pest',
+          service_intent: 'follow_up_existing_service',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: true, scheduledServiceId: 'visit-1', amount: 199 });
+
+    // Competing visit city ("Venice" vs customer's "Sarasota") rejects callback price sync!
+    selectChain.select.mockResolvedValueOnce([{
+      ...pestVisit,
+      service_address_line1: '100 Main St',
+      service_address_city: 'Sarasota',
+      service_address_zip: '34232',
+    }]);
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-diff-city', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      transcription: 'Caller: Confirming the price for the earlier visit at 100 Main St in Venice is $199.',
+      v2Extraction: {
+        scheduling: { status: 'none' },
+        property: { service_address: { street_line_1: '100 Main St', city: 'Venice', postal_code: '34285' } },
+        service_request: {
+          specific_service_name: 'One-Time Pest',
+          service_intent: 'follow_up_existing_service',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
 
     // Unnamed callback with schema enum `pest_general` + explicit prior-visit linkage SUCCEEDS!
     selectChain.select.mockResolvedValueOnce([pestVisit]);

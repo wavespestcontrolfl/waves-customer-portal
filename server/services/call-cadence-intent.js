@@ -31,6 +31,29 @@ function clauseSliceAfter(text, endIndex) {
   return m ? raw.slice(0, m.index) : raw;
 }
 
+function clauseSubSegmentBefore(before) {
+  const pivotRe = /,\s*(?:and\s+)?(?:but|however|though|now|yet|instead)\b|\b(?:but|however|though|instead)\b|,(?=\s*(?:i|we)\b)/gi;
+  let lastEnd = 0;
+  let m;
+  while ((m = pivotRe.exec(before))) lastEnd = m.index + m[0].length;
+  return before.slice(lastEnd);
+}
+
+function clauseSubSegmentAfter(after) {
+  const m = String(after || '').match(/,|(?:\b(?:but|however|though|yet|instead)\b)/i);
+  return m ? after.slice(0, m.index) : after;
+}
+
+function hasOtherProviderContext(before, after) {
+  const beforeSeg = clauseSubSegmentBefore(before);
+  const afterSeg = clauseSubSegmentAfter(after);
+  if (OTHER_PROVIDER_CONTEXT_RE.test(afterSeg)) return true;
+  const beforeMatch = beforeSeg.match(OTHER_PROVIDER_CONTEXT_RE);
+  if (!beforeMatch) return false;
+  const afterProviderText = beforeSeg.slice(beforeMatch.index + beforeMatch[0].length);
+  return !REQUEST_VERB_RE.test(afterProviderText);
+}
+
 function serviceCadenceMatch(re, text) {
   const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   let m;
@@ -38,7 +61,7 @@ function serviceCadenceMatch(re, text) {
     const before = clauseSliceBefore(text, m.index);
     const after = clauseSliceAfter(text, m.index + m[0].length);
     const billingNounAfter = /^\s{0,2}(?:payments?|installments?|billing|invoices?|price|pricing|cost)\b/i.test(after);
-    const otherProviderClause = OTHER_PROVIDER_CONTEXT_RE.test(`${before} ${after}`);
+    const otherProviderClause = hasOtherProviderContext(before, after);
     if (!billingNounAfter && !otherProviderClause && !NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
       const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
       if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;

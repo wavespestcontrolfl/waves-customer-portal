@@ -446,7 +446,9 @@ function isEligibleImplicitPriceContext(v2Extraction, catalogRow = null) {
 }
 
 function isUnhedgedNoResponseAgentQuote(entry) {
-  if (!entry || entry.stated_by !== 'agent' || isPlanRateV2Price(entry)) return false;
+  if (!entry || entry.stated_by !== 'agent' || entry.unit === 'per_application' || isPlanRateV2Price(entry)) {
+    return false;
+  }
   if (entry.amount_max_usd != null || entry.caller_response !== 'no_response') return false;
   const quote = String(entry.evidence_quote || '').trim();
   return quote.length > 0 && !PRICE_HEDGE_OR_ADDON_RE.test(quote);
@@ -778,7 +780,7 @@ function hasExplicitWdoRefusal({ extracted = {}, v2Extraction = null, transcript
   const callerText = transcription ? callerOnlyText(transcription) : '';
   const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
   if (!combined) return false;
-  const clauses = combined.split(/[.!?\n,;]+/).map((s) => s.trim()).filter(Boolean);
+  const clauses = combined.split(/(?<=\?)|[.!\n,;]+/).map((s) => s.trim()).filter(Boolean);
   let refused = false;
   for (const clause of clauses) {
     if (QUESTION_OR_CHECK_RE.test(clause)) continue;
@@ -817,7 +819,7 @@ function lastRegexMatchIndex(re, text) {
 
 function resolvePackageVisitCountChoice(combined) {
   let finalChoice = null;
-  for (const rawClause of String(combined || '').split(/[.!?\n,;]+/)) {
+  for (const rawClause of String(combined || '').split(/(?<=\?)|[.!\n,;]+/)) {
     const clause = rawClause.trim();
     if (!clause || QUESTION_OR_CHECK_RE.test(clause)) continue;
     const withoutNegTwo = clause.replace(NEGATED_TWO_VISIT_RE, (m) => ' '.repeat(m.length));
@@ -889,10 +891,14 @@ function downgradeRecurringToOneTime(selected, services) {
 
 function hasSpecialtyOneTimeHold({ callBookingCatalogRow, bookableCallServices = [], extracted = {}, v2Extraction = null, transcription = '' } = {}) {
   if (callBookingCatalogRow) return false;
-  const modelPick = findServiceByName(bookableCallServices, extracted.specific_service_name)
+  const byModelPick = findServiceByName(bookableCallServices, extracted.specific_service_name)
     || findServiceByName(bookableCallServices, extracted.matched_service)
     || findServiceByName(bookableCallServices, extracted.requested_service);
-  if (!modelPick || modelPick.billing_type !== 'recurring' || isSupportedGeneralRecurringFamily(modelPick)) {
+  const modelPick = (byModelPick && !isGenericCallCatalogRow(byModelPick))
+    ? byModelPick
+    : (matchingKeywordRows(callBookingResolutionHaystack(extracted, transcription), bookableCallServices)[0] || byModelPick);
+  if (!modelPick || modelPick.billing_type !== 'recurring') return false;
+  if (isSupportedGeneralRecurringFamily(modelPick) && downgradeRecurringToOneTime(modelPick, bookableCallServices)) {
     return false;
   }
   return hasExplicitOneTimeOnlyIntent({ extracted, v2Extraction, transcription });
@@ -1021,10 +1027,12 @@ function hasExplicitCurrencyEvidence(rawSource, evidence) {
   return rawHasDollar || /\$|\b(?:dollars?|bucks)\b/i.test(evidence);
 }
 
-function withinCatalogHundredRange(scaled, catalogRow) {
+function withinCatalogHundredRange(scaled, catalogRow, evidence = '') {
   if (scaled < 100 || scaled > 1999) return false;
   const base = Number(catalogRow?.base_price);
-  return Number.isFinite(base) && base >= 100 && Math.abs(scaled - base) <= base * 0.30;
+  if (!Number.isFinite(base) || base < 100) return false;
+  if (Math.abs(scaled - base) <= 1) return true;
+  return /\bhundred\b/i.test(String(evidence || '')) && Math.abs(scaled - base) <= base * 0.30;
 }
 
 function isFinalAcceptedStaffSttQuote(v2Extraction, entry) {
@@ -1040,6 +1048,7 @@ function isFinalAcceptedStaffSttQuote(v2Extraction, entry) {
     && entry.stated_by === 'agent'
     && entry.caller_response === 'accepted'
     && entry.amount_max_usd == null
+    && entry.unit !== 'per_application'
     && !isPlanRateV2Price(entry));
 }
 
@@ -1068,7 +1077,8 @@ function evidenceQuoteConfirmsRawAmount(evidence, raw, scaled) {
 
 // Recover STT hundred-dollar decimal mishears ("$2.50" -> $250, "$3.50" -> $350)
 // ONLY when scalar, structured entry, and evidence agree for ONE final accepted
-// staff quote tied to a FIXED catalog row within ±30% range (or explicit hundred-dollar wording).
+// staff quote tied to a FIXED catalog row (exact catalog list match, or ±30%
+// when spoken "hundred" wording confirms scale).
 function recoverSttDecimalCallPrice({ quotedPrice, catalogRow, v2Extraction = null } = {}) {
   if (!catalogRow || catalogRow.billing_type !== 'one_time' || catalogRow.pricing_type !== 'fixed') return null;
   const sr = v2Extraction ? v2Extraction.service_request : null;
@@ -1083,7 +1093,7 @@ function recoverSttDecimalCallPrice({ quotedPrice, catalogRow, v2Extraction = nu
   if (STT_CLOCK_WORD_RE.test(`${evidence} ${String(rawSource)}`)) return null;
   if (!hasExplicitCurrencyEvidence(rawSource, evidence)) return null;
   const scaled = Math.round(raw * 100);
-  if (!withinCatalogHundredRange(scaled, catalogRow)) return null;
+  if (!withinCatalogHundredRange(scaled, catalogRow, evidence)) return null;
   return evidenceQuoteConfirmsRawAmount(evidence, raw, scaled) ? scaled : null;
 }
 

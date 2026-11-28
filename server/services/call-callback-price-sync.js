@@ -37,15 +37,19 @@ const { statesNewAddress } = require('./call-triage-flags');
 const CALLBACK_PRICE_WINDOW_MS = 60 * 60 * 1000;
 const CALL_BOOKED_SOURCE_ACTIONS = new Set(['ai_call_pipeline', 'ai_call_pipeline_followup']);
 const BOOKING_ATTEMPT_STATUSES = new Set(['confirmed', 'requested', 'offered', 'reschedule_requested', 'ambiguous']);
-const EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE = /\b(?:price|quote|rate|total|cost|payment)\s+(?:for|on|of)\s+(?:the|that|my|our|earlier|this)\s+(?:visit|appointment|booking|service)\b|\bconfirm(?:ing)?\s+(?:the\s+)?(?:\$?\d[\d,.]*\s+)?(?:price|quote|total)\s+(?:for|on|of)\s+(?:that|the|today'?s|earlier)\s+(?:visit|appointment|booking|service)\b|\bearlier\s+(?:visit|appointment|booking)\b/i;
+const EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE = /\b(?:price|quote|rate|total|cost|payment)\s+(?:for|on|of)\s+(?:the|that|my|our|earlier|this)\s+(?:visit|appointment|booking|service)\b|\bconfirm(?:ing)?\s+(?:the\s+)?(?:\$?\d[\d,.]*\s+)?(?:price|quote|total)\s+(?:for|on|of)\s+(?:that|the|today'?s|earlier)\s+(?:visit|appointment|booking|service)\b|\b(?:price|quote|rate|total|cost|payment|confirm(?:ing)?|agreed|pay(?:ing)?)\b[^.!?\n]{0,35}\bearlier\s+(?:visit|appointment|booking|service)\b|\bearlier\s+(?:visit|appointment|booking|service)\b[^.!?\n]{0,35}\b(?:price|quote|rate|total|cost|payment|confirm(?:ing)?|agreed)\b/i;
 
 const CATEGORY_KEY_PATTERNS = {
   pest_general: /pest|cockroach|ant|spider|silverfish/i,
   general_pest: /pest|cockroach|ant|spider|silverfish/i,
-  rodent: /rodent|rat|mice|mouse|trapping/i,
+  rodent: /rodent|rat|mice|mouse/i,
   wdo: /wdo|wood_destroying/i,
   termite: /termite/i,
   mosquito: /mosquito/i,
+  stinging_insect: /bee|wasp|hornet|yellow\s*jacket|stinging/i,
+  bed_bug: /bed[\s_-]?bug/i,
+  palm_injection: /palm/i,
+  exclusion: /exclusion/i,
   lawn_care: /lawn|turf|ornamental|tree/i,
   lawn: /lawn|turf|ornamental|tree/i,
   wildlife: /wildlife|trapping|exclusion/i,
@@ -64,6 +68,7 @@ function isSingleAcceptedStaffOneTimeEntry(v2Extraction) {
   return entry.stated_by === 'agent'
     && entry.caller_response === 'accepted'
     && entry.amount_max_usd == null
+    && entry.unit !== 'per_application'
     && !isPlanRateV2Price(entry);
 }
 
@@ -71,7 +76,7 @@ function extractConfirmedCallbackOneTimePrice(v2Extraction) {
   if (!isSingleAcceptedStaffOneTimeEntry(v2Extraction)) return null;
   const agreed = resolveCallAgreedPrice(v2Extraction);
   if (!agreed || agreed.additionalTerms || agreed.amountMax != null) return null;
-  if (['per_month', 'per_quarter', 'per_year'].includes(agreed.unit)) return null;
+  if (['per_month', 'per_quarter', 'per_year', 'per_application'].includes(agreed.unit)) return null;
   if (agreed.amount < 20 || agreed.amount > 20000) return null;
   return Math.round(agreed.amount * 100) / 100;
 }
@@ -83,9 +88,9 @@ function visitEffectiveAddressShape(visitRow, fallbackCustomer) {
       hasAddress: true,
       addressLine1: line1,
       addressLine2: visitRow.service_address_line2 || visitRow.prop_line2 || null,
-      city: visitRow.service_address_city || visitRow.prop_city || null,
-      state: visitRow.prop_state || fallbackCustomer?.state || null,
-      zip: visitRow.service_address_zip || visitRow.prop_zip || null,
+      addressCity: visitRow.service_address_city || visitRow.prop_city || null,
+      addressState: visitRow.prop_state || fallbackCustomer?.state || null,
+      addressZip: visitRow.service_address_zip || visitRow.prop_zip || null,
     };
   }
   if (!fallbackCustomer) return null;
@@ -93,9 +98,9 @@ function visitEffectiveAddressShape(visitRow, fallbackCustomer) {
     hasAddress: Boolean(String(fallbackCustomer.address_line1 || '').trim()),
     addressLine1: fallbackCustomer.address_line1,
     addressLine2: fallbackCustomer.address_line2,
-    city: fallbackCustomer.city,
-    state: fallbackCustomer.state,
-    zip: fallbackCustomer.zip,
+    addressCity: fallbackCustomer.city,
+    addressState: fallbackCustomer.state,
+    addressZip: fallbackCustomer.zip,
   };
 }
 
