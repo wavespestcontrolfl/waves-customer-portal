@@ -183,6 +183,7 @@ function drawServiceReportProductRow(doc, p, index, compliance, { L, R, W, y, ad
 }
 
 function drawServiceReportRecommendations(doc, recommendations, { L, W, y, addContinuationPage }) {
+  if (!recommendations || !recommendations.length) return y;
   doc.fontSize(8.5).font('Helvetica');
   const measuredRecs = recommendations.map((rec) => {
     const text = `  \u2022  ${rec}`;
@@ -190,8 +191,10 @@ function drawServiceReportRecommendations(doc, recommendations, { L, W, y, addCo
     return { text, h };
   });
   const recBoxH = 10 + measuredRecs.reduce((sum, item) => sum + item.h, 0);
+  const fitsSinglePage = recBoxH + 28 <= 710 - 64;
   let curY = y;
-  if (curY + recBoxH + 28 > 710) curY = addContinuationPage();
+  if (fitsSinglePage && curY + recBoxH + 28 > 710) curY = addContinuationPage();
+  else if (!fitsSinglePage && curY + 28 + measuredRecs[0].h > 710) curY = addContinuationPage();
   curY = sectionHeader(doc, 'What We Recommend', L, curY);
   if (curY + recBoxH <= 710) {
     doc.save();

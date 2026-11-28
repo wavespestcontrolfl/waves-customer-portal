@@ -162,11 +162,12 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     }
   });
 
-  test('prep-guide-pdf paginates long paragraphs cleanly without triggering automatic PDFKit page breaks and preserves newlines', async () => {
+  test('prep-guide-pdf paginates long paragraphs and oversized unbroken tokens cleanly without PDFKit auto-breaks', async () => {
     const longParagraph = [
       Array.from({ length: 120 }, (_, i) => `Step ${i + 1}: clear baseboards, closets, and pet bowls before your Waves technician arrives.`).join(' '),
       '',
       'Section 2 instruction on its own line.',
+      `https://portal.wavespestcontrol.com/prep/${'a'.repeat(5000)}`,
       Array.from({ length: 120 }, (_, i) => `Aftercare ${i + 1}: allow treated surfaces to dry completely before pets re-enter.`).join(' '),
     ].join('\n');
     const addPageStacks = [];
@@ -220,9 +221,10 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     }
     expect(buf.slice(0, 5).toString()).toBe('%PDF-');
     const parsed = await PDFDocument.load(buf);
-    expect(parsed.getPageCount()).toBeGreaterThanOrEqual(3);
-    expect(heightCalls).toBeLessThan(120);
+    expect(parsed.getPageCount()).toBeGreaterThanOrEqual(4);
+    expect(heightCalls).toBeLessThan(180);
     expect(printedTexts).toContain('Section 2 instruction on its own line.');
+    expect(printedTexts.some((t) => t.startsWith('https://portal.wavespestcontrol.com/prep/aaa'))).toBe(true);
     // Page 1 is created in PDFDocument constructor; every subsequent page must
     // come from prep-guide-pdf.js (never from PDFKit internal auto-pagination).
     const continuationCalls = addPageStacks.slice(1);
@@ -251,13 +253,16 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     const sdDoc = await PDFDocument.load(sdBuf);
     expect(sdDoc.getPageCount()).toBeGreaterThanOrEqual(2);
 
+    const longDamage = Array.from({ length: 120 }, (_, i) => `Damage item ${i + 1} along subfloor joist segment with frass accumulation;`).join(' ');
     const wdoBuf = await buildWdoReportPDFBuffer({
       project: {
         id: 'proj-1',
         inspection_date: '2026-11-20',
         findings: {
           inspection_date: '2026-11-20',
-          comments: Array.from({ length: 45 }, (_, i) => `Detailed inspection observation #${i + 1} along the exterior foundation perimeter.`).join(' '),
+          property_address: '12345 Very Long Southwest Florida Waterfront Boulevard Building North Unit 402, Bradenton, FL 34205',
+          wdo_damage: longDamage,
+          comments: longDamage,
         },
       },
       customer: {
@@ -271,6 +276,6 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     });
     expect(wdoBuf.slice(0, 5).toString()).toBe('%PDF-');
     const wdoDoc = await PDFDocument.load(wdoBuf);
-    expect(wdoDoc.getPageCount()).toBeGreaterThanOrEqual(2);
+    expect(wdoDoc.getPageCount()).toBeGreaterThanOrEqual(3);
   });
 });

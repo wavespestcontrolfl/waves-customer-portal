@@ -111,6 +111,30 @@ function findFittingTokenEnd(doc, tokens, start, maxH, setBodyFont) {
   return best;
 }
 
+function findFittingCharEnd(doc, text, maxH, setBodyFont) {
+  let lo = 1;
+  let hi = text.length;
+  let best = 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    setBodyFont();
+    const h = Math.ceil(doc.heightOfString(text.slice(0, mid), { width: W, lineGap: 2 }));
+    if (h <= maxH) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+function advancePrepPage(doc) {
+  footer(doc);
+  doc.addPage();
+  drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
+}
+
 function drawChunkedHardLine(doc, line, setBodyFont) {
   if (!line.trim()) {
     ensureRoom(doc, 14);
@@ -128,22 +152,25 @@ function drawChunkedHardLine(doc, line, setBodyFont) {
       setBodyFont().fillColor(BODY).text(restText, L, doc.y, { width: W, lineGap: 2 });
       break;
     }
-    const firstH = Math.ceil(doc.heightOfString(tokens[idx].trimEnd(), { width: W, lineGap: 2 }));
-    if (firstH > availH && doc.y > 72) {
-      footer(doc);
-      doc.addPage();
-      drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
+    const firstTok = tokens[idx].trimEnd();
+    const firstH = Math.ceil(doc.heightOfString(firstTok, { width: W, lineGap: 2 }));
+    if (firstH > availH) {
+      if (doc.y > 72) {
+        advancePrepPage(doc);
+        continue;
+      }
+      const splitAt = findFittingCharEnd(doc, firstTok, availH, setBodyFont);
+      setBodyFont().fillColor(BODY).text(firstTok.slice(0, splitAt), L, doc.y, { width: W, lineGap: 2 });
+      tokens[idx] = firstTok.slice(splitAt) + tokens[idx].slice(firstTok.length);
+      if (!tokens[idx].trim()) idx += 1;
+      if (idx < tokens.length) advancePrepPage(doc);
       continue;
     }
     const end = findFittingTokenEnd(doc, tokens, idx, availH, setBodyFont);
     const chunkText = tokens.slice(idx, end).join('').trimEnd();
     setBodyFont().fillColor(BODY).text(chunkText, L, doc.y, { width: W, lineGap: 2 });
     idx = end;
-    if (idx < tokens.length) {
-      footer(doc);
-      doc.addPage();
-      drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
-    }
+    if (idx < tokens.length) advancePrepPage(doc);
   }
 }
 
