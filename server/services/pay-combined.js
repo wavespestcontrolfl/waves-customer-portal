@@ -595,8 +595,10 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
   // caller has finished its Stripe PI decision. One blocked sibling refuses
   // the whole combined amount.
   const { assertInvoiceDepositSettlementReady } = require('./estimate-deposits');
+  const { assertPlanChoiceCounterpartPayable } = require('./pay-plan-choice');
   for (const row of rows) {
     await assertInvoiceDepositSettlementReady(trx, row);
+    await assertPlanChoiceCounterpartPayable(trx, row, { inspectStripe: true });
   }
   return rows;
 }

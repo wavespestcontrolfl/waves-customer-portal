@@ -713,15 +713,23 @@ async function setLineForScalarWrite(database, customerId, { familyKey, previous
 }
 
 async function capturePrepayPriorRateSnapshot(database, {
-  customerId, effectiveCustomer, estimateData, billingTerm, suppressRecurringConversion, groupedEstimateAccept,
+  customerId, effectiveCustomer, createdCustomerId = null, estimateData, billingTerm, suppressRecurringConversion, groupedEstimateAccept,
 } = {}) {
   if (billingTerm !== 'prepay_annual' || suppressRecurringConversion || groupedEstimateAccept || !customerId) {
     return null;
   }
   if (estimateData?.prepayPriorRateSnapshot) return null;
-  const priorMonthlyRate = effectiveCustomer?.monthly_rate != null
+  // On a newly created customer, convertEstimate may have already stamped the
+  // quoted monthly_rate before this snapshot runs; keep priorMonthlyRate null
+  // so canceling prepay clears it back to no prior plan rather than retaining
+  // the canceled estimate's rate (Codex pre-push P0).
+  const isNewCustomer = createdCustomerId != null && String(createdCustomerId) === String(customerId);
+  const priorMonthlyRate = !isNewCustomer && effectiveCustomer?.monthly_rate != null
     ? roundMoney(effectiveCustomer.monthly_rate)
     : null;
+  if (isNewCustomer) {
+    return { customerId: String(customerId), priorMonthlyRate: null, priorComponents: [] };
+  }
   const read = (q) => loadComponents(q, customerId, { strictProbe: true, includeMeta: true });
   const rows = database?.isTransaction === true ? await database.transaction(read) : await read(database);
   const priorComponents = (rows || []).map((row) => ({
@@ -765,7 +773,10 @@ async function restoreLedgerComponentsOnPrepayCancel(database, customerId, sourc
   const deletedCount = await database('customer_plan_rates')
     .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
     .del();
-  if (Array.isArray(priorComponents) && priorComponents.length > 0) {
+  // Only restore prior non-estimate components if this accept still owned rows
+  // that we just removed; if deletedCount === 0 a later manual rate edit or
+  // reset already replaced the ledger and reinserting old rows would double-bill.
+  if (Number(deletedCount) > 0 && Array.isArray(priorComponents) && priorComponents.length > 0) {
     const surviving = await database('customer_plan_rates')
       .where({ customer_id: customerId })
       .select('family_key');

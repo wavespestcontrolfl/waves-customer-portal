@@ -891,14 +891,18 @@ function propertyIdFromCandidateRows(term, rows) {
 
 async function nonSuccessorTermPropertyId(term, conn, rows = null) {
   if (term?.property_id != null) return String(term.property_id);
-  const fromRows = propertyIdFromCandidateRows(term, rows);
-  if (fromRows) return fromRows;
   const rowsCarryProperty = rows === null || (Array.isArray(rows) && rows.some((r) => r?.property_id != null));
-  if (!rowsCarryProperty || typeof conn !== 'function') return null;
-  if (term?.source_estimate_id != null) {
+  // Prefer the accepted estimate's explicit property BEFORE reading
+  // visit-derived stamps so a stale visit stamp at another property never
+  // overrides the estimate's own property (Codex pre-push P0). Skip querying
+  // estimates only when candidate rows carry no property_id fields at all.
+  if (rowsCarryProperty && term?.source_estimate_id != null && typeof conn === 'function') {
     const est = await conn('estimates').where({ id: term.source_estimate_id }).first('property_id');
     if (est?.property_id != null) return String(est.property_id);
   }
+  const fromRows = propertyIdFromCandidateRows(term, rows);
+  if (fromRows) return fromRows;
+  if (!rowsCarryProperty || typeof conn !== 'function') return null;
   if (Array.isArray(rows) && term?.id != null && term?.customer_id != null) {
     const distinctRowProps = new Set(rows.filter((r) => r?.property_id != null).map((r) => String(r.property_id)));
     if (distinctRowProps.size > 1) {
@@ -4982,6 +4986,33 @@ async function successorLineageLabel(row, customerId, conn) {
 // visit inside the successor's own plan scope (the same
 // successorCoverageScope/rowInRenewalScope selection applied it) — an
 // unresolved lineage never suppresses.
+async function independentTermSeriesRoots(term, scheduledService, conn) {
+  const roots = new Set();
+  if (term?.series_root_id != null) roots.add(String(term.series_root_id));
+  if (term?.recurring_parent_id != null) roots.add(String(term.recurring_parent_id));
+  if (roots.size > 0 || typeof conn !== 'function' || !term?.customer_id) return roots;
+  if (term?.id == null && term?.source_estimate_id == null && term?.installation_anchor_visit_id == null) return roots;
+  const linked = await conn('scheduled_services as term_series_links')
+    .where({ customer_id: term.customer_id })
+    .whereNot({ id: scheduledService.id })
+    .where((q) => {
+      let hasClause = false;
+      const addOr = (fn) => {
+        if (hasClause) q.orWhere(fn);
+        else { hasClause = true; q.where(fn); }
+      };
+      if (term?.id != null) addOr((sub) => sub.where('annual_prepay_term_id', term.id));
+      if (term?.source_estimate_id != null) addOr((sub) => sub.where('source_estimate_id', term.source_estimate_id));
+      if (term?.installation_anchor_visit_id != null) addOr((sub) => sub.where('id', term.installation_anchor_visit_id));
+    })
+    .select('id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+  for (const row of (linked || [])) {
+    const root = rowSeriesRootId(row);
+    if (root) roots.add(root);
+  }
+  return roots;
+}
+
 async function stampedRowInNonSuccessorScope(term, scheduledService, conn) {
   const rowEstimate = scheduledService?.source_estimate_id == null ? null : String(scheduledService.source_estimate_id);
   const termEstimate = term?.source_estimate_id == null ? null : String(term.source_estimate_id);
@@ -4991,7 +5022,7 @@ async function stampedRowInNonSuccessorScope(term, scheduledService, conn) {
     const termProperty = await nonSuccessorTermPropertyId(term, conn, null);
     if (termProperty && rowProperty !== termProperty) return false;
   }
-  const owningRoots = await nonSuccessorSeriesRoots(term, conn, [scheduledService]);
+  const owningRoots = await independentTermSeriesRoots(term, scheduledService, conn);
   const rowRoot = rowSeriesRootId(scheduledService);
   if (owningRoots.size > 0 && rowRoot && !owningRoots.has(rowRoot)) return false;
   return true;

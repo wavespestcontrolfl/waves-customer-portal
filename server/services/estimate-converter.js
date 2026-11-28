@@ -6151,7 +6151,7 @@ const EstimateConverter = {
       });
     }
     const prepayPriorRateSnapshot = await require('./plan-rate-ledger').capturePrepayPriorRateSnapshot(database, {
-      customerId, effectiveCustomer, estimateData, billingTerm, suppressRecurringConversion, groupedEstimateAccept,
+      customerId, effectiveCustomer, createdCustomerId, estimateData, billingTerm, suppressRecurringConversion, groupedEstimateAccept,
     });
     if (!suppressRecurringConversion && !groupedEstimateAccept) {
       ({ ledgerScalar, ledgerAdvisoryScalar, planRateReviewNeeded } = await applyPlanRateLedgerForAccept(database, {

@@ -932,7 +932,7 @@ async function assertNoExistingPlanForPrepay(trx, ctx, estimate) {
       && linkedCustomer != null
       && String(linkedCustomer.id) === createdCustomerId
       && linkedCustomer.billing_mode == null;
-    livePreservesMembership = !mintedByThisAccept && Boolean(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
+    livePreservesMembership = !mintedByThisAccept && Boolean(linkedCustomer && customerHasActiveMonthlyMembership(linkedCustomer));
     hasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null, ctx.bookedAppointmentIds);
   }
   if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || livePreservesMembership || hasLivePlan) {

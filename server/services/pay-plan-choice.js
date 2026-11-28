@@ -105,7 +105,7 @@ async function loadPlanChoiceCounterparts(invoice, conn = db) {
     const rows = await conn('invoices')
       .where({ customer_id: invoice.customer_id, invoice_number: namedFirst })
       .whereNot({ id: invoice.id })
-      .select('id', 'invoice_number', 'status', 'paid_at', 'stripe_payment_intent_id', 'notes');
+      .select('id', 'invoice_number', 'status', 'paid_at', 'credit_applied', 'amount_paid', 'stripe_payment_intent_id', 'notes');
     return (rows || []).map((row) => ({ ...row, role: 'first' }));
   }
   if (!invoice.annual_prepay_term_id && invoice.invoice_number && acceptMintEstimateId(invoice.notes)) {
@@ -115,7 +115,7 @@ async function loadPlanChoiceCounterparts(invoice, conn = db) {
       .whereNot({ id: invoice.id })
       .whereNotNull('annual_prepay_term_id')
       .where('notes', 'like', `%${noteNeedle}%`)
-      .select('id', 'invoice_number', 'status', 'paid_at', 'stripe_payment_intent_id', 'notes');
+      .select('id', 'invoice_number', 'status', 'paid_at', 'credit_applied', 'amount_paid', 'stripe_payment_intent_id', 'notes');
     return (rows || [])
       .filter((row) => prepayNoteNamesInvoice(row.notes, invoice.invoice_number))
       .map((row) => ({ ...row, role: 'prepay' }));
@@ -170,8 +170,11 @@ async function planChoiceCounterpartConflict(invoice, { conn = db, inspectStripe
   for (const cp of counterparts) {
     const status = String(cp.status || '').toLowerCase();
     if (COUNTERPART_DEAD_STATUSES.has(status)) continue;
-    if (cp.paid_at || COUNTERPART_SETTLED_STATUSES.has(status)) {
-      const effectiveStatus = COUNTERPART_SETTLED_STATUSES.has(status) ? status : 'paid';
+    if (cp.paid_at || COUNTERPART_SETTLED_STATUSES.has(status)
+      || Number(cp.credit_applied || 0) > 0 || Number(cp.amount_paid || 0) > 0) {
+      const effectiveStatus = COUNTERPART_SETTLED_STATUSES.has(status)
+        ? status
+        : (Number(cp.credit_applied || 0) > 0 && !cp.paid_at && !(Number(cp.amount_paid || 0) > 0) ? 'credited' : 'paid');
       return { role: cp.role, invoiceId: cp.id, invoiceNumber: cp.invoice_number, status: effectiveStatus, inProgress: effectiveStatus === 'processing' };
     }
     const paymentStatus = await counterpartHasLivePaymentRow(cp.id, conn);
