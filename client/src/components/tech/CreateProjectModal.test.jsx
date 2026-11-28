@@ -661,6 +661,97 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     expect(invoiceCalls).toHaveLength(2); // one preview + one real send, no retry send
   });
 
+  // GATE_WDO_REPORT_HOLD (owner 2026-11-28): the sign step offers the same "Invoice now, report
+  // after payment" choice as the Reports page drawer, only when the server offers the hold.
+  function stubHoldSend({ reportHeld = true, emailUncertain = false } = {}) {
+    const baseFetch = fetch;
+    let prepared = false;
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (String(url).includes('/admin/projects/p-1/send-with-invoice')) {
+        const body = JSON.parse(opts.body || '{}');
+        if (body.prepare_invoice) {
+          prepared = true;
+          return jsonResponse({ invoice: { id: 'inv-1' } });
+        }
+        if (body.dry_run) {
+          return jsonResponse({
+            invoice: prepared ? { id: 'inv-1', total: 175, billing_fingerprint: 'fp-1' } : { id: null, total: 175, created: true },
+            email_routing: { recipient: 'jess@example.com' },
+            report_hold_release: { recipient: 'jess@example.com', copies: [] },
+          });
+        }
+        return jsonResponse({
+          sent: true,
+          report_held: reportHeld,
+          channels: { email: emailUncertain ? { ok: false, uncertain: true } : { ok: true } },
+          invoice: { id: 'inv-1', invoice_number: 'INV-2001' },
+        });
+      }
+      return baseFetch(url, opts);
+    }));
+  }
+
+  it('hides the hold choice when the server does not offer it', async () => {
+    await saveIntoSignStep({ onCreated: vi.fn() });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    await screen.findByRole('button', { name: 'Send invoice & report' });
+    expect(screen.queryByRole('button', { name: 'Invoice now, report after payment' })).toBeNull();
+  });
+
+  it('sends the invoice with the report held until paid, then closes the service', async () => {
+    detailPayload.report_payment_hold_available = true;
+    stubHoldSend();
+    const onCreated = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose: vi.fn() });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Invoice now, report after payment' }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'closed' }),
+      expect.objectContaining({ completed: true, invoice: expect.objectContaining({ id: 'inv-1' }) }),
+    ));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('hold the WDO report until it is paid'));
+    const bodies = fetch.mock.calls
+      .filter(([url]) => String(url).includes('/send-with-invoice'))
+      .map(([, opts]) => JSON.parse(opts.body || '{}'));
+    // Every leg carries the hold intent; the draft is prepared before the confirmed preview.
+    expect(bodies.every((b) => b.hold_report_until_paid === true)).toBe(true);
+    expect(bodies.some((b) => b.prepare_invoice)).toBe(true);
+    const realSend = bodies.find((b) => !b.dry_run && !b.prepare_invoice);
+    expect(realSend).toEqual({ invoice_id: 'inv-1', hold_report_until_paid: true, expected_billing_fingerprint: 'fp-1' });
+  });
+
+  it('stops before closeout when the server does not confirm the hold', async () => {
+    detailPayload.report_payment_hold_available = true;
+    stubHoldSend({ reportHeld: false });
+    const onCreated = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose: vi.fn() });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Invoice now, report after payment' }));
+
+    await screen.findByText(/hold was not confirmed/);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/admin/projects/p-1/close'))).toBe(false);
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  it('stops before closeout on an unknown invoice email outcome and offers no second send', async () => {
+    detailPayload.report_payment_hold_available = true;
+    stubHoldSend({ emailUncertain: true });
+    const onCreated = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose: vi.fn() });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Invoice now, report after payment' }));
+
+    await screen.findByText(/invoice email outcome is unknown/);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/admin/projects/p-1/close'))).toBe(false);
+    expect(onCreated).not.toHaveBeenCalled();
+    // No button left that would email the invoice again, send the held report early, or retry a refused closeout.
+    expect(screen.queryByRole('button', { name: 'Invoice now, report after payment' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send invoice & report' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Finish service' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save for later' })).toBeTruthy();
+  });
+
   it('accepts immediate report delivery when account credit fully covers the invoice', async () => {
     const baseFetch = fetch;
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {

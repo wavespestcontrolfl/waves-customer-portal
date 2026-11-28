@@ -231,6 +231,10 @@ test('bindingQuote: the list must be newest first with a stamp on every order, o
   expect(await quote([older, newer])).toBeNull(); // oldest first: the first match would be the OLD order
   expect(await quote([newer, { ...older, placedAt: undefined }])).toBeNull();
   expect(await quote([{ ...newer, placedAt: 'not a date' }, older])).toBeNull();
+  // Even when the list is out of order or undated, an open/uncounted order on the page is still surfaced.
+  const coming = order('R3', '2026-09-15T00:00:00Z', 140, [line()], { state: 'in_production', shipmentState: null, deliveredAt: null });
+  expect(await quote([older, coming])).toEqual({ cents: null, source: null, outstanding: { number: 'R3', why: 'coming' } });
+  expect(await quote([{ ...coming, placedAt: undefined }, older])).toEqual({ cents: null, source: null, outstanding: { number: 'R3', why: 'coming' } });
 });
 
 test('bindingQuote: a tie for latest with different totals refuses; the same total binds', async () => {
@@ -483,6 +487,17 @@ test('the last read before the POST: an order placed since the request was raise
   // Canceled in one only: not trusted, refused.
   const canceledNew = (listState, detailState) => ({ ...happy(), 'GET /api/orders': { orders: [{ number: 'SM-NEW', placedAt: '2026-11-26T15:00:00Z', state: listState }], canLoadMore: false }, 'GET /api/orders/SM-NEW': { number: 'SM-NEW', state: detailState, items: [line('4242', 1000)] } });
   f = fakeFetch(canceledNew('canceled', 'canceled'));
+  // A delivered post-request order already proven in the physical stock count (countedDelivery) is skipped too.
+  const deliveredNew = {
+    ...happy(),
+    'GET /api/orders': { orders: [{ number: 'SM-DEL', placedAt: '2026-11-26T15:00:00Z', state: 'complete', shipmentState: 'delivered', paymentState: 'paid', deliveredAt: '2026-11-27T10:00:00Z' }], canLoadMore: false },
+    'GET /api/orders/SM-DEL': { number: 'SM-DEL', state: 'complete', shipmentState: 'delivered', paymentState: 'paid', deliveredAt: '2026-11-27T10:00:00Z', items: [line('4242', 500)] },
+  };
+  const countedFetch = fakeFetch(deliveredNew);
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z', countedAt: '2026-11-27T18:00:00.000Z', receivedOrders: [] }, { fetchImpl: countedFetch.fetchImpl })).resolves.toMatchObject({ externalOrderNumber: 'SM-90001' });
+  // Without a later count (or receipt), the same delivered post-request order still refuses.
+  const uncountedFetch = fakeFetch(deliveredNew);
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z', countedAt: '2026-11-26T00:00:00.000Z', receivedOrders: [] }, { fetchImpl: uncountedFetch.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new', evidence: { outstandingOrder: { number: 'SM-DEL', why: 'since' } } });
   await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).resolves.toMatchObject({ externalOrderNumber: 'SM-90001' });
   for (const [l, d] of [['canceled', 'in_production'], ['in_production', 'canceled']]) {
     f = fakeFetch(canceledNew(l, d));

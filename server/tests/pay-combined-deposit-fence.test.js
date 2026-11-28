@@ -10,6 +10,9 @@ jest.mock('../services/stripe', () => ({
 jest.mock('../services/estimate-deposits', () => ({
   assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
 }));
+jest.mock('../services/invoice-promo-code', () => ({
+  assertNoPendingPromoCode: jest.fn(async () => {}),
+}));
 
 const { verifyAllocationLocked } = require('../services/pay-combined');
 const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');

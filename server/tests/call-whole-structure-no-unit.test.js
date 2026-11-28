@@ -317,9 +317,9 @@ describe('waiver wiring', () => {
   });
 
   test('no gate-specific decision version: the base version stays, the write chokepoint refreshes (main #5371)', () => {
-    expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
+    expect(V2_DECISION_VERSION).toBe('v2-1.51.0');
     const args = { callLogId: 'c1', extraction: {}, finalTriageFlags: [], routingResult: { allowed: true }, action: 'x' };
-    expect(buildRouteDecision(args).decision_version).toBe('v2-1.50.0');
+    expect(buildRouteDecision(args).decision_version).toBe('v2-1.51.0');
     expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
     expect(V2_DECISION_VERSIONS.some((v) => v.includes('+'))).toBe(false);
   });

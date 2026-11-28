@@ -104,31 +104,38 @@ async function classifyEmail(email) {
     const result = await classifyEmailContent(email);
     if (!result) return null;
 
+    // Validate model output BEFORE persisting or running auto-actions so an
+    // off-vocabulary category or malformed confidence (including booleans like
+    // true where Number(true)===1) never lands in DB or drives auto-actions.
+    const validCategory = typeof result.category === 'string' && EMAIL_CATEGORIES.includes(result.category);
+    const validConfidence = typeof result.confidence === 'number'
+      && Number.isFinite(result.confidence)
+      && result.confidence >= 0
+      && result.confidence <= 1;
+    if (!validCategory || !validConfidence) {
+      logger.warn(`[email-classifier] ${email.id}: rejected ${validCategory ? result.category : 'invalid_category'} (${validConfidence ? result.confidence : 'invalid_confidence'})`);
+      return null;
+    }
+    const validated = {
+      ...result,
+      category: result.category,
+      confidence: result.confidence,
+    };
+
     // Update email record
     await db('emails').where({ id: email.id }).update({
-      classification: result.category,
-      classification_confidence: result.confidence,
-      extracted_data: JSON.stringify(result),
+      classification: validated.category,
+      classification_confidence: validated.confidence,
+      extracted_data: JSON.stringify(validated),
       updated_at: new Date(),
     });
 
     // Execute auto-actions
     const { executeAutoAction } = require('./email-actions');
-    await executeAutoAction(email, result);
+    await executeAutoAction(email, validated);
 
-    // Category + confidence only, and only from the fixed vocabulary — both
-    // fields are model output, so an off-vocabulary value is logged as a
-    // sentinel rather than echoed (a malformed-but-valid JSON response could
-    // otherwise put the customer's name/email into either field). The model
-    // summary stays out entirely: it restates the customer's email and
-    // belongs in the DB row, not the logs.
-    const loggedCategory = EMAIL_CATEGORIES.includes(result.category) ? result.category : 'invalid_category';
-    const numericConfidence = Number(result.confidence);
-    const loggedConfidence = Number.isFinite(numericConfidence) && numericConfidence >= 0 && numericConfidence <= 1
-      ? numericConfidence
-      : 'invalid';
-    logger.info(`[email-classifier] ${email.id}: ${loggedCategory} (${loggedConfidence})`);
-    return result;
+    logger.info(`[email-classifier] ${email.id}: ${validated.category} (${validated.confidence})`);
+    return validated;
   } catch (err) {
     logger.error(`[email-classifier] Failed for ${email.id}: ${err.message}`);
     return null;

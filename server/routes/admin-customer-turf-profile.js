@@ -70,19 +70,26 @@ const showsBermudaRemoval = (req) => featureGates.lawnBermudaRemovalLive?.() ===
 const { OTHER_GRASSES, normalizeOtherGrasses } = require('../services/estimate-lawn-limits');
 const LAWN_LIMIT_COLUMNS = ['other_grasses', 'virus_streaks_suspected'];
 const lawnLimitsLive = () => featureGates.estimateLawnLimitsLive?.() === true;
+// Office-only estimate-photo flags: a technician never sees or edits them.
+const showsLawnLimits = (req) => lawnLimitsLive() && req.techRole === 'admin';
 function profileForResponse(profile, req) {
   if (!profile) return profile;
   const hideBermuda = !showsBermudaRemoval(req);
-  const hideLawnLimits = !lawnLimitsLive();
+  const hideLawnLimits = !showsLawnLimits(req);
   if (!hideBermuda && !hideLawnLimits) return profile;
   return Object.fromEntries(Object.entries(profile).filter(([key]) => !(
     (hideBermuda && BERMUDA_COLUMNS.includes(key)) || (hideLawnLimits && LAWN_LIMIT_COLUMNS.includes(key))
   )));
 }
 
-function pickProfileFields(body) {
+function pickProfileFields(body, req = {}) {
   const out = {};
-  const columns = lawnLimitsLive() ? [...PROFILE_COLUMNS, ...LAWN_LIMIT_COLUMNS] : PROFILE_COLUMNS;
+  // lawn_sqft mirrors onto price-bearing customers.property_sqft, so only
+  // non-technician (admin) writes may modify it.
+  const baseColumns = req.techRole === 'technician'
+    ? PROFILE_COLUMNS.filter((c) => c !== 'lawn_sqft')
+    : PROFILE_COLUMNS;
+  const columns = showsLawnLimits(req) ? [...baseColumns, ...LAWN_LIMIT_COLUMNS] : baseColumns;
   for (const k of columns) {
     if (Object.prototype.hasOwnProperty.call(body, k)) out[k] = body[k];
   }
@@ -194,8 +201,10 @@ router.get('/:customerId/turf-profile', async (req, res, next) => {
       lawn_v13_no_program: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, customer.lawn_type),
       // Gate on and an admin only: tells the editor to show the bermuda removal switch.
       ...(showsBermudaRemoval(req) ? { bermudaRemovalAvailable: true } : {}),
-      // GATE_ESTIMATE_LAWN_LIMITS live: tells the editor to show the two lawn-limit flags.
-      ...(lawnLimitsLive() ? { lawnLimitsAvailable: true, otherGrassOptions: OTHER_GRASSES } : {}),
+      // GATE_ESTIMATE_LAWN_LIMITS live (admins only): tells the editor to show the two lawn-limit flags.
+      ...(showsLawnLimits(req) ? { lawnLimitsAvailable: true, otherGrassOptions: OTHER_GRASSES } : {}),
+      // Technicians cannot alter price-bearing lawn_sqft; tell the editor to render it read-only.
+      ...(req.techRole === 'technician' ? { lawnSqftReadOnly: true } : {}),
     });
   } catch (err) {
     next(err);
@@ -216,7 +225,7 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).first('id', 'deleted_at');
     if (!customer || customer.deleted_at) return res.status(404).json({ error: 'Customer not found' });
 
-    const fields = pickProfileFields(req.body || {});
+    const fields = pickProfileFields(req.body || {}, req);
     const errors = validateProfile(fields);
     if (errors.length) return res.status(400).json({ error: 'Invalid payload', details: errors });
     // Stored as a clean ordered list; an empty list is stored as NULL (nothing flagged).

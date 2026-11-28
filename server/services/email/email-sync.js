@@ -16,6 +16,29 @@ let SYNC_IN_FLIGHT = null;
 const MESSAGE_RETRY_RUNS = 15;
 const messageFailures = new Map();
 const passedMessages = new Set();
+// Per-email background classification guard: prevents overlapping sync runs
+// from firing duplicate paid classifier calls for the same row and bounds
+// retry attempts after repeated failures.
+const MAX_CLASSIFY_RETRIES = 3;
+const classifyingEmailIds = new Set();
+const classifyAttempts = new Map();
+function scheduleBackgroundClassify(email) {
+  if (!email?.id) return;
+  const key = String(email.id);
+  const attempts = classifyAttempts.get(key) || 0;
+  if (classifyingEmailIds.has(key) || attempts >= MAX_CLASSIFY_RETRIES) return;
+  classifyingEmailIds.add(key);
+  classifyAttempts.set(key, attempts + 1);
+  const { classifyEmail } = require('./email-classifier');
+  setImmediate(() => {
+    classifyEmail(email)
+      .then((res) => { if (res) classifyAttempts.delete(key); })
+      .catch((err) => {
+        logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+      })
+      .finally(() => { classifyingEmailIds.delete(key); });
+  });
+}
 function forgetMessage(gmailId) {
   messageFailures.delete(gmailId);
   passedMessages.delete(gmailId);
@@ -131,32 +154,41 @@ async function fullSync(state) {
     // COMPLETES (failed/incomplete runs also stamp last_sync_at, so that
     // cannot be the signal — codex P1). Null ⇒ this IS the first connect.
 
-    let failedMessages = 0;
+    let succeededMessages = 0;
+    const failed = [];
     for (const msg of messages) {
       try {
         const parsed = await gmailClient.getMessage(msg.id);
         const receivedTs = parsed.received_at ? new Date(parsed.received_at).getTime() : 0;
         const inserted = await upsertEmail(parsed, { backfill: initialConnect && Boolean(scanBoundary) && receivedTs < scanBoundary.getTime() });
+        forgetMessage(msg.id);
+        succeededMessages += 1;
         if (inserted) newEmails++;
       } catch (err) {
         // 404 = deleted mid-scan (benign). Anything else means this message
         // is NOT stored, and it predates the pre-scan anchor — no future
         // incremental run would ever see it again.
         const gone = err.code === 404 || err.response?.status === 404;
-        if (!gone) failedMessages += 1;
+        if (gone) forgetMessage(msg.id);
+        else failed.push(msg.id);
         logger.warn(`[email-sync] Failed to fetch message ${msg.id}: ${err.message}`);
       }
     }
 
-    if (failedMessages > 0 || !anchorHistoryId) {
+    let held = 0;
+    for (const msgId of failed) {
+      if (await holdForRetry(msgId, succeededMessages > 0)) held += 1;
+    }
+
+    if (held > 0 || !anchorHistoryId) {
       // Withhold the cursor so the next 2-minute run re-runs the full sync
       // (upserts are idempotent). Anchoring past a missed message would
       // drop it from the portal permanently — and there is NO safe fallback
       // anchor when getProfile failed: the last iterated message is the
       // OLDEST one, and a cursor that old re-triggers the expired-history
       // full resync in a loop.
-      const why = failedMessages > 0
-        ? `${failedMessages} message(s) failed`
+      const why = held > 0
+        ? `${held} message(s) failed`
         : 'no current history anchor (getProfile failed)';
       await db('email_sync_state').where('id', state.id).update({
         errors: `full sync incomplete: ${why} — retrying next run`,
@@ -168,6 +200,9 @@ async function fullSync(state) {
       logger.warn(`[email-sync] Full sync incomplete (${why}) — cursor withheld for retry`);
       return { newEmails, fullSync: true, retry: true };
     }
+
+    // Cursor is advancing past any passed poison messages: forget their counts.
+    failed.forEach(forgetMessage);
 
     await db('email_sync_state').where('id', state.id).update({
       last_history_id: anchorHistoryId,
@@ -238,6 +273,7 @@ async function incrementalSync(state) {
     // is held for MESSAGE_RETRY_RUNS runs, then passed (see holdForRetry): one message that always fails must not hold
     // the cursor until the backlog forces a whole-mailbox full sync.
     let held = 0;
+    let succeededMessages = 0;
     const failed = [];
     for (const msgId of messageIds) {
       try {
@@ -248,6 +284,7 @@ async function incrementalSync(state) {
         const parsed = await gmailClient.getMessage(msgId);
         const inserted = await upsertEmail(parsed);
         forgetMessage(msgId);
+        succeededMessages += 1;
         if (inserted) newEmails++;
       } catch (err) {
         if (err.code === 404 || err.response?.status === 404) {
@@ -263,7 +300,7 @@ async function incrementalSync(state) {
       }
     }
     for (const msgId of failed) {
-      if (await holdForRetry(msgId, newEmails > 0)) held += 1;
+      if (await holdForRetry(msgId, succeededMessages > 0)) held += 1;
     }
 
     await db('email_sync_state').where('id', state.id).update({
@@ -350,11 +387,16 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // 20260903000070 unlinks the rows stored before this guard.
   let customerId = null;
   if (parsed.from_address && !isInternalEmailRecipient(parsed.from_address)) {
-    // Case-insensitive, like the request/complaint handlers (codex P2): a
-    // sender whose address differs only by casing is the same customer.
-    const customer = await db('customers')
+    // Case-insensitive, live-only, unambiguous single-row match (C2-22):
+    // deleted accounts never match, and duplicate accounts sharing an email
+    // stay unattributed rather than guessing.
+    const customerRows = await db('customers')
       .whereRaw('LOWER(email) = ?', [String(parsed.from_address).trim().toLowerCase()])
-      .first();
+      .whereNull('deleted_at')
+      .limit(2);
+    const customer = Array.isArray(customerRows)
+      ? (customerRows.length === 1 ? customerRows[0] : null)
+      : customerRows;
     if (customer) customerId = customer.id;
   }
 
@@ -400,11 +442,14 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     is_starred: parsed.is_starred,
     customer_id: customerId,
     classification: vendorMatch ? 'vendor' : null,
-    extracted_data: vendorMatch ? JSON.stringify({
-      vendor_name: vendorMatch.vendor_name,
-      vendor_domain: vendorMatch.domain,
-      expense_category: vendorMatch.expense_category,
-      primary_contact: vendorMatch.primary_contact,
+    extracted_data: (vendorMatch || parsed.list_unsubscribe) ? JSON.stringify({
+      ...(vendorMatch ? {
+        vendor_name: vendorMatch.vendor_name,
+        vendor_domain: vendorMatch.domain,
+        expense_category: vendorMatch.expense_category,
+        primary_contact: vendorMatch.primary_contact,
+      } : {}),
+      ...(parsed.list_unsubscribe ? { list_unsubscribe: parsed.list_unsubscribe } : {}),
     }) : null,
     updated_at: new Date(),
   };
@@ -412,17 +457,17 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   if (existing) {
     // Crash-recovery: a row inserted by a sync that died before its bell
     // fired is re-seen here. Ring at most once (idempotent on emailId).
-    await recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }).catch(() => {});
+    const bellRecovery = await recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }).catch(() => null);
     const labelIds = parsed.label_ids || [];
-    // Update read/starred/archive label status
-    await db('emails').where('id', existing.id).update({
+    const isArchived = !labelIds.includes('INBOX') || labelIds.includes('TRASH');
+    const refreshedFields = {
       // The owned-sender invariant holds on resync too: a row an older pod
       // linked during a rolling deploy (after migration 20260903000070
       // scanned) is unlinked the next time Gmail lists it (GH codex r1 P2).
       ...(existing.customer_id && isInternalEmailRecipient(parsed.from_address) ? { customer_id: null } : {}),
       is_read: parsed.is_read,
       is_starred: parsed.is_starred,
-      is_archived: !labelIds.includes('INBOX') || labelIds.includes('TRASH'),
+      is_archived: isArchived,
       label_ids: JSON.stringify(labelIds),
       // Backfill the header captures on resync — pre-migration rows would
       // otherwise fail the authentication gates closed forever and never
@@ -437,9 +482,22 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
       reply_to: parsed.reply_to || existing.reply_to || null,
       authentication_results: parsed.authentication_results || existing.authentication_results || null,
       updated_at: new Date(),
-    });
+    };
+    // Update read/starred/archive label status
+    await db('emails').where('id', existing.id).update(refreshedFields);
     // Outbound copies and blocked senders never get attachment rows.
     if (!SKIPPED_STORE_ACTIONS.has(existing.auto_action)) await addMissingAttachmentRows(existing.id, parsed.attachments);
+    // Decouple classification from first-insert flag (C2-28): if a prior sync
+    // crashed after committing the row but before classifyEmail ran, retry
+    // classification here using the refreshed row (including updated auth
+    // headers) and guarded by scheduleBackgroundClassify.
+    const refreshedExisting = { ...existing, ...refreshedFields };
+    if (!backfill && !isArchived && !existing.auto_action
+      && (!existing.classification || existing.classification === 'vendor')
+      && bellRecovery === 'ineligible'
+      && !(await isControlMessage(refreshedExisting))) {
+      scheduleBackgroundClassify(refreshedExisting);
+    }
     return false; // not new
   }
 
@@ -540,14 +598,8 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     logger.error(`[email-sync] Amazon delivery restock hook failed for ${email.id}: ${err?.message || err}`);
   }
 
-  // Store list_unsubscribe for auto-unsubscribe
+  // list_unsubscribe is already persisted on emailData.extracted_data at insert.
   if (parsed.list_unsubscribe) {
-    await db('emails').where('id', email.id).update({
-      extracted_data: JSON.stringify({
-        ...((email.extracted_data && typeof email.extracted_data === 'string') ? JSON.parse(email.extracted_data) : (email.extracted_data || {})),
-        list_unsubscribe: parsed.list_unsubscribe,
-      }),
-    });
     email.list_unsubscribe = parsed.list_unsubscribe;
   }
 
@@ -602,11 +654,7 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
         await ringCustomerEmailBell(email, { customerId, parsed, classified, lease });
       }
     } else {
-      setImmediate(() => {
-        classifyEmail(email).catch((err) => {
-          logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
-        });
-      });
+      scheduleBackgroundClassify(email);
     }
   }
 

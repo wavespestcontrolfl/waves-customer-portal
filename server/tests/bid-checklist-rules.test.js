@@ -93,7 +93,7 @@ describe('notification copy follows the admin notification rule', () => {
     const { spec, detail } = questionsReminderSpec(row, NOW);
     expect(() => composeAdminAlert(spec)).not.toThrow();
     expect(spec.action).toMatch(/questions due in 2 days/);
-    expect(spec.link).toBe(`/admin/bid-desk?bid=${row.id}`);
+    expect(spec.link).toBe(`/admin/bids?bid=${row.id}`);
     expect(detail).toMatch(/^Bid reminder \(questions\): Sample Ridge Residences questions are due Oct 3/);
   });
 

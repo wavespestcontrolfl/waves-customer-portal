@@ -8,15 +8,20 @@
 import React, { useEffect, useState } from "react";
 import { Select, cn } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
+import { formatETDate } from "../../lib/timezone";
 
-// One options read per page load, shared by every card on the list.
+// One options read per active admin session, shared by every card on the list.
+// Keyed by auth token so logout or switching users invalidates the cached list.
 let optionsRequest = null;
+let optionsToken = null;
 function loadSellerOptions() {
-  if (!optionsRequest) {
+  const token = typeof localStorage !== "undefined" ? (localStorage.getItem("waves_admin_token") || "") : "";
+  if (!optionsRequest || optionsToken !== token) {
+    optionsToken = token;
     optionsRequest = adminFetch("/admin/estimates/sold-by/options")
       .then((data) => (Array.isArray(data?.technicians) ? data.technicians : []))
       .catch((err) => {
-        optionsRequest = null;
+        if (optionsToken === token) optionsRequest = null;
         throw err;
       });
   }
@@ -28,7 +33,7 @@ function shortDate(value) {
   const d = new Date(value);
   return Number.isNaN(d.getTime())
     ? ""
-    : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    : formatETDate(d, { month: "short", day: "numeric" });
 }
 
 export function soldByDetail(soldBy) {

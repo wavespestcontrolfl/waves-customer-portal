@@ -42,6 +42,7 @@ const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
 // Dead Rodent Removal & Odor Treatment: the pristine prices and minutes, so a deleted or
 // malformed pricing_config row restores them on the next sync instead of pinning an old edit.
 const DEAD_ANIMAL_REMOVAL_DEFAULTS = JSON.parse(JSON.stringify(constants.RODENT.deadAnimalRemoval));
+const DEFAULT_BORACARE_CONSTANTS = Object.freeze({ ...constants.SPECIALTY.boraCare });
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -1014,6 +1015,180 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   } catch (err) {
     console.warn('[pricing-engine] pre-slab inventory-price link skipped:', err.message);
   }
+}
+
+// Config-floor catalog cost link for trenching termiticide bottles
+// (owner 2026-11-27): uses max(configured $/oz, approved catalog $/oz) within
+// the [0.5x, 2x] sanity band so vendor price spikes protect margin while
+// cheaper generic swaps never auto-cut below the configured basis. Stateless
+// across restarts/replicas; retains the last synced bottle cost for unchanged
+// config rows if a catalog read transiently fails. Kill switch: link_container_costs_to_catalog = false.
+function firstDefinedKey(obj, keys) {
+  for (const key of keys) {
+    if (obj && obj[key] != null) return obj[key];
+  }
+  return undefined;
+}
+
+const TRENCHING_PRODUCT_KEYS = ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'];
+const TRENCHING_PRODUCT_DEFAULTS = Object.freeze(Object.fromEntries(
+  TRENCHING_PRODUCT_KEYS
+    .filter((key) => constants.SPECIALTY.trenching?.products?.[key])
+    .map((key) => {
+      const product = constants.SPECIALTY.trenching.products[key];
+      return [key, Object.freeze({
+        ...product,
+        containerCost: Number(product.containerCost),
+        containerOz: Number(product.containerOz),
+        ...(Array.isArray(product.warnings) ? { warnings: Object.freeze([...product.warnings]) } : {}),
+      })];
+    }),
+));
+
+// Last successfully synced catalog cost per product, used ONLY to fail safe if
+// a subsequent catalog read throws (so a transient DB outage cannot silently
+// drop an active catalog price increase back to the lower configured cost).
+const lastSyncedTrenchingCatalogCost = new Map();
+
+function resetTrenchingCatalogFallbackCache() {
+  lastSyncedTrenchingCatalogCost.clear();
+}
+
+function trenchingConfigSignature(product) {
+  return `${Number(product.containerCost)}:${Number(product.containerOz)}:${String(product.catalogProductName || '').trim()}`;
+}
+
+function applyTrenchingOverlayToStaged(staged, data) {
+  if (!data || typeof data !== 'object') return;
+  const strFields = [
+    ['label', ['label']],
+    ['catalogProductName', ['catalogProductName', 'catalog_product_name']],
+    ['activeIngredient', ['activeIngredient', 'active_ingredient']],
+    ['chemistryType', ['chemistryType', 'chemistry_type']],
+    ['positioning', ['positioning']],
+    ['defaultWarrantyPositioning', ['defaultWarrantyPositioning', 'default_warranty_positioning']],
+    ['warrantyRisk', ['warrantyRisk', 'warranty_risk']],
+    ['standardConcentrationLabel', ['standardConcentrationLabel', 'standard_concentration_label']],
+    ['highConcentrationLabel', ['highConcentrationLabel', 'high_concentration_label']],
+  ];
+  const numFields = [
+    ['containerCost', ['containerCost', 'container_cost']],
+    ['containerOz', ['containerOz', 'container_oz']],
+    ['productOzPerFinishedGallonAtStandardRate', ['productOzPerFinishedGallonAtStandardRate', 'product_oz_per_finished_gallon_at_standard_rate']],
+    ['productOzPerFinishedGallonAtHighRate', ['productOzPerFinishedGallonAtHighRate', 'product_oz_per_finished_gallon_at_high_rate']],
+  ];
+  for (const [targetKey, keys] of strFields) setString(staged, targetKey, firstDefinedKey(data, keys));
+  for (const [targetKey, keys] of numFields) setNumber(staged, targetKey, firstDefinedKey(data, keys), Number);
+  setStringArray(staged, 'warnings', data.warnings);
+}
+
+function stageTrenchingCatalogState(ot = null) {
+  const linkFlag = ot ? firstDefinedKey(ot, ['link_container_costs_to_catalog', 'linkContainerCostsToCatalog']) : undefined;
+  const linkContainerCostsToCatalog = typeof linkFlag === 'boolean' ? linkFlag : true;
+  const trenchingProducts = (ot && (ot.products || ot.product_costs)) || {};
+  const products = {};
+  for (const [key, defaults] of Object.entries(TRENCHING_PRODUCT_DEFAULTS)) {
+    const staged = {
+      ...defaults,
+      ...(Array.isArray(defaults.warnings) ? { warnings: [...defaults.warnings] } : {}),
+    };
+    delete staged.configuredContainerCost;
+    delete staged.configuredContainerOz;
+    const overlay = (ot && (trenchingProducts[key] || ot[key])) || null;
+    applyTrenchingOverlayToStaged(staged, overlay);
+    // Do not inherit the code default catalog link onto an admin-renamed bottle
+    // (e.g. retained Talak label without an explicit catalogProductName).
+    const explicitLink = overlay && firstDefinedKey(overlay, ['catalogProductName', 'catalog_product_name']);
+    if (!explicitLink && staged.label && defaults.label && staged.label !== defaults.label) {
+      staged.catalogProductName = null;
+    }
+    products[key] = staged;
+  }
+  return { linkContainerCostsToCatalog, products };
+}
+
+function publishStagedTrenchingCatalogState(staged) {
+  const trenching = constants.SPECIALTY.trenching;
+  if (!trenching || !staged) return;
+  trenching.linkContainerCostsToCatalog = staged.linkContainerCostsToCatalog;
+  for (const [key, nextProduct] of Object.entries(staged.products)) {
+    const target = trenching.products?.[key];
+    if (!target) continue;
+    Object.assign(target, nextProduct);
+    if (nextProduct.configuredContainerCost === undefined) delete target.configuredContainerCost;
+    if (nextProduct.configuredContainerOz === undefined) delete target.configuredContainerOz;
+  }
+  applyRetreatOnlyTrenchingCopy(trenching);
+}
+
+function applyTrenchingCatalogPrice(key, product, row) {
+  const configCost = Number(product.containerCost);
+  const configOz = Number(product.containerOz);
+  const configPerOz = configCost / configOz;
+  const sig = trenchingConfigSignature(product);
+  const price = row ? Number(row.best_price) : NaN;
+  const oz = row ? Number(row.unit_size_oz) : NaN;
+  const catalogPerOz = Number.isFinite(price) && price > 0 && Number.isFinite(oz) && oz > 0 ? price / oz : NaN;
+  if (!Number.isFinite(catalogPerOz) || catalogPerOz <= configPerOz) {
+    lastSyncedTrenchingCatalogCost.delete(key);
+    return;
+  }
+  if (!withinCatalogSanityBand(catalogPerOz, configPerOz)) {
+    warnCatalogRefusalOnce(`trenching.${key}.band`, `[pricing-engine] trenching ${key}: catalog $${catalogPerOz.toFixed(4)}/oz outside sanity band of config $${configPerOz.toFixed(4)}/oz — keeping config value`);
+    lastSyncedTrenchingCatalogCost.delete(key);
+    return;
+  }
+  // Keep the pre-catalog configured bottle cost separate so rising costs on
+  // the included product (Taurus SC) never inflate the included chemical
+  // allowance subtracted from standard/premium trenching retail prices.
+  product.configuredContainerCost = configCost;
+  product.configuredContainerOz = configOz;
+  product.containerCost = price;
+  product.containerOz = oz;
+  lastSyncedTrenchingCatalogCost.set(key, { configSignature: sig, containerCost: price, containerOz: oz });
+}
+
+function restoreLastSyncedTrenchingCatalogCosts(entries) {
+  for (const [key, product] of entries) {
+    const cached = lastSyncedTrenchingCatalogCost.get(key);
+    if (!cached || cached.configSignature !== trenchingConfigSignature(product)) continue;
+    product.configuredContainerCost = Number(product.containerCost);
+    product.configuredContainerOz = Number(product.containerOz);
+    product.containerCost = cached.containerCost;
+    product.containerOz = cached.containerOz;
+  }
+}
+
+async function syncTrenchingContainerCostsFromCatalog(db, staged = null) {
+  const targetState = staged || stageTrenchingCatalogState(null);
+  if (targetState.linkContainerCostsToCatalog !== true) {
+    lastSyncedTrenchingCatalogCost.clear();
+    publishStagedTrenchingCatalogState(targetState);
+    return;
+  }
+  const entries = Object.entries(targetState.products || {}).filter(
+    ([, product]) => typeof product?.catalogProductName === 'string' && product.catalogProductName.trim()
+  );
+  if (!entries.length) {
+    publishStagedTrenchingCatalogState(targetState);
+    return;
+  }
+  try {
+    const byName = await loadApprovedCatalogRows(
+      db,
+      entries.map(([, product]) => product.catalogProductName.trim()),
+      ['name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'],
+    );
+    for (const [key, product] of entries) {
+      applyTrenchingCatalogPrice(key, product, byName.get(product.catalogProductName.trim()) || null);
+    }
+  } catch (err) {
+    restoreLastSyncedTrenchingCatalogCosts(entries);
+    console.warn('[pricing-engine] trenching inventory-price link skipped (retaining last synced costs):', err.message);
+  }
+  // Publish staged config + catalog costs synchronously in one step AFTER all awaits,
+  // so concurrent quote requests never see a transient pre-catalog reset value.
+  publishStagedTrenchingCatalogState(targetState);
 }
 
 // Catalog rows the pricing engine may price from: ACTIVE, priced rows whose
@@ -2150,6 +2325,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         constants.SPECIALTY.wdo.brackets = mapped;
       }
     }
+    const stagedTrenching = stageTrenchingCatalogState(config.onetime_trenching || null);
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;
       if (ot.per_lf_dirt != null) constants.SPECIALTY.trenching.dirtPerLF = r(Number(ot.per_lf_dirt));
@@ -2170,27 +2346,6 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       setNumber(constants.SPECIALTY.trenching, 'baselineTrenchDepthFt', ot.baselineTrenchDepthFt ?? ot.baseline_trench_depth_ft, Number);
       setNumber(constants.SPECIALTY.trenching, 'trenchDepthPremiumPerHalfFt', ot.trenchDepthPremiumPerHalfFt ?? ot.trench_depth_premium_per_half_ft, Number);
       setNumber(constants.SPECIALTY.trenching, 'highRatePriceMultiplier', ot.highRatePriceMultiplier ?? ot.high_rate_price_multiplier, Number);
-      const trenchingProducts = ot.products || ot.product_costs || {};
-      const applyTrenchingProductOverlay = (key, data = {}) => {
-        const target = constants.SPECIALTY.trenching.products?.[key];
-        if (!target || !data || typeof data !== 'object') return;
-        setString(target, 'label', data.label);
-        setString(target, 'activeIngredient', data.activeIngredient ?? data.active_ingredient);
-        setString(target, 'chemistryType', data.chemistryType ?? data.chemistry_type);
-        setString(target, 'positioning', data.positioning);
-        setString(target, 'defaultWarrantyPositioning', data.defaultWarrantyPositioning ?? data.default_warranty_positioning);
-        setString(target, 'warrantyRisk', data.warrantyRisk ?? data.warranty_risk);
-        setString(target, 'standardConcentrationLabel', data.standardConcentrationLabel ?? data.standard_concentration_label);
-        setString(target, 'highConcentrationLabel', data.highConcentrationLabel ?? data.high_concentration_label);
-        setNumber(target, 'containerCost', data.containerCost ?? data.container_cost, Number);
-        setNumber(target, 'containerOz', data.containerOz ?? data.container_oz, Number);
-        setNumber(target, 'productOzPerFinishedGallonAtStandardRate', data.productOzPerFinishedGallonAtStandardRate ?? data.product_oz_per_finished_gallon_at_standard_rate, Number);
-        setNumber(target, 'productOzPerFinishedGallonAtHighRate', data.productOzPerFinishedGallonAtHighRate ?? data.product_oz_per_finished_gallon_at_high_rate, Number);
-        setStringArray(target, 'warnings', data.warnings);
-      };
-      ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'].forEach((key) => {
-        applyTrenchingProductOverlay(key, trenchingProducts[key] || ot[key]);
-      });
       if (ot.applicationRates || ot.application_rates) {
         mergePlainObject(constants.SPECIALTY.trenching.applicationRates, ot.applicationRates || ot.application_rates);
       }
@@ -2199,14 +2354,23 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
       applyRetreatOnlyTrenchingCopy(constants.SPECIALTY.trenching);
     }
+    // Reset Bora-Care constants from immutable defaults on every sync so removing
+    // a DB override restores identical behavior across all workers.
+    Object.assign(constants.SPECIALTY.boraCare, DEFAULT_BORACARE_CONSTANTS);
     if (config.onetime_boracare) {
       const bc = config.onetime_boracare;
-      setNumber(constants.SPECIALTY.boraCare, 'galCost', bc.bc_gal ?? bc.galCost, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'coverage', bc.bc_cov ?? bc.coverage, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'equipCost', bc.bc_equip ?? bc.equipCost, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'marginDivisor', bc.marginDivisor ?? bc.margin_divisor, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'minJobPrice', bc.min_job_price ?? bc.minJobPrice, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'surfaceLaborSqFtPerHour', bc.surface_labor_sqft_per_hr ?? bc.surfaceLaborSqFtPerHour, Number);
+      const setPositive = (key, raw, max = Infinity) => {
+        const n = Number(raw);
+        if (raw != null && raw !== '' && Number.isFinite(n) && n > 0 && n <= max) {
+          constants.SPECIALTY.boraCare[key] = n;
+        }
+      };
+      setPositive('galCost', firstDefinedKey(bc, ['bc_gal', 'galCost', 'gal_cost']));
+      setPositive('coverage', firstDefinedKey(bc, ['bc_cov', 'coverage', 'coverage_sqft']));
+      setNumber(constants.SPECIALTY.boraCare, 'equipCost', firstDefinedKey(bc, ['bc_equip', 'equipCost', 'equip_cost']), Number);
+      setPositive('marginDivisor', firstDefinedKey(bc, ['marginDivisor', 'margin_divisor']), 1);
+      setNumber(constants.SPECIALTY.boraCare, 'minJobPrice', firstDefinedKey(bc, ['min_job_price', 'minJobPrice']), Number);
+      setPositive('surfaceLaborSqFtPerHour', firstDefinedKey(bc, ['surface_labor_sqft_per_hr', 'surfaceLaborSqFtPerHour']));
     }
     // Pre-slab step/link kill switches mutate in place across syncs, so EVERY
     // sync restores the in-code defaults before the row (if any) is applied —
@@ -2474,6 +2638,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     await syncPreSlabContainerCostsFromCatalog(db);
+    await syncTrenchingContainerCostsFromCatalog(db, stagedTrenching);
     await syncTermiteStationCostsFromCatalog(db);
     await syncMosquitoProductCostsFromCatalog(db);
 
@@ -2580,6 +2745,7 @@ module.exports = {
   getLastSyncAt,
   isSyncInFlight,
   syncConstantsFromDB,
+  resetTrenchingCatalogFallbackCache,
   readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,

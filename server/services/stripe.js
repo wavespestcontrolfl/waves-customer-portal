@@ -76,11 +76,31 @@ const {
 } = require('./stripe-invoice-state');
 const {
   assertInvoiceCollectible,
-  assertInvoiceNotWithdrawnFromCustomer,
+  assertInvoiceNotWithdrawnOrHeld,
+  invoiceWithdrawnFromCustomer,
+  invoiceHeldForChemicalReview,
   isInvoiceCollectibleStatus,
   invoiceAmountDue,
   refundedPaymentOwnsInvoice,
 } = require('./invoice-helpers');
+
+function assertLockedUpdateInvoice(lockedInvoice, effectivePaymentIntentId, baseCents) {
+  if (lockedInvoice && invoiceHeldForChemicalReview(lockedInvoice)) {
+    const err = new Error('This invoice is held for office billing review of a chemical area add-on');
+    err.statusCode = 409;
+    err.code = 'INVOICE_CHEMICAL_ADDON_HOLD';
+    throw err;
+  }
+  if (!lockedInvoice || !isInvoiceCollectibleStatus(lockedInvoice.status)
+    || invoiceWithdrawnFromCustomer(lockedInvoice)
+    || String(lockedInvoice.stripe_payment_intent_id || '') !== effectivePaymentIntentId
+    || Math.round(invoiceAmountDue(lockedInvoice) * 100) !== baseCents) {
+    const err = new Error('The invoice balance changed since this page loaded — refreshing.');
+    err.statusCode = 409;
+    err.staleBalance = true;
+    throw err;
+  }
+}
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -4970,6 +4990,7 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
+    await require('./invoice-promo-code').assertNoPendingPromoCode(invoice);
     if (!invoice.stripe_payment_intent_id) {
       throw new Error('PaymentIntent does not belong to this invoice');
     }
@@ -5137,20 +5158,15 @@ const StripeService = {
             anchorInvoiceId: invoiceId,
             expectPaymentIntentId: effectivePaymentIntentId,
           });
+          await require('./invoice-promo-code').assertNoPendingPromoCode(invoice, updateTrx);
           await refuseInPlaceOnConsentStampChange();
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
         });
       } else {
         paymentIntent = await db.transaction(async (updateTrx) => {
           const lockedInvoice = await updateTrx('invoices').where({ id: invoiceId }).forUpdate().first();
-          if (!lockedInvoice || !isInvoiceCollectibleStatus(lockedInvoice.status)
-            || String(lockedInvoice.stripe_payment_intent_id || '') !== effectivePaymentIntentId
-            || Math.round(invoiceAmountDue(lockedInvoice) * 100) !== baseCents) {
-            const err = new Error('The invoice balance changed since this page loaded — refreshing.');
-            err.statusCode = 409;
-            err.staleBalance = true;
-            throw err;
-          }
+          assertLockedUpdateInvoice(lockedInvoice, effectivePaymentIntentId, baseCents);
+          await require('./invoice-promo-code').assertNoPendingPromoCode(lockedInvoice, updateTrx);
           await require('./estimate-deposits').assertInvoiceDepositSettlementReady(updateTrx, lockedInvoice);
           await refuseInPlaceOnConsentStampChange();
           return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
@@ -5250,7 +5266,8 @@ const StripeService = {
       // as-is, not wrapped as a generic update failure — and so must the
       // combined allocation's staleBalance 409 (the page reloads to live
       // amounts).
-      if (err && (err.sessionChanged || err.staleBalance || err.code === 'DEPOSIT_RECONCILIATION_REQUIRED')) throw err;
+      if (err && (err.sessionChanged || err.staleBalance
+        || ['DEPOSIT_RECONCILIATION_REQUIRED', 'INVOICE_CHEMICAL_ADDON_HOLD'].includes(err.code))) throw err;
       if (err && err.consentStampChanged) {
         logger.info(`[stripe] PI ${effectivePaymentIntentId} consent stamp changed on update-amount; replacing for method=${selectedMethodCategory}`);
         return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, replacementContext());
@@ -5373,6 +5390,7 @@ const StripeService = {
           err.staleBalance = true;
           throw err;
         }
+        await require('./invoice-promo-code').assertNoPendingPromoCode(lockedInvoice, trx);
         await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, lockedInvoice);
       }
       // Guard against a racing setup/replace having already repointed the PI.
@@ -5485,6 +5503,7 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
+    await require('./invoice-promo-code').assertNoPendingPromoCode(invoice);
 
     // Retrieve the PM from Stripe to get real-time funding type
     let pm;
@@ -5501,6 +5520,9 @@ const StripeService = {
     // this as invoiceTotal below, so /finalize matches (finalize re-derives
     // the same combined base and refuses on drift).
     const quoteCombinedCtx = await require('./pay-combined').combinedContextForInvoice(invoice);
+    if (quoteCombinedCtx) {
+      await assertCombinedSiblingsNoPendingPromo(quoteCombinedCtx.siblings);
+    }
     const baseAmount = quoteCombinedCtx ? quoteCombinedCtx.totalCents / 100 : invoiceAmountDue(invoice);
 
     const chargeInfo = computeChargeAmount(baseAmount, methodType, { funding });
@@ -5570,6 +5592,7 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
+    await require('./invoice-promo-code').assertNoPendingPromoCode(invoice);
 
     if (!invoice.stripe_payment_intent_id) {
       throw new Error('Invoice has no active PaymentIntent');
@@ -5667,6 +5690,7 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
+        await require('./invoice-promo-code').assertNoPendingPromoCode(lockedInvoice, finalizeTrx);
         if (String(lockedInvoice.stripe_payment_intent_id || '')
           !== String(invoice.stripe_payment_intent_id)) {
           throw new Error('Invoice has a different active payment');
@@ -6174,7 +6198,7 @@ const StripeService = {
    * @param {string} paymentIntentId — Stripe pi_xxx ID
    * @returns {object} payment record
    */
-  async confirmInvoicePayment(invoiceId, paymentIntentId) {
+  async confirmInvoicePayment(invoiceId, paymentIntentId, opts) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -6205,7 +6229,7 @@ const StripeService = {
     // Without this an already-issued PaymentIntent settles customer funds
     // against debt that now belongs to AP. After the paid branch so a replayed
     // PI still returns its recorded payment.
-    assertInvoiceNotWithdrawnFromCustomer(invoice);
+    assertInvoiceNotWithdrawnOrHeld(invoice, opts);
     if (invoice.status === 'processing'
       && String(invoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
       throw new Error('Bank payment is already processing');
@@ -6429,7 +6453,7 @@ const StripeService = {
           cardBrand,
           cardLastFour: cardLastFour || bankLastFour || null,
           receiptUrl,
-        });
+        }, Object.assign({ rejectHeldInvoices: true }, opts));
         if (combinedOutcome.anchorPaymentRow) return combinedOutcome.anchorPaymentRow;
         // The anchor row can be absent only when its allocation share was
         // recorded as a residual (invoice raced terminal) — surface loudly.
@@ -6544,7 +6568,7 @@ const StripeService = {
         // Re-checked under the row lock for the same reason as the pre-lock
         // read (codex r25 P1): a Bill-To move committing between them must not
         // let this settlement through.
-        assertInvoiceNotWithdrawnFromCustomer(lockedInvoice);
+        assertInvoiceNotWithdrawnOrHeld(lockedInvoice, opts);
         if (lockedInvoice.status === 'processing'
           && String(lockedInvoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
           throw new Error('Bank payment is already processing');
@@ -6730,13 +6754,26 @@ const StripeService = {
 
       return paymentRecord;
     } catch (err) {
-      logger.error(`[stripe] Confirm invoice payment failed: ${err.message}`, { stack: err.stack });
-      // Map Stripe decline_codes to friendly customer-facing messages.
-      const friendly = friendlyStripeError(err);
-      throw new Error(friendly);
+      rethrowOrWrapConfirmError(err);
     }
   },
 };
+
+async function assertCombinedSiblingsNoPendingPromo(siblings, conn = db) {
+  if (!Array.isArray(siblings) || !siblings.length) return;
+  const { assertNoPendingPromoCode } = require('./invoice-promo-code');
+  for (const sibling of siblings) {
+    await assertNoPendingPromoCode(sibling, conn);
+  }
+}
+
+function rethrowOrWrapConfirmError(err) {
+  if (err && err.code === 'INVOICE_CHEMICAL_ADDON_HOLD') throw err;
+  logger.error(`[stripe] Confirm invoice payment failed: ${err.message}`, { stack: err.stack });
+  // Map Stripe decline_codes to friendly customer-facing messages.
+  const friendly = friendlyStripeError(err);
+  throw new Error(friendly);
+}
 
 // Map Stripe error codes/decline_codes to friendly customer-facing messages.
 // Raw Stripe error messages are logged server-side, never returned to the customer.

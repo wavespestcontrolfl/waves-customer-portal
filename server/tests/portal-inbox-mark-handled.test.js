@@ -38,7 +38,7 @@ jest.mock('../middleware/admin-auth', () => ({
     next();
   },
   requireTechOrAdmin: (req, res, next) => next(),
-  requireAdmin: (req, res, next) => next(),
+  requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })),
 }));
 
 const express = require('express');
@@ -208,14 +208,14 @@ describe('PATCH /requests/:id', () => {
     expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(2);
   });
 
-  test('quiet from a technician: quiet is ignored and the email goes (admins only)', async () => {
+  test('technician is refused (403) before any request write or customer email', async () => {
     mockTechRole = 'technician';
     try {
-      setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
       await withServer(async (baseUrl) => {
-        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved', quiet: true })).status).toBe(200);
+        expect((await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved', quiet: true })).status).toBe(403);
       });
-      expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(1);
+      expect(db).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendRequestUpdated).not.toHaveBeenCalled();
     } finally {
       mockTechRole = 'admin';
     }

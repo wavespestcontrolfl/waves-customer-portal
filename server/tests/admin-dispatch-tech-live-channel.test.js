@@ -96,11 +96,12 @@ describe('GET /weather/tomorrow', () => {
     expect(res.body).toEqual(ANALYSIS);
   });
 
-  test('gate off: a technician gets what it gets today', async () => {
+  test('gate off: a technician is still refused unconditionally (office-only)', async () => {
     delete process.env.GATE_TECH_LOGIN_PRIVACY;
     const res = await invoke('get', '/weather/tomorrow', { actor: TECH });
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual(ANALYSIS);
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toEqual({ error: 'Admin access required' });
+    expect(ForecastAnalyzer.analyzeTomorrow).not.toHaveBeenCalled();
   });
 });
 
@@ -193,10 +194,11 @@ describe('POST /slot-check', () => {
     expect(RainOut.checkSlots).toHaveBeenCalledTimes(4);
   });
 
-  test('gate off: a technician passing the odd forms is probed as today', async () => {
+  test('gate off: a technician passing the odd forms is still refused unconditionally', async () => {
     delete process.env.GATE_TECH_LOGIN_PRIVACY;
     const res = await invoke('post', '/slot-check', { actor: TECH, body: { targets: [{ ...SLOT_TARGET, serviceId: `{${OTHER_ID}}` }] } });
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(400);
+    expect(RainOut.checkSlots).not.toHaveBeenCalled();
   });
 
   test('gate on: a visit that does not exist is the router\'s 404', async () => {
@@ -232,10 +234,11 @@ describe('POST /slot-check', () => {
     expect(RainOut.checkSlots).toHaveBeenCalledTimes(1);
   });
 
-  test('gate off: a technician naming another route is probed as today', async () => {
+  test('gate off: a technician naming another route is still refused unconditionally', async () => {
     delete process.env.GATE_TECH_LOGIN_PRIVACY;
     const res = await invoke('post', '/slot-check', { actor: TECH, body: { targets: [{ ...SLOT_TARGET, serviceId: FOREIGN_VISIT, technicianId: OTHER_TECH }] } });
-    expect(res.statusCode).toBe(200);
-    expect(RainOut.checkSlots).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(403);
+    expect(res.body.code).toBe('service_not_assigned');
+    expect(RainOut.checkSlots).not.toHaveBeenCalled();
   });
 });

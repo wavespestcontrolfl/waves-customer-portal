@@ -101,4 +101,20 @@ describe("Communications Portal tab", () => {
     await waitFor(() => expect(summaryCalls()).toHaveLength(1));
     expect(await screen.findByRole("button", { name: "Portal" })).toBeInTheDocument();
   });
+
+  it("refreshes tab badges when a mutation happens in PortalInboxTabV2", async () => {
+    portalItems = [{
+      kind: "booking", id: "bell-1", version: "0123456789abcdef0123456789abcdef", createdAt: "2026-10-31T15:00:00.000Z",
+      customer: { id: "cust-7", firstName: "Jo", lastName: "Visitor", phone: "+19415550107", hasTexts: false },
+      service: "Mosquito Control", estimateId: "est-7",
+    }];
+    window.location.hash = "#tab=portal";
+    mount("admin", "/admin/communications#tab=portal");
+    expect(await screen.findByText("Jo Visitor")).toBeInTheDocument();
+    const before = summaryCalls().length;
+    summary = { enabled: true, count: 0 };
+    fireEvent.click(screen.getByRole("button", { name: "Mark handled" }));
+    await waitFor(() => expect(summaryCalls().length).toBeGreaterThan(before));
+    window.location.hash = "";
+  });
 });

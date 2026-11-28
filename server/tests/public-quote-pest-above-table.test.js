@@ -199,17 +199,17 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     expect(stored()).toBe(200000);
   });
 
-  // With no lot the route prices on a stand-in lot of 4 x the home size (96,000 sq ft for 24,000), and the engine lists that lot
-  // review (very_large_lot) first on the pest line. The quote read reasons[0]: the homeowner was told commercial properties need a
-  // manual quote, and the office notice filed a commercial lead.
+  // With no lot the route prices on a stand-in lot of 4 x the home size (96,000 sq ft for 24,000). Lot size no longer pushes
+  // very_large_lot into manualReviewReasons on the pest line, so standalone pest holds cleanly on home_size_above_public_limit,
+  // a manual lawn line beside verified-story pest keeps its own turf-verification reason (same rule as top dressing above),
+  // and unverified-story pest beside lawn still names home_size_above_public_limit (never commercial).
   test('above the ceiling with no lot size: the size hold names the quote, never the lot review on the pest line', async () => {
     const { notifyAdmin } = require('../services/notification-service');
-    for (const services of [{ pest: { frequency: 'quarterly' } }, { oneTimePest: {} }, { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine' } }]) {
+    for (const services of [{ pest: { frequency: 'quarterly' } }, { oneTimePest: {} }]) {
       notifyAdmin.mockClear();
       const { status, json } = await calculate(24000, 2, services, null);
       expect(status).toBe(202);
       expect(json).toMatchObject({ quote_required: true, reason: 'home_size_above_public_limit' });
-      expect(['pest_control', 'one_time_pest']).toContain(json.service);
       expect(json.message).toMatch(/A home this size is priced by our team/);
       expect(json.per_application).toBeUndefined();
       expect(storedEngineInput().lotSqFt).toBe(96000);
@@ -217,11 +217,23 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
       expect(bodies.some((body) => /needs property confirmation \(home_size_above_public_limit\)/.test(body))).toBe(true);
       expect(bodies.some((body) => /commercial/i.test(body))).toBe(false);
     }
-    // The engine does list the lot review on that line; the route does not read it as the quote's reason.
+    // With no lot-size hold on pest, lawn's own manual-review reason wins (same rule as top dressing above; never commercial).
+    notifyAdmin.mockClear();
+    const withLawn = await calculate(24000, 2, { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine' } }, null);
+    expect(withLawn.status).toBe(202);
+    expect(withLawn.json).toMatchObject({
+      quote_required: true,
+      service: 'lawn_care',
+      reason: 'low_confidence_turf_requires_field_verification',
+    });
+    expect(withLawn.json.per_application).toBeUndefined();
+    expect(storedEngineInput().lotSqFt).toBe(96000);
+    expect(notifyAdmin.mock.calls.map((c) => String(c[2])).some((b) => /commercial/i.test(b))).toBe(false);
+    // Lot size no longer pushes very_large_lot into manualReviewReasons; the size hold stands alone.
     const { generateEstimate } = require('../services/pricing-engine');
     await calculate(24000, 2, { pest: { frequency: 'quarterly' } }, null);
     const pest = generateEstimate(storedEngineInput()).lineItems.find((line) => line.service === 'pest_control');
-    expect(pest.manualReviewReasons[0]).toBe('very_large_lot');
+    expect(pest.manualReviewReasons).not.toContain('very_large_lot');
   });
 
   test('a size at the ceiling still prices (20,000 sq ft two-story = 10,000 footprint = $164)', async () => {
@@ -233,6 +245,19 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     const baitAtLimit = await calculate(20000, 2, { rodentBait: {} });
     expect(baitAtLimit.status).toBe(200);
     expect(baitAtLimit.json.quote_required).toBeFalsy();
+  });
+
+  test('a home at or below 5,500 sq ft with no posted lot (e.g. 5,200 sq ft -> 20,800 synthetic lot) returns 200 with prices for recurring and one-time pest', async () => {
+    const recurring = await calculate(5200, 1, { pest: { frequency: 'quarterly' } }, null);
+    expect(recurring.status).toBe(200);
+    expect(recurring.json.quote_required).toBeFalsy();
+    expect(recurring.json.per_application).toBeGreaterThan(0);
+    expect(storedEngineInput().lotSqFt).toBe(20800);
+
+    const oneTime = await calculate(5200, 1, { oneTimePest: {} }, null);
+    expect(oneTime.status).toBe(200);
+    expect(oneTime.json.quote_required).toBeFalsy();
+    expect(oneTime.json.onetime_total || oneTime.json.one_time_total || oneTime.json.per_application).toBeGreaterThan(0);
   });
 
   test('a quote WITHOUT pest above the ceiling goes to the team too and stores the real size, so pest added later is priced from it', async () => {
@@ -310,11 +335,11 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
         expect(bodies.some((body) => /needs property confirmation \(stories_estimated\)/.test(body))).toBe(true);
         expect(bodies.some((body) => /commercial/i.test(body))).toBe(false);
       }
-      // The engine does list the lot review first on that line; the route no longer reads it as the quote's reason.
+      // Lot size no longer pushes very_large_lot into manualReviewReasons; stories_estimated holds cleanly.
       const { generateEstimate } = require('../services/pricing-engine');
       await calculate(12000, 1, { pest: { frequency: 'quarterly' } }, null);
       const pest = generateEstimate(storedEngineInput()).lineItems.find((line) => line.service === 'pest_control');
-      expect(pest.manualReviewReasons.indexOf('very_large_lot')).toBe(0);
+      expect(pest.manualReviewReasons).not.toContain('very_large_lot');
       expect(pest.manualReviewReasons).toContain('stories_estimated');
       // One-time pest carries the same two reasons.
       const oneTime = await calculate(12000, 1, { oneTimePest: {} }, null);

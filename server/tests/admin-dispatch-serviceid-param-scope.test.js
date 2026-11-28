@@ -59,13 +59,13 @@ test("a technician reading another technician's visit gets the router's 403 serv
   expect(mockCancelPreview).not.toHaveBeenCalled();
 });
 
-test('a technician whose route includes the visit reaches the handler', async () => {
+test('a technician reading /:serviceId/card-hold gets 403 admin-only even on their own visit (P1-9)', async () => {
   mockOwnedRow = { id: SERVICE, technician_id: 'tech-A', scheduled_date: new Date().toISOString().slice(0, 10), status: 'confirmed' };
   await withServer(async (base) => {
     const res = await fetch(`${base}/${SERVICE}/card-hold`);
-    expect(res.status).not.toBe(404);
+    expect(res.status).toBe(403);
   });
-  expect(mockCancelPreview).toHaveBeenCalledWith(SERVICE);
+  expect(mockCancelPreview).not.toHaveBeenCalled();
 });
 
 test('an admin is not scoped by the param guard', async () => {
@@ -78,12 +78,12 @@ test('GET /reschedules/log is admin-only', async () => {
   await withServer(async (base) => { expect((await fetch(`${base}/reschedules/log`)).status).toBe(403); });
 });
 
-test("a technician's own CANCELLED visit is refused on a read (dead status), but PUT /:serviceId/status still reaches the status route's own retry logic", async () => {
+test("a technician's own CANCELLED visit is refused on card-hold and technician cancel is always 403 (P0-5)", async () => {
   mockOwnedRow = { id: SERVICE, technician_id: 'tech-A', scheduled_date: new Date().toISOString().slice(0, 10), status: 'cancelled' };
   await withServer(async (base) => {
     expect((await fetch(`${base}/${SERVICE}/card-hold`)).status).toBe(403);
     const retry = await fetch(`${base}/${SERVICE}/status`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status: 'cancelled' }) });
-    expect([403, 404]).not.toContain(retry.status);
+    expect(retry.status).toBe(403);
   });
   expect(mockCancelPreview).not.toHaveBeenCalled();
 });

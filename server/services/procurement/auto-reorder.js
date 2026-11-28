@@ -482,6 +482,7 @@ async function sweepProduct(ctx, p) {
   // orders from the request's (locked) vendor — then it owns the outcome
   // bell. A failure here is retried by the next sweep (handleLiveRequest).
   if (await dispatcherOrders(conn, parseMeta(request.metadata).vendorId)) { result.autoOrder = [...(result.autoOrder || []), request.id]; return; }
+  if (await require('./order-dispatch').hasLiveSkuOrderForRequest?.(conn, request.id, request)) { result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'vendor_sku_order_live' }); return; }
   await bellOrWarn(ctx, p, request, 'bells');
 }
 

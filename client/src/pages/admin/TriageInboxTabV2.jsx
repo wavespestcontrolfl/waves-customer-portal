@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Inbox, PhoneCall, CheckCircle2, XCircle, AlertTriangle, ThumbsUp, ThumbsDown, Zap } from "lucide-react";
 import {
   Badge,
@@ -648,11 +648,29 @@ function parseWrongFields(raw) {
   try { return JSON.parse(raw) || []; } catch { return []; }
 }
 
+function isSmsPropertyRoleItem(item) {
+  return Boolean(item?.sms_log_id) || Array.isArray(parsePayload(item?.payload)?.additional_property_proposals);
+}
+
 // Pending property-role proposals on a property_role_confirm card: what the
 // call classified, current → proposed, so the office can judge the apply
 // without re-listening. Payload shape: property-role-proposals.js.
-export function PropertyRoleEvidence({ payload }) {
-  const p = parsePayload(payload);
+export function PropertyRoleEvidence({ item, payload, draft, isOpenView, isAdmin, busy, onChange, onApply }) {
+  if (item && isSmsPropertyRoleItem(item)) {
+    return (
+      <SmsAdditionalPropertiesForm
+        itemId={item.id}
+        payload={item.payload}
+        draft={draft}
+        isOpenView={isOpenView}
+        isAdmin={isAdmin}
+        busy={busy}
+        onChange={onChange}
+        onApply={onApply}
+      />
+    );
+  }
+  const p = parsePayload(payload ?? item?.payload);
   const proposals = Array.isArray(p?.property_role_proposals) ? p.property_role_proposals : [];
   if (!proposals.length) return null;
   return (
@@ -686,6 +704,164 @@ export function PropertyRoleEvidence({ payload }) {
           {pr.evidence && <span className="text-ink-tertiary italic"> — "{pr.evidence}"</span>}
         </div>
       ))}
+    </div>
+  );
+}
+
+const OCCUPANCY_OPTIONS = Object.keys(OCCUPANCY_LABELS);
+
+function buildSmsPropertyDraft(proposals) {
+  return {
+    same_responsibility: false,
+    addresses: proposals.map((pr) => ({
+      quote: pr.quote || "",
+      address_line1: pr.address_line1 || "",
+      address_line2: pr.address_line2 || "",
+      city: pr.city || "",
+      state: String(pr.state || "").trim().toUpperCase(),
+      zip: pr.zip || "",
+      occupancy_type: OCCUPANCY_OPTIONS.includes(pr.occupancy_type) ? pr.occupancy_type : "unknown",
+    })),
+  };
+}
+
+// SMS additional-property proposals on a property_role_confirm card (sms-additional-properties.js):
+// the server requires explicit address review + occupancy_type + same_responsibility confirmation.
+export function SmsAdditionalPropertiesForm({ itemId, payload, draft, isOpenView, isAdmin, busy, onChange, onApply }) {
+  const p = parsePayload(payload);
+  const proposals = Array.isArray(p?.additional_property_proposals) ? p.additional_property_proposals : [];
+  if (!proposals.length) return null;
+  const current = draft && Array.isArray(draft.addresses) && draft.addresses.length === proposals.length
+    ? draft
+    : buildSmsPropertyDraft(proposals);
+
+  const updateAddress = (index, field, value) => {
+    const nextAddresses = current.addresses.map((addr, i) => (
+      i === index ? { ...addr, [field]: field === "state" ? value.toUpperCase() : value } : addr
+    ));
+    onChange({ ...current, addresses: nextAddresses });
+  };
+
+  const canSubmit = current.same_responsibility === true && current.addresses.every((a) => (
+    /^\d+[A-Za-z-]*\s+\S/.test(String(a.address_line1 || "").trim())
+    && String(a.city || "").trim().length > 0
+    && /^[A-Z]{2}$/.test(String(a.state || "").trim())
+    && /^\d{5}(?:-\d{4})?$/.test(String(a.zip || "").trim())
+    && OCCUPANCY_OPTIONS.includes(a.occupancy_type)
+  ));
+
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2 flex flex-col gap-2">
+      <div className="text-11 text-ink-tertiary font-medium">Proposed additional service addresses (from SMS)</div>
+      {p.sms_text && (
+        <div className="text-12 text-ink-secondary italic">“{p.sms_text}”</div>
+      )}
+      {p.sender_requires_review && (
+        <div className="text-12 text-alert-fg">
+          Sender phone did not match the customer’s primary phone — verify the conversation before applying.
+        </div>
+      )}
+      {current.addresses.map((addr, i) => (
+        <div key={i} className="rounded-sm border-hairline border-zinc-200 bg-white p-2 flex flex-col gap-1.5">
+          {proposals[i]?.quote && (
+            <div className="text-12 text-ink-tertiary italic">Quote: “{proposals[i].quote}”</div>
+          )}
+          {isOpenView && isAdmin ? (
+            <div className="grid grid-cols-1 sm:grid-cols-6 gap-1.5">
+              <input
+                type="text"
+                aria-label={`Address ${i + 1} street`}
+                value={addr.address_line1}
+                onChange={(e) => updateAddress(i, "address_line1", e.target.value)}
+                placeholder="Street address"
+                className="sm:col-span-3 h-7 px-2 rounded-md border-hairline text-12 bg-white"
+              />
+              <input
+                type="text"
+                aria-label={`Address ${i + 1} unit`}
+                value={addr.address_line2}
+                onChange={(e) => updateAddress(i, "address_line2", e.target.value)}
+                placeholder="Unit / Apt (optional)"
+                className="sm:col-span-3 h-7 px-2 rounded-md border-hairline text-12 bg-white"
+              />
+              <input
+                type="text"
+                aria-label={`Address ${i + 1} city`}
+                value={addr.city}
+                onChange={(e) => updateAddress(i, "city", e.target.value)}
+                placeholder="City"
+                className="sm:col-span-2 h-7 px-2 rounded-md border-hairline text-12 bg-white"
+              />
+              <input
+                type="text"
+                aria-label={`Address ${i + 1} state`}
+                maxLength={2}
+                value={addr.state}
+                onChange={(e) => updateAddress(i, "state", e.target.value)}
+                placeholder="FL"
+                className="sm:col-span-1 h-7 px-2 rounded-md border-hairline text-12 bg-white"
+              />
+              <input
+                type="text"
+                aria-label={`Address ${i + 1} zip`}
+                value={addr.zip}
+                onChange={(e) => updateAddress(i, "zip", e.target.value)}
+                placeholder="ZIP"
+                className="sm:col-span-1 h-7 px-2 rounded-md border-hairline text-12 bg-white"
+              />
+              <select
+                aria-label={`Address ${i + 1} occupancy`}
+                value={addr.occupancy_type}
+                onChange={(e) => updateAddress(i, "occupancy_type", e.target.value)}
+                className="sm:col-span-2 h-7 px-2 rounded-md border-hairline text-12 bg-white"
+              >
+                {OCCUPANCY_OPTIONS.map((opt) => (
+                  <option key={opt} value={opt}>{occupancyLabel(opt)}</option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div className="text-12 text-ink-secondary">
+              {[addr.address_line1, addr.address_line2, addr.city, addr.state, addr.zip].filter(Boolean).join(", ")}
+              {" · "}
+              {occupancyLabel(addr.occupancy_type)}
+            </div>
+          )}
+        </div>
+      ))}
+      {isOpenView && isAdmin && (
+        <>
+          <label className="flex items-start gap-2 text-12 text-ink-secondary cursor-pointer">
+            <input
+              type="checkbox"
+              aria-label={`Confirm common responsibility for ${itemId}`}
+              checked={!!current.same_responsibility}
+              onChange={(e) => onChange({ ...current, same_responsibility: e.target.checked })}
+              className="mt-0.5"
+            />
+            <span>I confirm these properties share common service and billing responsibility on this customer’s account.</span>
+          </label>
+          <div>
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={busy || !canSubmit}
+              onClick={() => onApply({
+                same_responsibility: current.same_responsibility,
+                addresses: current.addresses,
+              })}
+            >
+              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+              {busy ? "Applying…" : "Apply properties"}
+            </Button>
+          </div>
+        </>
+      )}
+      {isOpenView && !isAdmin && (
+        <div className="text-12 text-ink-tertiary">
+          Applying additional properties needs an admin.
+        </div>
+      )}
     </div>
   );
 }
@@ -913,9 +1089,16 @@ export default function TriageInboxTabV2({ isAdmin }) {
   // Email-disagreement confirm form draft, keyed by item id — which
   // candidate (or "other") is selected, and the typed value for "other".
   const [emailConfirmDrafts, setEmailConfirmDrafts] = useState({});
+  // SMS additional-property review drafts, keyed by `${item.id}:${item.updated_at || ""}`
+  // so a refreshed card discards prior edits and confirmation state.
+  const [smsPropertyDrafts, setSmsPropertyDrafts] = useState({});
+  const loadSeqRef = useRef(0);
+  const viewRef = useRef({ mode, status, autoOnly });
+  viewRef.current = { mode, status, autoOnly };
   const held = useHeldLines({ onError: setError }); // "Held lines" panel (no-text lines still blocked for texts)
 
   const load = useCallback((nextMode, nextStatus, nextAutoOnly = false) => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setError("");
     const terminal = nextStatus === "resolved" || nextStatus === "dismissed";
@@ -924,17 +1107,22 @@ export default function TriageInboxTabV2({ isAdmin }) {
       : `/admin/triage?status=${nextStatus}${terminal && nextAutoOnly ? "&source=auto" : ""}`;
     adminFetch(url)
       .then((d) => {
+        if (seq !== loadSeqRef.current) return;
         setItems(d.items || []);
         if (d.counts) setCounts(d.counts);
         setLoading(false);
       })
       .catch((err) => {
+        if (seq !== loadSeqRef.current) return;
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Failed to load.");
         setLoading(false);
       });
   }, []);
 
-  useEffect(() => { load(mode, status, autoOnly); }, [mode, status, autoOnly, load]);
+  useEffect(() => {
+    load(mode, status, autoOnly);
+    return () => { loadSeqRef.current += 1; };
+  }, [mode, status, autoOnly, load]);
 
   // Record a verdict (accept, or deny with fields). kind = 'triage' | 'auto_routed'.
   const recordVerdict = (item, kind, verdict, wrongFields, note) => {
@@ -1176,35 +1364,45 @@ export default function TriageInboxTabV2({ isAdmin }) {
   };
 
   // One-click apply for a property_role_confirm card — executes the parked
-  // occupancy/primary-residence proposals server-side and resolves the card.
-  const applyPropertyRoles = (item) => {
+  // occupancy/primary-residence (call) or additional-property (SMS) proposals
+  // server-side and resolves the card.
+  const applyPropertyRoles = (item, extraPayload = null) => {
+    const draftKey = `${item.id}:${item.updated_at || ""}`;
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/apply-property-roles`, {
       method: "POST",
       // Version binding: the server 409s if the card's proposals were
       // refreshed (force-reprocess) after this list render — the click
       // must apply exactly what was displayed.
-      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+      body: JSON.stringify({
+        expected_updated_at: item.updated_at,
+        ...(extraPayload || {}),
+      }),
     })
       .then(() => {
         setActioning(null);
-        // Full reload rather than optimistic removal: applying roles can
-        // atomically retire the call's second_service_address sibling
-        // server-side too — the list and counts must reflect every row
-        // the server resolved, not just the clicked one.
-        load(mode, status);
+        setSmsPropertyDrafts((prev) => {
+          if (!Object.hasOwn(prev, draftKey)) return prev;
+          const next = { ...prev };
+          delete next[draftKey];
+          return next;
+        });
+        // Reload using the CURRENT active view (not the closure captured when
+        // Apply was clicked) so switching tabs while Apply is pending never
+        // overwrites the new tab with cards from the old one.
+        const v = viewRef.current;
+        load(v.mode, v.status, v.autoOnly);
       })
       .catch((err) => {
         setActioning(null);
         if (err?.status === 409) {
-          // Version conflict: the card's proposals were refreshed (or the
-          // card resolved) after this render — reload the ACTIVE view
-          // (bare load() would fall back to the open tab) so the reviewer
-          // sees the CURRENT proposals before clicking again. setError
-          // runs AFTER load() so load's own setError("") reset doesn't
-          // swallow the explanation.
-          load(mode, status);
-          setError("This card changed since it loaded — review the refreshed proposals before applying.");
+          const v = viewRef.current;
+          load(v.mode, v.status, v.autoOnly);
+          setError(err?.message || "This card changed since it loaded — review the refreshed proposals before applying.");
+          return;
+        }
+        if ((err?.status === 400 || err?.status === 403) && err?.message) {
+          setError(err.message);
           return;
         }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Apply failed — try again.");
@@ -1470,6 +1668,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // click instead of an accept/deny verdict (the server rejects
                 // verdicts on them, same as bounce cards).
                 const isPropertyRoleCard = isTriage && item.reason_code === "property_role_confirm";
+                const isCallPropertyRoleCard = isPropertyRoleCard && !isSmsPropertyRoleItem(item);
                 // Parked reschedule-link promises aren't call verdicts either —
                 // the server 400s /verdict on them (settling the underlying
                 // commitment needs the single-card Resolve/Dismiss transition,
@@ -1572,15 +1771,17 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               </Button>
                             ) : null
                           ) : isPropertyRoleCard ? (
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              disabled={actioning === busyKey}
-                              onClick={() => applyPropertyRoles(item)}
-                            >
-                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                              {actioning === busyKey ? "Applying…" : "Apply roles"}
-                            </Button>
+                            isCallPropertyRoleCard && (
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                disabled={actioning === busyKey}
+                                onClick={() => applyPropertyRoles(item)}
+                              >
+                                <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                                {actioning === busyKey ? "Applying…" : "Apply roles"}
+                              </Button>
+                            )
                           ) : isBounceCard ? (
                             <Button
                               size="sm"
@@ -1657,7 +1858,21 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, canAttach: item.can_attach_contact === true, canNewCustomer: item.can_new_customer === true, busy: actioning === busyKey, onSave: () => saveContactNote(item), onAttach: (customerId, role) => attachContact(item, customerId, role), onNewCustomer: () => newCustomerFromCard(item), callPrepay: item.call_prepay || null, onAcceptPrepay: () => acceptCallPrepay(item), tapFor: item, onAcceptPhoneYes: (token) => acceptCallPhoneYes(item, token) })}
                     {isTriage && <ClosedNoTextAction item={item} onLineCanText={() => setLineCanTextFor(item)} />}
-                    {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
+                    {isPropertyRoleCard && (
+                      <PropertyRoleEvidence
+                        item={item}
+                        payload={item.payload}
+                        draft={smsPropertyDrafts[`${item.id}:${item.updated_at || ""}`]}
+                        isOpenView={isOpenView}
+                        isAdmin={isAdmin}
+                        busy={actioning === busyKey}
+                        onChange={(nextDraft) => setSmsPropertyDrafts((prev) => ({
+                          ...prev,
+                          [`${item.id}:${item.updated_at || ""}`]: nextDraft,
+                        }))}
+                        onApply={(extra) => applyPropertyRoles(item, extra)}
+                      />
+                    )}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">
                         Confirming the email spelling needs an admin.

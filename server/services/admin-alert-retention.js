@@ -170,8 +170,12 @@ const RERING = [
     decision: 'expire: only a new first-visit request from the customer on the estimate page raises it again (one open row per estimate; the settle pass closes it once the estimate is no longer open)' },
   { emitter: 'portal-message', files: ['services/portal-messages.js'], prefixes: ['portal-message:'], kind: 'event',
     decision: 'expire: only a new message the customer writes in their portal thread raises it again (one open row per thread)' },
+  { emitter: 'inventory-margin-watchdog', files: ['services/inventory-margin-watchdog.js'], prefixes: ['inventory-margin-watchdog:'], kind: 'periodic',
+    decision: 'expire, capped: while a vendor cost spike or modeled margin breach still holds, the next daily watchdog sweep raises one fresh row' },
   { emitter: 'family-drop-below-two', files: ['services/multi-home-family.js'], prefixes: ['family-drop-below-two:'], kind: 'event',
     decision: 'expire: only another family unlink, archive, or cancellation that drops a family below 2 active homes raises it again' },
+  { emitter: 'call-extraction-outage', files: ['services/call-hygiene-guards.js'], prefixes: ['call-extraction-outage:'], kind: 'event',
+    decision: 'expire: only a new burst of 3+ call extraction failures in 60 minutes raises it again' },
 ];
 
 const parseMeta = (metadata) => {

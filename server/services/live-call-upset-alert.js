@@ -42,10 +42,19 @@ Reply with ONLY this JSON: {"mood": "calm" | "concerned" | "upset" | "angry", "r
 Use "upset" or "angry" only when the caller clearly is: raised frustration, a complaint about service or billing, a threat to cancel or leave a review, or insults.`;
 
 const gateOn = () => require('../config/feature-gates').isEnabled('liveCallUpsetAlert');
+const notQuarantinedSql = () => `NOT ${require('./live-call-transcription').QUARANTINE_WHERE_SQL}`;
 
 function meta(value) {
   if (value && typeof value === 'object') return value;
   try { return JSON.parse(String(value || '')) || {}; } catch { return {}; }
+}
+
+// True when a warm transfer to the owner was accepted on this call (persisted on conference_path.owner_taken
+// across subsequent holds, and also checked on hold.transfer.status 'accepted'/'taken').
+function transferTakenByOwner(callMeta) {
+  const cp = callMeta?.conference_path;
+  const status = cp?.hold?.transfer?.status;
+  return Boolean(cp?.owner_taken || status === 'accepted' || status === 'taken');
 }
 
 // A call is over once Twilio reported a terminal status, the status callback stamped metadata.ended_at, or the
@@ -84,6 +93,7 @@ async function claimCheck(callSid, live, now) {
   if (callerCount - (Number(live.upset_checked_count) || 0) < MIN_NEW_UTTERANCES) return false;
   const won = await db('call_log')
     .where('twilio_call_sid', callSid)
+    .whereRaw(notQuarantinedSql())
     .whereRaw("COALESCE((metadata -> 'live_transcription' ->> 'upset_checks')::int, 0) = ?", [checks])
     .whereRaw("(metadata -> 'live_transcription') ->> 'upset_alert_at' IS NULL")
     .update({
@@ -152,12 +162,17 @@ const staffNameOf = (acceptance) => String(acceptance?.csr_name || '').replace(/
 
 async function raiseAlert(call, acceptance, reason) {
   const callSid = call.twilio_call_sid;
-  // The call may have ended while the model ran: one fresh read, so the owner is not paged to join a dead call.
-  const fresh = await db('call_log').where('twilio_call_sid', callSid).first('status', 'metadata');
-  if (!fresh || callEnded(fresh)) return false;
+  // The call may have ended, been quarantined, or warm-transferred to the owner while the model ran.
+  const fresh = await db('call_log')
+    .where('twilio_call_sid', callSid)
+    .whereRaw(notQuarantinedSql())
+    .first('status', 'metadata');
+  const freshMeta = meta(fresh?.metadata);
+  if (!fresh || callEnded(fresh) || ownerAnswered(freshMeta.forward_acceptance) || transferTakenByOwner(freshMeta)) return false;
   // Once per call: the first caller to stamp upset_alert_at raises it.
   const stamped = await db('call_log')
     .where('twilio_call_sid', callSid)
+    .whereRaw(notQuarantinedSql())
     .whereRaw("(metadata -> 'live_transcription') ->> 'upset_alert_at' IS NULL")
     .update({
       metadata: db.raw(
@@ -177,7 +192,12 @@ async function raiseAlert(call, acceptance, reason) {
       subject: { type: 'call', id: String(call.id) },
       doneWhen: 'call_ended',
       who: 'person',
-    }, { bell: true, dedupeKey: `live-call-upset:${callSid}`, bannerKind: 'live_call_upset' });
+    }, {
+      bell: true,
+      dedupeKey: `live-call-upset:${callSid}`,
+      bannerKind: 'live_call_upset',
+      ...(call.customer_id ? { metadata: { customerId: call.customer_id } } : {}),
+    });
     // notifyAdmin swallows a database failure and resolves null. A row (also a dedupe hit, which is the standing
     // alert) or an intentional suppression (bell policy, internal test customer: id null, suppressed true) is
     // delivered; nothing else is, so it takes the same release path as a rejection.
@@ -198,11 +218,14 @@ async function raiseAlert(call, acceptance, reason) {
 async function checkCall(callSid) {
   try {
     if (!gateOn()) return { checked: false, reason: 'gate_off' };
-    const call = await db('call_log').where('twilio_call_sid', callSid).first('id', 'twilio_call_sid', 'status', 'metadata');
+    const call = await db('call_log')
+      .where('twilio_call_sid', callSid)
+      .whereRaw(notQuarantinedSql())
+      .first('id', 'twilio_call_sid', 'customer_id', 'status', 'metadata');
     const callMeta = meta(call?.metadata);
     if (!call || !callMeta.live_transcription) return { checked: false, reason: 'not_live' };
     if (callEnded(call)) return { checked: false, reason: 'call_ended' };
-    if (ownerAnswered(callMeta.forward_acceptance)) return { checked: false, reason: 'owner_on_call' };
+    if (ownerAnswered(callMeta.forward_acceptance) || transferTakenByOwner(callMeta)) return { checked: false, reason: 'owner_on_call' };
     if (!(await claimCheck(callSid, callMeta.live_transcription, new Date()))) return { checked: false, reason: 'not_due' };
     const transcript = await transcriptWindow(callSid);
     if (!transcript) return { checked: true, alerted: false };
@@ -220,5 +243,5 @@ function afterCallerUtterance(callSid) {
   checkCall(callSid).catch(() => {});
 }
 
-// staffAnswered and staffNameOf are also read by live-call-early-summary.js (the next-step alert after an office call).
-module.exports = { afterCallerUtterance, checkCall, ownerAnswered, staffAnswered, staffNameOf, _test: { whyFrom, callEnded } };
+// staffAnswered, staffNameOf and transferTakenByOwner are also read by live-call-early-summary.js and admin-call-recordings.js.
+module.exports = { afterCallerUtterance, checkCall, ownerAnswered, staffAnswered, staffNameOf, transferTakenByOwner, _test: { whyFrom, callEnded } };

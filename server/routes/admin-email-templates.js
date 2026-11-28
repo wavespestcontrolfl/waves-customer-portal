@@ -279,20 +279,15 @@ router.get('/', async (req, res, next) => {
       .where({ status: 'draft' })
       .count('* as count')
       .groupBy('template_id');
-    const automationCounts = await db('email_template_automations')
-      .select('template_key')
-      .count('* as count')
-      .groupBy('template_key');
     const countMap = Object.fromEntries(versionCounts.map((r) => [r.template_id, Number(r.count)]));
     const draftMap = Object.fromEntries(draftCounts.map((r) => [r.template_id, Number(r.count)]));
-    const automationMap = Object.fromEntries(automationCounts.map((r) => [r.template_key, Number(r.count)]));
     res.json({
       templates: templates.map((t) => ({
         ...t,
         version_count: countMap[t.id] || 0,
         draft_count: draftMap[t.id] || 0,
-        automation_count: automationMap[t.template_key] || 0,
-        can_delete: canHardDeleteTemplate(t) && !automationMap[t.template_key],
+        automation_count: 0,
+        can_delete: canHardDeleteTemplate(t),
       })),
     });
   } catch (err) { next(err); }
@@ -787,23 +782,24 @@ router.put('/:key', async (req, res, next) => {
 // DELETE /api/admin/email-templates/:key
 router.delete('/:key', async (req, res, next) => {
   try {
-    const template = await loadTemplateByParam(req.params.key);
-    if (!template) return res.status(404).json({ error: 'template not found' });
-    const hardDeleteBlocker = templateHardDeleteBlocker(template);
-    if (hardDeleteBlocker) return res.status(409).json({ error: hardDeleteBlocker });
-    const dependents = await db('email_template_automations')
-      .where({ template_key: template.template_key })
-      .select('automation_key');
-    if (dependents.length) {
-      return res.status(409).json({
-        error: 'template is referenced by automations',
-        automations: dependents.map((d) => d.automation_key),
-      });
-    }
-    await db.transaction(async (trx) => {
+    // Lock the template row inside the transaction before checking delete
+    // eligibility so a concurrent activation cannot race past the draft/archived
+    // guard. GATE_EMAIL_TEMPLATE_AUTOMATIONS and its UI/routes were retired in
+    // #8620, so any remaining email_template_automations rows are orphaned legacy
+    // references with ON DELETE RESTRICT; clean them up before deleting the
+    // template (automation_runs.automation_id is SET NULL).
+    const result = await db.transaction(async (trx) => {
+      const template = await trx('email_templates').where({ template_key: req.params.key }).forUpdate().first();
+      if (!template) return { status: 404, body: { error: 'template not found' } };
+      const hardDeleteBlocker = templateHardDeleteBlocker(template);
+      if (hardDeleteBlocker) return { status: 409, body: { error: hardDeleteBlocker } };
+      if (!trx.schema || await trx.schema.hasTable('email_template_automations')) {
+        await trx('email_template_automations').where({ template_key: template.template_key }).del();
+      }
       await trx('email_templates').where({ id: template.id }).del();
+      return { status: 200, body: { deleted: true } };
     });
-    res.json({ deleted: true });
+    return res.status(result.status).json(result.body);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);

@@ -228,6 +228,19 @@ function planLink(mineRow, otherRow, customerId, otherCustomerId) {
   return { familyId: randomUUID(), add: [customerId, otherCustomerId] };
 }
 
+async function pruneSingleMemberOrphan(trx, row) {
+  if (!row) return null;
+  const members = await trx(TABLE).where({ family_id: row.family_id }).forUpdate().select('id');
+  if (Array.isArray(members) && members.length === 1 && members[0]?.id != null) {
+    const delQ = trx(TABLE).where({ id: members[0].id });
+    if (typeof delQ.del === 'function') {
+      await delQ.del();
+      return null;
+    }
+  }
+  return row;
+}
+
 async function loadFamilyAddresses(trx, familyIds) {
   const ids = [...new Set((familyIds || []).filter(Boolean))];
   if (!ids.length) return [];
@@ -246,9 +259,9 @@ async function linkInTransaction(trx, { customerId, otherCustomerId, actorId }) 
   if (sameHomeAddress(mineProfile, otherProfile)) {
     throw familyError('Both profiles share the same service address. Link distinct homes as Same family, or merge duplicate profiles instead.', 409);
   }
-  const rows = await trx(TABLE).whereIn('customer_id', [customerId, otherCustomerId]).forUpdate().select('customer_id', 'family_id');
-  const mineRow = rows.find((row) => row.customer_id === customerId);
-  const otherRow = rows.find((row) => row.customer_id === otherCustomerId);
+  const rows = await trx(TABLE).whereIn('customer_id', [customerId, otherCustomerId]).forUpdate().select('id', 'customer_id', 'family_id');
+  const mineRow = await pruneSingleMemberOrphan(trx, rows.find((row) => row.customer_id === customerId));
+  const otherRow = await pruneSingleMemberOrphan(trx, rows.find((row) => row.customer_id === otherCustomerId));
   const plan = planLink(mineRow, otherRow, customerId, otherCustomerId);
   if (plan.add && plan.add.length) {
     const familyIds = [mineRow?.family_id, otherRow?.family_id].filter(Boolean);

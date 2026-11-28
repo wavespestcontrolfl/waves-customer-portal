@@ -53,6 +53,21 @@ describe('call-log analytics', () => {
     expect(hub).toEqual(expect.objectContaining({ kind: 'unknown', label: 'Source unknown' }));
     expect(hub.basis).toMatch(/shared by the office and website/i);
 
+    // C2-10: Waves Main Line (+19412975749) is in domainTracking, so the voice
+    // webhook stamps metadata.numberType='domain_tracking' and domain='wavespestcontrol.com'.
+    // Shared-line ambiguity must win over recorded domain_tracking metadata.
+    for (const numberType of ['domain_tracking', 'pest_domain', 'lawn_domain']) {
+      const mainLineWithStamp = sourceEvidence({
+        to_phone: '+19412975749',
+        _source_name: 'Waves Main Line',
+        _source_type: 'main_site',
+        _source_domain: 'wavespestcontrol.com',
+        metadata: { numberType, domain: 'wavespestcontrol.com', location: 'Main Line' },
+      });
+      expect(mainLineWithStamp).toEqual(expect.objectContaining({ kind: 'unknown', label: 'Source unknown' }));
+      expect(mainLineWithStamp.basis).toMatch(/shared by the office and website/i);
+    }
+
     expect(sourceEvidence({
       to_phone: '+19413187612',
       _source_name: 'Website — Bradenton (city page)',

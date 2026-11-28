@@ -503,6 +503,34 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     expect(await countUnreadInboundSms({ customerId: ids[1] })).toEqual({ conversations: 1, messages: 1 });
   }, 30000);
 
+  test('conversation read keeps sub-millisecond arrivals after readBefore unread while explicit messageIds still mark displayed rows read', async () => {
+    const convId = randomUUID();
+    const displayedId = randomUUID();
+    const unseenSubMsId = randomUUID();
+    const readBefore = new Date('2026-11-28T08:00:00.123Z');
+    await mockPg('conversations').insert({
+      id: convId, customer_id: ids[2], channel: 'sms', contact_phone: '+19415550102', our_endpoint_id: '+19415550198',
+    });
+    // Both rows have PostgreSQL microsecond timestamps 500us after readBefore.
+    // The displayed row is passed in messageIds; the unseen arrival is not.
+    await mockPg.raw(
+      `INSERT INTO messages (id, conversation_id, channel, direction, author_type, is_read, body, created_at)
+       VALUES (?, ?, 'sms', 'inbound', 'customer', false, 'Displayed row', ?::timestamptz + interval '500 microseconds'),
+              (?, ?, 'sms', 'inbound', 'customer', false, 'Unseen sub-ms arrival', ?::timestamptz + interval '500 microseconds')`,
+      [displayedId, convId, readBefore.toISOString(), unseenSubMsId, convId, readBefore.toISOString()],
+    );
+
+    const res = await markInboundSmsRead({
+      messageIds: [displayedId],
+      conversationIds: [convId],
+      readBefore,
+      role: 'admin',
+    });
+    expect(res).toMatchObject({ updated: 1 });
+    expect((await mockPg('messages').where({ id: displayedId }).first()).is_read).toBe(true);
+    expect((await mockPg('messages').where({ id: unseenSubMsId }).first()).is_read).toBe(false);
+  }, 30000);
+
   // Reuse one synthetic sender fixture across identity, scope and race cases.
   async function withSender({ promoted = false, crossNumber = false, bellAfterEntry = false } = {}, run) {
     const phone = `+1941${randomBytes(4).readUInt32BE().toString().padStart(10, '0').slice(-7)}`;

@@ -74,7 +74,7 @@ const SERVICE_MAP = {
   },
   trenching: {
     label: 'Termidor Trench',
-    serviceTypes: ['Termidor Trench', 'Termite Trench'],
+    serviceTypes: ['Termidor Trench', 'Termite Trench', 'Liquid Termite Perimeter'],
     areaField: 'homeSqFt',
   },
   rodent_trapping: {

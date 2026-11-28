@@ -70,4 +70,21 @@ describe('EstimateSoldByRow', () => {
     expect(soldByDetail({ source: 'creator', technicianId: 't1', name: 'Sample Alpha', gpsDistanceM: null, flaggedAt: null }))
       .toBe('made the estimate in the technician tool');
   });
+
+  it('formats late-UTC flag timestamps on their Eastern calendar day and invalidates options cache on token change', async () => {
+    expect(soldByDetail({
+      source: 'flag', technicianId: 't1', name: 'Sample Alpha', gpsDistanceM: 12, flaggedAt: '2026-10-21T02:30:00Z',
+    })).toBe("from Sample Alpha's flag, truck 12 m away, Oct 20");
+
+    localStorage.setItem('waves_admin_token', 'token-a');
+    const first = render(<EstimateSoldByRow estimate={estimate(BLANK)} />);
+    await waitFor(() => expect(mockAdminFetch).toHaveBeenCalledWith('/admin/estimates/sold-by/options'));
+    const callsAfterA = mockAdminFetch.mock.calls.filter(([p]) => p.includes('/sold-by/options')).length;
+    first.unmount();
+
+    localStorage.setItem('waves_admin_token', 'token-b');
+    render(<EstimateSoldByRow estimate={estimate(BLANK)} />);
+    await waitFor(() => expect(mockAdminFetch.mock.calls.filter(([p]) => p.includes('/sold-by/options')).length).toBe(callsAfterA + 1));
+    localStorage.clear();
+  });
 });
