@@ -304,7 +304,7 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
       // Covers and Where were cleared by the first save: they are not sent again.
-      expect(putCalls(fetchMock)[1]).toEqual({ accessNotes: 'short' });
+      expect(putCalls(fetchMock)[1]).toEqual({ accessNotes: 'short', confirmedAsOf: MOVED_AT });
     });
 
     it('a typed-out date with another field rejected: the form takes Covers from the server answer', async () => {

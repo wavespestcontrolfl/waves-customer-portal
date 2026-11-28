@@ -8132,9 +8132,15 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
   // Resolves to the per-field rejections, or throws when the request failed.
   const submit = async (dirtyKeys) => {
     const body = accessPrefsSavePayload(draft, dirtyKeys);
-    // The sod record and the sprinkler timer are facts about one home: the server takes them only from a form
-    // rendered against the current home.
-    if ([...ACCESS_PREFS_SOD_KEYS, ...ACCESS_PREFS_TIMER_KEYS].some((k) => dirtyKeys.includes(k))) {
+    // The sod record, sprinkler timer, and moved-home access fields are facts
+    // about one home: send the form's render stamp whenever those fields change
+    // (for access fields, when a move stamp is on file).
+    const accessDirty = [
+      "propertyGateCode", "neighborhoodGateCode", "garageCode", "lockboxCode",
+      "sideGateAccess", "parkingNotes", "accessNotes", "specialInstructions",
+    ].some((k) => dirtyKeys.includes(k));
+    if ([...ACCESS_PREFS_SOD_KEYS, ...ACCESS_PREFS_TIMER_KEYS].some((k) => dirtyKeys.includes(k))
+      || (accessDirty && renderStampRef.current != null)) {
       body.confirmedAsOf = renderStampRef.current;
     }
     // The timers the row may hold, as brand|model|app: the one this form opened with (or last saved), and any a failed
