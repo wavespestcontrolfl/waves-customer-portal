@@ -1184,6 +1184,20 @@ function holdTimestampMs(value) {
   return Number.isNaN(ms) ? String(value) : ms;
 }
 
+async function findConcurrentHoldReplay(conn, { svc, locked, date, startTime }) {
+  const visitHold = require('../services/visit-hold');
+  const activeStatus = ['pending', 'confirmed'].includes(String(locked?.status || '').toLowerCase());
+  if (!visitHold.rowIsHeld(svc) || visitHold.rowIsHeld(locked) || !activeStatus) return null;
+  if (apptDateStr(locked?.scheduled_date) !== date || hhmm(locked?.window_start) !== startTime) return null;
+  const recentLog = await conn('reschedule_log')
+    .where({ scheduled_service_id: svc.id, initiated_by: 'customer_self_serve' })
+    .where('created_at', '>=', svc.held_at)
+    .orderBy('created_at', 'desc')
+    .first('new_date', 'new_window');
+  const loggedStart = String(recentLog?.new_window || '').slice(0, 5);
+  return recentLog && apptDateStr(recentLog.new_date) === date && loggedStart === startTime ? locked : null;
+}
+
 // Concurrent hold-state guard inside officeApprovalRecheck (GATE_VISIT_HOLD):
 // any hold change between the unlocked read and row lock (new hold placed by
 // staff, replaced hold, or cleared hold) stops the move — except when the row
@@ -1193,18 +1207,8 @@ async function assertLockedHoldState({ trx, svc, locked, date, startTime }) {
   const visitHold = require('../services/visit-hold');
   if (!visitHold.visitHoldLive()) return;
   if (holdTimestampMs(locked?.held_at) === holdTimestampMs(svc.held_at)) return;
-  const activeStatus = ['pending', 'confirmed'].includes(String(locked?.status || '').toLowerCase());
-  if (visitHold.rowIsHeld(svc) && !visitHold.rowIsHeld(locked) && activeStatus
-    && apptDateStr(locked?.scheduled_date) === date && hhmm(locked?.window_start) === startTime) {
-    const recentLog = await trx('reschedule_log')
-      .where({ scheduled_service_id: svc.id, initiated_by: 'customer_self_serve' })
-      .where('created_at', '>=', svc.held_at)
-      .orderBy('created_at', 'desc')
-      .first('new_date', 'new_window');
-    const loggedStart = String(recentLog?.new_window || '').slice(0, 5);
-    if (recentLog && apptDateStr(recentLog.new_date) === date && loggedStart === startTime) {
-      throw Object.assign(new Error('Already rescheduled'), { code: 'HOLD_RELEASE_REPLAY', locked });
-    }
+  if (await findConcurrentHoldReplay(trx, { svc, locked, date, startTime })) {
+    throw Object.assign(new Error('Already rescheduled'), { code: 'HOLD_RELEASE_REPLAY', locked });
   }
   throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
     statusCode: 409, isOperational: true, code: 'SLOT_TAKEN',
@@ -1311,9 +1315,19 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
 
     // Customer move limits (GATE_RESCHEDULE_MOVE_LIMITS). After the replay
-    // above: a retry of a move that already committed still replays. The
-    // page reloads on MOVE_LIMIT and shows what GET now offers.
-    await assertMoveLimitAllows(svc, elig, range, config, date);
+    // above: a retry of a move that already committed still replays. For a
+    // held visit racing a concurrent winner that just used the final daily
+    // move, replay the winner instead of returning MOVE_LIMIT.
+    try {
+      await assertMoveLimitAllows(svc, elig, range, config, date);
+    } catch (limitErr) {
+      if (limitErr?.code === 'MOVE_LIMIT' && visitHold.rowIsHeld(svc)) {
+        const fresh = await loadById(svc.id);
+        const replayedRow = fresh ? await findConcurrentHoldReplay(db, { svc, locked: fresh, date, startTime }) : null;
+        if (replayedRow) return res.json(await buildReplayResponse({ ...svc, ...replayedRow }, date, startTime));
+      }
+      throw limitErr;
+    }
 
     // Shared SLOT_TAKEN recovery response (Codex round 1 P2 on PR #5267,
     // PRRT_kwDOR3YQi86mzgqa): the anti-forgery miss below AND a capacity
@@ -1443,8 +1457,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const officeApprovalRecheck = async ({ trx }) => {
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
         .first('scheduled_date', 'window_start', 'window_end', 'status', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days', 'customer_pick_by', 'technician_id',
+          ...visitHold.heldColumn(),
           'service_id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included',
-          'date_exception', 'date_exception_cadence_date', ...visitHold.heldColumn());
+          'date_exception', 'date_exception_cadence_date');
       await assertLockedHoldState({ trx, svc, locked, date, startTime });
       // Both movers save the offered slot's technician (offerTechnicianScope kept the one this request read):
       // a staff reassignment since then refuses on the LOCKED row, missed visits too, never overwritten.

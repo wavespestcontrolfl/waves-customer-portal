@@ -201,6 +201,11 @@ function exemptFromPlanning(rows, planningMinutes) {
   return planningMinutes === false ? rows.map(row => ({ ...row, planning_exempt: true })) : rows;
 }
 
+function isInsertTarget(stored, changes, date, techId, forceInsert) {
+  return !!forceInsert || dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
+    || Boolean(changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5));
+}
+
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
   includeClaimedReservations = false, markLapsedReservations = false,
@@ -225,6 +230,9 @@ async function loadArrivalRouteContext({
   // road purchase, buySaveRoads): read the geocoder's cache only, as the
   // save's own locked read does.
   cacheLocation = false,
+  // True when re-inserting a visit returning from hold onto its own prior slot:
+  // evaluate every route insertion position rather than its stale route_order.
+  forceInsert,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -309,8 +317,7 @@ async function loadArrivalRouteContext({
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
   date, now, grouped, activeTarget, activeStop, prospective: !!prospective,
-  insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
-    || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
+  insertTarget: isInsertTarget(stored, changes, date, techId, forceInsert),
   // Where the visit is saved now (staffPlacement).
   placedAt: prospective ? null : { date: dateOnly(stored.scheduled_date),
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
