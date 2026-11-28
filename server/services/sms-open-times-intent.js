@@ -103,7 +103,9 @@ const PEST_REPORT_TOPIC_RE = /\b(?:ants?|roach(?:es)?|spider|termite|wasp|bee|fl
 
 const FOLLOWUP_SCHEDULING_REPLY_RE = /\b(?:any\s*time|anytime|flexible|whenever|either(?:\s+(?:one|works|day|time))?|wide\s+open|open\s+(?:all|any|this|next)|works?\s+for\s+me|that\s+works|sounds\s+good|yes\s+please|mornings?|afternoons?|before\s+noon|after\s+lunch|next\s+week|this\s+week|earlier|later|sooner|first\s+thing|in\s+the\s+a\.?m\.?|in\s+the\s+p\.?m\.?|a\.m\.|p\.m\.|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b/i;
 
-const STAFF_SCHEDULING_QUESTION_RE = /(?:\b(?:what|which)\s+(?:day|days|time|times|window)\b|\b(?:morning|afternoon)\s+or\s+(?:morning|afternoon)\b|\b(?:when|what\s+day|what\s+time)\b[^.?!]{0,45}\b(?:work|best|good|prefer|come\s+out|schedule|reschedule|move|book)\b|\b(?:would\s+you\s+like|do\s+you\s+want|want\s+me)\s+to\s+(?:schedule|reschedule|move|book)\b|\b(?:let\s+(?:us|me)\s+know)\b[^.?!]{0,45}\b(?:day|time|morning|afternoon|when|works)\b)/i;
+const STAFF_SCHEDULING_QUESTION_RE = /(?:\b(?:what|which)\s+(?:day|days|time|times|window)\b|\b(?:morning|afternoon)\s+or\s+(?:morning|afternoon)\b|\b(?:when|what\s+day|what\s+time)\b[^.?!]{0,45}\b(?:work|best|good|prefer|come\s+out|schedule|reschedule|move|book)\b|\b(?:would\s+you\s+like|do\s+you\s+want|want\s+me)\s+to\s+(?:schedule|reschedule|move|book)\b|\b(?:let\s+(?:us|me)\s+know)\b(?!\s+if\s+(?:that|this|it)\b)[^.?!]{0,45}\b(?:day|time|morning|afternoon|when|works)\b)/i;
+
+const STAFF_BOOKING_CONFIRMATION_RE = /\b(?:all\s+set|you(?:'re|\s+are)\s+(?:all\s+)?set|we(?:'ve|\s+have)?\s+(?:got\s+you|moved\s+you|booked\s+you|scheduled\s+you|confirmed)|(?:is|are)\s+(?:booked|scheduled|confirmed|moved)\s+(?:for|to))\b/i;
 
 const STAFF_EXPLICIT_VISIT_SUBJECT_RE = /\b(?:visit|appointment|service|tech|technician|come\s+out|pest|lawn|mosquito|treatment|spray)\b/i;
 
@@ -215,6 +217,7 @@ function collectCurrentCustomerTurns(recent, startIdx) {
 function isStaffAppointmentQuestion(body) {
   const clean = String(body || '');
   if (!STAFF_SCHEDULING_QUESTION_RE.test(clean)) return false;
+  if (STAFF_BOOKING_CONFIRMATION_RE.test(clean)) return false;
   if (NON_APPOINTMENT_SUBJECT_RE.test(clean)) return false;
   if (RESERVICE_SUBJECT_RE.test(clean)) return false;
   return true;
@@ -274,7 +277,9 @@ function threadSchedulingFollowUp({ inboundMessage, inboundPhone, smsHistory, no
       return { carried: false, reason: 'staff_closed_thread', anchorText: '' };
     }
     if (isCustomerAppointmentAsk(turn.body)) {
-      return { carried: true, reason: 'prior_customer_booking_ask', anchorText: String(turn.body).trim() };
+      const priorContext = collectCurrentCustomerTurns(recent, i + 1);
+      const anchorText = [...priorContext, String(turn.body).trim()].join('\n');
+      return { carried: true, reason: 'prior_customer_booking_ask', anchorText };
     }
     if (isCustomerTopicBarrier(turn.body)) {
       return { carried: false, reason: 'customer_changed_topic', anchorText: '' };
@@ -324,7 +329,7 @@ function buildThreadIdentityInput(threadFollowUp, inboundMessage) {
 
 function disambiguateThreadIdentity(threadFollowUp, identity, context, openEstimate) {
   if ((!threadFollowUp?.carried && !threadFollowUp?.anchorText) || !identity?.certain) return identity;
-  const fallbackReasons = new Set(['single_upcoming', 'engine_default', 'last_completed', 'next_of_series', 'open_estimate']);
+  const fallbackReasons = new Set(['single_upcoming', 'engine_default', 'last_completed', 'next_of_series']);
   if (!fallbackReasons.has(identity.reason)) return identity;
   const serviceTypes = new Set(
     (context?.upcomingServices || [])
@@ -332,7 +337,7 @@ function disambiguateThreadIdentity(threadFollowUp, identity, context, openEstim
       .filter(Boolean),
   );
   const hasOpenEstimate = Boolean(openEstimate || context?.pendingEstimate);
-  if (serviceTypes.size > 1 || (hasOpenEstimate && identity.reason !== 'open_estimate')) {
+  if (serviceTypes.size > 1 || hasOpenEstimate) {
     return { serviceType: null, certain: false, reason: 'thread_ambiguous' };
   }
   return identity;

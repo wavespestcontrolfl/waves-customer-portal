@@ -470,5 +470,41 @@ describe('threadSchedulingFollowUp', () => {
     });
     expect(earlierStaffService.carried).toBe(true);
     expect(earlierStaffService.anchorText).toContain('lawn visit');
+
+    // Codex P2: collect earlier active-thread context before returning a customer booking anchor
+    const priorCustomerAnchor = threadSchedulingFollowUp({
+      inboundMessage: 'Anytime works',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'inbound', body: 'Can we reschedule it to Friday?', date: minsAgo(5), fromPhone: ME, toPhone: WAVES },
+        { direction: 'outbound', body: 'What day works best for your lawn care visit?', date: minsAgo(10), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+        { direction: 'inbound', body: 'Can we move my lawn care visit?', date: minsAgo(20), fromPhone: ME, toPhone: WAVES },
+      ],
+    });
+    expect(priorCustomerAnchor.carried).toBe(true);
+    expect(priorCustomerAnchor.reason).toBe('prior_customer_booking_ask');
+    expect(priorCustomerAnchor.anchorText).toContain('lawn care visit');
+    expect(priorCustomerAnchor.anchorText).toContain('reschedule it to Friday');
+
+    // Codex P2: booking confirmation with conditional "let us know if that time doesn't work" footer closes thread
+    const confirmationFooter = threadSchedulingFollowUp({
+      inboundMessage: 'Sounds good',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'outbound', body: "All set, your lawn visit is booked for Thursday 10-12. Let us know if that time doesn't work.", date: minsAgo(5), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+      ],
+    });
+    expect(confirmationFooter).toEqual({ carried: false, reason: 'staff_closed_thread', anchorText: '' });
+
+    // Codex P2: explicit open_estimate identity stays certain even with multiple upcoming services
+    const explicitEstimate = disambiguateThreadIdentity(
+      { carried: true, anchorText: 'Staff asked: What day works best for the lawn treatment in your estimate?' },
+      { serviceType: 'Lawn Fertilization', certain: true, reason: 'open_estimate', estimateId: 'est-explicit-1' },
+      { upcomingServices: [{ type: 'Quarterly Pest' }, { type: 'Mosquito' }], pendingEstimate: { id: 'est-explicit-1' } },
+      { id: 'est-explicit-1' },
+    );
+    expect(explicitEstimate).toMatchObject({ serviceType: 'Lawn Fertilization', certain: true, reason: 'open_estimate', estimateId: 'est-explicit-1' });
   });
 });
