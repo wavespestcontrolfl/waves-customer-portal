@@ -13,14 +13,16 @@
  *    non-re-service visit within 48h.
  *    - Strictly preserves `missing_unit_number`, `email_unverified`, `email_invalid`,
  *      `missing_first_name`, `missing_last_name`, human-claimed `in_progress` cards,
- *      multi-property accounts (fail-closed on count error), street-mismatched cards,
- *      and unrelated leads.
+ *      multi-property accounts (fail-closed on count error), street/unit/locality
+ *      mismatched cards, city-only snapshots, missed-callback alerts, and unrelated leads.
  * 3. Suppresses false "Quote asked by text" owed-quote bells when an inbound photo SMS
- *    answers a recent 48h call where diarized `Agent:` speech explicitly asked the caller
- *    to text a picture (unless the SMS explicitly asks for pricing/a quote).
+ *    affirmatively delivers photos requested by `Agent:` on a recent inbound 48h call
+ *    (excluding outbound calls whose speaker labels may swap, and never suppressing
+ *    questions or ballpark/estimate asks even when an attachment is present).
  * 4. Preserves first-touch `lead_source` (Google Ads / GBP / organic / referral) across
  *    repeat or outbound callback calls so Call 2 never overwrites Call 1's channel with
- *    generic `phone_call` / `direct`.
+ *    generic `phone_call` / `direct`, preferring a call's recorded lead/referral source
+ *    over its dialed tracking number.
  */
 
 const logger = require('./logger');
@@ -30,7 +32,7 @@ const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks'
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const { scrubPans } = require('../utils/pan-scrub');
 const { redactAccessCodes } = require('./context-aggregator');
-const { streetKey } = require('./customer-properties');
+const { streetKey, unitKey: canonicalUnitKey, streetEmbeddedUnitKey } = require('./customer-properties');
 const { attributionForSourceType } = require('./ads/call-attribution');
 
 const EPISODE_WINDOW_HOURS = 48;
@@ -57,17 +59,29 @@ const ADDRESS_CONFLICT_HOLD_REASONS = Object.freeze(new Set([
   'multi_property_call',
 ]));
 
+const NEW_LEAD_ALERT_TITLES = Object.freeze([
+  'Untracked call lead',
+  'New call lead',
+  'New voicemail lead',
+]);
+
 const GENERIC_LEAD_SOURCES = Object.freeze(new Set([
   '', 'phone_call', 'direct', 'phone', 'inbound_call', 'outbound_call', 'unknown',
 ]));
 
 const URL_OR_SHORTLINK_RE = /\b(?:https?:\/\/\S+|www\.\S+|(?:[a-z0-9-]+\.)+(?:com|net|org|io|co|to|ly|me|app|link|us|info|biz)\/\S*)/gi;
 const DELIMITER_GUARD_RE = /<<<\s*PRIOR_CALL_DATA|PRIOR_CALL_DATA\s*>>>|<<<|>>>/gi;
-const EXPLICIT_QUOTE_ASK_RE = /\b(?:how\s+much|quote|price|pricing|cost|estimate|rate|charge|charges)\b/i;
+const QUOTE_OR_QUESTION_RE = /\?|\b(?:how\s+much|quote|price|pricing|cost|estimate|rate|charge|charges|ballpark|range|approx\w*|rough\s+(?:idea|number|figure)|can\s+you\s+(?:treat|help|come|give|tell|do|handle|check)|do\s+you\s+(?:treat|do|offer|service|handle)|would\s+(?:it|that|this)\s+(?:be|cost))\b/i;
 const PHOTO_SUBMISSION_RE = /\b(?:(?:here(?:'s|’s| is| are)?|attached|sending|sent|sharing)\b[^.!?\n]{0,45}\b(?:pic(?:ture)?s?|photos?|images?|snapshots?)|(?:pic(?:ture)?s?|photos?)\s+(?:of|from|as\s+requested|you\s+asked|for\s+you))\b/i;
 const STAFF_PHOTO_REQUEST_RE = /\b(?:text|send|shoot|email|message|snap)\b[^.!?\n]{0,50}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
 
 const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+const zip5 = (v) => { const m = String(v || '').match(/\d{5}/); return m ? m[0] : ''; };
+const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+
+function unitKey(line1, line2) {
+  return canonicalUnitKey(line2) || streetEmbeddedUnitKey(line1) || '';
+}
 
 function anchorDate(value) {
   const d = value ? new Date(value) : new Date();
@@ -88,6 +102,13 @@ function normalizedStreetKey(line1) {
   const street = String(line1 || '').split(',')[0].trim();
   if (!/^\d/.test(street)) return null;
   return streetKey(street) || null;
+}
+
+function localityOfRaw(raw) {
+  const s = String(raw || '');
+  const zip = zip5(s);
+  const m = s.match(/,\s*([A-Za-z][A-Za-z .'-]{1,30}?)(?:\s*,?\s*(?:FL|Florida)\b|\s+\d{5}\b|$)/i);
+  return { city: m ? m[1].trim() : '', zip };
 }
 
 function sanitizeEpisodeSmsBody(body) {
@@ -147,6 +168,8 @@ async function loadRecentEpisodeSms(conn, contactPhone, anchorCreatedAt = null) 
 
 // Find strictly earlier non-spam sibling calls within 48h for the same customer_id
 // (plus optional exact household normalized_street + last_name lookup).
+// Note: call_log has no lead_id column; lead links live in call_log.metadata->>'lead_id'
+// and leads.twilio_call_sid.
 async function findRecentEpisodeSiblingCalls(conn, {
   customerId = null,
   currentCallId = null,
@@ -159,6 +182,7 @@ async function findRecentEpisodeSiblingCalls(conn, {
   const anchor = anchorDate(anchorCreatedAt);
   const since = windowStartFrom(anchor);
   const byId = new Map();
+  const cols = ['id', 'twilio_call_sid', 'customer_id', 'metadata', 'created_at', 'direction', 'to_phone'];
 
   if (customerId) {
     const q = whereNotSandboxCall(conn('call_log'))
@@ -169,7 +193,7 @@ async function findRecentEpisodeSiblingCalls(conn, {
       .orderBy('created_at', 'desc')
       .limit(10);
     if (currentCallId) q.whereNot('id', currentCallId);
-    const rows = await q.select('id', 'twilio_call_sid', 'customer_id', 'lead_id', 'created_at', 'direction', 'to_phone');
+    const rows = await q.select(...cols);
     for (const r of rows) byId.set(String(r.id), r);
   }
 
@@ -193,7 +217,7 @@ async function findRecentEpisodeSiblingCalls(conn, {
         .orderBy('created_at', 'desc')
         .limit(10);
       if (currentCallId) q.whereNot('id', currentCallId);
-      const rows = await q.select('id', 'twilio_call_sid', 'customer_id', 'lead_id', 'created_at', 'direction', 'to_phone');
+      const rows = await q.select(...cols);
       for (const r of rows) byId.set(String(r.id), r);
     }
   }
@@ -201,9 +225,9 @@ async function findRecentEpisodeSiblingCalls(conn, {
   return [...byId.values()];
 }
 
-function buildReconcilableCardCodes({ customer, singleProperty, addressVerified, validatedStreetKey, hasAddressConflictHold }) {
+function buildReconcilableCardCodes({ customer, singleProperty, addressVerified, validatedPlace, hasAddressConflictHold }) {
   const codes = [];
-  if (addressVerified && !hasAddressConflictHold && singleProperty && validatedStreetKey
+  if (addressVerified && !hasAddressConflictHold && singleProperty && validatedPlace?.streetKey
       && String(customer?.address_line1 || '').trim() && String(customer?.zip || '').trim()) {
     codes.push(...EPISODE_ADDRESS_CARD_CODES);
   }
@@ -211,26 +235,53 @@ function buildReconcilableCardCodes({ customer, singleProperty, addressVerified,
   return codes;
 }
 
-// Match an open address review card against the street validated on Call 2 (and the
-// stored customer street). Never close a Street A card because Call 2 validated Street B.
-function addressCardMatchesVerifiedStreet(row, validatedStreetKey) {
-  if (!EPISODE_ADDRESS_CARD_SET.has(row?.reason_code)) return true;
-  if (!validatedStreetKey) return false;
-  const payload = parseMaybeJson(row?.payload);
-  if (!payload || typeof payload !== 'object') return true;
-  const heardTexts = [
-    payload.address_as_heard,
-    payload.heard_address?.street_line_1,
-    payload.heard_address?.raw_text,
-  ].filter((v) => String(v || '').trim());
-  if (!heardTexts.length) return true;
-  return heardTexts.every((t) => {
-    const key = normalizedStreetKey(t);
-    return key != null && key === validatedStreetKey;
-  });
+function readingMatchesValidatedPlace(reading, place) {
+  if (!place?.streetKey) return false;
+  const key = normalizedStreetKey(reading.text);
+  if (!key || key !== place.streetKey) return false;
+  const heardUnit = unitKey(reading.text, reading.line2);
+  if (heardUnit && heardUnit !== place.unit) return false;
+  const heardZip = zip5(reading.zip);
+  if (heardZip && place.zip && heardZip !== place.zip) return false;
+  const heardCity = cityKey(reading.city);
+  if (heardCity && place.city && heardCity !== place.city) return false;
+  return true;
 }
 
-async function resolveOpenSiblingCards(conn, priorCallIds, customerId, codes, currentCallId, validatedStreetKey) {
+function collectCardAddressReadings(payload) {
+  const readings = [];
+  if (payload.address_as_heard) {
+    readings.push({ text: payload.address_as_heard, ...localityOfRaw(payload.address_as_heard) });
+  }
+  const snap = payload.heard_address;
+  if (snap && typeof snap === 'object') {
+    if (snap.street_line_1) {
+      readings.push({ text: snap.street_line_1, line2: snap.street_line_2, city: snap.city, zip: snap.postal_code });
+    }
+    if (snap.raw_text) {
+      readings.push({ text: snap.raw_text, ...localityOfRaw(snap.raw_text) });
+    }
+    // Fail closed on a city/ZIP/unit-only snapshot with no street.
+    const hasFragment = [snap.street_line_2, snap.city, snap.postal_code].some((v) => String(v || '').trim());
+    if (!snap.street_line_1 && !snap.raw_text && hasFragment) return null;
+  }
+  return readings.filter((r) => String(r.text || '').trim());
+}
+
+// Match an open address review card against Call 2's validated street, unit, city, and ZIP.
+// Fails closed on unit mismatch, locality mismatch, or city/ZIP-only snapshots.
+function addressCardMatchesVerifiedPlace(row, validatedPlace) {
+  if (!EPISODE_ADDRESS_CARD_SET.has(row?.reason_code)) return true;
+  if (!validatedPlace?.streetKey) return false;
+  const payload = parseMaybeJson(row?.payload);
+  if (!payload || typeof payload !== 'object') return true;
+  const readings = collectCardAddressReadings(payload);
+  if (readings === null) return false;
+  if (!readings.length) return true;
+  return readings.every((r) => readingMatchesValidatedPlace(r, validatedPlace));
+}
+
+async function resolveOpenSiblingCards(conn, priorCallIds, customerId, codes, currentCallId, validatedPlace) {
   if (!priorCallIds.length || !codes.length) return 0;
   let totalResolved = 0;
   const now = new Date();
@@ -245,7 +296,7 @@ async function resolveOpenSiblingCards(conn, priorCallIds, customerId, codes, cu
         .whereIn('reason_code', codes)
         .select('id', 'reason_code', 'payload');
       const eligibleIds = openRows
-        .filter((r) => addressCardMatchesVerifiedStreet(r, validatedStreetKey))
+        .filter((r) => addressCardMatchesVerifiedPlace(r, validatedPlace))
         .map((r) => r.id);
       if (!eligibleIds.length) return 0;
       const count = await trx('triage_items')
@@ -277,19 +328,34 @@ async function isConfirmedNonReServiceBooking(conn, bookedServiceId, customerId)
   return !['pending', 'cancelled', 'skipped', 'no_show'].includes(String(visit.status || ''));
 }
 
-// Retire ONLY new-lead bells tied directly to the booked inquiry (`leadId` and
-// sibling calls linked to that exact lead), never unrelated leads for other services.
+function callSidMatchesBookedLead(sibling, leadIdStr, leadCallSid) {
+  if (!sibling?.twilio_call_sid) return false;
+  if (leadCallSid && String(sibling.twilio_call_sid) === String(leadCallSid)) return true;
+  const md = parseMaybeJson(sibling.metadata);
+  return Boolean(md?.lead_id && String(md.lead_id) === leadIdStr);
+}
+
+// Retire ONLY original new-lead alerts tied directly to the booked `leadId`
+// (preserving missed-callback or unrelated-service alerts sharing the lead ID).
 async function retireBookedLeadBells(conn, { leadId, siblings, anchor, since }) {
   if (!leadId) return 0;
   const leadIdStr = String(leadId);
-  const matchingCallSids = siblings
-    .filter((s) => s.twilio_call_sid && String(s.lead_id || '') === leadIdStr)
-    .map((s) => s.twilio_call_sid);
+  const leadRow = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'twilio_call_sid');
+  const leadCallSid = leadRow?.twilio_call_sid || null;
+  const matchingCallSids = [
+    ...new Set([
+      ...(leadCallSid ? [leadCallSid] : []),
+      ...siblings.filter((s) => callSidMatchesBookedLead(s, leadIdStr, leadCallSid)).map((s) => s.twilio_call_sid),
+    ]),
+  ];
 
   const now = new Date();
   const count = await conn('notifications')
     .whereNull('done_at')
-    .whereIn('category', ['lead', 'new_lead'])
+    .where((qb) => {
+      qb.where('category', 'new_lead')
+        .orWhere((q2) => q2.where('category', 'lead').whereIn('title', NEW_LEAD_ALERT_TITLES));
+    })
     .where('created_at', '>=', since)
     .where('created_at', '<', anchor)
     .where((qb) => {
@@ -328,10 +394,22 @@ function isCallTerminalNoise(opts) {
     || opts.isVoicemail === true || opts.extracted?.is_voicemail === true;
 }
 
+function buildValidatedPlace(av, fallbackStreet) {
+  const norm = av?.normalized || {};
+  const line1 = norm.street_line_1 || fallbackStreet || '';
+  const sk = normalizedStreetKey(line1);
+  if (!sk) return null;
+  return {
+    streetKey: sk,
+    unit: unitKey(line1, norm.street_line_2),
+    city: cityKey(norm.city),
+    zip: zip5(norm.postal_code),
+  };
+}
+
 function deriveReconciliationSignals(opts = {}) {
   const addressConflictHold = hasAddressConflictHold(opts);
   const av = opts.addressValidation;
-  const validatedStreet = av?.normalized?.street_line_1 || opts.validatedStreet || null;
   return {
     callId: opts.callId || opts.call?.id || null,
     callCreatedAt: opts.callCreatedAt || opts.call?.created_at || null,
@@ -341,7 +419,7 @@ function deriveReconciliationSignals(opts = {}) {
     isTerminalNoise: isCallTerminalNoise(opts),
     addressConflictHold,
     addressVerified: opts.addressVerified === true || (isVerifiedAddressValidation(av) && !addressConflictHold),
-    validatedStreetKey: normalizedStreetKey(validatedStreet),
+    validatedPlace: buildValidatedPlace(av, opts.validatedStreet),
   };
 }
 
@@ -352,12 +430,24 @@ async function isSingleActivePropertyCustomer(conn, customerId) {
       .count('* as n')
       .first();
     const count = parseInt(row?.n, 10);
-    // Fail closed if count is unreadable or > 1.
     return Number.isFinite(count) && count <= 1;
   } catch (err) {
     logger.warn(`[call-episode] active property count failed (preserving address cards): ${err.code || err.name || 'db_error'}`);
     return false;
   }
+}
+
+function customerPlaceMatchesValidated(customer, validatedPlace) {
+  if (!customer || !validatedPlace?.streetKey) return null;
+  if (normalizedStreetKey(customer.address_line1) !== validatedPlace.streetKey) return null;
+  const custUnit = unitKey(customer.address_line1, customer.address_line2);
+  if (validatedPlace.unit && custUnit && validatedPlace.unit !== custUnit) return null;
+  return {
+    streetKey: validatedPlace.streetKey,
+    unit: validatedPlace.unit || custUnit,
+    city: validatedPlace.city || cityKey(customer.city),
+    zip: validatedPlace.zip || zip5(customer.zip),
+  };
 }
 
 // Reconcile Call 1 open triage cards + stale new-lead bells tied to the booked lead
@@ -379,20 +469,17 @@ async function reconcilePriorEpisodeOnCallCompletion(conn, opts = {}) {
 
     const customer = await conn('customers')
       .where({ id: sig.customerId })
-      .first('id', 'email', 'address_line1', 'zip', 'active');
+      .first('id', 'email', 'address_line1', 'address_line2', 'city', 'zip', 'active');
     if (!customer || customer.active === false) return empty;
 
     const singleProperty = await isSingleActivePropertyCustomer(conn, sig.customerId);
-    const customerStreetKey = normalizedStreetKey(customer.address_line1);
-    const effectiveValidatedStreet = sig.validatedStreetKey && sig.validatedStreetKey === customerStreetKey
-      ? sig.validatedStreetKey
-      : null;
+    const verifiedPlace = customerPlaceMatchesValidated(customer, sig.validatedPlace);
 
     const codes = buildReconcilableCardCodes({
       customer,
       singleProperty,
       addressVerified: sig.addressVerified,
-      validatedStreetKey: effectiveValidatedStreet,
+      validatedPlace: verifiedPlace,
       hasAddressConflictHold: sig.addressConflictHold,
     });
     const priorCallIds = siblings.map((s) => s.id);
@@ -402,7 +489,7 @@ async function reconcilePriorEpisodeOnCallCompletion(conn, opts = {}) {
       sig.customerId,
       codes,
       sig.callId,
-      effectiveValidatedStreet,
+      verifiedPlace,
     );
 
     let bellsRetired = 0;
@@ -419,11 +506,14 @@ async function reconcilePriorEpisodeOnCallCompletion(conn, opts = {}) {
   }
 }
 
-// Pure predicate: is this inbound SMS submitting photos without explicitly asking for a quote?
+// Pure predicate: is this inbound SMS affirmatively delivering a requested photo
+// WITHOUT asking any question or requesting pricing/a ballpark/a quote?
 function isPhotoSubmissionSms({ triggerBody = '', hasMedia = false } = {}) {
   const body = String(triggerBody || '').trim();
-  if (EXPLICIT_QUOTE_ASK_RE.test(body)) return false;
-  return Boolean(hasMedia) || PHOTO_SUBMISSION_RE.test(body);
+  if (QUOTE_OR_QUESTION_RE.test(body)) return false;
+  if (PHOTO_SUBMISSION_RE.test(body)) return true;
+  // Bare media attachment with no text or a short non-question caption (<=60 chars).
+  return Boolean(hasMedia) && body.length <= 60;
 }
 
 // Pure predicate: did diarized Waves staff (`Agent:` lines ONLY) explicitly ask for
@@ -455,7 +545,8 @@ async function smsRowHasMedia(conn, triggerSmsLogId, timeoutMs) {
 }
 
 // Suppress false "Quote asked by text" when a customer texts photos requested by
-// staff on a recent call (<=48h) and does not explicitly ask for pricing in the text.
+// staff on a recent INBOUND call (<=48h; excludes outbound calls where speaker labels
+// may swap) and does not ask a question or request pricing/ballpark in the text.
 // Fail-open & bounded so Twilio webhook latency is preserved and real quotes never drop.
 async function isPhotoFollowUpToRecentCall(conn, {
   phone,
@@ -480,6 +571,7 @@ async function isPhotoFollowUpToRecentCall(conn, {
         "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
         [digits, digits],
       )
+      .whereRaw("COALESCE(direction, '') NOT LIKE 'outbound%'")
       .whereNotIn('processing_status', ['spam', 'voicemail'])
       .whereNotNull('transcription')
       .where('created_at', '>=', since)
@@ -496,7 +588,19 @@ async function isPhotoFollowUpToRecentCall(conn, {
   }
 }
 
-async function priorCallFirstTouchCandidate(conn, { digits, currentCallId, since, anchor, twilioNumbers }) {
+function sourceFromLeadRow(leadRow) {
+  if (!leadRow?.source_type) return null;
+  const mapped = attributionForSourceType(leadRow.source_type)?.leadSource || leadRow.source_type;
+  if (isGenericCallLeadSource(mapped)) return null;
+  return {
+    at: new Date(leadRow.created_at).getTime(),
+    source: mapped,
+    detail: leadRow.name || mapped,
+    callSid: leadRow.twilio_call_sid || null,
+  };
+}
+
+async function priorCallFirstTouchCandidate(conn, { digits, currentCallId, since, anchor, twilioNumbers, leadByCallSid }) {
   if (!twilioNumbers || typeof twilioNumbers.findByNumber !== 'function') return null;
   const q = whereNotSandboxCall(conn('call_log'))
     .whereRaw("right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ?", [digits])
@@ -507,14 +611,19 @@ async function priorCallFirstTouchCandidate(conn, { digits, currentCallId, since
     .orderBy('created_at', 'asc')
     .limit(5);
   if (currentCallId) q.whereNot('id', currentCallId);
-  const priorCalls = await q.select('to_phone', 'created_at');
+  const priorCalls = await q.select('twilio_call_sid', 'to_phone', 'created_at');
   for (const prior of priorCalls) {
+    const callAt = new Date(prior.created_at).getTime();
+    // Prefer the recorded lead attribution for this exact call (e.g. a spoken referral)
+    // over the raw tracking number dialed on the same call.
+    const linkedLead = prior.twilio_call_sid ? leadByCallSid.get(String(prior.twilio_call_sid)) : null;
+    if (linkedLead) return { ...linkedLead, at: callAt };
     const cfg = twilioNumbers.findByNumber(prior.to_phone);
     if (!cfg) continue;
     const resolved = twilioNumbers.getLeadSourceFromNumber(prior.to_phone);
     if (resolved && !isGenericCallLeadSource(resolved.source)) {
       return {
-        at: new Date(prior.created_at).getTime(),
+        at: callAt,
         source: resolved.source,
         detail: resolved.detail || resolved.domain || cfg.domain || resolved.area || 'prior inbound call',
       };
@@ -523,23 +632,22 @@ async function priorCallFirstTouchCandidate(conn, { digits, currentCallId, since
   return null;
 }
 
-async function priorLeadFirstTouchCandidate(conn, { digits, since, anchor }) {
-  const priorLead = await conn('leads')
+async function priorLeadFirstTouchCandidates(conn, { digits, since, anchor }) {
+  const rows = await conn('leads')
     .join('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
     .whereNull('leads.deleted_at')
     .whereRaw("right(regexp_replace(coalesce(leads.phone,''),'\\D','','g'),10) = ?", [digits])
     .where('leads.created_at', '>=', since)
     .where('leads.created_at', '<', anchor)
     .orderBy('leads.created_at', 'asc')
-    .first('leads.created_at', 'lead_sources.source_type', 'lead_sources.name');
-  if (!priorLead?.source_type) return null;
-  const mapped = attributionForSourceType(priorLead.source_type)?.leadSource || priorLead.source_type;
-  if (isGenericCallLeadSource(mapped)) return null;
-  return {
-    at: new Date(priorLead.created_at).getTime(),
-    source: mapped,
-    detail: priorLead.name || mapped,
-  };
+    .limit(5)
+    .select('leads.created_at', 'leads.twilio_call_sid', 'lead_sources.source_type', 'lead_sources.name');
+  const list = (Array.isArray(rows) ? rows : []).map(sourceFromLeadRow).filter(Boolean);
+  const byCallSid = new Map();
+  for (const item of list) {
+    if (item.callSid && !byCallSid.has(String(item.callSid))) byCallSid.set(String(item.callSid), item);
+  }
+  return { earliest: list[0] || null, byCallSid };
 }
 
 function shouldKeepCurrentLeadSource({ hasExplicitReferral, referredByName, isOutbound, fallback }) {
@@ -548,8 +656,8 @@ function shouldKeepCurrentLeadSource({ hasExplicitReferral, referredByName, isOu
 }
 
 // Preserve first-touch acquisition lead_source across repeat or outbound callback calls
-// within 48h so Call 2 never overwrites Call 1's Google Ads / GBP / organic source with
-// generic `phone_call` / `direct`. Fail-open to currentLeadSource on any error.
+// within 48h so Call 2 never overwrites Call 1's Google Ads / GBP / organic / referral source
+// with generic `phone_call` / `direct`. Fail-open to currentLeadSource on any error.
 async function resolveFirstTouchCallLeadSource(conn, {
   contactPhone,
   currentCallId = null,
@@ -569,10 +677,10 @@ async function resolveFirstTouchCallLeadSource(conn, {
   try {
     const anchor = anchorDate(currentCallCreatedAt);
     const since = windowStartFrom(anchor);
-    const [callCand, leadCand] = await Promise.all([
-      priorCallFirstTouchCandidate(conn, { digits, currentCallId, since, anchor, twilioNumbers }),
-      priorLeadFirstTouchCandidate(conn, { digits, since, anchor }),
-    ]);
+    const { earliest: leadCand, byCallSid } = await priorLeadFirstTouchCandidates(conn, { digits, since, anchor });
+    const callCand = await priorCallFirstTouchCandidate(conn, {
+      digits, currentCallId, since, anchor, twilioNumbers, leadByCallSid: byCallSid,
+    });
     const candidates = [callCand, leadCand].filter(Boolean);
     if (!candidates.length) return fallback;
     candidates.sort((a, b) => a.at - b.at);
@@ -599,7 +707,7 @@ module.exports = {
     normalizedStreetKey,
     sanitizeEpisodeSmsBody,
     buildReconcilableCardCodes,
-    addressCardMatchesVerifiedStreet,
+    addressCardMatchesVerifiedPlace,
     deriveReconciliationSignals,
   },
 };
