@@ -461,10 +461,14 @@ async function appendVisitCapabilityOffWarnings(trx, technicianId, { primary, ad
     const readAddons = (conn) => conn('scheduled_service_addons')
       .where({ scheduled_service_id: serviceId })
       .select('service_name as service_type', 'service_id');
-    const existing = await (trx.isTransaction && typeof trx.transaction === 'function'
-      ? trx.transaction((sp) => readAddons(sp))
-      : readAddons(trx)).catch(() => []);
-    capEntries.push(...existing);
+    try {
+      const existing = await (trx.isTransaction && typeof trx.transaction === 'function'
+        ? trx.transaction((sp) => readAddons(sp))
+        : readAddons(trx));
+      if (Array.isArray(existing)) capEntries.push(...existing);
+    } catch {
+      // Advisory capability warnings never block saves if the addon read fails.
+    }
   }
   const lines = await require('../services/technician-eligibility').capabilityOffWarningsFor(technicianId, capEntries, { conn: trx });
   for (const line of lines) if (!targetWarnings.includes(line)) targetWarnings.push(line);
