@@ -86,16 +86,16 @@ async function exportAs(role, format = 'json') {
   return res;
 }
 
-test('technician export excludes applicant audit rows (JSON)', async () => {
+test('technician is refused (403) on compliance export (JSON)', async () => {
   const res = await exportAs('tech');
-  expect(res.status).toBe(200);
-  expect(auditQuery.whereNot).toHaveBeenCalledWith({ audience: 'applicant' });
+  expect(res.status).toBe(403);
+  expect(db).not.toHaveBeenCalled();
 });
 
-test('technician export excludes applicant audit rows (CSV)', async () => {
+test('technician is refused (403) on compliance export (CSV)', async () => {
   const res = await exportAs('tech', 'csv');
-  expect(res.status).toBe(200);
-  expect(auditQuery.whereNot).toHaveBeenCalledWith({ audience: 'applicant' });
+  expect(res.status).toBe(403);
+  expect(db).not.toHaveBeenCalled();
 });
 
 test('admin export is unfiltered', async () => {
@@ -129,7 +129,7 @@ describe('POST /ai-draft recruiting boundary', () => {
 });
 
 describe('GET /scheduled recruiting boundary', () => {
-  test('technician: queued recruiting texts are filtered (message-level predicate); admin: unfiltered', async () => {
+  test('technician is refused (403); admin reads scheduled messages', async () => {
     const smsLogQuery = query({ result: [] });
     smsLogQuery.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(smsLogQuery); return smsLogQuery; });
     smsLogQuery.leftJoin = jest.fn(() => smsLogQuery);
@@ -138,9 +138,8 @@ describe('GET /scheduled recruiting boundary', () => {
     smsLogQuery.orderBy = jest.fn(async () => []);
     db.mockImplementation((table) => (table === 'sms_log' ? smsLogQuery : query({ result: [] })));
     let res = await fetch(`${base}/api/admin/communications/scheduled`, { headers: { Authorization: 'Bearer tech' } });
-    expect(res.status).toBe(200);
-    expect(smsLogQuery.orWhere).toHaveBeenCalledWith('sms_log.message_type', 'not like', 'job\\_%');
-    smsLogQuery.orWhere.mockClear();
+    expect(res.status).toBe(403);
+    expect(db).not.toHaveBeenCalled();
     res = await fetch(`${base}/api/admin/communications/scheduled`, { headers: { Authorization: 'Bearer admin' } });
     expect(res.status).toBe(200);
     expect(smsLogQuery.orWhere).not.toHaveBeenCalled();

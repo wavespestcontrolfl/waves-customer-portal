@@ -89,7 +89,7 @@ function useConfirmDialog() {
   const element = pending ? (
     <Dialog open size="sm" onClose={handleCancel} aria-label="Confirmation">
       <DialogBody>
-        <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_TEXT, whiteSpace: "pre-line", lineHeight: 1.5 }}>
           {pending.message}
         </div>
         {pending.input && (
@@ -122,12 +122,12 @@ function useConfirmDialog() {
 // ramp (whites/greys/black — owner direction). Names kept so the ~200
 // consumer sites need no churn; the embedded CustomerProjectReportPreview
 // deliberately does NOT read these — it mimics the customer-facing report.
-const ESTIMATE_BG = "#FFFFFF";
-const ESTIMATE_BORDER = "#E4E4E7";
-const ESTIMATE_INPUT_BORDER = "#D4D4D8";
-const ESTIMATE_INPUT_BG = "#FFFFFF";
-const ESTIMATE_TEXT = "#18181B";
-const ESTIMATE_MUTED = "#71717A";
+const ESTIMATE_BG = "var(--surface-primary, #FFFFFF)";
+const ESTIMATE_BORDER = "var(--border-default, #E4E4E7)";
+const ESTIMATE_INPUT_BORDER = "var(--border-strong, #D4D4D8)";
+const ESTIMATE_INPUT_BG = "var(--surface-page, #FFFFFF)";
+const ESTIMATE_TEXT = "var(--text-primary, #18181B)";
+const ESTIMATE_MUTED = "var(--text-secondary, #71717A)";
 
 // Status pills ride the shared Badge on the zinc ramp — sent is the "done"
 // state (strong), draft/closed stay neutral; alert-fg is reserved for
@@ -2580,11 +2580,11 @@ export function ProjectDetail({
     return (
       <div
         style={{
-          background: "#FFFFFF",
-          border: `1px solid #E4E4E7`,
+          background: ESTIMATE_BG,
+          border: `1px solid ${ESTIMATE_BORDER}`,
           borderRadius: 6,
           padding: 24,
-          color: "#71717A",
+          color: ESTIMATE_MUTED,
           display: "flex",
           alignItems: "flex-start",
           justifyContent: "space-between",
@@ -2638,7 +2638,7 @@ export function ProjectDetail({
           justifyContent: "space-between",
           padding: "20px 24px",
           borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-          background: "#FFFFFF",
+          background: ESTIMATE_BG,
         }}
       >
         {" "}
@@ -2905,10 +2905,10 @@ export function ProjectDetail({
                     fontWeight: 500,
                     letterSpacing: "0.06em",
                     textTransform: "uppercase",
-                    color: "#27272A",
+                    color: ESTIMATE_TEXT,
                     margin: "20px 0 10px",
                     paddingBottom: 6,
-                    borderBottom: "1px solid #E4E4E7",
+                    borderBottom: `1px solid ${ESTIMATE_BORDER}`,
                   }}
                 >
                   {field.section}
@@ -2941,7 +2941,7 @@ export function ProjectDetail({
                     style={{
                       background: "transparent",
                       border: "none",
-                      color: "#18181B",
+                      color: ESTIMATE_TEXT,
                       fontSize: 11,
                       fontWeight: 500,
                       cursor: "pointer",
@@ -3479,7 +3479,7 @@ function ProjectHistoryPanel({ activity }) {
         style={{
           fontSize: 14,
           fontWeight: 500,
-          color: "#09090B",
+          color: ESTIMATE_TEXT,
           marginBottom: 8,
         }}
       >
@@ -3488,7 +3488,7 @@ function ProjectHistoryPanel({ activity }) {
       {activity.length > 0 ? (
         <div
           style={{
-            border: `1px solid #E4E4E7`,
+            border: `1px solid ${ESTIMATE_BORDER}`,
             borderRadius: 8,
             overflow: "hidden",
           }}
@@ -3498,8 +3498,8 @@ function ProjectHistoryPanel({ activity }) {
               key={item.id || `${item.action}-${item.created_at}-${idx}`}
               style={{
                 padding: "10px 12px",
-                borderTop: idx === 0 ? "none" : `1px solid #E4E4E7`,
-                background: "#FFFFFF",
+                borderTop: idx === 0 ? "none" : `1px solid ${ESTIMATE_BORDER}`,
+                background: ESTIMATE_BG,
               }}
             >
               {" "}
@@ -3515,15 +3515,15 @@ function ProjectHistoryPanel({ activity }) {
                 <div style={{ minWidth: 0 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 500, color: "#09090B" }}
+                    style={{ fontSize: 14, fontWeight: 500, color: ESTIMATE_TEXT }}
                   >
                     {PROJECT_ACTIVITY_LABELS[item.action] || item.action}
                   </div>{" "}
-                  <div style={{ fontSize: 14, color: "#71717A", marginTop: 2 }}>
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2 }}>
                     {item.description || "Project activity recorded."}
                   </div>
                   {item.actor_name && (
-                    <div style={{ fontSize: 14, color: "#71717A", marginTop: 4 }}>
+                    <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4 }}>
                       By {item.actor_name}
                     </div>
                   )}
@@ -3532,7 +3532,7 @@ function ProjectHistoryPanel({ activity }) {
                   style={{
                     flexShrink: 0,
                     fontSize: 14,
-                    color: "#71717A",
+                    color: ESTIMATE_MUTED,
                     textAlign: "right",
                   }}
                 >
@@ -4095,8 +4095,8 @@ const btnPrimary = {
   borderRadius: 4,
   fontSize: 14,
   fontWeight: 500,
-  background: "#18181B",
-  color: "#fff",
+  background: "var(--text-primary, #18181B)",
+  color: "var(--surface-page, #fff)",
   border: "none",
   cursor: "pointer",
 };
@@ -4106,7 +4106,7 @@ const btnSecondary = {
   borderRadius: 4,
   fontSize: 14,
   fontWeight: 500,
-  background: "#FFFFFF",
+  background: ESTIMATE_BG,
   color: ESTIMATE_TEXT,
   border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
   cursor: "pointer",

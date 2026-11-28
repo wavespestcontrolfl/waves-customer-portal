@@ -54,12 +54,6 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] missed-call bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
-      // Repeat windows use the same post-call grace.
-      try {
-        await require('../services/repeat-caller-bell').ringRepeatCallerIfNeeded(callSid);
-      } catch (err) {
-        logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
-      }
       // An UNKNOWN caller (no customer on file) who waited 15s+ and left no
       // voicemail gets a text-back from the line they called — same grace,
       // own try/catch so a failure here never blocks the bells above.
@@ -951,16 +945,17 @@ async function stampPreconnectScreen(callSid, value) {
     const row = await db('call_log')
       .where('twilio_call_sid', callSid)
       .orderBy('created_at', 'desc')
-      .first();
+      .first('id');
     if (!row) return;
-    let meta = {};
-    try {
-      meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    } catch { meta = {}; }
-    meta.preconnect_screen = value;
     await db('call_log')
       .where({ id: row.id })
-      .update({ metadata: JSON.stringify(meta), updated_at: new Date() });
+      .update({
+        metadata: db.raw(
+          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{preconnect_screen}', ?::jsonb, true)",
+          [JSON.stringify(value)],
+        ),
+        updated_at: new Date(),
+      });
   } catch (err) {
     logger.warn(`[preconnect-screen] stamp '${value}' failed for ${maskSid(callSid)}: ${err.message}`);
   }
@@ -1842,10 +1837,11 @@ async function holdVoicemailTwiml(callSid) {
   }
 }
 
-// What /call-complete answers when the dial ended and the call is an answered one: today's empty response, except
-// for a conference call the hold timer sent to voicemail.
-async function answeredCallTwiml(query, callSid) {
-  return (query.conf === '1' && await holdVoicemailTwiml(callSid)) || EMPTY_RESPONSE_XML;
+// What /call-complete answers when the dial ended and the call is an answered one: null unless a conference
+// call's hold timer sent it to voicemail.
+async function pendingHoldVoicemailTwiml(query, callSid, shouldRecordVoicemail) {
+  if (shouldRecordVoicemail || query.conf !== '1') return null;
+  return holdVoicemailTwiml(callSid);
 }
 
 router.post('/call-complete', async (req, res) => {
@@ -1891,8 +1887,13 @@ router.post('/call-complete', async (req, res) => {
       }
     }
 
+    const holdVoicemailXml = await pendingHoldVoicemailTwiml(req.query, CallSid, shouldRecordVoicemail);
+
     const callUpdate = {
-      status,
+      // Hold voicemail keeps the caller on the line for up to 120 s inside the call's own recording:
+      // defer stamping terminal status='completed' until /call-status on actual hangup so card-pause
+      // recovery does not abort mid-voicemail.
+      ...(holdVoicemailXml ? {} : { status }),
       // A Sandy transfer (PR 2A) reaches this Dial AFTER the relay leg: the
       // AI portion (row created → packet transferred_at) is added back so the
       // saved duration is the whole call, not the staff leg (codex r1 P2).
@@ -2030,7 +2031,7 @@ router.post('/call-complete', async (req, res) => {
 
     // A conference call the hold timer sent to voicemail: the room ended, the caller leaves a message inside
     // this call's own recording. Any other call keeps today's empty answer.
-    res.type('text/xml').send(await answeredCallTwiml(req.query, CallSid));
+    res.type('text/xml').send(holdVoicemailXml || EMPTY_RESPONSE_XML);
   } catch (err) {
     logger.error(`Call complete webhook error: ${err.message}`);
     notifyTwilioFailure({
@@ -3294,7 +3295,7 @@ router.post('/recording-status', async (req, res) => {
           await park(targetRow, attach.reason);
           break;
         }
-        const write = { ...recordingData };
+        const write = { ...recordingData, invalid_reason: null };
         if (attach.action === 'replace') {
           // The row's transcript/extraction (if any) describe the OLD
           // audio. Reset processing_status atomically with the swap so the
@@ -4408,6 +4409,11 @@ router.post('/call-status', async (req, res) => {
     if (!isOutbound && TERMINAL_CALL_STATUSES.has(CallStatus) && (conferenceRing || conferencePath.conferenceRingOn())) {
       void conferencePath.closeForCallerEnd(CallSid)
         .catch((err) => logger.warn(`[conference] leg clean-up failed for ${maskSid(CallSid)} (${conferencePath.errorCode(err)})`));
+    }
+    // C2-21: if transcription-stopped arrived before /call-status stamped terminal status/ended_at,
+    // retry the same idempotent early-summary claim (with its normal settling delay; claim requires stopped_at).
+    if (!isOutbound && TERMINAL_CALL_STATUSES.has(CallStatus) && require('../config/feature-gates').isEnabled('callEarlySummary')) {
+      require('../services/live-call-early-summary').afterCallStopped(CallSid);
     }
 
     const { LEAD_CALL_REPLY_RING_SOURCE, noteRingEnded } = require('../services/lead-call-reply-ring');

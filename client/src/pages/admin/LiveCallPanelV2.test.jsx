@@ -187,6 +187,22 @@ describe("LiveCallPanelV2", () => {
         unmount();
       }
     });
+
+    it("C2-33: polls immediately after clicking Hold and surfaces failure text after 15 s if on_hold never arrives", async () => {
+      const fetchMock = server({ can_hold: true, on_hold: false, since: null });
+      vi.stubGlobal("fetch", fetchMock);
+      render(<LiveCallPanelV2 />);
+      await flush();
+      const liveCallsBefore = fetchMock.mock.calls.filter(([u]) => !String(u).endsWith("/hold")).length;
+      fireEvent.click(screen.getByRole("button", { name: "Hold" }));
+      await flush();
+      const liveCallsAfter = fetchMock.mock.calls.filter(([u]) => !String(u).endsWith("/hold")).length;
+      expect(liveCallsAfter).toBeGreaterThan(liveCallsBefore);
+      await vi.advanceTimersByTimeAsync(15000);
+      await flush();
+      expect(screen.getByRole("button", { name: "Hold" })).toBeEnabled();
+      expect(screen.getByTestId("live-call-hold")).toHaveTextContent("The hold did not start. Press star on the phone.");
+    });
   });
 
   it("renders Co-Pilot 2.0 brief, fixed vs variable catalog prices, best route slots, and missing-info checklist when present", async () => {

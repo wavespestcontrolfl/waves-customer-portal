@@ -4,7 +4,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DeclineModalV2, FollowUpModalV2 } from './EstimateModalsV2';
+import { DeclineModalV2, ExtendEstimateModalV2, FollowUpModalV2 } from './EstimateModalsV2';
 
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'test-token');
@@ -89,5 +89,44 @@ describe('FollowUpModalV2 ready text', () => {
     const post = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
     expect(String(post[0])).toContain('/admin/estimates/e1/follow-up');
     expect(JSON.parse(post[1].body)).toEqual({ message: DRAFT });
+    expect(onSent).toHaveBeenCalledWith('e1');
+  });
+
+  it('blocks double-submit and Escape dismissal while FollowUp, Decline, and Extend requests are in flight', async () => {
+    let resolveFollowUp;
+    const fetchMock = vi.fn((url, init) => {
+      if (String(url).endsWith('/follow-up-draft')) return Promise.resolve(json({ message: DRAFT }));
+      if (init?.method === 'POST') return new Promise((resolve) => { resolveFollowUp = () => resolve(json({ success: true })); });
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const onClose = vi.fn();
+    const onSent = vi.fn();
+    render(<FollowUpModalV2 estimate={estimate} onClose={onClose} onSent={onSent} />);
+    await waitFor(() => expect(box()).toHaveValue(DRAFT));
+    const sendBtn = screen.getByRole('button', { name: /send follow-up sms/i });
+    fireEvent.click(sendBtn);
+    fireEvent.click(sendBtn);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([, i]) => i?.method === 'POST')).toHaveLength(1);
+    resolveFollowUp();
+    await waitFor(() => expect(onSent).toHaveBeenCalledWith('e1'));
+
+    cleanup();
+    let resolveExtend;
+    const extFetch = vi.fn(() => new Promise((resolve) => { resolveExtend = () => resolve(json({ ok: true })); }));
+    vi.stubGlobal('fetch', extFetch);
+    const onCloseExt = vi.fn();
+    const onExtended = vi.fn();
+    render(<ExtendEstimateModalV2 estimate={{ ...estimate, customerPhone: '+19415550100' }} onClose={onCloseExt} onExtended={onExtended} />);
+    const extBtn = screen.getByRole('button', { name: /extend \+7d/i });
+    fireEvent.click(extBtn);
+    fireEvent.click(extBtn);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onCloseExt).not.toHaveBeenCalled();
+    expect(extFetch).toHaveBeenCalledTimes(1);
+    resolveExtend();
+    await waitFor(() => expect(onExtended).toHaveBeenCalledTimes(1));
   });
 });

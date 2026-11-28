@@ -2323,7 +2323,7 @@ async function callHandler(req, res, next) {
     next(err);
   }
 }
-router.post('/call', callHandler);
+router.post('/call', requireAdmin, callHandler);
 
 // GET /api/admin/communications/log — SMS history (reads unified messages
 // table since PR 2; sms_log still gets dual-written for legacy consumers).
@@ -4338,8 +4338,8 @@ router.post('/schedule-sms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/communications/scheduled — list scheduled messages
-router.get('/scheduled', async (req, res, next) => {
+// GET /api/admin/communications/scheduled — list scheduled messages (admin-only)
+router.get('/scheduled', requireAdmin, async (req, res, next) => {
   try {
     // Queued recruiting texts carry the bearer interview link — owner-only
     // (utils/recruiting-thread-scope.js), same as every other reader.
@@ -4397,7 +4397,7 @@ async function recruitingReplyContext(messageId, to) {
 // cleanup and would strand its state, exactly like the Intelligence Bar's
 // cancel_queued_message already refuses to. Recruiting texts and
 // Agent-Review-linked rows are unaffected (the writer reconciles both).
-router.delete('/scheduled/:id', async (req, res, next) => {
+router.delete('/scheduled/:id', requireAdmin, async (req, res, next) => {
   try {
     const result = await cancelScheduledSmsRow({
       id: req.params.id, techRole: req.techRole, technicianId: req.technicianId, refuseWorkflowOwned: true,
@@ -4544,7 +4544,7 @@ router.delete('/spam-senders/:number', requireAdmin, async (req, res, next) => {
 
 // GET /api/admin/communications/compliance-export
 // Query: customerId?, phone?, days?, format=json|csv
-router.get('/compliance-export', async (req, res, next) => {
+router.get('/compliance-export', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.min(Math.max(parsePositiveInt(req.query.days) || 90, 1), 730);
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -4655,7 +4655,7 @@ router.get('/compliance-export', async (req, res, next) => {
 });
 
 // GET /api/admin/communications/template-performance?days=30
-router.get('/template-performance', async (req, res, next) => {
+router.get('/template-performance', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.min(Math.max(parsePositiveInt(req.query.days) || 30, 1), 365);
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -4699,7 +4699,7 @@ router.get('/template-performance', async (req, res, next) => {
 
 // POST /api/admin/communications/contact-compliance-checks
 // Manual/provider-import scaffold for DNC/RND/line-type results.
-router.post('/contact-compliance-checks', async (req, res, next) => {
+router.post('/contact-compliance-checks', requireAdmin, async (req, res, next) => {
   try {
     const normalized = normalizeCompliancePhone(req.body?.phone);
     if (!normalized) return res.status(400).json({ error: 'valid phone required' });
@@ -4726,7 +4726,7 @@ router.post('/contact-compliance-checks', async (req, res, next) => {
 // gate states, case counts by state, and the last few call outcomes off the
 // collections contact ledger (masked; no PII beyond what the admin bell
 // already shows). Safe with the lane dark — every count is simply zero.
-router.get('/collections-voice-status', async (req, res, next) => {
+router.get('/collections-voice-status', requireAdmin, async (req, res, next) => {
     let queryFailed = null;
   try {
     const { isVoiceLatePaymentEnabled, isPayLinkEnabled, isAutoDialEnabled } = require('../services/collections/outbound-voice/gates');

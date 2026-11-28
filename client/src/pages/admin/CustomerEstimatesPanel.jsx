@@ -4,7 +4,7 @@
 // + conversion stats + last comms touchpoint. Everything fetched from
 // GET /admin/customers/:id/estimates-summary.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Phone,
@@ -90,6 +90,10 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
   const [comms, setComms] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const [calling, setCalling] = useState(false);
+  const callingRef = useRef(false);
+  const [deletingIds, setDeletingIds] = useState(() => new Set());
+  const deletingRef = useRef(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -286,7 +290,9 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
               {c.phone && (
                 <Button
                   type="button"
+                  disabled={calling}
                   onClick={async () => {
+                    if (callingRef.current) return;
                     if (
                       !window.confirm(
                         `Call ${c.first_name || ""} ${c.last_name || ""}`.trim() +
@@ -294,6 +300,8 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                       )
                     )
                       return;
+                    callingRef.current = true;
+                    setCalling(true);
                     try {
                       const r = await adminFetch("/admin/communications/call", {
                         method: "POST",
@@ -310,6 +318,9 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                         );
                     } catch (e) {
                       alert("Call failed: " + e.message);
+                    } finally {
+                      callingRef.current = false;
+                      setCalling(false);
                     }
                   }}
                   className="gap-2"
@@ -483,13 +494,17 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                               <Button
                                 type="button"
                                 variant="ghost"
+                                disabled={deletingIds.has(e.id)}
                                 aria-label="Delete draft estimate"
                                 title="Delete this draft estimate"
                                 onClick={async () => {
+                                  if (deletingRef.current.has(e.id)) return;
                                   const ok = window.confirm(
                                     "Delete this draft estimate?\n\nThis permanently removes it from the admin portal.",
                                   );
                                   if (!ok) return;
+                                  deletingRef.current.add(e.id);
+                                  setDeletingIds(new Set(deletingRef.current));
                                   try {
                                     const r = await adminFetch(
                                       `/admin/estimates/${e.id}`,
@@ -508,6 +523,9 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                                     window.alert(
                                       "Delete failed: " + err.message,
                                     );
+                                  } finally {
+                                    deletingRef.current.delete(e.id);
+                                    setDeletingIds(new Set(deletingRef.current));
                                   }
                                 }}
                                 className="h-9 w-9 px-0 text-alert-fg hover:bg-alert-bg"

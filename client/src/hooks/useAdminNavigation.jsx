@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { isAdminPath, routerPath } from '../lib/adminBookmarkMeta';
 import { adminNavigationPreferenceKey as preferenceKey, warmFieldViewLanding } from '../lib/fieldView';
 import { ADMIN_WORKSPACE_DESTINATIONS, ADMIN_WORKSPACE_GROUP_IDS, getAdminWorkspaceGroups, getAdminWorkspaceSelection } from '../config/adminNavigation';
 
@@ -9,6 +10,12 @@ export const AdminNavigationContext = createContext(null);
 // are dropped once; pins carry over.
 const PREFERENCE_VERSION = 2;
 const destinationIds = new Set(ADMIN_WORKSPACE_DESTINATIONS.map(({ id }) => id));
+// Standalone /admin/* routes outside AdminLayoutV2 (auth, two-step, report preview);
+// never carry dark mode onto them on logout, redirect, or navigation.
+const isStandaloneAdminPath = (path) => /^\/admin\/(login|change-password|two-step|forgot-password|reset-password|report-preview)(\/|$)/.test(routerPath(path));
+// In-memory per-account fallback when device storage is full or blocked so
+// toggling dark mode survives pathname-keyed AdminNavigationProvider remounts.
+const unsavedDarkModeByAccount = new Map();
 
 // This account's saved menu settings on this phone, or null when storage
 // cannot be read. Field view is not a menu group, so a version change never
@@ -20,12 +27,41 @@ function readSavedPreferences(accountId) {
       .filter((id) => typeof saved?.groups?.[id] === 'boolean')
       .map((id) => [id, saved.groups[id]]));
     const pins = Array.isArray(saved?.pins) ? [...new Set(saved.pins)].filter((id) => destinationIds.has(id)).slice(0, 3) : [];
-    return { groups, pins, fieldView: saved?.fieldView === true };
+    return { groups, pins, fieldView: saved?.fieldView === true, darkMode: saved?.darkMode === true };
   } catch { return null; }
 }
 
 function readPreferences(accountId) {
-  return (accountId && readSavedPreferences(accountId)) || { groups: {}, pins: [], fieldView: false };
+  const saved = accountId ? readSavedPreferences(accountId) : null;
+  const fallbackDark = accountId && unsavedDarkModeByAccount.has(accountId) ? unsavedDarkModeByAccount.get(accountId) : undefined;
+  if (saved) return fallbackDark !== undefined ? { ...saved, darkMode: fallbackDark } : saved;
+  return { groups: {}, pins: [], fieldView: false, darkMode: fallbackDark === true };
+}
+
+function mergePendingPreferences(stored, pending, accountId) {
+  const kept = pending ? stored.pins.filter((id) => pending.pins[id] !== false) : stored.pins;
+  const added = pending ? Object.keys(pending.pins).filter((id) => pending.pins[id] && !kept.includes(id)) : [];
+  const darkOverride = accountId && unsavedDarkModeByAccount.has(accountId)
+    ? unsavedDarkModeByAccount.get(accountId)
+    : pending?.darkMode;
+  return {
+    ...stored,
+    pins: [...kept, ...added].slice(0, 3),
+    groups: pending ? { ...stored.groups, ...pending.groups } : stored.groups,
+    ...(darkOverride !== undefined ? { darkMode: darkOverride } : {}),
+  };
+}
+
+function captureUnsavedChanges(base, next, pending) {
+  return {
+    pins: {
+      ...pending?.pins,
+      ...Object.fromEntries(base.pins.filter((id) => !next.pins.includes(id)).map((id) => [id, false])),
+      ...Object.fromEntries(next.pins.filter((id) => !base.pins.includes(id)).map((id) => [id, true])),
+    },
+    groups: { ...pending?.groups, ...Object.fromEntries(Object.entries(next.groups).filter(([id, open]) => base.groups[id] !== open)) },
+    darkMode: next.darkMode !== base.darkMode ? next.darkMode : pending?.darkMode,
+  };
 }
 
 export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, children }) {
@@ -74,31 +110,24 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   // change reached storage.
   const unsaved = useRef(null);
   const updatePreferences = (update, { onlyIfSaved = false } = {}) => {
-    const stored = user?.id ? readSavedPreferences(user.id) : null;
+    const accountId = user?.id;
+    const stored = accountId ? readSavedPreferences(accountId) : null;
     const pending = unsaved.current;
-    let base = stored || preferences;
-    if (stored && pending) {
-      const kept = stored.pins.filter((id) => pending.pins[id] !== false);
-      const added = Object.keys(pending.pins).filter((id) => pending.pins[id] && !kept.includes(id));
-      base = { ...stored, pins: [...kept, ...added].slice(0, 3), groups: { ...stored.groups, ...pending.groups } };
-    }
+    const base = stored ? mergePendingPreferences(stored, pending, accountId) : preferences;
     const next = update(base);
     let saved = false;
-    if (user?.id) {
+    if (accountId) {
       try {
-        localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION }));
+        localStorage.setItem(preferenceKey(accountId), JSON.stringify({ ...next, version: PREFERENCE_VERSION }));
         saved = true;
       } catch { /* full or blocked storage */ }
     }
     if (!saved && onlyIfSaved) return false;
-    unsaved.current = saved ? null : {
-      pins: {
-        ...pending?.pins,
-        ...Object.fromEntries(base.pins.filter((id) => !next.pins.includes(id)).map((id) => [id, false])),
-        ...Object.fromEntries(next.pins.filter((id) => !base.pins.includes(id)).map((id) => [id, true])),
-      },
-      groups: { ...pending?.groups, ...Object.fromEntries(Object.entries(next.groups).filter(([id, open]) => base.groups[id] !== open)) },
-    };
+    if (accountId) {
+      if (saved) unsavedDarkModeByAccount.delete(accountId);
+      else if (next.darkMode !== base.darkMode) unsavedDarkModeByAccount.set(accountId, next.darkMode);
+    }
+    unsaved.current = saved ? null : captureUnsavedChanges(base, next, pending);
     setPreferences(next);
     return saved;
   };
@@ -111,6 +140,7 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     const onStorage = (event) => {
       if (event.key !== null && event.key !== key) return;
       unsaved.current = null;
+      unsavedDarkModeByAccount.delete(user.id);
       setPreferences(readPreferences(user.id));
     };
     window.addEventListener('storage', onStorage);
@@ -133,6 +163,30 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   // row the save failed, so the row can say why the switch did not move.
   const fieldView = user?.role === 'admin' && preferences.fieldView === true;
   const setFieldView = (on) => updatePreferences((current) => ({ ...current, fieldView: on === true }), { onlyIfSaved: true });
+  // Dark mode is per-account on this browser/device and applies for all staff
+  // roles (both admin and technician). Cleaned up on unmount so customer routes
+  // and login pages stay light.
+  const darkMode = preferences.darkMode === true;
+  const setDarkMode = (on) => updatePreferences((current) => ({ ...current, darkMode: on === true }));
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const root = document.documentElement;
+    if (!enabled) {
+      if (isStandaloneAdminPath(window.location.pathname)) delete root.dataset.adminTheme;
+    } else if (darkMode) {
+      root.dataset.adminTheme = 'dark';
+    } else {
+      delete root.dataset.adminTheme;
+    }
+    return () => {
+      const path = window.location.pathname;
+      if (!isAdminPath(path) || isStandaloneAdminPath(path)) {
+        delete root.dataset.adminTheme;
+      }
+    };
+  }, [enabled, darkMode]);
+
   // A verified session with the switch on readies Today too: after a deploy
   // the app can open on another page (a push tap), and the next open with no
   // signal still lands on Today. Each mount reuses the page's try (see
@@ -153,7 +207,7 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     };
   }, [enabled, fieldView]);
 
-  return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView } : null}>
+  return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView, darkMode, setDarkMode } : null}>
     {children}
   </AdminNavigationContext.Provider>;
 }

@@ -29,6 +29,7 @@ const { redactAccessCodes } = require('./context-aggregator');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { loadBookableCallServices } = require('./call-booking-catalog');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 const BRIEF_TTL_MS = 60 * 1000;
@@ -261,6 +262,7 @@ async function loadCustomerBundle(customerId, callId, conn, now) {
       const row = await conn('sms_log')
         .where({ customer_id: customerId })
         .where('created_at', '>=', since48h)
+        .modify(excludeUnresolvedSendReservations)
         .count({ n: '*' })
         .first();
       return Number(row?.n) || 0;

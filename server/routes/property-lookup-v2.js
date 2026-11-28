@@ -6533,11 +6533,15 @@ router.post('/calculate-estimate', async (req, res) => {
     if (options?.reviseEstimateId && req.techRole === 'admin') {
       const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       if (UUID.test(String(options.reviseEstimateId))) {
-        const storedRow = await require('../models/db')('estimates').where({ id: String(options.reviseEstimateId) }).first('status', 'sent_at', 'address', 'estimate_data');
+        const storedRow = await require('../models/db')('estimates').where({ id: String(options.reviseEstimateId) }).first('status', 'sent_at', 'address', 'pricing_authority', 'estimate_data');
         const storedBlob = storedRow && (typeof storedRow.estimate_data === 'string'
           ? (() => { try { return JSON.parse(storedRow.estimate_data); } catch { return null; } })()
           : storedRow.estimate_data);
-        if (storedBlob) fleaRecord = require('../services/estimate-flea-size-replay').fleaPriceRecord(storedRow, storedBlob, { translate: translateV2CallToV1Input, nextAddress: options?.address });
+        if (storedBlob) {
+          fleaRecord = require('../services/estimate-flea-size-replay').fleaPriceRecord(storedRow, storedBlob, { translate: translateV2CallToV1Input, nextAddress: options?.address });
+          v1Input.year1PrepayNoPercent = require('../services/estimate-converter').estimateHasNoYear1PrepayPercent(storedBlob);
+          require('../services/estimate-tree-shrub-knob-replay').applyUnchangedRevisionPricingKnobs(v1Input, storedBlob, storedRow);
+        }
       }
     }
     const v1 = require('../services/estimate-flea-size-replay').generateWithFleaRecord(pricingEngine.generateEstimate, v1Input, fleaRecord);

@@ -30,7 +30,7 @@ jest.mock('../routes/booking', () => ({ _internals: { addressMatchesCustomer: (.
 // call_log holds one row; call_live_utterances is a list; customers is a map. The claim UPDATE runs its compare-and-swap
 // against the row's JSON, as the SQL does.
 jest.mock('../models/db', () => {
-  const state = { call: null, utterances: [], customers: {} };
+  const state = { call: null, utterances: [], customers: {}, propertyCounts: {} };
   const live = () => state.call.metadata.live_transcription;
   function callLog() {
     const q = { raws: [] };
@@ -65,7 +65,23 @@ jest.mock('../models/db', () => {
     q.first = jest.fn(async () => state.customers[q.id]);
     return q;
   }
-  const db = jest.fn((table) => (table === 'call_log' ? callLog() : table === 'customers' ? customers() : utterances()));
+  function customerProperties() {
+    const q = {};
+    q.where = jest.fn((cond) => { q.customerId = cond.customer_id; return q; });
+    q.count = jest.fn(() => q);
+    q.first = jest.fn(async () => {
+      const val = state.propertyCounts[q.customerId];
+      if (val instanceof Error) throw val;
+      return { count: String(val ?? 1) };
+    });
+    return q;
+  }
+  const db = jest.fn((table) => (
+    table === 'call_log' ? callLog()
+      : table === 'customers' ? customers()
+        : table === 'customer_properties' ? customerProperties()
+          : utterances()
+  ));
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.__state = state;
   return db;
@@ -104,6 +120,7 @@ beforeEach(() => {
   jest.useFakeTimers({ now: T0 + 600 * 1000 });
   db.__state.utterances = [];
   db.__state.customers = {};
+  db.__state.propertyCounts = {};
   isEnabled.mockReturnValue(true);
   process.env.ANTHROPIC_API_KEY = 'test-key';
   mockCreate.mockResolvedValue(reply(PEST));
@@ -751,10 +768,30 @@ describe('live call assist out-of-order runs', () => {
 });
 
 describe('assistForPanel', () => {
-  test('text fields only, null while nothing is known', () => {
+  test('text fields only, null while nothing is known or quarantined', () => {
     expect(assistForPanel({})).toBeNull();
     expect(assistForPanel({ live_transcription: { assist: { runs: 1, at: 'x', caller_count: 2 } } })).toBeNull();
+    expect(assistForPanel({ live_transcription: { quarantined_at: '2026-11-17T15:10:00Z', assist: { runs: 1, at: 'x', intent: 'Wants pest control' } } })).toBeNull();
     expect(assistForPanel({ live_transcription: { assist: { runs: 1, at: 'x', intent: 'Wants pest control', key: 'k', facts: { city: 'X' } } } }))
       .toEqual({ intent: 'Wants pest control', price: null, times: null, at: 'x' });
+  });
+});
+
+describe('C2-20 & C2-34: quarantine guard and multi-property pricing guard', () => {
+  test('C2-20: quarantined call does not run assist', async () => {
+    setCall({ quarantined_at: '2026-11-17T15:05:00Z' });
+    await expect(run()).resolves.toEqual({ ran: false, reason: 'quarantined' });
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  test('C2-34: multi-property customer does not price from primary mirror row sizes', async () => {
+    db.__state.customers['cust-multi'] = {
+      id: 'cust-multi', address_line1: '100 Main St', city: 'Sarasota', state: 'FL', zip: '34231',
+      lot_sqft: 8000, property_sqft: 3000,
+    };
+    db.__state.propertyCounts['cust-multi'] = 2;
+    mockCreate.mockResolvedValue(reply({ ...PEST, service: 'lawn_care' }));
+    await run({ customerId: 'cust-multi' });
+    expect(mockPricing).toHaveBeenCalledWith({ service: 'lawn_care', home_sqft: 2000, lot_sqft: undefined });
   });
 });

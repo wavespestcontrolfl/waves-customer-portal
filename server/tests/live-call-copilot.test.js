@@ -46,6 +46,7 @@ function makeFakeDb({
       whereNot() { return chain; },
       whereIn() { return chain; },
       whereRaw() { return chain; },
+      modify() { return chain; },
       orderBy() { return chain; },
       limit() { return chain; },
       select() {

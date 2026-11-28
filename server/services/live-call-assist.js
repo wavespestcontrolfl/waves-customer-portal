@@ -30,6 +30,9 @@ const { ledgerCall } = require('./llm-dispatch-metrics');
 const { anthropicText } = require('./llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { scrubPans } = require('../utils/pan-scrub');
+const { QUARANTINE_WHERE_SQL } = require('./live-call-transcription');
+
+const NOT_QUARANTINED_SQL = `NOT ${QUARANTINE_WHERE_SQL}`;
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -167,6 +170,7 @@ async function claimRun(callSid, live, now) {
   if (runs === 0 ? callerCount < FIRST_RUN_CALLERS : callerCount - (Number(assist.caller_count) || 0) < 1) return 0;
   const won = await db('call_log')
     .where('twilio_call_sid', callSid)
+    .whereRaw(NOT_QUARANTINED_SQL)
     .whereRaw("COALESCE((metadata -> 'live_transcription' -> 'assist' ->> 'runs')::int, 0) = ?", [runs])
     .whereRaw("(metadata -> 'live_transcription') ->> 'stopped_at' IS NULL")
     .update({
@@ -185,6 +189,7 @@ async function claimRun(callSid, live, now) {
 async function saveResult(callSid, patch, generation) {
   const saved = await db('call_log')
     .where('twilio_call_sid', callSid)
+    .whereRaw(NOT_QUARANTINED_SQL)
     .whereRaw("COALESCE((metadata -> 'live_transcription' -> 'assist' ->> 'runs')::int, 0) = ?", [generation])
     .update({
       metadata: db.raw(
@@ -248,6 +253,22 @@ async function accountFor(customerId) {
     return await db('customers').where({ id: customerId }).whereNull('deleted_at')
       .first('id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'lot_sqft', 'property_sqft') || null;
   } catch { return null; }
+}
+
+// Active property count for a matched account: >1 means multi-property (do not price from the primary
+// mirror row without knowing which property the caller means), -1 means lookup failed (fail closed).
+async function singlePropertyAccount(customer) {
+  if (!customer) return false;
+  try {
+    const row = await db('customer_properties')
+      .where({ customer_id: customer.id, active: true })
+      .count('* as count')
+      .first();
+    const count = parseInt((row && row.count) || 0, 10);
+    return count >= 0 && count <= 1;
+  } catch {
+    return false;
+  }
 }
 
 const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
@@ -316,7 +337,7 @@ function lookupKey(facts, accountId, scheduling) {
 // The price, times and key to store. An unchanged key reuses the last ones; a changed key looks both up again, and
 // whatever a lookup does not return is null, so nothing stale stays beside new facts. Each lookup stands alone: one
 // failing leaves the other and the intent in place, and drops the key so the next run tries again.
-async function priceAndTimes(facts, customer, useAccount, key, previous, scheduling) {
+async function priceAndTimes(facts, customer, useAccount, key, previous, scheduling, { useAccountForPrice = useAccount } = {}) {
   if (key === previous.key) return { price: previous.price ?? null, times: previous.times ?? null, key };
   let failed = false;
   const attempt = async (fn) => {
@@ -326,7 +347,7 @@ async function priceAndTimes(facts, customer, useAccount, key, previous, schedul
       return null;
     }
   };
-  const price = await attempt(() => lookupPrice(facts, useAccount ? customer : null));
+  const price = await attempt(() => lookupPrice(facts, useAccountForPrice ? customer : null));
   const times = scheduling && (facts.service || facts.when) ? await attempt(() => lookupTimes(facts, customer, useAccount)) : null;
   return { price, times, key: failed ? null : key };
 }
@@ -341,6 +362,7 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
     const callSid = callRow?.twilio_call_sid;
     const live = meta(callRow?.metadata).live_transcription;
     if (!callSid || !live) return { ran: false, reason: 'not_live' };
+    if (live.quarantined_at) return { ran: false, reason: 'quarantined' };
     const generation = await claimRun(callSid, live, new Date());
     if (!generation) return { ran: false, reason: 'not_due' };
     const transcript = await transcriptWindow(callSid);
@@ -353,9 +375,15 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
     const facts = mergeFacts(previous.facts, read.facts, read.withdrawn);
     const customer = await accountFor(customerId);
     const useAccount = !!customer && !facts.place_withdrawn && !statesOtherProperty(customer, facts);
+    const useAccountForPrice = useAccount && (await singlePropertyAccount(customer));
     const scheduling = schedulingOn();
-    const key = lookupKey(facts, useAccount ? customer.id : null, scheduling);
-    const patch = { intent: read.intent, service: facts.service, facts, ...(await priceAndTimes(facts, customer, useAccount, key, previous, scheduling)) };
+    const key = lookupKey(facts, useAccountForPrice ? customer.id : null, scheduling);
+    const patch = {
+      intent: read.intent,
+      service: facts.service,
+      facts,
+      ...(await priceAndTimes(facts, customer, useAccount, key, previous, scheduling, { useAccountForPrice })),
+    };
     return { ran: true, saved: await saveResult(callSid, patch, generation) };
   } catch (err) {
     logger.warn(`[live-call-assist] refresh failed: ${err?.code || err?.name || 'error'}`);
@@ -365,7 +393,9 @@ async function refreshAssistIfDue(callRow, { customerId = null } = {}) {
 
 // The shape GET /live sends: text only, or null while there is nothing to show.
 function assistForPanel(callMeta) {
-  const a = meta(callMeta).live_transcription?.assist;
+  const live = meta(callMeta).live_transcription;
+  if (live?.quarantined_at) return null;
+  const a = live?.assist;
   // Cached times are not shown while scheduling is off, whatever an earlier run saved.
   const times = (schedulingOn() && a?.times) || null;
   if (!a || (!a.intent && !a.price && !times)) return null;

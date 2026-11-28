@@ -81,6 +81,9 @@ describePg('call-log analytics SQL (PostgreSQL 16)', () => {
     rows[250].metadata = { google_ads_call_bridge: { campaignName: 'Brand' } };
     rows[251].metadata = { google_ads_call_bridge: { proposedResourceName: 'customers/1/callViews/proposal' } };
     rows[252].google_ads_call_resource_name = '   ';
+    // C2-10: Waves Main Line with webhook domain_tracking stamp must still sort
+    // as Source unknown, never Website.
+    rows[253].metadata = { numberType: 'domain_tracking', domain: 'wavespestcontrol.com', location: 'Main Line' };
     rows.push({ id: randomUUID(), direction: 'inbound', from_phone: '+19415559991', to_phone: '+19412691697',
       source: 'voice_relay_sandbox', twilio_call_sid: 'CASANDBOX', metadata: {}, created_at: new Date(month.startInstant.getTime() + 300 * 60000) });
     rows.push({ id: randomUUID(), direction: 'outbound', from_phone: '+19412691697', to_phone: '+19415559992',
