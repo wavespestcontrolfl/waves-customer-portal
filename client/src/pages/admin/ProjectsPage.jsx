@@ -89,7 +89,7 @@ function useConfirmDialog() {
   const element = pending ? (
     <Dialog open size="sm" onClose={handleCancel} aria-label="Confirmation">
       <DialogBody>
-        <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_TEXT, whiteSpace: "pre-line", lineHeight: 1.5 }}>
           {pending.message}
         </div>
         {pending.input && (
@@ -2905,10 +2905,10 @@ export function ProjectDetail({
                     fontWeight: 500,
                     letterSpacing: "0.06em",
                     textTransform: "uppercase",
-                    color: "#27272A",
+                    color: ESTIMATE_TEXT,
                     margin: "20px 0 10px",
                     paddingBottom: 6,
-                    borderBottom: "1px solid #E4E4E7",
+                    borderBottom: `1px solid ${ESTIMATE_BORDER}`,
                   }}
                 >
                   {field.section}
@@ -2941,7 +2941,7 @@ export function ProjectDetail({
                     style={{
                       background: "transparent",
                       border: "none",
-                      color: "#18181B",
+                      color: ESTIMATE_TEXT,
                       fontSize: 11,
                       fontWeight: 500,
                       cursor: "pointer",
@@ -3479,7 +3479,7 @@ function ProjectHistoryPanel({ activity }) {
         style={{
           fontSize: 14,
           fontWeight: 500,
-          color: "#09090B",
+          color: ESTIMATE_TEXT,
           marginBottom: 8,
         }}
       >
@@ -3488,7 +3488,7 @@ function ProjectHistoryPanel({ activity }) {
       {activity.length > 0 ? (
         <div
           style={{
-            border: `1px solid #E4E4E7`,
+            border: `1px solid ${ESTIMATE_BORDER}`,
             borderRadius: 8,
             overflow: "hidden",
           }}
@@ -3498,8 +3498,8 @@ function ProjectHistoryPanel({ activity }) {
               key={item.id || `${item.action}-${item.created_at}-${idx}`}
               style={{
                 padding: "10px 12px",
-                borderTop: idx === 0 ? "none" : `1px solid #E4E4E7`,
-                background: "#FFFFFF",
+                borderTop: idx === 0 ? "none" : `1px solid ${ESTIMATE_BORDER}`,
+                background: ESTIMATE_BG,
               }}
             >
               {" "}
@@ -3515,15 +3515,15 @@ function ProjectHistoryPanel({ activity }) {
                 <div style={{ minWidth: 0 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 500, color: "#09090B" }}
+                    style={{ fontSize: 14, fontWeight: 500, color: ESTIMATE_TEXT }}
                   >
                     {PROJECT_ACTIVITY_LABELS[item.action] || item.action}
                   </div>{" "}
-                  <div style={{ fontSize: 14, color: "#71717A", marginTop: 2 }}>
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2 }}>
                     {item.description || "Project activity recorded."}
                   </div>
                   {item.actor_name && (
-                    <div style={{ fontSize: 14, color: "#71717A", marginTop: 4 }}>
+                    <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4 }}>
                       By {item.actor_name}
                     </div>
                   )}
@@ -3532,7 +3532,7 @@ function ProjectHistoryPanel({ activity }) {
                   style={{
                     flexShrink: 0,
                     fontSize: 14,
-                    color: "#71717A",
+                    color: ESTIMATE_MUTED,
                     textAlign: "right",
                   }}
                 >

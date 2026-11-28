@@ -203,6 +203,21 @@
   html.admin-app[data-admin-theme="dark"] .ui-action.tech-visit-tip[aria-pressed="true"] .tech-visit-tip-copy {
     color: #3f3f46;
   }
+  html.admin-app[data-admin-theme="dark"] .ui-action.tech-visit-action.tech-visit-product--stock:is(
+    [aria-pressed="true"],
+    .tech-visit-product--added,
+    [aria-pressed="true"]:hover:where(:not(:disabled))
+  ) {
+    background-color: #fef3c7;
+    border-color: #f59e0b;
+    color: #78350f;
+  }
+  html.admin-app[data-admin-theme="dark"] .ui-action.tech-visit-action.tech-visit-product--stock:is(
+    [aria-pressed="true"],
+    .tech-visit-product--added
+  ) .tech-visit-stock-flag {
+    color: #92400e;
+  }
 
   /* Workspace navigation & action menus (ui-workspace.css) */
   html.admin-app[data-admin-theme="dark"] .ui-action-menu {
