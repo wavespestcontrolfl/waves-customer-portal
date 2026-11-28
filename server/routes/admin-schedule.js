@@ -3614,7 +3614,13 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
 // any row that still has NULL — a stale row, a future one-off insert bug,
 // a restore — must stay safe, so the check lives here rather than at each
 // of the many call sites below.
-const { ONE_TIME_ADDON_SERVICE_KEYS, isOneTimeOnlyAddonKey } = require('../services/recurring-template-overrides');
+const ONE_TIME_ADDON_SERVICE_KEYS = new Set(['waveguard_membership']);
+// An area add-on treatment (area_addon_<key>) is one application, sold and limited from one estimate: it is due only on the visit it
+// was sold on, whatever its stored `recurring_pattern` holds (a staff-built line leaves it NULL, which would ride the parent cadence).
+// A misting refill (mosquito_misting_refill) is one refill application, due once on the visit it was added to: a staff-built line leaves its
+// recurring_pattern NULL, which would copy the charge onto every later monthly visit of the plan series (misting PR 2a).
+const isOneTimeOnlyAddonKey = (serviceKey) => ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey) || isAreaAddOnCatalogKey(serviceKey)
+  || serviceKey === 'mosquito_misting_refill';
 
 // `blackoutDates` must be the same layers the visit-date generator used:
 // a visit nudged off a closure (Oct 15 → Oct 16) still owes the add-ons due
