@@ -7,9 +7,31 @@ import {
 import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import BillingHealthPanel from "../BillingHealthPanel";
+import CashRunwayCard from "../CashRunwayCard";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import Verdict from "../Verdict";
 import { agingVerdict } from "../scorecard-metrics";
+
+function PrepaidAndDraftsTile({ staleDrafts, buyerView }) {
+  const prepaid = buyerView?.prepaidOwed?.value;
+  const draftCount = staleDrafts?.count ?? null;
+  const draftTotal = staleDrafts?.total ?? 0;
+  const hasDrafts = draftCount != null && draftCount > 0;
+  const value = prepaid != null
+    ? fmtMoneyCompact(prepaid)
+    : draftCount != null
+      ? fmtMoneyCompact(draftTotal)
+      : "—";
+  const label = prepaid != null ? "Prepaid Owed" : "Stale Draft Invoices";
+  const sub = prepaid != null
+    ? hasDrafts
+      ? `${draftCount} unsent draft${draftCount === 1 ? "" : "s"} (${fmtMoneyCompact(draftTotal)}) 3d+`
+      : "unearned prepay · 0 stale drafts"
+    : draftCount != null
+      ? `${draftCount} unsent 3+ days · invisible to dunning`
+      : "unavailable";
+  return <KpiTile label={label} value={value} sub={sub} alert={hasDrafts} />;
+}
 
 // CASH — are we collecting what we earned? Collections, AR aging, and the
 // autopay/billing machinery that turns MRR into money.
@@ -21,6 +43,9 @@ export default function CashSection({
   kpiHistory,
   aging,
   billing,
+  buyerView,
+  cashForecast,
+  cashForecastForbidden = false,
   isMobile,
   pending = {},
   onRetry,
@@ -83,27 +108,22 @@ export default function CashSection({
                 }
                 chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
               />
-              {/* Deposits live in their own ledger (estimate_deposits) and
-                  never appear as invoices/payments rows, so without this tile
-                  collected-at-accept money is invisible on every cash view.
-                  On hand = received, not yet credited to a first invoice. */}
-              <KpiTile
-                label="Deposits on Hand"
-                value={
-                  kpis.deposits
-                    ? fmtMoneyCompact(kpis.deposits.onHand)
-                    : "—"
-                }
-                sub={
-                  kpis.deposits
-                    ? `${kpis.deposits.onHandCount} awaiting first invoice · ${fmtMoneyCompact(kpis.deposits.collectedPeriod)} collected this period`
-                    : "unavailable"
-                }
-              />
+              <PrepaidAndDraftsTile staleDrafts={kpis.billing?.staleDrafts} buyerView={buyerView} />
             </>
           )}
         </KpiStrip>
       </div>
+
+      {/* 13-week Cash Forecast summary — owner-only (hidden on 403 for non-owner admins) */}
+      {!cashForecastForbidden && (
+        <div className="mb-5">
+          <ChartCard title="Cash forecast & runway" sub="live bank pool & 13-week lowest projected balance">
+            <DashboardFeed value={cashForecast} pending={pending.cashForecast} label="cash forecast" onRetry={onRetry}>
+              <CashRunwayCard data={cashForecast} />
+            </DashboardFeed>
+          </ChartCard>
+        </div>
+      )}
 
       {/* AR aging — the 90+ buckets are the only place alert-fg */}
       <div className="mb-5">

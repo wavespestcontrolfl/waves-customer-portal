@@ -12,6 +12,7 @@ const data = { kpis: { revenueMTD: 123, activeCustomers: 10, newCustomersThisMon
 const props = {
   funnel: { funnel: {}, rates: {} },
   capAlloc: { channels: [] },
+  organicTraffic: { gsc: {}, ga4: {} },
   serviceLines: { lines: [], caveats: [] },
   kpis: { sales: { conversion: 50, booked: 1, leads: 2 }, membershipsSold: 3 },
   salesCapture: { captured: 100, missed: 100, captureRate: 50, wonCount: 1, lostCount: 1 },

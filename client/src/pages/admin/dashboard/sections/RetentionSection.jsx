@@ -16,6 +16,27 @@ import { mrrVerdict } from "../scorecard-metrics";
 import MrrBridgeCard from "../MrrBridgeCard";
 import ChurnParetoCard from "../ChurnParetoCard";
 
+function ReportQualityTile({ reportEngagement }) {
+  const rs = reportEngagement?.reserviceWithin14Days;
+  const pest = rs?.pest || {};
+  const lawn = rs?.lawn || {};
+  const visits = (Number(pest.visits) || 0) + (Number(lawn.visits) || 0);
+  const reserviced = (Number(pest.reserviced) || 0) + (Number(lawn.reserviced) || 0);
+  const rate = visits > 0 ? Math.round((reserviced / visits) * 1000) / 10 : null;
+  const openRate = reportEngagement?.total?.open_rate_pct;
+  const openNote = openRate != null ? `${openRate}% reports opened` : "report opens unavailable";
+  return (
+    <KpiTile
+      label="14d Re-Service"
+      n={visits || null}
+      value={rate != null ? `${rate}%` : "—"}
+      sub={visits > 0 ? `${reserviced}/${visits} visits · ${openNote}` : openNote}
+      alert={rate != null && visits >= 5 && rate >= 5}
+      chart={{ kind: "gauge", value: rate, max: 15 }}
+    />
+  );
+}
+
 // RETENTION — are customers staying? Net recurring-revenue momentum, the MRR
 // trend + the bridge decomposing WHY it moved, signup-cohort retention, and
 // the customer-quality signals behind it.
@@ -30,6 +51,7 @@ export default function RetentionSection({
   churnReasons,
   cohort,
   reviewTrend,
+  reportEngagement,
   isMobile,
   pending = {},
   onRetry,
@@ -97,28 +119,7 @@ export default function RetentionSection({
                 sub={`${kpis.retention.lost} lost`}
                 chart={{ kind: "gauge", value: kpis.retention.pct, max: 100 }}
               />
-              <KpiTile
-                label="CSAT"
-                metricKey="csat_avg"
-                targets={kpiTargets}
-                history={kpiHistory}
-                n={kpis.quality.csatResponses || null}
-                value={
-                  kpis.quality.csatAvg != null
-                    ? `${kpis.quality.csatAvg}/10`
-                    : "—"
-                }
-                sub={
-                  kpis.quality.csatResponses
-                    ? `${kpis.quality.csatResponses} rate-page responses`
-                    : "no responses yet"
-                }
-                chart={{
-                  kind: "gauge",
-                  value: kpis.quality.csatAvg != null ? parseFloat(kpis.quality.csatAvg) : null,
-                  max: 10,
-                }}
-              />
+              <ReportQualityTile reportEngagement={reportEngagement} />
             </>
           )}
         </KpiStrip>

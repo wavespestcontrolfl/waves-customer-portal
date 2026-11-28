@@ -21,6 +21,8 @@ export const KPI_METRIC_LABELS = {
   revenue_per_job: "Revenue per job ($)",
   revenue_per_man_hour: "Revenue per man-hour ($)",
   gross_margin: "Gross margin (%)",
+  tech_utilization: "Tech utilization (%)",
+  stops_per_hour: "Stops per hour",
   ar_days: "AR days",
   lead_conversion: "Lead conversion (%)",
   response_speed_min: "Response speed (min)",

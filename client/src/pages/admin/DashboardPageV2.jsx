@@ -100,6 +100,7 @@ export default function DashboardPageV2() {
     callsBySource, leadsBySource, channelMix, leadFunnel, channelRoi, serviceLines, mix,
     revenueByCity, reviewTrend, today, billing, alerts, kpiHistory, ebitda, officeCost, crossSell, opsMetrics,
     mrrBridge, revenueOverview, churnReasons, staleVisits, buyerView,
+    opsScoreboard, weeklyBi, organicTraffic, reportEngagement, cashForecast,
   } = values;
   const kpiTargets = useMemo(() => Object.fromEntries(
     (values.kpiTargets?.targets || []).map((row) => [row.metric, row]),
@@ -110,10 +111,14 @@ export default function DashboardPageV2() {
   const attributionReady = attributionKeys.every((key) => values[key]);
   const attributionLoading = !attributionReady && attributionKeys.some((key) => pending[key] && !values[key]);
   const attributionError = attributionReady ? null : attributionKeys.map((key) => errors[key]).find(Boolean);
-  const forbidden = Object.values(errors).some(isForbiddenError);
+  // cashForecast is owner-only (requireFullAccess); a 403 there must hide that
+  // card for non-owner admins rather than locking them out of the dashboard.
+  const forbidden = Object.entries(errors).some(([key, err]) => key !== "cashForecast" && isForbiddenError(err));
   const rateLimited = Object.values(errors).some(isRateLimitError);
   const retryFeed = rateLimited || refreshing ? undefined : refresh;
-  const hasMetricErrors = Object.entries(errors).some(([key, error]) => error && !["alerts", "today", "staleVisits"].includes(key));
+  const hasMetricErrors = Object.entries(errors).some(
+    ([key, error]) => error && !["alerts", "today", "staleVisits"].includes(key) && !(key === "cashForecast" && isForbiddenError(error)),
+  );
 
   useEffect(() => {
     const tick = setInterval(() => setClockTick((t) => t + 1), 30000);
@@ -204,7 +209,7 @@ export default function DashboardPageV2() {
       {sectionVisible("today") && (
         <TodaySection alerts={alerts?.alerts ?? null} alertsStale={!!errors.alerts}
           alertFailures={alerts?.failures} alertsLoading={pending.alerts && !alerts} today={today} staleVisits={staleVisits}
-          buyerView={buyerView}
+          buyerView={buyerView} opsScoreboard={opsScoreboard} weeklyBi={weeklyBi}
           errors={errors} pending={pending} onRetry={retryFeed} {...kpiStripProps} />
       )}
 
@@ -235,6 +240,7 @@ export default function DashboardPageV2() {
           salesCapture={salesCapture}
           funnel={funnel}
           revenueByCity={revenueByCity}
+          organicTraffic={organicTraffic}
           capAlloc={capAlloc}
           callsBySource={callsBySource}
           leadsBySource={leadsBySource}
@@ -279,6 +285,7 @@ export default function DashboardPageV2() {
           churnReasons={churnReasons}
           cohort={cohort}
           reviewTrend={reviewTrend}
+          reportEngagement={reportEngagement}
           isMobile={isMobile}
           {...kpiStripProps}
         />
@@ -290,6 +297,9 @@ export default function DashboardPageV2() {
           onRetry={retryFeed}
           aging={aging}
           billing={billing?.summary}
+          buyerView={buyerView}
+          cashForecast={cashForecast}
+          cashForecastForbidden={isForbiddenError(errors.cashForecast)}
           isMobile={isMobile}
           {...kpiStripProps}
         />

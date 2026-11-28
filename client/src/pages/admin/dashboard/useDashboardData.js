@@ -11,6 +11,8 @@ const REQUESTS = [
   ["today", "/admin/dashboard/today-completion", "today"],
   ["staleVisits", "/admin/command-center/stale-visits", "today"],
   ["buyerView", "/admin/dashboard/buyer-view", "today"],
+  ["opsScoreboard", "/admin/dashboard/ops-scoreboard", "today"],
+  ["weeklyBi", "/admin/dashboard-ops/bi/reports?limit=1", "today"],
   ["kpis", "/admin/dashboard/core-kpis", "shared", true],
   ["kpiTargets", "/admin/kpi-targets", "shared"],
   ["kpiHistory", "/admin/dashboard/kpi-history?days=90", "shared"],
@@ -19,6 +21,7 @@ const REQUESTS = [
   ["salesCapture", "/admin/dashboard/sales-capture", "growth"],
   ["funnel", "/admin/dashboard/funnel", "growth"],
   ["revenueByCity", "/admin/dashboard/revenue-by-city", "growth"],
+  ["organicTraffic", "/admin/dashboard/organic-traffic", "growth"],
   ["capAlloc", "/admin/ads/capital-allocation?period=quarter", "growth"],
   ["callsBySource", "/admin/dashboard/calls-by-source", "growth", true],
   ["leadsBySource", "/admin/dashboard/leads-by-source", "growth", true],
@@ -37,8 +40,10 @@ const REQUESTS = [
   ["churnReasons", "/admin/dashboard/churn-reasons?months=12", "retention"],
   ["cohort", "/admin/dashboard/retention-cohort?months=12", "retention"],
   ["reviewTrend", "/admin/dashboard/review-trend", "retention"],
+  ["reportEngagement", "/admin/dashboard/report-engagement", "retention"],
   ["aging", "/admin/dashboard/aging", "cash"],
   ["billing", "/admin/billing-health", "cash"],
+  ["cashForecast", "/admin/banking/cash-forecast", "cash"],
 ];
 const OPERATIONAL_KEYS = new Set(["alerts", "today", "staleVisits"]);
 // A feed may only show data, and above all an empty backlog or a zero, after
@@ -50,14 +55,19 @@ const REQUIRED_SHAPE = {
   kpiTargets: (value) => Array.isArray(value.targets),
   staleVisits: (value) => Array.isArray(value.visits),
   today: (value) => typeof value.total === "number",
+  opsScoreboard: (value) => isRecord(value.window),
+  weeklyBi: (value) => Array.isArray(value.reports),
   data: (value) => isRecord(value.kpis),
   funnel: (value) => isRecord(value.funnel),
+  organicTraffic: (value) => isRecord(value.gsc) || isRecord(value.ga4),
   officeCost: (value) => Array.isArray(value.months),
   crossSell: (value) => Array.isArray(value.series) && isRecord(value.now),
   opsMetrics: (value) => isRecord(value.errors),
   buyerView: isBuyerViewPayload,
+  reportEngagement: (value) => isRecord(value.total),
   aging: (value) => isRecord(value.aging),
   reviewTrend: (value) => Array.isArray(value.trend),
+  cashForecast: (value) => isRecord(value.opening),
 };
 const DASHBOARD_REFRESH_MS = 60000;
 

@@ -14,6 +14,59 @@ import CrossSellCard from "../CrossSellCard";
 import WorkAndRoutesCard from "../WorkAndRoutesCard";
 import MarginByLineBars from "../MarginByLineBars";
 
+function ProfitKpiTiles({ kpis, kpiTargets, kpiHistory }) {
+  const f = kpis.financial || {};
+  return (
+    <>
+      <KpiTile
+        label="Gross Margin"
+        metricKey="gross_margin"
+        targets={kpiTargets}
+        history={kpiHistory}
+        value={f.grossMarginWeighted != null ? `${Math.round(f.grossMarginWeighted)}%` : "—"}
+        sub={f.grossMarginAvg != null ? `per-job avg ${Math.round(f.grossMarginAvg)}%` : "revenue-weighted"}
+        chart={{ kind: "gauge", value: f.grossMarginWeighted, max: 100 }}
+      />
+      <KpiTile
+        label="Revenue / Man-Hour"
+        metricKey="revenue_per_man_hour"
+        targets={kpiTargets}
+        history={kpiHistory}
+        value={f.rpmh != null ? fmtMoney(f.rpmh) : "—"}
+        sub={`target $${kpiTargets?.revenue_per_man_hour?.target ?? 120}`}
+        chart={{ kind: "bullet", value: f.rpmh }}
+      />
+      <KpiTile
+        label="Revenue / Job"
+        metricKey="revenue_per_job"
+        metricValue={f.revPerJob}
+        targets={kpiTargets}
+        history={kpiHistory}
+        value={f.revPerJob != null ? fmtMoney(f.revPerJob) : "—"}
+        sub={`${f.jobsDone} completed`}
+      />
+      <KpiTile
+        label="Tech Utilization"
+        metricKey="tech_utilization"
+        targets={kpiTargets}
+        history={kpiHistory}
+        value={f.utilization != null ? `${f.utilization}%` : "—"}
+        sub={f.laborHours != null ? `${f.laborHours}h logged · ${f.activeTechs || 0} techs` : "field hours vs capacity"}
+        chart={{ kind: "gauge", value: f.utilization, max: 100 }}
+      />
+      <KpiTile
+        label="Stops / Hour"
+        metricKey="stops_per_hour"
+        metricValue={f.stopsPerHour}
+        targets={kpiTargets}
+        history={kpiHistory}
+        value={f.stopsPerHour != null ? String(f.stopsPerHour) : "—"}
+        sub={f.laborHours != null ? `${f.jobsDone} stops · ${f.laborHours}h` : "completed stops per hour"}
+      />
+    </>
+  );
+}
+
 // PROFIT — what's helping or hurting margin: fully-burdened gross margin,
 // labor productivity, the adjusted-EBITDA bridge (company-level, kept in its
 // own card NEXT TO but never mixed with the job-level gross margin), the
@@ -46,55 +99,7 @@ export default function ProfitSection({
     >
       <div className="mb-4 md:mb-5">
         <KpiStrip loading={kpisLoading} error={kpisError} ready={!!kpis}>
-          {kpis && (
-            <>
-              {/* Threshold tones come from the kpi_targets store via
-                  metricKey (defaults preserve the old hardcoded values). */}
-              <KpiTile
-                label="Gross Margin"
-                metricKey="gross_margin"
-                targets={kpiTargets}
-                history={kpiHistory}
-                value={
-                  kpis.financial.grossMarginWeighted != null
-                    ? `${Math.round(kpis.financial.grossMarginWeighted)}%`
-                    : "—"
-                }
-                sub={
-                  kpis.financial.grossMarginAvg != null
-                    ? `per-job avg ${Math.round(kpis.financial.grossMarginAvg)}%`
-                    : "revenue-weighted"
-                }
-                chart={{ kind: "gauge", value: kpis.financial.grossMarginWeighted, max: 100 }}
-              />
-              <KpiTile
-                label="Revenue / Man-Hour"
-                metricKey="revenue_per_man_hour"
-                targets={kpiTargets}
-                history={kpiHistory}
-                value={
-                  kpis.financial.rpmh != null
-                    ? fmtMoney(kpis.financial.rpmh)
-                    : "—"
-                }
-                sub={`target $${kpiTargets?.revenue_per_man_hour?.target ?? 120}`}
-                chart={{ kind: "bullet", value: kpis.financial.rpmh }}
-              />
-              <KpiTile
-                label="Revenue / Job"
-                metricKey="revenue_per_job"
-                metricValue={kpis.financial.revPerJob}
-                targets={kpiTargets}
-                history={kpiHistory}
-                value={
-                  kpis.financial.revPerJob != null
-                    ? fmtMoney(kpis.financial.revPerJob)
-                    : "—"
-                }
-                sub={`${kpis.financial.jobsDone} completed`}
-              />
-            </>
-          )}
+          {kpis && <ProfitKpiTiles kpis={kpis} kpiTargets={kpiTargets} kpiHistory={kpiHistory} />}
         </KpiStrip>
       </div>
 

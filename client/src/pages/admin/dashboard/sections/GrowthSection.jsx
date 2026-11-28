@@ -20,11 +20,49 @@ import Verdict from "../Verdict";
 import FunnelBySource from "../FunnelBySource";
 import ChannelROI from "../ChannelROI";
 import ServiceLineTiles from "../ServiceLineTiles";
+import OrganicTrafficCard from "../OrganicTrafficCard";
 import {
   capitalVerdict,
   captureVerdict,
   funnelVerdict,
 } from "../scorecard-metrics";
+
+function googleReviewsHero(k) {
+  const rating = k?.googleReviewRating;
+  const count = k?.googleReviewCount;
+  const unresponded = Number(k?.googleUnresponded) || 0;
+  return {
+    label: "Google Reviews",
+    value: rating != null ? `${Number(rating).toFixed(1)}★` : "—",
+    sub: count
+      ? `${fmtInt(count)} reviews${unresponded > 0 ? ` · ${fmtInt(unresponded)} need reply` : ""}`
+      : "Google Business Profile",
+    alert: unresponded > 0,
+  };
+}
+
+function OrganicTrafficSection({ isMobile, organicTraffic, pending, onRetry }) {
+  if (isMobile) {
+    return (
+      <MobileFold title="Organic Search & Traffic" sub="GSC + GA4 · trailing 30d">
+        <div className="px-1 pt-1">
+          <DashboardFeed value={organicTraffic} pending={pending} label="organic traffic" onRetry={onRetry}>
+            <OrganicTrafficCard data={organicTraffic} />
+          </DashboardFeed>
+        </div>
+      </MobileFold>
+    );
+  }
+  return (
+    <div className="mt-4">
+      <ChartCard title="Organic search & website traffic" sub="Google Search Console + GA4 · trailing 30 days vs prior 30 days">
+        <DashboardFeed value={organicTraffic} pending={pending} label="organic traffic" onRetry={onRetry}>
+          <OrganicTrafficCard data={organicTraffic} />
+        </DashboardFeed>
+      </ChartCard>
+    </div>
+  );
+}
 
 // Build a daily-revenue sparkline series from the array of { date, total }
 // returned by /admin/dashboard. Pad to at least 2 points so the sparkline
@@ -50,6 +88,7 @@ export default function GrowthSection({
   kpiHistory,
   funnel,
   revenueByCity,
+  organicTraffic,
   capAlloc,
   callsBySource,
   leadsBySource,
@@ -110,14 +149,7 @@ export default function GrowthSection({
         ? `${fmtInt(data.recurringPlans.customers)} members · every billing type`
         : "every billing type",
     },
-    {
-      label: "Review Index",
-      value: kpis?.quality?.nps != null ? String(kpis.quality.nps) : "—",
-      sub: kpis?.quality?.csatResponses
-        ? `${kpis.quality.csatResponses} responses · ${kpis.quality.csatAvg}/10 avg`
-        : "awaiting rate-page submissions",
-      alert: kpis?.quality?.nps != null && kpis.quality.nps < 30,
-    },
+    googleReviewsHero(k),
   ];
 
   return (
@@ -451,6 +483,12 @@ export default function GrowthSection({
           </ChartCard>
         </div>
       )}
+      <OrganicTrafficSection
+        isMobile={isMobile}
+        organicTraffic={organicTraffic}
+        pending={pending.organicTraffic}
+        onRetry={onRetry}
+      />
     </DashboardSection>
   );
 }

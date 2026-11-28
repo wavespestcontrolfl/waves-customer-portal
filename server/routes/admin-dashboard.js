@@ -494,6 +494,42 @@ router.get('/', dashboardCache, async (req, res, next) => {
 
 // GET /api/admin/dashboard/core-kpis?period=today|wtd|mtd|ytd
 // ServiceTitan-style operational KPIs: completion, CSAT, callback, RPJ, efficiency, retention, AR days, lead conv
+// Stale billable draft invoices (3+ days unsent) — shares the exact predicate
+// of dashboard-alerts.js `stale_draft_invoices` so the Cash tile and Action
+// Inbox stay in lockstep. Returns null on query failure.
+async function queryStaleDraftsSummary() {
+  try {
+    const cutoff = new Date(Date.now() - 3 * 86400000);
+    const row = await db('invoices as i')
+      .leftJoin('scheduled_services as ss', 'i.scheduled_service_id', 'ss.id')
+      .leftJoin('estimates as e', 'ss.source_estimate_id', 'e.id')
+      .whereNull('i.archived_at')
+      .where('i.status', 'draft')
+      .whereNull('i.sent_at')
+      .whereNull('i.sms_sent_at')
+      .whereNull('i.payer_statement_id')
+      .where(function anchorHoldExcluded() {
+        this.whereNull('i.scheduled_service_id')
+          .orWhere('ss.status', 'completed')
+          .orWhereRaw("COALESCE(e.estimate_data::jsonb->>'recurringCardLaneAccepted', 'false') <> 'true'");
+      })
+      .where('i.total', '>', 0)
+      .where('i.created_at', '<', cutoff)
+      .select(
+        db.raw('COUNT(*) as count'),
+        db.raw('COALESCE(SUM(i.total), 0) as total'),
+      )
+      .first();
+    return {
+      count: parseInt(row?.count || 0, 10),
+      total: Math.round(parseFloat(row?.total || 0) * 100) / 100,
+    };
+  } catch (err) {
+    logger.error(`[admin-dashboard] stale drafts summary failed: ${err.message}`);
+    return null;
+  }
+}
+
 async function computeCoreKpis(period = 'mtd', range = null) {
     const now = new Date();
     const todayStr = etDateString(now);
@@ -1070,6 +1106,8 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       };
     } catch (err) { logger.error(`[admin-dashboard] deposit kpis failed: ${err.message}`); }
 
+    const staleDrafts = await queryStaleDraftsSummary();
+
     return {
       period: range ? 'custom' : period,
       periodLabel: range ? `Since ${start}` : periodLabel(period),
@@ -1115,6 +1153,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         autopayPct,
         autopayCount,
         customerBase,
+        staleDrafts,
       },
       retention: { pct: retentionPct, lost },
       deposits,
@@ -2646,6 +2685,30 @@ router.delete('/widgets/:id', requireAiChartsEnabled, async (req, res, next) => 
     logger.error(`[admin-dashboard] DELETE /widgets failed: ${err.message}`);
     next(err);
   }
+});
+
+// GET /api/admin/dashboard/organic-traffic — GSC + GA4 trailing 30d vs prior 30d ($0 read-only)
+router.get('/organic-traffic', dashboardCache, async (_req, res, next) => {
+  try {
+    const { computeOrganicTraffic } = require('../services/dashboard-organic-traffic');
+    res.json(await computeOrganicTraffic());
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/report-engagement — service report open rate & 14-day re-service rate
+router.get('/report-engagement', dashboardCache, async (req, res, next) => {
+  try {
+    const { date_from, date_to } = req.query;
+    if ((date_from && !validCalendarDate(date_from)) || (date_to && !validCalendarDate(date_to))) {
+      return res.status(400).json({ error: 'date_from and date_to must be YYYY-MM-DD' });
+    }
+    const data = await executeDashboardTool('get_report_engagement', {
+      ...(date_from ? { date_from } : {}),
+      ...(date_to ? { date_to } : {}),
+    });
+    if (data?.error) return res.status(400).json({ error: data.error });
+    res.json(data);
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

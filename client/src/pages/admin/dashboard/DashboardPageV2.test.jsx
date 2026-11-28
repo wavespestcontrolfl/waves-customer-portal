@@ -57,6 +57,7 @@ const CORE_KPIS = {
     autopayPct: 23,
     autopayCount: 40,
     customerBase: 173,
+    staleDrafts: { count: 1, total: 145 },
   },
   financial: {
     grossMarginWeighted: 77,
@@ -64,6 +65,10 @@ const CORE_KPIS = {
     revPerJob: 110,
     jobsDone: 3,
     rpmh: 31,
+    utilization: 74,
+    stopsPerHour: 1.8,
+    laborHours: 14,
+    activeTechs: 2,
   },
   retention: { pct: 99.9, lost: 1 },
   ar: { days: 12, open: 2660, overdueCount: 5 },
@@ -81,10 +86,39 @@ const FIXTURES = {
       revenueChangePercent: 230.6,
       activeCustomers: 725,
       newCustomersThisMonth: 0,
+      googleReviewRating: 4.9,
+      googleReviewCount: 182,
+      googleUnresponded: 1,
     },
     mrr: 9750,
     mrrBreakdown: { committed: 9374, atRisk: 376 },
     revenueChart: { daily: [{ date: "2026-07-01", total: 497 }] },
+  },
+  "/admin/dashboard/ops-scoreboard": {
+    window: { from: "2026-06-24", to: "2026-06-30" },
+    aiCallShare: { aiHandled: 6, transferred: 1, humanAnswered: 3, voicemail: 2, share: 0.6 },
+    driveMinutesPerStop: { share: 11.2, timedStops: 30, completedStops: 32, vanDrivingMiles: 210 },
+    bookingsWithoutStaff: { share: 0.35, ai: 2, customerSelfServe: 1, staff: 5, aiPendingReview: 0 },
+    aiRouteDays: { share: 0.8, daysFollowed: 4, denominator: 5 },
+    customerPickerConversion: { numerator: 3, denominator: 6, share: 0.5 },
+  },
+  "/admin/dashboard-ops/bi/reports": {
+    reports: [{ id: "bi-1", week_of: "2026-06-29", summary: "Strong week for pest renewals.", action_items: "- Call overdue accounts" }],
+  },
+  "/admin/dashboard/organic-traffic": {
+    days: 30,
+    gsc: { clicks: 310, impressions: 14200, avgPosition: 13.5, nonbrandClicks: 220, clicksDeltaPct: 12, latestDate: "2026-06-28" },
+    ga4: { sessions: 820, users: 640, conversions: 19, pageviews: 1900, sessionsDeltaPct: 8, latestDate: "2026-06-30" },
+  },
+  "/admin/dashboard/report-engagement": {
+    total: { sent: 80, opened: 52, open_rate_pct: 65 },
+    reserviceWithin14Days: { pest: { visits: 60, reserviced: 1, rate_pct: 1.7 }, lawn: { visits: 20, reserviced: 0, rate_pct: 0 } },
+  },
+  "/admin/banking/cash-forecast": {
+    window_end: "2026-09-30",
+    opening: { bank_usd: 15200, partial: false, card_owed_usd: 1200 },
+    expected_available: true,
+    lowest: { booked: { week_start: "2026-08-10", usd: 4200 }, expected: { week_start: "2026-07-20", usd: 9800 } },
   },
   "/admin/dashboard/compare": {
     deltas: { revenue: 230.6 },
@@ -239,6 +273,7 @@ const FIXTURES = {
     ownerProfit: { marginPct: 14.2, sde: 31000, sdeMonthsCounted: 12, monthsCounted: 12, ownerPay: { officeMonths: 12, fieldMonths: 12, months: 12 }, basis: "Profit basis." },
     officeCost: { perStop: 11.5, pctOfRevenue: 8.1, monthsCounted: 12, basis: "Office basis." },
     ownerFieldHoursPerWeek: { value: 21.5, available: true },
+    prepaidOwed: { value: 15500 },
     pnlIncompleteMonths: [],
   },
   "/admin/dashboard/service-mix": { mix: [], total_services: 3 },
@@ -363,7 +398,19 @@ describe("DashboardPageV2 sections", () => {
     expect(document.getElementById("today")).toContainElement(
       screen.getByText("Action inbox"),
     );
+    expect(document.getElementById("today")).toContainElement(
+      screen.getByText("Weekly ops scoreboard"),
+    );
+    expect(document.getElementById("today")).toContainElement(
+      screen.getByText("Weekly Monday BI briefing"),
+    );
     // GROWTH
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Google Reviews"),
+    );
+    expect(document.getElementById("growth")).toContainElement(
+      screen.getByText("Organic search & website traffic"),
+    );
     expect(document.getElementById("growth")).toContainElement(
       screen.getByText("Sales capture"),
     );
@@ -398,6 +445,12 @@ describe("DashboardPageV2 sections", () => {
     // PROFIT — the adjusted-EBITDA bridge is its own card NEXT TO the margin
     // tiles (company-level vs job-level; never combined).
     expect(document.getElementById("profit")).toContainElement(
+      screen.getByText("Tech Utilization"),
+    );
+    expect(document.getElementById("profit")).toContainElement(
+      screen.getByText("Stops / Hour"),
+    );
+    expect(document.getElementById("profit")).toContainElement(
       screen.getByText("Service mix"),
     );
     expect(document.getElementById("profit")).toContainElement(
@@ -424,6 +477,9 @@ describe("DashboardPageV2 sections", () => {
     );
     // RETENTION
     expect(document.getElementById("retention")).toContainElement(
+      screen.getByText("14d Re-Service"),
+    );
+    expect(document.getElementById("retention")).toContainElement(
       screen.getByText("MRR trend"),
     );
     // Net-MRR bridge: month strip + waterfall rows + in-progress flag
@@ -447,6 +503,12 @@ describe("DashboardPageV2 sections", () => {
       screen.getByText("Retention by cohort"),
     );
     // CASH
+    expect(document.getElementById("cash")).toContainElement(
+      screen.getByText("Prepaid Owed"),
+    );
+    expect(document.getElementById("cash")).toContainElement(
+      screen.getByText("Cash forecast & runway"),
+    );
     expect(document.getElementById("cash")).toContainElement(
       screen.getByText("Accounts receivable aging"),
     );
@@ -562,6 +624,25 @@ describe("DashboardPageV2 sections", () => {
     await waitFor(() => expect(label.parentElement.querySelector("polyline")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "7D" }));
     await waitFor(() => expect(within(document.getElementById("today")).getByText("Service Completion").parentElement.querySelector("polyline")).toBeNull());
+  });
+
+  it("hides the owner-only cash forecast card on 403 without locking non-owner admins out of the dashboard", async () => {
+    const fetchFixture = adminFetch.getMockImplementation();
+    const forbidden = Object.assign(new Error("Forbidden"), { status: 403 });
+    adminFetch.mockImplementation((path, options) => {
+      const key = path.split("?")[0];
+      if (key === "/admin/banking/cash-forecast") return Promise.reject(forbidden);
+      if (key === "/admin/ads/capital-allocation") return Promise.resolve({ channels: [] });
+      return fetchFixture(path, options);
+    });
+
+    renderPage();
+
+    await screen.findAllByText(/Good (morning|afternoon|evening), Waves/);
+    await waitFor(() => expect(screen.queryByText("Cash forecast & runway")).not.toBeInTheDocument());
+    expect(screen.queryByText("Dashboard access requires an admin account.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Some dashboard data could not be refreshed/)).not.toBeInTheDocument();
+    expect(document.getElementById("cash")).toContainElement(screen.getByText("Billing health"));
   });
 
   it("passes the alerts response's failed checks to the action inbox instead of All clear", async () => {

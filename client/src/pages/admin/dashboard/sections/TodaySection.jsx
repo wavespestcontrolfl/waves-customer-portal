@@ -5,12 +5,35 @@ import {
   EmptyState,
 } from "../../../../components/dashboard/charts";
 import DashboardSection from "../DashboardSection";
+import DashboardFeed from "../DashboardFeed";
 import ActionInbox from "../ActionInbox";
 import StaleVisitsCard from "../StaleVisitsCard";
 import BuyerViewRow from "../BuyerViewRow";
+import OpsScoreboardCard from "../OpsScoreboardCard";
+import WeeklyBiCard from "../WeeklyBiCard";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import Verdict from "../Verdict";
 import { completionVerdict } from "../scorecard-metrics";
+
+function TodayOpsAndBriefing({ opsScoreboard, weeklyBi, pending, onRetry }) {
+  const opsSub = opsScoreboard?.window
+    ? `${opsScoreboard.window.from} → ${opsScoreboard.window.to}`
+    : "last 7 completed days";
+  return (
+    <div className="mt-4 space-y-3">
+      <ChartCard title="Weekly ops scoreboard" sub={opsSub}>
+        <DashboardFeed value={opsScoreboard} pending={pending.opsScoreboard} label="weekly ops scoreboard" onRetry={onRetry}>
+          <OpsScoreboardCard data={opsScoreboard} />
+        </DashboardFeed>
+      </ChartCard>
+      <ChartCard title="Weekly Monday BI briefing" sub="executive summary & action items">
+        <DashboardFeed value={weeklyBi} pending={pending.weeklyBi} label="weekly BI briefing" onRetry={onRetry}>
+          <WeeklyBiCard data={weeklyBi} />
+        </DashboardFeed>
+      </ChartCard>
+    </div>
+  );
+}
 
 // TODAY — what needs attention right now: the ranked Action Inbox, today's
 // schedule completion, and the period's service-execution tiles.
@@ -25,6 +48,8 @@ export default function TodaySection({
   today,
   staleVisits,
   buyerView,
+  opsScoreboard,
+  weeklyBi,
   kpis,
   kpisLoading,
   kpisError,
@@ -124,6 +149,12 @@ export default function TodaySection({
           </KpiStrip>
         </div>
       </div>
+      <TodayOpsAndBriefing
+        opsScoreboard={opsScoreboard}
+        weeklyBi={weeklyBi}
+        pending={pending}
+        onRetry={onRetry}
+      />
     </DashboardSection>
   );
 }
