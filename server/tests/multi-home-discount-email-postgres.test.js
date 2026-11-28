@@ -87,7 +87,7 @@ maybeDescribe('Multi-Home Discount email (real schema, fake provider)', () => {
     await trx('customers').insert({
       id, first_name: n % 2 ? 'Sample' : 'Example', last_name: `Person${n}`, phone: `+1941555${String(5000 + n)}`, email: `mhe-${id}@example.invalid`,
       address_line1: `${200 + n} Example Loop`, city: 'Sarasota', state: 'FL', zip: '34231',
-      pipeline_stage: 'new_lead', active: true, billing_mode: 'per_application', per_application_fee: 120, ...extra,
+      pipeline_stage: 'active_customer', active: true, billing_mode: 'per_application', per_application_fee: 120, ...extra,
     });
     return id;
   }

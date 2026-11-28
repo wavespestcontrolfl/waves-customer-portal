@@ -62,7 +62,7 @@ jest.mock('../models/db', () => {
   };
   const db = (table) => builder(table, false);
   db.transaction = jest.fn(async (fn) => {
-    mockTrx = Object.assign((table) => builder(table, true), { fn: { now: () => 'NOW()' }, isTrx: true });
+    mockTrx = Object.assign((table) => builder(table, true), { fn: { now: () => 'NOW()' }, raw: jest.fn(async () => undefined), isTrx: true });
     return fn(mockTrx);
   });
   return db;
