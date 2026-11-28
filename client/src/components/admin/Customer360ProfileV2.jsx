@@ -8138,6 +8138,8 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
     const accessDirty = [
       "propertyGateCode", "neighborhoodGateCode", "garageCode", "lockboxCode",
       "sideGateAccess", "parkingNotes", "accessNotes", "specialInstructions",
+      "hoaName", "hoaCompany", "hoaPhone", "hoaEmail", "hoaRestrictions",
+      "hoaLawnHeight", "hoaSignageRules", "hoaTimingRestrictions", "hoaInspectionPeriod",
     ].some((k) => dirtyKeys.includes(k));
     if ([...ACCESS_PREFS_SOD_KEYS, ...ACCESS_PREFS_TIMER_KEYS].some((k) => dirtyKeys.includes(k))
       || (accessDirty && renderStampRef.current != null)) {

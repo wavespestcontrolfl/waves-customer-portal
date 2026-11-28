@@ -1099,10 +1099,13 @@ function moveRowBlock(move, stamp) {
 async function lockMoveForConversion(conn, data) {
   const stamp = data && data.move;
   if (!stamp || typeof stamp !== 'object' || !stamp.moveId) return null;
-  // Lock customers BEFORE customer_moves so estimate conversion, public submit,
-  // and customer archive all take row locks in the same order and never deadlock.
+  // Lock order (codex #3565 / PR #8786): property-preferences advisory fence ->
+  // customer-comms fence -> customers row lock -> customer_moves share lock, so
+  // concurrent estimate conversion and Customer 360 preferences saves never deadlock.
   const owner = await conn('customer_moves').where({ id: stamp.moveId }).first('customer_id');
   if (owner?.customer_id) {
+    await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(owner.customer_id)]);
+    await require('../utils/customer-comms-lock').lockCustomerComms(conn, owner.customer_id);
     await conn('customers').where({ id: owner.customer_id }).forUpdate().first('id');
   }
   const move = await conn('customer_moves')
