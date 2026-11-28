@@ -46,6 +46,11 @@ jest.mock('../services/purchase-receipts/undelivered-shipments', () => ({
   alertUndeliveredShipments: jest.fn(async () => ({ undelivered: [], errors: [] })),
   closeDeliveredUndeliveredBells: jest.fn(async () => 0),
 }));
+// The alert's own raise/refresh/close logic is covered in purchase-receipts-failed-lines-alert.test.js.
+jest.mock('../services/purchase-receipts/failed-lines-alert', () => ({
+  ...jest.requireActual('../services/purchase-receipts/failed-lines-alert'),
+  reconcileFailedLineAlert: jest.fn(async ({ failed }) => failed.length),
+}));
 jest.mock('../models/db', () => {
   // Only runPurchaseReceiptRestockSweep's own emails query touches db in
   // this file — processReceiptEmail takes an already-fetched row.
@@ -64,9 +69,10 @@ jest.mock('../models/db', () => {
   return fn;
 });
 
-const { processReceiptEmail, runPurchaseReceiptRestockSweep, amazonEmailLines } = require('../services/purchase-receipts/sweep');
+const { processReceiptEmail, runPurchaseReceiptRestockSweep, amazonEmailLines, summarize } = require('../services/purchase-receipts/sweep');
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
 const { alertUndeliveredShipments } = require('../services/purchase-receipts/undelivered-shipments');
+const { reconcileFailedLineAlert } = require('../services/purchase-receipts/failed-lines-alert');
 const logger = require('../services/logger');
 
 // The shape a genuine Amazon delivery email carries (every
@@ -283,6 +289,11 @@ describe('processReceiptEmail', () => {
     const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn() });
     expect(result.errors).toEqual([{ title: 'Taurus SC Termiticide 78 oz', message: 'inventory-operations boom' }]);
     expect(result.unmatched).toHaveLength(1);
+    // The failed line is also kept with its table key, so the alert can carry it past the 7-day lookback.
+    expect(result.failedLines).toEqual([expect.objectContaining({
+      key: 'amazon|900-1000001-1000001|e1|1', title: 'Taurus SC Termiticide 78 oz', reason: 'inventory-operations boom',
+      receivedAt: '2026-09-27T15:00:00.000Z',
+    })]);
   });
 
   test('items with no readable Order # are passed down to be held (no_order_number), never logged', async () => {
@@ -348,6 +359,30 @@ describe('runPurchaseReceiptRestockSweep', () => {
     expect(result.emailsScanned).toBe(2);
     expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', productId: 'p1', receivedQty: 156, receivedUnit: 'fl_oz', emailId: 'e1' }]);
     expect(result.unmatched.map((row) => row.emailId)).toEqual(['e1', 'e2']);
+  });
+
+  test('failed lines are counted for the alert with the sweep floor; the run itself still returns normally', async () => {
+    mockState.emails = [deliveredEmail];
+    processReceiptLine.mockImplementationOnce(async () => { throw new Error('inventory-operations boom'); });
+    processReceiptLine.mockImplementationOnce(async () => unmatched);
+    const result = await runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
+    // The other line recorded an outcome: its key is the alert's evidence that a failed one is over. The failed one is not.
+    expect(reconcileFailedLineAlert).toHaveBeenCalledWith({
+      failed: [expect.objectContaining({ emailId: 'e1', title: 'Taurus SC Termiticide 78 oz' })],
+      settled: [{ key: 'amazon|900-1000001-1000001|e1|2', emailId: 'e1' }],
+      since: new Date('2026-09-26T05:49:45Z'), // PURCHASE_RECEIPT_SINCE, so the alert retires entries the count already includes
+    });
+    expect(result.unappliedFailedLines).toBe(1);
+    expect(summarize(result)).toMatchObject({ errors: 1, unappliedFailedLines: 1 });
+  });
+
+  test('a failed-lines alert that cannot be written fails the run after every line was processed (job_health failed, retried next tick)', async () => {
+    mockState.emails = [deliveredEmail];
+    processReceiptLine.mockImplementationOnce(async () => { throw new Error('boom'); });
+    processReceiptLine.mockImplementationOnce(async () => unmatched);
+    reconcileFailedLineAlert.mockRejectedValueOnce(new Error('alert write timed out'));
+    await expect(runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) })).rejects.toThrow('alert write timed out');
+    expect(processReceiptLine).toHaveBeenCalledTimes(2); // both lines were processed before the alert write
   });
 
   test('a close pass that fails is logged and never fails the sweep or changes what it returns', async () => {
@@ -544,6 +579,20 @@ describe('SiteOne invoices in the sweep', () => {
     const result = await run();
     expect(result.errors).toEqual([{ title: siteOneEmail.subject, message: 'extraction row locked', emailId: 's1' }]);
     expect(result.logged).toEqual([expect.objectContaining({ emailId: 's2' })]);
+  });
+
+  test('an invoice email that could not be read is a failed email entry; a later read that does not throw settles it', async () => {
+    const siteOne = require('../services/purchase-receipts/siteone-invoices');
+    mockState.siteOneEmails = [siteOneEmail];
+    siteOne.readSiteOneInvoice.mockImplementationOnce(async () => { throw new Error('extraction row locked'); });
+    await run();
+    expect(reconcileFailedLineAlert).toHaveBeenLastCalledWith({
+      failed: [expect.objectContaining({ kind: 'email', key: 'email|siteone|s1', vendor: 'siteone', emailId: 's1', receivedAt: '2026-09-27T12:00:00.000Z' })],
+      settled: [], since: expect.any(Date),
+    });
+    mockState.siteOneInvoice = { pending: true };
+    await run();
+    expect(reconcileFailedLineAlert).toHaveBeenLastCalledWith({ failed: [], settled: [{ key: 'email|siteone|s1', emailId: 's1' }], since: expect.any(Date) });
   });
 
   test.each([

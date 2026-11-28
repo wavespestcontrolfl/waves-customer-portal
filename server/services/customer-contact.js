@@ -563,6 +563,7 @@ module.exports = {
   phoneKeyOf,
   isServiceContactRole,
   slotWithheldFromReports,
+  serviceContactsConsented,
   withAccountPrimaryContactStrict,
   getBillingContact,
   getAppointmentContacts,

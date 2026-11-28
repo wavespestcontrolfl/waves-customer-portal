@@ -133,7 +133,7 @@ import {
   typedInsectEvidencePath,
   typedPesticideFieldApplies,
 } from "../../lib/tree-shrub-pest-check";
-import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
+import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAddOnRecordRow, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { holdForRecapUpload } from "../../lib/recapUploads";
 import { productDimension } from "../../lib/fast-complete-products";
@@ -217,6 +217,8 @@ import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-n
 import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups, techTipYardLine, techTipSourceLabels } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 import { directionsHref } from "../../lib/directionsHref";
+import { remapRestoredActionLabels } from "../../lib/protocol-action-renames";
+import { tankCoverageLines, tankFillLines } from "./protocolTankOptions";
 // The marker under "Time on site" on a completed visit (server timeOnSite.evidence).
 const TIME_ON_SITE_SOURCE_LABEL = {
   gps_measured: "Measured by truck GPS",
@@ -548,6 +550,27 @@ export function withoutProtocolMarkerLines(notes, labels) {
         || !drop.has(entry.text.toLowerCase());
     })
     .join("\n");
+}
+// A restored draft's action marker lines follow a renamed card line (remapRestoredActionLabels): the old text is
+// rewritten to the current one, keeping its tag, and dropped when the notes already hold the current marker, so the
+// server never reads the action back twice.
+export function renameProtocolMarkerLines(notes, renames) {
+  const byOld = new Map(Object.entries(renames || {}).map(([from, to]) => [String(from || "").trim().toLowerCase(), to]));
+  if (!byOld.size) return String(notes || "");
+  const lines = String(notes || "").split("\n");
+  const renamedTo = (entry) => (entry && PROTOCOL_MARKER_TAGS.includes(entry.tag) ? byOld.get(entry.text.toLowerCase()) : undefined);
+  // Markers already in their current form count as present; a marker being renamed does not count against itself.
+  const present = new Set(lines.map(parseMarkerLine).filter((entry) => entry && renamedTo(entry) === undefined)
+    .map((entry) => `${entry.tag}\n${entry.text.toLowerCase()}`));
+  return lines.flatMap((line) => {
+    const entry = parseMarkerLine(line);
+    const to = renamedTo(entry);
+    if (to === undefined) return [line];
+    const key = `${entry.tag}\n${to.toLowerCase()}`;
+    if (present.has(key)) return [];
+    present.add(key);
+    return [line.replace(entry.text, to)];
+  }).join("\n");
 }
 // Submit-time allowlist for restored/selected protocol action labels. First
 // rule with an opinion decides (true keep / false drop / null pass); no
@@ -1322,6 +1345,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
   "proposal_terms_unread",               // an invoice-mode commercial proposal's Net terms could not be read; the resume re-reads them and mints
   "held_payment_lookup_failed",          // GATE_REPORT_AFTER_PAY: the payment holding the visit could not be read; the resume re-reads it before any invoice is linked
+  "chemical_addon_billing_alert_failed", // unrecorded chemical add-on billing review alert failed to save; the resume retries saving the alert
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -8416,20 +8440,17 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                             <div>
                               {fmtProtocolNumber(lawnMix.areaSqft, " sq ft")}
                             </div>{" "}
-                            <div>
-                              {fmtProtocolNumber(
-                                lawnMix.equipment?.tankCoverageSqft,
-                                " sq ft/tank",
-                              )}
-                            </div>{" "}
+                            {tankCoverageLines(lawnMix.equipment, fmtProtocolNumber(lawnMix.equipment?.tankCoverageSqft, " sq ft/tank"))
+                              .map((line) => <div key={line}>{line}</div>)}{" "}
                           </div>{" "}
                         </div>
-                        {(lawnMix.warnings || []).map((w) => (
+                        {(lawnMix.warnings || []).map((w, index) => (
                           <div
-                            key={w.code}
+                            key={`${w.code}-${index}`}
                             style={{
                               fontSize: 11,
-                              color: D.red,
+                              // A standing sprayer number is a note, not an alert.
+                              color: w.severity === "note" ? D.muted : D.red,
                               marginBottom: 6,
                             }}
                           >
@@ -8500,9 +8521,8 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                                   <div>
                                     {mixQuantityText(areaMix?.amount, areaMix?.amountUnit)}
                                   </div>{" "}
-                                  <div style={{ color: D.muted }}>
-                                    {mixQuantityText(tankMix?.amount, tankMix?.amountUnit)}/tank
-                                  </div>{" "}
+                                  {tankFillLines(item, `${mixQuantityText(tankMix?.amount, tankMix?.amountUnit)}/tank`)
+                                    .map((line) => <div key={line} style={{ color: D.muted }}>{line}</div>)}{" "}
                                 </div>{" "}
                               </div>{" "}
                             </div>
@@ -10715,10 +10735,20 @@ export function completionGroupMates(group, selectedProducts, protocolActions) {
   };
 }
 
+export function completionAddOnWarnings(service, rows, isIncompleteVisit = false) {
+  return [
+    addOnActualsProblem(service, rows),
+    !isIncompleteVisit ? addOnRecordMissingProblem(service, rows) : null,
+  ].filter(Boolean);
+}
+
 export function completionProductRowProblem(service, rows, typeFor) {
   const treeShrubWork = visitHasTreeShrubWork(service);
   const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p), false, false, p, treeShrubWork);
   const missingArea = rows.find((p) => {
+    // Chemical area add-on actuals and missing records are non-blocking warnings (owner 2026-11-26):
+    // surfaced in AreaAddOnFields and routed to office billing review on the server instead of trapping closeout.
+    if (isAddOnRecordRow(service, p)) return false;
     const requirement = areaOf(p);
     if (!requirement) return false;
     // Linear feet are optional (owner 2026-10-22, "make feet optional"): an empty box holds nothing; a typed
@@ -10727,8 +10757,7 @@ export function completionProductRowProblem(service, rows, typeFor) {
     const value = Number(p.areaValue);
     return !Number.isFinite(value) || value <= 0 || p.areaUnit !== requirement.unit;
   });
-  // (This helper runs for a COMPLETED visit only: every chemical add-on the visit carries then needs its product row.)
-  return missingArea ? `Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.` : (addOnActualsProblem(service, rows) || addOnRecordMissingProblem(service, rows));
+  return missingArea ? `Enter ${areaOf(missingArea).alertLabel} for ${missingArea.name}.` : null;
 }
 
 function productApplicationMethod(product = {}, serviceType = "") {
@@ -11393,18 +11422,19 @@ export function TreeShrubCloseoutBlock({
     <div style={{ display: "grid", gap: 8 }}>
       {blocks.length > 0 && (
         <div
+          role="status"
           style={{
-            background: `${colors.error}12`,
-            border: `1px solid ${colors.error}`,
+            background: `${colors.warn || colors.error}12`,
+            border: `1px solid ${colors.warn || colors.error}`,
             borderRadius: 10,
             padding: 10,
-            color: colors.error,
+            color: colors.warn || colors.error,
             fontSize: 12,
             lineHeight: 1.4,
           }}
         >
           {blocks.slice(0, 4).map((block) => block.message).join(" ")}
-          {blocks.length > 4 ? ` ${blocks.length - 4} more required.` : ""}
+          {blocks.length > 4 ? ` ${blocks.length - 4} more warning(s).` : ""} Warning only — you can still complete this visit.
         </div>
       )}
       <div
@@ -11418,7 +11448,7 @@ export function TreeShrubCloseoutBlock({
           lineHeight: 1.4,
         }}
       >
-        Closeout is locked until ordinance, plant inventory, pollinator status, pest/life stage, YTD Snapshot/fertilizer, product actuals, and photos are recorded.
+        Recommended for Tree &amp; Shrub closeout: ordinance, plant inventory, pollinator status, pest/life stage, YTD Snapshot/fertilizer, product actuals, and photos. Missing items warn without blocking closeout.
       </div>
       <select
         value={value.ordinanceZone || fertilizerContext?.ordinanceZone || "other_unknown"}
@@ -14892,13 +14922,16 @@ export function CompletionPanel({
   );
   // Protocol checklist / default-product disposition were removed with the
   // read-only protocol redesign — they no longer gate completion.
+  // Tagged area add-on rows warn without blocking submission (matching AreaAddOnFields
+  // and server non-blocking warnings), while ordinary products keep required actuals.
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
-      !product.totalAmount ||
-      !Number.isFinite(Number(product.totalAmount)) ||
-      Number(product.totalAmount) <= 0 ||
-      !product.amountUnit ||
-      (product.lawnPlanDefaults && !productApplicationMethod(product, typeFor(product))),
+      !product.areaAddOnKey &&
+      (!product.totalAmount ||
+        !Number.isFinite(Number(product.totalAmount)) ||
+        Number(product.totalAmount) <= 0 ||
+        !product.amountUnit ||
+        (product.lawnPlanDefaults && !productApplicationMethod(product, typeFor(product)))),
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards
@@ -15131,8 +15164,6 @@ export function CompletionPanel({
         isIncompleteVisit,
       })
     : [];
-  const treeShrubCompletionBlocked =
-    treeShrubCloseoutRequired && !isIncompleteVisit && treeShrubCloseoutBlocks.length > 0;
   const structuredCloseoutRequired =
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const baseCompletionCtaLabel = submitting
@@ -15157,9 +15188,7 @@ export function CompletionPanel({
         : selectedProductsMissingActualAmount.length
           ? "Product Actuals Required"
           : "Inventory Blocked"
-      : treeShrubCompletionBlocked
-        ? "Tree/Shrub Closeout Required"
-        : isIncompleteVisit
+      : isIncompleteVisit
           ? "Mark Visit Incomplete"
           : !effectiveSendSms
             ? "Complete Service"
@@ -15504,19 +15533,29 @@ export function CompletionPanel({
   // kept as the technician's text). An empty or unloaded list leaves the
   // fallback chips as the selector, and "Any" programs never change by month.
   useEffect(() => {
+    if (isLawn || generating || !protocolActionsLoaded || !protocolActions.length) return;
+    const offeredLabels = protocolActions.map((action) => (action.label || action.note || action.raw || "").trim());
+    // A draft saved before a card line was reworded holds the old text: it follows the current line first
+    // (labels, scopes and marker lines), and a former line with no current match leaves with its markers, so a
+    // re-check never submits both wordings (remapRestoredActionLabels).
+    const { labels: remapped, renames, dropped: formerDropped } = remapRestoredActionLabels(selectedProtocolActionLabels, offeredLabels);
+    // Then, on a month-keyed list, a selection it still does not offer is stale.
     const listMonth = protocolActionMeta?.visit?.month;
-    if (isLawn || generating || !protocolActionsLoaded || !protocolActions.length || !listMonth || listMonth === "Any") return;
-    const offered = new Set(protocolActions.map((action) => (action.label || action.note || action.raw || "").trim()));
-    const stale = selectedProtocolActionLabels.filter((label) => !offered.has(String(label).trim()));
-    if (!stale.length) return;
-    if (typeof preGenerationNotesRef.current === "string") {
-      preGenerationNotesRef.current = withoutProtocolMarkerLines(preGenerationNotesRef.current, stale);
-    }
-    invalidateGeneratedReportOnTypedEdit();
-    setNotes((current) => withoutProtocolMarkerLines(current, stale));
-    setSelectedProtocolActionLabels((current) => current.filter((label) => !stale.includes(label)));
+    const offered = new Set(offeredLabels);
+    const monthStale = listMonth && listMonth !== "Any" ? remapped.filter((label) => !offered.has(String(label).trim())) : [];
+    const stale = [...formerDropped, ...monthStale];
+    if (!stale.length && !Object.keys(renames).length) return;
+    const fixNotes = (current) => renameProtocolMarkerLines(withoutProtocolMarkerLines(current, stale), renames);
+    if (typeof preGenerationNotesRef.current === "string") preGenerationNotesRef.current = fixNotes(preGenerationNotesRef.current);
+    if (stale.length) invalidateGeneratedReportOnTypedEdit();
+    setNotes(fixNotes);
+    setSelectedProtocolActionLabels(remapped.filter((label) => !monthStale.includes(label)));
     setActionScopeByLabel((current) => {
       const next = { ...current };
+      Object.entries(renames).forEach(([from, to]) => {
+        if (next[from] !== undefined && next[to] === undefined) next[to] = next[from];
+        if (from !== to) delete next[from];
+      });
       stale.forEach((label) => { delete next[label]; });
       return next;
     });
@@ -18588,14 +18627,7 @@ export function CompletionPanel({
       alert("Completion options are still loading — please try again in a moment.");
       return;
     }
-    if (treeShrubCompletionBlocked) {
-      alert(
-        `Complete Tree/Shrub closeout before submitting: ${treeShrubCloseoutBlocks
-          .map((block) => block.message)
-          .join(" ")}`,
-      );
-      return;
-    }
+    // Tree/Shrub closeout findings warn inline in TreeShrubCloseoutBlock without blocking submission (owner 2026-11-26).
     // A typo in the live time-on-site override must never silently fall
     // back to the inflated timer — the whole point of the field is that the
     // timer is wrong. Block here; completionTimeOnSiteBody's range check is
@@ -18938,7 +18970,9 @@ export function CompletionPanel({
       alert(AREA_ADDONS_LOOKUP_FAILED_MESSAGE);
       return;
     }
-    const productRowProblem = isIncompleteVisit ? addOnActualsProblem(service, selectedProducts) : completionProductRowProblem(service, selectedProducts, typeFor);
+    // Chemical add-on actuals / missing records are shown as non-blocking warnings in AreaAddOnFields
+    // and routed to office billing review on the server (owner 2026-11-26).
+    const productRowProblem = isIncompleteVisit ? null : completionProductRowProblem(service, selectedProducts, typeFor);
     if (productRowProblem) {
       alert(productRowProblem);
       return;
@@ -21607,7 +21641,8 @@ export function CompletionPanel({
               products={products}
               onAddProduct={addAreaAddOnProduct}
               disabled={generating}
-              colors={{ text: M.ink, muted: M.ink3, border: M.hairline }}
+              isIncompleteVisit={isIncompleteVisit}
+              colors={{ text: M.ink, muted: M.ink3, border: M.hairline, warn: M.warn }}
               selectStyle={mSelect}
               labelStyle={eyebrowStyle}
             />
@@ -22725,7 +22760,7 @@ export function CompletionPanel({
                 generating ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
-                    treeShrubCompletionBlocked || propertyAreasBlocked ||
+                    propertyAreasBlocked ||
                     protocolActualsCompletionBlocked))
               }
               style={{
@@ -22736,7 +22771,7 @@ export function CompletionPanel({
                   cardAnswerPending ||
                   (!committedReplayReady &&
                     (completionPricingPending || closeoutAdvisoriesPending ||
-                      treeShrubCompletionBlocked || propertyAreasBlocked ||
+                      propertyAreasBlocked ||
                       protocolActualsCompletionBlocked))
                     ? 0.5
                     : 1,
@@ -24101,7 +24136,8 @@ export function CompletionPanel({
             products={products}
             onAddProduct={addAreaAddOnProduct}
             disabled={generating}
-            colors={{ text: D.text, muted: D.muted, border: D.border }}
+            isIncompleteVisit={isIncompleteVisit}
+            colors={{ text: D.text, muted: D.muted, border: D.border, warn: D.amber }}
             selectStyle={inputStyle}
             labelStyle={labelStyle}
           />
@@ -25015,7 +25051,7 @@ export function CompletionPanel({
               generating ||
               (!committedReplayReady &&
                 (completionPricingPending || closeoutAdvisoriesPending ||
-                  treeShrubCompletionBlocked || propertyAreasBlocked ||
+                  propertyAreasBlocked ||
                   protocolActualsCompletionBlocked))
             }
             style={{
@@ -25034,7 +25070,7 @@ export function CompletionPanel({
                 cardAnswerPending ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
-                    treeShrubCompletionBlocked || propertyAreasBlocked ||
+                    propertyAreasBlocked ||
                     protocolActualsCompletionBlocked))
                   ? 0.6
                   : 1,

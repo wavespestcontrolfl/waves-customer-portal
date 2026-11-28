@@ -63,6 +63,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/procurement/order-dispatch', () => ({
   canAutoOrder: jest.fn(async ({ vendorId }) => mockState.autoOrder === true && (!mockState.autoOrderVendor || vendorId === mockState.autoOrderVendor)),
   findLiveAutoOrder: jest.fn(async () => mockState.liveAutoOrder || null), // the product's unreconciled automatic order
+  maybePlacedSql: (alias = 'vo') => `(${alias}.placed_at IS NOT NULL)`, // the one outstanding-order rule's SQL; the mocked connection never runs it
   // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
   settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
   retireRequestBell: jest.fn(async (_conn, requestId) => { (mockState.retiredBells = mockState.retiredBells || []).push(requestId); }),

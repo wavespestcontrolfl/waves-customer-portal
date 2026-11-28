@@ -228,7 +228,7 @@ async function refreshOpenRequest(ctx, p, existing) {
 // ledger bell (auto-order:<ledger>[:<v>], placed_at null). A dispatched
 // order's reconciliation bell never matches.
 function requestOrderBells(conn, requestId, { handoff = true } = {}) {
-  const ledger = "EXISTS (SELECT 1 FROM vendor_orders vo WHERE vo.restock_request_id = ? AND vo.placed_at IS NULL AND (metadata->>'dedupeKey' = 'auto-order:' || vo.id OR metadata->>'dedupeKey' LIKE 'auto-order:' || vo.id || ':%'))";
+  const ledger = `EXISTS (SELECT 1 FROM vendor_orders vo WHERE vo.restock_request_id = ? AND NOT ${require('./order-dispatch').maybePlacedSql('vo')} AND (metadata->>'dedupeKey' = 'auto-order:' || vo.id OR metadata->>'dedupeKey' LIKE 'auto-order:' || vo.id || ':%'))`;
   return handoff
     ? conn('notifications').whereRaw(`(metadata->>'dedupeKey' = ? OR ${ledger})`, [`auto-reorder:${requestId}`, requestId])
     : conn('notifications').whereRaw(ledger, [requestId]);

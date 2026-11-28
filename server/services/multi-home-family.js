@@ -233,6 +233,7 @@ module.exports = {
   linkFamily,
   unlinkFamily,
   isUuid,
+  lockFamilyChanges,
   lockFamilyChangesShared,
   _test: { AUDIT_LINK, AUDIT_UNLINK, FAMILY_CHANGES_LOCK_KEY },
 };

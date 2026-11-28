@@ -328,6 +328,7 @@ function buildCheck({
   try {
     pay = computePaycheck({
       payDate,
+      workWeekEnd: addStaffWorkDays(weekStart, 6),
       payFrequency: 'weekly',
       hourlyRate: tech.pay_rate,
       regularMinutes: tech.regular_minutes,
@@ -552,10 +553,19 @@ const runColumns = (conn) => [
   ...(timeOffOn() ? ['unpaid_time_off', 'bank_payouts'] : []),
 ];
 
+const storedTimeOff = (row) => (
+  Number(row.pto_minutes || 0) > 0
+  || Number(row.holiday_minutes || 0) > 0
+  || Number(row.pto_pay_cents || 0) > 0
+  || Number(row.holiday_pay_cents || 0) > 0
+);
+
 const checkColumns = (conn) => [
   'id', 'run_id', 'technician_id', 'employee_name', 'hourly_rate', 'regular_minutes', 'overtime_minutes',
   ...MONEY_KEYS,
-  ...(timeOffOn() ? [...TIME_OFF_COLUMNS, 'pto_earned_minutes', conn.raw("calc_snapshot->'ptoBank' as pto_bank")] : []),
+  // Always read stored PTO/holiday columns so finalized stubs and exports never drop paid time off if the gate toggles off.
+  ...TIME_OFF_COLUMNS,
+  ...(timeOffOn() ? ['pto_earned_minutes', conn.raw("calc_snapshot->'ptoBank' as pto_bank")] : []),
   ...PAY_LINE_KEYS, ...UNEMPLOYMENT_COLUMNS, ...SIMPLE_COLUMNS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
   // The minimum paid week, read whatever the gates are: a check that paid one shows it.
   'minimum_week_minutes', 'minimum_week_pay_cents',
@@ -569,6 +579,7 @@ const checkColumns = (conn) => [
 ];
 
 const iso = (value) => (value ? new Date(value).toISOString() : null);
+const num0 = (value) => Number(value || 0);
 
 function serializeCheck(row) {
   return {
@@ -604,13 +615,13 @@ function serializeCheck(row) {
       simpleDeferralCents: Number(row.simple_deferral_cents),
       simpleEmployerCents: Number(row.simple_employer_cents),
     } : {}),
-    ...(timeOffOn() ? {
-      ptoMinutes: Number(row.pto_minutes || 0),
-      holidayMinutes: Number(row.holiday_minutes || 0),
+    ...(timeOffOn() || storedTimeOff(row) ? {
+      ptoMinutes: num0(row.pto_minutes),
+      holidayMinutes: num0(row.holiday_minutes),
       ptoHours: hoursText(row.pto_minutes),
       holidayHours: hoursText(row.holiday_minutes),
-      ptoPayCents: Number(row.pto_pay_cents || 0),
-      holidayPayCents: Number(row.holiday_pay_cents || 0),
+      ptoPayCents: num0(row.pto_pay_cents),
+      holidayPayCents: num0(row.holiday_pay_cents),
     } : {}),
     ...bankView(row),
     // The minimum paid week (payroll-week-minimum.js): only on a check of a technician who has one.
@@ -628,12 +639,12 @@ function serializeCheck(row) {
       holidayWorkPremiumCents: Number(row.holiday_work_premium_cents),
     } : {}),
     ...(payLinesOn() || storedLines(row) ? {
-      reviewBonusCents: Number(row.review_bonus_cents || 0),
-      commissionCents: Number(row.commission_cents || 0),
-      healthAllowanceCents: Number(row.health_allowance_cents || 0),
-      hsaEmployerCents: Number(row.hsa_employer_cents || 0),
+      reviewBonusCents: num0(row.review_bonus_cents),
+      commissionCents: num0(row.commission_cents),
+      healthAllowanceCents: num0(row.health_allowance_cents),
+      hsaEmployerCents: num0(row.hsa_employer_cents),
       ...(row.tech_rewards_cents != null ? { techRewardsCents: Number(row.tech_rewards_cents) } : {}),
-      lineOvertimePremiumCents: Number(row.line_overtime_premium_cents || 0),
+      lineOvertimePremiumCents: num0(row.line_overtime_premium_cents),
       payLines: Array.isArray(row.pay_lines) ? row.pay_lines : [],
     } : {}),
   };
@@ -1870,6 +1881,7 @@ module.exports = {
   listOwnChecks,
   getOwnStub,
   exportCsv,
+  withPaperPayments,
   lockPayrollMutations,
   PAYROLL_LOCK_NS,
   PAYROLL_LOCK_KEY,

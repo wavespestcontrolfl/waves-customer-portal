@@ -1,466 +1,93 @@
 # AGENTS.md
 
-Code-review rubric for the automated reviewers that audit diffs in the
-**waves-customer-portal** monorepo: the Codex pre-push hook and the `@codex`
-GitHub bot. Every rule
-names the failure it prevents and the file it protects. Codex invocations
-return JSON matching `.github/codex-review-schema.json`; every reviewer
-cites `file:line` for every finding.
-Other tasks use the user's requested format; coding agents follow the
-invariants and Implementation defaults below.
-The pre-push hook (`scripts/hooks/pre-push`, wired via `core.hooksPath` by
-`npm prepare`) blocks a push on any P0 and warns on P1.
+Code-review rubric for automated diff reviewers in **waves-customer-portal** (Codex pre-push hook and `@codex` GitHub bot). Every rule names the failure it prevents and the file it protects. Codex invocations return JSON matching `.github/codex-review-schema.json`; cite `file:line` for every finding. Other tasks use the user's format; coding agents follow these invariants and Implementation defaults. `scripts/hooks/pre-push` blocks pushes on P0 (for the first 3 audited pushes of a branch by default, `CODEX_REVIEW_BLOCK_ROUNDS=3`; always on `main`) and warns on P1 — always check the printed verdict even when a branch push succeeds.
 
-**Budget: this file stays under 30 KB** — `npm run check:domain-rules`
-fails when it grows past that; Codex truncates the loaded instruction
-chain at 32 KiB. Orientation lives in `CLAUDE.md`, procedures in
-`.claude/skills/*`, per-route security contracts in
-`docs/public-route-contracts.md`: point at them, never duplicate.
+**Budget: under 26 KB** — `npm run check:domain-rules` fails past 26 KB so `~/.codex/AGENTS.md` + repo `AGENTS.md` stay inside Codex's default 32 KiB cumulative chain. Orientation lives in `CLAUDE.md`, procedures in `.claude/skills/*`, per-route security contracts in `docs/public-route-contracts.md`: point at them, never duplicate.
 
-For coding work read `CLAUDE.md` first and load only the relevant skills
-and reference sections. For an audit, read rules as evidence; do not
-execute the workflows they describe.
+For coding work read `CLAUDE.md` first and load only relevant skills. For an audit, read rules as evidence; do not execute the workflows they describe.
 
 ## Codex local database policy
 
-- Never point a Codex session at production: use a Railway dev/preview
-  `DATABASE_URL` and follow `docs/development.md` (setup,
-  `dev:migrate`, frontend-only verification). Say in the PR summary when
-  migrations were not run; backend or migration work needs a real dev
-  `DATABASE_URL` before claiming end-to-end DB verification.
+- Never point Codex at production: use a Railway dev/preview `DATABASE_URL` and follow `docs/development.md` (setup, `dev:migrate`, frontend-only verification). State in the PR summary when migrations were not run; backend/migration work needs a real dev `DATABASE_URL` before claiming end-to-end DB verification.
 
 ## Treat as P0
 
-- **Stripe webhook raw-body order.** `server/routes/stripe-webhook.js`
-  mounts `express.raw({ type: 'application/json' })` and is registered
-  **before** the global `express.json()` in `server/index.js`. Moving the
-  mount after the JSON parser, swapping `raw` for `json`, or feeding a
-  parsed object into `stripe.webhooks.constructEvent` breaks signature
-  verification — every webhook 400s silently in prod.
-- **Stripe webhook idempotency.** Every event is deduped against
-  `stripe_webhook_events.id` before its handler runs. Removing the dedupe
-  `SELECT`, marking `processed=true` before the handler succeeds, or
-  short-circuiting the insert lets a Stripe retry double-charge,
-  double-refund, or double-create `payments` rows.
-- **No second Stripe webhook router.** All Stripe events flow through the
-  one mount at `/api/stripe/webhook`. A `/webhook-v2` or per-event mount
-  bypasses the central idempotency table.
-- **Webhook secret presence.** A falsy `stripeConfig.webhookSecret` must
-  reject with 500 and never call `constructEvent`. Defaulting the secret
-  to `''` or accepting unverified events is a forged-event vector.
-- **Surcharge math comes from `computeChargeAmount`.**
-  `server/services/stripe-pricing.js` is the single source of truth for
-  the card surcharge (`CONFIGURED_COST_BPS = 290`, capped by
-  `NETWORK_CAP_BPS`; consent copy says "up to 2.9%"; `CARD_SURCHARGE_RATE`
-  is a deprecated mirror). The surcharge applies only when
-  `opts.funding === 'credit'` — debit, prepaid, unknown, and ACH pay the
-  base. The amount shown to the customer, the `amountCents` sent to
-  Stripe, and the `card_surcharge` on the `payments` row must all derive
-  from one `computeChargeAmount(invoice.total, methodType, { funding })`
-  call. Ad-hoc `* 1.03`, `* 0.03`, or local rounding drifts the three
-  numbers apart and breaks reconciliation.
-- **`isCardMethodType` is the surcharge classifier.** A new payment method
-  type (`cashapp`, `affirm`, …) that is not added to `isCardMethodType` in
-  `stripe-pricing.js` is silently surcharged as card-family.
-- **PI ↔ invoice ↔ webhook amount agreement.** `pay-v2.js` rewrites the
-  PaymentIntent via `/update-amount` when the customer switches card/ACH.
-  The PI `amount`, the invoice `total`, and the webhook's recorded
-  `payments.amount` must agree to the cent; a change to one without the
-  others is P0.
-- **Terminal handoff burn stays atomic.** The single
-  `UPDATE terminal_handoff_tokens SET used_at = now() WHERE jti = ? AND used_at IS NULL AND expires_at > now()`
-  in `server/routes/stripe-terminal.js` is the burn. Splitting it into
-  `SELECT` + `UPDATE`, dropping `used_at IS NULL`, or moving it after
-  `paymentIntents.create` lets two iOS devices share one mint and
-  double-charge. The claim/DB comparison right after the burn stays — it
-  catches cross-environment replay if the JWT secret leaks.
-- **Handoff mint rate limit is DB-enforced** (`stripe-terminal.js`
-  header comment) so it survives deploys and replicates across pods. An
-  in-memory `Map` / `setInterval` / process-local counter is P0.
-- **Handoff TTL stays short.** `HANDOFF_TTL_SECONDS = 60`. Past ~5 minutes
-  widens the leaked-token window; P0 unless the PR body argues for it.
-- **`scheduled_services.status` is gated by a CHECK constraint, not a
-  helper.** Migration `20260426000004_relax_scheduled_services_status_enum`
-  (under `server/models/migrations/`, run via `--knexfile server/knexfile.js`)
-  defines `pending | confirmed | rescheduled | en_route | on_site |
-  completed | cancelled | skipped`. A new status string without a
-  migration extending the CHECK throws at runtime and CI won't catch it.
-  Writers use direct `update({ status })` (admin-schedule.js,
-  admin-dispatch.js); new dispatcher/tech code appends to
-  `job_status_history` (from→to, CHECK-mirrored); legacy callers stay on
-  `service_status_log`. The customer-visible tracker state is a separate
-  `track_state` enum owned by `server/services/track-transitions.js`.
-- **`/api/admin/*` routers apply auth at the router level.** Every
-  `server/routes/admin-*.js` starts with
-  `router.use(adminAuthenticate, requireAdmin | requireTechOrAdmin)` from
-  `server/middleware/admin-auth.js`. A new file that omits it, or a diff
-  that removes it, exposes admin endpoints. Both halves are required on
-  new routers: `adminAuthenticate` alone admits technicians to
-  admin-intended pages. An existing router that already mounts only
-  `adminAuthenticate` is a known consistency defect (P2 — technician
-  reach, not an unauthenticated hole); flag it when the diff adds a router
-  or removes a guard, not on unrelated edits. Per-handler middleware is
-  acceptable; missing entirely is P0.
-- **Internal and worker routes authenticate.** Any `/api/internal/*` mount
-  needs `adminAuthenticate` + `requireAdmin` or an HMAC-signed header
-  check; each `/api/integrations/*-worker` mount authenticates via its own
-  HMAC check inside the router. An unauthenticated one is P0.
-- **Public route surface.** `docs/public-route-contracts.md` lists every
-  route served with no session auth (unauthenticated or token-only;
-  customer-JWT `authenticate` routes are not public) and the guards each
-  one carries. A new public route not added to that document in the same
-  PR is P0, and so is a change to a LISTED route's auth, gate, rate limit,
-  payload, or headers that leaves its entry stale — a widened auth
-  payload, a raised payload cap, an expiry override, a changed webhook
-  response.
-  Every token route keeps a token format gate before any DB read, a
-  generic 404 (unknown, malformed, dark-gated and ineligible rows
-  indistinguishable), a rate limit, and privacy headers; a dark `GATE_*`
-  route skips its limiter so a probe never sees a revealing 429. That
-  baseline holds where an entry says nothing else; a different or narrower
-  entry is authoritative — flag drift from it, never the entry itself, and
-  flag a new route or widened payload below the baseline unless its entry
-  says why. Writes on the `/api/reports/:token/*` family gate on
-  `service_report_v1` + the token format check, use atomic conditional
-  updates for one-shot guards (409 on 0 rows), mirror the read-side
-  eligibility check, validate bodies before `Number()` coercion, and ride
-  `reportEventLimiter`. Contract e-signature tokens burn when signed. The
-  estimate `ask` and `find-slots` routes keep the estimate token gate, the
-  short-lived signed `askToken`, terminal/expired rejection, their rate
-  limits, no raw question/query logging, and never book. The commit path
-  re-checks the preflight read: a live gate re-read (no row lock stabilizes
-  an env flip — `validateBookingSlotGeometry` vs `customerWindowAdmits`)
-  and row-derived eligibility on the locked row (`reserveSlot`). Skipping
-  either is P0 unless the entry records the exception.
-- **`/receipt/:token` permanence.** The receipt token is `invoices.token`
-  and is intentionally permanent — customers re-share receipt links with
-  bookkeepers months later. A `used` / `viewed_count` / `expires_at` gate
-  on `/api/receipt/:token` or `/pdf`, token rotation after payment, or auth
-  on those endpoints is P0.
-- **No string-interpolated user input in `db.raw`.** Query builders are
-  parameterized; `.raw()` is not. `db.raw(\`… ${x} …\`)` or
-  `db.raw('… ' + x + ' …')` where `x` comes from `req.body / req.query /
-  req.params` is SQL injection (`check:domain-rules` does not scan for it).
-  `db.raw('… WHERE id = ?', [x])` and constant-string raw are fine.
-- **Card PAN, CVV, full SSN, or full Stripe `payment_method` objects in
-  logs.** Railway logs and `errors.log` are plain text. last4 is fine; the
-  full PM object (BIN, fingerprint) is not.
-- **Hardcoded Anthropic model IDs.** Anthropic IDs live only in
-  `server/config/models.js` (a tier it exports) and `services/llm/deep.js`;
-  `check:domain-rules` enforces it. A new `'claude-…'` literal elsewhere
-  pins a tier and defeats the env-var swap. Per-service OpenAI/Gemini
-  defaults (transcription and extraction in
-  `call-recording-processor.js`) are a documented exception, not a
-  finding; so is the `--model` fallback in `.github/workflows/claude*.yml`
-  (Actions has no tier registry — override via the repo variable
-  `CLAUDE_REVIEW_MODEL`). Every DEEP call site goes through
-  `createDeepMessage` (thinking-block stripping + refusal fallback).
-- **Estimate service-mix rail member exclusion**
-  (`server/routes/estimate-public.js` `applyServiceMixChange`,
-  `server/routes/admin-estimates.js` `applyLeadServiceForSend`). A priced
-  customer add (`GATE_ESTIMATE_SERVICE_ADD`) and the send-time lead-service
-  park (`GATE_ESTIMATE_LEAD_SERVICE_SEND`) price NEW-customer terms; a plan
-  member's ladder is a different program. Both read the ONE evidence reader
-  `memberEvidenceInEstimateData`, run a strict live `isActivePlanCustomer`
-  check that fails CLOSED, and re-check on a `FOR UPDATE` customer row
-  inside the write (customer-comms fence → estimate owner recheck/lock →
-  customer lock; the accept path's estimate-before-customer row order).
-  Also security-critical: the add branch is customer-only (`actor !==
-  'customer'` → 400), an add whose recompute yields no new recurring row
-  fails closed (409 `add_unavailable`), and a staff-parked offer re-enters
-  only under the add gate. Dropping any of these plants fresh-quote
-  pricing on a member plan or lets staff parks masquerade as customer
-  removals.
+- **Stripe webhook raw-body order.** `server/routes/stripe-webhook.js` mounts `express.raw({ type: 'application/json' })` **before** global `express.json()` in `server/index.js`. Moving it after JSON parsing, swapping `raw` for `json`, or passing a parsed object to `stripe.webhooks.constructEvent` breaks signature verification (every webhook silently 400s).
+- **Stripe webhook idempotency.** Dedupe every event against `stripe_webhook_events.id` before running its handler. Dropping the dedupe `SELECT`, marking `processed=true` before success, or short-circuiting the insert lets Stripe retries double-charge, double-refund, or double-create `payments` rows.
+- **No second Stripe webhook router.** All Stripe events flow through `/api/stripe/webhook`; a `/webhook-v2` or per-event mount bypasses central idempotency.
+- **Webhook secret presence.** Falsy `stripeConfig.webhookSecret` must reject with 500 and never call `constructEvent` (forged-event vector).
+- **Surcharge math comes from `computeChargeAmount`.** `server/services/stripe-pricing.js` is the single source of truth (`CONFIGURED_COST_BPS = 290`, capped by `NETWORK_CAP_BPS`; consent copy says "up to 2.9%"; `CARD_SURCHARGE_RATE` is a deprecated mirror). Surcharge applies only when `opts.funding === 'credit'` (debit/prepaid/unknown/ACH pay base). Customer-displayed amount, `amountCents` sent to Stripe, and `payments.card_surcharge` must derive from one `computeChargeAmount(invoice.total, methodType, { funding })` call; ad-hoc `* 1.03` / `* 0.03` / local rounding breaks reconciliation.
+- **`isCardMethodType` is the surcharge classifier.** Any new non-card payment method (`cashapp`, `affirm`, …) omitted from `isCardMethodType` in `stripe-pricing.js` is silently surcharged as card-family.
+- **PI ↔ invoice ↔ webhook amount agreement.** `pay-v2.js` updates the PaymentIntent via `/update-amount` on card/ACH switch. PI `amount`, invoice `total`, and webhook `payments.amount` must agree to the cent.
+- **Terminal handoff burn stays atomic.** Single `UPDATE terminal_handoff_tokens SET used_at = now() WHERE jti = ? AND used_at IS NULL AND expires_at > now()` in `server/routes/stripe-terminal.js`. Splitting into `SELECT`+`UPDATE`, dropping `used_at IS NULL`, or moving it after `paymentIntents.create` lets two iOS devices double-charge; keep the post-burn claim/DB comparison to block cross-env replay.
+- **Handoff mint rate limit is DB-enforced** (`stripe-terminal.js` header comment) across deploys/pods; an in-memory `Map`/`setInterval`/process counter is P0.
+- **Handoff TTL stays short.** `HANDOFF_TTL_SECONDS = 60`; past ~5 min widens leaked-token exposure (P0 unless PR argues why).
+- **`scheduled_services.status` CHECK constraint.** Migration `20260426000004_relax_scheduled_services_status_enum` (`server/models/migrations/`, `--knexfile server/knexfile.js`) allows `pending | confirmed | rescheduled | en_route | on_site | completed | cancelled | skipped`. A new status without a migration throws at runtime. Writers use direct `update({ status })` (`admin-schedule.js`, `admin-dispatch.js`); new dispatcher/tech code appends to `job_status_history` (CHECK-mirrored); legacy callers stay on `service_status_log`. Customer tracker state is separate (`track_state`, `server/services/track-transitions.js`).
+- **`/api/admin/*` routers apply auth at router level.** Every `server/routes/admin-*.js` starts with `router.use(adminAuthenticate, requireAdmin | requireTechOrAdmin)` (`server/middleware/admin-auth.js`). Both halves are required on new routers (`adminAuthenticate` alone admits technicians). Existing routers mounting only `adminAuthenticate` are a known P2 consistency defect — flag only when a diff adds a router or removes a guard. Per-handler middleware is acceptable; missing auth entirely is P0.
+- **Internal and worker routes authenticate.** `/api/internal/*` needs `adminAuthenticate`+`requireAdmin` or HMAC header check; `/api/integrations/*-worker` needs its router HMAC check.
+- **Public route surface.** `docs/public-route-contracts.md` lists every route served without session auth (unauthenticated or token-only; customer-JWT `authenticate` routes are not public) and its guards. Any new public route omitted from that doc, or any change to a listed route's auth, gate, rate limit, payload, or headers leaving its entry stale (widened auth payload, raised cap, expiry override, changed webhook response), is P0. Baseline for token routes: token format gate before DB read, generic 404 (unknown/malformed/dark-gated/ineligible indistinguishable), rate limit, privacy headers; a dark `GATE_*` route skips its limiter so probes never see a revealing 429. Where an entry records a narrower guard set, the entry is authoritative — flag drift from it, never the entry itself; flag any new route or widened payload below baseline unless explained in the entry. `/api/reports/:token/*` writes gate on `service_report_v1` + token format, use atomic conditional updates for one-shot guards (409 on 0 rows), mirror read eligibility, validate bodies before `Number()`, and ride `reportEventLimiter`. Contract e-sign tokens burn on sign. Estimate `ask` and `find-slots` keep estimate token gate, short-lived signed `askToken`, terminal/expired rejection, rate limits, no raw question/query logging, and never book. Commit path re-checks preflight: live gate re-read (`validateBookingSlotGeometry` vs `customerWindowAdmits`) and row-derived eligibility on locked row (`reserveSlot`), unless the entry records an exception.
+- **`/receipt/:token` permanence.** `invoices.token` is intentionally permanent. Any `used`/`viewed_count`/`expires_at` gate on `/api/receipt/:token` or `/pdf`, post-payment rotation, or auth on those endpoints is P0.
+- **No string-interpolated user input in `db.raw`.** `db.raw(\`… ${x} …\`)` or `db.raw('… ' + x)` from `req.body/query/params` is SQL injection (not caught by `check:domain-rules`). Parameterize (`db.raw('… WHERE id = ?', [x])`).
+- **Card PAN, CVV, full SSN, or full Stripe `payment_method` objects in logs.** Railway logs and `errors.log` are plain text; `last4` is fine, full PM objects (BIN/fingerprint) are not.
+- **Hardcoded Anthropic model IDs.** Allowed only in `server/config/models.js` (exported tiers) and `services/llm/deep.js` (`check:domain-rules` enforces). Documented exceptions: per-service OpenAI/Gemini defaults in `call-recording-processor.js`, and `--model` fallback in `.github/workflows/claude*.yml` (overridden by repo var `CLAUDE_REVIEW_MODEL`). Every `DEEP` call site uses `createDeepMessage`.
+- **Estimate service-mix rail member exclusion** (`server/routes/estimate-public.js` `applyServiceMixChange`, `server/routes/admin-estimates.js` `applyLeadServiceForSend`). Customer add (`GATE_ESTIMATE_SERVICE_ADD`) and send-time park (`GATE_ESTIMATE_LEAD_SERVICE_SEND`) price NEW-customer terms. Both read `memberEvidenceInEstimateData`, run fail-closed live `isActivePlanCustomer`, and re-check on a `FOR UPDATE` customer row inside the write (customer-comms fence → estimate owner recheck/lock, aborting on ownership mismatch → customer lock). Add branch is customer-only (`actor !== 'customer'` → 400), recompute yielding no new recurring row fails closed (409 `add_unavailable`), and staff-parked offers re-enter only under the add gate.
 
 ## Treat as P1
 
-- **Blind `content[0].text` on a raw Anthropic response.** Reasoning
-  models may lead with a `thinking` block that has no `.text`, so the real
-  answer sits in `content[1]` and the caller takes its "model returned
-  nothing" branch. It is input-dependent, so a smoke test never reproduces
-  it. Flag any new raw `client.messages.create` read via
-  `content[0]` without `stripThinkingBlocks` (`services/llm/deep.js`), or
-  better, any raw call that bypasses the `llm/` helpers.
-- **America/New_York discipline.** Railway runs `TZ=UTC`; the portal is
-  Eastern-only. Use `server/utils/datetime-et.js` (`parseETDateTime`,
-  `etParts`, `formatET*`). Flag `new Date(\`${ymd}T${hm}\`).get*()`,
-  `toLocaleString` without `timeZone: 'America/New_York'` on wall-clock
-  fields, and `node-cron` schedules without `timezone: 'America/New_York'`.
-- **Near-today date literals in tests.** A literal that passes a
-  not-in-the-past validator (Joi `.min(todayStartEt)`) goes red when the
-  ET calendar passes it (`schedule-confirm-race.test.js`).
-  Compute relative dates for anything a freshness check validates.
-- **PII in logs (non-card).** Phone, email, street address, full inbound
-  SMS bodies, or customer names interpolated into log lines. Log ids.
-- **Floating promises in Express handlers.** A bare `someAsync()` inside an
-  async handler that isn't awaited. Mark deliberate fire-and-forget with
-  `void someAsync().catch(err => logger.error(...))`.
-- **No `{ virtual: true }` jest mocks of real modules.** A virtual mock
-  registers under a synthesized key; in a warmed shared worker the module
-  under test requires the REAL package and bypasses it — order-dependent,
-  green locally, red in CI. `virtual` is only for modules that don't exist.
-- **Feature flags fail closed.** `client/src/hooks/useFeatureFlag.js`
-  returns `false` on API error by design. `|| true`, `?? true`,
-  `localStorage` overrides, or env bypasses are P1 (P0 if they expose a V2
-  admin page with broken data wiring). Re-fetching a flag per list-row
-  render instead of once at the page boundary is also P1.
-- **Retained V1 shared-export modules.** `client/src/pages/admin/`
-  `SchedulePage.jsx`, `CustomersPage.jsx`, `EstimatePage.jsx`, and
-  `CommunicationsPage.jsx` survive the V1→V2 migration as utility modules
-  whose named exports V2 pages import (list: `waves-design` skill).
-  Touching them is a coordinated change; deleting or resurrecting the
-  files is not allowed.
-- **Style-system mixing.** Tier-2 pages use inline styles + the `D`
-  palette; Tier-1 V2 pages use Tailwind + `components/ui`. A file that
-  imports `components/ui/*` and defines a `D = { … }` palette is mixing.
-  Flag any *new* `D` usage inside a migrated panel.
-  Visual-refresh PRs on V2 pages are strict 1:1 on data, endpoints, and
-  metrics — content or endpoint changes never share a PR with them.
-  `alert-fg` red is for genuine alerts only; the one sanctioned exception
-  is the Customers V2 status indicators (health rings, tier badges, stage
-  badge) on `/admin/customers`.
-- **Retired-tool names.** New imports, env vars, or literals referencing
-  Square, Zapier, Make (Integromat), Elementor, NitroPack, or RankMath.
-  Flag only when the diff introduces or moves them.
-- **Twilio `From` / `MessagingServiceSid` hardcoded.** Numbers per GBP
-  location come from config; `+1…` literals in route code drift.
-- **Permission-allowlist entries** (`.claude/settings.json`
-  `permissions.allow`, command-frontmatter `allowed-tools`) auto-approve
-  every variant the pattern matches. Flag: (a) an npm wrapper whose
-  `pre`/`post` hook writes the DB, calls external APIs, or spends money;
-  (b) a wildcard over a script family that
-  mixes safe and spending commands (`check:*` sweeps in `check:lawn-models`,
-  which POSTs to three LLM providers); (c) a prefix rule over a command
-  with destructive flags (`git branch:*` has `-D`, `git push:*` has
-  `--no-verify`/`-f`, `git fetch:*` moves refs, `gh api:*` POSTs,
-  `git ls-remote:*` allows `--upload-pack=<exec>`, `gh pr create` pushes,
-  `gh pr comment:*` has `--delete-last`, `npm ci` runs install scripts,
-  `npm run test:contracts` calls live Stripe/Twilio/GitHub/Cloudflare when
-  secrets are loaded); (d) an exact command with a remote side effect —
-  `npm run dev:server` boots `initScheduledJobs()` with `cronJobs`
-  defaulting ON outside prod, and `npm run models:check` sends
-  `ANTHROPIC_API_KEY` to api.anthropic.com — none of these may be
-  pre-approved. Prefer exact forms; note a trailing `:*` enforces a
-  word boundary, so colon-named scripts need exact entries. Accepted
-  residual risk (owner ruling, #2768): local read/stage prefix rules
-  (`git status/diff/log/show/add/commit:*`) stay — damage is local and
-  visible before the always-prompting `git push`. Flag any new prefix rule
-  whose abuse is remote, irreversible, or invisible.
-- **`ops/agents/` convention.** Scripts declare READ-ONLY or MUTATES in
-  the header, default to dry-run (`--execute` to write), and contain no
-  secrets, tokens, customer names, or invoice numbers (`ops/agents/README.md`).
-- **Customer PII in the repo.** Names, lead addresses, or live payload
-  dumps never appear in code, tests, migration headers, commit messages,
-  or PR bodies — reference accounts by id. One violation forced a branch
-  history rewrite.
-- **Inactive evidence modules.** A `server/services/email/email-reply-*`
-  recognizer or findings consumer with no runtime caller, whose every result
-  is `needs_review` and which can never send, is reviewed against its
-  documented supported grammar, not against every English phrasing: it
-  merges on green CI with no P0, and a phrasing it does not yet recognize is
-  a backlog item in the module doc's known-limitations list (P2), never a
-  P1 blocker. Over-flagging is acceptable; a miss is never a send. Owner
-  ruling 2026-09-20 (#4614).
-- **"Per application" price copy.** Customer-facing units read "per
-  application", never "per visit", and no combined plan totals ("$X/mo",
-  "$X/yr") appear on any customer-facing estimate surface. Owner exception
-  2026-10-20: the per-application price
-  stays the price; a smaller "$X a month" average (plus a plan average
-  for 2+ services, = stored monthly total) may sit beneath it; "$X/mo" as
-  the price stays banned. Exempt: prepay previews (12-month LIST
-  annual line item), commercial proposals, monthly-billed legacy plans, and
-  the service-report cross-sell card headline (bare amount, no unit).
-- **Appointment windows start on the hour.** `window_start` is always
-  HH:00:00 — flag slot/window creation that can produce :15/:30 starts
-  (`admin-leads.js` rejects them at entry). `window_end` is
-  duration-driven and may land off-hour (`classifySlot` yields 10:30 for a
-  90-min service at 09:00) — never round or reject it. Customer-facing
-  arrival copy is `window_start` → +120 min, display-only, via
-  `arrivalWindowRange()` (`server/utils/sms-time-format.js`); never change
-  `window_end` for display.
-- **Email-change token fanout.** When a customer's email moves,
-  `customer-email-fanout.js` rotates email-bound subscriber tokens
-  (`newsletter_subscribers.confirmation_token` / `unsubscribe_token`);
-  never retarget unlinked sends by email alone. Per-delivery
-  `newsletter_send_deliveries.engagement_token` values are NOT rotated —
-  don't describe them as rotating, and flag diffs that widen what an old
-  emailed token can reach. `invoices.token` receipt links never rotate.
-- **Compliance language on any customer surface** (portal, prep
-  guides, reports, estimator lines, marketing): no pesticide is ever
-  "safe" (incl. "pet-safe"/"family-safe"); "EPA-registered"/"EPA-exempt",
-  never "EPA-approved"; never a fixed re-entry/drying minute figure — the
-  idiom is "safe once dry" + technician confirms timing. SMS agent: rainfast/
-  re-entry time only from LABEL FACTS (`sms-label-facts.js`). Sweep the
-  tree; flag diffs that ADD/EXTEND such copy. Every new path admitting
-  free text into REPORT/treatment copy runs the COMPLETE screen
-  `customerCopyViolations` (`service-report/technician-report-copy.js`)
-  before it stores AND renders — never the `findBannedCustomerCopy`
-  subset, which alone misses bare "safe"/"toxic"/"poison", bare
-  "infestation" and access-code shapes. Voice-fill prefills, technician
-  edits and owner-direct/LLM commits have each shipped past it. Report-copy
-  guard only: it bans efficacy words billing/support copy may use, and
-  a field whose wording a state form sets is exempt.
-- **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
-  recurring residential lanes get the callbacks/money-back/no-contract line
-  (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/
-  unknown are terms-neutral — termite never gets recurring terms; copy
-  failures fail soft and never block. Estimate page, proposal and Ask Waves:
-  the `noGuaranteeClaims` rule in docs/public-route-contracts.md.
-- **Report/track egress.** Access/gate/lockbox codes are excluded from
-  customer-facing reports (`report-copy-context.js`). Raw
-  `technician_notes` never egress on any report path. The
-  `/api/public/track/:token` payload masks email/phone server-side.
-- **WDO and pre-treatment termite certificates are FDACS paper compliance
-  documents** — no AI narrative, no ask bar, conservative surfaces.
-  ("Infestation extent" is legitimate FDACS wording on the WDO page.)
-- **Call pipeline do-not-regress** (`call-recording-processor.js` and the
-  extraction/routing stack): call-created bookings resolve to a real
-  `services` row (`service_id` set) or book "Waves Assessment", never an
-  invented `service_type` with a null `service_id`; recurring intent beats
-  the presenting pest (`applyRecurringIntentDefault`: ambiguous cadence →
-  Quarterly, upgrade-only backstop, explicit "just one-time" keeps the
-  single service, general-pest only); only `scheduling.status ===
-  'confirmed'` becomes an appointment; extraction schema changes are
-  additive-only (both schema JSONs + normalizer + persisted enum +
-  `SCHEMA_VERSION` bump, never in `required`, new fields join the replay
-  `FIELD_GROUPS`; a prompt/schema/catalog change bumps the
-  `ai_extraction_prompt_version` hash, resetting the promotion cohort so
-  older shadow rows never count; downstream composers read v2 + raw
-  transcript, never v1); AV counts only `hasReplacedComponents` as a
-  correction, accepts only `inServiceArea === true`, holds when unreachable,
-  treats a `PREMISE` missing only `subpremise` as a building without its
-  unit (`avMissingUnitOnly` — hold `missing_unit_number`, never street
-  recovery); the `NO_ASK_ADDRESS_CARDS` drop only on
-  `callMakesNoServiceAsk()`, never a call-nature label (`vendor_logged`); a
-  `text_number_differs` card binds per (line, arming) within ONE call;
-  an owed ask auto-closes only on evidence answering THAT ask, never every
-  open card because one later event was classified (`missing_unit_number` is
-  human-verdict-only, in `triage-auto-resolve.js`; `quiet_aged` dismissal
-  proves nothing: no evidence, no office decision); auto-routing stays
-  confidence-gated (address validates AND service maps AND no HOA/commercial
-  flag, else triage — the ONE exception (owner 2026-09-24): the grounded
-  agent commitment behind `GATE_CALL_AGENT_COMMIT_BOOKING` +
-  `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS` (Waves personnel dictating the
-  booking) demotes `commercial_requires_quote` to advisory, an agreed price
-  never does, and confirmed lender/realtor/buyer WDO INSPECTION callers are
-  authorized, never treatment (2026-09-26)), inserts keep idempotency keys,
-  TCPA consent precedes any SMS; hard-bounced call-captured emails are
-  re-verified against the recording and surfaced for owner read-back, never
-  auto-corrected or resent. Owner exceptions: `GATE_CALL_BOUNCE_OTHER_SPELLING`
-  resends once to the other pass's settled spelling, same customer, taken
-  on delivery, no card (11-05); `GATE_CALL_BOUNCE_SELF_FIX` saves one small
-  call fix per customer, never resends (`isSmallFix`; 11-17).
-- **Estimator engine authority.** `generateEstimate` is the sole dollar authority; LLM output proposes intent only,
-  never proposal/price fields; engine drafts never auto-send; existing customers are blocked from engine drafting;
-  low-confidence markers (fpSource/turfBasis fallback, low pricingConfidence) route to review. Caller-stated unit size +
-  `relationship_to_property: tenant` outrank county sqft for commercial tenants. Three owner-approved taps mint the
-  customer an estimate: a priced cross-sell (`GATE_REPORT_CLICK_TO_ESTIMATE`), "Restart my plan" (`plan_restart`;
-  re-verified churned under row lock, live recurring families excluded) and "See my price and book" (`plan_start`; no
-  membership, recurring row or prepay term; re-verified under row lock and at accept). Same bounds: deterministic
-  options only, no LLM, server recompute matches the shown/snapshotted price to the cent or it refuses, zero delivery
-  (no send, follow-up or customer comms). "Never auto-send" stands except website estimate self-service
-  (`website-quote-publication.js`, `GATE_WEBSITE_QUOTE_BOOKING`: eligible new-customer engine quotes publish without
-  staff approval, under estimate then customer row locks, cent-exact frozen booking snapshot; existing quote-invite and
-  booking-confirmation comms stay allowed) and the one-time-job plan offer (`GATE_ONETIME_PLAN_OFFER=live`, 11-20: one
-  emailed quote per customer per 12 months, same price bounds).
-- **Lawn-diagnostic lockstep.** `CONDITION_LABELS` / `SUMMARY_CAUSE_RE` /
-  the `GOVERNED_CAUSE` test stay mirrored and
-  plural-aware; customer egress is confidence-gated and allowlisted —
-  never publish client- or LLM-supplied `customer_wording`. Persistence
-  stamps provenance server-side: `tech-lawn-diagnostic.js` accepts
-  `body.aiAnalysis` but overwrites `provenance` (`challenge_reverified`,
-  writer, run id) from the verified `lawn_diagnostic_runs` row — a client
-  must never be able to forge either and make an unreviewed summary look
-  eligible for confident customer voice.
-- **Lawn protocol data fan-out.** A product/protocol change reaches BOTH
-  sources of truth (field-exec `protocols.json` AND `lawn_protocol_products`
-  rates/gates + windows) plus `products_catalog` (rates match
-  `default_rate_per_1000`, lowercase category, `epa_reg` NOT NULL and never
-  guessed), pricing.csv, and the plan-matcher. Premium/optional rows are
-  `default_in_plan:false` + a gate. Never write a full product name into a
-  parsable disclaimer line; never bulk-import the legacy 4-turf workbook.
-- **Booking conflict-check class.** Tech-scoped conflict WHEREs are blind
-  to technician-NULL rows (`filterCollidingSlots`) — every new
-  booking/reschedule surface needs the mirror guard.
-- **Condo aggregation guards.** Keep the `parcel.aggregated` branch ahead
-  of `countyUseDescToPropertyType`; don't lower `AGGREGATE_MIN_UNITS` (5).
-- **Twilio number classification.** `TWILIO_NUMBERS.findByNumber` reports
-  the AI toll-free number as `type:'location', locationId:'bradenton'` —
-  "location numbers only" logic must also exclude the AI number explicitly.
-- **Admin OAuth pattern.** Admin auth is bearer-only (`Authorization` from
-  `localStorage.waves_admin_token`; no cookie/query fallback). A "connect"
-  endpoint returns the consent URL as JSON for the SPA to navigate — a
-  bearer-protected `res.redirect` hard-401s on top-level navigation. The
-  callback validates via a one-time `state` nonce, not bearer.
-- **`@waves/*` CJS workspace packages** join `optimizeDeps.include` +
-  `build.commonjsOptions.include` in `client/vite.config.js` or fail Rollup
-  named-export analysis in prod. Exception: SERVER-ONLY packages (Node
-  built-ins, e.g. `@waves/affiliate-registry`) must NOT be added — mark them
-  SERVER-ONLY in their `package.json` description.
-- **Company name in copy** is "Waves Pest Control", never "Waves Lawn &
-  Pest". Texts and portal Messages say "Waves" (owner 2026-11-04, 11-12);
-  legal lines keep the full name. Keep the old-name mascot art.
+- **Blind `content[0].text` on raw Anthropic responses.** Always-thinking models lead with a `thinking` block; read with `anthropicText()` (`server/services/llm/call.js`), `stripThinkingBlocks()` (`server/services/llm/deep.js`), or `llm/` helpers, never raw `content[0]`.
+- **America/New_York discipline.** Railway runs `TZ=UTC`; portal is Eastern-only. Use `server/utils/datetime-et.js` (`parseETDateTime`, `etParts`, `formatET*`). Flag `new Date(\`${ymd}T${hm}\`).get*()`, `toLocaleString` without `timeZone: 'America/New_York'` on wall-clock fields, and `node-cron` without `timezone: 'America/New_York'`.
+- **Near-today date literals in tests.** Compute relative dates for any freshness validator (e.g. Joi `.min(todayStartEt)` in `schedule-confirm-race.test.js`) so tests never rot past calendar midnight.
+- **PII in logs (non-card).** Never interpolate phone, email, street address, full inbound SMS bodies, or customer names into logs; log ids.
+- **Floating promises in Express handlers.** Await async calls or mark deliberate fire-and-forget with `void someAsync().catch(err => logger.error(...))`.
+- **No `{ virtual: true }` jest mocks of real modules.** Warmed shared workers bypass virtual mocks for real packages (order-dependent CI failures). Reserve `virtual` for nonexistent modules.
+- **Feature flags fail closed.** `client/src/hooks/useFeatureFlag.js` returns `false` on error. `|| true`, `?? true`, `localStorage` overrides, or env bypasses are P1 (P0 if exposing broken V2 admin wiring); per-row flag fetches are P1.
+- **Retained V1 shared-export modules.** `client/src/pages/admin/{SchedulePage,CustomersPage,EstimatePage,CommunicationsPage}.jsx` stay as utility export modules for V2 pages (`waves-design` skill); do not delete or resurrect them.
+- **Style-system mixing.** Tier-2 = inline styles + `D` palette; Tier-1 V2 = Tailwind + `components/ui`. Never mix `D` into migrated `components/ui` files. V2 visual-refresh PRs are 1:1 on data/endpoints/metrics. `alert-fg` red is for genuine alerts only (sole exception: Customers V2 status indicators on `/admin/customers`).
+- **Retired-tool names.** Flag diffs introducing/moving Square, Zapier, Make (Integromat), Elementor, NitroPack, or RankMath.
+- **Hardcoded Twilio `From` / `MessagingServiceSid`.** Pull per-GBP numbers from config; no `+1…` literals in route code.
+- **Permission-allowlist entries** (`.claude/settings.json` `permissions.allow`, command `allowed-tools`). Flag: (a) npm wrappers whose pre/post hooks write DB, call external APIs, or spend money; (b) wildcards mixing safe and spending scripts (`check:*` sweeps in `check:lawn-models`); (c) prefix rules over destructive/remote flags (`git branch/push/fetch/ls-remote:*`, `gh api/pr create/pr comment:*`, `npm ci`, `npm run test:contracts`); (d) exact remote-side-effect commands (`npm run dev:server`, `npm run models:check`). Prefer exact entries (`:*` enforces word boundary, so colon-named scripts need exact forms). Accepted residual risk (#2768): local read/stage git prefixes (`status/diff/log/show/add/commit:*`). Flag any new prefix rule with remote, irreversible, or invisible abuse.
+- **`ops/agents/` convention.** Declare READ-ONLY or MUTATES in header, default dry-run (`--execute` to write), no secrets/tokens/customer names/invoice numbers (`ops/agents/README.md`).
+- **Customer PII in repo.** No customer names, lead addresses, or live payload dumps in code, tests, migration headers, commits, or PR bodies — use ids.
+- **Inactive evidence modules.** Unwired `server/services/email/email-reply-*` modules whose results are `needs_review` and never send are reviewed against their documented grammar (green CI + no P0; missing phrasings are P2 backlog in module doc, owner #4614).
+- **"Per application" price copy.** Customer estimate units read "per application", never "per visit", with no "$X/mo" or "$X/yr" as the price. Owner exception (2026-10-20): smaller "$X a month" average (plus plan average for 2+ services = stored monthly total) may sit beneath the per-application price. Exempt: prepay 12-month LIST previews, commercial proposals, legacy monthly plans, and service-report cross-sell bare-amount headline.
+- **Appointment windows start on the hour.** `window_start` is always `HH:00:00` (`admin-leads.js` rejects off-hour starts); `window_end` is duration-driven (`classifySlot`) and may land off-hour — never round/reject it. Customer arrival copy is display-only `window_start` → +120 min via `arrivalWindowRange()` (`server/utils/sms-time-format.js`).
+- **Email-change token fanout.** `customer-email-fanout.js` rotates `newsletter_subscribers.{confirmation,unsubscribe}_token`; never retarget unlinked sends by email alone. `newsletter_send_deliveries.engagement_token` does NOT rotate (never widen its scope); `invoices.token` never rotates.
+- **Compliance language on customer surfaces** (portal, prep guides, reports, estimates, marketing): never call a pesticide "safe" (incl. "pet-safe"/"family-safe"); use "EPA-registered"/"EPA-exempt", never "EPA-approved"; no fixed re-entry/drying minutes — use "safe once dry" + tech confirms timing (SMS agent uses `sms-label-facts.js` LABEL FACTS only). Flag diffs adding/extending banned copy. Every new free-text path into REPORT/treatment copy runs `customerCopyViolations` (`service-report/technician-report-copy.js`) before store AND render — never the `findBannedCustomerCopy` subset (misses bare safe/toxic/poison/infestation and access codes). Report-copy guard only; state-form wording is exempt.
+- **Estimate follow-up truth scope** (`estimate-followup-copy.js`): recurring residential gets callbacks/money-back/no-contract line (no 90-day window); rodent/termite/commercial/bundle/unknown stay terms-neutral (termite never gets recurring terms); copy failures fail soft. Estimate/proposal/Ask Waves keep `noGuaranteeClaims` (`docs/public-route-contracts.md`).
+- **Report/track egress.** Exclude access/gate/lockbox codes (`report-copy-context.js`) and raw `technician_notes` from customer reports; `/api/public/track/:token` masks email/phone server-side.
+- **WDO & pre-treatment termite certificates** are FDACS paper compliance docs — no AI narrative, no ask bar, conservative surfaces ("Infestation extent" is legitimate FDACS wording).
+- **Call pipeline do-not-regress** (`call-recording-processor.js` + extraction/routing): bookings resolve to a real `services` row (`service_id` set) or "Waves Assessment" (never null `service_id`); recurring intent beats presenting pest (`applyRecurringIntentDefault`: ambiguous → Quarterly, upgrade-only, explicit one-time stays single, general-pest only); only `scheduling.status === 'confirmed'` books; extraction schema is additive-only (both schema JSONs + normalizer + enum + `SCHEMA_VERSION` bump, never in `required`, new fields join replay `FIELD_GROUPS`; prompt/schema/catalog change bumps `ai_extraction_prompt_version` resetting promotion cohort; composers read v2 + raw transcript, never v1); AV counts only `hasReplacedComponents` as correction, accepts only `inServiceArea === true`, holds when unreachable, treats `PREMISE` missing only `subpremise` as `avMissingUnitOnly` (hold `missing_unit_number`, never street recovery); `NO_ASK_ADDRESS_CARDS` drop only on `callMakesNoServiceAsk()`, never call-nature labels (`vendor_logged`); `text_number_differs` binds per `(line, arming)` within one call; owed asks auto-close only on evidence answering THAT ask (`missing_unit_number` is human-only in `triage-auto-resolve.js`; `quiet_aged` proves nothing); auto-routing stays confidence-gated (validated address + mapped service + no HOA/commercial, else triage — sole exception: Waves personnel commitment under `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS` demotes `commercial_requires_quote` to advisory, agreed price alone never does, confirmed lender/realtor/buyer WDO INSPECTION callers authorized, never treatment); keep insert idempotency keys and TCPA consent before SMS; hard-bounced call emails re-verify against recording for owner read-back (exceptions: `GATE_CALL_BOUNCE_OTHER_SPELLING` resends once to the other pass's settled spelling bound to the same customer and updates their profile email only on confirmed delivery, no card; `GATE_CALL_BOUNCE_SELF_FIX` saves at most one small fix per customer via `isSmallFix`, never resends).
+- **Estimator engine authority.** `generateEstimate` is sole dollar authority; LLM proposes intent only, never prices; drafts never auto-send; existing customers blocked from engine drafting; low-confidence markers (`fpSource`/`turfBasis` fallback, low `pricingConfidence`) route to review. Caller-stated unit size + `relationship_to_property: tenant` beat county sqft for commercial tenants. Three taps mint customer estimates under identical bounds (deterministic only, no LLM, cent-exact server recompute or refuse, zero comms/delivery): priced cross-sell (`GATE_REPORT_CLICK_TO_ESTIMATE`), "Restart my plan" (`plan_restart`, re-verified churned under lock, live recurring families excluded), and "See my price and book" (`plan_start`, no membership/recurring/prepay, re-verified under lock + at accept). "Never auto-send" exceptions: website self-service (`website-quote-publication.js`, `GATE_WEBSITE_QUOTE_BOOKING`, eligible new customers only re-checked under estimate→customer row locks at publication time, cent-exact frozen snapshot, quote-invite/booking-confirm comms allowed) and one-time-job plan offer (`GATE_ONETIME_PLAN_OFFER=live`, 1 emailed quote/customer/12 mo, same price bounds).
+- **Lawn-diagnostic lockstep.** `CONDITION_LABELS` / `SUMMARY_CAUSE_RE` / `GOVERNED_CAUSE` test stay mirrored and plural-aware; customer egress is confidence-gated/allowlisted (never client/LLM `customer_wording`). `tech-lawn-diagnostic.js` overwrites `provenance` (`challenge_reverified`, writer, run id) server-side from verified `lawn_diagnostic_runs` so clients cannot forge eligibility.
+- **Lawn protocol data fan-out.** Product/protocol edits update BOTH field-exec `protocols.json` AND `lawn_protocol_products` (rates/gates/windows) plus `products_catalog` (rates match `default_rate_per_1000`, lowercase category, non-null verified `epa_reg`), `pricing.csv`, and plan-matcher. Optional rows use `default_in_plan:false` + gate. No full product names in parsable disclaimers; never bulk-import the legacy 4-turf workbook.
+- **Booking conflict-check class.** Tech-scoped conflict WHEREs miss technician-NULL rows (`filterCollidingSlots`); mirror that guard on every booking/reschedule surface.
+- **Condo aggregation guards.** Keep `parcel.aggregated` ahead of `countyUseDescToPropertyType`; keep `AGGREGATE_MIN_UNITS` ≥ 5.
+- **Twilio number classification.** `TWILIO_NUMBERS.findByNumber` labels the AI toll-free number `type:'location', locationId:'bradenton'` — "location numbers only" logic must exclude the AI number explicitly.
+- **Admin OAuth pattern.** Admin auth is bearer-only (`localStorage.waves_admin_token`; no cookie/query fallback). Connect endpoints return consent URL as JSON for SPA navigation (bearer `res.redirect` 401s); callbacks validate one-time `state` nonce.
+- **`@waves/*` CJS workspace packages.** Client-imported packages join `optimizeDeps.include` + `build.commonjsOptions.include` in `client/vite.config.js`; SERVER-ONLY packages (e.g. `@waves/affiliate-registry`) must NOT be added and declare SERVER-ONLY in `package.json`.
+- **Company name in copy.** "Waves Pest Control", never "Waves Lawn & Pest". Texts and portal Messages say "Waves"; legal lines keep full name. Old-name mascot art stays.
+- **Unapproved paid spend or Twilio RCS.** Any PR that starts, restores (e.g., key/token/credential fixes), or raises spend — paid API/service calls, pricier models/SKUs (`server/config/models.js`), paid-key crons/backfills (`server/services/scheduler.js`), paid add-ons/infra, or spend-triggering gate flips — without estimated $/day & $/mo spend and owner approval in the PR body is P1 (`CLAUDE.md` rule 23; silent bill spikes); Twilio RCS (`server/services/twilio.js`) is always P1 (owner-rejected).
 
 ## Implementation defaults
 
-Authoring defaults for any agent writing code here; reviewers flag at the
-severity noted.
-
-- **Simplest implementation that fully meets the current requirement.**
-  No speculative config, single-call-site generic handlers,
-  one-implementation interfaces, or future-proofing layers. P2.
-- **Structural lint is a signal, not a gate.** `eslint.config.js:26`
-  (`QUALITY_WARN`) warns, never errors, on `complexity` > 20 and
-  `max-depth` > 4 in every production block. A warning on a function the
-  diff adds or rewrites is P2 (remove decisions per CLAUDE.md rule 20 — not
-  a one-use helper that just moves the branches); a warning on untouched
-  legacy code is ignored. Never add `--max-warnings` to the lint-staged
-  command — it would block commits on pre-existing code.
-- **No compat shims for code changed in the same PR.** Migrate every
-  internal call site; no deprecated wrappers, re-export aliases, or dual
-  paths for callers this repo controls (P2). The inverse is mandatory for
-  external consumers — deployed native apps, in-flight tokenized links,
-  astro-fleet form posts, webhook payloads, existing DB rows must keep
-  working; breaking them is P0.
-- **Use existing dependencies; no new ones without owner approval.** Don't
-  hand-roll what a library in `package.json` provides. A new `package.json`
-  entry not called out in the PR body is P1.
-- **Extend the existing mechanism; don't build a parallel one.** Before
-  adding a status writer, cron sweep, approval path, rate limiter, dedupe
-  stamp, date util, or service-area predicate, find the existing one and
-  extend it. A second mechanism for a purpose an existing one serves is P1
-  unless the PR body names the existing mechanism and why it can't be
-  extended (instances rated P0 above, e.g. a second Stripe webhook mount,
-  keep P0).
+- **Simplest coherent implementation.** No speculative config, single-call generic handlers, one-implementation interfaces, or future-proofing layers. P2.
+- **Structural lint is a signal, not a gate.** `eslint.config.js:26` (`QUALITY_WARN`) warns on `complexity` > 20 and `max-depth` > 4. Warnings on added/rewritten functions are P2 (remove decisions per `CLAUDE.md` rule 20, don't relocate into one-use helpers); untouched legacy warnings are ignored. Never add `--max-warnings` to lint-staged.
+- **No internal compat shims.** Migrate every internal call site in the same PR; no deprecated wrappers, aliases, or dual paths for repo-controlled callers (P2). Keep external consumers working (native apps, in-flight tokens, astro forms, webhooks, existing DB rows — breaking them is P0).
+- **Use existing dependencies.** No new `package.json` dependency without owner approval; call out any new entry in PR body (P1).
+- **Extend the existing mechanism.** Before adding a status writer, cron sweep, approval path, rate limiter, dedupe stamp, date util, or service-area predicate, extend the existing one (duplicate mechanism is P1 unless PR justifies why; P0 for P0 domains like Stripe webhook mount).
 
 ## Out of scope (do not flag)
 
-- `client/dist/**` (built bundle), `waves-customer-portal.tar.gz`,
-  `SESSION-*-AUDIT.md`, `TODO.md`, `errors.log`.
-- `docs/design/DECISIONS.md` — append-only log; new entries at the bottom.
-- Cross-timezone concerns. The portal is Eastern-only.
-- Style-of-existing-code refactors. Match the file; don't rewrite legacy
-  inline styles to Tailwind in a non-redesign PR.
-- Settled owner rulings: the one-time completion gate stays removed
-  (#3013); `ESTIMATE_DEPOSIT_REQUIRED` stays off; lawn IS
-  WaveGuard-tier-discountable; `deposit_credit` ledger credits face value;
-  missed surcharges are forward-only (no clawback).
+- `client/dist/**`, `waves-customer-portal.tar.gz`, `errors.log`.
+- `docs/design/DECISIONS.md` (append-only; new entries at bottom).
+- Cross-timezone concerns (Eastern-only).
+- Unrequested inline-style-to-Tailwind rewrites (match the file).
+- Settled owner rulings: one-time completion gate removed (#3013); `ESTIMATE_DEPOSIT_REQUIRED` stays off; lawn IS WaveGuard-tier-discountable; `deposit_credit` credits face value; missed surcharges are forward-only (no clawback).
 
 ## Maintaining this file
 
-- A rule earns its place by naming the failure it prevents and the file
-  that carries it. If you can't name the failure, delete the rule.
-- One bullet = the invariant, the protected `file:line`, and the incident
-  in one clause. No snapshot counts, no "as of" dates, no review-round
-  narration — those rot within weeks and a wrong instruction costs more
-  than a missing one.
-- Before adding, sharpen the existing rule that covers the class. Before
-  writing prose, ask whether the rule can be a test or a scanner
-  (`check:domain-rules`, the route-surface allowlist, contract tests); if
-  so, write that and leave a one-line pointer here.
-- Procedures go in a skill; orientation goes in `CLAUDE.md`; route
-  contracts go in `docs/public-route-contracts.md`. `/lesson` routes a
-  correction to the right file.
-- After every model upgrade, run `/doctor prompt-audit` and a manual stale-fact
-  pass: verify each cited file, constant, and gate still exists as
-  described, and drop anything the current models do unprompted.
+- Every rule names the failure it prevents and the file it protects; otherwise delete it.
+- One bullet = invariant + protected `file:line` + failure in one clause. No snapshot counts, "as of" dates, or review-round narration.
+- Prefer tests/scanners (`check:domain-rules`, route-surface allowlist, contract tests) with a one-line pointer here over prose.
+- Procedures → `.claude/skills/*`; orientation → `CLAUDE.md`; route contracts → `docs/public-route-contracts.md`. Use `/lesson`.
+- After every model upgrade, run `/doctor prompt-audit` and a stale-fact pass; drop anything current models do unprompted.

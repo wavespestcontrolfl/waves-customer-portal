@@ -2037,13 +2037,18 @@ function assertFenceTransaction(trx) {
 
 async function findAccountByContact(trx, {
   phone, email, matchEmail = false, confirmEmailAccountId = null, fenceAttach = false,
-  forceNewAccount = false, ignorePhoneMatch = false,
+  forceNewAccount = false, ignorePhoneMatch = false, exactUsPhone = false,
 }) {
   if (fenceAttach) assertFenceTransaction(trx);
   const digits = phoneLast10(phone);
   const lookupByPhone = () => (digits
     ? trx('customers')
-      .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+      .whereRaw(
+        exactUsPhone
+          ? "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)"
+          : "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?",
+        exactUsPhone ? [digits, `1${digits}`] : [`%${digits}`],
+      )
       .whereNull('deleted_at')
       .orderBy('is_primary_profile', 'desc')
       .orderBy('created_at', 'asc')
@@ -2895,6 +2900,60 @@ router.get('/pipeline/view', requireAdmin, async (req, res, next) => {
 // Lightweight endpoint so the MobilePaymentSheet's Card on File picker
 // doesn't have to load the full customer profile (tags, interactions,
 // services, etc.) every time the tech opens the payment sheet.
+// People a caller named for the visit texts on this customer (owner 2026-11-24 PM, 2026-11-27 "yes"): staff see the
+// list and can stop or restart each one. Admin only (techs see no contact lists of this kind). A stop is a mark,
+// never a delete (services/call-visit-recipient.js setReminderContactStopped).
+const REMINDER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.get('/:id/reminder-contacts', requireAdmin, async (req, res, next) => {
+  try {
+    if (!REMINDER_ID.test(String(req.params.id))) return res.status(400).json({ error: 'Invalid customer id' });
+    const VisitRecipient = require('../services/call-visit-recipient');
+    res.json({ reminderContacts: await VisitRecipient.listReminderContacts(req.params.id) });
+  } catch (err) { next(err); }
+  return undefined;
+});
+
+for (const [action, stopped] of [['stop', true], ['restart', false]]) {
+  router.post(`/:id/reminder-contacts/:reminderId/${action}`, requireAdmin, async (req, res, next) => {
+    try {
+      if (!REMINDER_ID.test(String(req.params.id)) || !REMINDER_ID.test(String(req.params.reminderId))) {
+        return res.status(400).json({ error: 'Invalid id' });
+      }
+      const VisitRecipient = require('../services/call-visit-recipient');
+      // The change and its audit row commit together (a restart clears stopped_by, so the audit row is the only record).
+      const entry = await db.transaction(async (trx) => {
+        // A profile a merge retired (a screen opened before the merge) is refused under its row lock, the lock a merge
+        // takes: clearing its stop would reach the account that took it over.
+        const profile = await trx('customers').where({ id: req.params.id }).forUpdate().first('id', 'deleted_at');
+        if (!profile) return null;
+        if (profile.deleted_at) return 'retired';
+        const changed = await VisitRecipient.setReminderContactStopped({ customerId: req.params.id, id: req.params.reminderId, stopped, by: 'staff', conn: trx });
+        if (!changed) return null;
+        // Audit only a real change: a stale screen's repeat Stop must not record that staff stopped someone the customer did.
+        if (!changed.changed) return changed;
+        await recordAuditEvent({
+          actor_type: 'technician',
+          actor_id: req.technicianId || null,
+          action: stopped ? 'customer.reminder_contact_stopped' : 'customer.reminder_contact_restarted',
+          resource_type: 'customer',
+          resource_id: req.params.id,
+          metadata: { reminder_contact_id: req.params.reminderId },
+          ip_address: req.ip,
+          user_agent: req.get('user-agent') || null,
+          critical: true,
+          trx,
+        });
+        return changed;
+      });
+      if (entry === 'retired') return res.status(409).json({ error: 'This customer record was merged into another one', code: 'CUSTOMER_RETIRED' });
+      if (!entry) return res.status(404).json({ error: 'Not found' });
+      res.json({ reminderContact: entry });
+    } catch (err) { next(err); }
+    return undefined;
+  });
+}
+
 router.get('/:id/cards', async (req, res, next) => {
   try {
     // Payment methods stay visible to the tech checkout/project flows, but
@@ -4472,6 +4531,10 @@ const customerUpdateHandler = async (req, res, next) => {
       // too. (member_since/churned_at aren't editable fields, so no clobber.)
       Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
     }
+    // req.ibServiceContactRoles is set only by setServiceContactsFromBar (never an HTTP field): the relationship the bar
+    // card recorded, as role columns ({ service_contact2_role: 'tenant' }), applied before compaction so it travels with
+    // its person, as the call pipeline's explicit role does.
+    Object.assign(updates, req.ibServiceContactRoles);
     compactServiceContactSlots(updates, before);
     // If the primary phone is changing, drop the stale line_type cache so the
     // SMS landline guard re-evaluates the new number instead of acting on the
@@ -4599,9 +4662,10 @@ const customerUpdateHandler = async (req, res, next) => {
               statusCode: 409, isOperational: true, code: 'preview_changed',
             });
           }
-          // req.ibVerifyPlan is set only by setCustomerBillToFromBar (never an HTTP field): it re-derives the bar card
-          // inside this transaction over held rows (bill-to-tools.js lockedPlanCheck: every open invoice FOR UPDATE)
-          // and throws preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
+          // req.ibVerifyPlan is set only by the bar's in-process cards (runCustomerUpdateFromBar; never an HTTP field): it
+          // re-derives the bar card inside this transaction over held rows (bill-to-tools.js lockedPlanCheck: every open
+          // invoice FOR UPDATE; service-contact-tools.js lockedPlanCheck: the locked contact slots) and throws
+          // preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
           if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
@@ -7200,6 +7264,8 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 });
 
 router._private = {
+  SERVICE_CONTACT_SLOT_FIELDS,
+  normalizeChangedServiceContacts,
   latestHealthValueRaw,
   customerHealthFilterSchema,
   applyCustomerListFilters,
@@ -7265,13 +7331,12 @@ router.hasMembership = hasMembership;
 
 module.exports = router;
 
-// The Intelligence Bar's set_customer_bill_to runs the SAME handler as PUT /:id with only { payerId } — exactly
-// what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
-// pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
-// reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
-// card showed (null = the customer pays); verifyPlan(trx): re-checks the card inside the transaction and throws
-// preview_changed on any difference; the change refuses too if any invoice would move (the card promises none).
-function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verifyPlan, actor }) {
+// The Intelligence Bar's cards run the SAME handler as PUT /:id without an HTTP request (the admin-invoices.js adapter
+// pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the reply it
+// would send, { status, json }. An error passed to next() rejects. verifyPlan(trx): re-checks the card inside the
+// transaction over the locked customer row and throws preview_changed on any difference. `ib` holds the other
+// internal-only request fields a card sets (never HTTP body fields).
+function runCustomerUpdateFromBar({ customerId, body, verifyPlan, actor, ib = {} }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -7280,16 +7345,35 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verify
     };
     const req = {
       params: { id: customerId },
-      body: { payerId: payerId == null ? '' : String(payerId) },
+      body,
       technicianId: actor?.technicianId || null,
       ip: null,
       get: () => null,
-      ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
       ibVerifyPlan: typeof verifyPlan === 'function' ? verifyPlan : null,
-      ibExpectNoMove: true,
+      ...ib,
     };
     Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);
   });
 }
+
+// set_customer_bill_to: only { payerId }, exactly what the customer page's Bill-To select sends. expectedPayerId: the
+// Bill-To the card showed (null = the customer pays); the change refuses too if any invoice would move (the card
+// promises none).
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verifyPlan, actor }) {
+  return runCustomerUpdateFromBar({
+    customerId,
+    body: { payerId: payerId == null ? '' : String(payerId) },
+    verifyPlan,
+    actor,
+    ib: { ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId), ibExpectNoMove: true },
+  });
+}
+// set_customer_service_contact (IB gap #28): the three service-contact slots' name, phone and email, exactly what the
+// customer page's contact editor sends (it posts every slot on every save), plus the relationship the card recorded
+// for a slot (roles: role columns, e.g. { service_contact2_role: 'tenant' }), which the page's editor cannot set.
+function setServiceContactsFromBar({ customerId, slots, roles, verifyPlan, actor }) {
+  return runCustomerUpdateFromBar({ customerId, body: slots, verifyPlan, actor, ib: { ibServiceContactRoles: roles } });
+}
 module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;
+module.exports.setServiceContactsFromBar = setServiceContactsFromBar;
 module.exports.reminder24hField = reminder24hField;

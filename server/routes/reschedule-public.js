@@ -563,6 +563,7 @@ function selectSvc(column, value, database = db) {
       's.last_auto_dispatch_at',
       'c.first_name as cust_first_name',
       'c.last_name as cust_last_name',
+      'c.phone as customer_phone',
       // Availability must be computed around the BOOKED property, not the
       // customer's primary mirror (codex round-7 P1): stamped fields win
       // under the same output names, and coords follow the divergence rule —

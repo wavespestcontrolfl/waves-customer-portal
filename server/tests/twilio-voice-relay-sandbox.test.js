@@ -232,7 +232,7 @@ describe('POST /relay-sandbox', () => {
     // (codex r6 P1).
     expect(xml).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Gather [^>]*><Play>https:\/\/[^<]+\.mp3<\/Play><\/Gather>/);
     expect(xml).toMatch(/<Gather [^>]*numDigits="2"/);
-    expect(xml).toMatch(/<Gather [^>]*timeout="3"/);
+    expect(xml).toMatch(/<Gather [^>]*timeout="6"/);
     expect(xml).toContain(`action="${RELAY_SANDBOX_CELL_ACTION}"`);
     expect(xml.indexOf('<Gather')).toBeLessThan(xml.indexOf('<Connect'));
     expect(xml).toContain(`<Connect action="${RELAY_COMPLETE_ACTION_SANDBOX.replace('?', '?')}"`);
@@ -414,7 +414,7 @@ describe('POST /relay-sandbox', () => {
       return { xml: res.body, meta };
     };
     // The answer document every caller got before the gate: the cell <Gather> with Twilio's default finish key.
-    const UNCHANGED_GATHER = '<Gather input="dtmf" numDigits="2" timeout="3" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST"><Play>';
+    const UNCHANGED_GATHER = '<Gather input="dtmf" numDigits="2" timeout="6" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST"><Play>';
     const expectUnchangedDocument = (xml) => {
       expect(xml).toContain(UNCHANGED_GATHER);
       expect(xml).toContain('</Gather><Connect');
@@ -445,7 +445,7 @@ describe('POST /relay-sandbox', () => {
     test('gate on: a recorded document has no finish key, so no key press can skip the disclosure and reach the recording', async () => {
       process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
       const { xml } = await answer();
-      expect(xml).toContain(`<Gather input="dtmf" numDigits="2" timeout="3" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST" finishOnKey=""><Play>`);
+      expect(xml).toContain(`<Gather input="dtmf" numDigits="2" timeout="6" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST" finishOnKey=""><Play>`);
       // the only route to the recording inside this document is the end of the <Gather>
       expect(xml).toMatch(new RegExp(`</Play></Gather>${SANDBOX_RECORDING}<Connect`));
       expect(xml.split('<Gather')).toHaveLength(2);

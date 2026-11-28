@@ -1,13 +1,13 @@
-// GATE_LAWN_V13 has no bahia track, so the copy that lists the lawn tracks (the pricing knowledge
-// entry written by the KB sync, and the customer guide at /service-details/lawn_care) stops
-// promising one and says the office reviews bahia lawns. Gate off, both are the old text.
+// GATE_LAWN_V13 has no bahia track, so the pricing knowledge entry written by the KB sync stops
+// promising one. The customer guide at /service-details/lawn_care names no grass at all (owner
+// 2026-11-26: "dont mention the lawn types"), gate on or off.
 jest.mock('../models/db', () => jest.fn());
 const { lawnTrackKnowledgeLines, lawnTrackNames } = require('../services/lawn-program');
 const { buildServiceDetailsContent } = require('../services/estimate-service-details');
 
 afterEach(() => { delete process.env.GATE_LAWN_V13; });
 
-const grassRow = (content) => content.systemBox.rows.find((row) => row[0] === 'Built for your grass');
+const lawnRow = (content) => content.systemBox.rows.find((row) => row[0] === 'Built for your lawn');
 const guide = async () => {
   const db = require('../models/db');
   db.mockImplementation(() => { throw new Error('no registry in this test'); });
@@ -15,10 +15,10 @@ const guide = async () => {
 };
 
 describe('gate off', () => {
-  test('the knowledge line and the guide row are the old text', async () => {
+  test('the knowledge line is the old text and the guide row names no grass', async () => {
     expect(lawnTrackKnowledgeLines()).toEqual(['Tracks: St. Augustine | Bermuda | Zoysia | Bahia']);
     expect(lawnTrackNames()).toEqual(['St. Augustine', 'Bermuda', 'Zoysia', 'Bahia']);
-    expect(grassRow(await guide())).toEqual(['Built for your grass', 'St. Augustine, Bermuda, Zoysia, and Bahia each run their own product track. We confirm the grass before anything goes down, because a product that helps one grass can injure another']);
+    expect(lawnRow(await guide())).toEqual(['Built for your lawn', 'We inspect your lawn before anything goes down and use only products labeled for it']);
   });
 });
 
@@ -32,12 +32,10 @@ describe('gate on', () => {
     expect(lines.join('\n')).not.toMatch(/\| Bahia/);
   });
 
-  test('the customer guide stops promising a bahia track and says the team reviews bahia lawns', async () => {
-    const row = grassRow(await guide());
-    expect(row).toHaveLength(2);
-    expect(row[1]).toContain('Bahiagrass lawns: our team reviews these before quoting');
-    expect(row[1]).toContain('St. Augustine, Bermuda or Zoysia');
-    expect(row[1]).not.toMatch(/Bahia each run|Bahia\b.*product track/);
+  test('the customer guide row is the same plain row and names no grass', async () => {
+    const content = await guide();
+    expect(lawnRow(content)).toEqual(['Built for your lawn', 'We inspect your lawn before anything goes down and use only products labeled for it']);
+    expect(JSON.stringify(content.systemBox)).not.toMatch(/Bahia|Bermuda|Zoysia|St\. Augustine/);
   });
 });
 

@@ -990,6 +990,34 @@ async function findExistingCustomerForPhoneConfirm(phoneDigits, customerId) {
   return queryActiveCustomerByPhone(phoneDigits).first();
 }
 
+async function resolveSelfBookingPhoneOwner(phoneDigits, customerId) {
+  const phone10 = normalizeUsPhoneLast10(phoneDigits);
+  if (!phone10) {
+    return { error: { ok: false, status: 400, error: 'Please enter a valid 10-digit US phone number.' } };
+  }
+  const existing = await findExistingCustomerForPhoneConfirm(phone10, customerId);
+  if (!existing) return { custId: null };
+  if (!customerId) {
+    // NOTE: a new_customer double-submit retry lands here (the first
+    // attempt created the profile) and gets this 409 rather than an
+    // idempotent replay — deliberately. Phone + date + start time is
+    // NOT proof of identity on a public route; replaying the booking
+    // row + confirmation code here would let anyone with a
+    // customer's phone number probe slots and harvest booking
+    // details. The in-transaction replay guard still covers callers
+    // that proved identity (customer_id / estimate token).
+    return { error: { ok: false, status: 409, error: 'This phone number is already on file. Please verify the customer profile before booking.' } };
+  }
+  if (String(existing.id) !== String(customerId)) {
+    return { error: { ok: false, status: 400, error: 'Customer lookup mismatch' } };
+  }
+  // Phone + customer_id resolves the BOOKING, but is knowledge, not
+  // possession: the id comes from the public address lookup and the
+  // phone can be typed by anyone who knows it. Not enough to WRITE a
+  // unit onto the record — only token-proven estimate paths backfill.
+  return { custId: existing.id };
+}
+
 function invalidateEstimateSlotCaches() {
   try {
     require('../services/estimate-slot-availability').invalidateAllEstimates();
@@ -3199,28 +3227,9 @@ async function createSelfBooking(payload = {}) {
       }
     }
     if (!custId && phoneDigits) {
-      const existing = await findExistingCustomerForPhoneConfirm(phoneDigits, customer_id);
-      if (existing) {
-        if (!customer_id) {
-          // NOTE: a new_customer double-submit retry lands here (the first
-          // attempt created the profile) and gets this 409 rather than an
-          // idempotent replay — deliberately. Phone + date + start time is
-          // NOT proof of identity on a public route; replaying the booking
-          // row + confirmation code here would let anyone with a
-          // customer's phone number probe slots and harvest booking
-          // details. The in-transaction replay guard still covers callers
-          // that proved identity (customer_id / estimate token).
-          return { ok: false, status: 409, error: 'This phone number is already on file. Please verify the customer profile before booking.' };
-        }
-        if (String(existing.id) !== String(customer_id)) {
-          return { ok: false, status: 400, error: 'Customer lookup mismatch' };
-        }
-        custId = existing.id;
-        // Phone + customer_id resolves the BOOKING, but is knowledge, not
-        // possession: the id comes from the public address lookup and the
-        // phone can be typed by anyone who knows it. Not enough to WRITE a
-        // unit onto the record — only token-proven estimate paths backfill.
-      }
+      const phoneMatch = await resolveSelfBookingPhoneOwner(phoneDigits, customer_id);
+      if (phoneMatch.error) return phoneMatch.error;
+      if (phoneMatch.custId) custId = phoneMatch.custId;
     }
 
     if (customer_id && !custId && !phoneDigits && !estimate_id) {
@@ -3469,8 +3478,9 @@ async function createSelfBooking(payload = {}) {
       const account = await ensureCustomerAccount(db, {
         firstName: new_customer.first_name,
         lastName: new_customer.last_name || '',
-        phone: phoneDigits,
+        phone: normalizeUsPhoneLast10(phoneDigits) || phoneDigits,
         email: new_customer.email || null,
+        exactUsPhone: true,
       });
       // Only an account this request PROVABLY minted (the helper's explicit
       // flag) is ever rolled back — never an existing profile-less account

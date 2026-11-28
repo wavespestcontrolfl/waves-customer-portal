@@ -1464,11 +1464,12 @@ function payrollBankMatchOn() {
 // Finalized checks and payroll deposit / RT-6 calendar rows with no bank line yet, and the
 // unmatched business-account debits that could be the other half of a pair.
 async function loadPayrollMatchContext(conn = db) {
-  const checks = await conn('payroll_checks as pc')
+  const rawChecks = await conn('payroll_checks as pc')
     .leftJoin('bank_transactions as bt', 'bt.matched_payroll_check_id', 'pc.id')
     .where('pc.status', 'finalized')
     .whereNull('bt.id')
     .select('pc.id', 'pc.employee_name', 'pc.net_cents', 'pc.pay_method', 'pc.check_number', conn.raw("to_char(pc.pay_date, 'YYYY-MM-DD') as pay_date"));
+  const checks = await require('./payroll-runs').withPaperPayments(conn, rawChecks);
   const filings = await conn('tax_filing_calendar as f')
     .leftJoin('bank_transactions as bt', 'bt.matched_tax_filing_id', 'f.id')
     .where(function payrollRows() { this.where('f.source_key', 'like', 'payroll:941_deposit:%').orWhere('f.source_key', 'like', 'payroll:rt6:%'); })
@@ -1512,8 +1513,13 @@ const PAYROLL_TARGET_KINDS = {
     goneReason: 'check_not_final',
     pool: 'checks',
     counter: 'payrollChecksLinked',
-    lock: (trx, id) => trx('payroll_checks').where({ id }).forUpdate()
-      .first('id', 'status', 'employee_name', 'net_cents', 'pay_method', 'check_number', trx.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date")),
+    lock: async (trx, id) => {
+      const row = await trx('payroll_checks').where({ id }).forUpdate()
+        .first('id', 'status', 'employee_name', 'net_cents', 'pay_method', 'check_number', trx.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"));
+      if (!row) return row;
+      const [merged] = await require('./payroll-runs').withPaperPayments(trx, [row]);
+      return merged;
+    },
     usable: (t) => t.status === 'finalized',
     plausible: (row, t) => payrollMatch.isPlausibleCheckLink(row, t),
     payDates: (t) => [t.pay_date],

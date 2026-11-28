@@ -46,6 +46,7 @@ test('buckets: tracking (0) → fresh others (2) → fresh storms (3) → visit 
   expect(sql).not.toMatch(/geofence/);
   expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type IN \('tech_line_sms', 'customer_visit_photos'\) THEN 4/);
   expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 3/);
+  expect(sql).toMatch(/WHEN type = 'weather_safety_advisory' THEN 3/);
   expect(sql).toMatch(/interval '6 hours' THEN 2 ELSE 4 END/);
   // Stage 2 before stage 1 inside the tracking bucket, before the limit
   // truncates — the client's stage-first sort cannot rescue a row the 20-row
@@ -158,11 +159,12 @@ describe('feed age rules', () => {
     expect(chain.whereRaw).toHaveBeenCalledWith("type NOT LIKE 'geofence\\_%'");
   });
 
-  test('storm nudges keep their 6-hour cap', async () => {
+  test('storm nudges and weather advisories keep their 6-hour cap', async () => {
     await run();
     expect(db.mock.results.length).toBeGreaterThan(0);
     const chain = db.mock.results[db.mock.results.length - 1].value;
     expect(chain.whereNot).toHaveBeenCalledWith({ type: 'storm_watch_alert' });
+    expect(chain.whereNot).toHaveBeenCalledWith({ type: 'weather_safety_advisory' });
     expect(chain.orWhereRaw).toHaveBeenCalledWith("created_at >= now() - interval '6 hours'");
   });
 });

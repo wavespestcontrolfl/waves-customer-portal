@@ -2417,7 +2417,7 @@ function cachePolicyDimensions(makeRoomOffer) {
     mode,
     featureGates.multiTechConfirmLive?.() ? 'multi_tech:on' : 'multi_tech:off',
     isEnabled('geoSlotRanking') ? 'geo_rank:on' : 'geo_rank:off',
-    isEnabled('customerRainRank') ? 'rain_rank:on' : 'rain_rank:off',
+    featureGates.gateEnvValue?.('GATE_CUSTOMER_RAIN_RANK') ? 'rain_rank:on' : 'rain_rank:off',
     featureGates.visitHoldLive?.() ? 'visit_hold:on' : 'visit_hold:off',
   ];
   if (capacityEnabled()) dims.push(`grace:${selfServeArrivalGraceMinutes()}`);

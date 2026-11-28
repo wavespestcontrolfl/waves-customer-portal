@@ -11,7 +11,7 @@
  * Rule: an ordinary optimization may not move a visit BACK onto a date that
  * auto-dispatch moved it off of (`reschedule_log.original_date` with the
  * auto-dispatch day-move signature) within the last `config.bounceCooldownDays`
- * days (7 in flex mode; 0 turns it off).
+ * days (30 in flex mode; 0 turns it off).
  *
  * Exemptions (never blocked):
  *   - conflict moves (closed day, customer blackout, overlap, mowing day,

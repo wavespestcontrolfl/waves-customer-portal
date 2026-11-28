@@ -129,8 +129,13 @@ const TECHNICIAN_ALLOW_LIST = [
   // Own timesheet. The timesheet dispute and own mileage are not on the list
   // (owner 2026-11-04, D5 A): the dispute router is admin-only and no
   // technician screen offers it, and no technician mileage route exists.
+  // Admin timetracking is narrowed to the exact 3 technician-reachable routes
+  // (dashboard own-status feed, roster read, and own photo upload) so future
+  // routes added under /api/admin/timetracking fail closed for technicians.
   { bucket: 'own-time', methods: ANY, pattern: /^\/api\/tech\/timetracking(\/.*)?$/ },
-  { bucket: 'own-time', methods: ANY, pattern: /^\/api\/admin\/timetracking(\/.*)?$/ },
+  { bucket: 'own-time', methods: READ, pattern: /^\/api\/admin\/timetracking$/ },
+  { bucket: 'own-time', methods: READ, pattern: /^\/api\/admin\/timetracking\/technicians$/ },
+  { bucket: 'own-time', methods: ['POST'], pattern: /^\/api\/admin\/timetracking\/technicians\/[^/]+\/photo$/ },
 
   // Texts with customers on their own visits: admin-communications scopes a
   // technician's inbox, sends, drafts and read-marks to customers on their

@@ -106,11 +106,14 @@ describe('sensitive SPA document headers', () => {
     expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
   });
 
-  test('recognizes only full careers interview 64-hex token document paths', () => {
+  test('matches every path the interview route opens, and no other (parity with offer)', () => {
     expect(isCareersInterviewPath(`/careers/interview/${'a'.repeat(64)}`)).toBe(true);
     expect(isCareersInterviewPath(`/careers/interview/${'a'.repeat(64)}/`)).toBe(true);
-    expect(isCareersInterviewPath(`/careers/interview/${'A'.repeat(64)}`)).toBe(false);
-    expect(isCareersInterviewPath('/careers/interview/not-a-token')).toBe(false);
+    expect(isCareersInterviewPath(`/Careers/Interview/${'A'.repeat(64)}//`)).toBe(true);
+    expect(isCareersInterviewPath(`/careers/%69nterview/${'a'.repeat(64)}`)).toBe(true);
+    expect(isCareersInterviewPath('/careers/interview/not-a-token')).toBe(true);
+    expect(isCareersInterviewPath('/careers/interview/')).toBe(false);
+    expect(isCareersInterviewPath('/careers/interview/a/b')).toBe(false);
     expect(isCareersInterviewPath('/careers')).toBe(false);
   });
 

@@ -555,6 +555,55 @@ describe('RecruitingPage — the same person\'s other records (same phone number
     await screen.findByRole('heading', { name: 'Jordan Lee — Technician' });
     expect(screen.queryByText('Same phone number')).not.toBeInTheDocument();
   });
+
+  it('ignores a late rescreen or contact-save response after closing or switching applicants', async () => {
+    let resolveRescreen;
+    let resolveContact;
+    const base = fetchWithTwoRecords();
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      if (url.endsWith('/admin/careers/app-1/rescreen') && options.method === 'POST') {
+        return new Promise((resolve) => { resolveRescreen = resolve; });
+      }
+      if (url.endsWith('/admin/careers/app-1/contact') && options.method === 'PATCH') {
+        return new Promise((resolve) => { resolveContact = resolve; });
+      }
+      return base(url, options);
+    }));
+
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Lee'));
+    await screen.findByRole('heading', { name: 'Jordan Lee — Technician' });
+
+    // Start AI re-screen, then switch to applicant 2 before it settles.
+    fireEvent.click(screen.getByRole('button', { name: 'Run AI screen' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open the New record of Jordan L' }));
+    expect(await screen.findByRole('heading', { name: 'Jordan L — Technician' })).toBeInTheDocument();
+
+    resolveRescreen(apiResponse({
+      application: detailFixture({ ai_score: 91, ai_recommendation: 'strong_fit' }),
+    }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Jordan L — Technician' })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('heading', { name: 'Jordan Lee — Technician' })).not.toBeInTheDocument();
+
+    // Open applicant 1, start contact save, close the dialog before it settles.
+    fireEvent.click(screen.getByRole('button', { name: 'Open the New record of Jordan Lee' }));
+    await screen.findByRole('heading', { name: 'Jordan Lee — Technician' });
+    fireEvent.click(screen.getByRole('button', { name: 'Edit contact' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save contact' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Jordan Lee — Technician' })).not.toBeInTheDocument();
+    });
+
+    resolveContact(apiResponse({
+      application: detailFixture({ contact_snapshot: { name: 'Jordan Lee Updated', phone: '9415551234', email: 'jordan@example.com' } }),
+    }));
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: /Jordan Lee/ })).not.toBeInTheDocument();
+    });
+  });
 });
 
 describe('inviteDelivered', () => {

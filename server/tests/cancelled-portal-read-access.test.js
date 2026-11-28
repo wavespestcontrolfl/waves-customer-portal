@@ -41,29 +41,46 @@ const authRouter = require('../routes/auth');
 let tables;
 const norm = (col) => String(col).replace(/^[a-z]+\./, '');
 function builder(table) {
-  const conds = [];
-  const b = {};
-  const rows = () => (tables[table] || []).filter((r) => conds.every((c) => c(r)));
-  b.where = (a, op, val) => {
-    // Grouped predicate (login admissibility OR-group) — pass-through; the
-    // JS-side sessionCustomerAdmitted filter still applies in the routes.
-    if (typeof a === 'function') return b;
-    if (typeof a === 'object') Object.entries(a).forEach(([k, v]) => conds.push((r) => String(r[norm(k)]) === String(v)));
-    else if (val === undefined) conds.push((r) => String(r[norm(a)]) === String(op));
-    else if (op === '>=') conds.push((r) => r[norm(a)] >= val);
-    else conds.push((r) => String(r[norm(a)]) === String(val));
-    return b;
+  const branches = [[]];
+  const pushAnd = (pred) => { branches[branches.length - 1].push(pred); };
+  const pushOr = (pred) => {
+    if (branches.length === 1 && branches[0].length === 0) branches[0].push(pred);
+    else branches.push([pred]);
   };
-  b.whereNull = (col) => { conds.push((r) => r[norm(col)] == null); return b; };
-  b.whereNotNull = (col) => { conds.push((r) => r[norm(col)] != null); return b; };
-  b.whereIn = (col, vals) => { conds.push((r) => vals.map(String).includes(String(r[norm(col)]))); return b; };
-  b.whereRaw = (sql, params) => {
-    if (/regexp_replace/.test(sql)) {
-      const like = String(params[0]).replace(/%/g, '');
-      conds.push((r) => String(r.phone || '').replace(/\D/g, '').endsWith(like));
+  const makePred = (a, op, val) => {
+    if (typeof a === 'function') {
+      const sub = builder(table);
+      a.call(sub, sub);
+      return (r) => sub._matches(r);
     }
-    return b;
+    if (typeof a === 'object') {
+      const entries = Object.entries(a);
+      return (r) => entries.every(([k, v]) => String(r[norm(k)]) === String(v));
+    }
+    if (val === undefined) return (r) => String(r[norm(a)]) === String(op);
+    if (op === '>=') return (r) => r[norm(a)] >= val;
+    return (r) => String(r[norm(a)]) === String(val);
   };
+  const makeRawPred = (sql, params = []) => {
+    const m = /regexp_replace\(COALESCE\(([a-z0-9_.]+)/i.exec(sql);
+    if (m) {
+      const col = norm(m[1]);
+      const like = String(params[0] || '').replace(/%/g, '');
+      return (r) => String(r[col] || '').replace(/\D/g, '').endsWith(like);
+    }
+    return () => true;
+  };
+  const b = {};
+  b._matches = (r) => branches.some((andGroup) => andGroup.every((c) => c(r)));
+  const rows = () => (tables[table] || []).filter((r) => b._matches(r));
+  b.where = (a, op, val) => { pushAnd(makePred(a, op, val)); return b; };
+  b.andWhere = b.where;
+  b.orWhere = (a, op, val) => { pushOr(makePred(a, op, val)); return b; };
+  b.whereNull = (col) => { pushAnd((r) => r[norm(col)] == null); return b; };
+  b.whereNotNull = (col) => { pushAnd((r) => r[norm(col)] != null); return b; };
+  b.whereIn = (col, vals) => { pushAnd((r) => vals.map(String).includes(String(r[norm(col)]))); return b; };
+  b.whereRaw = (sql, params) => { pushAnd(makeRawPred(sql, params)); return b; };
+  b.orWhereRaw = (sql, params) => { pushOr(makeRawPred(sql, params)); return b; };
   // Multi-key sort, applied over the filtered rows like SQL — NOT one
   // in-place sort per call (last key would win) and with a TOTAL comparator:
   // undefined/NULL sorts last on asc / first on desc (Postgres), so a
@@ -275,12 +292,24 @@ describe('cancelled customer — read allowance (gate on)', () => {
   // In-app account deletion (App Store 5.1.1(v)) is the one write besides
   // restart a cancelled customer keeps — the confirm dialog must not land on
   // a 401 (codex GH r5 P1).
-  test('DELETE /api/auth/account soft-deletes for the churned customer', async () => {
+  test('DELETE /api/auth/account soft-deletes for the churned customer and deactivates native push & live-activity tokens', async () => {
+    tables.push_subscriptions = [
+      { id: 'sub-1', customer_id: 'cust-churned', platform: 'ios', device_token: 'apns-tok-1', active: true, live_activity_start_token: 'la-tok-1', live_activity_os_major: 18 },
+      { id: 'sub-2', customer_id: 'cust-churned', platform: 'android', device_token: 'fcm-tok-1', active: true, live_activity_start_token: null, live_activity_os_major: null },
+      { id: 'sub-other', customer_id: 'cust-active', platform: 'ios', device_token: 'apns-other', active: true, live_activity_start_token: 'la-other', live_activity_os_major: 18 },
+    ];
     const res = await call('DELETE', '/api/auth/account', bearer('cust-churned'));
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     const row = tables.customers.find((c) => c.id === 'cust-churned');
     expect(row.deleted_at).not.toBeNull();
+    expect(tables.push_subscriptions.find((s) => s.id === 'sub-1')).toMatchObject({
+      active: false, live_activity_start_token: null, live_activity_os_major: null,
+    });
+    expect(tables.push_subscriptions.find((s) => s.id === 'sub-2')).toMatchObject({ active: false });
+    expect(tables.push_subscriptions.find((s) => s.id === 'sub-other')).toMatchObject({
+      active: true, live_activity_start_token: 'la-other',
+    });
   });
 
   test('DELETE /api/auth/account stays 401 for a deactivated (non-churned) row and with the gate off', async () => {

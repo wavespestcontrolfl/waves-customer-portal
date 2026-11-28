@@ -1880,6 +1880,51 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)",
         bindings: ['9415551234', '19415551234'],
       });
+
+      // Unsupported non-US / malformed phone formats are rejected with 400 before
+      // account creation so they can never attach to another customer via last-10 suffix.
+      whereRawCalls.length = 0;
+      const badPhoneRes = await createSelfBooking(confirmPayload(sig, {
+        new_customer: { lat: LAT, lng: LNG, phone: '+449415551234', first_name: 'Pat', last_name: 'Lee' },
+      }));
+      expect(badPhoneRes).toMatchObject({ ok: false, status: 400 });
+      expect(badPhoneRes.error).toMatch(/valid 10-digit US phone/i);
+      expect(whereRawCalls).toHaveLength(0);
+    });
+
+    test('ensureCustomerAccount with exactUsPhone: true uses exact US IN matching instead of LIKE suffix', async () => {
+      const { ensureCustomerAccount } = require('../routes/admin-customers');
+      const whereRawCalls = [];
+      const insertedAccounts = [];
+      const trx = jest.fn((table) => {
+        if (table === 'customers') {
+          const q = {
+            whereRaw: jest.fn((sql, bindings) => { whereRawCalls.push({ sql, bindings }); return q; }),
+            whereNull: jest.fn().mockReturnThis(),
+            orderBy: jest.fn().mockReturnThis(),
+            first: jest.fn().mockResolvedValue(null),
+          };
+          return q;
+        }
+        if (table === 'customer_accounts') {
+          return {
+            insert: jest.fn((row) => {
+              insertedAccounts.push(row);
+              return { returning: jest.fn().mockResolvedValue([{ id: 'acct-new', ...row }]) };
+            }),
+          };
+        }
+        throw new Error(`unexpected table ${table}`);
+      });
+      const res = await ensureCustomerAccount(trx, {
+        firstName: 'Pat', lastName: 'Lee', phone: '9415551234', email: null, exactUsPhone: true,
+      });
+      expect(res).toMatchObject({ accountId: 'acct-new', created: true });
+      expect(whereRawCalls).toContainEqual({
+        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)",
+        bindings: ['9415551234', '19415551234'],
+      });
+      expect(insertedAccounts).toHaveLength(1);
     });
 
     test('GET /api/booking/customer-lookup accepts +1 E.164 phone, matches property across shared-phone rows, and rejects non-US numbers', async () => {

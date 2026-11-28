@@ -387,19 +387,51 @@ describe('RelayConversation — explicit end after capture', () => {
   });
 
   describe('prompt caching', () => {
-    test('system blocks + tools are built once and carry a cache breakpoint', async () => {
+    test('system blocks + tools are built once and carry a shared cache breakpoint', async () => {
       process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
       try {
         const convo = new RelayConversation({ callSid: 'CAc', from: '+19415551234', send: jest.fn() });
         await convo._runLoop('first turn').catch(() => {});
         const first = convo._systemBlocks;
         expect(Array.isArray(first)).toBe(true);
+        expect(first).toHaveLength(1);
         expect(first[0].cache_control).toEqual({ type: 'ephemeral' });
         // The RENDERED clock block (the per-turn invalidator) is out; the prompt
         // RULE that tells her a clock exists stays.
         expect(first[0].text).not.toContain('<<<CLOCK DATA');
         await convo._runLoop('second turn').catch(() => {});
         expect(convo._systemBlocks).toBe(first); // same object — byte-identical prefix
+      } finally {
+        delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+      }
+    });
+
+    test('KNOWN CALLER rides a separate block so two callers share a byte-identical Block 0 prefix', async () => {
+      process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+      try {
+        const a = new RelayConversation({ callSid: 'CAc-a', from: '+19415551234', send: jest.fn() });
+        a._callerContext = { customer: { id: 'c-1' }, tier: 'full', block: 'KNOWN CALLER: Pat A' };
+        a._runModelRound = jest.fn().mockResolvedValue(null);
+        const b = new RelayConversation({ callSid: 'CAc-b', from: '+19415559999', send: jest.fn() });
+        b._callerContext = { customer: { id: 'c-2' }, tier: 'full', block: 'KNOWN CALLER: Sam B' };
+        b._runModelRound = jest.fn().mockResolvedValue(null);
+        await a._runLoop('hi');
+        await b._runLoop('hi');
+        expect(a._systemBlocks).toHaveLength(2);
+        expect(b._systemBlocks).toHaveLength(2);
+        expect(a._systemBlocks[0].text).toBe(b._systemBlocks[0].text);
+        expect(a._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral' });
+        expect(a._systemBlocks[0].text).not.toContain('KNOWN CALLER: Pat A');
+        expect(a._systemBlocks[1]).toEqual({
+          type: 'text',
+          text: 'KNOWN CALLER: Pat A',
+          cache_control: { type: 'ephemeral' },
+        });
+        expect(b._systemBlocks[1]).toEqual({
+          type: 'text',
+          text: 'KNOWN CALLER: Sam B',
+          cache_control: { type: 'ephemeral' },
+        });
       } finally {
         delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
       }

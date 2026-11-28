@@ -287,23 +287,25 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
     expect(nearbyRes.summary).not.toMatch(/No route near you/i);
   });
 
-  test('wrapper cache key separates arrival-grace and rain-rank policy settings', async () => {
-    const featureGates = require('../config/feature-gates');
+  test('wrapper cache key separates arrival-grace and live rain-rank policy settings', async () => {
     const prevGrace = process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
+    const prevRain = process.env.GATE_CUSTOMER_RAIN_RANK;
     try {
       process.env.GATE_SCHEDULING_CAPACITY = 'true';
       delete process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
-      featureGates.isEnabled.mockReturnValue(false);
+      delete process.env.GATE_CUSTOMER_RAIN_RANK;
       expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(false);
       expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
       process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = '45';
       expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(false);
-      featureGates.isEnabled.mockImplementation((flag) => flag === 'customerRainRank');
+      // GATE_CUSTOMER_RAIN_RANK is read at call time by slotRainTierOf; a live env flip must miss the cache.
+      process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
       expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(false);
     } finally {
-      featureGates.isEnabled.mockReturnValue(false);
       if (prevGrace === undefined) delete process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES;
       else process.env.SELF_SERVE_ARRIVAL_GRACE_MINUTES = prevGrace;
+      if (prevRain === undefined) delete process.env.GATE_CUSTOMER_RAIN_RANK;
+      else process.env.GATE_CUSTOMER_RAIN_RANK = prevRain;
     }
   });
 

@@ -26,14 +26,20 @@ const { phoneIdentityKey } = require('../utils/phone');
 const LEAD_RESPONSE_SLA_MINUTES = 30;
 
 // `database` is the knex instance the query came from (its .raw builds the
-// internal-name exclusion). Returns the query for chaining.
-function applyLeadsAwaitingContactFilter(query, database) {
+// internal-name exclusion). Optional `cutoff` overrides NOW() for callers
+// running against a fixed snapshot instant (e.g. EOD digest). Returns the
+// query for chaining.
+function applyLeadsAwaitingContactFilter(query, database, { cutoff = null } = {}) {
   query
     .where('status', 'new')
     .whereNull('deleted_at')
     .whereNull('response_time_minutes')
-    .whereNotNull('first_contact_at')
-    .whereRaw(`first_contact_at <= NOW() - INTERVAL '${LEAD_RESPONSE_SLA_MINUTES} minutes'`);
+    .whereNotNull('first_contact_at');
+  if (cutoff instanceof Date) {
+    query.where('first_contact_at', '<=', new Date(cutoff.getTime() - LEAD_RESPONSE_SLA_MINUTES * 60 * 1000));
+  } else {
+    query.whereRaw(`first_contact_at <= NOW() - INTERVAL '${LEAD_RESPONSE_SLA_MINUTES} minutes'`);
+  }
   if (SPEED_TO_LEAD_FRESH_START) {
     query.where('first_contact_at', '>=', SPEED_TO_LEAD_FRESH_START);
   }
@@ -75,5 +81,6 @@ module.exports = {
   LEAD_RESPONSE_SLA_MINUTES,
   applyLeadsAwaitingContactFilter,
   excludeInternalTestLeads,
+  waitingPersonKey,
   countWaitingPeople,
 };
