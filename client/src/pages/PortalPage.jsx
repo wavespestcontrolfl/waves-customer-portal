@@ -18916,6 +18916,25 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
 // on screen, unlocked and with no sheet open, before the app asks.
 const APP_RATING_ASK_DELAY_MS = 8000;
 
+function usePendingProfileState(customer) {
+  const customerId = customer?.id;
+  const activeIdRef = useRef(customerId);
+  activeIdRef.current = customerId;
+  const [state, setState] = useState({ ownerId: null, email: '', notice: '' });
+  const isOwner = state.ownerId === customerId;
+  const setEmail = useCallback((nextEmail) => {
+    const originId = customerId;
+    if (activeIdRef.current !== originId) return;
+    setState((prev) => ({ ownerId: originId, email: nextEmail, notice: prev.ownerId === originId ? prev.notice : '' }));
+  }, [customerId]);
+  const setNotice = useCallback((nextNotice) => {
+    const originId = customerId;
+    if (activeIdRef.current !== originId) return;
+    setState((prev) => ({ ownerId: originId, email: prev.ownerId === originId ? prev.email : '', notice: nextNotice }));
+  }, [customerId]);
+  return [isOwner ? state.email : '', setEmail, isOwner ? state.notice : '', setNotice];
+}
+
 export default function PortalPage() {
   const { customer, customerSaved = false, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
@@ -18991,6 +19010,7 @@ export default function PortalPage() {
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
   const [showMenu, setShowMenu] = useState(false);
+  const [pendingProfileEmail, setPendingProfileEmail, pendingProfileNotice, setPendingProfileNotice] = usePendingProfileState(customer);
   const accountMenuDialogRef = useModalFocus(showMenu, () => setShowMenu(false));
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
@@ -19573,7 +19593,14 @@ export default function PortalPage() {
                     </div>
                   </div>
                   {/* Edit own name and email (GATE_CUSTOMER_PROFILE_EDIT): /auth/me profileEdit is true only while the gate is on. */}
-                  <ProfileEditCard customer={customer} refreshCustomer={refreshCustomer} />
+                  <ProfileEditCard
+                    customer={customer}
+                    refreshCustomer={refreshCustomer}
+                    pendingEmail={pendingProfileEmail}
+                    onPendingEmailChange={setPendingProfileEmail}
+                    notice={pendingProfileNotice}
+                    onNoticeChange={setPendingProfileNotice}
+                  />
                 </div>
                 {propertiesError && (
                   <div role="alert" style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}`, background: '#FFF7ED' }}>
