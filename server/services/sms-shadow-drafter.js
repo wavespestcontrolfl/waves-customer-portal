@@ -35,7 +35,7 @@ const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection, renderSmsBankFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
 const portalCancelFact = require('./sms-portal-cancel-fact');
-const { namedDayMatcher } = require('./sms-open-times-intent');
+const { namedDayMatcherForThread } = require('./sms-open-times-intent');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
 const promptPatch = require('./sms-prompt-patch');
 const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
@@ -5960,25 +5960,26 @@ function sanitizeExemplarText(text) {
 // untrusted grounding text (property notes, call summaries, transcripts)
 // drops that line/entry — the drafter must never be handed repeatable
 // prohibited language.
-const SMS_COMPLIANCE_CLAIM_RE = /\b(?:pet|child|kid|family|people|human)s?[\s-]?safe\b|\bnon[\s-]?toxic\b|\bharmless\b|\bEPA[\s-]?(?:approved|certified)\b|\bsafe\s+(?:for|around|to)\b|\b(?:is|are|was|were|be|being|been|it'?s|they'?re|stays?|remains?|totally|completely|perfectly|very|100%)\s+safe\b|\b(?:treatment|product|chemical|spray|application)s?\b[^.\n]{0,25}\bsafe\b|\bre-?entry\b[^.\n]{0,30}\d+\s*(?:min|minute|hour)|\bdry(?:ing)?\s*time\b[^.\n]{0,20}\d+|\b(?:dry|dries|dried|drying)\b[^.\n]{0,25}\b(?:in|after|within)\b[^.\n]{0,15}\d+\s*(?:min|minute|hour)/i;
-
-const EXEMPLAR_INJECTION_RE = /\b(ignore|disregard|forget|override)\b[^.]{0,40}\b(previous|prior|above|earlier|instruction|instructions|prompt|context|rule|rules)\b|system\s*prompt|you are now|\bact as\b|new instructions|```|<\/?[a-z][\w-]*>|\b(assistant|system|user)\s*:/i;
-function exemplarLooksClean(inbound, reply) {
-  return !EXEMPLAR_INJECTION_RE.test(inbound) && !EXEMPLAR_INJECTION_RE.test(reply);
-}
+const {
+  buildEligibleSmsExemplarQuery,
+  isCleanExemplar: exemplarLooksClean,
+  COMPLIANCE_CLAIM_RE: SMS_COMPLIANCE_CLAIM_RE,
+  PROMPT_CONTROL_RE: EXEMPLAR_INJECTION_RE,
+} = require('./voice-exemplar-retriever');
 
 /**
  * Pure: format mined human-reply exemplars into a few-shot block. Returns ''
  * when there are no usable rows (then the prompt is identical to v6). The
  * exemplar text is UNTRUSTED (customer/admin-authored): each field is
- * sanitized to a single capped line, exemplars that look like prompt-control
- * attempts are dropped, and the survivors are quoted and framed as DATA — never
- * instructions, never a fact source. Bracketed redaction placeholders must be
- * replaced with THIS customer's real details, never echoed.
+ * screened unclipped (both sides together for access codes, compliance claims,
+ * and prompt-control attempts), sanitized to a single capped line, and the
+ * survivors are quoted and framed as DATA — never instructions, never a fact
+ * source. Bracketed redaction placeholders must be replaced with THIS
+ * customer's real details, never echoed.
  */
 function formatExemplarBlock(exemplars) {
   const clean = (exemplars || [])
-    .filter((e) => e && e.inbound_text && e.reply_text)
+    .filter((e) => e && e.inbound_text && e.reply_text && exemplarLooksClean(e.inbound_text, e.reply_text))
     .map((e) => ({ inbound: sanitizeExemplarText(e.inbound_text), reply: sanitizeExemplarText(e.reply_text) }))
     .filter((e) => e.inbound && e.reply && exemplarLooksClean(e.inbound, e.reply));
   if (!clean.length) return '';
@@ -5997,52 +5998,20 @@ ${lines}`;
  * Fail-safe: any error (or the kill switch, or no intent) → [] so drafting is
  * never blocked on the corpus.
  */
-// Edit-learning exemplar ranking (owner 2026-10-24). All three facts are read at FETCH time from the live
-// tables, never stamped on the corpus row at mine time: the corpus is insert-ignore (a row never changes after it is
-// mined), a judgment lands days after the reply, and rows mined before the ranking went on would otherwise never rank.
-//   the reply's send resolved a suggestion decision: sms_log.metadata.agent_decision_id -> agent_decisions.id (the link
-//     both send paths stamp; the nightly judge and the corrections view join the same way). The uuid cast sits behind a
-//     shape check so one malformed metadata value cannot fail the query.
-//   edited   = that decision's human_verdict is 'corrected', or the send is a legacy 'ai_revised' draft-queue send.
-//   verbatim = human_verdict 'accepted': staff sent the suggestion unchanged, so the text is the drafter's own.
-//   judged   = shadow_draft_judgments.human_reply_sms_id = the corpus row's source_id (both sms_log ids) with verdict
-//     'human_better': the judge scored the human's reply above the draft for the same inbound.
-const LINKED_DECISION_VERDICT_SQL = (verdict) => `EXISTS (
-  SELECT 1 FROM sms_log sl JOIN agent_decisions ad
-    ON ad.id = CASE WHEN sl.metadata->>'agent_decision_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    THEN (sl.metadata->>'agent_decision_id')::uuid END
-   WHERE sl.id = voice_corpus_examples.source_id AND ad.human_verdict = '${verdict}')`;
-const EDITED_SUGGESTION_SQL = `(${LINKED_DECISION_VERDICT_SQL('corrected')}
-  OR EXISTS (SELECT 1 FROM sms_log sl WHERE sl.id = voice_corpus_examples.source_id AND sl.message_type = 'ai_revised'))`;
-const JUDGED_HUMAN_BETTER_SQL = `EXISTS (SELECT 1 FROM shadow_draft_judgments j
-   WHERE j.human_reply_sms_id = voice_corpus_examples.source_id AND j.verdict = 'human_better')`;
-const OUTCOME_RANK_SQL = `CASE WHEN ${EDITED_SUGGESTION_SQL} OR ${JUDGED_HUMAN_BETTER_SQL} THEN 0 ELSE 1 END`;
-
+// Edit-learning exemplar ranking (owner 2026-10-24) and sealed-exam holdout
+// live in voice-exemplar-retriever.js (`buildEligibleSmsExemplarQuery`) so
+// both this live SMS drafter and the full-corpus retriever enforce one shared
+// eligibility contract while preserving each caller's own ranking behavior.
 async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, excludeCustomerIds = [], throwOnError = false } = {}) {
   if (!FEWSHOT_ENABLED || !intent || limit <= 0) return [];
   try {
-    const query = dbi('voice_corpus_examples')
-      .where({ source: 'sms_human_reply', intent })
-      .whereNotNull('inbound_text')
-      .whereNotNull('reply_text')
-      .whereRaw("COALESCE(outcome->>'optedOut', 'false') <> 'true'")
-      .whereRaw("COALESCE(outcome->>'complaintWithin7d', 'false') <> 'true'")
-      // Sealed-exam holdout: human replies frozen into sms_sealed_eval_items
-      // are the exam's answer key. A drafter that sees one as a few-shot
-      // exemplar has studied from the exam — its sealed scores would inflate
-      // and the live/exam comparison would lie. Excluded EVERYWHERE (live,
-      // backfill, and exam paths share this fetch), not just during runs:
-      // "sealed" means never trained on, not merely not trained on today.
-      // (source_id for sms_human_reply rows IS the reply's sms_log id.)
-      .whereNotIn('source_id', dbi('sms_sealed_eval_items').select('human_reply_sms_id').whereNotNull('human_reply_sms_id'));
-    // Edit learning: never teach the drafter its own text (a suggestion sent unchanged), then edited-suggestion and
-    // human_better replies first, newest within each tier.
-    query
-      .whereRaw(`NOT ${LINKED_DECISION_VERDICT_SQL('accepted')}`)
-      .orderByRaw(`${OUTCOME_RANK_SQL} ASC, occurred_at DESC`);
-    query.limit(limit).select('inbound_text', 'reply_text');
-    if (excludeCustomerIds.length) query.whereNotIn('customer_id', excludeCustomerIds);
-    return await query;
+    const query = buildEligibleSmsExemplarQuery(dbi, {
+      intent,
+      filterByIntent: true,
+      excludeCustomerIds,
+      candidateLimit: limit,
+    });
+    return await query.select('inbound_text', 'reply_text');
   } catch (err) {
     if (throwOnError) throw err;
     logger.warn(`[sms-shadow] voice exemplar fetch failed (${intent}): ${err.message}`);
@@ -6384,9 +6353,13 @@ function openTimesWithheldReason({ timesAsked, missedVisitListed, missedRebook, 
 
 // What draftShadowReply stores from the OPEN TIMES outcome: the intended_actions key open_times_withheld ({} when times were shown
 // or never asked for). Empty for a frozen replay and with the real-answers gate off.
-function openTimesStampFor({ frozen, ...withheldInputs }) {
-  const withheld = frozen || !gateEnvValue('GATE_SMS_REAL_ANSWERS') ? null : openTimesWithheldReason(withheldInputs);
-  return withheld ? { open_times_withheld: withheld } : {};
+function openTimesStampFor({ frozen, threadCarryReason = null, ...withheldInputs }) {
+  if (frozen || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return {};
+  const withheld = openTimesWithheldReason(withheldInputs);
+  return {
+    ...(withheld ? { open_times_withheld: withheld } : {}),
+    ...(threadCarryReason ? { open_times_from_thread: threadCarryReason } : {}),
+  };
 }
 
 // B1: the free re-service booking page's own openings for a covered pest report that decides the reply. { block, days, offer } with
@@ -6501,10 +6474,23 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // A text linked to an estimate prices the estimate's service, so the missed visit's own times cannot be told apart from it: that draft
   // keeps today's hand-off (OPEN TIMES withheld for the whole reply).
   const missedRebook = missedVisitListed && smsPromptB1Live() && !estimateId;
-  const timesAsked = Boolean(schedulingIntent)
+  const openTimesIntent = require('./sms-open-times-intent');
+  const directTimesAsked = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
     || pestReportSignal(inboundMessage, context);
+  const threadFollowUp = openTimesIntent.resolveThreadSchedulingContext({
+    frozen: Boolean(presetFactsBlock),
+    liveOpenTimes,
+    directTimesAsked,
+    realAnswersOn: gateEnvValue('GATE_SMS_REAL_ANSWERS'),
+    continuityOn: require('../config/feature-gates').smsThreadContinuityLive(),
+    inboundMessage,
+    inboundPhone,
+    context,
+    asOf,
+  });
+  const timesAsked = threadFollowUp.timesAsked;
   const needsOpenTimes = missedRebook || (!missedVisitListed && timesAsked);
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
@@ -6530,9 +6516,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const identity = willFetchOpenTimes && !estimateId
-    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(inboundMessage, context, { openEstimate }))
+  const identityText = openTimesIntent.buildThreadIdentityInput(threadFollowUp, inboundMessage);
+  const rawIdentity = willFetchOpenTimes && !estimateId
+    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(identityText, context, { openEstimate }))
     : { serviceType: liveServiceType(context), certain: true };
+  const identity = openTimesIntent.disambiguateThreadIdentity(threadFollowUp, rawIdentity, context, openEstimate);
   const serviceType = identity.serviceType;
   const pricingEstimateId = estimateId || identity.estimateId || null;
   // An estimate pins the service itself; otherwise an uncertain identity
@@ -6560,7 +6548,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
-      schedulerOffer, namedDay: namedDayMatcher(inboundMessage),
+      schedulerOffer, namedDay: namedDayMatcherForThread(inboundMessage, threadFollowUp),
     });
   const openTimesFetch = { block: openTimesBlock, withheld: openTimesWithheldFetch };
   // B1: a covered pest report offers the free re-service booking page's own openings (a section of its own, never OPEN TIMES)
@@ -6572,6 +6560,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const openTimesStamp = openTimesStampFor({
     frozen: Boolean(presetFactsBlock), timesAsked, missedVisitListed, missedRebook, reserviceLaneDecides,
     reserviceOpeningsShown: Boolean(reserviceOpenings.block), willFetchOpenTimes, identityCertain, identityReason: identity.reason, fetched: openTimesFetch,
+    threadCarryReason: threadFollowUp.carryReason,
   });
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
   const reserviceBooked = reserviceState ? reserviceState.booked : {};
@@ -7035,6 +7024,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);
       return null;
     }
+    // Carried scheduling follow-ups inherit the same scheduling delivery safeguards
+    // and stored scheduling_intent flag as direct scheduling texts.
+    schedulingIntent = require('./sms-open-times-intent').effectiveSchedulingIntent(schedulingIntent, openTimesStamp);
 
     const intentName = intent?.intent || 'GENERAL';
     // factsForDraft is the EXACT block generateGroundedDraft drafted and

@@ -104,7 +104,6 @@ const LEGACY_BASELINE = {
   'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
   'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2 },
   'client/src/components/NotificationBell.jsx': { 'banned-font-size': 6 },
-  'client/src/components/PestPressureCard.jsx': { 'banned-font-size': 6 },
   'client/src/components/ServiceRecapModal.jsx': { 'emoji': 8 },
   'client/src/components/StationMapCard.jsx': { 'banned-font-size': 3 },
   'client/src/components/estimate/AppShowcaseCard.jsx': { 'banned-font-size': 2 },

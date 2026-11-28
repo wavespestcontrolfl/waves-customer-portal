@@ -114,6 +114,7 @@ const MAX_SLOT_HORIZON_DAYS = 90;
 // ---------- in-memory caches ----------
 
 const wrapperCache = new Map();      // key: `${estimateId}:${hourOfDay}` → { result, expiresAt }
+let wrapperCacheGeneration = 0;      // bumped on every invalidation so in-flight reads cannot refill stale occupancy
 const WRAPPER_TTL_MS = 5 * 60 * 1000;
 
 const geocodeCache = new Map();      // key: normalized address → { coords, expiresAt }
@@ -2162,6 +2163,31 @@ function signCustomerFacingSlots(slots, estimateId) {
   });
 }
 
+// Sign every distinct opening ONCE across `primary`, `expander`, and
+// `calendarSlots` so the same slot always carries the exact same signed
+// `slotId` across lists even across a millisecond tick (SchedulePicker joins
+// recommended chips to calendar slots by exact `slotId`).
+function signEstimateOfferLists({ primary, expander, calendarPool }, estimateId) {
+  const signedIdByBase = new Map();
+  const signList = (list) => (Array.isArray(list) ? list : []).map((slot) => {
+    const baseId = slot.slotId;
+    if (baseId && signedIdByBase.has(baseId)) {
+      const publicSlot = { ...slot, slotId: signedIdByBase.get(baseId) };
+      delete publicSlot.routeMode;
+      delete publicSlot.makeRoom;
+      return publicSlot;
+    }
+    const [signed] = signCustomerFacingSlots([slot], estimateId);
+    if (baseId) signedIdByBase.set(baseId, signed.slotId);
+    return signed;
+  });
+  return {
+    primary: signList(primary),
+    expander: signList(expander),
+    calendarSlots: signList(calendarPool),
+  };
+}
+
 function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes
     && (!capacityEnabled() || slot.stops_that_day > 0);
@@ -2373,9 +2399,46 @@ function startMakeRoomCheck(mode, args) {
   }
 }
 
+// Full chronological list of open slots for the estimate calendar grid (every
+// open day and hour in the window, plus any make-room offer). `primary` and
+// `expander` stay curated for the "Our best times" strip and legacy consumers.
+function buildCalendarSlots(pool, makeRoomSlot = null) {
+  const combined = makeRoomSlot ? [...(pool || []), makeRoomSlot] : [...(pool || [])];
+  return dedupeSlots(combined).sort(compareCustomerFacingSlots);
+}
+
+// Gate/policy dimensions included in the offer cache key so live flips never
+// serve stale offers built under different capacity/ranking/hold/make-room rules.
+function cachePolicyDimensions(makeRoomOffer) {
+  const mode = capacityEnabled()
+    ? 'capacity_v2'
+    : (featureGates.schedulingPlanMinutesOnly?.() ? 'plan_minutes' : 'legacy_capacity');
+  const dims = [
+    mode,
+    featureGates.multiTechConfirmLive?.() ? 'multi_tech:on' : 'multi_tech:off',
+    isEnabled('geoSlotRanking') ? 'geo_rank:on' : 'geo_rank:off',
+    featureGates.gateEnvValue?.('GATE_CUSTOMER_RAIN_RANK') ? 'rain_rank:on' : 'rain_rank:off',
+    featureGates.visitHoldLive?.() ? 'visit_hold:on' : 'visit_hold:off',
+  ];
+  if (capacityEnabled()) dims.push(`grace:${selfServeArrivalGraceMinutes()}`);
+  if (makeRoomOffer) {
+    dims.push(
+      featureGates.makeRoomEmptyHourLive?.() ? 'mr_empty:on' : 'mr_empty:off',
+      featureGates.makeRoomLaterDaysLive?.() ? 'mr_later:on' : 'mr_later:off',
+    );
+  }
+  return dims;
+}
+
+function canStoreInWrapperCache({ funnelDays, skipResultCache, bypassCache, routeDayPolicyKey, cacheGenerationAtStart }) {
+  return funnelDays == null && !skipResultCache && !bypassCache && routeDayPolicyKey != null
+    && wrapperCacheGeneration === cacheGenerationAtStart;
+}
+
 // ---------- main ----------
 
 async function getAvailableSlots(estimateId, userOpts = {}) {
+  const cacheGenerationAtStart = wrapperCacheGeneration;
   // Self-serve notice window (owner ruling 2026-09-23) is the live default
   // lead — read at call time so a SELF_SERVE_NOTICE_HOURS flip needs no
   // redeploy — overridable by an explicit userOpts.minimumLeadMinutes
@@ -2441,7 +2504,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     estimateId,
     `move-in:${moveInDate || 'none'}`,
     `route-days:${routeDayPolicyKey}`,
-    capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
+    ...cachePolicyDimensions(makeRoomOffer),
     // A flip of GATE_CUSTOMER_LAST_START_16 must not serve cached 17:00 offers.
     customerLastStart16Enabled() ? 'last_start_16' : 'last_start_17',
     // A flip of GATE_ESTIMATE_SLOT_ONE_PER_HOUR must not serve the other list shape.
@@ -2513,11 +2576,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // lead-time filter would drop nothing, serve the cache as-is. If it would
     // drop a stale same-day window, the capped cache can't backfill the next
     // bookable window from the full pool, so invalidate and recompute below.
-    const cachedPrimary = cached.result.primary || [];
-    const cachedExpander = cached.result.expander || [];
-    const primary = filterPastSlotsForToday(cachedPrimary, { minimumLeadMinutes: opts.minimumLeadMinutes });
-    const expander = filterPastSlotsForToday(cachedExpander, { minimumLeadMinutes: opts.minimumLeadMinutes });
-    if (primary.length === cachedPrimary.length && expander.length === cachedExpander.length) {
+    const cachedLists = [cached.result.primary, cached.result.expander, cached.result.calendarSlots].map((list) => list || []);
+    const [primary, expander, calendarSlots] = cachedLists.map((list) => filterPastSlotsForToday(list, { minimumLeadMinutes: opts.minimumLeadMinutes }));
+    if (primary.length === cachedLists[0].length && expander.length === cachedLists[1].length && calendarSlots.length === cachedLists[2].length) {
       // Gate-off must win over a cache entry written while the rain-chip
       // gate was on: the gate resolves at process start and this cache is
       // in-memory, so today the two can't actually disagree — but if the
@@ -2525,7 +2586,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // serving rainChance for up to 5 minutes of TTL (Codex 2026-07-20).
       // The key deliberately excludes gate state; strip on read instead.
       if (!isEnabled('bookingRainChips')
-        && [...primary, ...expander].some((s) => s.rainChance != null)) {
+        && [...primary, ...expander, ...calendarSlots].some((s) => s.rainChance != null)) {
         const strip = (slots) => slots.map((s) => {
           const copy = { ...s };
           delete copy.rainChance;
@@ -2535,6 +2596,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
           ...cached.result,
           primary: strip(primary),
           expander: strip(expander),
+          calendarSlots: strip(calendarSlots),
           metadata: { ...cached.result.metadata, cacheHit: true },
         };
       }
@@ -2654,12 +2716,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     );
     const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
+    const calendarPool = buildCalendarSlots(funneledBookable);
     const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
     stampSlotRainChances(primary, rainOutlook);
     stampSlotRainChances(expander, rainOutlook);
+    stampSlotRainChances(calendarPool, rainOutlook);
+    const signedLists = signEstimateOfferLists({ primary, expander, calendarPool }, estimateId);
     const fallback = {
-      primary: signCustomerFacingSlots(primary, estimateId),
-      expander: signCustomerFacingSlots(expander, estimateId),
+      ...signedLists,
       nearby: [...primary, ...expander].some((s) => s.routeOptimal),
       metadata: {
         // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -2669,6 +2733,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         // Funnel active → count the (time-filtered) days the customer can
         // see; inactive → the full bookable pool, exactly as before.
         firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : bookable),
+        dateFrom,
+        dateTo,
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
         includeWeekends: opts.includeWeekends,
@@ -2859,18 +2925,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // A make-room hour on a later day (GATE_MAKE_ROOM_LATER_DAYS) is placed by withMakeRoomSlot.
   const shown = makeRoomSlot ? withMakeRoomSlot(selected, makeRoomSlot, { pool: routeChecked, total: TARGET_TOTAL }) : selected;
   const { primary, expander } = splitSlotResults(shown, opts.maxResults, opts.expanderMaxResults);
+  const calendarPool = buildCalendarSlots(funneledBookable, makeRoomSlot);
 
   // Stamp rain BEFORE signing/caching (see stampSlotRainChances) so the
   // wrapper cache serves the decorated slots for its whole 5-min TTL.
   const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
   stampSlotRainChances(primary, rainOutlook);
   stampSlotRainChances(expander, rainOutlook);
+  stampSlotRainChances(calendarPool, rainOutlook);
 
+  const signedLists = signEstimateOfferLists({ primary, expander, calendarPool }, estimateId);
   const result = {
     // Signed at the edge; the 5-min wrapper cache stores the SIGNED result,
     // well inside the offer TTL (see slot-offer-token.js).
-    primary: signCustomerFacingSlots(primary, estimateId),
-    expander: signCustomerFacingSlots(expander, estimateId),
+    ...signedLists,
     nearby: [...primary, ...expander].some((s) => s.routeOptimal),
     metadata: {
       // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -2880,6 +2948,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // Funnel active → count the (time-filtered) days the customer can
       // see; inactive → the full bookable pool, exactly as before.
       firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : countedBookable),
+      dateFrom,
+      dateTo,
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,
@@ -2904,7 +2974,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // cluster-day slot stays invisible until TTL expiry. Funneled-zone
   // estimates are a small slice of traffic; recomputing beats versioning
   // the cache by schedule state. Non-funneled results keep today's caching.
-  if (funnelDays == null && !skipResultCache && !bypassCache && routeDayPolicyKey != null) {
+  if (canStoreInWrapperCache({ funnelDays, skipResultCache, bypassCache, routeDayPolicyKey, cacheGenerationAtStart })) {
     wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
   }
   return result;
@@ -2956,15 +3026,18 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
 
   const primary = result.primary || [];
   const expander = result.expander || [];
-  const nearby = result.nearby ?? [...primary, ...expander].some((s) => s.routeOptimal);
+  const calendarSlots = result.calendarSlots || [];
+  const allFound = calendarSlots.length ? calendarSlots : [...primary, ...expander];
+  const nearby = allFound.some((s) => s.routeOptimal);
   return {
-    summary: summarizeWindow(when, { count: primary.length + expander.length, nearby }),
+    summary: summarizeWindow(when, { count: allFound.length, nearby }),
     understood: when.understood,
     window: { date_from: when.dateFrom, date_to: when.dateTo },
     time_of_day: when.timeOfDay,
     nearby,
     primary,
     expander,
+    calendarSlots,
   };
 }
 
@@ -3094,6 +3167,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
 // estimate (across all hour buckets — the key shape is `${estimateId}:${hour}`).
 function invalidateEstimate(estimateId) {
   if (!estimateId) return 0;
+  wrapperCacheGeneration += 1;
   const prefix = `${estimateId}:`;
   let dropped = 0;
   for (const k of wrapperCache.keys()) {
@@ -3106,6 +3180,7 @@ function invalidateEstimate(estimateId) {
 // so EVERY estimate's cached slot list may now offer a wrong date. The cache
 // is small (5-min TTL) and recomputes lazily; correctness beats warmth.
 function invalidateAllEstimates() {
+  wrapperCacheGeneration += 1;
   const dropped = wrapperCache.size;
   wrapperCache.clear();
   return dropped;
@@ -3171,7 +3246,7 @@ module.exports = {
     applyLineOfferRule,
     lineOfferRankingFor,
     heldVisitLines,
-    clearCaches() { wrapperCache.clear(); geocodeCache.clear(); require('./scheduling/expected-service-minutes').clearExpectedServiceMinutesCache(); },
+    clearCaches() { wrapperCacheGeneration += 1; wrapperCache.clear(); geocodeCache.clear(); require('./scheduling/expected-service-minutes').clearExpectedServiceMinutesCache(); },
     stopDatesInRange,
     makeRoomAdmit,
     makeRoomPlacement,

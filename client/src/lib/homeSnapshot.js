@@ -203,8 +203,23 @@ export function readHomeSnapshot(token) {
 
 // ---- Saved home reads -----------------------------------------------------
 
-const VISIT_FIELDS = ['id', 'serviceType', 'type', 'date', 'windowStart', 'day_only', 'arrival_note'];
-const pickVisit = (visit) => (visit && typeof visit === 'object' ? pick(visit, VISIT_FIELDS) : null);
+const VISIT_FIELDS = ['id', 'serviceType', 'type', 'date', 'windowStart', 'day_only', 'arrival_note', 'customerPickBy'];
+const pickVisit = (visit) => {
+  if (!visit || typeof visit !== 'object') return null;
+  const shaped = pick(visit, VISIT_FIELDS);
+  if (!shaped.windowStart && !Object.prototype.hasOwnProperty.call(shaped, 'customerPickBy')) {
+    shaped.customerPickBy = null;
+  }
+  return shaped;
+};
+
+const isLegacyWindowlessNextVisit = (key, data) => (
+  key === 'next-visit'
+  && !!data?.next
+  && !data.next.windowStart
+  && !data.next.day_only
+  && !Object.prototype.hasOwnProperty.call(data.next, 'customerPickBy')
+);
 
 // The saved card prints a visit's name, day and arrival window and nothing
 // else, so that is all a read keeps: no report or calendar links, no amounts.
@@ -229,7 +244,7 @@ export function readHomeReads(identity, property) {
   for (const key of SAVED_READ_KEYS) {
     const read = entry.reads[key];
     const age = read ? Date.now() - Number(read.updatedAt) : NaN;
-    if (read && read.data !== undefined && age >= -CLOCK_SKEW_MS && age <= HOME_STORE_MAX_AGE_MS) {
+    if (read && read.data !== undefined && !isLegacyWindowlessNextVisit(key, read.data) && age >= -CLOCK_SKEW_MS && age <= HOME_STORE_MAX_AGE_MS) {
       out[key] = { data: read.data, updatedAt: Number(read.updatedAt) };
     }
   }

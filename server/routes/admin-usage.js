@@ -59,8 +59,11 @@ const RELOAD_BLOCKERS = new Set([
   'first-page', 'reload-missed', 'admin-index', 'waves-admin', 'field-page', 'current',
   'never-heard', 'offline', 'no-signal', 'storage', 'reloaded', 'stalled', 'saving', 'request',
   // Holds (registerReloadHold, holdReloadWhileSending).
-  'ask-draft', 'bank-import', 'bank-link', 'card-payment', 'dictation', 'email-draft',
-  'estimate-send', 'misting-layout', 'photo-assessment', 'push-setup', 'recap-upload',
+  'ask-draft', 'bank-import', 'bank-link', 'card-on-file-charge', 'card-payment',
+  'cash-tender', 'check-tender', 'checkout-invoice-mint', 'dictation', 'email-draft',
+  'estimate-send', 'in-person-card-handoff', 'invoice-send', 'mark-prepaid',
+  'misting-layout', 'photo-assessment', 'prepay-switch', 'prepay-switch-abort',
+  'prepay-switch-collecting', 'prepay-switch-confirm', 'push-setup', 'recap-upload',
   'schedule-notice', 'tap-to-pay', 'text-attachment', 'text-draft', 'time-clock',
   'visit-step', 'visual-note', 'zone-map',
 ]);
@@ -94,7 +97,7 @@ const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // route table by the drift test in admin-usage-routes.test.js, which parses
 // App.jsx — when you add an admin route, that test tells you to add it here.
 const KNOWN_PAGE_KEYS = new Set([
-  'ads', 'agent-decisions', 'agent-estimate', 'agents', 'auto-dispatch',
+  'accounting', 'ads', 'agent-decisions', 'agent-estimate', 'agents', 'auto-dispatch',
   'banking', 'bid-desk', 'bid-kit', 'bids', 'billing-recovery', 'blog', 'call-recordings', 'communications',
   'compliance', 'content-engine', 'content-registry', 'contracts',
   'credentials', 'customers', 'dashboard', 'data-hygiene', 'design-system',
