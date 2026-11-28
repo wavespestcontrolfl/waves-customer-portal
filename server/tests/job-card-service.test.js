@@ -4129,6 +4129,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     });
     const meritCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc12', dbh: meritDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
     expect(meritCalc.amount).toBeNull();
+    expect(meritCalc.reason).toBe('Dose by plant size — follow the protocol dose below; no tank amount');
     expect(meritCalc.warnings.join(' ')).toContain('Soil drench, FlowZone soil injector: 0.1 to 0.2 fl oz per inch of trunk diameter');
     expect(meritCalc.warnings.join(' ')).toContain('Trees 15 inches across or more have separate borer directions on the label.');
 
@@ -4590,6 +4591,29 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     failedPinDbWrap.raw = pinnedVisitDb.raw;
     const failedPinPick = await jobCard.mixForProduct('oil', 110, { serviceId: 'svc30', equipmentSystemId: 'sys-1', dbh: failedPinDbWrap, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
     expect(failedPinPick.tank.source).toBeNull();
+
+    // Two booked services sharing the same dilution and exact spray volume still split when their carrier bounds differ.
+    const diffBoundsProtocols = {
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{ visit: 1, month: 'Any', primary: 'Acelepryn Insecticide 0.1 fl oz/gal', mixRates: [{ product: 'Acelepryn Insecticide', where: 'Perimeter', perGallon: { amount: 0.1, unit: 'fl oz' }, epa: '100-1489' }] }],
+      },
+      tree_shrub: {
+        name: 'Tree & Shrub Care',
+        visits: [{ visit: 3, month: 'Mar', primary: 'Acelepryn Insecticide 0.1 fl oz/gal; at most 2 gal of mix per 1,000 sq ft', mixRates: [{ product: 'Acelepryn Insecticide', where: 'Foliar', perGallon: { amount: 0.1, unit: 'fl oz' }, limit: 'At most 2 gal of mix per 1,000 sq ft.', epa: '100-1489' }] }],
+      },
+    };
+    const diffBoundsDb = dbFor({
+      scheduled_services: [{ id: 'svc35', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', assigned_equipment_system_id: 'sys-hi', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [ace],
+      product_aliases: [],
+      equipment_calibrations: highRig,
+      equipment_systems: [{ id: 'sys-hi', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }],
+      scheduled_service_addons: [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }],
+    });
+    const diffBoundsCalc = await jobCard.mixForProduct('ace', 100, { serviceId: 'svc35', dbh: diffBoundsDb, deps: { buildPlan: jest.fn(), protocols: diffBoundsProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(diffBoundsCalc.serviceAmounts).toHaveLength(2);
+    expect(diffBoundsCalc.warnings.join(' ')).toContain('Tree & Shrub Care: Truck Rig #1 sprays 5 gal per 1,000 sq ft, above the label maximum of 2 gal per 1,000 sq ft.');
 
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],

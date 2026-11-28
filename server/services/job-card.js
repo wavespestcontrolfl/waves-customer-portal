@@ -2985,7 +2985,7 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     ].filter(Boolean);
     const cond = line.conditional ? { conditional: true } : {};
     if (!used || line.directDoseOnly) {
-      return { service: line.name, amount: null, unit: null, fromCard: false, warnings: line.directDoseOnly ? [DIRECT_DOSE_NO_TANK, ...warning] : warning, ...cond };
+      return { service: line.name, amount: null, unit: null, fromCard: false, warnings: line.directDoseOnly ? [directDoseReason(line), ...warning] : warning, ...cond };
     }
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier, tankOverrides: band ? line.tankOverrides : [] });
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000, basis, tankTableOverride } = dose;
@@ -3004,8 +3004,18 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
 // The checks that used to withhold a searched product's dose, in the old guard order, as warning text (owner 2026-11-26:
 // warned, never blocked). A chemical-group repeat is not here: it rides as rotationWarnings (owner 2026-10-09).
 const AREA_ADDON_NO_TANK = 'Area add-on — apply the label rate on the card over the area sold; no tank amount';
-const DIRECT_DOSE_NO_TANK = 'Apply directly — see protocol dose below; no tank amount';
+const DIRECT_DOSE_NO_TANK = 'No tank amount — follow the protocol dose below';
+const PLANT_SIZE_DOSE_NO_TANK = 'Dose by plant size — follow the protocol dose below; no tank amount';
+const PLANT_SIZE_DOSE_RE = /\b(?:per inch of trunk|per foot of (?:shrub )?height|per plant|per palm)\b/i;
 const NOT_TANK_MIX = 'Not a tank mix — apply as labeled';
+
+function directDoseReason(protocolLine) {
+  const notes = [
+    ...(Array.isArray(protocolLine?.doseUseNotes) ? protocolLine.doseUseNotes : []),
+    ...((protocolLine?.conflictLines || []).flatMap((line) => line.doseUseNotes || [])),
+  ].join(' ');
+  return PLANT_SIZE_DOSE_RE.test(notes) ? PLANT_SIZE_DOSE_NO_TANK : DIRECT_DOSE_NO_TANK;
+}
 
 function isDirectDoseOnlyLine(protocolLine) {
   if (!protocolLine) return false;
@@ -3015,7 +3025,7 @@ function isDirectDoseOnlyLine(protocolLine) {
 }
 
 function noTankDoseResult(protocolLine, governedRate, rateUnit) {
-  const reason = protocolLine?.governed ? AREA_ADDON_NO_TANK : (isDirectDoseOnlyLine(protocolLine) ? DIRECT_DOSE_NO_TANK : NOT_TANK_MIX);
+  const reason = protocolLine?.governed ? AREA_ADDON_NO_TANK : (isDirectDoseOnlyLine(protocolLine) ? directDoseReason(protocolLine) : NOT_TANK_MIX);
   const labelWarnings = !protocolLine?.conflictLines && Array.isArray(protocolLine?.rowLabelWarnings) ? protocolLine.rowLabelWarnings : [];
   const useNotes = protocolLine?.conflictLines?.length
     ? protocolLine.conflictLines.flatMap((line) => (line.doseUseNotes || []).map((w) => `${line.name}: ${w}`))
@@ -3275,9 +3285,15 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // or the exact volume from the specific mix row / line prose.
   const statedVolumeOf = (hit, mixRows = [], useSpecific = false) => (useSpecific ? null : statedLabelVolume(hit.raw))
     || sprayVolumeBoundsForRows(mixRows, useSpecific ? null : hit).exact;
+  const boundsOf = (h) => {
+    const boundLine = h.useSpecific ? null : h.hit;
+    const specs = sprayVolumeBoundsForRows(h.mixRows, boundLine);
+    const { areaCap = null } = areaCapForRows(h.mixRows, boundLine);
+    return { min: specs.min, max: specs.max, areaCap };
+  };
   // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
   // narrowed by the label band, as before.
-  const conflictLinesOf = (list) => (servicesConflict(list, { rateOf, statedVolumeOf }) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {});
+  const conflictLinesOf = (list) => (servicesConflict(list, { rateOf, statedVolumeOf, boundsOf }) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {});
   const lineOf = (h) => {
     const { hit, mixRows: rows, doseUseNotes } = h;
     const boundLine = h.useSpecific ? null : hit;
@@ -3357,18 +3373,19 @@ function protocolBand(label, protocolLine) {
 // (owner 2026-11-26). Only a card that states its own tank rate or spray volume, or a line with a condition, can disagree:
 // other products' lines keep the first card's rate narrowed by the label band. Two services that differ only in their
 // conditions (neither states a rate, both fall back to the catalog dose) still keep each condition: a row each.
-function servicesConflict(list, { rateOf, statedVolumeOf }) {
+function servicesConflict(list, { rateOf, statedVolumeOf, boundsOf }) {
   if (list.length < 2) return false;
   const rates = new Set(list.map((h) => JSON.stringify(rateOf(h))));
   const mixed = list.some((h) => h.hit.selected === false) && list.some((h) => h.hit.selected !== false);
   const volumes = new Set(list.map((h) => statedVolumeOf(h.hit, h.mixRows, h.useSpecific) || h.hit.labelCarrierGalPer1000 || 0));
+  const boundsDiffer = boundsOf ? new Set(list.map((h) => JSON.stringify(boundsOf(h)))).size > 1 : false;
   // Several "if needed" services that differ in target or restriction keep one row each, even at one concentration.
   const conditionalUses = list.filter((h) => h.hit.selected === false);
   const usesDiffer = conditionalUses.length > 1 && new Set(conditionalUses.map((h) => String(h.hit.raw || '').replace(/\s+/g, ' ').trim())).size > 1;
   const directMixDiffers = list.some((h) => h.directDoseOnly) && list.some((h) => !h.directDoseOnly);
   const conditionsDiffer = mixed || usesDiffer || directMixDiffers;
   const statesRate = list.some((h) => h.hit.labelUseRate || h.hit.declaredRate || rateOf(h));
-  return (rates.size > 1 || conditionsDiffer || volumes.size > 1) && (statesRate || conditionsDiffer);
+  return (rates.size > 1 || conditionsDiffer || volumes.size > 1 || boundsDiffer) && (statesRate || conditionsDiffer || boundsDiffer);
 }
 
 // The per-area limit a line states for ONE spray ("no more than 0.37 fl oz per 1,000 sq ft in one spray"), or {}.

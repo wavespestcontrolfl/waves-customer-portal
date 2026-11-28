@@ -114,6 +114,7 @@ beforeEach(() => {
   protocols.lawn.st_augustine.visits = [visit];
   db.mockImplementation((table) => {
     if (table === 'equipment_calibrations as ec') return calibrationQuery();
+    if (table === 'equipment_systems') return readQuery([{ id: 'sys-1', system_type: 'tank', tank_capacity_gal: 110, system_name: 'Truck #1' }]);
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery(CATALOG.flatMap((product) => (
       product.aliases.map((alias_name) => ({ product_id: product.id, alias_name }))
@@ -567,6 +568,15 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
       { assigned_equipment_system_id: 'tank-sys-1', assigned_calibration_id: 'tank-old-superseded', technician_id: 'tech-a' },
     );
     expect(await getBackpackCalibration(truckPin.calibration, truckPin.calibrationScope)).toEqual(otherFlowZone);
+
+    // A system-only FlowZone assignment with no eligible calibration also suppresses other-backpack fallback.
+    const fzSystemOnly = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'bp-sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(fzSystemOnly.calibration).toBeNull();
+    expect(fzSystemOnly.calibrationScope.unresolvedRigId).toBe('bp-sys-1');
+    expect(await getBackpackCalibration(fzSystemOnly.calibration, fzSystemOnly.calibrationScope)).toBeNull();
   });
 
   test('an unresolved calibration-only pin skips the alternate 110-gal tank fallback even when two tanks have different outputs', async () => {

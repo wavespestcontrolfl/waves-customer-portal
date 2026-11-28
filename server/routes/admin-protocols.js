@@ -799,7 +799,12 @@ async function loadSheetCalibration(req, scheduled) {
   const techScope = sheetTechnicianScope(req, scheduled, pickedRigId);
   const calibration = await getActiveCalibration(rigId, { calibrationId, ...techScope });
   const unresolvedPinRigId = calibrationId && !calibration ? (rigId || '__unknown__') : null;
-  const calibrationScope = { ...techScope, ...(unresolvedPinRigId ? { unresolvedPinRigId } : {}) };
+  const unresolvedRigId = !calibration && (rigId || calibrationId) ? (rigId || '__unknown__') : null;
+  const calibrationScope = {
+    ...techScope,
+    ...(unresolvedPinRigId ? { unresolvedPinRigId } : {}),
+    ...(unresolvedRigId ? { unresolvedRigId } : {}),
+  };
   return { rigId, calibration, calibrationScope };
 }
 
@@ -852,7 +857,8 @@ async function isFlowZoneSystem(equipmentSystemId) {
 
 async function getBackpackCalibration(selected, scope = {}) {
   if (selected && isFlowZone4Gal(selected)) return selected;
-  if (scope.unresolvedPinRigId && await isFlowZoneSystem(scope.unresolvedPinRigId)) return null;
+  const blockedRigId = scope.unresolvedRigId || scope.unresolvedPinRigId || null;
+  if (blockedRigId && await isFlowZoneSystem(blockedRigId)) return null;
   const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
