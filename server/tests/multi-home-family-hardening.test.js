@@ -182,12 +182,19 @@ describe('Decision 2: office review alert when Same-Family drops below 2 active 
   const SURVIVOR = '33333333-3333-4333-8333-333333333333';
   const DEPARTED = '44444444-4444-4444-8444-444444444444';
 
-  function makeAlertConn({ member, familyMembersRows = [], upcomingDiscountedCount = 2, captureWhereIn = null }) {
+  function makeAlertConn({ member, familyMembersRows = [], upcomingDiscountedCount = 2, captureWhereIn = null, captureWhere = null }) {
     const conn = (table) => {
       const q = {
         join() { return q; },
-        where(arg) { if (typeof arg === 'function') arg(q); return q; },
-        orWhere() { return q; },
+        where(arg, val) {
+          if (typeof arg === 'function') arg(q);
+          else if (captureWhere) captureWhere.push({ table, col: arg, val });
+          return q;
+        },
+        orWhere(arg, val) {
+          if (captureWhere) captureWhere.push({ table, op: 'orWhere', col: arg, val });
+          return q;
+        },
         orWhereExists() { return q; },
         whereIn(col, vals) { if (captureWhereIn) captureWhereIn.push({ table, col, vals }); return q; },
         whereNotIn() { return q; },
@@ -273,8 +280,9 @@ describe('Decision 2: office review alert when Same-Family drops below 2 active 
     expect(mockRaiseAdminAlert).not.toHaveBeenCalled();
   });
 
-  test('includes rescheduled visits and checks departing active home when includeDeparted=true (unlink)', async () => {
+  test('includes rescheduled visits (exempt from scheduled_date cutoff) and checks departing active home when includeDeparted=true (unlink)', async () => {
     const captureWhereIn = [];
+    const captureWhere = [];
     const conn = makeAlertConn({
       member: {
         id: DEPARTED, first_name: 'Sam', last_name: 'Sample', company_name: null,
@@ -283,6 +291,7 @@ describe('Decision 2: office review alert when Same-Family drops below 2 active 
       familyMembersRows: [],
       upcomingDiscountedCount: 1,
       captureWhereIn,
+      captureWhere,
     });
     const alerted = await Family.alertFamilyDropBelowTwo(conn, {
       formerMemberIds: [DEPARTED],
@@ -292,7 +301,8 @@ describe('Decision 2: office review alert when Same-Family drops below 2 active 
     });
     expect(alerted).toBe(1);
     const statusFilter = captureWhereIn.find((c) => c.table === 'scheduled_services' && c.col === 'status');
-    expect(statusFilter?.vals).toEqual(expect.arrayContaining(['pending', 'confirmed', 'rescheduled']));
+    expect(statusFilter?.vals).toEqual(['pending', 'confirmed']);
+    expect(captureWhere).toContainEqual({ table: 'scheduled_services', op: 'orWhere', col: 'status', val: 'rescheduled' });
   });
 });
 

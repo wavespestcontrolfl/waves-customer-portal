@@ -327,8 +327,12 @@ async function countUpcomingMultiHomeDiscountedVisits(conn, customerId) {
   if (!preset?.id) return 0;
   const row = await conn('scheduled_services')
     .where({ customer_id: customerId })
-    .where('scheduled_date', '>=', today)
-    .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+    .where((q) => {
+      q.where((upcoming) => {
+        upcoming.where('scheduled_date', '>=', today)
+          .whereIn('status', ['pending', 'confirmed']);
+      }).orWhere('status', 'rescheduled');
+    })
     .where((q) => {
       q.where('discount_id', preset.id)
         .orWhere('line_discount_id', preset.id)
