@@ -767,13 +767,15 @@ async function loadBookedInvoiceState(conn, invoiceId) {
 }
 
 async function reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx) {
-  if (!inv.annual_prepay_covered_term_id || !inv.scheduled_service_id) return true;
+  if (!inv.annual_prepay_covered_term_id || !inv.scheduled_service_id) {
+    return { ok: true, reversed: false };
+  }
   const visitJe = await trx('gl_journal_entries')
     .where({ source_type: 'unearned_recognition', source_id: `covered-visit:${inv.scheduled_service_id}`, status: 'posted' })
     .whereNull('reversed_by_entry_id')
     .first('id', 'reversed_by_entry_id', trx.raw('entry_date::text as entry_date'));
-  if (!visitJe) return true;
-  return reverseOrPreview(
+  if (!visitJe) return { ok: true, reversed: false };
+  const ok = await reverseOrPreview(
     visitJe,
     adjDate || dateCellText(visitJe.entry_date),
     `Superseded by covered invoice ${inv.invoice_number || inv.id}`,
@@ -781,6 +783,7 @@ async function reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx) {
     'invoices',
     { connOverride: trx },
   );
+  return { ok, reversed: ok };
 }
 
 async function syncRefundedInvoiceDepositRestore(trx, inv, prepayInvoiceIds, prepayTermByInvoiceId, ctx) {
@@ -805,18 +808,36 @@ async function syncSingleInvoiceRow(inv, prepayInvoiceIds, prepayTermByInvoiceId
 
   const reconcile = async (trx) => {
     const { bookedByCode, totalEntryCount } = await loadBookedInvoiceState(trx, inv.id);
-    if (!(await reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx))) return;
 
     if (totalEntryCount === 0) {
       if (!desired) return;
+      // Post/preview the replacement invoice FIRST so a failure (e.g. PERIOD_LOCKED) never
+      // commits an orphaned visit-recognition reversal; roll back if supersession reversal fails.
       const posted = await postOrPreview(desired, ctx, 'invoices', { connOverride: trx });
       if (!posted) return;
-    } else if (adjDate) {
-      const adjEntry = buildInvoiceDeltaEntry(inv, desired ? desired.lines : [], bookedByCode, adjDate, totalEntryCount);
-      if (!adjEntry) {
-        ctx.stats.invoices.skipped += 1;
-      } else {
-        await postOrPreview(adjEntry, ctx, 'invoices', { isAdjustment: true, connOverride: trx });
+      const revVisit = await reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx);
+      if (!revVisit.ok) {
+        if (ctx.dryRun) {
+          ctx.stats.invoices.would_post = Math.max(0, ctx.stats.invoices.would_post - 1);
+          if (desired.idempotencyKey) ctx.caches.seenPreviewKeys.delete(desired.idempotencyKey);
+        } else {
+          ctx.stats.invoices.posted = Math.max(0, ctx.stats.invoices.posted - 1);
+          const rollbackErr = new Error('ABORT_VISIT_SUPERSESSION');
+          rollbackErr.code = 'ABORT_VISIT_SUPERSESSION';
+          throw rollbackErr;
+        }
+        return;
+      }
+    } else {
+      const revVisit = await reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx);
+      if (!revVisit.ok) return;
+      if (adjDate) {
+        const adjEntry = buildInvoiceDeltaEntry(inv, desired ? desired.lines : [], bookedByCode, adjDate, totalEntryCount);
+        if (!adjEntry) {
+          ctx.stats.invoices.skipped += 1;
+        } else {
+          await postOrPreview(adjEntry, ctx, 'invoices', { isAdjustment: true, connOverride: trx });
+        }
       }
     }
 
@@ -826,7 +847,11 @@ async function syncSingleInvoiceRow(inv, prepayInvoiceIds, prepayTermByInvoiceId
   if (ctx.dryRun) {
     await reconcile(ctx.conn);
   } else {
-    await withEntitySyncLock(ctx.conn, `gl-sync-invoice:${inv.id}`, reconcile);
+    try {
+      await withEntitySyncLock(ctx.conn, `gl-sync-invoice:${inv.id}`, reconcile);
+    } catch (err) {
+      if (err?.code !== 'ABORT_VISIT_SUPERSESSION') throw err;
+    }
   }
 }
 
@@ -1040,10 +1065,11 @@ async function hasCoveredInvoiceForVisit(trx, visitId) {
 }
 
 /**
- * Pure: determine whether an annual-prepay term still holds valid paid coverage for
- * completed visits. End-at-term renewal cancellations (status = 'cancelled' with
- * cancel_disposition = 'end_at_term' or legacy renewal_decision = 'cancel') retain
- * paid coverage through term end unless the prepay invoice itself was voided/refunded.
+ * Pure: determine whether an annual-prepay term holds valid paid coverage for recognizing
+ * a completed prepaid visit. Both end-at-term and end-now-refund cancelled terms retain
+ * earned revenue for visits that actually completed while the prepay invoice was paid
+ * (partial end-now cancellations refund only remaining unused visits); only unpaid, voided,
+ * or fully-refunded prepay terms are excluded from new recognition.
  */
 function isPrepayTermCoverageValid(term, prepayInv = null) {
   const status = String(term?.status || '').trim().toLowerCase();
@@ -1052,10 +1078,6 @@ function isPrepayTermCoverageValid(term, prepayInv = null) {
   if (invStatus && ['void', 'cancelled', 'canceled', 'refunded'].includes(invStatus)) return false;
 
   if (status === 'cancelled' || status === 'canceled') {
-    const disp = term.cancel_disposition == null ? null : String(term.cancel_disposition).trim().toLowerCase();
-    const dec = term.renewal_decision == null ? null : String(term.renewal_decision).trim().toLowerCase();
-    const isEndAtTerm = disp === 'end_at_term' || (disp === null && dec === 'cancel');
-    if (!isEndAtTerm) return false;
     if (prepayInv) {
       return ['paid', 'prepaid'].includes(invStatus) || prepayInv.paid_at != null;
     }
@@ -1064,73 +1086,58 @@ function isPrepayTermCoverageValid(term, prepayInv = null) {
   return true;
 }
 
-function whereEndAtTermCancelled(q, { hasCancelDisp, hasRenewalDec }) {
-  q.whereIn('apt.status', ['cancelled', 'canceled']);
-  if (hasCancelDisp && hasRenewalDec) {
-    q.where((disp) => {
-      disp.where('apt.cancel_disposition', 'end_at_term')
-        .orWhere((legacy) => legacy.whereNull('apt.cancel_disposition').where('apt.renewal_decision', 'cancel'));
-    });
-  } else if (hasCancelDisp) {
-    q.where('apt.cancel_disposition', 'end_at_term');
-  } else if (hasRenewalDec) {
-    q.where('apt.renewal_decision', 'cancel');
-  } else {
-    q.whereRaw('1 = 0');
+/**
+ * Pure: determine whether an already-posted completed visit recognition should be reversed
+ * because the prepay term/invoice was voided or never paid. Never reverses consumed visits
+ * on paid cancelled terms (end_at_term or partial end_now_refund) or fully-refunded invoices
+ * (where computePrepayRefundUnearnedCents already offsets earned revenue via 4090).
+ */
+function isPrepayTermRevokedForPostedVisit(term, prepayInv = null) {
+  const status = String(term?.status || '').trim().toLowerCase();
+  if (!status || status === 'void' || status === 'payment_pending') return true;
+  const invStatus = prepayInv ? String(prepayInv.status || '').trim().toLowerCase() : null;
+  if (invStatus && ['void', 'cancelled', 'canceled'].includes(invStatus)) return true;
+
+  if (status === 'cancelled' || status === 'canceled') {
+    if (prepayInv && !['paid', 'prepaid', 'refunded'].includes(invStatus) && prepayInv.paid_at == null) {
+      return true;
+    }
   }
-  q.where((paid) => {
-    paid.whereNull('apt.prepay_invoice_id')
-      .orWhereIn('prepay_inv.status', ['paid', 'prepaid'])
-      .orWhereNotNull('prepay_inv.paid_at');
-  });
+  return false;
 }
 
-function wherePrepayTermEligible(q, caps) {
+function wherePaidCancelledPrepayTerm(q) {
+  q.whereIn('apt.status', ['cancelled', 'canceled'])
+    .where((paid) => {
+      paid.whereNull('apt.prepay_invoice_id')
+        .orWhereIn('prepay_inv.status', ['paid', 'prepaid'])
+        .orWhereNotNull('prepay_inv.paid_at');
+    });
+}
+
+function wherePrepayTermEligible(q) {
   q.where((st) => {
     st.whereNotIn('apt.status', EXCLUDED_PREPAY_TERM_STATUSES)
-      .orWhere((endAtTerm) => whereEndAtTermCancelled(endAtTerm, caps));
+      .orWhere(wherePaidCancelledPrepayTerm);
   }).where((inv) => {
     inv.whereNull('apt.prepay_invoice_id')
       .orWhereRaw("LOWER(COALESCE(prepay_inv.status, 'paid')) NOT IN ('void', 'cancelled', 'canceled', 'refunded')");
   });
 }
 
-function whereCancelledTermRevoked(q, { hasCancelDisp, hasRenewalDec }) {
-  q.whereIn('apt.status', ['cancelled', 'canceled']);
-  const addUnpaidBranch = (sub) => {
-    sub.orWhere((unpaid) => {
-      unpaid.whereNotNull('apt.prepay_invoice_id')
-        .whereRaw("LOWER(COALESCE(prepay_inv.status, '')) NOT IN ('paid', 'prepaid')")
-        .whereNull('prepay_inv.paid_at');
-    });
-  };
-  if (hasCancelDisp && hasRenewalDec) {
-    q.where((notEndAtTerm) => {
-      notEndAtTerm.whereRaw("apt.cancel_disposition IS NOT NULL AND apt.cancel_disposition <> 'end_at_term'")
-        .orWhere((noDisp) => noDisp.whereNull('apt.cancel_disposition').whereRaw("COALESCE(apt.renewal_decision, '') <> 'cancel'"));
-      addUnpaidBranch(notEndAtTerm);
-    });
-  } else if (hasCancelDisp) {
-    q.where((notEndAtTerm) => {
-      notEndAtTerm.whereRaw("COALESCE(apt.cancel_disposition, '') <> 'end_at_term'");
-      addUnpaidBranch(notEndAtTerm);
-    });
-  } else if (hasRenewalDec) {
-    q.where((notEndAtTerm) => {
-      notEndAtTerm.whereRaw("COALESCE(apt.renewal_decision, '') <> 'cancel'");
-      addUnpaidBranch(notEndAtTerm);
-    });
-  }
-}
-
-function wherePrepayTermRevoked(q, caps) {
+function wherePrepayTermRevoked(q) {
   q.whereNull('apt.id')
-    .orWhere((invRevoked) => {
-      invRevoked.whereNotNull('apt.prepay_invoice_id')
-        .whereRaw("LOWER(COALESCE(prepay_inv.status, '')) IN ('void', 'cancelled', 'canceled', 'refunded')");
+    .orWhere((invVoided) => {
+      invVoided.whereNotNull('apt.prepay_invoice_id')
+        .whereRaw("LOWER(COALESCE(prepay_inv.status, '')) IN ('void', 'cancelled', 'canceled')");
     })
     .orWhereIn('apt.status', ['void', 'payment_pending'])
-    .orWhere((cancelled) => whereCancelledTermRevoked(cancelled, caps));
+    .orWhere((unpaidCancelled) => {
+      unpaidCancelled.whereIn('apt.status', ['cancelled', 'canceled'])
+        .whereNotNull('apt.prepay_invoice_id')
+        .whereRaw("LOWER(COALESCE(prepay_inv.status, '')) NOT IN ('paid', 'prepaid', 'refunded')")
+        .whereNull('prepay_inv.paid_at');
+    });
 }
 
 async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
@@ -1142,19 +1149,13 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
     return;
   }
 
-  const [hasCancelDisp, hasRenewalDec] = await Promise.all([
-    hasSchemaColumn(conn, 'annual_prepay_terms', 'cancel_disposition'),
-    hasSchemaColumn(conn, 'annual_prepay_terms', 'renewal_decision'),
-  ]);
-  const termCaps = { hasCancelDisp, hasRenewalDec };
-
   const visits = await conn('scheduled_services as ss')
     .join('annual_prepay_terms as apt', 'apt.id', 'ss.annual_prepay_term_id')
     .leftJoin('invoices as prepay_inv', 'prepay_inv.id', 'apt.prepay_invoice_id')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.status', 'completed')
     .whereNotNull('ss.annual_prepay_term_id')
-    .where((eligible) => wherePrepayTermEligible(eligible, termCaps))
+    .where(wherePrepayTermEligible)
     .where((win) => {
       win.whereRaw(
         "COALESCE(DATE(ss.completed_at AT TIME ZONE 'America/New_York'), ss.scheduled_date) BETWEEN ?::date AND ?::date",
@@ -1223,8 +1224,8 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
     }
   }
 
-  // Reverse any visit-level recognition whose visit was un-completed/canceled or whose term coverage was truly revoked
-  // (preserving earned revenue on end-at-term renewal cancellations whose paid coverage remained valid).
+  // Reverse any visit-level recognition whose visit was un-completed/canceled or whose prepay term/invoice
+  // was voided or never paid (retaining earned revenue for completed visits on paid cancelled terms).
   const revokedVisits = await conn('gl_journal_entries as e')
     .join('scheduled_services as ss', conn.raw("e.source_type = 'unearned_recognition' AND e.source_id = 'covered-visit:' || ss.id::text"))
     .leftJoin('annual_prepay_terms as apt', 'apt.id', 'ss.annual_prepay_term_id')
@@ -1234,7 +1235,7 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
     .where((sub) => {
       sub.where('ss.status', '<>', 'completed')
         .orWhereNull('ss.annual_prepay_term_id')
-        .orWhere((revoked) => wherePrepayTermRevoked(revoked, termCaps));
+        .orWhere(wherePrepayTermRevoked);
     })
     .where((win) => {
       win.whereBetween('e.entry_date', [from, to])
@@ -1359,19 +1360,61 @@ async function loadStatementChildInvoices(conn, statementIds) {
   return byStatement;
 }
 
+/**
+ * Pure: detect invoice-less legacy monthly-autopay dues payments (stripe.chargeMonthly)
+ * that collect a customer's monthly_rate without generating an invoice row.
+ */
+function isInvoiceLessMonthlyDuesPayment(pay, linkedInv, fallbackInvId = null) {
+  if (linkedInv || fallbackInvId || pay?.statement_id != null) return false;
+  const meta = parseJsonObject(pay?.metadata);
+  const type = String(meta.type || '').trim().toLowerCase();
+  if (type === 'monthly_autopay') return true;
+  return /waveguard\s+monthly/i.test(String(pay?.description || ''));
+}
+
+function resolveMonthlyDuesPeriod(pay, paymentDate, lockedMonths = null) {
+  const meta = parseJsonObject(pay?.metadata);
+  const rawMonth = String(meta.billed_month || '').trim();
+  const billedMonth = rawMonth.length === 7 && validDateOnly(`${rawMonth}-01`)
+    ? rawMonth
+    : paymentDate.slice(0, 7);
+  if (billedMonth === paymentDate.slice(0, 7)) {
+    return { billedMonth, accrualDate: paymentDate };
+  }
+  if (lockedMonths && lockedMonths.has(billedMonth)) {
+    return { billedMonth, accrualDate: paymentDate };
+  }
+  return { billedMonth, accrualDate: `${billedMonth}-01` };
+}
+
+function extractFallbackInvoiceUuid(meta, auditMarker) {
+  if (UUID_RE.test(String(meta.invoice_id || ''))) return meta.invoice_id;
+  if (UUID_RE.test(String(auditMarker?.invoiceId || ''))) return auditMarker.invoiceId;
+  return null;
+}
+
+function isCommercialPayment(pay, linkedInv, meta, isMonthlyDues) {
+  if (isCommercialProperty(linkedInv?.property_type || pay.property_type)) return true;
+  if (!isMonthlyDues) return false;
+  return /\bcommercial\b/i.test(String(meta.tier || pay.description || ''));
+}
+
 function resolvePaymentContext(pay, linkedInv, auditMarker, statementInvoicesByStmt) {
   const meta = parseJsonObject(pay.metadata);
   const method = resolvePaymentMethod(pay, linkedInv, auditMarker);
-  const isDeposit = !linkedInv && !pay.statement_id && /deposit/i.test(String(meta.type || meta.source || ''));
-  const isCommercial = isCommercialProperty(linkedInv?.property_type || pay.property_type);
-  const serviceLine = isCommercial ? 'commercial' : (linkedInv?.service_type || null);
-  const fallbackInvId = UUID_RE.test(String(meta.invoice_id || ''))
-    ? meta.invoice_id
-    : (UUID_RE.test(String(auditMarker?.invoiceId || '')) ? auditMarker.invoiceId : null);
+  const fallbackInvId = extractFallbackInvoiceUuid(meta, auditMarker);
+  const unbilled = !linkedInv && !fallbackInvId && pay.statement_id == null;
+  const isDeposit = unbilled && /deposit/i.test(String(meta.type || meta.source || ''));
+  const isMonthlyDues = !isDeposit && isInvoiceLessMonthlyDuesPayment(pay, linkedInv, fallbackInvId);
+  const isCommercial = isCommercialPayment(pay, linkedInv, meta, isMonthlyDues);
+  const defaultLine = isMonthlyDues ? 'pest' : null;
+  const serviceLine = isCommercial ? 'commercial' : (linkedInv?.service_type || defaultLine);
   const stmtChildren = pay.statement_id != null ? statementInvoicesByStmt.get(String(pay.statement_id)) : null;
   return {
     method,
     isDeposit,
+    isMonthlyDues,
+    isCommercial,
     serviceLine,
     invoiceId: linkedInv?.id || fallbackInvId,
     stmtChildren,
@@ -1424,6 +1467,22 @@ async function syncSinglePaymentRow(pay, invoiceMaps, auditMarkers, statementInv
     ? allocateStatementPrincipalAcrossInvoices(principalCents, pCtx.stmtChildren)
     : null;
 
+  const duesPeriod = pCtx.isMonthlyDues
+    ? resolveMonthlyDuesPeriod(pay, paymentDate, ctx.caches.lockedMonths)
+    : null;
+  const duesAccrualEntry = pCtx.isMonthlyDues && principalCents > 0
+    ? rules.buildMonthlyDuesAccrualEntry({
+      paymentId: pay.id,
+      accrualDate: duesPeriod.accrualDate,
+      billedMonth: duesPeriod.billedMonth,
+      amountCents: principalCents,
+      serviceLine: pCtx.serviceLine || 'pest',
+      isCommercial: pCtx.isCommercial,
+      customerId: pay.customer_id,
+      memo: pay.description ? String(pay.description).slice(0, 300) : null,
+    })
+    : null;
+
   const entry = rules.buildPaymentEntry({
     paymentId: pay.id,
     paymentDate,
@@ -1432,7 +1491,7 @@ async function syncSinglePaymentRow(pay, invoiceMaps, auditMarkers, statementInv
     surchargeCents,
     method: pCtx.method,
     isDeposit: pCtx.isDeposit,
-    invoiceId: arAllocations ? null : pCtx.invoiceId,
+    invoiceId: arAllocations ? null : (duesAccrualEntry ? duesAccrualEntry.idempotencyKey : pCtx.invoiceId),
     arAllocations,
     customerId: pay.customer_id,
     serviceLine: pCtx.serviceLine,
@@ -1441,6 +1500,13 @@ async function syncSinglePaymentRow(pay, invoiceMaps, auditMarkers, statementInv
 
   // Reconcile any prior Stripe gap receipt atomically so a late payments row never duplicates or orphans it.
   const applyPayment = async (trx) => {
+    let postedDuesAccrual = false;
+    if (duesAccrualEntry) {
+      const errBefore = ctx.stats.payments.errors.length;
+      postedDuesAccrual = await postOrPreview(duesAccrualEntry, ctx, 'payments', { connOverride: trx });
+      if (ctx.stats.payments.errors.length > errBefore) return;
+    }
+
     const priorGap = await findSupersedingGapEntry(trx, pay, pCtx.invoiceId);
     let reversedGap = false;
     if (priorGap) {
@@ -1458,9 +1524,12 @@ async function syncSinglePaymentRow(pay, invoiceMaps, auditMarkers, statementInv
       );
       if (!reversedGap) return;
     }
+    const payErrBefore = ctx.stats.payments.errors.length;
     const posted = await postOrPreview(entry, ctx, 'payments', { connOverride: trx });
-    if (reversedGap && !posted && !ctx.dryRun) {
-      ctx.stats.payments.reversed = Math.max(0, ctx.stats.payments.reversed - 1);
+    const payErrored = ctx.stats.payments.errors.length > payErrBefore;
+    if ((reversedGap || (postedDuesAccrual && payErrored)) && !posted && !ctx.dryRun) {
+      if (reversedGap) ctx.stats.payments.reversed = Math.max(0, ctx.stats.payments.reversed - 1);
+      if (postedDuesAccrual) ctx.stats.payments.posted = Math.max(0, ctx.stats.payments.posted - 1);
       const rollbackErr = new Error('ABORT_GAP_REPLACEMENT');
       rollbackErr.code = 'ABORT_GAP_REPLACEMENT';
       throw rollbackErr;
@@ -1483,7 +1552,7 @@ async function syncSinglePaymentRow(pay, invoiceMaps, auditMarkers, statementInv
 
 async function reconcileCanceledPayments(conn, from, to, ctx) {
   const canceled = await conn('gl_journal_entries as e')
-    .join('payments as p', conn.raw("e.idempotency_key = 'payment:' || p.id::text"))
+    .join('payments as p', conn.raw("e.idempotency_key IN ('payment:' || p.id::text, 'monthly-dues:' || p.id::text)"))
     .where('e.status', 'posted')
     .whereNull('e.reversed_by_entry_id')
     .whereIn('p.status', ['canceled', 'cancelled'])
@@ -1525,6 +1594,16 @@ async function reconcileCanceledPayments(conn, from, to, ctx) {
 
 async function syncPayments(conn, from, to, ctx) {
   if (!(await conn.schema.hasTable('payments'))) return;
+  const hasDescriptionCol = await hasSchemaColumn(conn, 'payments', 'description');
+  const selectCols = [
+    'p.id', 'p.customer_id', 'p.amount', 'p.base_amount_cents', 'p.surcharge_amount_cents',
+    'p.status', 'p.processor', 'p.payment_method_type',
+    'p.stripe_payment_intent_id', 'p.stripe_charge_id', 'p.statement_id', 'p.payer_id',
+    'p.metadata', conn.raw('p.payment_date::text as payment_date'), 'p.created_at',
+    'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
+  ];
+  if (hasDescriptionCol) selectCols.push('p.description');
+
   const rows = await conn('payments as p')
     .leftJoin('customers as c', 'c.id', 'p.customer_id')
     .whereIn('p.status', ['paid', 'refunded', 'disputed'])
@@ -1533,13 +1612,7 @@ async function syncPayments(conn, from, to, ctx) {
       "COALESCE(p.payment_date, DATE(p.created_at AT TIME ZONE 'America/New_York')) BETWEEN ?::date AND ?::date",
       [from, to],
     )
-    .select(
-      'p.id', 'p.customer_id', 'p.amount', 'p.base_amount_cents', 'p.surcharge_amount_cents',
-      'p.status', 'p.processor', 'p.payment_method_type',
-      'p.stripe_payment_intent_id', 'p.stripe_charge_id', 'p.statement_id', 'p.payer_id',
-      'p.metadata', conn.raw('p.payment_date::text as payment_date'), 'p.created_at',
-      'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
-    );
+    .select(...selectCols);
 
   const nonTestRows = rows.filter((r) => !isTestCustomerRow(r));
   const manualIds = nonTestRows
@@ -4064,6 +4137,9 @@ module.exports = {
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
   isPrepayTermCoverageValid,
+  isPrepayTermRevokedForPostedVisit,
+  isInvoiceLessMonthlyDuesPayment,
+  resolveMonthlyDuesPeriod,
   computeGapReceiptAmounts,
   isDisputeOutflow,
   isInvoiceLinkedCreditRow,

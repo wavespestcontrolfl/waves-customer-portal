@@ -180,6 +180,43 @@ function buildUnearnedRecognitionEntry({
   };
 }
 
+/**
+ * 2b. Invoice-less Monthly Autopay Dues Accrual (legacy WaveGuard Monthly charges that
+ *     collect recurring monthly_rate without generating an invoice row). Accrues A/R and
+ *     service revenue keyed to the obligation month so the companion payment clears A/R to $0
+ *     and both accrual and cash-basis P&L reflect the exact earned revenue.
+ */
+function buildMonthlyDuesAccrualEntry({
+  paymentId,
+  accrualDate,
+  billedMonth = null,
+  amountCents,
+  serviceLine = 'pest',
+  isCommercial = false,
+  customerId = null,
+  memo = null,
+}) {
+  const amt = posInt(amountCents, 'amountCents');
+  if (amt <= 0) throw new AccountingError(400, 'Monthly dues amountCents must be > 0');
+  const duesRef = `monthly-dues:${paymentId}`;
+  const revCode = revenueAccountCodeFor(serviceLine, isCommercial);
+  const meta = { customerId, serviceLine, invoiceRef: duesRef };
+  return {
+    entryDate: accrualDate,
+    entryType: 'operational',
+    basisScope: 'accrual_only',
+    sourceType: 'monthly_dues',
+    sourceId: String(paymentId),
+    idempotencyKey: duesRef,
+    reference: billedMonth ? `dues:${billedMonth}` : String(paymentId),
+    memo: memo || `Monthly membership dues${billedMonth ? ` (${billedMonth})` : ''}`,
+    lines: [
+      { accountCode: SYSTEM_CODES.ACCOUNTS_RECEIVABLE, debitCents: amt, creditCents: 0, ...meta },
+      { accountCode: revCode, debitCents: 0, creditCents: amt, ...meta },
+    ],
+  };
+}
+
 function cashAccountForPaymentMethod(methodKey) {
   if (methodKey === 'zelle' || methodKey === 'ach_direct') return SYSTEM_CODES.CHECKING_PRIMARY;
   if (methodKey === 'check' || methodKey === 'cash') return SYSTEM_CODES.UNDEPOSITED_FUNDS;
@@ -1269,6 +1306,7 @@ module.exports = {
   revenueAccountCodeFor,
   buildInvoiceEntry,
   buildUnearnedRecognitionEntry,
+  buildMonthlyDuesAccrualEntry,
   buildPaymentEntry,
   buildStripeFeeEntry,
   buildRefundEntry,

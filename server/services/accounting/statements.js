@@ -265,13 +265,103 @@ function computeBalanceSheet(accounts, sumsByAccount, { asOf } = {}) {
   };
 }
 
+function allocateProportionalAdjustment(accountDeltas, totalAdjustmentCents, targetMap) {
+  const entries = [...accountDeltas.entries()].filter(([, d]) => d !== 0);
+  if (!entries.length || totalAdjustmentCents === 0) return;
+  const weightSum = entries.reduce((s, [, d]) => s + Math.abs(d), 0);
+  if (weightSum <= 0) return;
+
+  let remaining = totalAdjustmentCents;
+  for (let i = 0; i < entries.length; i += 1) {
+    const [accountId, delta] = entries[i];
+    const part = i === entries.length - 1
+      ? remaining
+      : Math.round((totalAdjustmentCents * Math.abs(delta)) / weightSum);
+    remaining -= part;
+    if (part !== 0) {
+      targetMap.set(accountId, (targetMap.get(accountId) || 0) + part);
+    }
+  }
+}
+
+function accumulateNonCashEntryLine(rec, acct, row) {
+  if (!acct) return;
+  if (INCOME_STATEMENT_TYPES.has(acct.account_type)) {
+    rec.hasIncomeLine = true;
+    return;
+  }
+  const signed = sectionSignedBalanceCents(acct, row.debit_cents, row.credit_cents);
+  if (signed === 0) return;
+  if (acct.account_type === 'asset' && acct.sub_type === 'fixed_asset') {
+    rec.fixedByAcct.set(acct.id, (rec.fixedByAcct.get(acct.id) || 0) + signed);
+    rec.fixedTotal += signed;
+  } else if (acct.account_type === 'liability' || acct.account_type === 'equity') {
+    rec.counterpartByAcct.set(acct.id, (rec.counterpartByAcct.get(acct.id) || 0) + signed);
+    rec.counterpartTotal += signed;
+  }
+}
+
+/**
+ * Pure: identify noncash investing/financing offsets (e.g. DR Vehicles / CR Loans Payable,
+ * owner-contributed fixed assets, or partially financed equipment purchases) from entry-level
+ * journal lines so ASC 230 investing and financing cash flows reflect actual cash movement only.
+ */
+function computeNonCashInvestingFinancingAdjustments(accounts, fixedAssetEntryLines) {
+  const adjustmentsByAccountId = new Map();
+  const disclosures = [];
+  if (!Array.isArray(fixedAssetEntryLines) || !fixedAssetEntryLines.length) {
+    return { adjustmentsByAccountId, disclosures };
+  }
+
+  const acctById = new Map(accounts.map((a) => [a.id, a]));
+  const byEntry = new Map();
+  for (const row of fixedAssetEntryLines) {
+    const key = String(row.entry_id);
+    let rec = byEntry.get(key);
+    if (!rec) {
+      rec = {
+        entry_id: row.entry_id,
+        entry_date: dateCellText(row.entry_date),
+        memo: row.memo || null,
+        hasIncomeLine: false,
+        fixedByAcct: new Map(),
+        counterpartByAcct: new Map(),
+        fixedTotal: 0,
+        counterpartTotal: 0,
+      };
+      byEntry.set(key, rec);
+    }
+    accumulateNonCashEntryLine(rec, acctById.get(row.account_id), row);
+  }
+
+  for (const rec of byEntry.values()) {
+    if (rec.hasIncomeLine || rec.fixedTotal === 0 || rec.counterpartTotal === 0) continue;
+    if (Math.sign(rec.fixedTotal) !== Math.sign(rec.counterpartTotal)) continue;
+    const offset = Math.sign(rec.fixedTotal) * Math.min(Math.abs(rec.fixedTotal), Math.abs(rec.counterpartTotal));
+    if (offset === 0) continue;
+
+    allocateProportionalAdjustment(rec.fixedByAcct, -offset, adjustmentsByAccountId);
+    allocateProportionalAdjustment(rec.counterpartByAcct, -offset, adjustmentsByAccountId);
+    disclosures.push({
+      entry_id: rec.entry_id,
+      entry_date: rec.entry_date,
+      memo: rec.memo,
+      amount_cents: Math.abs(offset),
+    });
+  }
+
+  return { adjustmentsByAccountId, disclosures };
+}
+
 /**
  * Pure: Indirect Statement of Cash Flows over [from, to].
- * Reconciles Net Income -> Operating -> Investing -> Financing -> Ending Cash.
+ * Reconciles Net Income -> Operating -> Investing -> Financing -> Ending Cash,
+ * excluding noncash financed/contributed fixed-asset acquisitions per ASC 230.
  */
-function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to } = {}) {
+function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to, nonCashEntries = [] } = {}) {
   const pnl = computeProfitAndLoss(accounts, periodSums, { from, to, basis: 'accrual' });
   const netIncomeCents = pnl.totals.net_income_cents;
+  const { adjustmentsByAccountId, disclosures } = computeNonCashInvestingFinancingAdjustments(accounts, nonCashEntries);
 
   let beginningCashCents = 0;
   let periodCashChangeCents = 0;
@@ -283,12 +373,13 @@ function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to 
   for (const acct of accounts) {
     const pSum = periodSums.get(acct.id);
     const oSum = openingSums.get(acct.id);
-    const delta = pSum ? sectionSignedBalanceCents(acct, pSum.debitCents, pSum.creditCents) : 0;
+    const rawDelta = pSum ? sectionSignedBalanceCents(acct, pSum.debitCents, pSum.creditCents) : 0;
+    const delta = rawDelta + (adjustmentsByAccountId.get(acct.id) || 0);
     const opening = oSum ? sectionSignedBalanceCents(acct, oSum.debitCents, oSum.creditCents) : 0;
 
     if (acct.account_type === 'asset' && CASH_SUB_TYPES.has(acct.sub_type)) {
       beginningCashCents += opening;
-      periodCashChangeCents += delta;
+      periodCashChangeCents += rawDelta;
       continue;
     }
     if (delta === 0) continue;
@@ -335,6 +426,7 @@ function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to 
       items: financing,
       total_cents: financingCashCents,
     },
+    non_cash_investing_financing: disclosures,
     summary: {
       net_cash_change_cents: computedNetChangeCents,
       beginning_cash_cents: beginningCashCents,
@@ -940,7 +1032,7 @@ async function getCashFlowStatement({ from = null, to = null, conn = db } = {}) 
   if (start > end) throw new AccountingError(400, 'from date cannot be after to date');
 
   const accounts = await loadAccountsOrdered(conn);
-  const [periodSums, openingSums] = await Promise.all([
+  const [periodSums, openingSums, nonCashEntries] = await Promise.all([
     queryAccountSums(conn, { from: start, to: end, basis: 'accrual', excludeClosing: true }),
     conn('gl_journal_lines as l')
       .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
@@ -954,9 +1046,31 @@ async function getCashFlowStatement({ from = null, to = null, conn = db } = {}) 
         conn.raw('COALESCE(SUM(l.credit_cents), 0)::bigint as credit_cents'),
       )
       .then(sumMapFromRows),
+    excludeClosingEntries(
+      conn('gl_journal_lines as l')
+        .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+        .where('e.status', 'posted')
+        .whereBetween('e.entry_date', [start, end])
+        .whereIn('e.basis_scope', ['both', 'accrual_only'])
+        .whereExists(function touchesFixedAsset() {
+          this.select(conn.raw('1'))
+            .from('gl_journal_lines as fl')
+            .join('gl_accounts as fa', 'fa.id', 'fl.account_id')
+            .whereRaw('fl.entry_id = e.id')
+            .where('fa.account_type', 'asset')
+            .where('fa.sub_type', 'fixed_asset');
+        }),
+    ).select(
+      'e.id as entry_id',
+      conn.raw('e.entry_date::text as entry_date'),
+      'e.memo',
+      'l.account_id',
+      'l.debit_cents',
+      'l.credit_cents',
+    ),
   ]);
 
-  return computeCashFlowStatement(accounts, periodSums, openingSums, { from: start, to: end });
+  return computeCashFlowStatement(accounts, periodSums, openingSums, { from: start, to: end, nonCashEntries });
 }
 
 function isSalesTaxRemittanceSource(sourceType, idempotencyKey) {

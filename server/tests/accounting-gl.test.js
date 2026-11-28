@@ -88,6 +88,9 @@ const {
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
   isPrepayTermCoverageValid,
+  isPrepayTermRevokedForPostedVisit,
+  isInvoiceLessMonthlyDuesPayment,
+  resolveMonthlyDuesPeriod,
   computeGapReceiptAmounts,
   isDisputeOutflow,
   isInvoiceLinkedCreditRow,
@@ -2709,11 +2712,12 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     const accounts = makeSyntheticAccounts();
     const revIdByCode = new Map(accounts.filter((a) => a.account_type === 'revenue').map((a) => [a.code, a.id]));
 
-    // 1. End-at-term renewal cancellation preserves paid prepay coverage, while end_now_refund / void / refunded invoice revoke it
+    // 1. Paid cancelled prepay terms (both end_at_term and partial end_now_refund) retain earned visits;
+    //    only voided, payment_pending, unpaid, or voided/fully-refunded prepay terms are excluded
     expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }, { status: 'paid' })).toBe(true);
     expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: null }, { status: 'prepaid' })).toBe(true);
-    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_now_refund' }, { status: 'paid' })).toBe(false);
-    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: null, cancel_disposition: null }, { status: 'paid' })).toBe(false);
+    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_now_refund' }, { status: 'paid' })).toBe(true);
+    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: null, cancel_disposition: null }, { status: 'overdue', paid_at: null })).toBe(false);
     expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }, { status: 'refunded' })).toBe(false);
     expect(isPrepayTermCoverageValid({ status: 'void' }, { status: 'paid' })).toBe(false);
     expect(isPrepayTermCoverageValid({ status: 'active' }, { status: 'paid' })).toBe(true);
@@ -2947,5 +2951,239 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     const recatPreview = await syncSubledgersToGl({ fromDate: '2026-08-01', toDate: '2026-08-31', dryRun: true, conn: recatConn });
     expect(recatPreview.expenses.would_adjust).toBe(1);
     expect(recatPreview.expenses.errors).toEqual([]);
+  });
+
+  test('Codex R11: atomic visit supersession on locked periods, retained end-now-refund visits, noncash cash-flow exclusions, and invoice-less monthly dues accrual', async () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    // 1. Replacement covered invoice in a LOCKED month must NOT reverse the already-recognized visit
+    const lockedCovInv = {
+      id: 'inv-locked-cov-1',
+      invoice_number: 'WPC-LOCK-COV',
+      status: 'paid',
+      scheduled_service_id: '00000000-0000-4000-8000-00000000f111',
+      annual_prepay_covered_term_id: 'term-lock-1',
+      subtotal: '100.00',
+      discount_amount: '0',
+      tax_amount: '0',
+      total: '0',
+      visit_prepaid_amount: '100.00',
+      service_type: 'pest',
+      service_date: '2026-09-15',
+      updated_at: '2026-10-05T14:00:00Z',
+      property_type: 'single_family',
+    };
+    const lockConn = (table) => {
+      const state = { isVisitLookup: false };
+      const chain = {
+        leftJoin: () => chain,
+        join: () => chain,
+        where: (arg) => {
+          if (arg && typeof arg === 'object' && arg.source_type === 'unearned_recognition') {
+            state.isVisitLookup = true;
+          }
+          return chain;
+        },
+        whereIn: () => chain,
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(accounts);
+          if (table === 'gl_periods') return Promise.resolve([{ period_month: '2026-09', status: 'locked' }]);
+          if (table === 'invoices as i') return Promise.resolve([lockedCovInv]);
+          return Promise.resolve([]);
+        },
+        first: () => {
+          if (table === 'gl_journal_entries' && state.isVisitLookup) {
+            return Promise.resolve({ id: 'je-visit-existing', reversed_by_entry_id: null, entry_date: '2026-09-15' });
+          }
+          return Promise.resolve(null);
+        },
+      };
+      return chain;
+    };
+    lockConn.raw = (sql) => sql;
+    lockConn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+    const lockPreview = await syncSubledgersToGl({ fromDate: '2026-09-01', toDate: '2026-10-31', dryRun: true, conn: lockConn });
+    expect(lockPreview.invoices.would_post).toBe(0);
+    expect(lockPreview.invoices.would_reverse).toBe(0);
+    expect(lockPreview.invoices.errors.length).toBeGreaterThan(0);
+
+    // 2. End-now-refund cancellation ($400 4-visit prepay, 1 completed $100 visit, $300 unused refund)
+    //    retains the $100 earned visit and clears 2300 Unearned Revenue cleanly to $0
+    expect(isPrepayTermRevokedForPostedVisit(
+      { status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_now_refund' },
+      { status: 'paid' },
+    )).toBe(false);
+    expect(isPrepayTermRevokedForPostedVisit(
+      { status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_now_refund' },
+      { status: 'refunded' },
+    )).toBe(false);
+    expect(isPrepayTermRevokedForPostedVisit({ status: 'cancelled' }, { status: 'void' })).toBe(true);
+    expect(isPrepayTermRevokedForPostedVisit({ status: 'payment_pending' }, { status: 'sent', paid_at: null })).toBe(true);
+
+    const prepayPartialRefundUnearned = computePrepayRefundUnearnedCents({
+      isAnnualPrepay: true,
+      isReversal: false,
+      subtotalCents: 30000,
+      originalUnearnedCents: 40000,
+      recognizedCents: 10000,
+      priorUnearnedRefundedCents: 0,
+    });
+    expect(prepayPartialRefundUnearned).toBe(30000);
+    const endNowSums = accumulateEntries(accounts, [
+      rules.buildInvoiceEntry({ invoiceId: 'inv-pp-400', issueDate: '2026-01-01', subtotalCents: 40000, isAnnualPrepay: true }),
+      rules.buildPaymentEntry({ paymentId: 'pay-pp-400', paymentDate: '2026-01-01', grossCents: 40000, method: 'stripe', invoiceId: 'inv-pp-400' }),
+      rules.buildUnearnedRecognitionEntry({ sourceId: 'covered-visit:v1', recognitionDate: '2026-02-01', amountCents: 10000, serviceLine: 'pest' }),
+      rules.buildRefundEntry({ refundId: 'ref-pp-300', refundDate: '2026-03-01', subtotalCents: 30000, unearnedCents: prepayPartialRefundUnearned, method: 'stripe', invoiceId: 'inv-pp-400' }),
+    ]);
+    expect(bal(endNowSums, SYSTEM_CODES.UNEARNED_REVENUE)).toBe(0);
+    expect(bal(endNowSums, SYSTEM_CODES.REV_RESIDENTIAL_PEST)).toBe(10000);
+    expect(bal(endNowSums, SYSTEM_CODES.STRIPE_CLEARING)).toBe(10000);
+
+    // 3. Noncash financed vehicle acquisition (DR Vehicles $10,000 / CR Loans Payable $10,000)
+    //    reports $0 investing & $0 financing cash flows while disclosing $10,000 noncash activity;
+    //    partially financed acquisition ($30,000 truck = $5,000 cash + $25,000 loan) reports -$5,000 investing and $0 financing
+    const vehAcct = byCode.get(SYSTEM_CODES.FIXED_ASSETS_VEHICLES);
+    const loanAcct = byCode.get(SYSTEM_CODES.LOANS_PAYABLE);
+    const chkAcct = byCode.get(SYSTEM_CODES.CHECKING_PRIMARY);
+
+    const pureFinancedSums = accumulateEntries(accounts, [{
+      entryDate: '2026-06-01',
+      entryType: 'adjusting',
+      memo: 'Financed truck',
+      lines: [
+        { accountCode: SYSTEM_CODES.FIXED_ASSETS_VEHICLES, debitCents: 1000000, creditCents: 0 },
+        { accountCode: SYSTEM_CODES.LOANS_PAYABLE, debitCents: 0, creditCents: 1000000 },
+      ],
+    }]);
+    const pureCf = computeCashFlowStatement(accounts, pureFinancedSums, new Map(), {
+      from: '2026-06-01',
+      to: '2026-06-30',
+      nonCashEntries: [
+        { entry_id: 'je-fin-1', entry_date: '2026-06-01', memo: 'Financed truck', account_id: vehAcct.id, debit_cents: 1000000, credit_cents: 0 },
+        { entry_id: 'je-fin-1', entry_date: '2026-06-01', memo: 'Financed truck', account_id: loanAcct.id, debit_cents: 0, credit_cents: 1000000 },
+      ],
+    });
+    expect(pureCf.investing.total_cents).toBe(0);
+    expect(pureCf.financing.total_cents).toBe(0);
+    expect(pureCf.non_cash_investing_financing).toHaveLength(1);
+    expect(pureCf.non_cash_investing_financing[0].amount_cents).toBe(1000000);
+    expect(pureCf.summary.reconciles_to_cash).toBe(true);
+
+    const partialFinancedSums = accumulateEntries(accounts, [{
+      entryDate: '2026-06-15',
+      entryType: 'adjusting',
+      memo: 'Truck down payment + loan',
+      lines: [
+        { accountCode: SYSTEM_CODES.FIXED_ASSETS_VEHICLES, debitCents: 3000000, creditCents: 0 },
+        { accountCode: SYSTEM_CODES.CHECKING_PRIMARY, debitCents: 0, creditCents: 500000 },
+        { accountCode: SYSTEM_CODES.LOANS_PAYABLE, debitCents: 0, creditCents: 2500000 },
+      ],
+    }]);
+    const partialCf = computeCashFlowStatement(accounts, partialFinancedSums, new Map(), {
+      from: '2026-06-01',
+      to: '2026-06-30',
+      nonCashEntries: [
+        { entry_id: 'je-fin-2', entry_date: '2026-06-15', memo: 'Truck down payment + loan', account_id: vehAcct.id, debit_cents: 3000000, credit_cents: 0 },
+        { entry_id: 'je-fin-2', entry_date: '2026-06-15', memo: 'Truck down payment + loan', account_id: chkAcct.id, debit_cents: 0, credit_cents: 500000 },
+        { entry_id: 'je-fin-2', entry_date: '2026-06-15', memo: 'Truck down payment + loan', account_id: loanAcct.id, debit_cents: 0, credit_cents: 2500000 },
+      ],
+    });
+    expect(partialCf.investing.total_cents).toBe(-500000);
+    expect(partialCf.financing.total_cents).toBe(0);
+    expect(partialCf.non_cash_investing_financing[0].amount_cents).toBe(2500000);
+    expect(partialCf.summary.reconciles_to_cash).toBe(true);
+
+    // 4. Invoice-less monthly dues (stripe.chargeMonthly) accrue revenue keyed to billed_month
+    //    and clear 1100 A/R cleanly to $0 instead of driving A/R negative
+    const monthlyPay = {
+      id: 'pay-monthly-100',
+      customer_id: '00000000-0000-4000-8000-000000000801',
+      amount: '100.00',
+      processor: 'stripe',
+      stripe_payment_intent_id: 'pi_monthly_100',
+      payment_date: '2026-12-02',
+      description: 'WaveGuard WaveGuard Monthly — Jane Doe',
+      metadata: { type: 'monthly_autopay', tier: 'WaveGuard', billed_month: '2026-11' },
+      property_type: 'single_family',
+    };
+    expect(isInvoiceLessMonthlyDuesPayment(monthlyPay, null, null)).toBe(true);
+    expect(isInvoiceLessMonthlyDuesPayment(monthlyPay, { id: 'inv-1' }, null)).toBe(false);
+    expect(resolveMonthlyDuesPeriod(monthlyPay, '2026-12-02', new Set())).toEqual({ billedMonth: '2026-11', accrualDate: '2026-11-01' });
+    expect(resolveMonthlyDuesPeriod(monthlyPay, '2026-12-02', new Set(['2026-11']))).toEqual({ billedMonth: '2026-11', accrualDate: '2026-12-02' });
+
+    const duesAccrual = rules.buildMonthlyDuesAccrualEntry({
+      paymentId: monthlyPay.id,
+      accrualDate: '2026-11-01',
+      billedMonth: '2026-11',
+      amountCents: 10000,
+      serviceLine: 'pest',
+      isCommercial: false,
+      customerId: monthlyPay.customer_id,
+    });
+    const duesPayment = rules.buildPaymentEntry({
+      paymentId: monthlyPay.id,
+      paymentDate: '2026-12-02',
+      grossCents: 10000,
+      method: 'stripe',
+      invoiceId: duesAccrual.idempotencyKey,
+      customerId: monthlyPay.customer_id,
+      serviceLine: 'pest',
+    });
+    const duesSums = accumulateEntries(accounts, [duesAccrual, duesPayment]);
+    expect(bal(duesSums, SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(duesSums, SYSTEM_CODES.REV_RESIDENTIAL_PEST)).toBe(10000);
+    expect(bal(duesSums, SYSTEM_CODES.STRIPE_CLEARING)).toBe(10000);
+
+    // End-to-end dryRun sync previews BOTH the monthly dues accrual AND the payment entry (2 entries)
+    const duesConn = (table) => {
+      const chain = {
+        leftJoin: () => chain,
+        join: () => chain,
+        where: () => chain,
+        whereIn: () => chain,
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(accounts);
+          if (table === 'payments as p') return Promise.resolve([monthlyPay]);
+          return Promise.resolve([]);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return chain;
+    };
+    duesConn.raw = (sql) => sql;
+    duesConn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+    const duesPreview = await syncSubledgersToGl({ fromDate: '2026-12-01', toDate: '2026-12-31', dryRun: true, conn: duesConn });
+    expect(duesPreview.payments.would_post).toBe(2);
+    expect(duesPreview.payments.errors).toEqual([]);
   });
 });
