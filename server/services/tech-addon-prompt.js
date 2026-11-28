@@ -8,28 +8,32 @@
  * at THIS visit's primary premises (`OFFER_LADDER = ['pest_control', 'lawn_care']`, owner
  * ruling 2026-11-21: never push Tree & Shrub or Termite).
  *
- * Hard constraints honored:
- *   - Uses the canonical premises-scoped ownership authority (`loadOwnedRecurringServiceKeys`
- *     + off-calendar legacy/null-status recurring rows per `plan-start-eligibility.js`, scoped
- *     via `filterRowsToStreet` to proven primary premises only so Field Lead never quotes the
- *     wrong property) AND suppresses whenever `plan-rate-ledger` (`strictProbe: true`) shows a
- *     positive monthly rate OR `plan_holds` has an active hold for the target family.
+ * Hard constraints honored (aligned with `plan-start-eligibility.js`):
+ *   - Uses canonical premises-scoped live recurring rows (`loadLiveRecurringObligationRows` +
+ *     `filterRowsToStreet`), off-calendar legacy/null-status recurring rows, AND ongoing series
+ *     roots between visits (`eligibleSeriesParentIds`) scoped to proven primary premises only,
+ *     checking `isCommercialServiceRow` BEFORE reducing to family keys so commercial plans at
+ *     the same address always suppress residential cross-sell.
+ *   - Suppresses whenever `plan-rate-ledger` (`strictProbe: true`) has a positive monthly rate
+ *     for the target family OR an unattributed positive rate, OR `plan_holds` has an active hold.
  *   - Excludes soft-deleted customers (`deleted_at IS NULL`) and commercial accounts across
- *     `customers.property_type`, `customers.building_use`, `waveguard_tier`, visit label, and
- *     the visit's catalog row (`loadCatalogFieldsByRowId` + `isCommercialServiceRow`).
+ *     `customers.property_type`, any populated `customers.building_use` (only won commercial
+ *     proposals stamp `building_use`, including `'residential'` for HOA communities),
+ *     `waveguard_tier`, visit label, and catalog row (`loadCatalogFieldsByRowId`).
  *   - ZERO prices, margins, discount percentages, or hardcoded tier claims (owner 2026-11-04).
  *   - Pre-fills the existing Field Lead modal (`Lawn` or `Pest`) so the office quotes it and
  *     credits the technician's seller commission (owner ruling 2026-11-09).
  */
 
 const {
-  loadOwnedRecurringServiceKeys,
+  loadLiveRecurringObligationRows,
   loadCatalogFieldsByRowId,
   isLiveObligationRow,
   filterRowsToStreet,
   ownershipKeysForRow,
 } = require('./waveguard-existing-services');
 const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
+const { eligibleSeriesParentIds } = require('./recurring-series-topup');
 const { isCommercialServiceRow } = require('./self-booking-plan-sync');
 const { OFFER_LADDER } = require('./service-report/cross-sell');
 const { isCommercialProperty } = require('./pricing-engine/commercial-helpers');
@@ -83,9 +87,13 @@ function pickTechAddonPrompt(ownedKeys, { isCommercial = false, planRateFamilies
   return PILLAR_PROMPTS[target] ? { ...PILLAR_PROMPTS[target] } : null;
 }
 
+/**
+ * Matches `plan-start-eligibility.js`: ANY populated `building_use` ('residential' for a won
+ * HOA commercial proposal or 'nonresidential' for a business building) marks a commercial account.
+ */
 function isCommercialVisit(customer, svc) {
   return isCommercialProperty({ propertyType: customer.property_type })
-    || String(customer.building_use || '').trim().toLowerCase() === 'nonresidential'
+    || Boolean(String(customer.building_use || '').trim())
     || String(customer.waveguard_tier || '').trim().toLowerCase() === 'commercial'
     || isCommercialServiceRow(svc);
 }
@@ -118,8 +126,28 @@ async function resolvePrimaryVisitStreetScope(svc, customer, dbh, deps = {}) {
   };
 }
 
+function collectResidentialKeysOrNull(rows, catalogById = null) {
+  const keys = new Set();
+  for (const row of rows) {
+    const enriched = catalogById ? { ...row, ...(catalogById.get(row.id) || {}) } : row;
+    if (isCommercialServiceRow(enriched)) return null;
+    for (const key of ownershipKeysForRow(enriched)) keys.add(key);
+  }
+  return [...keys];
+}
+
 /**
- * Loads off-calendar live recurring visits that `loadOwnedRecurringServiceKeys` omits
+ * Loads live recurring obligation rows scoped to this premises and verifies none are commercial
+ * BEFORE reducing to ownership family keys (returns null on commercial uncertainty).
+ */
+async function loadScopedLiveOwnedKeys(dbh, customerId, { streetScope }) {
+  const joined = await loadLiveRecurringObligationRows(dbh, customerId);
+  const scoped = await filterRowsToStreet(dbh, joined, streetScope);
+  return collectResidentialKeysOrNull(scoped);
+}
+
+/**
+ * Loads off-calendar live recurring visits that `loadLiveRecurringObligationRows` omits
  * (legacy `is_recurring IS NULL` with `recurring_parent_id`, or `is_recurring = true` with
  * `status IS NULL`), scoped to the exact same visit premises (`filterRowsToStreet`).
  */
@@ -139,13 +167,22 @@ async function loadOffCalendarOwnedKeys(dbh, customerId, { streetScope, catalogB
   const live = [...legacy, ...noStatus].filter((row) => isPlanSeriesRow(row) && isLiveObligationRow(row, today));
   if (!live.length) return [];
   const scoped = await filterRowsToStreet(dbh, live, streetScope);
-  const keys = new Set();
-  for (const row of scoped) {
-    const enriched = { ...row, ...(catalogById.get(row.id) || {}) };
-    if (isCommercialServiceRow(enriched)) return null;
-    for (const key of ownershipKeysForRow(enriched)) keys.add(key);
-  }
-  return [...keys];
+  return collectResidentialKeysOrNull(scoped, catalogById);
+}
+
+/**
+ * Loads ongoing series roots between scheduled visits (`plan-start-eligibility.js` rule)
+ * so an active plan awaiting its next nightly top-up is never pitched as missing.
+ */
+async function loadOngoingSeriesOwnedKeys(dbh, customerId, { streetScope, catalogById }) {
+  const parentIds = await eligibleSeriesParentIds(dbh, { customerId });
+  if (!parentIds?.length) return [];
+  const roots = await dbh('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereIn('id', parentIds)
+    .select(...OFF_CALENDAR_COLS);
+  const scoped = await filterRowsToStreet(dbh, roots, streetScope);
+  return collectResidentialKeysOrNull(scoped, catalogById);
 }
 
 async function loadActivePlanHoldFamilies(dbh, customerId) {
@@ -157,9 +194,10 @@ async function loadActivePlanHoldFamilies(dbh, customerId) {
 
 const DEFAULT_FACT_DEPS = Object.freeze({
   loadCatalogFieldsByRowId,
-  loadOwnedRecurringServiceKeys,
-  loadPlanComponents: loadComponents,
+  loadScopedLiveOwnedKeys,
   loadOffCalendarOwnedKeys,
+  loadOngoingSeriesOwnedKeys,
+  loadPlanComponents: loadComponents,
   loadActivePlanHoldFamilies,
 });
 
@@ -188,18 +226,19 @@ async function techAddonPromptFacts(svc, dbh, deps = {}) {
     const streetScope = await resolvePrimaryVisitStreetScope(svc, customer, dbh, deps);
     if (!streetScope) return null;
 
-    const [ownedKeys, offCalKeys, planComponents, heldFamilies] = await Promise.all([
-      d.loadOwnedRecurringServiceKeys(dbh, svc.customer_id, { streetScope }),
+    const [liveKeys, offCalKeys, ongoingKeys, planComponents, heldFamilies] = await Promise.all([
+      d.loadScopedLiveOwnedKeys(dbh, svc.customer_id, { streetScope }),
       d.loadOffCalendarOwnedKeys(dbh, svc.customer_id, { streetScope, catalogById }),
+      d.loadOngoingSeriesOwnedKeys(dbh, svc.customer_id, { streetScope, catalogById }),
       d.loadPlanComponents(dbh, svc.customer_id, { strictProbe: true }),
       d.loadActivePlanHoldFamilies(dbh, svc.customer_id),
     ]);
-    if (!offCalKeys) return null;
+    if (!liveKeys || !offCalKeys || !ongoingKeys) return null;
 
     const activeRates = (planComponents || []).filter((row) => Number(row.monthly_rate) > 0);
     if (activeRates.some((row) => !row.family_key || row.family_key === 'unattributed')) return null;
 
-    return pickTechAddonPrompt([...new Set([...(ownedKeys || []), ...offCalKeys])], {
+    return pickTechAddonPrompt([...new Set([...liveKeys, ...offCalKeys, ...ongoingKeys])], {
       isCommercial: false,
       planRateFamilies: activeRates.map((row) => String(row.family_key)),
       heldFamilies,
@@ -214,7 +253,10 @@ module.exports = {
   PILLAR_PROMPTS,
   pickTechAddonPrompt,
   resolvePrimaryVisitStreetScope,
+  collectResidentialKeysOrNull,
+  loadScopedLiveOwnedKeys,
   loadOffCalendarOwnedKeys,
+  loadOngoingSeriesOwnedKeys,
   loadActivePlanHoldFamilies,
   techAddonPromptFacts,
 };
