@@ -951,8 +951,8 @@ const UNCONFIRMED_CALLS = [
     // without confirmed (intelligence-bar-family-link.test.js covers the cards themselves).
     ['family-link-tools', 'executeFamilyLinkTool', 'link_customer_family', { customer_id: '00000000-0000-0000-0000-00000000a911', other_customer_id: '00000000-0000-0000-0000-00000000a912' }, {
       customers: [
-        { id: '00000000-0000-0000-0000-00000000a911', first_name: 'Pat', last_name: 'Tester', active: true, deleted_at: null },
-        { id: '00000000-0000-0000-0000-00000000a912', first_name: 'Sam', last_name: 'Tester', active: true, deleted_at: null },
+        { id: '00000000-0000-0000-0000-00000000a911', first_name: 'Pat', last_name: 'Sample', active: true, pipeline_stage: 'active_customer', address_line1: '100 Oak St', deleted_at: null },
+        { id: '00000000-0000-0000-0000-00000000a912', first_name: 'Sam', last_name: 'Sample', active: true, pipeline_stage: 'active_customer', address_line1: '200 Pine Ave', deleted_at: null },
       ],
       multi_home_family_members: [],
     }],

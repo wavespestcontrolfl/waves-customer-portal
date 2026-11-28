@@ -11827,7 +11827,6 @@ function buildComplaintCallAlert({ call, customerId, name = null, v2Extraction =
 // bell. A failure is logged by code and never fails the call. Sends nothing to the customer.
 async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction, procGeneration, now = new Date() }) {
   if (written !== true || disposition !== 'complaint_escalated') return null;
-  if (isOutboundCall(call)) return null;
   if (require('./call-hygiene-guards').isCompetitorOrNonWavesComplaint(v2Extraction)) return null;
   try {
     const id = customerId || call.customer_id;

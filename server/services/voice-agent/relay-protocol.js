@@ -271,14 +271,18 @@ function agentName() {
 // when asked. VOICE_RELAY_GREETING overrides the line verbatim; the ONE guard
 // left is that an override may not CLAIM to be human — an identity lie is
 // discarded wholesale (refusing would strand live calls on a bad env value).
-const DEFAULT_WELCOME_GREETING = 'Waves, this is {name}. How can I help you {dayPart}?';
+// Owner 2026-11-28: full brand name ("Waves Pest Control"), punchy opener, and
+// no time-of-day phrase that sounds awkward past midnight.
+const DEFAULT_WELCOME_GREETING = 'Waves Pest Control, this is {name}. How can I help?';
 
-// ET day-part for the greeting: morning until noon, afternoon until 5 PM,
-// evening after — the same clock every other spoken-time rule uses.
+// ET day-part helper (kept for callers/overrides using a time-of-day phrase):
+// midnight through 4:59 AM ET returns 'today' instead of 'this morning';
+// morning 5 AM–11:59 AM, afternoon noon–4:59 PM, evening 5 PM–11:59 PM.
 function greetingDayPart(now = new Date()) {
   const { etParts } = require('../../utils/datetime-et');
   const hour = Number(etParts(now).hour);
   if (!Number.isFinite(hour)) return 'today';
+  if (hour < 5) return 'today';
   if (hour < 12) return 'this morning';
   if (hour < 17) return 'this afternoon';
   return 'this evening';

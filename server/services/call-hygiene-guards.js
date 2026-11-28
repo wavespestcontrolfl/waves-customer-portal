@@ -16,7 +16,7 @@ const COMPETITOR_CAUSED_RE = new RegExp(
   'i',
 );
 const SWITCHING_TO_COMPETITOR_RE = new RegExp(`\\b(?:switch(?:ing)?|mov(?:e|ing)|go(?:ing)?|call(?:ing)?)\\s+(?:to|with)\\s+${COMPETITOR_ENTITY}\\b`, 'i');
-const WAVES_FAULT_RE = /\b(?:your\s+(?:tech|technician|office|billing|invoice|charge|service|driver|company|team|crew)|waves\b[^.!?\n]{0,30}\b(?:tech|technician|office|billing|invoice|missed|skipped|failed|never|didn'?t|did\s+not|overcharged|charged|billed|damaged|ruined|late|rude|bad|awful|terrible|wrong|no[- ]?show|problem|issue|complaint|upset|frustrated|unhappy)|billed\s+us|charged\s+us|you\s+guys)\b/i;
+const WAVES_FAULT_RE = /\b(?:your\s+(?:tech|technician|office|billing|invoice|charge|service|driver|company|team|crew)|waves\b[^.!?\n]{0,30}\b(?:tech|technician|office|billing|invoice|missed|skipped|failed|never|didn'?t|did\s+not|overcharged|charged|billed|damaged|ruined|late|rude|bad|awful|terrible|wrong|no[- ]?show|problem|issue|complaint|upset|frustrated|unhappy)|(?:refund|credit|reimburse|reimbursement)\b[^.!?\n]{0,25}\b(?:from\s+waves|waves)?|cancel(?:ing|ling)?\s+(?:my\s+|our\s+)?(?:waves|account|service|membership|plan)|billed\s+us|charged\s+us|you\s+guys)\b/i;
 
 const OUTAGE_WINDOW_MS = 60 * 60 * 1000;
 const OUTAGE_MIN_FAILURES = 3;
@@ -36,13 +36,14 @@ const ERROR_CATEGORY_RULES = [
 
 function isCompetitorOrNonWavesComplaint(v2Extraction = null) {
   if (!v2Extraction || typeof v2Extraction !== 'object') return false;
-  const objections = Array.isArray(v2Extraction?.sentiment_and_lead?.objections_raised)
+  const objections = (Array.isArray(v2Extraction?.sentiment_and_lead?.objections_raised)
     ? v2Extraction.sentiment_and_lead.objections_raised
-    : [];
-  const summary = String(v2Extraction?.meta?.call_summary || '');
+    : []).map((o) => String(o || '').trim()).filter(Boolean);
+  const summary = String(v2Extraction?.meta?.call_summary || '').trim();
   const text = [...objections, summary].filter(Boolean).join('\n');
   if (!text) return false;
   if (SWITCHING_TO_COMPETITOR_RE.test(text) || WAVES_FAULT_RE.test(text)) return false;
+  if (objections.length && !objections.every((o) => COMPETITOR_CAUSED_RE.test(o))) return false;
   return COMPETITOR_CAUSED_RE.test(text);
 }
 
@@ -60,7 +61,10 @@ function clearSpamForActiveCustomer({ extracted, knownCaller = null, knownCaller
 function extractHttpStatus(err) {
   const raw = err?.status ?? err?.statusCode ?? err?.response?.status ?? null;
   const n = Number(raw);
-  return Number.isInteger(n) && n >= 100 && n <= 599 ? n : null;
+  if (Number.isInteger(n) && n >= 100 && n <= 599) return n;
+  const msg = String(err?.message || (typeof err === 'string' ? err : ''));
+  const m = msg.match(/\b(?:HTTP|API|status(?:\s+code)?)\s*[:=]?\s*([45]\d{2})\b/i);
+  return m ? Number(m[1]) : null;
 }
 
 function classifyErrorCategory(status, code, name, msg) {

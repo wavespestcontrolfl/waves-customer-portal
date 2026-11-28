@@ -178,6 +178,10 @@ describe('PR A2: complaint alert guard, active-customer spam guard, and outage m
       meta: { call_summary: 'Caller left Orkin last year. Waves was late today.' },
       sentiment_and_lead: { objections_raised: [] },
     })).toBe(false);
+    expect(isCompetitorOrNonWavesComplaint({
+      meta: { call_summary: 'Orkin overcharged me. I want a refund from Waves.' },
+      sentiment_and_lead: { objections_raised: ['Orkin overcharged me', 'Refund requested'] },
+    })).toBe(false);
 
     expect(isCompetitorOrNonWavesComplaint({
       meta: { call_summary: 'Caller complained Waves technician missed the back lanai.' },
@@ -229,6 +233,10 @@ describe('PR A2: complaint alert guard, active-customer spam guard, and outage m
       { status: 429 },
     );
     expect(classifyExtractionError(rawSecretErr)).toEqual({ category: 'rate_limit', status: 429 });
+    expect(classifyExtractionError(new Error('Gemini API 500: Internal server error'))).toEqual({
+      category: 'provider_5xx',
+      status: 500,
+    });
 
     const payload = JSON.parse(buildSanitizedExtractionErrorPayload(
       rawSecretErr,
