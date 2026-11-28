@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { isNeverAttemptedHoldDeferral } = require('../services/collections/collection-hold');
 const { authenticate } = require('../middleware/auth');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 
 // =========================================================================
 // BADGE DEFINITIONS — 22 badges across 5 categories
@@ -327,12 +327,12 @@ router.post('/:badgeType/notify', authenticate, async (req, res, next) => {
 // =========================================================================
 
 // GET /api/badges/admin/definitions — all badge definitions
-router.get('/admin/definitions', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
+router.get('/admin/definitions', adminAuthenticate, requireAdmin, async (req, res) => {
   res.json({ badges: BADGE_DEFS });
 });
 
 // GET /api/badges/admin/stats — aggregate badge stats
-router.get('/admin/stats', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
+router.get('/admin/stats', adminAuthenticate, requireAdmin, async (req, res) => {
   try {
     const [earned, customers] = await Promise.all([
       db('customer_badges').count('* as c').first().catch(() => ({ c: 0 })),
@@ -349,7 +349,7 @@ router.get('/admin/stats', adminAuthenticate, requireTechOrAdmin, async (req, re
 });
 
 // GET /api/badges/admin/customer/:customerId — badges for a specific customer
-router.get('/admin/customer/:customerId', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
+router.get('/admin/customer/:customerId', adminAuthenticate, requireAdmin, async (req, res) => {
   try {
     const { earned, progress } = await evaluateBadges(req.params.customerId);
     const earnedList = BADGE_DEFS.filter(b => earned[b.type]).map(b => {

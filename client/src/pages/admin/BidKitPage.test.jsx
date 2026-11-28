@@ -736,6 +736,29 @@ it("the facts sheet reads its data again when the Eastern day turns", async () =
   }
 });
 
+it("scrolls to a ?item= deep-link once without re-scrolling on reload, and enforces reference field maxLengths", async () => {
+  const scrollIntoView = vi.fn();
+  window.HTMLElement.prototype.scrollIntoView = scrollIntoView;
+  let reads = 0;
+  const signed = ITEMS.map((item) => (item.id === "i1" ? { ...item, status: "ready", attested_at: "2026-10-23T16:00:00.000Z", updated_at: "2026-10-23T16:00:00.000Z" } : item));
+  route({
+    "GET /admin/bid-kit/": () => reply(payload(reads++ === 0 ? ITEMS : signed)),
+    "POST /admin/bid-kit/i1/attest": () => reply({ item: signed[0] }),
+  });
+  renderPage("/?item=i3");
+  await screen.findByText("Certificate of insurance");
+  expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(within(rowFor("FDACS business license copy")).getByRole("button", { name: "Sign off" }));
+  await waitFor(() => expect(reads).toBe(2));
+  expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(within(rowFor("Customer reference")).getByRole("button", { name: "Edit" }));
+  expect(screen.getByLabelText("Entity")).toHaveAttribute("maxlength", "200");
+  expect(screen.getByLabelText("Scope of work")).toHaveAttribute("maxlength", "1000");
+  expect(screen.getByLabelText("Phone")).toHaveAttribute("maxlength", "40");
+});
+
 it("prompts before switching to Facts sheet or another item editor when an editor has unsaved changes", async () => {
   route({
     "GET /admin/bid-kit/": () => reply(payload()),

@@ -170,7 +170,7 @@ it("sends only the details the operator changed, and nothing when nothing change
   expect(screen.queryByText("Nothing changed")).toBeNull();
   fireEvent.click(save);
   await waitFor(() => expect(patches).toHaveLength(1));
-  expect(patches[0]).toEqual({ questionsDueAt: "2026-11-02T10:00" });
+  expect(patches[0]).toEqual({ questionsDueAt: "2026-11-02T10:00", expected_updated_at: "2026-10-29T12:00:00Z" });
 });
 
 it("sends a changed type, judging and mandatory flag together", async () => {
@@ -187,7 +187,7 @@ it("sends a changed type, judging and mandatory flag together", async () => {
   fireEvent.click(screen.getByLabelText("Mandatory"));
   fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
   await waitFor(() => expect(patches).toHaveLength(1));
-  expect(patches[0]).toEqual({ solicitationType: "rfp", scored: true, jobWalkMandatory: false });
+  expect(patches[0]).toEqual({ solicitationType: "rfp", scored: true, jobWalkMandatory: false, expected_updated_at: "2026-10-29T12:00:00Z" });
 });
 
 it.each([

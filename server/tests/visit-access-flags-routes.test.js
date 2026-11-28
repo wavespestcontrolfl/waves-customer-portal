@@ -67,19 +67,28 @@ const FLAG = { questionId: 'dog_on_property', evidenceId: EVID, title: 'Dog or o
 let mockCurrentCustomer = 'cust-1';
 function stubVisit({ owned = true, stillOwned = true, recheckThrows = false, currentCustomer = 'cust-1' } = {}) {
   mockCurrentCustomer = currentCustomer;
-  const row = { id: 'svc-1', customer_id: 'cust-1', pre_service_brief: null };
-  db.mockImplementation(() => {
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const row = { id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: todayET, pre_service_brief: null };
+  db.mockImplementation((table) => {
     const q = {};
     q.cond = {};
-    q.where = jest.fn((cond) => { Object.assign(q.cond, cond); return q; });
+    q.where = jest.fn((cond, val) => {
+      if (cond && typeof cond === 'object') Object.assign(q.cond, cond);
+      else if (typeof cond === 'string') q.cond[cond] = val;
+      return q;
+    });
+    q.whereIn = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
+    q.whereNull = jest.fn(() => q);
+    q.select = jest.fn(async () => []);
     q.modify = jest.fn((cb) => { cb(q); return q; });
     q.first = jest.fn(async (...cols) => {
-      if (cols[0] === 'scheduled_services.id' && cols.length === 1) {
+      if (table === 'customers') return { address_line1: '100 Main St', address_line2: null, city: 'Sarasota', zip: '34231' };
+      if (cols[0] === 'scheduled_services.id') {
         if (recheckThrows) throw new Error('db down');
         // the recheck names the customer the brief was built for; the visit's current customer decides
         const named = q.cond['scheduled_services.customer_id'];
-        return stillOwned && (named === undefined || named === mockCurrentCustomer) ? { id: 'svc-1' } : undefined;
+        return stillOwned && (named === undefined || named === mockCurrentCustomer) ? { ...row } : undefined;
       }
       return owned ? row : undefined;
     });

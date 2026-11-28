@@ -39,9 +39,9 @@ it("shows a pill on each line that needs a kit paper, linked to the kit item, an
   await screen.findByText("Kit: on file, signed off");
   const pills = screen.getAllByTestId("kit-pill");
   expect(pills.map((pill) => pill.textContent)).toEqual(["Kit: on file, signed off", "Kit: template on file", "Kit: 1 of 3 references"]);
-  expect(pills[0]).toHaveAttribute("href", "/admin/bid-kit?item=kit-license");
-  expect(pills[1]).toHaveAttribute("href", "/admin/bid-kit?item=kit-stmt");
-  expect(pills[2]).toHaveAttribute("href", "/admin/bid-kit?item=kit-r1");
+  expect(pills[0]).toHaveAttribute("href", "/admin/bids?tab=kit&item=kit-license");
+  expect(pills[1]).toHaveAttribute("href", "/admin/bids?tab=kit&item=kit-stmt");
+  expect(pills[2]).toHaveAttribute("href", "/admin/bids?tab=kit&item=kit-r1");
   // The signer line, the typed line: no pill. A pill never ticks anything.
   expect(screen.getByLabelText("Line 3").closest("li").querySelector("[data-testid=kit-pill]")).toBeNull();
   expect(screen.getByLabelText("Typed line").closest("li").querySelector("[data-testid=kit-pill]")).toBeNull();

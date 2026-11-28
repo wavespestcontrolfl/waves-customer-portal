@@ -668,11 +668,21 @@ router.get('/balance', async (req, res, next) => {
       // (Codex #4311 r36 P1) — drafts are deliberately excluded from
       // balanceCarryingInvoiceIds, so nothing else filtered it.
       .where(function payerOwned() {
-        this.whereNotNull('payer_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
+        this.whereNotNull('payer_id')
+          .orWhere('scheduled_send_error', 'like', 'payer_billed:%')
+          .orWhere('scheduled_send_error', 'like', 'chemical_addon_review:%');
       })
-      .select('id')
-      .catch(() => []);
-    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+      .select('id', 'payer_id', 'scheduled_send_error');
+    const payerInvoiceIds = new Set();
+    const heldInvoiceIds = new Set();
+    for (const r of payerInvRows) {
+      const id = String(r.id);
+      if (r.payer_id || String(r.scheduled_send_error || '').startsWith('payer_billed:')) {
+        payerInvoiceIds.add(id);
+      } else {
+        heldInvoiceIds.add(id);
+      }
+    }
     const metadataInvoiceId = (p) => {
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
@@ -684,6 +694,10 @@ router.get('/balance', async (req, res, next) => {
     const isPayerPayment = (p) => {
       const invId = metadataInvoiceId(p);
       return !!(invId && payerInvoiceIds.has(invId));
+    };
+    const isExcludedBalancePayment = (p) => {
+      const invId = metadataInvoiceId(p);
+      return !!(invId && (payerInvoiceIds.has(invId) || heldInvoiceIds.has(invId)));
     };
 
     // Failed attempts whose retry later collected are superseded — the
@@ -716,15 +730,15 @@ router.get('/balance', async (req, res, next) => {
     // (isNeverAttemptedDeferral and the canonical unsuperseded-failed query live in services/failed-payments.js — the SMS
     // grounding balance reads the same code; Codex round-35 P1.)
     const failedFacts = await loadFailedPaymentFacts(req.customerId);
-    const failedTotal = standaloneFailedTotal(failedFacts, isPayerPayment);
+    const failedTotal = standaloneFailedTotal(failedFacts, isExcludedBalancePayment);
 
-    // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the
-    // homeowner's upcomingCharges / nextCharge never show the payer's amount/date.
+    // Upcoming (scheduled autopay) rows: exclude payer-linked and chemical-review-held
+    // ones so the homeowner's upcomingCharges / nextCharge never show held or AP debt.
     const upcomingRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'upcoming' })
       .orderBy('payment_date', 'asc')
       .select('amount', 'payment_date', 'description', 'metadata');
-    const visibleUpcoming = upcomingRows.filter((p) => !isPayerPayment(p));
+    const visibleUpcoming = upcomingRows.filter((p) => !isExcludedBalancePayment(p));
     const upcomingTotal = visibleUpcoming.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
     const nextPayment = visibleUpcoming[0] || null;
 
@@ -741,6 +755,9 @@ router.get('/balance', async (req, res, next) => {
       // debt as their own balance.
       .where(function withdrawnExcluded() {
         this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+      })
+      .where(function chemicalHoldExcluded() {
+        this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'chemical_addon_review:%');
       })
       // Outstanding balance = amount DUE (total − applied account credit − part payments), not the
       // raw total, so the portal balance matches what Stripe/Terminal actually charge.

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ExternalLink,
   MessageSquare,
@@ -297,16 +297,19 @@ export default function NotificationEventsTabV2({ isAdminRole }) {
   const [pending, setPending] = useState({});
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState("");
+  const loadSeqRef = useRef(0);
 
   const markPending = (key, value) => {
     setPending((prev) => ({ ...prev, [key]: value }));
   };
 
   const loadEvents = useCallback(() => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     setToast("");
     return adminFetch("/admin/notification-events")
       .then((d) => {
+        if (seq !== loadSeqRef.current) return;
         const nextEvents = d.events || [];
         setEvents(nextEvents);
         setCatalog(d.catalog || []);
@@ -316,12 +319,17 @@ export default function NotificationEventsTabV2({ isAdminRole }) {
           ),
         ));
       })
-      .catch((e) => setToast(`Notification events failed: ${e.message}`))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (seq === loadSeqRef.current) setToast(`Notification events failed: ${e.message}`);
+      })
+      .finally(() => {
+        if (seq === loadSeqRef.current) setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
     loadEvents();
+    return () => { loadSeqRef.current += 1; };
   }, [loadEvents]);
 
   const regularEvents = useMemo(
@@ -335,20 +343,20 @@ export default function NotificationEventsTabV2({ isAdminRole }) {
     const draft = smsDrafts[template.id] || smsDraftFrom(template);
     markPending(key, true);
     setToast("");
-    setEvents((prev) => updateSmsRows(prev, template.id, (row) => ({
-      ...row,
-      body: draft.body,
-      is_active: draft.is_active,
-    })));
     try {
-      await adminFetch(`/admin/sms-templates/${template.id}`, {
+      await adminFetch(`/admin/sms-templates/${encodeURIComponent(template.id)}`, {
         method: "PUT",
         body: JSON.stringify({ body: draft.body, is_active: draft.is_active }),
       });
+      setEvents((prev) => updateSmsRows(prev, template.id, (row) => ({
+        ...row,
+        body: draft.body,
+        is_active: draft.is_active,
+      })));
       setToast(`${template.name} saved`);
     } catch (e) {
-      setEvents((prev) => updateSmsRows(prev, template.id, () => template));
-      setSmsDrafts((prev) => ({ ...prev, [template.id]: smsDraftFrom(template) }));
+      // Preserve unsaved edits in smsDrafts so the operator can fix validation
+      // or retry transient errors without retyping their draft.
       setToast(`SMS save failed: ${e.message}`);
     } finally {
       markPending(key, false);

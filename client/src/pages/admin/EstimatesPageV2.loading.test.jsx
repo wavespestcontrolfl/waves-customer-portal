@@ -328,3 +328,18 @@ it("recovers a failed filter when a late booking refresh succeeds", async () => 
   expect(await screen.findByText("Synthetic Archived")).toBeInTheDocument();
   expect(screen.queryByText("Failed to load estimates")).not.toBeInTheDocument();
 });
+
+it("keeps Archived rows accessible when the active analytics fetch fails and hides Mark lost on repricePending rows", async () => {
+  const heldFailed = { ...active, id: "qa-reprice", customerName: "Synthetic Reprice Hold", status: "send_failed", repricePending: true };
+  loadActive.mockResolvedValueOnce(response({ estimates: [active, heldFailed] }));
+  mount(1440);
+  await screen.findByText("Synthetic Reprice Hold");
+  fireEvent.click(screen.getByRole("button", { name: "Actions for Synthetic Reprice Hold" }));
+  expect(screen.queryByText("Mark lost")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Actions for Synthetic Reprice Hold" }));
+
+  loadActive.mockResolvedValueOnce(response({ error: "Analytics unavailable" }, 503));
+  fireEvent.click(screen.getByRole("button", { name: "Archived", exact: true }));
+  expect(await screen.findByText("Synthetic Archived")).toBeInTheDocument();
+  expect(screen.queryByText("Failed to load estimates")).not.toBeInTheDocument();
+});

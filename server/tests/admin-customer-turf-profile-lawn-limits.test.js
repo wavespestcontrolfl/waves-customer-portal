@@ -46,11 +46,11 @@ const call = async (handler, req) => {
   const res = { json: jest.fn(), status: jest.fn() };
   res.status.mockReturnValue(res);
   const next = jest.fn();
-  await handler({ params: { customerId: 'c1' }, technicianId: 'tech-1', techRole: 'technician', body: {}, ...req }, res, next);
+  await handler({ params: { customerId: 'c1' }, technicianId: 'admin-1', techRole: 'admin', body: {}, ...req }, res, next);
   expect(next).not.toHaveBeenCalled();
   return res;
 };
-const put = (body) => call(putHandler, { body });
+const put = (body, req = {}) => call(putHandler, { body, ...req });
 
 beforeEach(() => { jest.clearAllMocks(); });
 afterEach(() => { delete process.env.GATE_ESTIMATE_LAWN_LIMITS; });
@@ -133,5 +133,25 @@ describe('PUT turf-profile validation and write', () => {
     await put({ grass_type: 'st_augustine' });
     expect(writes[0].merge).not.toHaveProperty('other_grasses');
     expect(writes[0].merge).not.toHaveProperty('virus_streaks_suspected');
+  });
+
+  test('gate on: a technician cannot read or write office lawn-limit flags or price-bearing lawn_sqft', async () => {
+    process.env.GATE_ESTIMATE_LAWN_LIMITS = 'true';
+    const writes = fakeDbs();
+    const getBody = (await call(getHandler, { techRole: 'technician', technicianId: 'tech-1' })).json.mock.calls[0][0];
+    expect(getBody.profile).not.toHaveProperty('other_grasses');
+    expect(getBody.profile).not.toHaveProperty('virus_streaks_suspected');
+    expect(getBody).not.toHaveProperty('lawnLimitsAvailable');
+    expect(getBody).not.toHaveProperty('otherGrassOptions');
+
+    const res = await put(
+      { grass_type: 'st_augustine', lawn_sqft: 9999, other_grasses: ['carpetgrass'], virus_streaks_suspected: true },
+      { techRole: 'technician', technicianId: 'tech-1' },
+    );
+    expect(res.status).not.toHaveBeenCalled();
+    expect(writes[0].insert).not.toHaveProperty('lawn_sqft');
+    expect(writes[0].insert).not.toHaveProperty('other_grasses');
+    expect(writes[0].insert).not.toHaveProperty('virus_streaks_suspected');
+    expect(writes[0].merge).not.toHaveProperty('lawn_sqft');
   });
 });

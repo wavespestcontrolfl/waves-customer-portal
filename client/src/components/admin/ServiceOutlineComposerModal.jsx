@@ -117,7 +117,7 @@ function timeAgo(value) {
   return `${days}d ago`;
 }
 
-export default function ServiceOutlineComposerModal({ estimate, adminFetch, onClose }) {
+export default function ServiceOutlineComposerModal({ estimate, adminFetch, onClose, onChanged }) {
   // The Estimates list opens a program's outline (Tree & Shrub GATE_TS_OUTLINE, Pest Control GATE_PEST_OUTLINE, Mosquito
   // GATE_MOSQUITO_OUTLINE) with its outlineServiceLine; a program outline has no grass and no product cards. Every other
   // open is the lawn outline.
@@ -232,6 +232,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
       setPublicUrl(data.packet?.publicUrl || "");
       loadEvents(data.packet?.id);
       setNotice(approve ? "Outline approved and link created." : "Draft saved and secure link created.");
+      onChanged?.();
       return data.packet;
     } catch (err) {
       setError(err.message || "Save failed");
@@ -259,10 +260,10 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
         setPacket(active);
         loadEvents(active.id);
       }
-      const tokenForReuse = publicUrl ? publicUrl.split("/service-outlines/")[1] : "";
+      const rawToken = publicUrl.split("/service-outlines/")[1];
       const data = await adminFetch(`/admin/service-outlines/${active.id}/send`, {
         method: "POST",
-        body: JSON.stringify({ method, token: tokenForReuse ? decodeURIComponent(tokenForReuse) : undefined }),
+        body: JSON.stringify({ method, token: rawToken ? decodeURIComponent(rawToken) : undefined }),
       });
       setPacket(data.packet);
       setPublicUrl(data.publicUrl || data.packet?.publicUrl || publicUrl);
@@ -271,6 +272,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
       if (data.outcomes?.sms) parts.push(data.outcomes.sms.sent ? "SMS sent" : `SMS failed: ${data.outcomes.sms.reason || data.outcomes.sms.error || "unknown"}`);
       if (data.outcomes?.email) parts.push(data.outcomes.email.messageId ? "Email sent" : `Email failed: ${data.outcomes.email.error || "unknown"}`);
       setNotice(parts.join(" / ") || "Outline sent.");
+      onChanged?.();
     } catch (err) {
       setError(err.message || "Send failed");
     } finally {
@@ -318,6 +320,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
       }));
       loadEvents(data.packet?.id);
       setNotice(regenerationNotice(data));
+      onChanged?.();
     } catch (err) {
       setError(err.message || "Regenerate failed");
     } finally {

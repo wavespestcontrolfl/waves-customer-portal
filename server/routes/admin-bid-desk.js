@@ -72,6 +72,7 @@ const startSchema = Joi.object({ type: Joi.string().valid(...SOLICITATION_TYPES)
 const reorderSchema = Joi.object({ ids: Joi.array().items(Joi.string().uuid()).min(1).max(200).required() }).unknown(false);
 
 const DATE_CHANGED = 'The due date changed since you opened this bid. Reload and check it again.';
+const BID_CHANGED = 'This bid changed since you opened it. Reload and check it again.';
 
 const fromEmailSchema = Joi.object({ email_id: Joi.string().uuid().required() }).unknown(false);
 
@@ -140,8 +141,8 @@ function checklistPatch(value) {
 }
 
 function buildPatch(bid, value) {
-  const fenced = value.due_at !== undefined || value.confirm_due === true;
-  if (fenced && !value.expected_updated_at) return { error: { status: 409, body: { error: DATE_CHANGED } } };
+  const dateFenced = value.due_at !== undefined || value.confirm_due === true;
+  if (dateFenced && !value.expected_updated_at) return { error: { status: 409, body: { error: DATE_CHANGED } } };
   const patch = {};
   for (const key of ['job_walk_at', 'questions_due_at']) {
     if (value[key] === undefined) continue;
@@ -172,7 +173,7 @@ function buildPatch(bid, value) {
   const extra = checklistPatch(value);
   if (extra.error) return extra;
   Object.assign(patch, extra.patch);
-  return { patch, fenced };
+  return { patch, dateFenced };
 }
 
 // The checklist form spells the two extra dates in camelCase; they are the same columns as job_walk_at and
@@ -320,18 +321,34 @@ async function saveBidUpdate(trx, bidId, value, { precheck = null } = {}) {
   if (!bid) return { status: 404, body: { error: 'Not found' } };
   const refusal = precheck ? precheck(bid) : null;
   if (refusal) return refusal;
-  // A linked estimate must exist (the foreign key would also refuse it, with a worse answer).
-  if (value.estimateId && !(await trx('estimates').where({ id: value.estimateId }).first('id'))) {
-    return { status: 400, body: { error: 'That estimate does not exist' } };
+  const dateFencedEarly = value.due_at !== undefined || value.confirm_due === true;
+  if (dateFencedEarly && !value.expected_updated_at) {
+    return { status: 409, body: { error: DATE_CHANGED } };
+  }
+  // Enforce the optimistic-version fence BEFORE field-level validation (such as
+  // jobWalkConfirmed when a concurrent save cleared job_walk_at) so stale edits
+  // always surface 409 conflict recovery instead of a misleading 400.
+  if (value.expected_updated_at && bid.updated_at) {
+    const rowMs = Math.trunc(new Date(bid.updated_at).getTime());
+    const expectedMs = Math.trunc(new Date(value.expected_updated_at).getTime());
+    if (Number.isFinite(rowMs) && Number.isFinite(expectedMs) && rowMs !== expectedMs) {
+      return { status: 409, body: { error: dateFencedEarly ? DATE_CHANGED : BID_CHANGED } };
+    }
+  }
+  // A linked estimate must exist and not be archived (matching GET /estimates).
+  // FOR SHARE holds the estimate row against a concurrent archive until this transaction commits.
+  if (value.estimateId && !(await trx('estimates').where({ id: value.estimateId }).whereNull('archived_at').forShare().first('id'))) {
+    return { status: 400, body: { error: 'That estimate does not exist or is archived' } };
   }
   const built = buildPatch(bid, value);
   if (built.error) return built.error;
-  const { patch, fenced } = built;
+  const { patch, dateFenced } = built;
+  const fenced = dateFenced || Boolean(value.expected_updated_at);
 
   const written = await trx('bid_opportunities').where({ id: bid.id })
     .modify((q) => { if (fenced) q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [value.expected_updated_at]); })
     .update({ ...patch, updated_at: trx.raw('clock_timestamp()') });
-  if (!written) return { status: 409, body: { error: DATE_CHANGED } };
+  if (!written) return { status: 409, body: { error: dateFenced ? DATE_CHANGED : BID_CHANGED } };
   const updated = await trx('bid_opportunities').where({ id: bid.id }).first(columnsFor());
   try {
     await trx.raw('SAVEPOINT bid_desk_close_alerts');
@@ -376,7 +393,11 @@ router.post('/:id/checklist/start', async (req, res, next) => {
       const bid = await bidExists(trx, req.params.id, true);
       if (!bid) return null;
       const type = value.type || bid.solicitation_type || null;
-      if (value.type && value.type !== bid.solicitation_type) await trx('bid_opportunities').where({ id: bid.id }).update({ solicitation_type: value.type });
+      if (value.type && value.type !== bid.solicitation_type) {
+        await trx('bid_opportunities')
+          .where({ id: bid.id })
+          .update({ solicitation_type: value.type, updated_at: trx.raw('clock_timestamp()') });
+      }
       const result = await checklist.startChecklist(trx, bid.id, type, { addMissing: req.query.add === 'missing' });
       const items = await checklist.listItems(trx, bid.id);
       return { ...result, type, checklist: items, checklist_progress: checklist.progressOf(items), checklist_missing: await checklist.missingCount(trx, bid.id, type) };

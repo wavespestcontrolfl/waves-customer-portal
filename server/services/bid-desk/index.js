@@ -682,13 +682,15 @@ async function runBackfill({ days = BACKFILL_DAYS, dryRun = true, now = new Date
       .whereRaw('(created_at, id) <= (?::timestamptz, ?::uuid)', [until.at, until.id])
       .whereRaw(NOT_SPAM_SQL)
       .orderBy([{ column: 'received_at' }, { column: 'id' }])
-      .limit(BACKFILL_BATCH).select(EMAIL_COLUMNS);
+      .limit(BACKFILL_BATCH)
+      .select([...EMAIL_COLUMNS, db.raw('received_at::text AS cursor_at')]);
     if (!rows.length) break;
     for (const email of rows) {
       result.read += 1;
-      cursor = { at: new Date(email.received_at).toISOString(), id: email.id };
+      cursor = { at: email.cursor_at, id: email.id };
       await backfillOne(email, { dryRun, previewThreads, result });
     }
+    if (rows.length < BACKFILL_BATCH) break;
   }
   if (!dryRun && !stored) await writeWatermark(until);
   return result;

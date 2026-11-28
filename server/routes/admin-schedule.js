@@ -442,7 +442,98 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const { isTechnicianRequest, adminOnlyFields, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
+const {
+  isTechnicianRequest,
+  adminOnlyFields,
+  technicianCurrentVisitFilter,
+  technicianLiveVisitFilter,
+  technicianMayReadVisitAccessCodes,
+  visitHasDirectPremiseStamp,
+  visitMatchesPrimaryHomeForTechAccess,
+  loadActiveHomesByCustomerIds,
+  loadTechHomesByCustomerIds,
+  loadTechPrimaryAccessIds,
+  recheckTechFeedAccessRows,
+  redactFreeTextAccessCodes,
+  collectStoredAccessCodes,
+  sameHomeForTechVisitPrefs,
+  stripAccessCodePrefs,
+  stripAccessCodesFromBriefBlock,
+} = require('../services/technician-visit-scope');
+
+function redactTechFeedText(allowWindow, text, knownCodes = null) {
+  return allowWindow ? text : redactFreeTextAccessCodes(text, knownCodes);
+}
+
+function redactTechHistoryText(req, text, knownCodes = null) {
+  return isTechnicianRequest(req) ? redactFreeTextAccessCodes(text, knownCodes) : text;
+}
+
+function pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds) {
+  if (!droppedIds.size) return;
+  for (let i = enriched.length - 1; i >= 0; i -= 1) {
+    if (droppedIds.has(enriched[i].id)) enriched.splice(i, 1);
+  }
+  for (let i = unassigned.length - 1; i >= 0; i -= 1) {
+    if (droppedIds.has(unassigned[i].id)) unassigned.splice(i, 1);
+  }
+  for (const [key, tech] of Object.entries(byTech)) {
+    tech.services = tech.services.filter((s) => !droppedIds.has(s.id));
+    if (!tech.services.length) {
+      delete byTech[key];
+      continue;
+    }
+    tech.totalServices = tech.services.length;
+    tech.completedServices = tech.services.filter((s) => s.status === 'completed').length;
+    tech.estimatedServiceMinutes = tech.services.reduce((sum, s) => sum + (s.estimatedDuration || 30), 0);
+    tech.estimatedDriveMinutes = tech.services.length * 8;
+    const zones = {};
+    const materials = {};
+    tech.services.forEach((s) => {
+      zones[s.zone] = (zones[s.zone] || 0) + 1;
+      (s.materialsNeeded || []).forEach((m) => { materials[m.product || m] = true; });
+    });
+    tech.zones = zones;
+    tech.loadList = Object.keys(materials);
+  }
+}
+
+const BILLING_FEED_ALERT_TYPES = new Set(['no_card_on_file', 'unbilled_visit']);
+
+async function applyTechScheduleFeedRecheck(conn, req, candidates, { enriched, byTech, unassigned, date = null }) {
+  const droppedIds = await recheckTechFeedAccessRows(conn, req, candidates, (c, { lostWindow, lostPrimary }) => {
+    const knownCodes = collectStoredAccessCodes(c.prefs, c.visit);
+    const preservedBilling = Array.isArray(c.row.propertyAlerts)
+      ? c.row.propertyAlerts.filter((a) => a && BILLING_FEED_ALERT_TYPES.has(a.type))
+      : [];
+    const safeNotes = lostWindow ? redactFreeTextAccessCodes(c.cleanedNotes, knownCodes) : c.cleanedNotes;
+    const keepNeighborhood = !lostWindow && (visitHasDirectPremiseStamp(c.visit) || !c.visit.source_estimate_id || !lostPrimary);
+    c.row.propertyAlerts = [
+      ...compilePropertyAlerts({
+        prefs: stripAccessCodePrefs(c.prefs, knownCodes),
+        notes: safeNotes,
+        genuinelyNew: c.genuinelyNew,
+        servicePreferences: c.visit.service_preferences,
+        normalizedServiceType: c.normalizedType,
+        neighborhoodGate: keepNeighborhood ? c.neighborhoodGate : null,
+        neighborhoodActions: keepNeighborhood && c.neighborhoodActions,
+      }),
+      ...preservedBilling,
+    ];
+    if (!keepNeighborhood) delete c.row.neighborhoodGateActions;
+    if (lostWindow) {
+      c.row.lastServiceNotes = redactFreeTextAccessCodes(c.row.lastServiceNotes, knownCodes);
+      c.row.lastLineServiceNotes = redactFreeTextAccessCodes(c.row.lastLineServiceNotes, knownCodes);
+    }
+  });
+  if (droppedIds.size) {
+    pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds);
+    require('../services/visit-groups').visitSummariesForRows(enriched);
+    const legsToday = date === etDateString();
+    Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs')
+      .attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
+  }
+}
 
 function normalizeAddonEntry(a) {
   return {
@@ -568,12 +659,241 @@ function discountProvenanceProjection(req, s) {
 // and lead score are office-only, as Customer 360 already treats them. Rows
 // are shared by reference with techSummary / unassigned, so this mutates in
 // place and returns nothing. Admin rows are never touched.
+function stripTechMonthMoney(req, weeks) {
+  if (!isTechnicianRequest(req)) return;
+  for (const week of weeks) {
+    for (const day of week) {
+      delete day.estimatedRevenue;
+      for (const svc of day.services) delete svc.prepaidAmount;
+    }
+  }
+}
+
+function parseAdminExtraLine(e) {
+  const description = String(e?.description || '').slice(0, 200);
+  const quantity = Number(e?.quantity) || 1;
+  const rawUnitPrice = Number(e?.unit_price) || 0;
+  const rawAmount = Number(e?.amount) || 0;
+  const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (quantity !== 0 ? rawAmount / quantity : 0);
+  if (!description || !Number.isFinite(unit_price)) return null;
+  return {
+    description,
+    quantity,
+    unit_price,
+    amount: rawAmount || quantity * unit_price,
+    category: e?.category ? String(e.category).slice(0, 100) : null,
+    discount_id: e?.discount_id ? String(e.discount_id) : null,
+  };
+}
+
+function parseOptionalNumber(val) {
+  return (val == null || val === '') ? 0 : Number(val);
+}
+
+function resolveTechExtraLineMoney(e, quantity) {
+  const rawUnitPrice = parseOptionalNumber(e?.unit_price);
+  const rawAmount = parseOptionalNumber(e?.amount);
+  if (!Number.isFinite(rawUnitPrice) || !Number.isFinite(rawAmount)) {
+    return { error: 'Extra line item amount exceeds field checkout limit' };
+  }
+  const expectedCents = Math.round(quantity * rawUnitPrice * 100);
+  if (rawUnitPrice !== 0 && rawAmount !== 0 && Math.abs(Math.round(rawAmount * 100) - expectedCents) > 1) {
+    return { error: 'Extra line item amount does not match quantity and unit price' };
+  }
+  const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (rawAmount / quantity);
+  const billedCents = Math.round(quantity * unit_price * 100);
+  if (!Number.isFinite(unit_price) || !Number.isFinite(billedCents) || Math.abs(billedCents) > 500000) {
+    return { error: 'Extra line item amount exceeds field checkout limit' };
+  }
+  return {
+    billedCents,
+    unit_price: rawUnitPrice !== 0 ? rawUnitPrice : (billedCents / 100) / quantity,
+    amount: billedCents / 100,
+  };
+}
+
+function parseTechExtraLine(e) {
+  const description = String(e?.description || '').slice(0, 200);
+  if (!description) return { skip: true };
+  const quantity = e?.quantity == null ? 1 : Number(e.quantity);
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 25) {
+    return { error: 'Invalid extra line item quantity' };
+  }
+  const money = resolveTechExtraLineMoney(e, quantity);
+  if (money.error) return money;
+  const discount_id = e?.discount_id ? String(e.discount_id) : null;
+  if (money.billedCents < 0 || money.unit_price < 0 || discount_id) {
+    return { error: 'Technicians cannot apply discounts or negative adjustments during field checkout' };
+  }
+  return {
+    billedCents: money.billedCents,
+    line: {
+      description,
+      quantity,
+      unit_price: money.unit_price,
+      amount: money.amount,
+      category: e?.category ? String(e.category).slice(0, 100) : null,
+      discount_id: null,
+    },
+  };
+}
+
+function parseAndValidateExtraLines(req, rawExtras) {
+  const extras = Array.isArray(rawExtras) ? rawExtras : [];
+  if (!isTechnicianRequest(req)) {
+    return { error: null, extraLines: extras.map(parseAdminExtraLine).filter(Boolean) };
+  }
+  if (extras.length > 20) return { error: 'Too many extra line items', extraLines: [] };
+  const extraLines = [];
+  let totalCents = 0;
+  for (const e of extras) {
+    const parsed = parseTechExtraLine(e);
+    if (parsed.error) return { error: parsed.error, extraLines: [] };
+    if (parsed.skip) continue;
+    totalCents += Math.abs(parsed.billedCents);
+    if (totalCents > 1000000) return { error: 'Extra line item amount exceeds field checkout limit', extraLines: [] };
+    extraLines.push(parsed.line);
+  }
+  return { error: null, extraLines };
+}
+
+function stripTechScheduleListBilling(req, rows) {
+  if (!isTechnicianRequest(req)) return;
+  const today = etDateString();
+  for (const row of rows) {
+    const isToday = dateOnly(row.scheduledDate) === today;
+    const prepaid = row.prepaidAmount != null ? Math.max(0, Number(row.prepaidAmount) || 0) : 0;
+    if (isToday && prepaid > 0) {
+      row.checkoutPrepaidCredit = Math.round(prepaid * 100) / 100;
+    } else {
+      delete row.checkoutPrepaidCredit;
+    }
+    delete row.monthlyRate;
+    delete row.leadScore;
+    if (!isToday) delete row.estimatedPrice;
+    delete row.primaryLinePrice;
+    delete row.prepaidAmount;
+    delete row.prepaidMethod;
+    delete row.prepaidAt;
+    delete row.payerId;
+    delete row.poNumber;
+    delete row.selfPayOverride;
+  }
+}
+
+const EMPTY_CHECKOUT_INVOICE_FIELDS = {
+  checkoutInvoiceId: null,
+  checkoutInvoiceStatus: null,
+  checkoutInvoiceTotal: null,
+  checkoutInvoiceNumber: null,
+  checkoutInvoiceLines: [],
+  checkoutInvoiceCreditApplied: 0,
+  checkoutInvoiceAmountPaid: 0,
+  checkoutInvoicePrepaidApplied: false,
+  checkoutInvoicePayerBilled: false,
+};
+
+function serializeAdminCheckoutInvoice(checkoutInvoice, checkoutInvoicePrepaidApplied) {
+  if (!checkoutInvoice) return { ...EMPTY_CHECKOUT_INVOICE_FIELDS, checkoutInvoicePrepaidApplied };
+  return {
+    checkoutInvoiceId: checkoutInvoice.id || null,
+    checkoutInvoiceStatus: checkoutInvoice.status || null,
+    checkoutInvoiceTotal: checkoutInvoice.total != null ? Number(checkoutInvoice.total) : null,
+    checkoutInvoiceNumber: checkoutInvoice.invoice_number || null,
+    checkoutInvoiceLines: compactCheckoutInvoiceLines(checkoutInvoice.line_items),
+    checkoutInvoiceCreditApplied: checkoutInvoice.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+    checkoutInvoiceAmountPaid: checkoutInvoice.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
+    checkoutInvoicePrepaidApplied,
+    checkoutInvoicePayerBilled: !!checkoutInvoice.payer_id,
+  };
+}
+
+function serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoicePrepaidApplied) {
+  if (!isTechnicianRequest(req)) {
+    return serializeAdminCheckoutInvoice(checkoutInvoice, checkoutInvoicePrepaidApplied);
+  }
+  if (!checkoutInvoice || dateOnly(s.scheduled_date) !== etDateString()) {
+    return {
+      ...EMPTY_CHECKOUT_INVOICE_FIELDS,
+      ...(dateOnly(s.scheduled_date) === etDateString()
+        ? { checkoutInvoicePrepaidApplied: Boolean(checkoutInvoicePrepaidApplied) }
+        : {}),
+    };
+  }
+  const netDue = Math.max(0, Math.round((Number(checkoutInvoice.total || 0) - Number(checkoutInvoice.credit_applied || 0) - Number(checkoutInvoice.amount_paid || 0)) * 100) / 100);
+  return {
+    ...EMPTY_CHECKOUT_INVOICE_FIELDS,
+    checkoutInvoiceId: checkoutInvoice.id,
+    checkoutInvoiceStatus: checkoutInvoice.status || null,
+    checkoutInvoiceTotal: netDue,
+    checkoutInvoiceNumber: checkoutInvoice.invoice_number || null,
+    checkoutInvoicePrepaidApplied: Boolean(checkoutInvoicePrepaidApplied),
+    checkoutInvoicePayerBilled: !!checkoutInvoice.payer_id,
+  };
+}
+
+function techSafeEstimateSourcePayload(payload) {
+  return {
+    linked: true,
+    estimateId: payload.estimateId,
+    estimateSlug: payload.estimateSlug,
+    linkedSeriesCount: payload.linkedSeriesCount,
+    estimateStatus: payload.estimateStatus,
+    createdAt: payload.createdAt,
+    lines: (payload.lines || []).map((line) => ({
+      estimateLabel: line.estimateLabel || null,
+      name: line.name || null,
+      service: line.service || null,
+      serviceKey: line.serviceKey || null,
+      cadence: line.cadence || null,
+      intervalDays: line.intervalDays ?? null,
+      source: line.source || null,
+      frequency: line.frequency || null,
+      visitsPerYear: line.visitsPerYear ?? null,
+    })),
+    deposit: payload.deposit && (payload.deposit.payerBilled || payload.deposit.required)
+      ? { payerBilled: Boolean(payload.deposit.payerBilled), required: Boolean(payload.deposit.required) }
+      : null,
+    payment: payload.payment && (payload.payment.billingTerm || payload.payment.annualPrepay)
+      ? {
+          billingTerm: payload.payment.billingTerm || null,
+          ...(payload.payment.annualPrepay ? {
+            annualPrepay: {
+              coversThisVisit: payload.payment.annualPrepay.coversThisVisit,
+              refunded: Boolean(payload.payment.annualPrepay.refunded),
+            },
+          } : {}),
+        }
+      : null,
+  };
+}
+
+function stripTechInvoiceResponse(req, body) {
+  if (isTechnicianRequest(req)) delete body.token;
+  return body;
+}
+
+function technicianTodayLiveVisitFilter(req, q) {
+  technicianLiveVisitFilter(req, q);
+  if (isTechnicianRequest(req)) q.where('scheduled_services.scheduled_date', etDateString());
+  return q;
+}
+
 function stripTechOwnerOnlyMoney(req, rows) {
   if (!isTechnicianRequest(req)) return;
+  const today = etDateString();
   for (const row of rows) {
     delete row.monthlyRate;
     delete row.leadScore;
-    if (row.billingLane) delete row.billingLane.monthlyRate;
+    if (row.billingLane) {
+      delete row.billingLane.monthlyRate;
+      if (row.billingLane.prediction && dateOnly(row.scheduledDate) !== today) {
+        row.billingLane = {
+          ...row.billingLane,
+          prediction: { ...row.billingLane.prediction, amount: null, grossAmount: null },
+        };
+      }
+    }
   }
 }
 
@@ -5757,22 +6077,27 @@ function formatServiceDisplay(primaryType, addons = []) {
   return `${names[0]} + ${names.length - 1} more`;
 }
 
-function mapAddonRow(row) {
+const optNum = (v) => (v != null ? Number(v) : null);
+
+function mapAddonRow(row, { forTech = false } = {}) {
   return {
     id: row.id,
     serviceId: row.service_id || null,
     serviceName: row.service_name,
     serviceKey: row.service_key_snapshot || null,
     serviceCategory: row.service_category_snapshot || null,
-    excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
     estimatedDuration: row.estimated_duration_minutes ?? null,
-    basePrice: row.base_price != null ? Number(row.base_price) : null,
-    estimatedPrice: row.estimated_price != null ? Number(row.estimated_price) : null,
-    discountId: row.discount_id || null,
-    discountName: row.discount_name || null,
-    discountType: row.discount_type || null,
-    discountAmount: row.discount_amount != null ? Number(row.discount_amount) : null,
-    discountDollars: row.discount_dollars != null ? Number(row.discount_dollars) : null,
+    hasBillablePrice: Number(row.estimated_price ?? row.base_price ?? 0) > 0,
+    ...(forTech ? {} : {
+      excludedFromPercentDiscount: lineExcludedFromPercentDiscount(row.service_key_snapshot),
+      basePrice: optNum(row.base_price),
+      estimatedPrice: optNum(row.estimated_price),
+      discountId: row.discount_id || null,
+      discountName: row.discount_name || null,
+      discountType: row.discount_type || null,
+      discountAmount: optNum(row.discount_amount),
+      discountDollars: optNum(row.discount_dollars),
+    }),
     recurringPattern: row.recurring_pattern || null,
     recurringIntervalDays: row.recurring_interval_days ?? null,
     recurringNth: row.recurring_nth ?? null,
@@ -5782,7 +6107,7 @@ function mapAddonRow(row) {
   };
 }
 
-async function loadAddonsByServiceId(serviceIds) {
+async function loadAddonsByServiceId(serviceIds, { forTech = false } = {}) {
   const ids = (serviceIds || []).filter(Boolean);
   if (!ids.length) return new Map();
   try {
@@ -5796,7 +6121,7 @@ async function loadAddonsByServiceId(serviceIds) {
     for (const row of rows) {
       const key = row.scheduled_service_id;
       if (!map.has(key)) map.set(key, []);
-      map.get(key).push(mapAddonRow(row));
+      map.get(key).push(mapAddonRow(row, { forTech }));
     }
     return map;
   } catch (e) {
@@ -6865,7 +7190,7 @@ router.get('/', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         // The primary address on file, for the rain step's stopForecastZone
         // (stampedAddressDiverges): kept on the row only, never in the response.
-        'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
+        'customers.address_line1 as customer_address_line1', 'customers.address_line2 as customer_address_line2', 'customers.city as customer_city', 'customers.zip as customer_zip',
         // Visit coordinates for map-centered tools (treatment-zone mapper):
         // stamped visit coords win; the customer mirror only backfills a
         // NON-divergent stamp — a divergent stamp with no coords must degrade
@@ -6891,7 +7216,7 @@ router.get('/', async (req, res, next) => {
       )
       .orderByRaw('COALESCE(route_order, 999), window_start');
 
-    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id), { forTech: isTechnicianRequest(req) });
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
     // Neighborhood gate-code directory:
     // the shared entry for a visit whose customer has no gate code. A failed
@@ -7042,6 +7367,12 @@ router.get('/', async (req, res, next) => {
     } catch { deferredPrepayCustomerIds = null; }
     // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
     const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
+    // For technicians, raw property access codes and away-mode dates follow
+    // access-code-capture.js#listForVisit: only active (non-completed/terminal)
+    // visits in [yesterday..tomorrow] ET at the matching home receive them.
+    const activeHomesByCustomer = await loadTechHomesByCustomerIds(db, req, services.map((s) => s.customer_id));
+    const techPrimaryAllowedIds = await loadTechPrimaryAccessIds(db, req, services, activeHomesByCustomer);
+    const techRecheckCandidates = [];
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -7091,14 +7422,25 @@ router.get('/', async (req, res, next) => {
       // Compiled by the shared helper (services/nextstop-alerts.js) so the
       // pre-visit brief's deterministic access block and this day feed can
       // never drift — the block moved verbatim, behavior 1:1.
+      // Primary-home property_preferences codes require BOTH visit-window
+      // eligibility AND a primary-home match; neighborhoodGateByVisit is
+      // already scoped to the visit's own property_id so secondary homes keep
+      // their own neighborhood gate entry while inside the visit window.
+      const knownCodes = isTechnicianRequest(req) ? collectStoredAccessCodes(prefs, s) : null;
+      const allowTechVisitWindow = technicianMayReadVisitAccessCodes(req, s);
+      const allowTechPrimaryPrefs = !isTechnicianRequest(req) || (allowTechVisitWindow && techPrimaryAllowedIds.has(s.id));
+      const allowTechNeighborhood = !isTechnicianRequest(req)
+        || (allowTechVisitWindow && (visitHasDirectPremiseStamp(s) || !s.source_estimate_id || allowTechPrimaryPrefs));
+      const rowNeighborhoodGate = allowTechNeighborhood ? (neighborhoodGateByVisit.get(s.id) || null) : null;
+      const rowNeighborhoodActions = allowTechNeighborhood && gateActionVisits.has(s.id);
       const alerts = compilePropertyAlerts({
-        prefs,
-        notes: cleanedNotes,
+        prefs: allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs, knownCodes),
+        notes: redactTechFeedText(allowTechVisitWindow, cleanedNotes, knownCodes),
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
-        neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
-        neighborhoodActions: gateActionVisits.has(s.id),
+        neighborhoodGate: rowNeighborhoodGate,
+        neighborhoodActions: rowNeighborhoodActions,
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -7251,7 +7593,7 @@ router.get('/', async (req, res, next) => {
             });
           })
         : [];
-      return {
+      const row = {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
         ...(prepPhotosLive ? { customerSentPhotos: customerSentPhotosByServiceId.get(s.id) === true } : {}),
@@ -7297,19 +7639,7 @@ router.get('/', async (req, res, next) => {
             name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
           }
           : null,
-        checkoutInvoiceId: checkoutInvoice?.id || null,
-        checkoutInvoiceStatus: checkoutInvoice?.status || null,
-        checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
-        checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
-        checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
-        checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
-        checkoutInvoiceAmountPaid: checkoutInvoice?.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
-        checkoutInvoicePrepaidApplied,
-        // The INVOICE's own Bill-To: a payer-billed invoice survives the
-        // visit's payer being cleared/deactivated, and the Charge-now reuse
-        // path refuses it — the sheets must not present it as collectible
-        // even when the visit itself resolves self-pay.
-        checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
+        ...serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoicePrepaidApplied),
         completionProfile: projectCompletionContext.completionProfile || null,
         // Dispatch V2 completes from this payload — the closeout promise
         // checkbox renders only on true (Codex #3178 r21 P1).
@@ -7389,7 +7719,7 @@ router.get('/', async (req, res, next) => {
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
-        ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(rowNeighborhoodActions ? { neighborhoodGateActions: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
@@ -7398,12 +7728,12 @@ router.get('/', async (req, res, next) => {
         // scheduler-audit filter is for scheduled_services.notes (where ops
         // sessions write audit trails), and would false-positive on genuine
         // tech prose like "No SMS sent because the phone is disconnected".
-        lastServiceNotes: previewText(lastService?.technician_notes),
+        lastServiceNotes: previewText(redactTechHistoryText(req, lastService?.technician_notes, knownCodes)),
         // Line-scoped last visit for the service dashboards (Protocol panel):
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: safeDate(lastLineService?.service_date),
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
-        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
+        lastLineServiceNotes: previewText(redactTechHistoryText(req, lastLineService?.technician_notes, knownCodes)),
         checkOutTime: s.check_out_time,
         // With checkInTime/checkOutTime: the drive line finds where the tech is now.
         enRouteAt: s.en_route_at || null,
@@ -7429,6 +7759,14 @@ router.get('/', async (req, res, next) => {
         visitId: s.visit_id || null,
         trackState: s.track_state || null,
       };
+      if (isTechnicianRequest(req)) {
+        techRecheckCandidates.push({
+          visit: s, row, prefs, cleanedNotes, genuinelyNew, normalizedType,
+          neighborhoodGate: rowNeighborhoodGate, neighborhoodActions: rowNeighborhoodActions,
+          hadWindow: allowTechVisitWindow, hadPrimary: allowTechPrimaryPrefs,
+        });
+      }
+      return row;
     }));
     require('../services/visit-groups').visitSummariesForRows(enriched);
     const visitIds = [...new Set(enriched.map((service) => service.visitId).filter(Boolean))];
@@ -7568,6 +7906,10 @@ router.get('/', async (req, res, next) => {
 
     await attachOfficeToldFields(req, enriched);
     stripTechOwnerOnlyMoney(req, enriched);
+    // Final authorization + access-code recheck runs AFTER all enrichment,
+    // closeout, roster, weather, and office-told awaits so reassigned visits
+    // are removed and completed/changed stops never serialize raw credentials.
+    await applyTechScheduleFeedRecheck(db, req, techRecheckCandidates, { enriched, byTech, unassigned, date });
 
     res.json({
       date, services: enriched,
@@ -7723,7 +8065,7 @@ router.get('/week', async (req, res, next) => {
 
       const zones = {};
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
-      const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+      const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id), { forTech: isTechnicianRequest(req) });
       const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
       // Same trace-eligibility flag the day feed carries (codex P2 r2):
       // the mobile Week view opens the shared CompletionPanel straight off
@@ -8003,16 +8345,7 @@ router.get('/week', async (req, res, next) => {
               name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
             }
             : null,
-          checkoutInvoiceId: checkoutInvoice?.id || null,
-          checkoutInvoiceStatus: checkoutInvoice?.status || null,
-          checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
-          checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
-          checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
-          checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
-          checkoutInvoiceAmountPaid: checkoutInvoice?.amount_paid != null ? Number(checkoutInvoice.amount_paid) : 0,
-          checkoutInvoicePrepaidApplied,
-          // Same invoice-level Bill-To flag as the day payload (see there).
-          checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
+          ...serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoicePrepaidApplied),
           completionProfile: projectCompletionContext.completionProfile || null,
           // Same field as the day view above — both feed the V2 closeout.
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
@@ -8208,7 +8541,7 @@ router.get('/month', async (req, res, next) => {
       .orderBy('scheduled_services.scheduled_date')
       .orderByRaw('COALESCE(scheduled_services.route_order, 999)');
 
-    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id), { forTech: isTechnicianRequest(req) });
 
     // Group by date
     const byDate = {};
@@ -8308,6 +8641,7 @@ router.get('/month', async (req, res, next) => {
       }
       weeks.push(week);
     }
+    stripTechMonthMoney(req, weeks);
 
     // Month summary stats
     const monthServices = services.filter(s => {
@@ -11461,7 +11795,7 @@ router.get('/list', async (req, res, next) => {
     // Add-on lines so the Edit appointment modal opened from the list view
     // knows the full visit composition (primary + add-ons) and edits totals
     // correctly rather than rebasing the visit price down to the primary line.
-    const listAddonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
+    const listAddonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id), { forTech: isTechnicianRequest(req) });
 
     const mapped = services.map(s => ({
       id: s.id,
@@ -11514,6 +11848,7 @@ router.get('/list', async (req, res, next) => {
       ...(s._approximate ? { approximate: true, matchReasons: s._matchReasons } : {}),
     }));
 
+    stripTechScheduleListBilling(req, mapped);
     // GATE_DAY_ONLY_PROMISE part E: the list, and the client search that reads it, open the same edit window as the day feed.
     await attachOfficeToldFields(req, mapped);
     res.json({
@@ -20040,7 +20375,11 @@ router.delete('/:id/prepaid', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-async function buildValidatedCheckoutExtraLines(extras, baseAmount) {
+// Validate extra checkout lines (including admin discount clamping) before minting.
+async function buildValidatedCheckoutExtraLines(extras, baseAmount, req = null) {
+  if (extras.length > 0 && req && isTechnicianRequest(req)) {
+    throw httpError(403, 'Only admins can add extra items or discounts during checkout.');
+  }
   const extraLines = extras
     .map((e) => {
       const quantity = Number(e?.quantity) || 1;
@@ -20104,7 +20443,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // svc row the transaction works from is one the tech was authorized
     // for at read time.
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.id)
-      .modify((q) => technicianLiveVisitFilter(req, q))
+      .modify((q) => technicianTodayLiveVisitFilter(req, q))
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select('scheduled_services.*',
         'customers.monthly_rate as cust_monthly_rate',
@@ -20177,7 +20516,9 @@ router.post('/:id/invoice', async (req, res, next) => {
       if (!isTechnicianRequest(req)) return;
       const still = await technicianLiveVisitFilter(
         req,
-        trx('scheduled_services').where({ 'scheduled_services.id': svc.id }),
+        trx('scheduled_services')
+          .where({ 'scheduled_services.id': svc.id })
+          .where('scheduled_services.scheduled_date', etDateString()),
       ).forUpdate().first('scheduled_services.id');
       if (!still) {
         const e = new Error('Scheduled service not found');
@@ -20380,7 +20721,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       // into tender selection for a $0 charge.
       const alreadyPaid = ['paid', 'prepaid'].includes(existing.status)
         || invoiceAmountDue(existing) <= 0;
-      return res.json({
+      return res.json(stripTechInvoiceResponse(req, {
         success: true,
         reused: true,
         invoiceId: existing.id,
@@ -20394,7 +20735,7 @@ router.post('/:id/invoice', async (req, res, next) => {
         token: existing.token,
         status: existing.status,
         alreadyPaid,
-      });
+      }));
     }
 
     // Mobile checkout sheet can append extra services + discount lines before
@@ -20416,7 +20757,9 @@ router.post('/:id/invoice', async (req, res, next) => {
     // caller of this endpoint, and any client older than this slice) skips
     // the check entirely — byte-identical to before.
     const expectedDiscountStacking = req.body?.expected_discount_stacking;
-    const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extras, amount);
+    // Technicians may collect at the server-calculated visit total only —
+    // never add custom services, negative lines, or discounts during checkout.
+    const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extras, amount, req);
 
     const extrasTotal = invoiceExtraLines.reduce((s, e) => s + e.amount, 0);
     if (!(amount > 0) && extrasTotal <= 0) {
@@ -20510,7 +20853,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // nothing to collect — never hand the parent a $0 tender flow.
     const mintAlreadyPaid = ['paid', 'prepaid'].includes(invoice.status)
       || invoiceAmountDue(invoice) <= 0;
-    res.json({
+    res.json(stripTechInvoiceResponse(req, {
       success: true,
       reused: minted.reused,
       invoiceId: invoice.id,
@@ -20522,7 +20865,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       token: invoice.token,
       status: invoice.status,
       alreadyPaid: mintAlreadyPaid,
-    });
+    }));
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
@@ -24934,6 +25277,20 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.*');
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    // Technicians read raw property access codes and absence/Away Watch dates
+    // only on non-ended visits in [yesterday..tomorrow] ET at the matching home.
+    const checkTechBriefCodeEligibility = async (visitRow) => {
+      if (!isTechnicianRequest(req)) return true;
+      if (!technicianMayReadVisitAccessCodes(req, visitRow)) return false;
+      const homesMap = await loadActiveHomesByCustomerIds(db, [visitRow.customer_id]);
+      const homes = homesMap ? (homesMap.get(visitRow.customer_id) || []) : null;
+      let customerPrimary = null;
+      if (Array.isArray(homes) && homes.length === 0) {
+        customerPrimary = await db('customers').where({ id: visitRow.customer_id }).first('address_line1', 'address_line2', 'city', 'zip').catch(() => null);
+      }
+      return visitMatchesPrimaryHomeForTechAccess(db, visitRow, homes, customerPrimary);
+    };
+    const allowTechBriefAccessCodes = await checkTechBriefCodeEligibility(svc);
     const PrevisitBrief = require('../services/previsit-brief');
     // Every `{brief: null}` answer optionally carries a deterministic
     // `facts` block (access codes + last same-line visit's products) for
@@ -24994,7 +25351,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
             .update({ tech_seen_at: db.fn.now() })
             .catch((err) => logger.warn(`[admin-schedule] visit-prep tech_seen_at stamp failed for ${svc.id}: ${err.message}`));
         }
-        return { ...payload, facts };
+        const safeFacts = (!allowTechBriefAccessCodes && facts?.access)
+          ? { ...facts, access: stripAccessCodesFromBriefBlock(facts.access) }
+          : facts;
+        return { ...payload, facts: safeFacts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
         return payload;
@@ -25008,6 +25368,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const withAwayWatch = async (payload) => {
       const AwayWatch = require('../services/away-watch');
       if (!AwayWatch.awayWatchLive()) return payload;
+      // Absence/return dates follow the same visit-window + home eligibility
+      // rule as access codes so far-future or completed stops never expose
+      // when a customer's home stands empty.
+      if (isTechnicianRequest(req) && !allowTechBriefAccessCodes) return payload;
       let awayWatch = null;
       try {
         awayWatch = await AwayWatch.awayWatchCardLines(db, svc.id);
@@ -25041,22 +25405,60 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       // every brief gate off, and withholds the whole answer when the visit was lost during the read or the check cannot run.
       if (out && !out.editable) return payload;
       homeNoteLooked = true;
-      return out ? { ...payload, homeNote: { note: out.note, customerId: out.customerId } } : payload;
+      if (!out) return payload;
+      const safeNote = (isTechnicianRequest(req) && !allowTechBriefAccessCodes && typeof out.note?.body === 'string')
+        ? { ...out.note, body: redactFreeTextAccessCodes(out.note.body) }
+        : out.note;
+      return { ...payload, homeNote: { note: safeNote, customerId: out.customerId } };
     };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
     // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
     // customer the brief was built for (a merge changes the visit's customer while the technician stays assigned).
     // No longer so, or the check itself failing: the whole answer is withheld. All three gates off and no home note looked up: no extra read.
+    const stripCodesFromBriefPayload = (payload) => {
+      const next = { ...payload };
+      delete next.awayWatch;
+      const briefCodes = [
+        ...Object.values(next.facts?.access?.codes || {}),
+        ...Object.values(next.brief?.access?.codes || {}),
+      ].flatMap((v) => {
+        const t = String(v || '').trim();
+        const s = t.replace(/^[#*]+|[#*]+$/g, '');
+        return [t, s].filter((x) => x.length >= 3);
+      });
+      if (next.facts?.access) next.facts = { ...next.facts, access: stripAccessCodesFromBriefBlock(next.facts.access, briefCodes) };
+      if (next.brief?.access) next.brief = { ...next.brief, access: stripAccessCodesFromBriefBlock(next.brief.access, briefCodes) };
+      if (typeof next.homeNote?.note?.body === 'string') {
+        next.homeNote = {
+          ...next.homeNote,
+          note: { ...next.homeNote.note, body: redactFreeTextAccessCodes(next.homeNote.note.body, briefCodes) },
+        };
+      }
+      return next;
+    };
     const finalRecheck = async (payload) => {
-      if (!(homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
+      const techHoldingCodes = isTechnicianRequest(req) && allowTechBriefAccessCodes;
+      if (!(techHoldingCodes || homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
       try {
-        const stillOwned = await db('scheduled_services')
+        const recheckQ = db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
-          .modify((q) => (customerAskedBound ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
-          .modify((q) => technicianCurrentVisitFilter(req, q))
-          .first('scheduled_services.id');
-        return stillOwned ? payload : { brief: null };
+          .modify((q) => ((customerAskedBound || techHoldingCodes) ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
+          .modify((q) => technicianCurrentVisitFilter(req, q));
+        const stillOwned = techHoldingCodes
+          ? await recheckQ.first(
+            'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+            'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
+            'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+            'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+            'scheduled_services.source_estimate_id',
+          )
+          : await recheckQ.first('scheduled_services.id');
+        if (!stillOwned) return { brief: null };
+        if (techHoldingCodes && !(await checkTechBriefCodeEligibility(stillOwned))) {
+          return stripCodesFromBriefPayload(payload);
+        }
+        return payload;
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief final recheck failed for ${svc.id}: ${err.message}`);
         return { brief: null };
@@ -25085,7 +25487,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return answer({ brief: null, stale: staleReason });
       }
     }
-    const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
+    const safeBrief = (!allowTechBriefAccessCodes && parsedBrief?.access)
+      ? { ...parsedBrief, access: stripAccessCodesFromBriefBlock(parsedBrief.access) }
+      : parsedBrief;
+    const served = { brief: safeBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
     // Facts ride along with EVERY served brief (gated): the WDO and
     // legacy shapes carry no access/last_visit at all, and even a served
     // visit brief's access block is a snapshot from the :19/:49 sweep —
@@ -25102,7 +25507,13 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
 // holds the visit row locked in its own transaction, so a reassignment landing during the save refuses it. A stale save
 // (the note changed since the editor read it) is 409 with the current note. Staff only: no customer, report or token
 // route reads this table.
-const HOME_NOTE_VISIT_COLUMNS = ['scheduled_services.id', 'scheduled_services.customer_id'];
+const HOME_NOTE_VISIT_COLUMNS = [
+  'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+  'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
+  'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+  'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+  'scheduled_services.source_estimate_id',
+];
 const homeNoteVisitRefusal = (req, res) => (isTechnicianRequest(req)
   ? res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' })
   : res.status(404).json({ error: 'Scheduled service not found' }));
@@ -25121,8 +25532,22 @@ router.get('/:id/home-note', async (req, res, next) => {
     const stillOwned = await db('scheduled_services')
       .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
       .modify((q) => technicianCurrentVisitFilter(req, q))
-      .first('scheduled_services.id');
+      .first(HOME_NOTE_VISIT_COLUMNS);
     if (!stillOwned) return homeNoteVisitRefusal(req, res);
+    if (isTechnicianRequest(req)) {
+      const mayReadCodes = technicianMayReadVisitAccessCodes(req, stillOwned)
+        && await sameHomeForTechVisitPrefs(db, req.technicianId, stillOwned.customer_id, stillOwned);
+      if (!mayReadCodes) {
+        out.editable = false;
+        if (typeof out?.note?.body === 'string') {
+          const prefs = stillOwned.customer_id
+            ? await db('property_preferences').where({ customer_id: stillOwned.customer_id }).first().catch(() => null)
+            : null;
+          const knownCodes = collectStoredAccessCodes(prefs, stillOwned);
+          out.note = { ...out.note, body: redactFreeTextAccessCodes(out.note.body, knownCodes) };
+        }
+      }
+    }
     HomeNote.sendHomeNote(res, out);
   } catch (err) { next(err); }
 });
@@ -25145,9 +25570,24 @@ router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, a
           : Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });
       }
       if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forShare().first('id');
-      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id'], { allowCompleted: true });
+      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, [
+        'id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'property_id',
+        'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+        'source_estimate_id',
+      ], { allowCompleted: true });
       if (String(peek.customer_id || '') !== String(svc.customer_id || '')) {
         return { status: 409, error: 'This visit now belongs to another customer. Reload it.', code: 'customer_changed' };
+      }
+      if (isTechnicianRequest(req)) {
+        const mayReadCodes = technicianMayReadVisitAccessCodes(req, svc)
+          && await sameHomeForTechVisitPrefs(trx, req.technicianId, svc.customer_id, svc);
+        if (!mayReadCodes) {
+          return {
+            status: 403,
+            error: 'Home notes are read-only outside the active visit window at the matching service address.',
+            code: 'home_note_read_only',
+          };
+        }
       }
       return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
     });
@@ -25428,27 +25868,10 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         .catch(() => []);
       lines = scheduleLinesFromEstimate(est, indexServicesForSchedule(serviceRows));
     } catch { lines = []; }
-    res.json({
+    const fullPayload = {
       linked: true,
       estimateId: est.id,
-      // Owner-only: est.token is the permanent public bearer credential for
-      // the unauthenticated /api/estimates/:token router (view, PDF, resend,
-      // change-request) — admin-customers.js already strips 'estimates' from
-      // the tech 360 for exactly this reason. Never hand it to a technician
-      // token, which outlives the 7-day tech access window and any
-      // reassignment/termination (ADMIN-BUG-R40). No tech client reads this
-      // field. Owner-only quote totals/deposit/payment posture are also stripped
-      // for technicians (P1-9).
-      ...adminOnlyFields(req, {
-        estimateToken: est.token,
-        quotedTotal,
-        monthlyTotal: Number(est.monthly_total || 0),
-        annualTotal: Number(est.annual_total || 0),
-        onetimeTotal: Number(est.onetime_total || 0),
-        deposit,
-        payment,
-      }),
-      ...sanitizeEstimatePostureForTech(req, deposit, payment),
+      estimateToken: est.token,
       // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
@@ -25456,10 +25879,15 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       linkedSeriesCount,
       estimateStatus: est.status,
       createdAt: est.created_at,
-      lines: isTechnicianRequest(req)
-        ? lines.map((line) => ({ name: line.name, cadence: line.cadence, category: line.category }))
-        : lines,
-    });
+      quotedTotal,
+      monthlyTotal: Number(est.monthly_total || 0),
+      annualTotal: Number(est.annual_total || 0),
+      onetimeTotal: Number(est.onetime_total || 0),
+      lines,
+      deposit,
+      payment,
+    };
+    res.json(isTechnicianRequest(req) ? techSafeEstimateSourcePayload(fullPayload) : fullPayload);
   } catch (err) { next(err); }
 });
 
@@ -25535,6 +25963,17 @@ const {
 // or carrying the PaymentIntent that page opens — is the normal state, not a
 // refusal. That lane voids nothing at the choice; every money guard below
 // (collected, part-paid, credited, deposit, payer, foreign lines) still holds.
+function supersedeInvoiceHoldReason(inv) {
+  const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview } = require('../services/invoice-helpers');
+  if (inv.payer_id || inv.payer_statement_id || invoiceWithdrawnFromCustomer(inv)) {
+    return 'isn’t available — this visit’s invoice bills to a third-party payer';
+  }
+  if (invoiceHeldForChemicalReview(inv)) {
+    return 'isn’t available — this visit’s invoice is held for office chemical add-on billing review';
+  }
+  return null;
+}
+
 async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db, delivered = false }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0) {
     return { ok: true, supersedes: [] };
@@ -25580,8 +26019,8 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
           });
       })
       .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid', 'paid_at',
-        'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
-        'notes');
+        'payer_id', 'payer_statement_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
+        'scheduled_send_error', 'notes');
   } catch (err) {
     logger.warn(`[schedule:prepay-switch] attached-invoice lookup failed for ${visitIds.join(',')}: ${err.message} — refusing`);
     return { ok: false, blockReason: 'couldn’t confirm what this visit is already invoiced for — refresh and try again' };
@@ -25648,8 +26087,9 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     if (lines.some((li) => String(li?.category || '') === 'deposit_credit')) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit carries an estimate deposit credit. Mint the prepay from Customer 360 so the deposit is applied to it` };
     }
-    if (inv.payer_id) {
-      return { ok: false, blockReason: 'isn’t available — this visit’s invoice bills to a third-party payer' };
+    const holdBlockReason = supersedeInvoiceHoldReason(inv);
+    if (holdBlockReason) {
+      return { ok: false, blockReason: holdBlockReason };
     }
     supersedes.push({
       id: inv.id,
@@ -26626,6 +27066,7 @@ async function runPrepaySwitch({
       await trx('invoices')
         .where(function supersedeNets() {
           this.whereIn('scheduled_service_id', target.visitIds);
+          if (payPageInvoiceId) this.orWhere({ id: payPageInvoiceId });
           if (target.estimateId) {
             this.orWhere(function customerProvenance() {
               this.where({ customer_id: target.customerId })
@@ -28616,8 +29057,10 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     let typedFallbackNextSteps = [];
     let treeShrubReviewGrounding = null;
     if (scheduledServiceId) {
-      const svc = await db('scheduled_services')
-        .where({ id: scheduledServiceId })
+      const svcQ = db('scheduled_services')
+        .where({ 'scheduled_services.id': scheduledServiceId });
+      technicianCurrentVisitFilter(req, svcQ);
+      const svc = await svcQ
         // is_callback feeds the pressure-suppression rule below — without it
         // in the projection the flag reads undefined and callback visits on
         // one-time keys would ground differently than /complete scores them
@@ -31055,6 +31498,8 @@ module.exports.splitRootsByTopupSkip = splitRootsByTopupSkip;
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;
 // Test surface for the technician money strip on the day and week feeds.
 module.exports.stripTechOwnerOnlyMoney = stripTechOwnerOnlyMoney;
+module.exports.serializeCheckoutInvoiceForFeed = serializeCheckoutInvoiceForFeed;
+module.exports.mapAddonRow = mapAddonRow;
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;

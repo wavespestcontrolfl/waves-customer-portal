@@ -3432,8 +3432,70 @@ function streetNameParts(tokens) {
   // optional directional run (codex r6 P2).
   const tail = [];
   while (rest.length > 1 && DIRECTIONAL_TOKENS.has(rest[rest.length - 1])) tail.unshift(rest.pop());
-  if (STREET_SUFFIX_WORDS.has(rest[rest.length - 1])) rest.pop();
-  return { name, withoutSuffix: [...rest, ...tail].join(' ') };
+  const suffix = rest.length > 1 && STREET_SUFFIX_WORDS.has(rest[rest.length - 1]) ? rest.pop() : '';
+  const coreTokens = [...rest];
+  const preDir = coreTokens.length > 1 && DIRECTIONAL_TOKENS.has(coreTokens[0]) ? coreTokens.shift() : '';
+  return {
+    name,
+    withoutSuffix: [...rest, ...tail].join(' '),
+    preDir,
+    postDir: tail.join(' '),
+    suffix,
+    core: coreTokens.join(' '),
+  };
+}
+
+function singleTypoStreetMatch(partName, expectedName) {
+  if (!partName || !expectedName || partName[0] !== expectedName[0]) return false;
+  if (partName.length < 5 || partName.length !== expectedName.length) return false;
+  let diffs = 0;
+  for (let i = 0; i < partName.length; i += 1) {
+    if (partName[i] !== expectedName[i]) {
+      diffs += 1;
+      if (diffs > 1) return false;
+    }
+  }
+  return diffs === 1;
+}
+
+function fuzzyComponentsAgree(part, expected) {
+  if (part.suffix && part.suffix !== expected.suffix) return false;
+  if (part.preDir !== expected.preDir || part.postDir !== expected.postDir) return false;
+  return !/\d/.test(part.core) && !/\d/.test(expected.core);
+}
+
+function streetPartMatchesExpected(part, expected, allowFuzzySingleTypo, fromCommunity = false) {
+  if (!part.name) return false;
+  if (part.house && part.house !== expected.house) return false;
+  if ([expected.name, expected.withoutSuffix].includes(part.name)) return true;
+  if (fromCommunity || !allowFuzzySingleTypo || part.house || !fuzzyComponentsAgree(part, expected)) return false;
+  return singleTypoStreetMatch(part.core, expected.core);
+}
+
+function isCityMatchingCommunity(spokenCommunity, savedCity, savedZip, structured) {
+  if (!spokenCommunity || !savedCity || structured.length) return false;
+  const nonStateWords = cityKey(spokenCommunity).replace(/\b(?:fl|florida)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  if (nonStateWords !== savedCity) return false;
+  return rawIsPureLocalityPhrase(spokenCommunity, savedCity, savedZip);
+}
+
+function restatesStreetEvidence({ sa, structured, parsed, raw, rawIsLocality, acknowledgment, tailAgrees, hasPositiveLocality, rawAddress, savedCity, savedZip, savedUnit, onFile }) {
+  const streetItems = structured.map(part => ({ street: part.street, fromCommunity: false }));
+  const spokenCommunity = String(sa.subdivision_or_community || '').trim();
+  const communityMatchesSavedCity = isCityMatchingCommunity(spokenCommunity, savedCity, savedZip, structured);
+  if (spokenCommunity && !communityMatchesSavedCity) streetItems.push({ street: spokenCommunity, fromCommunity: true });
+  if (raw && !rawIsLocality && !acknowledgment) {
+    streetItems.push({ street: tailAgrees ? splitStreetLineUnit(parsed.line1).street : rawAddress, fromCommunity: false });
+  }
+  const activeItems = streetItems.filter(item => Boolean(item.street));
+  const expected = restatementStreetParts(onFile.street);
+  const allowFuzzySingleTypo = Boolean(
+    !savedUnit && tailAgrees && hasPositiveLocality && (!structured.length || !/\d/.test(String(sa.street_line_1 || ''))),
+  );
+  const agree = activeItems.every(item => streetPartMatchesExpected(
+    restatementStreetParts(item.street), expected, allowFuzzySingleTypo, item.fromCommunity,
+  ));
+  return { agree, streetEvidenceCount: activeItems.length, communityMatchesSavedCity };
 }
 
 function restatesOnFileAddress(sa, knownCustomer) {
@@ -3446,22 +3508,10 @@ function restatesOnFileAddress(sa, knownCustomer) {
   const { unit: leadingUnit, rest: rawAddress = raw } = splitUnitFirstLine(raw) || {};
   const parsed = parseRawAddress(rawAddress);
   const structured = statedValues([sa.street_line_1, sa.line1, sa.street]).map(splitStreetLineUnit);
-  // EVERY unit the raw phrase names is compared ("Apt 4, 500 Main St Apt 5"
-  // against on-file Apt 4 is a contradiction, not a restatement — codex
-  // r11 P1); a first-match pick let the later unit vanish.
-  // The parsed street's own unit is a FRAGMENT of the whole-line unit when
-  // the parser split a compound unit across line1/city ("Bldg 4 Apt 5" →
-  // line1 "… Bldg 4", city "Apt 5") — only consulted when the whole line
-  // carried no unit at all (codex r12 P2).
   const rawUnits = [leadingUnit, unitAnywhereOnLine(rawAddress) || unitAnywhereOnLine(parsed.line1)].filter(Boolean);
-  // The comma-free parser reads an alphabetic unit value as a city + state
-  // ("100 Main St Apt CT" → city "Apt", state CT): a unit designator in the
-  // city slot is neither a locality nor geography (codex r12 P2).
   const parsedCityIsUnitWord = UNIT_WORD.test(parsed.city || '');
   const parsedCity = parsedCityIsUnitWord ? '' : parsed.city;
   const parsedState = parsedCityIsUnitWord ? '' : parsed.state;
-  // …and that designator + value pair IS the caller's unit ("Apt CT"), which
-  // no unit detector recognizes on its own because the value is alphabetic.
   if (parsedCityIsUnitWord && parsed.state && !rawUnits.length) rawUnits.push(`${parsed.city} ${parsed.state}`);
   const savedUnit = unitKey(saved.addressLine2 || onFile.unit);
   const units = statedValues([sa.street_line_2, sa.line2, sa.unit, sa.apt, ...rawUnits, ...structured.map(part => part.unit)]);
@@ -3476,45 +3526,25 @@ function restatesOnFileAddress(sa, knownCustomer) {
   ];
   if (comparisons.some(([value, expected]) => value && value !== expected)) return false;
 
-  // Ignore only positive locality restatements or a short acknowledgment.
-  // Every other raw phrase is compared as street evidence, including names
-  // with no house number or suffix; unknown words cannot disappear behind a city.
-  // Whole-phrase check only (codex r9 P1): cityKey() drops digits, so a
-  // "compare the letters to the city" shortcut let "34203 Parrish" pass as
-  // a plain "Parrish" — the contradictory ZIP vanished.
   const rawIsLocality = raw === savedZip || rawIsPureLocalityPhrase(raw, savedCity, savedZip);
   const acknowledgment = /^(?:yes|(?:the )?same (?:place|address|as before|as always))\.?$/i.test(raw);
   const rawCity = cityKey(parsedCity);
-  // A city slot holding the TAIL of a compound raw unit ("Apt 5" of
-  // "Bldg 4 Apt 5") is that unit, not a locality.
   const cityUnitLine = String(normalizeUnitLine(parsed.city) || '').toLowerCase();
   const cityIsUnit = Boolean(cityUnitLine) && rawUnits.some((unit) => {
     const line = String(normalizeUnitLine(unit) || '').toLowerCase();
     return line === cityUnitLine || line.endsWith(` ${cityUnitLine}`);
   });
   const tailAgrees = [!rawCity, rawCity === savedCity, cityIsUnit].some(Boolean);
-  const streets = structured.map(part => part.street);
-  // A spoken community is street evidence too (call 657a96e6, 2026-11-04: a
-  // community heard as "Sample Palm Manor" for the on-file "1234 Sample Palm
-  // Manor Dr" held a confirmed re-service). It agrees only when it names the
-  // on-file street, with or without the suffix — the same test a house-less
-  // raw street passes. Any other community is another place and holds.
-  streets.push(String(sa.subdivision_or_community || '').trim());
-  if (raw && !rawIsLocality && !acknowledgment) streets.push(tailAgrees ? splitStreetLineUnit(parsed.line1).street : rawAddress);
-  // A raw ZIP restatement carrying ordinary punctuation or ZIP+4 ("34219.",
-  // "34219-1234") is not the exact-string match rawIsLocality looks for, so it
-  // falls through to the push above — but a bare ZIP parses to an EMPTY
-  // street (parsed.line1 ''), and that phantom entry vetoed agreement on real,
-  // already-matched ZIP evidence below (codex P2). Only actual street text is
-  // street evidence; nothing the caller actually said disappears here.
-  const streetEvidence = streets.filter(Boolean);
-  // A building street alone cannot identify the saved apartment. City/ZIP
-  // only callers still use the complete on-file address at booking time.
-  if (savedUnit && streetEvidence.length && !units.length) return false;
-  const expected = restatementStreetParts(onFile.street);
-  const agree = streetEvidence.map(restatementStreetParts).every(part => part.name && [expected.name, expected.withoutSuffix].includes(part.name)
-    && (!part.house || part.house === expected.house));
-  return agree && [streetEvidence.length, cities.length, zips.length, acknowledgment, rawIsLocality && raw].some(Boolean);
+  const hasPositiveLocality = Boolean(
+    (savedCity && cities.some((c) => c === savedCity))
+    || (savedZip && zips.some((z) => z === savedZip))
+    || (savedCity && rawCity === savedCity),
+  );
+  const { agree, streetEvidenceCount, communityMatchesSavedCity } = restatesStreetEvidence({
+    sa, structured, parsed, raw, rawIsLocality, acknowledgment, tailAgrees, hasPositiveLocality, rawAddress, savedCity, savedZip, savedUnit, onFile,
+  });
+  if (savedUnit && streetEvidenceCount && !units.length) return false;
+  return agree && [streetEvidenceCount, cities.length, zips.length, acknowledgment, communityMatchesSavedCity, rawIsLocality && raw].some(Boolean);
 }
 
 /**

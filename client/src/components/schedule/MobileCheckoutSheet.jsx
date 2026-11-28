@@ -40,6 +40,7 @@ import {
 import { attachedVisitInvoice } from './visitInvoice';
 import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 import { getAdminUser } from '../../lib/adminAuth';
+import { etDateString } from '../../lib/timezone';
 import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -227,7 +228,8 @@ export default function MobileCheckoutSheet({
   const hasOwnPrice = rawPrice != null && rawPrice > 0;
   // Declared here (not at its old spot further down) so the gross-fallback
   // safety check right below can read it before `price` is computed.
-  const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
+  const rawPrepaid = service.prepaidAmount ?? service.checkoutPrepaidCredit;
+  const prepaidAmount = rawPrepaid != null ? Math.max(0, Number(rawPrepaid) || 0) : 0;
   // Callbacks (re-services) are free by definition for recurring/WaveGuard
   // customers — the server zeroes the visit and won't bill monthly dues, so the
   // checkout preview must not fall back to monthlyRate (which would show a
@@ -594,7 +596,9 @@ export default function MobileCheckoutSheet({
   // PRICED payer-billed visit's own `price` (rawPrice) still previewed a
   // live "Charge $X" button here, which then 400'd on every tap. Disabled
   // regardless of hasOwnPrice, matching the server exactly.
-  const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice
+  const visitDate = String(service.scheduledDate || '').slice(0, 10);
+  const techNonTodayCheckoutBlocked = !isAdmin && !!visitDate && visitDate !== etDateString();
+  const nothingToCharge = techNonTodayCheckoutBlocked || priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice
     || (payerBilled && !invoicePreview)
     || siblingBlocksCharge
     || attachedInvoiceRefusedForFeeAtCompletion;
@@ -819,7 +823,9 @@ export default function MobileCheckoutSheet({
         >
           {minting
             ? 'Opening payment…'
-            : processingVisitInvoice
+            : techNonTodayCheckoutBlocked
+              ? 'Today’s visits only — cannot charge'
+              : processingVisitInvoice
               ? 'Payment processing — nothing to collect'
               : priceRefreshBlocksCharge
                 ? 'Price needs a refresh — reopen this visit'

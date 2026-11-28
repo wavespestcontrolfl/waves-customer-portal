@@ -932,8 +932,43 @@ router.get('/:id/recipients', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const TECH_SAFE_INVOICE_KEYS = [
+  'id', 'customer_id', 'scheduled_service_id', 'invoice_number', 'title', 'status',
+  'subtotal', 'tax', 'tax_rate', 'tax_amount', 'total', 'amount_paid', 'balance_due',
+  'service_date', 'due_date', 'paid_at', 'created_at', 'updated_at', 'payment_method',
+];
+const TECH_SAFE_CUSTOMER_KEYS = [
+  'first_name', 'last_name', 'phone', 'email',
+];
+const TECH_SAFE_VISIT_CUSTOMER_KEYS = [
+  ...TECH_SAFE_CUSTOMER_KEYS, 'address_line1', 'city', 'state', 'zip',
+];
+
+function pickAllowedFields(source, keys) {
+  const out = {};
+  for (const key of keys) {
+    if (key in source) out[key] = source[key];
+  }
+  return out;
+}
+
+// Explicit field-checkout allowlist for technician single-invoice reads so
+// permanent public bearer tokens, third-party payer snapshots (AP email /
+// address), annual-prepay plan pricing (monthlyRate / prepayAmount), saved
+// card metadata, discounts, credits, and office notes can never leak.
+// Only visit-bound invoices include the service customer's address fields;
+// customer-level prepay invoices omit address keys across multi-home accounts.
+function techSafeInvoicePayload(invoice) {
+  const safe = pickAllowedFields(invoice, TECH_SAFE_INVOICE_KEYS);
+  safe.tech_card_on_file = invoice.tech_card_on_file === true;
+  const c = invoice.customer;
+  const customerKeys = invoice.scheduled_service_id ? TECH_SAFE_VISIT_CUSTOMER_KEYS : TECH_SAFE_CUSTOMER_KEYS;
+  safe.customer = (c && typeof c === 'object') ? pickAllowedFields(c, customerKeys) : null;
+  return safe;
+}
+
 // What a technician may read with GET /:id (technician visibility audit A10,
-// 2026-11-04): an invoice bound to one of its own current visits, or the
+// 2026-11-04): an invoice bound to one of its own visits TODAY (ET), or the
 // prepay invoice of an annual prepay term for a customer it serves (the
 // prepay switch mints that invoice with no visit link, then re-reads it after
 // tender). Not the customer's other invoices. Admins read any invoice.
@@ -942,7 +977,9 @@ async function technicianMayReadInvoice(req, invoice) {
   if (invoice.scheduled_service_id) {
     const visit = await technicianCurrentVisitFilter(
       req,
-      db('scheduled_services').where({ 'scheduled_services.id': invoice.scheduled_service_id, customer_id: invoice.customer_id }),
+      db('scheduled_services')
+        .where({ 'scheduled_services.id': invoice.scheduled_service_id, customer_id: invoice.customer_id })
+        .where('scheduled_services.scheduled_date', etDateString()),
     ).first('scheduled_services.id');
     return !!visit;
   }
@@ -954,7 +991,8 @@ async function technicianMayReadInvoice(req, invoice) {
 // above lets a technician token reach this handler for their own tap-to-pay
 // checkout (PrepaySwitchSheet / AnnualPrepayLauncher re-reading after
 // tender) — so a technician request is scoped here by
-// technicianMayReadInvoice. Admin requests are unscoped (ADMIN-BUG-R05).
+// technicianMayReadInvoice and stripped of bearer tokens & office-only
+// billing fields via techSafeInvoicePayload. Admin requests are unscoped.
 router.get('/:id', async (req, res, next) => {
   try {
     const invoice = await InvoiceService.getById(req.params.id);
@@ -969,12 +1007,12 @@ router.get('/:id', async (req, res, next) => {
     if (isTechnicianRequest(req)) {
       // The visit payment sheet shows Card on File to a technician only when
       // this invoice is one it may charge (GATE_TECH_CARD_ON_FILE), judged on
-      // the stored lines before the property strip below.
+      // the stored lines before techSafeInvoicePayload omits line_items.
       invoice.tech_card_on_file = techCardOnFileLive() && await technicianMayChargeCardOnFile(req, invoice);
-      invoice.line_items = require('../services/invoice-property-lines').techSafeInvoiceLineItems(invoice.line_items);
+      return res.json(techSafeInvoicePayload(invoice));
     }
     // Coverage-service suggestion for the annual-prepay modal (real recurring
-    // service, not the invoice title). Modal-only; safe to attach for all GETs.
+    // service, not the invoice title). Modal-only; safe to attach for admin GETs.
     invoice.suggested_coverage = await suggestCoverageServiceType(invoice.customer_id);
     res.json(invoice);
   } catch (err) { next(err); }
@@ -2032,10 +2070,17 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
     // for delivery to them (Codex #4311 r29 P0). The Bill-To reconciliation
     // is what releases such a row; scheduling is refused until then.
     const scheduleTarget = await db('invoices').where({ id: req.params.id }).first('scheduled_send_error');
-    if (require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(scheduleTarget)) {
+    const invoiceHelpers = require('../services/invoice-helpers');
+    if (invoiceHelpers.invoiceWithdrawnFromCustomer(scheduleTarget)) {
       return res.status(409).json({
         error: 'This invoice is billed to a third-party payer and has been withdrawn from the customer — clear the Bill-To first.',
         code: 'invoice_withdrawn_from_customer',
+      });
+    }
+    if (invoiceHelpers.invoiceHeldForChemicalReview(scheduleTarget)) {
+      return res.status(409).json({
+        error: 'This invoice is held for office billing review of a chemical area add-on — review and send or clear the hold first.',
+        code: 'INVOICE_CHEMICAL_ADDON_HOLD',
       });
     }
 
@@ -2043,7 +2088,7 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
       .where({ id: req.params.id })
       .whereIn('status', ['draft', 'scheduled'])
       .whereNull('payer_statement_id')
-      .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
+      .whereRaw("(scheduled_send_error IS NULL OR (scheduled_send_error NOT LIKE 'payer_billed:%' AND scheduled_send_error NOT LIKE 'chemical_addon_review:%'))")
       // req.ibApprovedSchedule is set only by scheduleSendFromBar (never an HTTP field): the invoice edit time the card
       // showed, as one more predicate on this UPDATE. The page's call is unchanged.
       .modify((q) => {
@@ -2054,8 +2099,8 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
         scheduled_send_at: when,
         scheduled_send_attempts: 0,
         // The accepted-Text/pending-Email marker (a Text leg the visit summary text carries)
-        // survives a reschedule: clearing it would text the pay link a second time.
-        scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED%' OR scheduled_send_error LIKE 'SUMMARY_TEXT_PLANNED%' THEN scheduled_send_error ELSE NULL END"),
+        // and chemical review-hold stamps survive any reschedule.
+        scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED%' OR scheduled_send_error LIKE 'SUMMARY_TEXT_PLANNED%' OR scheduled_send_error LIKE 'chemical_addon_review:%' THEN scheduled_send_error ELSE NULL END"),
         scheduled_request_review: Boolean(requestReview),
         scheduled_review_delay_minutes: requestReview ? reviewDelayMinutes : null,
         updated_at: new Date(),

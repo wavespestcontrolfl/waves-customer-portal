@@ -23,6 +23,125 @@ const {
   assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer,
   isInvoiceCollectibleStatus, invoiceAmountDue, invoiceHeldForChemicalReview,
 } = require('../services/invoice-helpers');
+
+const PAY_READ_ALLOWED_WHEN_HELD_STATUSES = new Set(['paid', 'prepaid', 'processing']);
+
+function rejectUnavailablePayReadInvoice(data, res) {
+  if (data.payer_statement_id) {
+    res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
+    return true;
+  }
+  const status = String(data.status || '').toLowerCase();
+  if (invoiceHeldForChemicalReview(data) && !PAY_READ_ALLOWED_WHEN_HELD_STATUSES.has(status)) {
+    res.status(409).json({
+      error: 'This invoice is held for office billing review of a chemical area add-on',
+      code: 'INVOICE_CHEMICAL_ADDON_HOLD',
+    });
+    return true;
+  }
+  return false;
+}
+
+function errorPayload(err, extra = {}) {
+  return { error: err.message, ...(err?.code ? { code: err.code } : {}), ...extra };
+}
+
+function confirmErrorStatus(err) {
+  return err && err.code === 'INVOICE_CHEMICAL_ADDON_HOLD' ? 409 : 400;
+}
+
+function combinedAllocationInvoiceScope(pi) {
+  const { parseCombinedAllocation, isCombinedPiMetadata } = require('../services/pay-combined');
+  try {
+    const alloc = parseCombinedAllocation(pi?.metadata);
+    return {
+      ids: Array.isArray(alloc) ? alloc.map((a) => String(a.invoiceId)).filter(Boolean) : [],
+      malformed: false,
+    };
+  } catch {
+    return { ids: [], malformed: Boolean(isCombinedPiMetadata(pi?.metadata)) };
+  }
+}
+
+async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null, { extraInvoiceIds = [], malformedCombined = false } = {}) {
+  // Billing lock order: invoice(s) sorted by id FOR UPDATE → customer FOR UPDATE
+  // → packet/visit SHARE checks. Matches stripe-terminal.js, pay-combined.js,
+  // and webhookInvoiceRefusesEnrollment so concurrent enrollment + terminal/
+  // combined transactions cannot deadlock on opposite lock order, and covers
+  // every sibling invoice on a combined PaymentIntent.
+  if (malformedCombined) {
+    return {
+      status: 409,
+      body: {
+        error: 'Payment allocation could not be verified — Auto Pay enrollment was not completed.',
+        code: 'COMBINED_ALLOCATION_UNREADABLE',
+      },
+    };
+  }
+  const ids = [...new Set([
+    ...(invoiceId ? [String(invoiceId)] : []),
+    ...(Array.isArray(extraInvoiceIds) ? extraInvoiceIds.map((id) => String(id)) : []),
+  ].filter(Boolean))].sort();
+  let liveInvs = [];
+  if (ids.length === 1) {
+    const one = await trx('invoices').where({ id: ids[0] }).forUpdate().first('id', 'scheduled_send_error');
+    if (one) liveInvs = [one];
+  } else if (ids.length > 1) {
+    liveInvs = await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate().select('id', 'scheduled_send_error');
+  }
+  if (customerId) {
+    // Nonblocking customer lock while holding invoice locks (ABBA avoidance
+    // against customer-dedupe.js, which locks customers before invoices).
+    const cq = trx('customers').where({ id: customerId }).forUpdate();
+    if (typeof cq.noWait === 'function') {
+      try {
+        await cq.noWait().first('id');
+      } catch (lockErr) {
+        if (lockErr?.code !== '55P03') throw lockErr;
+        return {
+          status: 409,
+          body: { error: 'This account is being updated. Please try again in a moment.', code: 'INVOICE_BUSY_RETRY' },
+        };
+      }
+    } else {
+      await cq.first('id');
+    }
+  }
+  if (liveInvs.some((inv) => invoiceHeldForChemicalReview(inv))) {
+    return {
+      status: 409,
+      body: {
+        error: 'This invoice is held for office billing review of a chemical area add-on',
+        code: 'INVOICE_CHEMICAL_ADDON_HOLD',
+      },
+    };
+  }
+  const { invoicePayerOwnedNow } = require('../services/visit-completion-packets');
+  for (const id of ids) {
+    if (await invoicePayerOwnedNow(id, trx)) {
+      return {
+        status: 409,
+        body: { error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' },
+      };
+    }
+  }
+  return null;
+}
+
+function rejectWithdrawnOrHeldInvoice(invoice, res) {
+  if (invoiceWithdrawnFromCustomer(invoice)) {
+    res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
+    return true;
+  }
+  if (invoiceHeldForChemicalReview(invoice)) {
+    res.status(409).json({
+      error: 'This invoice is held for office billing review of a chemical area add-on',
+      code: 'INVOICE_CHEMICAL_ADDON_HOLD',
+    });
+    return true;
+  }
+  return false;
+}
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
@@ -569,7 +688,7 @@ router.get('/:token', async (req, res, next) => {
     // Phase 2: an accrued invoice is not individually viewable/payable — it
     // renders on the consolidated statement. Fail closed on the pay surface
     // (receipts stay permanent; the block is here, not in getByToken).
-    if (data.payer_statement_id) return res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
+    if (rejectUnavailablePayReadInvoice(data, res)) return;
     // NOTE: this is an UNAUTHENTICATED public-by-token GET (link previews /
     // scanners hit it). It must stay read-only for money state — account credit
     // is auto-applied from the controlled POST /:token/setup path, never here.
@@ -648,7 +767,7 @@ router.get('/:token', async (req, res, next) => {
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
     // A read failure hides the block and never fails the page.
     const promoCode = await require('../services/invoice-promo-code')
-      .promoCodeViewForInvoice(data, { saveRequired: getSaveRequired })
+      .promoCodeViewForInvoice(data, { saveRequired: getSaveRequired, payerOwnedLive })
       .catch((err) => {
         logger.warn(`[pay-v2] promo code block suppressed for invoice ${data.id}: ${err.code || err.message}`);
         return null;
@@ -966,9 +1085,9 @@ router.post('/:token/setup', async (req, res, next) => {
       // `inProgress: true` so the pay page shows the "bank payment processing"
       // state instead of a red error.
       if (invoice.status === 'processing') {
-        return res.status(409).json({ error: err.message, inProgress: true });
+        return res.status(409).json(errorPayload(err, { inProgress: true }));
       }
-      return res.status(400).json({ error: err.message });
+      return res.status(400).json(errorPayload(err));
     }
 
     // Required-save invoices force the flag server-side — stripping the URL
@@ -1136,17 +1255,48 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
     if (typeof req.body?.code !== 'string') return res.status(400).json({ error: 'invalid_code' });
     // The code is saved under the invoice row lock, the lock /setup holds
     // when it redeems it: an invoice that was paid, voided or moved to a
-    // payer meanwhile takes no code.
+    // payer meanwhile takes no code. Any open client-confirmable PI on the
+    // invoice is retired before returning 200 so another tab cannot confirm
+    // the pre-promo gross amount directly at Stripe before reload runs /setup.
     const outcome = await db.transaction(async (trx) => {
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
       if (!locked) return null;
       // No code on an invoice that must save a payment method first: its
       // credit coverage is held for the capture step, not applied at /setup.
       if (await invoiceRequiresSavedMethod(locked, { database: trx })) return { ok: false, reason: 'invalid_code' };
-      return require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code }, trx);
+      const entered = await require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code, trackInsert: true }, trx);
+      return { ...entered, openPiId: locked.stripe_payment_intent_id || null };
     });
     if (!outcome) return notFound();
     if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
+    // Retire any pre-promo open PaymentIntent whenever the promo row is still
+    // unredeemed ('entered') — never on an already-redeemed row whose PI is
+    // already priced with the discount. Public 409 responses never expose PI IDs
+    // or upstream Stripe details.
+    if (outcome.openPiId && !outcome.applied?.credited) {
+      const { retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
+      const retireRefusal = await retireOpenPaymentIntentBeforeSettlement(
+        { id: invoice.id, stripe_payment_intent_id: outcome.openPiId },
+        { action: 'applying a promo code' },
+      );
+      if (retireRefusal) {
+        if (outcome.insertedNew) {
+          await db.transaction(async (cleanupTrx) => {
+            await cleanupTrx('invoices').where({ id: invoice.id }).forUpdate().first('id');
+            await cleanupTrx('invoice_promo_codes')
+              .where({ invoice_id: invoice.id, status: 'entered' })
+              .delete();
+          }).catch(() => {});
+        }
+        return res.status(409).json({
+          error: 'A payment is already in progress for this invoice — please wait a moment and refresh.',
+          code: 'payment_in_flight',
+        });
+      }
+      await db('invoices')
+        .where({ id: invoice.id, stripe_payment_intent_id: outcome.openPiId })
+        .update({ stripe_payment_intent_id: null });
+    }
     return res.json({ success: true, promoCode: { canEnter: false, applied: outcome.applied } });
   } catch (err) {
     logger.warn(`[pay-v2] promo-code failed (code=${err?.code || 'none'}, invoice=${invoiceId || 'unresolved'})`);
@@ -1170,6 +1320,12 @@ router.post('/:token/plan-choice', async (req, res) => {
     const invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return notFound();
     invoiceId = invoice.id;
+    if (invoiceHeldForChemicalReview(invoice)) {
+      return res.status(409).json({
+        error: 'This invoice is held for office billing review of a chemical area add-on',
+        code: 'INVOICE_CHEMICAL_ADDON_HOLD',
+      });
+    }
     if (req.body?.plan !== 'prepay_annual') return res.status(400).json({ error: 'invalid_plan' });
     const outcome = await require('../services/pay-plan-choice').selectAnnualPrepay(invoice);
     if (outcome.refused) return res.status(409).json({ error: 'plan_choice_unavailable' });
@@ -1205,7 +1361,7 @@ router.post('/:token/update-amount', async (req, res, next) => {
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
-      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+      return res.status(invoice.status === 'processing' ? 409 : 400).json(errorPayload(err));
     }
 
     // Required-save invoices force the flag server-side (see /setup).
@@ -1229,7 +1385,7 @@ router.post('/:token/update-amount', async (req, res, next) => {
     // allocation drifted under the locked re-verification — same
     // reload-and-retry contract as /setup.
     if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message, staleBalance: !!err.staleBalance });
+      return res.status(409).json(errorPayload(err, { staleBalance: !!err.staleBalance }));
     }
     logger.error(
       `[pay-v2] Update-amount error `
@@ -1249,6 +1405,22 @@ router.post('/:token/update-amount', async (req, res, next) => {
     res.status(400).json({ error: 'Could not update payment total. Please refresh and try again, or call (941) 297-5749.' });
   }
 });
+
+function respondPayPhaseError(req, res, { invoice, phase, methodCategory, paymentIntentId, err }) {
+  if (err && err.statusCode === 409 && err.staleBalance) {
+    return res.status(409).json({ error: err.message, staleBalance: true });
+  }
+  logger.error(`[pay-v2] ${phase === 'quote' ? 'Quote' : 'Confirm'} error: ${err.message}`);
+  reportBillPaymentError(req, {
+    invoice,
+    phase,
+    methodCategory,
+    paymentIntentId,
+    error: err,
+    statusCode: 400,
+  });
+  return res.status(400).json({ error: err.message });
+}
 
 // =========================================================================
 // POST /api/pay/:token/quote — Get surcharge quote for a specific PM
@@ -1270,22 +1442,19 @@ router.post('/:token/quote', async (req, res, next) => {
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
-      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+      return res.status(invoice.status === 'processing' ? 409 : 400).json(errorPayload(err));
     }
 
     const result = await StripeService.quoteInvoiceSurcharge(invoice.id, paymentMethodId);
     res.json(result);
   } catch (err) {
-    logger.error(`[pay-v2] Quote error: ${err.message}`);
-    reportBillPaymentError(req, {
+    respondPayPhaseError(req, res, {
       invoice,
       phase: 'quote',
       methodCategory: 'card',
       paymentIntentId: invoice?.stripe_payment_intent_id,
-      error: err,
-      statusCode: 400,
+      err,
     });
-    res.status(400).json({ error: err.message });
   }
 });
 
@@ -1309,7 +1478,7 @@ router.post('/:token/finalize', async (req, res, next) => {
     try {
       assertInvoiceCollectible(invoice);
     } catch (err) {
-      return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
+      return res.status(invoice.status === 'processing' ? 409 : 400).json(errorPayload(err));
     }
 
     // Required-save invoices force the flag server-side (see /setup).
@@ -1404,7 +1573,7 @@ router.post('/:token/confirm', async (req, res, next) => {
         throw err;
       }
     } catch (err) {
-      return res.status(400).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+      return res.status(confirmErrorStatus(err)).json(errorPayload(err));
     }
     if (invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
@@ -1450,15 +1619,16 @@ router.post('/:token/confirm', async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[pay-v2] Confirm error: ${err.message}`);
+    const confirmStatus = confirmErrorStatus(err);
     reportBillPaymentError(req, {
       invoice,
       phase: 'confirm',
       methodCategory: req.body?.methodCategory || invoice?.payment_method,
       paymentIntentId: req.body?.paymentIntentId,
       error: err,
-      statusCode: 400,
+      statusCode: confirmStatus,
     });
-    res.status(400).json({ error: err.message });
+    res.status(confirmStatus).json(errorPayload(err));
   }
 });
 
@@ -1491,11 +1661,9 @@ router.post('/:token/consent', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    if (invoiceWithdrawnFromCustomer(invoice)) {
-      // Same rule as the collection seams (Codex #4311 r33 P1): a withdrawn
-      // invoice must not enroll the homeowner's method for the debt.
-      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
-    }
+    // Same rule as the collection seams (Codex #4311 r33 P1): a withdrawn or
+    // chemical-review-held invoice must not enroll the homeowner's method.
+    if (rejectWithdrawnOrHeldInvoice(invoice, res)) return;
     if (!invoice.customer_id) {
       return respondWithPaymentError(req, res, {
         invoice,
@@ -1707,18 +1875,17 @@ router.post('/:token/consent', async (req, res, next) => {
     // back with it. (The Stripe attach above cannot join a database
     // transaction — an attached-but-unconsented, unenrolled method is inert.)
     const PAYER_BILLED_ROLLBACK = Symbol('payer_billed_rollback');
-    let consentRefusedForPayer = false;
+    let consentRefusal = null;
     let enrollment = null;
     let row;
     try {
+      const combinedScope = combinedAllocationInvoiceScope(pi);
       row = await db.transaction(async (trx) => {
-        // The customer row FOR UPDATE first (local audit on r46): the
-        // ownership check takes it FOR SHARE and the enrollment then upgrades
-        // the same row to FOR UPDATE — two of these transactions holding
-        // SHARE would deadlock on that upgrade. Taking the stronger lock up
-        // front keeps the customer-before-member order intact.
-        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-        if (await Packets.invoicePayerOwnedNow(invoice.id, trx)) throw PAYER_BILLED_ROLLBACK;
+        consentRefusal = await enrollmentInvoiceRefusal(trx, invoice.id, invoice.customer_id, {
+          extraInvoiceIds: combinedScope.ids,
+          malformedCombined: combinedScope.malformed,
+        });
+        if (consentRefusal) throw PAYER_BILLED_ROLLBACK;
         const created = await ConsentService.recordConsent({
           customerId: invoice.customer_id,
           paymentMethodId: saved.id,
@@ -1744,18 +1911,20 @@ router.post('/:token/consent', async (req, res, next) => {
           invoiceId: invoice.id,
           dbh: trx,
         });
-        if (enrollment?.reason === 'payer_billed') throw PAYER_BILLED_ROLLBACK;
+        if (enrollment?.reason === 'payer_billed') {
+          consentRefusal = {
+            status: 409,
+            body: { error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' },
+          };
+          throw PAYER_BILLED_ROLLBACK;
+        }
         return created;
       });
     } catch (txErr) {
       if (txErr !== PAYER_BILLED_ROLLBACK) throw txErr;
-      consentRefusedForPayer = true;
     }
-    if (consentRefusedForPayer) {
-      return res.status(409).json({
-        error: 'This invoice is billed to a third-party payer',
-        code: 'invoice_withdrawn_from_customer',
-      });
+    if (consentRefusal) {
+      return res.status(consentRefusal.status).json(consentRefusal.body);
     }
     if (enrollmentDeferred) {
       logger.info(`[pay-v2] Consent recorded for processing ACH PI ${pi.id} (invoice ${invoice.id}) — enrollment deferred to the succeeded webhook`);
@@ -1821,9 +1990,7 @@ router.post('/:token/capture-setup', async (req, res) => {
     // collectible status and a NULL payer_id, so the required-save check
     // still approves it and the homeowner's method would be saved — and
     // enrolled for Auto Pay — against debt that now belongs to AP.
-    if (invoiceWithdrawnFromCustomer(invoice)) {
-      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
-    }
+    if (rejectWithdrawnOrHeldInvoice(invoice, res)) return;
     // Fail closed: capture exists solely for the required-save +
     // credit-covered state — any other invoice/token must not be usable to
     // start attaching methods to the account.
@@ -1912,9 +2079,7 @@ router.post('/:token/setup-complete', async (req, res) => {
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
-    if (invoiceWithdrawnFromCustomer(invoice)) {
-      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
-    }
+    if (rejectWithdrawnOrHeldInvoice(invoice, res)) return;
     // Fail closed: this endpoint exists solely to satisfy the required-save
     // rule — a non-required invoice token must not be usable to attach
     // methods to the account.
@@ -1986,14 +2151,12 @@ router.post('/:token/setup-complete', async (req, res) => {
     // first left it recorded when a Bill-To assignment landed before the
     // enrollment and the request answered 409.
     const SETUP_PAYER_BILLED_ROLLBACK = Symbol('setup_payer_billed_rollback');
-    let refusedForPayer = false;
+    let setupRefusal = null;
     let enrollment = null;
     try {
       await db.transaction(async (trx) => {
-        // Customer FOR UPDATE before the SHARE-taking ownership check, so the
-        // enrollment's own upgrade cannot deadlock against a sibling request.
-        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-        if (await PacketsForConsent.invoicePayerOwnedNow(invoice.id, trx)) throw SETUP_PAYER_BILLED_ROLLBACK;
+        setupRefusal = await enrollmentInvoiceRefusal(trx, invoice.id, invoice.customer_id);
+        if (setupRefusal) throw SETUP_PAYER_BILLED_ROLLBACK;
         if (needsConsentRow) {
           await ConsentService.recordConsent({
             customerId: invoice.customer_id,
@@ -2017,17 +2180,19 @@ router.post('/:token/setup-complete', async (req, res) => {
           invoiceId: invoice.id,
           dbh: trx,
         });
-        if (enrollment?.reason === 'payer_billed') throw SETUP_PAYER_BILLED_ROLLBACK;
+        if (enrollment?.reason === 'payer_billed') {
+          setupRefusal = {
+            status: 409,
+            body: { error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' },
+          };
+          throw SETUP_PAYER_BILLED_ROLLBACK;
+        }
       });
     } catch (txErr) {
       if (txErr !== SETUP_PAYER_BILLED_ROLLBACK) throw txErr;
-      refusedForPayer = true;
     }
-    if (refusedForPayer) {
-      return res.status(409).json({
-        error: 'This invoice is billed to a third-party payer',
-        code: 'invoice_withdrawn_from_customer',
-      });
+    if (setupRefusal) {
+      return res.status(setupRefusal.status).json(setupRefusal.body);
     }
     // Savepoint mode hands the confirmation email back for after the commit.
     if (typeof enrollment?.sendEnrollmentConfirmation === 'function') {
@@ -2194,7 +2359,7 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
     if (!data) return res.status(404).json({ error: 'Invoice not found' });
     // Phase 2: an accrued invoice's individual PDF is not served — it renders on
     // the consolidated statement (the receipt PDF stays permanent, unaffected).
-    if (data.payer_statement_id) return res.status(404).json({ error: 'This charge is billed on the monthly statement.' });
+    if (rejectUnavailablePayReadInvoice(data, res)) return;
     // Downloaded/printed PDF must show the same Bill-To = payer block as the
     // emailed copy (getByToken doesn't attach the payer on its own).
     await require('../services/payer').attachToInvoice(data);

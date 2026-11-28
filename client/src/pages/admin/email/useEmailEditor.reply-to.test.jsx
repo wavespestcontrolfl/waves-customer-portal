@@ -50,3 +50,18 @@ it("an immediate reply names the replied-to email so the server can add In-Reply
   expect(sends).toHaveLength(1);
   expect(JSON.parse(sends[0][1].body)).toMatchObject({ threadId: "t2", replyEmailId: "e2" });
 });
+
+it("C2-28 & H01: does not prepend duplicate Re: and sends X-Idempotency-Key + idempotencyKey", async () => {
+  const email = { id: "e3", from_address: "customer@example.com", subject: "Re: Existing thread", gmail_thread_id: "t3" };
+  const { result } = renderHook(() => useEmailEditor("u1"));
+  await act(async () => { result.current.setReplyDraft(email.id, "Following up."); });
+  await act(async () => { await result.current.handleReply(email, async () => {}); });
+
+  const sends = adminFetch.mock.calls.filter(([path, opts]) => path === "/api/admin/email/send" && opts?.method === "POST");
+  expect(sends).toHaveLength(1);
+  const [, opts] = sends[0];
+  const body = JSON.parse(opts.body);
+  expect(body.subject).toBe("Re: Existing thread");
+  expect(body.idempotencyKey).toBeTruthy();
+  expect(opts.headers["X-Idempotency-Key"]).toBe(body.idempotencyKey);
+});

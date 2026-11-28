@@ -198,7 +198,13 @@ export default function useEmailInbox(active, clearDraftResult) {
         // own read request retries it with visible feedback.
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const email = await r.json();
-        if (!cancelled && request === messageSequenceRef.current) await openEmail(email);
+        if (!cancelled && request === messageSequenceRef.current) {
+          if (email.is_read) {
+            patchEmail(email.id, { is_read: true });
+            loadStats();
+          }
+          await openEmail(email);
+        }
       } catch {
         if (!cancelled && request === messageSequenceRef.current) setMessageState({ loading: false, error: true });
       }
@@ -244,6 +250,7 @@ export default function useEmailInbox(active, clearDraftResult) {
       try {
         const response = await adminFetch(`/api/admin/email/message/${email.id}/read`, {
           method: "POST",
+          body: JSON.stringify({ is_read: true }),
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         patchEmail(email.id, { is_read: true });
@@ -353,7 +360,18 @@ export default function useEmailInbox(active, clearDraftResult) {
         setActionFeedback({ error: true, message: typeof data?.error === "string" && data.error.trim() ? data.error : "Could not reclassify the email. Try again." });
         return;
       }
-      patchEmail(emailId, { classification: data?.classification?.category, extracted_data: data?.classification });
+      if (data?.email?.id === emailId) {
+        patchEmail(emailId, {
+          ...data.email,
+          classification: data.classification?.category ?? data.email.classification,
+          extracted_data: data.classification ?? data.email.extracted_data,
+        });
+      } else {
+        patchEmail(emailId, { classification: data?.classification?.category, extracted_data: data?.classification });
+        await refreshEmail(emailId);
+      }
+      loadStats();
+      loadDigest();
       setActionFeedback({ message: "Email reclassified." });
     } catch {
       setActionFeedback({ error: true, message: "Could not reclassify the email. Try again." });

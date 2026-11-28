@@ -98,6 +98,8 @@ const TECH_LIST_STRIPPED_FIELDS = [
   // Stored coordinates are the map's office-only input; a technician already
   // gets the address text for assigned customers and needs nothing more.
   'lat', 'lng',
+  // Sibling property count reveals multi-property portfolio size (office-only).
+  'propertyCount',
 ];
 
 function techSafeListRow(mapped) {
@@ -159,12 +161,14 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
-// Access codes and free-text access notes. The visit card (schedule feed) is the only place a technician sees
-// them (owner 2026-10-05, 2026-11-04); Customer 360 reaches any customer with a visit from 7 days back to any
-// future date, so it never carries them to a technician.
+// Access codes, free-text access notes, and absence/blackout dates. The visit
+// card (schedule feed) is the only place a technician sees them (owner
+// 2026-10-05, 2026-11-04); Customer 360 reaches any customer with a visit from
+// 7 days back to any future date, so it never carries them to a technician.
 const TECH_360_STRIPPED_PREFERENCE_FIELDS = [
   'property_gate_code', 'neighborhood_gate_code', 'garage_code', 'lockbox_code',
-  'side_gate_access', 'parking_notes', 'access_notes',
+  'side_gate_access', 'parking_notes', 'access_notes', 'special_instructions',
+  'away_mode_until', 'blackout_start', 'blackout_end',
 ];
 
 // Technician Customer 360 is a field-context view, not a raw database-row
@@ -190,7 +194,7 @@ const TECH_360_SCHEDULED_FIELDS = [
   'id', 'customer_id', 'technician_id', 'property_id', 'service_id', 'visit_id',
   'scheduled_date', 'window_start', 'window_end', 'service_type',
   'service_key_snapshot', 'service_category_snapshot', 'status', 'notes',
-  'internal_notes', 'customer_confirmed', 'confirmed_at', 'field_confirmed_at',
+  'customer_confirmed', 'confirmed_at', 'field_confirmed_at',
   'technician_name', 'tech_name', 'is_recurring', 'recurring_parent_id',
   'recurring_pattern', 'recurring_ongoing', 'recurring_nth',
   'recurring_weekday', 'recurring_interval_days', 'skip_weekends',
@@ -252,16 +256,24 @@ function techSafeStructuredNotes(value) {
   return safe;
 }
 
-function techSafeServiceRecord(record) {
+function techSafeServiceRecord(record, knownCodes = null) {
   const safe = pickFields(record, TECH_360_SERVICE_FIELDS);
+  const { redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
+  if (typeof safe.technician_notes === 'string') safe.technician_notes = redactFreeTextAccessCodes(safe.technician_notes, knownCodes);
+  if (typeof safe.notes === 'string') safe.notes = redactFreeTextAccessCodes(safe.notes, knownCodes);
   if (record && Object.prototype.hasOwnProperty.call(record, 'structured_notes')) {
     safe.structured_notes = techSafeStructuredNotes(record.structured_notes);
   }
   return safe;
 }
 
-function techSafeScheduledService(service) {
-  return pickFields(service, TECH_360_SCHEDULED_FIELDS);
+function techSafeScheduledService(service, knownCodes = null) {
+  const safe = pickFields(service, TECH_360_SCHEDULED_FIELDS);
+  if (typeof safe.notes === 'string') {
+    const { redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
+    safe.notes = redactFreeTextAccessCodes(safe.notes, knownCodes);
+  }
+  return safe;
 }
 
 // Appointment history for the customer-detail payload (`scheduled`): past +
@@ -273,9 +285,11 @@ function techSafeScheduledService(service) {
 // rows (24-visit fixed series) — proximity keeps the current visit and the
 // recent past in every case.
 const SCHEDULED_HISTORY_LIMIT = 50;
-function customerScheduledHistoryQuery(dbConn, customerId, today = etDateString()) {
-  return dbConn('scheduled_services')
-    .where({ customer_id: customerId })
+function customerScheduledHistoryQuery(dbConn, customerId, today = etDateString(), { technicianId = null } = {}) {
+  const q = dbConn('scheduled_services')
+    .where({ customer_id: customerId });
+  if (technicianId) q.where({ technician_id: technicianId });
+  return q
     .orderByRaw('abs(scheduled_date - ?::date) asc', [today])
     .orderBy('scheduled_date', 'desc')
     .orderBy('window_start', 'desc')
@@ -286,14 +300,19 @@ function customerScheduledHistoryQuery(dbConn, customerId, today = etDateString(
 // than the cap's worth of nearer rows would otherwise drop it from
 // `scheduled` and the drawer loses its "Current" row, so it is fetched
 // explicitly (same customer only) and appended when the window missed it.
-async function customerScheduledHistory(dbConn, customerId, { today = etDateString(), focusServiceId = null } = {}) {
-  const rows = await customerScheduledHistoryQuery(dbConn, customerId, today);
+async function customerScheduledHistory(dbConn, customerId, { today = etDateString(), focusServiceId = null, technicianId = null, req = null } = {}) {
+  const scopedTechId = technicianId || (req?.techRole === 'technician' ? req.technicianId : null);
+  const rows = await customerScheduledHistoryQuery(dbConn, customerId, today, { technicianId: scopedTechId });
   if (!focusServiceId || rows.some((r) => String(r.id) === String(focusServiceId))) return rows;
-  const focus = await dbConn('scheduled_services').where({ id: focusServiceId, customer_id: customerId }).first();
+  const focusQ = dbConn('scheduled_services').where({ id: focusServiceId, customer_id: customerId });
+  if (scopedTechId) focusQ.where({ technician_id: scopedTechId });
+  const focus = await focusQ.first();
   return focus ? [...rows, focus] : rows;
 }
 
-function techSafe360Payload(payload) {
+function techSafe360Payload(payload, { technicianId = null } = {}) {
+  const { collectStoredAccessCodes, redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
+  const knownCodes = collectStoredAccessCodes(payload.preferences, payload.customer);
   const out = { ...payload };
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
@@ -304,10 +323,22 @@ function techSafe360Payload(payload) {
   if (payload.preferences) {
     out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
     for (const field of TECH_360_STRIPPED_PREFERENCE_FIELDS) delete out.preferences[field];
+    if (typeof out.preferences.pets_secured_plan === 'string') {
+      out.preferences.pets_secured_plan = redactFreeTextAccessCodes(out.preferences.pets_secured_plan, knownCodes);
+    }
+    if (typeof out.preferences.pet_details === 'string') {
+      out.preferences.pet_details = redactFreeTextAccessCodes(out.preferences.pet_details, knownCodes);
+    }
+    if (typeof out.preferences.chemical_sensitivity_details === 'string') {
+      out.preferences.chemical_sensitivity_details = redactFreeTextAccessCodes(out.preferences.chemical_sensitivity_details, knownCodes);
+    }
   }
-  out.services = (payload.services || []).map(techSafeServiceRecord);
-  out.scheduled = (payload.scheduled || []).map(techSafeScheduledService);
-  out.upcomingScheduled = (payload.upcomingScheduled || []).map(techSafeScheduledService);
+  out.services = (payload.services || []).map((r) => techSafeServiceRecord(r, knownCodes));
+  const ownOnly = (rows) => (technicianId
+    ? (rows || []).filter((s) => String(s?.technician_id || '') === String(technicianId))
+    : (rows || []));
+  out.scheduled = ownOnly(payload.scheduled).map((s) => techSafeScheduledService(s, knownCodes));
+  out.upcomingScheduled = ownOnly(payload.upcomingScheduled).map((s) => techSafeScheduledService(s, knownCodes));
   return out;
 }
 
@@ -2894,11 +2925,13 @@ router.get('/', async (req, res, next) => {
       total: totalCount, page, limit,
       totalPages: Math.max(1, Math.ceil(totalCount / limit)),
       pipelineCounts: isTechRequest ? {} : pipelineMap,
-      filters: {
-        tags: isTechRequest ? [] : allTags.map(t => t.tag),
-        sources: isTechRequest ? [] : allSources.map(s => s.lead_source).filter(Boolean),
-        areas: allAreas.map(a => a.city).filter(Boolean),
-      },
+      filters: isTechRequest
+        ? { tags: [], sources: [], areas: [] }
+        : {
+          tags: allTags.map(t => t.tag),
+          sources: allSources.map(s => s.lead_source).filter(Boolean),
+          areas: allAreas.map(a => a.city).filter(Boolean),
+        },
     });
   } catch (err) { next(err); }
 });
@@ -3001,15 +3034,34 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
 
 router.get('/:id/cards', async (req, res, next) => {
   try {
-    // Payment methods stay visible to the tech checkout/project flows, but
-    // only for customers with a visit assigned to this tech.
-    if (!(await technicianServicesCustomer(req, req.params.id))) {
-      return res.status(404).json({ error: 'Customer not found' });
+    const isTech = req.techRole === 'technician';
+    if (isTech) {
+      // Technicians see saved cards ONLY while GATE_TECH_CARD_ON_FILE is live,
+      // only for a live (non-deleted) customer with a visit assigned to them
+      // today (ET), and only card methods (never ACH bank accounts).
+      const { techCardOnFileLive } = require('../config/feature-gates');
+      if (!techCardOnFileLive()) {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+      const { TECH_DEAD_ASSIGNMENT_STATUSES } = require('../services/technician-visit-scope');
+      const ownToday = await db('scheduled_services')
+        .join('customers', 'scheduled_services.customer_id', 'customers.id')
+        .where({
+          'scheduled_services.customer_id': req.params.id,
+          'scheduled_services.technician_id': req.technicianId,
+          'scheduled_services.scheduled_date': etDateString(),
+        })
+        .whereNotIn('scheduled_services.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+        .whereNull('customers.deleted_at')
+        .first('scheduled_services.id');
+      if (!ownToday) return res.status(404).json({ error: 'Customer not found' });
     }
-    const cards = await db('payment_methods')
+    const query = db('payment_methods')
       .where({ customer_id: req.params.id })
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
+    if (isTech) query.whereRaw("LOWER(COALESCE(method_type, '')) = 'card'");
+    const cards = await query;
     res.json({
       cards: cards.map((c) => ({
         id: c.id,
@@ -3018,7 +3070,7 @@ router.get('/:id/cards', async (req, res, next) => {
         last_four: c.last_four,
         exp_month: c.exp_month,
         exp_year: c.exp_year,
-        bank_name: c.bank_name,
+        ...(isTech ? {} : { bank_name: c.bank_name }),
         is_default: !!c.is_default,
       })),
     });
@@ -3564,7 +3616,7 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
         .select(
           'id', 'status', 'token', 'service_interest', 'decline_reason',
           'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at',
+          'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at', 'archived_at',
         ),
       db('messages')
         .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
@@ -3588,7 +3640,7 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
       total: estimates.length,
       accepted: accepted.length,
       declined: declined.length,
-      open: estimates.filter((e) => ['draft', 'sent', 'viewed'].includes(e.status)).length,
+      open: estimates.filter((e) => !e.archived_at && ['draft', 'sent', 'viewed'].includes(e.status)).length,
       conversionRate: decided > 0 ? Math.round((accepted.length / decided) * 100) / 100 : null,
       acceptedLifetimeMonthly: Math.round(acceptedLifetimeMonthly * 100) / 100,
     };
@@ -3643,9 +3695,8 @@ router.get('/:id/latest-scheduled-service', async (req, res, next) => {
 // Registered above /:id so the literal path is not read as a customer id.
 // POST with the address in the body — a street address is PII and a GET
 // query string would land in the Morgan request log (AGENTS.md P1).
-router.post('/at-address', async (req, res, next) => {
+router.post('/at-address', requireAdmin, async (req, res, next) => {
   try {
-    if (req.techRole === 'technician') return res.status(403).json({ error: 'Admin access required' });
     const address = String(req.body?.address || '').trim();
     const exclude = req.body?.excludeCustomerId ? String(req.body.excludeCustomerId) : null;
     if (address.length < 6) return res.json({ customers: [] });
@@ -3792,12 +3843,13 @@ router.get('/:id', async (req, res, next) => {
       // account updater replaced keeps its old number on earlier payments.
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payments.card_brand, payment_methods.card_brand) as card_brand'), db.raw('COALESCE(payments.card_last_four, payment_methods.last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       lifetimeRevenueFor(db, c.id).then(net => ({ net })).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
-      customerScheduledHistory(db, c.id, { focusServiceId }),
+      customerScheduledHistory(db, c.id, { focusServiceId, req }),
       // Upcoming, active-only — drives Customer 360's next appointment.
       db('scheduled_services as ss')
         .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
         .select('ss.*', 'tech.name as technician_name')
         .where('ss.customer_id', c.id)
+        .modify((q) => { if (req.techRole === 'technician' && req.technicianId) q.where('ss.technician_id', req.technicianId); })
         .where('ss.scheduled_date', '>=', etDateString())
         .whereNotIn('ss.status', ['cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show'])
         .orderBy('ss.scheduled_date')
@@ -4174,7 +4226,7 @@ router.get('/:id', async (req, res, next) => {
       },
       customerDiscounts: customerDiscounts || [],
     };
-    res.json(req.techRole === 'technician' ? techSafe360Payload(payload) : payload);
+    res.json(req.techRole === 'technician' ? techSafe360Payload(payload, { technicianId: req.technicianId }) : payload);
   } catch (err) { next(err); }
 });
 

@@ -198,7 +198,7 @@ describe('schedule per-visit ownership (technician role)', () => {
     expect(db.__state.writes).toHaveLength(0);
   });
 
-  test('a nonexistent visit id also 404s on tech-reachable invoice route (no existence oracle)', async () => {
+  test('a nonexistent visit id also 404s on invoice mint (no existence oracle)', async () => {
     const { status } = await call('POST', '/api/admin/schedule/svc-nope/invoice', {});
     expect(status).toBe(404);
     expect(db.__state.writes).toHaveLength(0);
@@ -243,14 +243,14 @@ describe('schedule per-visit ownership (technician role)', () => {
     expect(body.error).toMatch(/own vehicle location/i);
   });
 
-  test('series prepayment modes are admin-only even on the tech\'s OWN anchor visit', async () => {
+  test('prepayment recording and clearing are admin-only even on the tech\'s OWN visit', async () => {
     const stamp = await call('POST', '/api/admin/schedule/svc-own/prepaid', {
-      amount: 360, method: 'cash', applyToSeries: true,
+      amount: 50, method: 'cash',
     });
     expect(stamp.status).toBe(403);
     expect(stamp.body.error).toMatch(/admin access required/i);
 
-    const clear = await call('DELETE', '/api/admin/schedule/svc-own/prepaid?series=1', undefined);
+    const clear = await call('DELETE', '/api/admin/schedule/svc-own/prepaid', undefined);
     expect(clear.status).toBe(403);
     expect(clear.body.error).toMatch(/admin access required/i);
 
@@ -334,12 +334,14 @@ describe('customer routes: requireAdmin on non-tech surfaces', () => {
 });
 
 describe('customer routes: assigned-customer proxy (technician role)', () => {
-  test('360 detail and cards 404 for a customer with no visit assigned to this tech', async () => {
-    for (const path of ['/api/admin/customers/cust-other', '/api/admin/customers/cust-other/cards']) {
-      const { status, body } = await call('GET', path);
-      expect(status).toBe(404);
-      expect(body.error).toMatch(/customer not found/i);
-    }
+  test('360 detail 404s for a customer with no visit assigned to this tech; cards 403s when card-on-file gate is off', async () => {
+    const detail = await call('GET', '/api/admin/customers/cust-other');
+    expect(detail.status).toBe(404);
+    expect(detail.body.error).toMatch(/customer not found/i);
+
+    const cards = await call('GET', '/api/admin/customers/cust-other/cards');
+    expect(cards.status).toBe(403);
+    expect(cards.body.error).toMatch(/admin access required/i);
   });
 
   test('technicianServicesCustomer: admin unscoped, tech scoped to assigned customers', async () => {
@@ -470,20 +472,48 @@ describe('techSafe360Payload: access codes', () => {
   const prefs = {
     property_gate_code: '0000', neighborhood_gate_code: '1111', garage_code: '2222', lockbox_code: '3333',
     side_gate_access: 'Latch on left', parking_notes: 'Park on street', access_notes: 'Ring bell',
+    away_mode_until: '2026-12-31', blackout_start: '2026-12-01', blackout_end: '2026-12-15',
     pet_details: 'Small dog', special_instructions: 'Call first',
   };
 
-  test('a technician gets no gate, garage or lockbox codes and no access notes; other preferences stay', () => {
+  test('a technician gets no gate, garage or lockbox codes, access notes, special_instructions, or absence/blackout dates; other preferences stay', () => {
     const out = techSafe360Payload({ customer: { id: 'c1' }, preferences: { ...prefs } });
     for (const field of TECH_360_STRIPPED_PREFERENCE_FIELDS) expect(out.preferences).not.toHaveProperty(field);
-    expect(out.preferences).toEqual({ pet_details: 'Small dog', special_instructions: 'Call first' });
+    expect(out.preferences).toEqual({ pet_details: 'Small dog' });
   });
 
-  test('the strip covers every access field the schema stores', () => {
+  test('the strip covers every access and absence field the schema stores', () => {
     expect([...TECH_360_STRIPPED_PREFERENCE_FIELDS].sort()).toEqual([
-      'access_notes', 'garage_code', 'lockbox_code', 'neighborhood_gate_code',
+      'access_notes', 'away_mode_until', 'blackout_end', 'blackout_start',
+      'garage_code', 'lockbox_code', 'neighborhood_gate_code',
       'parking_notes', 'property_gate_code', 'side_gate_access',
+      'special_instructions',
     ]);
+  });
+
+  test('techSafe360Payload filters foreign technician visits, strips internal_notes, and redacts access codes in notes', () => {
+    const out = techSafe360Payload({
+      customer: { id: 'c1' },
+      services: [
+        { id: 'sr-1', technician_notes: 'Gate code 4499 on left keypad', notes: 'Lockbox code 8877 behind planter' },
+      ],
+      scheduled: [
+        { id: 'v-own', technician_id: 'tech-1', notes: 'Public note; garage code 2233', internal_notes: 'Office secret' },
+        { id: 'v-other', technician_id: 'tech-2', notes: 'Other tech stop' },
+      ],
+      upcomingScheduled: [
+        { id: 'u-own', technician_id: 'tech-1', notes: 'Entry pin 5566', internal_notes: 'Office secret 2' },
+        { id: 'u-other', technician_id: 'tech-2' },
+      ],
+    }, { technicianId: 'tech-1' });
+    expect(out.services[0].technician_notes).not.toContain('4499');
+    expect(out.services[0].notes).not.toContain('8877');
+    expect(out.scheduled.map((v) => v.id)).toEqual(['v-own']);
+    expect(out.scheduled[0]).not.toHaveProperty('internal_notes');
+    expect(out.scheduled[0].notes).not.toContain('2233');
+    expect(out.upcomingScheduled.map((v) => v.id)).toEqual(['u-own']);
+    expect(out.upcomingScheduled[0]).not.toHaveProperty('internal_notes');
+    expect(out.upcomingScheduled[0].notes).not.toContain('5566');
   });
 
   test('stripping does not change the caller\'s preferences object', () => {

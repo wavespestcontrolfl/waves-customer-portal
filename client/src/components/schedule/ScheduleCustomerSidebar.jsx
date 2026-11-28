@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
-import { getAdminUser } from '../../lib/adminAuth';
+import { useIsStaffAdmin } from '../../hooks/useStaffRole';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
 import SkipVisitOption from './SkipVisitOption';
@@ -78,6 +78,39 @@ function addressText(c, fallback) {
   ].filter(Boolean).join(' ');
 }
 
+function sidebarMessagesHref(phone, customerId, officeActions) {
+  const base = `/admin/communications?phone=${encodeURIComponent(phone)}`;
+  return officeActions || !customerId
+    ? base
+    : `${base}&customerId=${encodeURIComponent(customerId)}&thread=${encodeURIComponent(customerId)}`;
+}
+
+function sidebarCancelScopes(officeActions) {
+  return officeActions
+    ? [
+      ['this_only', 'This appointment only'],
+      ['following', 'This and following appointments'],
+      ['series', 'All appointments in series'],
+    ]
+    : [['this_only', 'This appointment only']];
+}
+
+function SidebarPaymentOnFileSection({ show, cards }) {
+  if (!show) return null;
+  return (
+    <Section title="Payment on file">
+      {cards.length === 0 ? (
+        <div className="text-14 text-ink-secondary">None saved</div>
+      ) : cards.map((card) => (
+        <div key={card.id} className="flex items-center justify-between py-2 border-b border-hairline border-zinc-100 last:border-b-0">
+          <span className="text-14 text-zinc-900">{card.card_brand || 'Card'} ending {card.last_four}</span>
+          {card.is_default && <span className="text-12 text-ink-tertiary">Default</span>}
+        </div>
+      ))}
+    </Section>
+  );
+}
+
 function Section({ title, children }) {
   return (
     <section className="border-t border-hairline border-zinc-200 py-5">
@@ -110,9 +143,10 @@ export default function ScheduleCustomerSidebar({
   const [notificationType, setNotificationType] = useState('text');
   const [notificationMessage, setNotificationMessage] = useState('');
   const [cancelling, setCancelling] = useState(false);
-  // Book next, Edit and Take payment are office-only: their routes refuse a
-  // technician, and /admin/invoices bounces one to Today.
-  const officeActions = getAdminUser()?.role === 'admin';
+  // Book next, Edit, Take payment, Payment on file, and series cancel scopes
+  // are office-only: their routes refuse a technician, and /admin/invoices
+  // bounces one to Today.
+  const officeActions = useIsStaffAdmin();
 
   useEffect(() => {
     setNote(service?.notes || '');
@@ -402,7 +436,7 @@ export default function ScheduleCustomerSidebar({
             )}
             {phone && (
               <a
-                href={`/admin/communications?phone=${encodeURIComponent(phone)}`}
+                href={sidebarMessagesHref(phone, service.customerId, officeActions)}
                 className="inline-flex h-9 items-center rounded-sm border-hairline border-zinc-300 bg-white px-3 text-12 font-medium uppercase tracking-label text-zinc-900 no-underline u-focus-ring"
               >
                 View messages
@@ -511,16 +545,7 @@ export default function ScheduleCustomerSidebar({
             </div>
           </Section>
 
-          <Section title="Payment on file">
-            {cards.length === 0 ? (
-              <div className="text-14 text-ink-secondary">None saved</div>
-            ) : cards.map((card) => (
-              <div key={card.id} className="flex items-center justify-between py-2 border-b border-hairline border-zinc-100 last:border-b-0">
-                <span className="text-14 text-zinc-900">{card.card_brand || 'Card'} ending {card.last_four}</span>
-                {card.is_default && <span className="text-12 text-ink-tertiary">Default</span>}
-              </div>
-            ))}
-          </Section>
+          <SidebarPaymentOnFileSection show={officeActions} cards={cards} />
 
           {payments.length > 0 && (
             <Section title="Transactions">
@@ -592,11 +617,7 @@ export default function ScheduleCustomerSidebar({
               <div className="mt-6">
                 <div className="text-13 font-medium text-zinc-900 mb-3">Apply changes to</div>
                 <div className="space-y-2">
-                  {[
-                    ['this_only', 'This appointment only'],
-                    ['following', 'This and following appointments'],
-                    ['series', 'All appointments in series'],
-                  ].map(([value, label]) => {
+                  {sidebarCancelScopes(officeActions).map(([value, label]) => {
                     const disabled = value !== 'this_only' && !canCancelSeries;
                     return (
                       <label
@@ -617,7 +638,7 @@ export default function ScheduleCustomerSidebar({
                     );
                   })}
                 </div>
-                {!canCancelSeries && (
+                {officeActions && !canCancelSeries && (
                   <div className="mt-2 text-12 text-ink-tertiary">Series options are available for recurring appointments.</div>
                 )}
                 <SkipVisitOption key={service.id} service={service} enabled={officeActions} origin="appointment sidebar" onSkipped={onCancel} />

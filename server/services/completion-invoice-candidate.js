@@ -129,8 +129,17 @@ async function completionNewestLiveInvoiceLookup(conn, { serviceRecordId = null,
 // OLDER row via service_record_id while a newer live row hangs off
 // scheduled_service_id. A refunded row alone (no live row) parks exactly
 // as before; no refunded row → the chain's row stands untouched.
-function reconcileLiveVsRefunded(existing, refunded, newestLive = null) {
-  if (!refunded) return { existing, terminal: null, liveBeside: null };
+async function shouldPreservePinnedReportInvoice(db, reportAfterPayHeld, existing, refunded) {
+  if (!reportAfterPayHeld || !existing) return false;
+  if (!refunded) return true;
+  if (String(refunded.id) === String(existing.id)) return false;
+  const live = await db('invoices').where({ id: existing.id }).first('status');
+  return ['paid', 'prepaid'].includes(String(live?.status || '').toLowerCase());
+}
+
+function reconcileLiveVsRefunded(existing, refunded, newestLive = null, { preserveExisting = false } = {}) {
+  const preserveSafe = Boolean(preserveExisting && existing && (!refunded || String(refunded.id) !== String(existing.id)));
+  if (!refunded || preserveSafe) return { existing, terminal: null, liveBeside: null };
   return { existing: null, terminal: refunded, liveBeside: newestLive || existing || null };
 }
 
@@ -160,6 +169,7 @@ module.exports = {
   completionInvoicesOnVisits,
   completionTerminalInvoiceLookup,
   completionNewestLiveInvoiceLookup,
+  shouldPreservePinnedReportInvoice,
   reconcileLiveVsRefunded,
   splitTerminalCompletionInvoice,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
