@@ -1018,7 +1018,9 @@ plain one-off payment (no save) attests nothing and is unchanged. Existing
 rows are untouched — the enrollment floor (v8+) does not move, so no existing
 customer is re-asked),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
-statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
+statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off,
+including `statementDarkPreGuard` before `/api/` rate limiting and 404 for unsent
+`open` draft statements; `Cache-Control: no-store` + `X-Robots-Tag: noindex`),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
 a `payer_statements` row (never a homeowner record), charges the PAYER's Stripe
 customer only, exposes only the consolidated statement + serviced addresses

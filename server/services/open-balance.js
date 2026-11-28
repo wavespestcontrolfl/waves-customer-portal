@@ -56,6 +56,14 @@ const MAX_OPEN_INVOICES = 200;
 // never disagree about what "open self-pay invoice" means: presented
 // (sent/viewed/overdue — drafts were never presented), not payer-billed, not
 // on a statement, remainder > 0 (cents-checked again in JS by the caller).
+const OPEN_SELF_PAY_SQL = [
+  "invoices.status IN ('sent', 'viewed', 'overdue')",
+  'invoices.payer_id IS NULL',
+  'invoices.payer_statement_id IS NULL',
+  "COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'payer_billed:%'",
+  "COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'",
+].join(' AND ');
+
 function applyOpenSelfPayPredicates(query) {
   return query
     .whereIn('invoices.status', ['sent', 'viewed', 'overdue'])
@@ -379,4 +387,4 @@ async function listPayablePortalInvoices(customerId, {
 
 module.exports = {
   // the shared open-self-pay definition (also the cash forecast's open invoices)
-  applyOpenSelfPayPredicates, openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, listPayablePortalInvoices, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };
+  OPEN_SELF_PAY_SQL, applyOpenSelfPayPredicates, openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, listPayablePortalInvoices, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };

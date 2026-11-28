@@ -592,7 +592,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
                     </Badge>
                   </td>
                   <td className={tdClass}>
-                    {s.prepaidAmount > 0 ? (
+                    {Number(s.prepaidAmount ?? s.checkoutPrepaidCredit) > 0 ? (
                       <span
                         className="inline-flex items-center rounded-full uppercase tracking-label font-medium"
                         style={{ height: 18, padding: '0 8px', background: '#DCFCE7', color: '#166534', fontSize: 10 }}

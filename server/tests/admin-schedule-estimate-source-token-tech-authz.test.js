@@ -150,21 +150,26 @@ beforeEach(() => {
 });
 
 describe('GET /:id/estimate-source — technician projection', () => {
-  test('a technician on their own visit gets the provenance card but NOT the public bearer token', async () => {
+  test('a technician on their own visit gets service scope only — no bearer token, totals, line prices, or invoice IDs', async () => {
     const { status, body } = await get('/api/admin/schedule/svc-own/estimate-source');
     expect(status).toBe(200);
     expect(body.linked).toBe(true);
     expect(body.estimateId).toBe('est-1');
-    // The public bearer token authorizes /api/estimates/:token/* customer
-    // actions with no auth of its own — office-only, same rule as
-    // TECH_360_STRIPPED_KEYS 'estimates' in admin-customers.js.
     expect(body.estimateToken).toBeUndefined();
+    expect(body.quotedTotal).toBeUndefined();
+    expect(body.monthlyTotal).toBeUndefined();
+    expect(body.annualTotal).toBeUndefined();
+    expect(body.onetimeTotal).toBeUndefined();
+    expect(body.deposit).toBeNull();
+    expect(body.payment).toBeNull();
   });
 
-  test('control: an admin still receives estimateToken (sanity that the field is real)', async () => {
+  test('control: an admin still receives estimateToken and financial totals', async () => {
     mockCurrentRole = 'admin';
     const { status, body } = await get('/api/admin/schedule/svc-own/estimate-source');
     expect(status).toBe(200);
     expect(body.estimateToken).toBe('tok_public_bearer');
+    expect(body.monthlyTotal).toBe(89);
+    expect(body.quotedTotal).toBe(89);
   });
 });

@@ -295,6 +295,10 @@ describe('wdoFeeSeedFromVisit', () => {
       estimatedPrice: 255,
       serviceAddons: [{ serviceName: 'Rodent exclusion check', estimatedPrice: 80 }],
     })).toBe('');
+    expect(wdoFeeSeedFromVisit({
+      estimatedPrice: 255,
+      serviceAddons: [{ serviceName: 'Rodent exclusion check', hasBillablePrice: true }],
+    })).toBe('');
   });
 
   it('seeds primaryLinePrice when the visit has a billable add-on and no appointment-level discount (B-25)', () => {

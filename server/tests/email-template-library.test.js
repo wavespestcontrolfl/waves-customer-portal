@@ -2841,6 +2841,90 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
     }
   });
 
+  test('preflight rejects an unsubscribe URL containing unresolved placeholders when no ASM group is configured', async () => {
+    const marketingTemplate = () => ({
+      id: 'tpl-marketing',
+      template_key: 'newsletter.monthly',
+      name: 'Monthly Newsletter',
+      mode: 'marketing',
+      send_stream: 'marketing_newsletter',
+      active_version_id: 'ver-marketing',
+    });
+    const marketingVersion = () => ({
+      id: 'ver-marketing',
+      template_id: 'tpl-marketing',
+      version_number: 1,
+      status: 'active',
+      subject: 'Monthly update',
+      blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}, here is the monthly update.' }],
+    });
+    sendgrid.newsletterGroupId.mockReturnValue(null);
+    try {
+      for (const badUrl of [
+        'https://portal.wavespestcontrol.com/unsubscribe/{{missing}}',
+        'https://portal.wavespestcontrol.com/unsubscribe/%7B%7Bmissing%7D%7D',
+        'https:unsubscribe',
+        'https://-example.com/unsubscribe',
+        'mailto:unsubscribe@example.com',
+        'http://127.0.0.1:5173/unsubscribe/demo',
+        'http://localhost:5173/unsubscribe/demo',
+        'http://[::1]:5173/unsubscribe/demo',
+        'http://10.0.0.1/unsubscribe/demo',
+        'https://portal.railway.internal/unsubscribe/demo',
+        'https://service.local/unsubscribe/demo',
+      ]) {
+        setDbQueues({
+          email_templates: [chain({ first: marketingTemplate() })],
+          email_template_versions: [chain({ first: marketingVersion() })],
+        });
+        const result = await EmailTemplates.preflightTemplateSend({
+          templateKey: 'newsletter.monthly',
+          to: 'sam@example.com',
+          payload: { first_name: 'Sam' },
+          unsubscribeUrl: badUrl,
+        });
+        expect(result).toEqual({
+          ok: false,
+          reason: 'marketing template sends require an unsubscribe URL or SendGrid ASM group',
+          code: 'EMAIL_TEMPLATE_UNSUBSCRIBE_REQUIRED',
+        });
+      }
+    } finally {
+      sendgrid.newsletterGroupId.mockReturnValue(101);
+    }
+
+    // With a configured ASM group, live marketing sends fall back to the ASM
+    // token instead of leaking loopback or internal-only unsubscribe URLs.
+    for (const nonPublicUrl of [
+      'http://127.0.0.1:5173/unsubscribe/demo',
+      'http://localhost:5173/unsubscribe/demo',
+      'https://portal.railway.internal/unsubscribe/demo',
+      'https://service.local/unsubscribe/demo',
+    ]) {
+      const queuedMessage = { id: 'msg-nonpublic', status: 'queued', subject_snapshot: 'Monthly update' };
+      const queueInsert = chain({ returning: [queuedMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: marketingTemplate() })],
+        email_template_versions: [chain({ first: marketingVersion() })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, chain({ returning: [{ ...queuedMessage, status: 'sent' }] })],
+      });
+      sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-nonpublic' });
+      await EmailTemplates.sendTemplate({
+        templateKey: 'newsletter.monthly',
+        to: 'sam@example.com',
+        payload: { first_name: 'Sam' },
+        recipientType: 'subscriber',
+        unsubscribeUrl: nonPublicUrl,
+      });
+      const sentCall = sendgrid.sendOne.mock.calls.at(-1)[0];
+      expect(sentCall.html).toContain('<%asm_group_unsubscribe_raw_url%>');
+      expect(sentCall.html).not.toContain(nonPublicUrl);
+      expect(sentCall.text).toContain('Unsubscribe: <%asm_group_unsubscribe_raw_url%>');
+      expect(sentCall.text).not.toContain(nonPublicUrl);
+    }
+  });
+
   test('an infrastructure error in the shared chain (a template read failing) is rethrown, not read as a block', async () => {
     const failing = chain();
     failing.first = jest.fn(async () => { throw new Error('connection terminated'); });

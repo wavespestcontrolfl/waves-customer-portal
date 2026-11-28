@@ -125,8 +125,13 @@ describe('rollupStatement', () => {
       }
       // invoices aggregate
       return {
-        where() { return this; },
+        where(arg) { if (typeof arg === 'function') arg.call(this); return this; },
         whereNot() { return this; },
+        whereIn() { return this; },
+        whereNotIn() { return this; },
+        whereRaw() { return this; },
+        orWhereRaw() { return this; },
+        update: async () => 0,
         first: async () => ({ subtotal: '100.00', tax_amount: '7.00', total: '107.00', invoice_count: 2 }),
       };
     };
@@ -159,8 +164,13 @@ describe('finalizeStatement', () => {
     mockDbHandler = (t) => {
       if (t === 'invoices') {
         return {
-          where() { return this; },
+          where(arg) { if (typeof arg === 'function') arg.call(this); return this; },
           whereNot() { return this; },
+          whereIn() { return this; },
+          whereNotIn() { return this; },
+          whereRaw() { return this; },
+          orWhereRaw() { return this; },
+          update: async () => 0,
           first: async () => ({ subtotal: '300.00', tax_amount: '21.00', total: '321.00', invoice_count: 3 }),
         };
       }
@@ -194,7 +204,16 @@ describe('finalizeStatement', () => {
     };
     mockDbHandler = (t) => {
       if (t === 'invoices') {
-        return { where() { return this; }, whereNot() { return this; }, first: async () => ({ subtotal: '0', tax_amount: '0', total: '0', invoice_count: 0 }) };
+        return {
+          where(arg) { if (typeof arg === 'function') arg.call(this); return this; },
+          whereNot() { return this; },
+          whereIn() { return this; },
+          whereNotIn() { return this; },
+          whereRaw() { return this; },
+          orWhereRaw() { return this; },
+          update: async () => 0,
+          first: async () => ({ subtotal: '0', tax_amount: '0', total: '0', invoice_count: 0 }),
+        };
       }
       return {
         where() { return this; },
@@ -236,7 +255,13 @@ describe('finalizeStatement', () => {
     mockDbHandler = (t) => {
       if (t === 'invoices') {
         return {
-          where() { return this; }, whereNot() { return this; },
+          where(arg) { if (typeof arg === 'function') arg.call(this); return this; },
+          whereNot() { return this; },
+          whereIn() { return this; },
+          whereNotIn() { return this; },
+          whereRaw() { return this; },
+          orWhereRaw() { return this; },
+          update: async () => 0,
           first: async () => ({ subtotal: '50.00', tax_amount: '0', total: '50.00', invoice_count: 1 }),
         };
       }

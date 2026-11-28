@@ -18,7 +18,8 @@ jest.mock('../services/sendgrid-mail', () => ({
   serviceGroupId: () => null,
   sendOne: jest.fn(),
 }));
-jest.mock('nodemailer', () => ({ createTransport: jest.fn(() => ({ sendMail: jest.fn().mockResolvedValue({}) })) }));
+const mockSmtpSendMail = jest.fn().mockResolvedValue({});
+jest.mock('nodemailer', () => ({ createTransport: jest.fn(() => ({ sendMail: mockSmtpSendMail })) }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: () => true }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
@@ -435,5 +436,34 @@ describe('sendInvoiceEmail service summary', () => {
     // The raw note flows to the template variable verbatim (SendGrid escapes),
     // but the SMTP-fallback HTML path escapes it — assert the raw value is intact.
     expect(args.payload.invoice_summary).toBe('Treated <b>garage</b> & perimeter');
+  });
+
+  test('SMTP fallback escapes dynamic fields in HTML and tags summary boxes for dark mode', async () => {
+    const previousPassword = process.env.GOOGLE_SMTP_PASSWORD;
+    process.env.GOOGLE_SMTP_PASSWORD = 'synthetic-test-password';
+    require('../services/sendgrid-mail').isConfigured.mockReturnValue(false);
+    mockSmtpSendMail.mockClear();
+    const recipientMock = require('../services/customer-contact').getInvoiceEmailRecipients;
+    recipientMock.mockReturnValueOnce([{ email: 'customer@example.com', name: 'Pat <script>x</script>', role: 'primary' }]);
+    mockDb(invoiceRow({
+      invoice_number: 'WPC-<img src=x>',
+      service_type: 'Pest & <Lawn>',
+      notes: 'Treated <b>garage</b> & perimeter',
+    }));
+    try {
+      const result = await sendInvoiceEmail('inv-1');
+      expect(result.ok).toBe(true);
+      const sent = mockSmtpSendMail.mock.calls[0][0];
+      expect(sent.html).toContain('Hi Pat &lt;script&gt;x&lt;/script&gt;');
+      expect(sent.html).not.toContain('<script>x</script>');
+      expect(sent.html).toContain('WPC-&lt;img src=x&gt;');
+      expect(sent.html).not.toContain('WPC-<img src=x>');
+      expect(sent.html).toContain('Pest &amp; &lt;Lawn&gt;');
+      expect(sent.html).toContain('class="dm-box"');
+      expect(sent.text).toContain('Hi Pat <script>x</script>,');
+    } finally {
+      if (previousPassword === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
+      else process.env.GOOGLE_SMTP_PASSWORD = previousPassword;
+    }
   });
 });

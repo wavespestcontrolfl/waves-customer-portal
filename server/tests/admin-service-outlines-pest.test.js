@@ -58,6 +58,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => true),
   sendOne: jest.fn(async () => ({ messageId: 'sg-1' })),
+  serviceGroupId: jest.fn(() => 22222),
 }));
 
 jest.mock('../services/logger', () => ({

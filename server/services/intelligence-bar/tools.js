@@ -3087,9 +3087,20 @@ const CLOSED_OUT_AT_SQL = `COALESCE(
 
 // Live customers' sprinkler timers on file, totalled by timer and phone-app answer (controllerTimerCounts).
 async function getSprinklerTimerCounts() {
+  const { INTERNAL_TEST_CUSTOMERS, INTERNAL_TEST_CUSTOMER_IDS } = require('../internal-test-customers');
+  const customersSubquery = db('customers').modify(whereLiveCustomer).select('id');
+  if (INTERNAL_TEST_CUSTOMERS.length) {
+    customersSubquery.whereNotIn(
+      db.raw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))"),
+      INTERNAL_TEST_CUSTOMERS,
+    );
+  }
+  if (INTERNAL_TEST_CUSTOMER_IDS.length) {
+    customersSubquery.whereNotIn('id', INTERNAL_TEST_CUSTOMER_IDS);
+  }
   const rows = await db('property_preferences')
     .whereNotNull('irrigation_controller_brand')
-    .whereIn('customer_id', db('customers').modify(whereLiveCustomer).select('id'))
+    .whereIn('customer_id', customersSubquery)
     .groupBy('irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app')
     .select({ brand: 'irrigation_controller_brand', model: 'irrigation_controller_model', app: 'irrigation_controller_app' })
     .count({ customers: '*' });

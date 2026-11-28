@@ -1,4 +1,5 @@
 import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
+import { useIsStaffAdmin } from '../../hooks/useStaffRole';
 // client/src/pages/admin/CustomersPageV2.jsx
 // Monochrome V2 of CustomersPage. Strict 1:1 on data, endpoints, behavior:
 //   - GET  /admin/customers?search=&stage=&tier=&city=&page=&limit=
@@ -255,15 +256,6 @@ function directoryAddress(customer) {
 function messagesHref(c, isAdmin) {
   const base = `/admin/communications?phone=${encodeURIComponent(c.phone)}`;
   return isAdmin ? base : `${base}&customerId=${encodeURIComponent(c.id)}&thread=${encodeURIComponent(c.id)}`;
-}
-function getAdminRole() {
-  try {
-    return (
-      JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role || null
-    );
-  } catch {
-    return null;
-  }
 }
 
 // --- Pipeline card (V2) ---
@@ -1993,6 +1985,7 @@ function customerRouteSignature(searchParams, isAdmin) {
   const rawView = searchParams.get("view");
   const view = new Map([
     ["health", "directory"],
+    ["pipeline", isAdmin ? "pipeline" : "directory"],
     ["intelligence", isAdmin ? "intelligence" : "directory"],
     ["map", isAdmin ? "map" : "directory"],
   ]).get(rawView) || rawView || "directory";
@@ -2062,7 +2055,7 @@ export default function CustomersPageV2() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
   const location = useLocation();
-  const isAdmin = getAdminRole() === "admin";
+  const isAdmin = useIsStaffAdmin();
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
   const [pipelineLoading, setPipelineLoading] = useState(false);

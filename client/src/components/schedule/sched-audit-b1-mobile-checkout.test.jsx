@@ -216,6 +216,7 @@ describe('Schedule & Dispatch audit Batch 1 — Mobile Checkout, Payment & Fast 
   });
 
   it('P1-20: MobileItemDiscountPickerSheet rejects custom percentage discounts above 100%', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, json: async () => [] });
     const promptSpy = vi.spyOn(window, 'prompt').mockReturnValueOnce('150').mockReturnValueOnce('25');
     const onSelect = vi.fn();
