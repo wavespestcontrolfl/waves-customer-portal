@@ -54,9 +54,11 @@ const {
   allocateCashReceiptToRevenue,
   allocateCumulativeCashReceipt,
   buildInvoiceProfileAsOf,
+  resolveInvoiceProfileForReceipt,
   buildPayrollProfileAsOf,
   allocateCumulativePayrollSettlement,
   summarizeSalesTaxLines,
+  reportable1099LineCents,
   summarize1099VendorLines,
   get1099VendorSummary,
   summarizeBalanceSheetKpis,
@@ -85,6 +87,7 @@ const {
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
+  isPrepayTermCoverageValid,
   computeGapReceiptAmounts,
   isDisputeOutflow,
   isInvoiceLinkedCreditRow,
@@ -2699,5 +2702,88 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     const merchPreview = await syncSubledgersToGl({ fromDate: '2026-07-01', toDate: '2026-08-31', dryRun: true, conn: merchConn });
     expect(merchPreview.expenses.would_post).toBe(2);
     expect(merchPreview.expenses.errors).toEqual([]);
+  });
+
+  test('Codex R9: preserve end-at-term prepay revenue, base 1099 on disbursements (not A/P accruals), and keep tax profile when receipts precede invoice GL date', async () => {
+    const accounts = makeSyntheticAccounts();
+    const revIdByCode = new Map(accounts.filter((a) => a.account_type === 'revenue').map((a) => [a.code, a.id]));
+
+    // 1. End-at-term renewal cancellation preserves paid prepay coverage, while end_now_refund / void / refunded invoice revoke it
+    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }, { status: 'paid' })).toBe(true);
+    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: null }, { status: 'prepaid' })).toBe(true);
+    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_now_refund' }, { status: 'paid' })).toBe(false);
+    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: null, cancel_disposition: null }, { status: 'paid' })).toBe(false);
+    expect(isPrepayTermCoverageValid({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }, { status: 'refunded' })).toBe(false);
+    expect(isPrepayTermCoverageValid({ status: 'void' }, { status: 'paid' })).toBe(false);
+    expect(isPrepayTermCoverageValid({ status: 'active' }, { status: 'paid' })).toBe(true);
+
+    // 2. 1099-NEC totals count disbursements (direct payments & A/P settlements), NOT unpaid A/P accruals
+    const decBillAccrual = {
+      vendor_id: 'v1', display_name: 'Sub Co', entity_type: 'sole_prop', w9_received_at: '2025-01-10',
+      entry_id: 'e-dec-bill', entry_type: 'manual', account_sub_type: 'subcontractors',
+      payment_method: null, debit_cents: 250000, credit_cents: 0, paid_by_credit_card: false,
+      entry_disbursement_cents: 0, entry_expense_net_cents: 250000,
+    };
+    const decSummary = summarize1099VendorLines([decBillAccrual], [
+      { entry_id: 'e-dec-unlinked-bill', entry_type: 'manual', entry_number: 5, entry_date: '2025-12-20', entry_memo: 'Accrued bill', account_sub_type: 'subcontractors', debit_cents: 250000, credit_cents: 0, paid_by_credit_card: false, entry_disbursement_cents: 0, entry_expense_net_cents: 250000 },
+    ], 60000);
+    expect(decSummary.vendors).toEqual([]);
+    expect(decSummary.unlinked_contractor_count).toBe(0);
+
+    const janApPayment = {
+      vendor_id: 'v1', display_name: 'Sub Co', entity_type: 'sole_prop', w9_received_at: '2025-01-10',
+      entry_id: 'e-jan-pay', entry_type: 'manual', account_sub_type: 'ap',
+      payment_method: 'ach', debit_cents: 250000, credit_cents: 0, paid_by_credit_card: false,
+      entry_disbursement_cents: 250000, entry_expense_net_cents: 0,
+    };
+    const janCardApPayment = {
+      vendor_id: 'v1', display_name: 'Sub Co', entity_type: 'sole_prop', w9_received_at: '2025-01-10',
+      entry_id: 'e-jan-card-pay', entry_type: 'manual', account_sub_type: 'ap',
+      payment_method: null, debit_cents: 100000, credit_cents: 0, paid_by_credit_card: true,
+      entry_disbursement_cents: 100000, entry_expense_net_cents: 0,
+    };
+    const janSummary = summarize1099VendorLines([janApPayment, janCardApPayment], [], 200000);
+    expect(janSummary.vendors).toHaveLength(1);
+    expect(janSummary.vendors[0].total_paid_cents).toBe(250000);
+    expect(janSummary.vendors[0].excluded_1099k_cents).toBe(100000);
+    expect(janSummary.vendors[0].filing_required).toBe(true);
+
+    // Mixed partial-cash + partial-A/P bill reports only the $1,000 disbursed on the bill date
+    expect(reportable1099LineCents({
+      account_sub_type: 'subcontractors', debit_cents: 250000, credit_cents: 0,
+      entry_disbursement_cents: 100000, entry_expense_net_cents: 250000,
+    })).toBe(100000);
+    expect(reportable1099LineCents({
+      account_sub_type: 'ap', debit_cents: 0, credit_cents: 150000,
+      entry_disbursement_cents: 100000, entry_expense_net_cents: 250000,
+    })).toBe(0);
+
+    // 3. Cash-basis receipt on Nov 28 preceding Dec 5 taxable invoice GL date excludes $7 sales tax
+    //    whether the report ends Nov 30 (fallback profile) or extends into Dec (initial GL profile)
+    const commRevId = revIdByCode.get(SYSTEM_CODES.REV_COMMERCIAL_PEST);
+    const decInvoiceLines = [
+      { entry_date: '2026-12-05', code: SYSTEM_CODES.ACCOUNTS_RECEIVABLE, account_type: 'asset', account_id: 'ar-id', debit_cents: 10700, credit_cents: 0 },
+      { entry_date: '2026-12-05', code: SYSTEM_CODES.REV_COMMERCIAL_PEST, account_type: 'revenue', account_id: commRevId, debit_cents: 0, credit_cents: 10000 },
+      { entry_date: '2026-12-05', code: SYSTEM_CODES.SALES_TAX_PAYABLE, account_type: 'liability', account_id: 'tax-id', debit_cents: 0, credit_cents: 700 },
+      // Later Jan edit to $214 must NOT alter the Nov 28 pre-paid receipt's profile
+      { entry_date: '2027-01-10', code: SYSTEM_CODES.ACCOUNTS_RECEIVABLE, account_type: 'asset', account_id: 'ar-id', debit_cents: 10700, credit_cents: 0 },
+      { entry_date: '2027-01-10', code: SYSTEM_CODES.REV_COMMERCIAL_PEST, account_type: 'revenue', account_id: commRevId, debit_cents: 0, credit_cents: 10000 },
+      { entry_date: '2027-01-10', code: SYSTEM_CODES.SALES_TAX_PAYABLE, account_type: 'liability', account_id: 'tax-id', debit_cents: 0, credit_cents: 700 },
+    ];
+    const fallbackProfile = {
+      arDebitedCents: 10700,
+      taxCents: 700,
+      revenueSplits: [{ accountId: commRevId, amountCents: 10000 }],
+    };
+
+    // Report ending Nov 30 (no GL invoice rows yet -> fallback profile)
+    const novProfile = resolveInvoiceProfileForReceipt([], '2026-11-28', fallbackProfile);
+    const novAlloc = allocateCumulativeCashReceipt(0, 10700, novProfile, 'commercial', revIdByCode);
+    expect(novAlloc).toEqual([{ accountId: commRevId, signedCents: 10000 }]);
+
+    // Report extending through Dec 31 or Jan 31 (Dec 5 GL invoice row IS present -> uses earliest GL profile, still $100!)
+    const decProfile = resolveInvoiceProfileForReceipt(decInvoiceLines, '2026-11-28', null);
+    const decAlloc = allocateCumulativeCashReceipt(0, 10700, decProfile, 'commercial', revIdByCode);
+    expect(decAlloc).toEqual([{ accountId: commRevId, signedCents: 10000 }]);
   });
 });

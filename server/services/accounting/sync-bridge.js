@@ -1039,6 +1039,100 @@ async function hasCoveredInvoiceForVisit(trx, visitId) {
   return Boolean(row);
 }
 
+/**
+ * Pure: determine whether an annual-prepay term still holds valid paid coverage for
+ * completed visits. End-at-term renewal cancellations (status = 'cancelled' with
+ * cancel_disposition = 'end_at_term' or legacy renewal_decision = 'cancel') retain
+ * paid coverage through term end unless the prepay invoice itself was voided/refunded.
+ */
+function isPrepayTermCoverageValid(term, prepayInv = null) {
+  const status = String(term?.status || '').trim().toLowerCase();
+  if (!status || status === 'void' || status === 'payment_pending') return false;
+  const invStatus = prepayInv ? String(prepayInv.status || '').trim().toLowerCase() : null;
+  if (invStatus && ['void', 'cancelled', 'canceled', 'refunded'].includes(invStatus)) return false;
+
+  if (status === 'cancelled' || status === 'canceled') {
+    const disp = term.cancel_disposition == null ? null : String(term.cancel_disposition).trim().toLowerCase();
+    const dec = term.renewal_decision == null ? null : String(term.renewal_decision).trim().toLowerCase();
+    const isEndAtTerm = disp === 'end_at_term' || (disp === null && dec === 'cancel');
+    if (!isEndAtTerm) return false;
+    if (prepayInv) {
+      return ['paid', 'prepaid'].includes(invStatus) || prepayInv.paid_at != null;
+    }
+    return true;
+  }
+  return true;
+}
+
+function whereEndAtTermCancelled(q, { hasCancelDisp, hasRenewalDec }) {
+  q.whereIn('apt.status', ['cancelled', 'canceled']);
+  if (hasCancelDisp && hasRenewalDec) {
+    q.where((disp) => {
+      disp.where('apt.cancel_disposition', 'end_at_term')
+        .orWhere((legacy) => legacy.whereNull('apt.cancel_disposition').where('apt.renewal_decision', 'cancel'));
+    });
+  } else if (hasCancelDisp) {
+    q.where('apt.cancel_disposition', 'end_at_term');
+  } else if (hasRenewalDec) {
+    q.where('apt.renewal_decision', 'cancel');
+  } else {
+    q.whereRaw('1 = 0');
+  }
+  q.where((paid) => {
+    paid.whereNull('apt.prepay_invoice_id')
+      .orWhereIn('prepay_inv.status', ['paid', 'prepaid'])
+      .orWhereNotNull('prepay_inv.paid_at');
+  });
+}
+
+function wherePrepayTermEligible(q, caps) {
+  q.where((st) => {
+    st.whereNotIn('apt.status', EXCLUDED_PREPAY_TERM_STATUSES)
+      .orWhere((endAtTerm) => whereEndAtTermCancelled(endAtTerm, caps));
+  }).where((inv) => {
+    inv.whereNull('apt.prepay_invoice_id')
+      .orWhereRaw("LOWER(COALESCE(prepay_inv.status, 'paid')) NOT IN ('void', 'cancelled', 'canceled', 'refunded')");
+  });
+}
+
+function whereCancelledTermRevoked(q, { hasCancelDisp, hasRenewalDec }) {
+  q.whereIn('apt.status', ['cancelled', 'canceled']);
+  const addUnpaidBranch = (sub) => {
+    sub.orWhere((unpaid) => {
+      unpaid.whereNotNull('apt.prepay_invoice_id')
+        .whereRaw("LOWER(COALESCE(prepay_inv.status, '')) NOT IN ('paid', 'prepaid')")
+        .whereNull('prepay_inv.paid_at');
+    });
+  };
+  if (hasCancelDisp && hasRenewalDec) {
+    q.where((notEndAtTerm) => {
+      notEndAtTerm.whereRaw("apt.cancel_disposition IS NOT NULL AND apt.cancel_disposition <> 'end_at_term'")
+        .orWhere((noDisp) => noDisp.whereNull('apt.cancel_disposition').whereRaw("COALESCE(apt.renewal_decision, '') <> 'cancel'"));
+      addUnpaidBranch(notEndAtTerm);
+    });
+  } else if (hasCancelDisp) {
+    q.where((notEndAtTerm) => {
+      notEndAtTerm.whereRaw("COALESCE(apt.cancel_disposition, '') <> 'end_at_term'");
+      addUnpaidBranch(notEndAtTerm);
+    });
+  } else if (hasRenewalDec) {
+    q.where((notEndAtTerm) => {
+      notEndAtTerm.whereRaw("COALESCE(apt.renewal_decision, '') <> 'cancel'");
+      addUnpaidBranch(notEndAtTerm);
+    });
+  }
+}
+
+function wherePrepayTermRevoked(q, caps) {
+  q.whereNull('apt.id')
+    .orWhere((invRevoked) => {
+      invRevoked.whereNotNull('apt.prepay_invoice_id')
+        .whereRaw("LOWER(COALESCE(prepay_inv.status, '')) IN ('void', 'cancelled', 'canceled', 'refunded')");
+    })
+    .orWhereIn('apt.status', ['void', 'payment_pending'])
+    .orWhere((cancelled) => whereCancelledTermRevoked(cancelled, caps));
+}
+
 async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
   const hasVisits = await conn.schema.hasTable('scheduled_services');
   const hasTerms = await conn.schema.hasTable('annual_prepay_terms');
@@ -1048,13 +1142,19 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
     return;
   }
 
+  const [hasCancelDisp, hasRenewalDec] = await Promise.all([
+    hasSchemaColumn(conn, 'annual_prepay_terms', 'cancel_disposition'),
+    hasSchemaColumn(conn, 'annual_prepay_terms', 'renewal_decision'),
+  ]);
+  const termCaps = { hasCancelDisp, hasRenewalDec };
+
   const visits = await conn('scheduled_services as ss')
     .join('annual_prepay_terms as apt', 'apt.id', 'ss.annual_prepay_term_id')
     .leftJoin('invoices as prepay_inv', 'prepay_inv.id', 'apt.prepay_invoice_id')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.status', 'completed')
     .whereNotNull('ss.annual_prepay_term_id')
-    .whereNotIn('apt.status', EXCLUDED_PREPAY_TERM_STATUSES)
+    .where((eligible) => wherePrepayTermEligible(eligible, termCaps))
     .where((win) => {
       win.whereRaw(
         "COALESCE(DATE(ss.completed_at AT TIME ZONE 'America/New_York'), ss.scheduled_date) BETWEEN ?::date AND ?::date",
@@ -1123,26 +1223,32 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
     }
   }
 
-  // Reverse any visit-level recognition whose visit was un-completed/canceled or whose term was voided/canceled.
+  // Reverse any visit-level recognition whose visit was un-completed/canceled or whose term coverage was truly revoked
+  // (preserving earned revenue on end-at-term renewal cancellations whose paid coverage remained valid).
   const revokedVisits = await conn('gl_journal_entries as e')
     .join('scheduled_services as ss', conn.raw("e.source_type = 'unearned_recognition' AND e.source_id = 'covered-visit:' || ss.id::text"))
     .leftJoin('annual_prepay_terms as apt', 'apt.id', 'ss.annual_prepay_term_id')
+    .leftJoin('invoices as prepay_inv', 'prepay_inv.id', 'apt.prepay_invoice_id')
     .where('e.status', 'posted')
     .whereNull('e.reversed_by_entry_id')
     .where((sub) => {
       sub.where('ss.status', '<>', 'completed')
         .orWhereNull('ss.annual_prepay_term_id')
-        .orWhereIn('apt.status', EXCLUDED_PREPAY_TERM_STATUSES);
+        .orWhere((revoked) => wherePrepayTermRevoked(revoked, termCaps));
     })
     .where((win) => {
       win.whereBetween('e.entry_date', [from, to])
-        .orWhereRaw("DATE(ss.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+        .orWhereRaw("DATE(ss.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to])
+        .orWhereRaw("apt.updated_at IS NOT NULL AND DATE(apt.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
     })
-    .select('e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'), 'ss.status as visit_status', 'ss.updated_at');
+    .select(
+      'e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'),
+      'ss.status as visit_status', 'ss.updated_at', 'apt.updated_at as term_updated_at',
+    );
 
   for (const row of revokedVisits) {
-    const revDate = timestampToEtDate(row.updated_at) || dateCellText(row.entry_date);
-    await reverseOrPreview(row, revDate, `Prepaid visit no longer completed (${row.visit_status})`, ctx, 'invoices');
+    const revDate = timestampToEtDate(row.updated_at || row.term_updated_at) || dateCellText(row.entry_date);
+    await reverseOrPreview(row, revDate, `Prepaid visit no longer covered (${row.visit_status})`, ctx, 'invoices');
   }
 }
 
@@ -3884,6 +3990,7 @@ module.exports = {
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
+  isPrepayTermCoverageValid,
   computeGapReceiptAmounts,
   isDisputeOutflow,
   isInvoiceLinkedCreditRow,

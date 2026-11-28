@@ -521,7 +521,31 @@ function buildInvoiceProfileAsOf(invoiceLines, asOfDate) {
   };
 }
 
-async function loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, maxReceiptDate = null) {
+/**
+ * Pure: resolve the cash-basis revenue/tax allocation profile for a receipt on `receiptDay`.
+ * Uses the GL invoice history on or before `receiptDay`; when the receipt preceded the
+ * invoice's GL service date (e.g. paid Nov 28 for a Dec 5 service), falls back to the
+ * invoice's earliest GL posting profile (so later adjustments cannot mutate it) or the
+ * operational invoice fallback profile so sales tax is never miscounted as revenue.
+ */
+function resolveInvoiceProfileForReceipt(invoiceLines, receiptDay, fallbackProfile = null) {
+  const asOf = buildInvoiceProfileAsOf(invoiceLines, receiptDay);
+  if (asOf) return asOf;
+  if (Array.isArray(invoiceLines) && invoiceLines.length) {
+    let earliestDate = null;
+    for (const r of invoiceLines) {
+      const d = dateCellText(r.entry_date);
+      if (d && (!earliestDate || d < earliestDate)) earliestDate = d;
+    }
+    if (earliestDate) {
+      const initialProfile = buildInvoiceProfileAsOf(invoiceLines, earliestDate);
+      if (initialProfile && initialProfile.arDebitedCents > 0) return initialProfile;
+    }
+  }
+  return fallbackProfile || null;
+}
+
+async function loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, maxReceiptDate = null, earliestReceiptDateByInvoice = null) {
   const linesByInvoice = new Map();
   const fallbackProfiles = new Map();
   if (!invoiceRefs.length) return { linesByInvoice, fallbackProfiles };
@@ -557,7 +581,11 @@ async function loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, ma
   }
 
   const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const missingUuids = invoiceRefs.filter((ref) => !linesByInvoice.has(ref) && uuidRe.test(ref));
+  const missingUuids = invoiceRefs.filter((ref) => {
+    if (!uuidRe.test(ref)) return false;
+    const earliestReceipt = earliestReceiptDateByInvoice?.get(ref) || null;
+    return !resolveInvoiceProfileForReceipt(linesByInvoice.get(ref), earliestReceipt, null);
+  });
   await loadFallbackInvoiceProfiles(conn, missingUuids, revIdByCode, fallbackProfiles);
   return { linesByInvoice, fallbackProfiles };
 }
@@ -819,16 +847,19 @@ async function queryCashBasisSums(conn, { from, to }) {
       .select('id', 'code');
     const revIdByCode = new Map(revAccounts.map((r) => [r.code, r.id]));
 
-    const invoiceRefs = [
-      ...new Set(
-        activityRows
-          .filter((r) => r.account_code === SYSTEM_CODES.ACCOUNTS_RECEIVABLE && r.invoice_ref)
-          .map((r) => String(r.invoice_ref)),
-      ),
-    ];
+    const earliestReceiptDateByInvoice = new Map();
+    for (const row of activityRows) {
+      if (row.account_code !== SYSTEM_CODES.ACCOUNTS_RECEIVABLE || !row.invoice_ref) continue;
+      const key = String(row.invoice_ref);
+      const day = dateCellText(row.entry_date);
+      if (day && (!earliestReceiptDateByInvoice.has(key) || day < earliestReceiptDateByInvoice.get(key))) {
+        earliestReceiptDateByInvoice.set(key, day);
+      }
+    }
+    const invoiceRefs = [...earliestReceiptDateByInvoice.keys()];
 
     const [{ linesByInvoice, fallbackProfiles }, priorReceiptRows] = await Promise.all([
-      loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, to),
+      loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, to, earliestReceiptDateByInvoice),
       invoiceRefs.length
         ? conn('gl_journal_lines as l')
           .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
@@ -854,7 +885,7 @@ async function queryCashBasisSums(conn, { from, to }) {
         : null;
       const receiptDay = dateCellText(row.entry_date);
       const profile = invKey
-        ? (buildInvoiceProfileAsOf(linesByInvoice.get(invKey), receiptDay) || fallbackProfiles.get(invKey) || null)
+        ? resolveInvoiceProfileForReceipt(linesByInvoice.get(invKey), receiptDay, fallbackProfiles.get(invKey) || null)
         : null;
       const priorCum = invKey ? (cumByInvoice.get(invKey) || 0) : 0;
       const allocations = allocateCumulativeCashReceipt(priorCum, signedCents, profile, row.service_line, revIdByCode);
@@ -1049,9 +1080,40 @@ function isExcluded1099Payment(row) {
 }
 
 /**
- * Pure: aggregate 1099-NEC vendor lines while excluding card, debit-card, and
- * third-party platform (Upwork/Fiverr) payments per tax-worksheets.js rules
- * (reported by card networks/platforms on Form 1099-K).
+ * Pure: compute the cash/disbursement-basis reportable cent amount for a single 1099 line.
+ * - Pure non-cash accruals (e.g. DR Contract Labor / CR Accounts Payable, where entry_disbursement_cents === 0)
+ *   contribute $0 until actually paid.
+ * - A/P settlements (DR Accounts Payable / CR Checking, where entry_expense_net_cents === 0) contribute
+ *   the settled amount on the payment date.
+ * - Mixed partial-cash + partial-A/P entries skip the A/P accrual line and prorate the expense line
+ *   to the cash portion disbursed on that date.
+ */
+function reportable1099LineCents(row) {
+  const rawNet = Number(row.debit_cents) - Number(row.credit_cents);
+  if (rawNet === 0) return 0;
+  if (row.entry_disbursement_cents === undefined || row.entry_disbursement_cents === null) {
+    return rawNet;
+  }
+  const disb = Math.trunc(Number(row.entry_disbursement_cents) || 0);
+  if (disb === 0) return 0;
+
+  const isApLine = row.account_sub_type === 'ap';
+  const expNet = Math.trunc(Number(row.entry_expense_net_cents) || 0);
+  if (isApLine) {
+    // Only count A/P lines moving in the same direction as the disbursement (settlements and their reversals),
+    // never A/P increases on bill accruals or mixed bill entries.
+    return Math.sign(rawNet) === Math.sign(disb) ? rawNet : 0;
+  }
+  if (expNet !== 0 && Math.sign(disb) === Math.sign(expNet) && Math.abs(disb) < Math.abs(expNet)) {
+    return Math.round((rawNet * Math.abs(disb)) / Math.abs(expNet));
+  }
+  return rawNet;
+}
+
+/**
+ * Pure: aggregate 1099-NEC vendor lines on a disbursement (payment) basis while excluding
+ * card, debit-card, and third-party platform (Upwork/Fiverr) payments per tax-worksheets.js
+ * rules (reported by card networks/platforms on Form 1099-K) and unpaid A/P bill accruals.
  */
 function summarize1099VendorLines(vendorLines, unlinkedLines, thresholdCents) {
   const byVendor = new Map();
@@ -1060,7 +1122,7 @@ function summarize1099VendorLines(vendorLines, unlinkedLines, thresholdCents) {
 
   for (const r of vendorLines || []) {
     if (r.entry_type === 'closing' || r.reversed_entry_type === 'closing') continue;
-    const netCents = Number(r.debit_cents) - Number(r.credit_cents);
+    const netCents = reportable1099LineCents(r);
     if (netCents === 0) continue;
 
     const w9Date = dateCellText(r.w9_received_at);
@@ -1111,7 +1173,7 @@ function summarize1099VendorLines(vendorLines, unlinkedLines, thresholdCents) {
       entry_number: Number(u.entry_number),
       entry_date: dateCellText(u.entry_date),
       memo: u.entry_memo,
-      amount_cents: Number(u.debit_cents) - Number(u.credit_cents),
+      amount_cents: reportable1099LineCents(u),
     }))
     .filter((u) => u.amount_cents !== 0);
 
@@ -1129,12 +1191,15 @@ function summarize1099VendorLines(vendorLines, unlinkedLines, thresholdCents) {
   };
 }
 
+const DISBURSEMENT_ACCOUNT_SUB_TYPES_SQL = "'checking', 'savings', 'stripe_clearing', 'undeposited_funds', 'credit_card', 'owner_equity', 'owner_draw'";
+
 /**
- * 1099-NEC Vendor Payment Summary driven by gl_vendors + gl_journal_lines.
+ * 1099-NEC Vendor Payment Summary driven by gl_vendors + gl_journal_lines on a payment basis.
  * Uses $600 threshold through 2025 and $2,000 threshold from 2026 onward (P.L. 119-21).
- * Excludes card, debit-card, and platform (1099-K) payments per tax-worksheets.js rules,
+ * Excludes unpaid A/P bill accruals (counting A/P settlements on their payment date instead),
+ * excludes card, debit-card, and platform (1099-K) payments per tax-worksheets.js rules,
  * excludes period-closing entries (and their reversals), and surfaces unlinked non-card
- * Contract Labor (5500) lines missing a vendor_id.
+ * Contract Labor (5500) disbursements missing a vendor_id.
  */
 async function get1099VendorSummary({ year = null, conn = db } = {}) {
   const targetYear = parseInt(year, 10) || etParts(new Date()).year;
@@ -1145,16 +1210,24 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
   const creditCardExistsRaw = conn.raw(
     "EXISTS (SELECT 1 FROM gl_journal_lines cl JOIN gl_accounts ca ON ca.id = cl.account_id WHERE ca.sub_type = 'credit_card' AND ((cl.entry_id = e.id AND (cl.credit_cents > 0 OR cl.debit_cents > 0)) OR (e.reverses_entry_id IS NOT NULL AND cl.entry_id = e.reverses_entry_id AND (cl.credit_cents > 0 OR cl.debit_cents > 0)))) as paid_by_credit_card",
   );
+  const entryDisbursementRaw = conn.raw(
+    `(SELECT COALESCE(SUM(pl.credit_cents - pl.debit_cents), 0) FROM gl_journal_lines pl JOIN gl_accounts pa ON pa.id = pl.account_id WHERE pl.entry_id = e.id AND pa.sub_type IN (${DISBURSEMENT_ACCOUNT_SUB_TYPES_SQL}))::bigint as entry_disbursement_cents`,
+  );
+  const entryExpenseNetRaw = conn.raw(
+    "(SELECT COALESCE(SUM(el.debit_cents - el.credit_cents), 0) FROM gl_journal_lines el JOIN gl_accounts ea ON ea.id = el.account_id WHERE el.entry_id = e.id AND ea.account_type IN ('cogs', 'expense'))::bigint as entry_expense_net_cents",
+  );
 
   const [vendorLines, unlinkedLines] = await Promise.all([
     excludeClosingEntries(
       conn('gl_journal_lines as l')
         .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
         .join('gl_accounts as a', 'a.id', 'l.account_id')
-        .join('gl_vendors as v', 'v.id', 'l.vendor_id')
+        .join('gl_vendors as v', conn.raw(
+          "v.id = COALESCE(l.vendor_id, CASE WHEN a.sub_type = 'ap' THEN (SELECT CASE WHEN COUNT(DISTINCT vl.vendor_id) = 1 THEN MIN(vl.vendor_id::text)::uuid ELSE NULL END FROM gl_journal_lines vl WHERE vl.entry_id = e.id AND vl.vendor_id IS NOT NULL) ELSE NULL END)",
+        ))
         .where('e.status', 'posted')
         .whereBetween('e.entry_date', [from, to])
-        .whereIn('a.account_type', ['cogs', 'expense'])
+        .where((acct) => acct.whereIn('a.account_type', ['cogs', 'expense']).orWhere('a.sub_type', 'ap'))
         .where('v.is_1099_eligible', true),
     )
       .select(
@@ -1162,6 +1235,7 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
         'e.entry_type',
         'e.memo as entry_memo',
         'close_orig.memo as original_entry_memo',
+        'a.sub_type as account_sub_type',
         'l.memo as line_memo',
         'l.payment_method',
         'l.debit_cents',
@@ -1173,6 +1247,8 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
         conn.raw('v.w9_received_at::text as w9_received_at'),
         'v.tin_last4',
         creditCardExistsRaw,
+        entryDisbursementRaw,
+        entryExpenseNetRaw,
       ),
     excludeClosingEntries(
       conn('gl_journal_lines as l')
@@ -1191,11 +1267,14 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
         conn.raw('e.entry_date::text as entry_date'),
         'e.memo as entry_memo',
         'close_orig.memo as original_entry_memo',
+        'a.sub_type as account_sub_type',
         'l.memo as line_memo',
         'l.payment_method',
         'l.debit_cents',
         'l.credit_cents',
         creditCardExistsRaw,
+        entryDisbursementRaw,
+        entryExpenseNetRaw,
       ),
   ]);
 
@@ -1271,9 +1350,11 @@ module.exports = {
   allocateCashReceiptToRevenue,
   allocateCumulativeCashReceipt,
   buildInvoiceProfileAsOf,
+  resolveInvoiceProfileForReceipt,
   buildPayrollProfileAsOf,
   allocateCumulativePayrollSettlement,
   summarizeSalesTaxLines,
+  reportable1099LineCents,
   summarize1099VendorLines,
   summarizeBalanceSheetKpis,
   getTrialBalance,
