@@ -163,13 +163,26 @@ async function pushToStripe(job, customer, email) {
 }
 
 const STRIPE_LEASE_MINUTES = 2;
+const STRIPE_EMAIL_SYNC_LOCK_NS = 'stripe.email.sync';
+
+// Called by email writers (customer-email-write.js) and merges (customer-dedupe.js)
+// AFTER acquiring customers FOR UPDATE: blocks until any in-flight Stripe email
+// write for these customer(s) completes so older jobs cannot overwrite a newer
+// confirmed email or write to a profile being transferred by a merge.
+async function lockStripeEmailSync(trx, customerIds) {
+  const ids = [...new Set((Array.isArray(customerIds) ? customerIds : [customerIds]).filter(Boolean).map(String))].sort();
+  for (const id of ids) {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [STRIPE_EMAIL_SYNC_LOCK_NS, id]);
+  }
+}
 
 async function scheduleJobLater(trx, jobId, minutes, patch = {}) {
-  await trx(TABLE).where({ id: jobId }).update({
+  const updated = await trx(TABLE).where({ id: jobId }).update({
     ...patch,
     updated_at: trx.fn.now(),
     next_attempt_at: trx.raw("now() + (? * interval '1 minute')", [minutes]),
-  });
+  }).returning([trx.raw('updated_at::text AS version')]);
+  return updated?.[0]?.version || null;
 }
 
 async function finishJobOutcome(trx, job, customer, status, result, alert = false) {
@@ -215,17 +228,22 @@ async function claimForStripePhase(jobId) {
 
     // Lease the job briefly and release the DB transaction + customers FOR UPDATE
     // lock BEFORE calling Stripe HTTP so slow Stripe calls cannot block writes
-    // on the customer row.
+    // on the customer row (payments/webhooks). The outer stripe.email.sync
+    // advisory lock stays held to serialize against concurrent email edits & merges.
     const priorNextAttemptAt = job.next_attempt_at;
-    await scheduleJobLater(trx, job.id, STRIPE_LEASE_MINUTES);
-    return { done: false, job, customer, email, priorNextAttemptAt };
+    const leasedVersion = await scheduleJobLater(trx, job.id, STRIPE_LEASE_MINUTES);
+    return { done: false, job, customer, email, priorNextAttemptAt, leasedVersion };
   });
 }
 
 async function finalizeStripePhase({ job, customer, email, priorNextAttemptAt, outcome, stripeError }) {
   return db.transaction(async (trx) => {
-    // Re-lock in the same global order: customer first, then job.
-    const liveCustomer = await trx('customers').where({ id: customer.id }).forUpdate()
+    // Do NOT take customers FOR UPDATE here: the outer stripe.email.sync advisory
+    // lock is still held while a waiting email writer or merge may hold customers
+    // FOR UPDATE waiting for that advisory lock (taking FOR UPDATE here would ABBA).
+    // No email edit or merge can commit until the advisory lock releases, so a
+    // plain read of customers sees the exact serialized state.
+    const liveCustomer = await trx('customers').where({ id: customer.id })
       .first('id', 'email', 'stripe_customer_id', 'deleted_at', 'phone');
     const liveJob = await trx(TABLE).where({ id: job.id, status: 'pending' }).forUpdate().first();
     if (!liveJob) return 'busy';
@@ -257,24 +275,45 @@ async function finalizeStripePhase({ job, customer, email, priorNextAttemptAt, o
 }
 
 async function processJob(jobId) {
-  const step1 = await claimForStripePhase(jobId);
-  if (step1.done) return step1.result;
+  const peek = await db(TABLE).where({ id: jobId }).first('customer_id');
+  if (!peek) return 'busy';
+  // Hold ONLY the non-blocking stripe.email.sync advisory lock across Stripe HTTP
+  // (never customers FOR UPDATE): payments/webhooks never stall on Stripe latency,
+  // while email edits and customer merges wait for any in-flight Stripe email write
+  // to finish before mutating email or transferring Stripe profile ownership.
+  return db.transaction(async (advisoryTrx) => {
+    const lockRes = await advisoryTrx.raw(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+      [STRIPE_EMAIL_SYNC_LOCK_NS, String(peek.customer_id)],
+    );
+    if (lockRes?.rows?.[0]?.locked === false) return 'busy';
 
-  let outcome = null;
-  let stripeError = null;
-  try {
-    outcome = await pushToStripe(step1.job, step1.customer, step1.email);
-  } catch (err) {
-    stripeError = err;
-  }
+    const step1 = await claimForStripePhase(jobId);
+    if (step1.done) return step1.result;
 
-  return finalizeStripePhase({
-    job: step1.job,
-    customer: step1.customer,
-    email: step1.email,
-    priorNextAttemptAt: step1.priorNextAttemptAt,
-    outcome,
-    stripeError,
+    let outcome = null;
+    let stripeError = null;
+    try {
+      outcome = await pushToStripe(step1.job, step1.customer, step1.email);
+    } catch (err) {
+      stripeError = err;
+    }
+
+    try {
+      return await finalizeStripePhase({
+        job: step1.job,
+        customer: step1.customer,
+        email: step1.email,
+        priorNextAttemptAt: step1.priorNextAttemptAt,
+        outcome,
+        stripeError,
+      });
+    } catch (finErr) {
+      if (step1.leasedVersion && finErr && typeof finErr === 'object') {
+        finErr.leasedVersion = step1.leasedVersion;
+      }
+      throw finErr;
+    }
   });
 }
 
@@ -350,9 +389,10 @@ async function drainOnce({ limit = 20 } = {}) {
         processed += 1;
         counts.error = (counts.error || 0) + 1;
         logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
-        // Only the version this drain saw: a job changed or rescheduled since keeps its own schedule.
-        // It spends a try too; a job that keeps failing here stops for good with an office alert (no Stripe write).
-        await pushBack(id, seen, err).catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
+        // Only the version this drain saw (or the committed lease version if
+        // finalization threw after leasing): a job changed or rescheduled since
+        // keeps its own schedule.
+        await pushBack(id, err?.leasedVersion || seen, err).catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
       }
     }
     if (page.length < limit) break;
@@ -361,4 +401,4 @@ async function drainOnce({ limit = 20 } = {}) {
   return counts;
 }
 
-module.exports = { enqueue, processJob, drainDue, MAX_ATTEMPTS, TABLE };
+module.exports = { enqueue, processJob, drainDue, lockStripeEmailSync, MAX_ATTEMPTS, TABLE };

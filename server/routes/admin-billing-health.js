@@ -203,7 +203,7 @@ function chargeableCustomerRefusal(customer) {
   return null;
 }
 
-function buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount, desc) {
+function buildOneTimeChargeIdempotencyKey(req, customerId) {
   const headerKey = typeof req.get === 'function' ? req.get('idempotency-key') : null;
   const rawCallerKey = (typeof headerKey === 'string' && headerKey.trim())
     || (typeof req.body?.idempotencyKey === 'string' && req.body.idempotencyKey.trim())
@@ -212,10 +212,7 @@ function buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount, desc) {
     const hash = crypto.createHash('sha256').update(rawCallerKey.slice(0, 256)).digest('hex').slice(0, 24);
     return `admin_charge_one_time_${customerId}_${hash}`;
   }
-  const amountCents = toCents(chargeAmount);
-  const descHash = crypto.createHash('sha256').update(String(desc || '')).digest('hex').slice(0, 12);
-  const minuteBucket = Math.floor(Date.now() / 60000);
-  return `admin_charge_one_time_${customerId}_${amountCents}_${descHash}_${minuteBucket}`;
+  return `admin_charge_one_time_${customerId}_${crypto.randomUUID()}`;
 }
 
 // Inside the billing lock, just before the dues charge: re-read customer state

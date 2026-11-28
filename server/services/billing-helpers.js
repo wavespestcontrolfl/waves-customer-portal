@@ -37,4 +37,18 @@ function isBillingDayMatch(customerBillingDay, todayDay, daysInTargetMonth = nul
   return effectiveBillingDay(customerBillingDay, daysInTargetMonth) === todayDay;
 }
 
-module.exports = { isBillingDayMatch, effectiveBillingDay, daysInMonth };
+/**
+ * Returns every stored `billing_day` (1..31) that clamps onto calendar `day`
+ * in the target `(year, month)`. On the last day of a shorter month (e.g.,
+ * Feb 28 -> [28, 29, 30, 31], Apr 30 -> [30, 31]), includes every clamped
+ * month-end billing_day so advance reminders match monthly cron execution.
+ */
+function billingDaysForDate(year, month, day) {
+  const lastDay = daysInMonth(year, month);
+  if (day !== lastDay) return [day];
+  const days = [];
+  for (let d = day; d <= 31; d += 1) days.push(d);
+  return days;
+}
+
+module.exports = { isBillingDayMatch, effectiveBillingDay, daysInMonth, billingDaysForDate };

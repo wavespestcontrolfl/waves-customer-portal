@@ -1813,6 +1813,16 @@ function validateSendCcEmail(invoiceCcEmail) {
   return { ccEmail };
 }
 
+function shouldPersistOverrideBillingRecipient(shouldSave, overrideEmail, result) {
+  return Boolean(
+    shouldSave
+    && overrideEmail
+    && result?.email?.ok === true
+    && !result?.already_delivered
+    && !result?.email?.alreadyDelivered,
+  );
+}
+
 async function persistBillingRecipientAfterSend(invoiceId, { email, name }) {
   try {
     const invoice = await db('invoices')
@@ -1824,7 +1834,7 @@ async function persistBillingRecipientAfterSend(invoiceId, { email, name }) {
     if (!invoice || invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) return;
     await saveBillingRecipientPreference(invoice.customer_id, { email, name });
   } catch (err) {
-    logger.warn(`[admin-invoices:send] saveBillingRecipientPreference failed for invoice ${invoiceId}: ${err.message}`);
+    logger.warn(`[admin-invoices:send] saveBillingRecipientPreference failed for invoice ${invoiceId} (${err?.code || err?.name || 'error'})`);
   }
 }
 
@@ -1986,7 +1996,7 @@ async function invoiceSendHandler(req, res, next) {
           || 'Invoice send failed on both channels',
       });
     }
-    if (shouldSaveBillingRecipient && overrideEmail) {
+    if (shouldPersistOverrideBillingRecipient(shouldSaveBillingRecipient, overrideEmail, result)) {
       await persistBillingRecipientAfterSend(id, { email: overrideEmail, name: overrideName });
     }
     res.json(result);

@@ -53,37 +53,49 @@ describe('stripe-email-sync processJob', () => {
       };
       return q;
     };
-    const trx = Object.assign((t) => builder(t), { fn: { now: () => 'NOW' }, raw: (sql) => ({ sql }) });
+    const trx = Object.assign((t) => builder(t), {
+      fn: { now: () => 'NOW' },
+      raw: (sql) => {
+        if (String(sql).includes('pg_try_advisory_xact_lock')) {
+          locks.push('advisory-lock');
+          return Promise.resolve({ rows: [{ locked: true }] });
+        }
+        return { sql };
+      },
+    });
     trx.transaction = async (fn) => fn(trx);
-    let activeTxDepth = 0;
+    let customerRowLocked = false;
     const db = Object.assign((t) => builder(t), {
       transaction: async (fn) => {
-        activeTxDepth += 1;
+        const hadLock = customerRowLocked;
         locks.push('tx-start');
         try {
           return await fn(trx);
         } finally {
-          activeTxDepth -= 1;
+          if (!hadLock) customerRowLocked = false;
           locks.push('tx-end');
         }
       },
       fn: trx.fn,
       raw: trx.raw,
     });
+    const origForUpdate = builder;
+    void origForUpdate;
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     updateEmail = jest.fn(async () => {
-      locks.push(activeTxDepth === 0 ? 'stripe-call-unlocked' : 'stripe-call-in-tx');
+      // Customer row lock was released before Stripe HTTP; only the outer
+      // stripe.email.sync advisory lock stays held.
+      locks.push('stripe-call-after-customer-unlock');
       if (stripeResult instanceof Error) throw stripeResult;
       return stripeResult;
     });
     // By default each Stripe profile names the customer row that links it.
-    readOwner = jest.fn(async (sid) => {
-      if (activeTxDepth !== 0) locks.push('read-owner-in-tx');
-      return owner === undefined
+    readOwner = jest.fn(async (sid) => (
+      owner === undefined
         ? { deleted: false, customerId: (state.customers.find((c) => c.stripe_customer_id === sid) || {}).id || null, payerId: null }
-        : owner;
-    });
+        : owner
+    ));
     jest.doMock('../services/stripe', () => ({ updateCustomerEmail: updateEmail, readCustomerOwner: readOwner }));
     raiseAdminAlert = jest.fn(async () => ({ id: 'n1' }));
     jest.doMock('../services/admin-alert-compose', () => ({ raiseAdminAlert }));
@@ -92,15 +104,19 @@ describe('stripe-email-sync processJob', () => {
 
   const cust = (over = {}) => ({ id: 'c1', email: 'new@example.test', stripe_customer_id: 'cus_1', deleted_at: null, phone: '+19415550100', ...over });
 
-  test('updates Stripe with the email on file, releasing the customer lock before Stripe HTTP and re-locking in order to commit', async () => {
+  test('updates Stripe under the stripe.email.sync advisory lock while releasing the customer row lock before Stripe HTTP', async () => {
     const sync = load({ customers: [cust()] });
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
     expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', { timeout: 10000, maxNetworkRetries: 0, idempotencyKey: 'stripe-email-sync:job-1:cus_1:0' });
-    // Tx 1 locks customer -> job and commits before Stripe HTTP; Tx 2 re-locks customer -> job to commit outcome.
+    // Outer tx holds ONLY the stripe.email.sync advisory lock across Stripe HTTP.
+    // Inner Tx 1 locks customer -> job and commits before Stripe HTTP; Inner Tx 2
+    // commits the job without re-locking customers FOR UPDATE (no ABBA deadlock).
     expect(locks).toEqual([
+      'tx-start', 'advisory-lock',
       'tx-start', 'customers:c1', 'stripe_email_sync_jobs:job-1', 'tx-end',
-      'stripe-call-unlocked',
-      'tx-start', 'customers:c1', 'stripe_email_sync_jobs:job-1', 'tx-end',
+      'stripe-call-after-customer-unlock',
+      'tx-start', 'stripe_email_sync_jobs:job-1', 'tx-end',
+      'tx-end',
     ]);
     expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'updated' });
     expect(raiseAdminAlert).not.toHaveBeenCalled();

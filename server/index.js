@@ -504,6 +504,12 @@ app.use('/api/public/secure-card', (req, res, next) => {
   res.set('X-Robots-Tag', 'noindex');
   next();
 });
+// Digital business card privacy header must also survive the GLOBAL /api
+// limiter's 429s (same pre-limiter contract as secure-card above).
+app.use('/api/card', (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  next();
+});
 // Book at the Table (GATE_IN_PERSON_CARD): while dark, POST /:token/accept-terms (and POST /:token/select-plan
 // while GATE_SECURE_PLAN_CHOICE is off) is a uniform 404 before the global limiter and the body parsers, never a 429/413/400
 // (privacy headers are already set above). Call-time gate read. Case-insensitive, as

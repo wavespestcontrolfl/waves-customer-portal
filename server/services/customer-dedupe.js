@@ -3561,6 +3561,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     mergeLockedAt = new Date();
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
+    // Serialize profile transfers with any in-flight Stripe email sync (after
+    // customers FOR UPDATE — row lock first, advisory lock second, sorted by id).
+    await require('./stripe-email-sync').lockStripeEmailSync(trx, [winnerId, loserId]);
     // The recurring-series-create advisory locks, AFTER the customer row
     // lock above (pre-push audit on 4c3ff61175, P1): the three series
     // creators (admin-schedule.js, booking.js, estimate-converter) all take

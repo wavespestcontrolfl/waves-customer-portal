@@ -137,6 +137,9 @@ async function verifyStripeChargeForReconcile(invoice, stripeChargeId) {
   if (chargeDetails.status !== 'succeeded') {
     return { refusal: { status: 400, error: `Charge is ${chargeDetails.status}, not succeeded` } };
   }
+  if (chargeDetails.captured === false || (chargeDetails.amount_captured != null && Number(chargeDetails.amount_captured) <= 0)) {
+    return { refusal: { status: 400, error: 'Charge is authorized but not captured — capture the funds in Stripe before reconciling' } };
+  }
   if (chargeDetails.refunded || Number(chargeDetails.amount_refunded) > 0 || chargeDetails.disputed) {
     return { refusal: { status: 400, error: 'Charge has been refunded or disputed — it cannot be reconciled against an invoice' } };
   }
@@ -144,7 +147,7 @@ async function verifyStripeChargeForReconcile(invoice, stripeChargeId) {
     return { refusal: { status: 400, error: `Charge currency is ${String(chargeDetails.currency || 'unknown').toUpperCase()} — only USD charges can be reconciled` } };
   }
 
-  const chargeAmtCents = Math.round(chargeDetails.amount);
+  const chargeAmtCents = Math.round(Number(chargeDetails.amount_captured ?? chargeDetails.amount));
   const amountDue = invoiceAmountDue(invoice);
   const surcharged = computeChargeAmount(amountDue, 'card', { funding: 'credit' });
   if (surcharged.surchargeCents > 0 && Math.abs(chargeAmtCents - surcharged.totalCents) <= 1) {

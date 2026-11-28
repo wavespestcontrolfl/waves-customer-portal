@@ -8,6 +8,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { isPaused } = require('./autopay-eligibility');
 const { MONTHLY_LANE_SQL, isMembershipTier, resolveBillingLane } = require('./billing-lane');
+const { billingDaysForDate, daysInMonth, isBillingDayMatch } = require('./billing-helpers');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 /**
@@ -135,11 +136,18 @@ async function sendPreChargeReminders() {
   const catchUp = require('../config/feature-gates').moneyNoticeCatchupLive();
   const today = new Date();
   const targets = [3, 2, 1].map((days) => addETDays(today, days));
-  const dayOf = (date) => Number(etParts(date).day);
-  const targetDay = dayOf(targets[0]);
-  const retryDays = targets.slice(1).map(dayOf);
+  const billingDaysForTarget = (date) => {
+    const p = etParts(date);
+    return billingDaysForDate(Number(p.year), Number(p.month), Number(p.day));
+  };
+  const matchesTargetDate = (date, billingDay) => {
+    const p = etParts(date);
+    return isBillingDayMatch(billingDay, Number(p.day), daysInMonth(Number(p.year), Number(p.month)));
+  };
+  const targetDays = billingDaysForTarget(targets[0]);
+  const retryDays = [...new Set(targets.slice(1).flatMap(billingDaysForTarget))];
 
-  logger.info(`[autopay-notifications] Pre-charge reminders for billing_day=${targetDay}`);
+  logger.info(`[autopay-notifications] Pre-charge reminders for billing_day in [${targetDays.join(',')}]`);
 
   // Active autopay customers whose billing_day matches 3 days from now.
   // Non-monthly billing modes keep monthly_rate populated (legacy surfaces)
@@ -166,7 +174,7 @@ async function sendPreChargeReminders() {
     .where('monthly_rate', '>', 0)
     .whereRaw(MONTHLY_LANE_SQL)
     .where(function eligibleBillingDay() {
-      this.where('billing_day', targetDay)
+      this.whereIn('billing_day', targetDays)
         .orWhere(function retryDay() {
           if (!catchUp) this.whereRaw("COALESCE(phone, '') = ''");
           this.whereIn('billing_day', retryDays);
@@ -182,8 +190,9 @@ async function sendPreChargeReminders() {
   for (const c of customers) {
     try {
       // The charge date this row was selected for (T+3, or a retry day: a
-      // no-phone customer, or any customer under the catch-up gate).
-      const target = targets.find((date) => dayOf(date) === Number(c.billing_day)) || targets[0];
+      // no-phone customer, or any customer under the catch-up gate), clamped
+      // for shorter months (e.g. billing_day 31 -> Feb 28).
+      const target = targets.find((date) => matchesTargetDate(date, c.billing_day)) || targets[0];
       // No phone: only an explicit App / Email choice can carry the
       // reminder, and each selected leg is dispatched on its own below
       // (null = the customer has a phone and gets the single Text).
