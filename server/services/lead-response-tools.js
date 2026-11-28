@@ -487,7 +487,10 @@ async function executeLeadTool(toolName, input, context) {
             return { ok: false, code: 'LEAD_SUBJECT_CHANGED', reason: 'Assigned lead or contact changed before dispatch' };
           }
           if (preflightPriceCheck.hasPrice) {
-            const livePriceCheck = await verifyLeadSmsQuotedPrices(message, trx, current, { estimateDeliverableUnderGate });
+            const livePriceCheck = await verifyLeadSmsQuotedPrices(message, trx, current, {
+              estimateDeliverableUnderGate,
+              lockQuotedEstimate: true,
+            });
             if (!livePriceCheck.ok) {
               return { ok: false, code: 'PRICE_CHANGED_BEFORE_DISPATCH', reason: `Quoted price failed send-time verification (${livePriceCheck.reason})` };
             }

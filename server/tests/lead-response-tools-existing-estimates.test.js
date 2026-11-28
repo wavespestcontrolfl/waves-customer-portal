@@ -48,7 +48,14 @@ const builder = {
 const context = { leadId: 'l1', customerId: 'c1' };
 const mockLead = { id: 'l1', customer_id: 'c1', phone: '+19415550100', estimate_id: null, property_id: null };
 const mockCustomer = { id: 'c1', customer_id: 'c1', phone: '+19415550100' };
-const leadSubjectBuilder = { where: jest.fn(() => leadSubjectBuilder), whereNull: jest.fn(() => leadSubjectBuilder), first: jest.fn(async () => ({ ...mockLead })) };
+const mockLeadPointers = [];
+const leadSubjectBuilder = {
+  where: jest.fn(() => leadSubjectBuilder),
+  whereNull: jest.fn(() => leadSubjectBuilder),
+  whereNotNull: jest.fn(() => leadSubjectBuilder),
+  select: jest.fn(async () => [...mockLeadPointers]),
+  first: jest.fn(async () => ({ ...mockLead })),
+};
 const customerSubjectBuilder = { where: jest.fn(() => customerSubjectBuilder), whereNull: jest.fn(() => customerSubjectBuilder), first: jest.fn(async () => ({ ...mockCustomer })) };
 const mockDb = jest.fn((table) => {
   if (table === 'leads') return leadSubjectBuilder;
@@ -120,6 +127,7 @@ beforeEach(() => {
   mockPricing.priceLocked = false;
   mockLead.estimate_id = null;
   mockLead.property_id = null;
+  mockLeadPointers.length = 0;
   mockPerApplicationAverageFor.mockClear();
   mockEstimateBillsPerApplication.mockClear();
   mockEstimateSoldAsAnnualPrepay.mockClear();
@@ -636,6 +644,41 @@ describe('send_lead_response dispatch-boundary price verification', () => {
     );
     expect(costsRes.ok).toBe(false);
     expect(costsRes.hasPrice).toBe(true);
+
+    // Spelled-out price ("fifty dollars") is caught via payment-status-contract's money grammar.
+    const spelledOutRes = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Treatment costs fifty dollars.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(spelledOutRes.ok).toBe(false);
+    expect(spelledOutRes.hasPrice).toBe(true);
+
+    // Customer's sole estimate pointed to by ANOTHER active lead's leads.estimate_id is withheld (both price & link).
+    mockLeadPointers.push({ id: 'l-other', estimate_id: 'e-owned-by-other' });
+    pages.push([row({ id: 'e-owned-by-other', monthly_total: '49.67', onetime_total: '0.00' })]);
+    const pointerConflictOut = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(pointerConflictOut.estimates[0]).toMatchObject({
+      id: 'e-owned-by-other', pricingUnavailable: 'different_lead_estimate', token: null, viewUrl: null, viewUrlWithheld: 'different_lead_estimate',
+    });
+    mockLeadPointers.length = 0;
+
+    // Legacy lineItems fallback with multiple charges is treated as a multi-item bundle and withheld.
+    mockPricing.livePricing = {
+      bundle: { defaultServiceMode: 'one_time', anchorOneTimePrice: 395, frequencies: [], quoteRequired: false },
+      snapshotHit: true,
+    };
+    pages.push([row({
+      id: 'e-legacy-bundle',
+      monthly_total: '0.00',
+      annual_total: '0.00',
+      onetime_total: '395.00',
+      estimate_data: { lineItems: [{ label: 'Pest', amount: 195 }, { label: 'Rodent', amount: 200 }] },
+    })]);
+    const legacyBundleOut = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(legacyBundleOut.estimates[0].pricing).toBeUndefined();
+    expect(legacyBundleOut.estimates[0].pricingUnavailable).toBe('use_estimate_link');
 
     // Closed/declined row never inherits current billing unit.
     mockPricing.billsPerApplication = false;

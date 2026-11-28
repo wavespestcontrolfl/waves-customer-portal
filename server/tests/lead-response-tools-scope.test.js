@@ -42,8 +42,13 @@ const mockDb = jest.fn(table => {
     }),
     whereIn: jest.fn((key, values) => { clauses.push(['whereIn', key, values]); return builder; }),
     whereNull: jest.fn(key => { filters[key] = null; clauses.push(['whereNull', key]); return builder; }),
+    whereNotNull: jest.fn(key => { clauses.push(['whereNotNull', key]); return builder; }),
     orWhereNull: jest.fn(key => { clauses.push(['orWhereNull', key]); return builder; }),
     whereRaw: jest.fn((_sql, bindings) => { invocation = bindings; return builder; }),
+    orderBy: jest.fn(() => builder),
+    offset: jest.fn(() => builder),
+    limit: jest.fn(async () => (table === 'estimates' ? (mockState.estimates || []) : [])),
+    select: jest.fn(async () => (table === 'leads' && mockState.lead?.estimate_id ? [{ id: mockState.lead.id, estimate_id: mockState.lead.estimate_id }] : [])),
     forUpdate: jest.fn(() => builder),
     forNoKeyUpdate: jest.fn(() => builder),
     first: jest.fn(async () => {

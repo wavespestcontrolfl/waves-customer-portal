@@ -5,9 +5,10 @@
  * Mirrors payment-status-contract.js's verbatim-sentence contract:
  *  - Only open, delivered, viewable, authority-approved estimates uniquely bound
  *    to the assigned lead expose server-rendered `priceSentences`.
- *  - Every outgoing lead SMS is verified at both pre-flight and locked send-time:
- *    verified verbatim sentences from this lead's current estimate are stripped,
- *    and any remaining currency/price/unit wording fails closed to staff review.
+ *  - Every outgoing lead SMS is verified at both pre-flight and locked send-time
+ *    (with the quoted estimate row locked through handoff): verified verbatim
+ *    sentences from this lead's current estimate are stripped, and any remaining
+ *    money, price, or billing-unit signal fails closed to staff review.
  */
 
 const logger = require('./logger');
@@ -23,15 +24,24 @@ const {
   estimateIsPriceLocked,
   resolveLivePricing,
 } = require('./estimate-proposal-billing');
+const { remainderHasMoney } = require('./payment-status-contract');
 const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 const VIEWABLE_LIMIT = 5;
 const VIEWABLE_PAGE = 15;
 const OPEN_QUOTABLE_STATUSES = new Set(['sent', 'viewed']);
 
-// Any price, currency, or billing-unit signal left OUTSIDE a server-rendered
-// verbatim sentence fails closed.
-const UNVERIFIED_PRICE_SIGNAL_RE = /\$\s*\d|\$|\busd\b|\b\d[\d,]*(?:\.\d{1,2})?\s*(?:dollars?|bucks|cents|\/\s*(?:mo(?:nth)?|yr|year|app(?:lication)?|visit|tx|treatment)|per\s+(?:month|mo|year|yr|application|app|visit|treatment|service)|a\s+(?:month|year|application|visit)|one[\s-]time)\b|\b(?:per\s+(?:application|month|visit|year|treatment|service)|\/\s*(?:mo|month|yr|year|app|visit))\b|\b(?:costs?|price[ds]?|quoted?|rate|fee|charge[ds]?|total)\b[^.!?\n]*\d/i;
+// Supplements payment-status-contract.remainderHasMoney with explicit currency
+// and billing-unit signals so any price wording outside verbatim sentences
+// fails closed (including spelled-out amounts like "fifty dollars" via
+// remainderHasMoney / sms-suggest-mode.hasPriceQuote).
+const EXTRA_PRICE_SIGNAL_RE = /\$|\busd\b|\b(?:per\s+(?:application|month|visit|year|treatment|service)|\/\s*(?:mo|month|yr|year|app|visit))\b|\b(?:costs?|price[ds]?|quoted?|rate|fee|charge[ds]?|total)\b[^.!?\n]*\d/i;
+
+function hasUnverifiedPriceSignal(text) {
+  const normalized = normalizeForMatch(text);
+  if (!normalized) return false;
+  return EXTRA_PRICE_SIGNAL_RE.test(normalized) || remainderHasMoney(normalized);
+}
 
 function positiveMoneyCents(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -104,31 +114,39 @@ function isPerApplicationOneTimeItem(item) {
     || item?.service === 'area_addon';
 }
 
-function classifyOneTimeBreakdownItems(items, data) {
-  const rows = Array.isArray(items) ? items : [];
-  const charges = rows.filter((item) => item
+function positiveChargeItems(items) {
+  return (Array.isArray(items) ? items : []).filter((item) => item
     && item.kind !== 'credit'
     && item.kind !== 'discount'
     && positiveMoneyCents(item.amount ?? item.price) !== null);
+}
+
+function classifyOneTimeBreakdownItems(items, data) {
+  let charges = positiveChargeItems(items);
+  if (!charges.length) {
+    const fallbackSource = Array.isArray(data?.oneTimeBreakdown?.items) && data.oneTimeBreakdown.items.length
+      ? data.oneTimeBreakdown.items
+      : (Array.isArray(data?.pricingEngineResult?.lineItems) && data.pricingEngineResult.lineItems.length
+        ? data.pricingEngineResult.lineItems
+        : (Array.isArray(data?.lineItems) ? data.lineItems : []));
+    charges = positiveChargeItems(fallbackSource);
+  }
   if (charges.length > 0) {
     const perAppCount = charges.filter(isPerApplicationOneTimeItem).length;
     if (perAppCount === charges.length) return { unitKind: 'per_application', charges };
     return { unitKind: perAppCount > 0 ? 'mixed' : 'one_time', charges };
   }
-  const fallbackRows = [
-    ...(Array.isArray(data?.oneTimeBreakdown?.items) ? data.oneTimeBreakdown.items : []),
-    ...(Array.isArray(data?.pricingEngineResult?.lineItems) ? data.pricingEngineResult.lineItems : []),
-    ...(Array.isArray(data?.lineItems) ? data.lineItems : []),
-  ];
-  return { unitKind: fallbackRows.some(isPerApplicationOneTimeItem) ? 'mixed' : 'one_time', charges: [] };
+  return { unitKind: 'one_time', charges: [] };
 }
 
-function singleOneTimeLabel(charges, estimate) {
-  // Withhold multi-item bundles so a bundle total cannot be quoted as a single
-  // component; only a single named service produces a verbatim sentence.
+function singleReconciledOneTimeLabel(charges, expectedCents, estimate) {
+  // Withhold multi-item bundles and unreconciled totals so a bundle total
+  // cannot be attributed to one component or an unrelated service_interest.
   if (charges.length > 1) return '';
   if (charges.length === 1) {
     const item = charges[0];
+    const itemCents = positiveMoneyCents(item.amount ?? item.price);
+    if (!itemCents || Math.abs(itemCents - expectedCents) > 1) return '';
     return cleanEstimateLineLabel(
       item?.label || item?.name || item?.addOnKey || (item?.service !== 'area_addon' ? item?.service : ''),
     );
@@ -217,7 +235,7 @@ async function oneTimeEstimatePricing(estimate, data) {
     || null;
   const { unitKind, charges } = classifyOneTimeBreakdownItems(breakdownItems, data);
   if (unitKind === 'mixed') return { pricingUnavailable: 'use_estimate_link' };
-  const label = singleOneTimeLabel(charges, estimate);
+  const label = singleReconciledOneTimeLabel(charges, resolved.cents, estimate);
   if (!label) return { pricingUnavailable: 'use_estimate_link' };
   const suffix = unitKind === 'per_application' ? 'per application' : 'one-time';
   const sentence = `Your estimate lists ${label} at ${formatDollarsFromCents(resolved.cents)} ${suffix}.`;
@@ -259,47 +277,74 @@ async function monthlyMembershipEstimatePricing(estimate, monthlyCents) {
   };
 }
 
+// Active leads.estimate_id pointers for this customer: admin tools record
+// ownership in leads.estimate_id even when estimate_data.lead_id is unset.
+async function loadActiveLeadEstimatePointers(conn, customerId) {
+  const rows = await conn('leads')
+    .where({ customer_id: customerId })
+    .whereNull('deleted_at')
+    .whereNotNull('estimate_id')
+    .select('id', 'estimate_id');
+  const ownersByEstimate = new Map();
+  for (const r of rows || []) {
+    if (!r?.estimate_id || !r?.id) continue;
+    const key = String(r.estimate_id);
+    if (!ownersByEstimate.has(key)) ownersByEstimate.set(key, new Set());
+    ownersByEstimate.get(key).add(String(r.id));
+  }
+  return ownersByEstimate;
+}
+
 // Conflict check runs BEFORE accepting any match, including an explicit
-// lead.estimate_id, so a stale link can never override conflicting lead or
-// property identifiers.
-function rowIdentifierConflict(entry, lead) {
+// lead.estimate_id, so a stale pointer or another active lead's pointer can
+// never release the wrong estimate's price or bearer URL.
+function rowIdentifierConflict(entry, lead, ownersByEstimate) {
+  const leadId = lead?.id ? String(lead.id) : null;
   const rec = estimateRecordedLeadId(entry.row, entry.data);
-  if (rec && lead?.id && String(rec) !== String(lead.id)) return 'different_lead_estimate';
+  if (rec && leadId && String(rec) !== leadId) return 'different_lead_estimate';
+  const pointers = ownersByEstimate?.get(String(entry.row.id));
+  if (pointers && leadId && [...pointers].some((ownerId) => ownerId !== leadId)) {
+    return 'different_lead_estimate';
+  }
   if (lead?.property_id && entry.row?.property_id && String(lead.property_id) !== String(entry.row.property_id)) {
     return 'different_property_estimate';
   }
   return null;
 }
 
-function resolveLeadBindingPlan(allEligible, lead) {
+function rowExplicitlyOwnedByLead(entry, lead, ownersByEstimate) {
+  const leadId = lead?.id ? String(lead.id) : null;
+  if (!leadId) return false;
+  const rec = estimateRecordedLeadId(entry.row, entry.data);
+  if (rec && String(rec) === leadId) return true;
+  const pointers = ownersByEstimate?.get(String(entry.row.id));
+  return Boolean(pointers && pointers.has(leadId));
+}
+
+function resolveLeadBindingPlan(allEntries, lead, ownersByEstimate) {
   if (lead?.estimate_id) {
-    const linked = allEligible.find((e) => String(e.row.id) === String(lead.estimate_id));
+    const linked = allEntries.find((e) => String(e.row.id) === String(lead.estimate_id));
     if (!linked) return { boundId: null, fallbackReason: 'different_lead_estimate' };
-    const conflict = rowIdentifierConflict(linked, lead);
+    const conflict = rowIdentifierConflict(linked, lead, ownersByEstimate);
     return conflict ? { boundId: null, fallbackReason: conflict } : { boundId: String(linked.row.id), fallbackReason: 'different_lead_estimate' };
   }
-  const nonConflicting = allEligible.filter((e) => !rowIdentifierConflict(e, lead));
-  if (lead?.id) {
-    const leadMatches = nonConflicting.filter((e) => {
-      const rec = estimateRecordedLeadId(e.row, e.data);
-      return rec && String(rec) === String(lead.id);
-    });
-    if (leadMatches.length === 1) return { boundId: String(leadMatches[0].row.id), fallbackReason: 'different_lead_estimate' };
-    if (leadMatches.length > 1) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
-  }
+  const nonConflicting = allEntries.filter((e) => !rowIdentifierConflict(e, lead, ownersByEstimate));
+  const leadMatches = nonConflicting.filter((e) => rowExplicitlyOwnedByLead(e, lead, ownersByEstimate));
+  if (leadMatches.length === 1) return { boundId: String(leadMatches[0].row.id), fallbackReason: 'different_lead_estimate' };
+  if (leadMatches.length > 1) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
   if (lead?.property_id) {
     const propMatches = nonConflicting.filter((e) => e.row?.property_id && String(e.row.property_id) === String(lead.property_id));
     if (propMatches.length === 1) return { boundId: String(propMatches[0].row.id), fallbackReason: 'different_property_estimate' };
     return { boundId: null, fallbackReason: propMatches.length > 1 ? 'ambiguous_multiple_estimates' : 'different_property_estimate' };
   }
-  if (nonConflicting.length === 1 && allEligible.length === 1) {
+  if (nonConflicting.length === 1 && allEntries.length === 1) {
     return { boundId: String(nonConflicting[0].row.id), fallbackReason: null };
   }
-  return { boundId: null, fallbackReason: allEligible.length === 1 ? 'different_lead_estimate' : 'ambiguous_multiple_estimates' };
+  return { boundId: null, fallbackReason: allEntries.length === 1 ? 'different_lead_estimate' : 'ambiguous_multiple_estimates' };
 }
 
-function bindingReasonForRow(entry, lead, plan) {
-  const conflict = rowIdentifierConflict(entry, lead);
+function bindingReasonForRow(entry, lead, plan, ownersByEstimate) {
+  const conflict = rowIdentifierConflict(entry, lead, ownersByEstimate);
   if (conflict) return conflict;
   if (plan.boundId && String(entry.row.id) === plan.boundId) return null;
   return plan.fallbackReason || 'ambiguous_multiple_estimates';
@@ -335,9 +380,6 @@ async function evaluateDeliveredEstimateRow(conn, row) {
     logger.warn('[lead-tools] check_existing_estimates: malformed estimate_data hidden', { estimateId: row.id });
     return null;
   }
-  // Require real delivery/publication evidence: declined rows can pass public
-  // viewability without ever having been sent, and self-serve rows stamp
-  // sent_at at mint time without delivering anything.
   const hasDeliveryEvidence = Boolean(row.sent_at || row.viewed_at || parsed.data?.deliveryState?.firstDeliveredAt);
   if (!hasDeliveryEvidence || isUndeliveredSelfServe(row.source, parsed.data)) return null;
   try {
@@ -356,48 +398,46 @@ async function loadExplicitLinkedEstimate(conn, customerId, explicitEstimateId) 
   return evaluateDeliveredEstimateRow(conn, row);
 }
 
-// Checks remaining rows past the 5-row display limit ONLY when an implicit
-// binding candidate currently looks unique, so a 6th matching row cannot hide
-// ambiguity without penalizing the normal paging stop when already ambiguous.
-async function probeForAdditionalBindingMatches(conn, customerId, lead, seenIds, startPageRows, nextOffset, initialPlan) {
-  if (lead?.estimate_id || !initialPlan.boundId) return initialPlan;
-  const matches = [initialPlan.boundId];
-  const checkCandidate = async (row) => {
-    if (seenIds.has(String(row.id))) return false;
-    seenIds.add(String(row.id));
-    const evaluated = await evaluateDeliveredEstimateRow(conn, row);
-    if (!evaluated || rowIdentifierConflict(evaluated, lead)) return false;
-    const rec = estimateRecordedLeadId(evaluated.row, evaluated.data);
-    if (lead?.id && rec && String(rec) === String(lead.id)) {
-      matches.push(String(evaluated.row.id));
-      return matches.length > 1;
-    }
-    if (lead?.property_id && evaluated.row?.property_id && String(evaluated.row.property_id) === String(lead.property_id)) {
-      matches.push(String(evaluated.row.id));
-      return matches.length > 1;
-    }
-    if (!lead?.property_id && !rec) {
-      matches.push(String(evaluated.row.id));
-      return matches.length > 1;
-    }
-    return false;
-  };
-  for (const row of startPageRows) {
-    if (await checkCandidate(row)) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
+// Scans beyond the 5-row display cap ONLY when needed to resolve implicit lead
+// ownership (either to detect a second ambiguous match or to find an explicitly
+// owned estimate past row 5 when the first 5 were all unrelated). Stops right
+// away when the first 5 already contain >= 2 eligible unstamped matches.
+async function resolveFullBindingBeyondLimit(conn, customerId, lead, ownersByEstimate, entries, seenIds, unreadRows, nextOffset, exhausted) {
+  const initialPlan = resolveLeadBindingPlan(entries, lead, ownersByEstimate);
+  if (lead?.estimate_id || exhausted) return { entries, bindingPlan: initialPlan };
+  const initialNonConflicting = entries.filter((e) => !rowIdentifierConflict(e, lead, ownersByEstimate));
+  const initialOwned = initialNonConflicting.filter((e) => rowExplicitlyOwnedByLead(e, lead, ownersByEstimate));
+  if (!initialOwned.length && !lead?.property_id && initialNonConflicting.length >= 2) {
+    return { entries, bindingPlan: initialPlan };
   }
-  if (startPageRows.exhausted) return initialPlan;
+  const extraEntries = [];
+  const inspectRows = async (rows) => {
+    for (const row of rows) {
+      if (seenIds.has(String(row.id))) continue;
+      seenIds.add(String(row.id));
+      const evaluated = await evaluateDeliveredEstimateRow(conn, row);
+      if (evaluated) extraEntries.push(evaluated);
+    }
+  };
+  await inspectRows(unreadRows);
   for (let offset = nextOffset; ; offset += VIEWABLE_PAGE) {
     const rows = await conn('estimates').where({ customer_id: customerId })
       .orderBy('created_at', 'desc').offset(offset).limit(VIEWABLE_PAGE);
-    for (const row of rows) {
-      if (await checkCandidate(row)) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
-    }
+    await inspectRows(rows);
     if (rows.length < VIEWABLE_PAGE) break;
   }
-  return initialPlan;
+  const combined = [...entries, ...extraEntries];
+  const fullPlan = resolveLeadBindingPlan(combined, lead, ownersByEstimate);
+  let display = entries;
+  if (fullPlan.boundId && !entries.some((e) => String(e.row.id) === fullPlan.boundId)) {
+    const match = extraEntries.find((e) => String(e.row.id) === fullPlan.boundId);
+    if (match) display = [match, ...entries.slice(0, VIEWABLE_LIMIT - 1)];
+  }
+  return { entries: display, bindingPlan: fullPlan };
 }
 
 async function loadDeliveredViewableEstimates(conn, customerId, lead) {
+  const ownersByEstimate = await loadActiveLeadEstimatePointers(conn, customerId);
   const entries = [];
   const seenIds = new Set();
   let hiddenCount = 0;
@@ -433,22 +473,22 @@ async function loadDeliveredViewableEstimates(conn, customerId, lead) {
       break;
     }
   }
-  const initialPlan = resolveLeadBindingPlan(entries, lead);
-  unreadInLastPage.exhausted = exhausted;
-  const bindingPlan = await probeForAdditionalBindingMatches(conn, customerId, lead, seenIds, unreadInLastPage, nextOffset, initialPlan);
-  return { entries, hiddenCount, bindingPlan };
+  const resolved = await resolveFullBindingBeyondLimit(
+    conn, customerId, lead, ownersByEstimate, entries, seenIds, unreadInLastPage, nextOffset, exhausted,
+  );
+  return { entries: resolved.entries, hiddenCount, bindingPlan: resolved.bindingPlan, ownersByEstimate };
 }
 
 async function checkExistingEstimatesForLead(conn, subject, { estimateDeliverableUnderGate, shortenOrPassthrough }) {
   const customerId = subject.customer.id;
-  const { entries, hiddenCount, bindingPlan } = await loadDeliveredViewableEstimates(conn, customerId, subject.lead);
+  const { entries, hiddenCount, bindingPlan, ownersByEstimate } = await loadDeliveredViewableEstimates(conn, customerId, subject.lead);
   if (!entries.length) {
     return { hasEstimates: false, estimates: [], ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}) };
   }
   const estimates = await Promise.all(entries.map(async (entry) => {
     const e = entry.row;
     const authorityOk = await estimateDeliverableUnderGate(conn, e);
-    const bindingReason = bindingReasonForRow(entry, subject.lead, bindingPlan);
+    const bindingReason = bindingReasonForRow(entry, subject.lead, bindingPlan, ownersByEstimate);
     const linkable = authorityOk && !bindingReason && !!e.token;
     let pricingFields;
     if (!authorityOk) pricingFields = { totalWithheld: 'pricing-authority-not-server' };
@@ -500,23 +540,47 @@ function stripVerifiedPriceSentences(message, sentences) {
   return remainder.replace(/\s+/g, ' ').trim();
 }
 
-async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliverableUnderGate }) {
+async function lockAndRevalidateBoundEstimate(conn, customerId, estimateId, lead, ownersByEstimate, estimateDeliverableUnderGate) {
+  const query = conn('estimates').where({ id: estimateId, customer_id: customerId });
+  const lockedRow = typeof query.forNoKeyUpdate === 'function'
+    ? await query.forNoKeyUpdate().first()
+    : await query.first();
+  if (!lockedRow) return null;
+  const evaluated = await evaluateDeliveredEstimateRow(conn, lockedRow);
+  if (!evaluated || rowIdentifierConflict(evaluated, lead, ownersByEstimate)) return null;
+  const authorityOk = await estimateDeliverableUnderGate(conn, evaluated.row);
+  if (!authorityOk) return null;
+  return customerFacingEstimatePricing(evaluated.row, evaluated.data);
+}
+
+async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliverableUnderGate, lockQuotedEstimate = false }) {
   const normalized = normalizeForMatch(message);
-  if (!UNVERIFIED_PRICE_SIGNAL_RE.test(normalized)) {
+  if (!hasUnverifiedPriceSignal(normalized)) {
     return { ok: true, hasPrice: false };
   }
   try {
-    const existing = await checkExistingEstimatesForLead(conn, subject, {
-      estimateDeliverableUnderGate,
-      shortenOrPassthrough: async (url) => url,
-    });
-    const allowedSentences = (existing.estimates || [])
-      .flatMap((est) => (Array.isArray(est?.pricing?.priceSentences) ? est.pricing.priceSentences : []));
+    const { entries, bindingPlan, ownersByEstimate } = await loadDeliveredViewableEstimates(conn, subject.customer.id, subject.lead);
+    if (!bindingPlan.boundId) {
+      return { ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' };
+    }
+    let pricingFields;
+    if (lockQuotedEstimate) {
+      pricingFields = await lockAndRevalidateBoundEstimate(
+        conn, subject.customer.id, bindingPlan.boundId, subject.lead, ownersByEstimate, estimateDeliverableUnderGate,
+      );
+    } else {
+      const boundEntry = entries.find((e) => String(e.row.id) === bindingPlan.boundId);
+      const authorityOk = boundEntry ? await estimateDeliverableUnderGate(conn, boundEntry.row) : false;
+      pricingFields = boundEntry && authorityOk ? await customerFacingEstimatePricing(boundEntry.row, boundEntry.data) : null;
+    }
+    const allowedSentences = Array.isArray(pricingFields?.pricing?.priceSentences)
+      ? pricingFields.pricing.priceSentences
+      : [];
     if (!allowedSentences.length) {
       return { ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' };
     }
     const remainder = stripVerifiedPriceSentences(normalized, allowedSentences);
-    if (UNVERIFIED_PRICE_SIGNAL_RE.test(remainder)) {
+    if (hasUnverifiedPriceSignal(remainder)) {
       return { ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' };
     }
     return { ok: true, hasPrice: true };
