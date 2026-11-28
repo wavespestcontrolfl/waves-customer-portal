@@ -41,6 +41,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   gateEnvValue: (name) => ['1', 'true', 'on'].includes(String(process.env[name] || '').toLowerCase()),
+  zelleBankReconcileLive: jest.requireActual('../config/feature-gates').zelleBankReconcileLive,
   isEnabled: jest.fn(() => false),
   gates: {},
 }));

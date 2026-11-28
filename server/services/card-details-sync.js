@@ -39,12 +39,8 @@ const WINDOW_MONTHS = 2;
 const MAX_PAST_MONTHS = 18;
 const MAX_DAILY_SYNC_CARDS = 200;
 
-// Gate read at call time when cardDetailsSyncLive() is available; falls back to
-// gates.cardDetailsSync for suites that mock feature-gates directly.
 function gateOn() {
-  const fg = require('../config/feature-gates');
-  if (typeof fg.cardDetailsSyncLive === 'function') return fg.cardDetailsSyncLive();
-  return fg.gates?.cardDetailsSync === true;
+  return require('../config/feature-gates').cardDetailsSyncLive();
 }
 
 // Same normalization isExpiredCardMethod uses: legacy rows hold 2-digit years.

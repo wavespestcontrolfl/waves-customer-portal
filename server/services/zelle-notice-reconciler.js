@@ -100,12 +100,7 @@ const BANK_CHANGED_ERROR = 'The bank changed or withdrew this transaction, or Ba
 const BANK_CHANGE_NONE_SQL = "bt.suggestion->'plaidModified' IS NULL AND bt.suggestion->'plaidRemoved' IS NULL AND bt.suggestion->'plaidDismissed' IS NULL";
 
 function isZelleBankReconcileEnabled(env = process.env) {
-  const fg = require('../config/feature-gates');
-  if (typeof fg.zelleBankReconcileLive === 'function') return fg.zelleBankReconcileLive(env);
-  const val = env.GATE_ZELLE_BANK_RECONCILE !== undefined
-    ? env.GATE_ZELLE_BANK_RECONCILE
-    : process.env.GATE_ZELLE_BANK_RECONCILE;
-  return env.NODE_ENV === 'test' ? val !== 'false' : val === 'true';
+  return require('../config/feature-gates').zelleBankReconcileLive(env);
 }
 
 function customerName(row) {

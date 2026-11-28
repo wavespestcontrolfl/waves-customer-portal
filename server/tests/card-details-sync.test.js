@@ -5,7 +5,10 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ auditCardDetailsSynced: jest.fn(async () => 1) }));
 jest.mock('../services/stripe', () => ({ retrievePaymentMethod: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gates: { cardDetailsSync: true }, isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => {
+  const gates = { cardDetailsSync: true };
+  return { gates, isEnabled: jest.fn(() => true), cardDetailsSyncLive: () => gates.cardDetailsSync === true };
+});
 
 const logger = require('../services/logger');
 const { auditCardDetailsSynced } = require('../services/audit-log');
