@@ -120,7 +120,9 @@ function isValidUnsubscribeTarget(trimmed) {
   if (/\s/.test(trimmed) || hasUnresolvedPlaceholder(trimmed)) return false;
   try {
     const parsed = new URL(trimmed);
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return Boolean(parsed.hostname);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return /^https?:\/\//i.test(trimmed) && Boolean(parsed.hostname);
+    }
     if (parsed.protocol === 'mailto:') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(parsed.pathname);
     return false;
   } catch {

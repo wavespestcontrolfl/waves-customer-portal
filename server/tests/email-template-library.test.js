@@ -2863,6 +2863,7 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
       for (const badUrl of [
         'https://portal.wavespestcontrol.com/unsubscribe/{{missing}}',
         'https://portal.wavespestcontrol.com/unsubscribe/%7B%7Bmissing%7D%7D',
+        'https:unsubscribe',
       ]) {
         setDbQueues({
           email_templates: [chain({ first: marketingTemplate() })],
