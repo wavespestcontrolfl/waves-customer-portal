@@ -365,16 +365,21 @@ function stampedStreetForVisitOrParent(row) {
 }
 
 async function resolveRowPropertyEvidence(database, row, cache) {
-  const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+  const { normalizedEstimateStreet, scopeKeysShareLocality } = require('./estimate-property-linkage');
+  const hasLocality = (k) => Boolean(k && scopeKeysShareLocality(k, k));
   const directPropId = row.property_id || row.parent_property_id || null;
   let street = stampedStreetForVisitOrParent(row);
-  if (!street && directPropId) street = await cachedPropertyStreet(database, directPropId, cache);
+  if (!hasLocality(street) && directPropId) {
+    const propStreet = await cachedPropertyStreet(database, directPropId, cache);
+    if (propStreet && (!street || hasLocality(propStreet))) street = propStreet;
+  }
   const sourceEstimateId = row.source_estimate_id || row.parent_source_estimate_id || null;
-  if (street || !sourceEstimateId) return { propId: directPropId, street };
+  if (hasLocality(street) || !sourceEstimateId) return { propId: directPropId, street };
   const est = await cachedEstimateRow(database, sourceEstimateId, cache);
+  const estStreet = est?.address ? normalizedEstimateStreet(est.address) : null;
   return {
     propId: directPropId || est?.property_id || null,
-    street: est?.address ? normalizedEstimateStreet(est.address) : null,
+    street: (estStreet && (!street || hasLocality(estStreet))) ? estStreet : street,
   };
 }
 
