@@ -1372,8 +1372,11 @@ async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice, opt
 async function resolveBouncedAchProcessingState(row, nextMeta, fallbackPiId) {
   let wasStillProcessing = nextMeta.payment_state === 'processing' && !nextMeta.settled_event_at;
   let debitAlreadyTerminal = false;
+  let settledNow = false;
+  let settledEventAtIso = null;
+  let settledPaymentDate = null;
   if (!wasStillProcessing || row.status !== 'refunded') {
-    return { wasStillProcessing: false, debitAlreadyTerminal: false };
+    return { wasStillProcessing: false, debitAlreadyTerminal: false, settledNow, settledEventAtIso, settledPaymentDate };
   }
   const livePiId = row.stripe_payment_intent_id || fallbackPiId || null;
   const bounceStripeCheck = getStripe();
@@ -1381,15 +1384,42 @@ async function resolveBouncedAchProcessingState(row, nextMeta, fallbackPiId) {
     throw new Error(`Refund bounce for PI ${livePiId || row.id} cannot verify the live debit (Stripe client unavailable); retry`);
   }
   if (livePiId) {
-    const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(livePiId);
+    const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(livePiId, {
+      expand: ['latest_charge.balance_transaction'],
+    });
     if (!['processing', 'succeeded', 'requires_capture'].includes(liveBouncePi.status)) {
       debitAlreadyTerminal = true;
       wasStillProcessing = false;
     } else if (liveBouncePi.status === 'succeeded') {
       wasStillProcessing = false;
+      settledNow = true;
+      const latestCharge = liveBouncePi.latest_charge;
+      const settledSec = Number(latestCharge?.balance_transaction?.created || latestCharge?.created || 0);
+      if (settledSec > 0) {
+        const settledDate = new Date(settledSec * 1000);
+        settledEventAtIso = settledDate.toISOString();
+        settledPaymentDate = etDateString(settledDate);
+      }
     }
   }
-  return { wasStillProcessing, debitAlreadyTerminal };
+  return { wasStillProcessing, debitAlreadyTerminal, settledNow, settledEventAtIso, settledPaymentDate };
+}
+
+async function matchUnchargedProcessingRowForCharge(trx, charge, chargeId) {
+  if (!charge?.payment_intent) return [];
+  const candidates = (await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).forUpdate())
+    .filter((row) => !row.stripe_charge_id);
+  if (candidates.length !== 1) return [];
+  const stripeClient = getStripe();
+  if (!stripeClient) return [];
+  const livePi = await stripeClient.paymentIntents.retrieve(charge.payment_intent);
+  const activeChargeId = typeof livePi?.latest_charge === 'string'
+    ? livePi.latest_charge
+    : (livePi?.latest_charge?.id || null);
+  // If a newer replacement charge is active on this reused PaymentIntent, do
+  // not adopt the uncharged row for an older charge's delayed refund.
+  if (activeChargeId && activeChargeId !== chargeId) return [];
+  return candidates;
 }
 
 async function restoreSingleInvoiceOnRefundBounce(trx, { linkedInvoice, paymentRow, rowId, nextMeta, achBounceState }) {
@@ -4217,10 +4247,10 @@ async function handleChargeRefunded(charge) {
     let singleLockedRows = await trx('payments').where({ stripe_charge_id: chargeId }).forUpdate();
     if (!singleLockedRows.length && charge.payment_intent) {
       // Processing-stage ACH rows carry stripe_payment_intent_id with
-      // stripe_charge_id NULL — adopt only charge-less rows for this PI so a
-      // reusable PI's prior charge row is never overwritten.
-      singleLockedRows = (await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).forUpdate())
-        .filter((row) => !row.stripe_charge_id);
+      // stripe_charge_id NULL — adopt only after verifying via Stripe that
+      // this charge is the active attempt on the PI (never claiming a
+      // replacement debit on a reused PI).
+      singleLockedRows = await matchUnchargedProcessingRowForCharge(trx, charge, chargeId);
     }
     if (await isRefundFencedInTx(trx, refundId, singleLockedRows)) {
       logger.warn(`[stripe-webhook] single-invoice refund ${refundId} on charge ${chargeId} was fenced as FAILED while waiting for the lock — skipping stamp + side effects`);
@@ -5014,7 +5044,13 @@ async function handleRefundFailed(refund) {
       : {};
     const achBounceState = nextRefundCents < rowPaidCents
       ? await resolveBouncedAchProcessingState(row, nextMeta, piId)
-      : { wasStillProcessing: false, debitAlreadyTerminal: false };
+      : { wasStillProcessing: false, debitAlreadyTerminal: false, settledNow: false, settledEventAtIso: null, settledPaymentDate: null };
+    if (achBounceState.settledNow) {
+      nextMeta.payment_state = 'paid';
+      if (achBounceState.settledEventAtIso && !nextMeta.settled_event_at) {
+        nextMeta.settled_event_at = achBounceState.settledEventAtIso;
+      }
+    }
     const restoredPaymentStatus = achBounceState.debitAlreadyTerminal
       ? 'failed'
       : (achBounceState.wasStillProcessing ? 'processing' : 'paid');
@@ -5039,10 +5075,12 @@ async function handleRefundFailed(refund) {
           : {})),
       // Restore actual debit state when a full refund bounces: an unsettled
       // processing ACH row verifies the live PaymentIntent and restores to
-      // 'processing', 'failed', or 'paid' rather than blindly marking paid.
+      // 'processing', 'failed', or 'paid' (with actual settlement date/time
+      // when the debit succeeded while refunded).
       ...(row.status === 'refunded' && nextRefundCents < rowPaidCents
         ? {
             status: restoredPaymentStatus,
+            ...(achBounceState.settledPaymentDate ? { payment_date: achBounceState.settledPaymentDate } : {}),
             ...(achBounceState.debitAlreadyTerminal
               ? { failure_reason: 'ACH debit terminated before settling (refund bounced afterwards)' }
               : {}),

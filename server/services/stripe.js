@@ -139,29 +139,42 @@ function stripPendingRefundMeta(meta) {
   return out;
 }
 
-function reconcileLockedRefundTotals(lockedRow, opts) {
+function isRefundStampedOnRow(row, meta, refundId) {
+  if (!refundId || !row) return false;
+  if (row.stripe_refund_id === refundId) return true;
+  const stampedIds = Array.isArray(meta?.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+  return stampedIds.includes(refundId);
+}
+
+function reconcileLockedRefundTotals(lockedRow, lockedMeta, opts) {
   const {
     refund, isFullRefund, totalRefundedCents, surchargeCents,
     alreadyRefundedSurchargeCents, requestCents, bounceFence, bouncedIds,
   } = opts;
-  const paidCents = Math.round(Number(lockedRow?.amount || 0) * 100);
-  const priorBounces = Array.isArray(bouncedIds) ? bouncedIds.length : 0;
+  const refundAmtCents = Number(refund?.amount) || 0;
+  const paidCents = lockedRow ? Math.round(Number(lockedRow.amount) * 100) || 0 : 0;
+  const priorBounces = bouncedIds ? bouncedIds.length : 0;
+  const hasSiblingBounce = Boolean(lockedRow) && bounceFence.size > priorBounces;
+  const alreadyStamped = isRefundStampedOnRow(lockedRow, lockedMeta, refund?.id);
   let effTotal = totalRefundedCents;
   let effPriorSurcharge = alreadyRefundedSurchargeCents;
-  if (lockedRow && bounceFence.size > priorBounces) {
-    const livePriorCents = Math.round(Number(lockedRow.refund_amount || 0) * 100);
-    const refundAmtCents = Number(refund?.amount) || 0;
-    effTotal = lockedRow.stripe_refund_id === refund?.id
-      ? livePriorCents
-      : Math.min(paidCents, livePriorCents + refundAmtCents);
-    effPriorSurcharge = Number(lockedRow.refunded_surcharge_cents || 0);
+  if (hasSiblingBounce) {
+    const livePriorCents = Math.round(Number(lockedRow.refund_amount) * 100) || 0;
+    effTotal = alreadyStamped ? livePriorCents : Math.min(paidCents, livePriorCents + refundAmtCents);
+    effPriorSurcharge = Number(lockedRow.refunded_surcharge_cents) || 0;
   }
   const effFull = paidCents > 0 ? effTotal >= paidCents : isFullRefund;
-  const nextSurcharge = surchargeCents > 0
-    ? (effFull
-      ? surchargeCents
-      : Math.min(surchargeCents, effPriorSurcharge + Math.max(0, (Number(refund?.amount) || 0) - (requestCents || 0))))
-    : null;
+  if (!(surchargeCents > 0)) return { effTotal, effFull, nextSurcharge: null };
+  let nextSurcharge;
+  if (effFull) {
+    nextSurcharge = surchargeCents;
+  } else if (hasSiblingBounce && alreadyStamped) {
+    // Locked surcharge tracker already includes this stamped refund's share;
+    // preserve it rather than double-counting it after a sibling bounce.
+    nextSurcharge = Math.min(surchargeCents, effPriorSurcharge);
+  } else {
+    nextSurcharge = Math.min(surchargeCents, effPriorSurcharge + Math.max(0, refundAmtCents - (requestCents || 0)));
+  }
   return { effTotal, effFull, nextSurcharge };
 }
 
@@ -206,7 +219,7 @@ async function stampRefundInTransaction(trx, opts) {
     await trx('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(abortMeta) });
     return { abortedByBounce: true, isFullRefund: false, totalRefundedCents: opts.totalRefundedCents };
   }
-  const { effTotal, effFull, nextSurcharge } = reconcileLockedRefundTotals(lockedRow, { ...opts, bounceFence });
+  const { effTotal, effFull, nextSurcharge } = reconcileLockedRefundTotals(lockedRow, lockedMeta, { ...opts, bounceFence });
   const mergedMeta = mergeRefundMetadata(lockedMeta, baseClearedMeta, bounceFence, refundId);
   const patch = {
     status: effFull ? 'refunded' : 'paid',
@@ -223,6 +236,14 @@ async function stampRefundInTransaction(trx, opts) {
   return { abortedByBounce: false, isFullRefund: effFull, totalRefundedCents: effTotal };
 }
 
+async function isThisRefundBouncedInTrx(trx, row, refundId) {
+  if (!refundId) return false;
+  const meta = parsePaymentMetaSafe(row?.metadata);
+  const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+  if (failedIds.includes(refundId)) return true;
+  return isRefundFencedTableInTrx(trx, refundId);
+}
+
 function isPaymentStillRefundedFor(row, refundId) {
   if (!row || String(row.status || '').toLowerCase() !== 'refunded') return false;
   let meta = {};
@@ -232,8 +253,7 @@ function isPaymentStillRefundedFor(row, refundId) {
   const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
   if (refundId && failedIds.includes(refundId)) return false;
   if (!refundId) return true;
-  const stampedIds = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
-  return row.stripe_refund_id === refundId || stampedIds.includes(refundId);
+  return isRefundStampedOnRow(row, meta, refundId);
 }
 
 function isIncompatibleAttachedMethodError(err) {
@@ -3957,7 +3977,12 @@ const StripeService = {
 
     // Side effects past this point never mask the successful refund as
     // "Refund processing failed" — each degrades on its own.
-    let refundReverted = false;
+    // Track full-refund revert (e.g. an earlier partial bounced, leaving this
+    // payment partially refunded) SEPARATELY from this specific refund bouncing:
+    // only throw a bounce failure when THIS refund's own ID bounced, never
+    // prompting staff to repeat a refund that actually succeeded.
+    let fullRefundReverted = false;
+    let thisRefundBounced = false;
     if (isFullRefund) {
       // Return any applied account credit to the customer's balance — a full
       // refund gives back the cash, so the credit they used must return too
@@ -3979,8 +4004,9 @@ const StripeService = {
             await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
             const lockedPayment = await trx('payments').where({ id: paymentId }).forUpdate().first();
             if (!isPaymentStillRefundedFor(lockedPayment, refund.id)) {
-              refundReverted = true;
-              logger.warn(`[stripe] refund ${refund.id} for payment ${paymentId} was reverted before credit restore (status=${lockedPayment?.status || 'missing'}) — skipping credit restore`);
+              fullRefundReverted = true;
+              if (await isThisRefundBouncedInTrx(trx, lockedPayment, refund.id)) thisRefundBounced = true;
+              logger.warn(`[stripe] refund ${refund.id} for payment ${paymentId} no longer full-refunded before credit restore (status=${lockedPayment?.status || 'missing'}, thisBounced=${thisRefundBounced}) — skipping credit restore`);
               return;
             }
             const lockedInvoice = await trx('invoices')
@@ -4007,12 +4033,13 @@ const StripeService = {
       // a fabricated status that could bypass the guard after a bounce.
       try {
         await db.transaction(async (trx) => {
-          if (refundReverted) return;
+          if (fullRefundReverted) return;
           await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
           const lockedPayment = await trx('payments').where({ id: paymentId }).forUpdate().first();
           if (!isPaymentStillRefundedFor(lockedPayment, refund.id)) {
-            refundReverted = true;
-            logger.warn(`[annual-prepay] refund ${refund.id} for payment ${paymentId} was reverted before prepay sync (status=${lockedPayment?.status || 'missing'}) — skipping coverage clawback`);
+            fullRefundReverted = true;
+            if (await isThisRefundBouncedInTrx(trx, lockedPayment, refund.id)) thisRefundBounced = true;
+            logger.warn(`[annual-prepay] refund ${refund.id} for payment ${paymentId} no longer full-refunded before prepay sync (status=${lockedPayment?.status || 'missing'}, thisBounced=${thisRefundBounced}) — skipping coverage clawback`);
             return;
           }
           await require('./annual-prepay-renewals').syncTermForRefundedPayment(lockedPayment, trx);
@@ -4023,7 +4050,7 @@ const StripeService = {
       // Best-effort setup-fee alert reconcile after refund + prepay claw-back (B-43).
       // reconcileSetupFeeAlertForInvoice no-ops on null and catches its own errors.
       await Promise.resolve()
-        .then(() => (!refundReverted
+        .then(() => (!fullRefundReverted
           ? require('./setup-fee-alert-reconcile').reconcileSetupFeeAlertForInvoice(refundedInvoice)
           : undefined))
         .catch((reconcileErr) => {
@@ -4037,7 +4064,7 @@ const StripeService = {
     } catch (readErr) {
       logger.warn(`[stripe] refund post-update read failed for payment ${paymentId}: ${readErr.message}`);
     }
-    if (refundReverted) {
+    if (thisRefundBounced) {
       logger.warn(`[stripe] Refund ${refund.id} for payment ${paymentId} bounced before completion — suppressing refund-issued email and surfacing bounce failure`);
       throw new Error('This refund attempt bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
     }
