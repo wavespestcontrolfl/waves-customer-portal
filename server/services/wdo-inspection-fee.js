@@ -45,15 +45,15 @@ function bookedWdoVisitFee(visit) {
   const primary = positiveFee(visit.primary_line_price ?? visit.primaryLinePrice);
   const estimated = positiveFee(rawEstimated);
   const addonCents = addonCentsTotal(visit.service_addons || visit.serviceAddons);
-  if (visit.has_billable_addons || visit.hasBillableAddons || addonCents > 0) {
-    const discounted = Number(visit.discount_amount || visit.discountAmount || 0) > 0
-      || Number(visit.primary_line_discount || visit.primaryLineDiscount || 0) > 0;
-    if (primary === null || discounted || addonCents === 0) return null;
-    if (estimated !== null && Math.round(primary * 100) + addonCents !== Math.round(estimated * 100)) return null;
-    return primary;
+  const hasBillableAddons = Boolean(visit.has_billable_addons || visit.hasBillableAddons || addonCents);
+  if (!hasBillableAddons) {
+    if (primary !== null && estimated !== null) return Math.min(primary, estimated);
+    return estimated ?? primary;
   }
-  if (primary !== null && estimated !== null) return Math.min(primary, estimated);
-  return estimated ?? primary;
+  const discounted = Number(visit.discount_amount || visit.discountAmount || visit.primary_line_discount || visit.primaryLineDiscount || 0) > 0;
+  if (primary === null || discounted || addonCents === 0) return null;
+  if (estimated !== null && Math.round(primary * 100) + addonCents !== Math.round(estimated * 100)) return null;
+  return primary;
 }
 
 async function loadLinkedWdoVisit(project, database) {

@@ -241,22 +241,21 @@ function addonSeedPrice(addon) {
 
 export function wdoFeeSeedFromVisit(service) {
   if (!service) return '';
-  const addons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   let addonTotal = 0;
-  for (const a of addons) addonTotal += addonSeedPrice(a);
-  const rawPrimary = service.primaryLinePrice ?? service.primary_line_price;
-  const primary = Number(rawPrimary);
-  const validPrimary = Number.isFinite(primary) && primary > 0 ? primary : '';
-  const hasExplicitDiscount = Number(service.discountAmount || service.discount_amount || 0) > 0
+  if (Array.isArray(service.serviceAddons)) {
+    for (const a of service.serviceAddons) addonTotal += addonSeedPrice(a);
+  }
+  const primary = Number(service.primaryLinePrice ?? service.primary_line_price);
+  const discounted = Number(service.discountAmount || service.discount_amount || 0) > 0
     || Number(service.primaryLineDiscount || service.primary_line_discount || 0) > 0;
   const rawEst = service.estimatedPrice ?? service.estimated_price;
-  if (addonTotal > 0) {
-    const est = Number(rawEst);
-    if (hasExplicitDiscount || validPrimary === '' || rawEst == null || rawEst === '' || !Number.isFinite(est)) return '';
-    return Math.round((primary + addonTotal) * 100) === Math.round(est * 100) ? primary : '';
+  if (addonTotal <= 0) {
+    if (rawEst != null && rawEst !== '') return rawEst;
+    return !discounted && Number.isFinite(primary) && primary > 0 ? primary : '';
   }
-  if (rawEst != null && rawEst !== '') return rawEst;
-  return hasExplicitDiscount ? '' : validPrimary;
+  const est = Number(rawEst);
+  if (discounted || !(primary > 0) || rawEst == null || rawEst === '' || !Number.isFinite(est)) return '';
+  return Math.round((primary + addonTotal) * 100) === Math.round(est * 100) ? primary : '';
 }
 
 // Populate the WDO contact/address fields from the selected customer. With
