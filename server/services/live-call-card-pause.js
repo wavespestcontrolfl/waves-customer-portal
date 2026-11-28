@@ -136,12 +136,28 @@ function warn(what, callSid, err) {
   logger.warn(`[live-card-pause] ${what} for ${maskSid(callSid)}: ${errorCode(err)}`);
 }
 
-async function setRecording(callSid, status) {
+const isNotFound = (err) => Number(err?.code) === 20404 || Number(err?.status) === 404;
+
+async function setRecording(callSid, status, childCallSid = null, beforeFallback = null) {
   requestClient = requestClient || new RequestClient({ timeout: REQUEST_TIMEOUT_MS });
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN, { httpClient: requestClient });
   const update = { status };
   if (status === 'paused') update.pauseBehavior = 'silence';
-  await client.calls(callSid).recordings(CURRENT_RECORDING).update(update);
+  try {
+    await client.calls(callSid).recordings(CURRENT_RECORDING).update(update);
+  } catch (err) {
+    // Classic <Dial record="record-from-answer-dual"> attaches the recording to the child dial_call_sid
+    // rather than the parent CallSid; re-fence the sender lease before sending the fallback request so
+    // two sequential 5 s requests can never outlive the 8 s lease.
+    if (isNotFound(err) && childCallSid && childCallSid !== callSid) {
+      if (typeof beforeFallback === 'function' && !(await beforeFallback())) {
+        throw Object.assign(new Error('lease lost before child fallback'), { code: 'lease_lost' });
+      }
+      await client.calls(childCallSid).recordings(CURRENT_RECORDING).update(update);
+      return;
+    }
+    throw err;
+  }
 }
 
 function cardPauseOf(row) {
@@ -149,7 +165,7 @@ function cardPauseOf(row) {
   return value && typeof value === 'object' ? value : {};
 }
 
-// The card pause, and the star-key hold's wanted phase (call-hold.js) from the same row.
+// The card pause, the star-key hold's wanted phase (call-hold.js), and the classic <Dial> child SID from the same row.
 function readCardPauseRow(conn, callSid) {
   return conn('call_log')
     .where('twilio_call_sid', callSid)
@@ -157,17 +173,18 @@ function readCardPauseRow(conn, callSid) {
     .first(
       conn.raw("metadata -> 'live_transcription' -> 'card_pause' AS card_pause"),
       conn.raw("metadata #>> '{conference_path,hold,phase}' AS hold_phase"),
+      conn.raw("metadata -> 'forward_acceptance' ->> 'dial_call_sid' AS dial_call_sid"),
     );
 }
 
 // Run one decision under the per-call advisory lock; commit before any Twilio request is sent. fn also gets
-// { holdHeld }: the star-key hold holds the caller, so the recording must stay paused.
+// { holdHeld, dialCallSid }: the star-key hold holds the caller, so the recording must stay paused.
 async function withCallLock(callSid, fn) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`live_card_pause:${callSid}`]);
     const row = await readCardPauseRow(trx, callSid);
     if (!row) return { action: 'none', reason: 'not_started_here' };
-    return fn(trx, cardPauseOf(row), { holdHeld: row.hold_phase === 'held' });
+    return fn(trx, cardPauseOf(row), { holdHeld: row.hold_phase === 'held', dialCallSid: row.dial_call_sid || null });
   });
 }
 
@@ -233,10 +250,10 @@ function planClaim(state, token, { slackMs = 0, allowPause = true }, holdHeld = 
 
 // Commit the decision (and the lease with it) before any Twilio request is sent.
 async function claimStep(callSid, token, opts) {
-  return withCallLock(callSid, async (trx, state, { holdHeld }) => {
+  return withCallLock(callSid, async (trx, state, { holdHeld, dialCallSid }) => {
     const { res, next } = planClaim(state, token, opts || {}, holdHeld);
     if (next !== state) await stampCardPause(trx, callSid, next);
-    return res;
+    return res.send ? { ...res, childCallSid: dialCallSid || null } : res;
   });
 }
 
@@ -338,11 +355,12 @@ async function recordOutcome(callSid, nextState) {
   }
 }
 
-async function sendStep(callSid, step) {
+async function sendStep(callSid, step, token) {
   const pausing = step.send === 'pause';
   try {
-    await setRecording(callSid, pausing ? 'paused' : 'in-progress');
+    await setRecording(callSid, pausing ? 'paused' : 'in-progress', step.childCallSid, () => fenceLease(callSid, token));
   } catch (err) {
+    if (err?.code === 'lease_lost') return { action: 'send_busy', dueAtMs: step.dueAtMs, leaseLost: true };
     const code = errorCode(err);
     warn(`${step.send} failed`, callSid, err);
     await recordOutcome(callSid, (current) => stateAfterFailure(current, step, err, code));
@@ -368,7 +386,11 @@ async function drain(callSid, opts) {
         holding = false;
         return sent ? { action: sent } : { action: 'send_busy', dueAtMs: step.dueAtMs };
       }
-      const out = await sendStep(callSid, step);
+      const out = await sendStep(callSid, step, token);
+      if (out.leaseLost) {
+        holding = false;
+        return sent ? { action: sent } : { action: 'send_busy', dueAtMs: step.dueAtMs };
+      }
       if (out.error_code) return out;
       sent = out.action;
     }
