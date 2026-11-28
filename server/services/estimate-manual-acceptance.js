@@ -959,6 +959,35 @@ function customerHasActiveMonthlyMembership(customer) {
 // recurring plan (different service family or different property) that would
 // silently stop billing. Single-service renewals and prepay-on-book for the
 // same service continue untouched.
+function findConflictingRecurringPlanRow(liveRows, { targetPropertyId, targetType }) {
+  const rows = liveRows || [];
+  const distinctProps = new Set(rows.map((r) => (r.property_id ? String(r.property_id) : null)).filter(Boolean));
+  const hasNullPropRow = rows.some((r) => !r.property_id);
+  const ambiguousMultiProperty = !targetPropertyId
+    && rows.length > 1
+    && (distinctProps.size > 1 || (distinctProps.size === 1 && hasNullPropRow));
+  if (ambiguousMultiProperty) return rows[0];
+
+  const { serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  return rows.find((row) => {
+    if (targetPropertyId && row.property_id && String(row.property_id) !== targetPropertyId) return true;
+    if (!targetType || !row.service_type) return false;
+    return !serviceMatchesCoverage(row, targetType);
+  }) || null;
+}
+
+function throwAnnualPrepayExistingPlanConflict(message, details) {
+  const err = httpError(message, 409);
+  err.status = 409;
+  err.code = 'ANNUAL_PREPAY_EXISTING_PLAN';
+  err.existingPlanConflict = {
+    error: err.message,
+    code: 'ANNUAL_PREPAY_EXISTING_PLAN',
+    ...details,
+  };
+  throw err;
+}
+
 async function assertCustomer360NoConflictingPlanForPrepay(trx, {
   customerId, coverageServiceType, propertyId = null, scheduledServiceId = null, acquirePropertyLock = true,
 } = {}) {
@@ -971,18 +1000,10 @@ async function assertCustomer360NoConflictingPlanForPrepay(trx, {
   }
   const lockedCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
   if (customerHasActiveMonthlyMembership(lockedCustomer)) {
-    const err = httpError(
+    throwAnnualPrepayExistingPlanConflict(
       'This customer is on an active monthly membership — annual prepay switches the whole account to annual_prepay billing, which would silence their monthly dues. Switch their billing mode first.',
-      409,
+      { reason: 'monthly_membership' },
     );
-    err.status = 409;
-    err.code = 'ANNUAL_PREPAY_EXISTING_PLAN';
-    err.existingPlanConflict = {
-      error: err.message,
-      code: 'ANNUAL_PREPAY_EXISTING_PLAN',
-      reason: 'monthly_membership',
-    };
-    throw err;
   }
   let targetPropertyId = propertyId ? String(propertyId) : null;
   if (!targetPropertyId && scheduledServiceId) {
@@ -990,37 +1011,20 @@ async function assertCustomer360NoConflictingPlanForPrepay(trx, {
     if (targetRow?.property_id) targetPropertyId = String(targetRow.property_id);
   }
   const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
-  const { serviceMatchesCoverage, normalizeCoverageServiceType } = require('./annual-prepay-renewals');
+  const { normalizeCoverageServiceType } = require('./annual-prepay-renewals');
   const liveRows = await trx('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNotIn('status', TERMINAL_STATUSES)
     .select('id', 'service_type', 'property_id');
-  const targetType = normalizeCoverageServiceType(coverageServiceType);
-  const distinctProps = new Set((liveRows || []).map((r) => (r.property_id ? String(r.property_id) : null)).filter(Boolean));
-  const hasNullPropRow = (liveRows || []).some((r) => !r.property_id);
-  const ambiguousMultiProperty = !targetPropertyId
-    && ((liveRows || []).length > 1 && (distinctProps.size > 1 || (distinctProps.size === 1 && hasNullPropRow)));
-  const conflict = ambiguousMultiProperty
-    ? (liveRows || [])[0]
-    : (liveRows || []).find((row) => {
-      if (targetPropertyId && row.property_id && String(row.property_id) !== targetPropertyId) return true;
-      if (!targetType || !row.service_type) return false;
-      return !serviceMatchesCoverage(row, targetType);
-    });
+  const conflict = findConflictingRecurringPlanRow(liveRows, {
+    targetPropertyId,
+    targetType: normalizeCoverageServiceType(coverageServiceType),
+  });
   if (conflict) {
-    const err = httpError(
+    throwAnnualPrepayExistingPlanConflict(
       `This customer already has another active recurring plan (${conflict.service_type || 'other service'}) — annual prepay switches the whole account to annual_prepay billing, which would stop billing that plan.`,
-      409,
+      { reason: 'other_recurring_plan', serviceType: conflict.service_type || null },
     );
-    err.status = 409;
-    err.code = 'ANNUAL_PREPAY_EXISTING_PLAN';
-    err.existingPlanConflict = {
-      error: err.message,
-      code: 'ANNUAL_PREPAY_EXISTING_PLAN',
-      reason: 'other_recurring_plan',
-      serviceType: conflict.service_type || null,
-    };
-    throw err;
   }
 }
 

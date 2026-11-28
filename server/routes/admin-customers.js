@@ -6326,20 +6326,23 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     let appliedDepositCredit = 0;
     let depositCreditEstimateId = null;
     let settledByDepositCredit = false;
+    const allowOverlap = req.body?.allowOverlap === true;
+    const requestedPropertyId = req.body?.propertyId || null;
+    const requestedScheduledServiceId = req.body?.scheduledServiceId || null;
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(customer.id)],
       );
       await lockAndAssertNoAnnualPrepayOverlap(
-        trx, customer.id, termStart, req.body?.allowOverlap === true,
+        trx, customer.id, termStart, allowOverlap,
         'Customer already has an annual prepay term through',
       );
       await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
         customerId: customer.id,
         coverageServiceType,
-        propertyId: req.body?.propertyId || null,
-        scheduledServiceId: req.body?.scheduledServiceId || null,
+        propertyId: requestedPropertyId,
+        scheduledServiceId: requestedScheduledServiceId,
         acquirePropertyLock: false,
       });
       // The credit consumes ONLY the estimate the operator was shown in the
@@ -6809,20 +6812,23 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
     const sendReceipt = require('../config/feature-gates').gates.recordedAnnualPrepayReceipt;
     let result;
+    const allowOverlap = req.body?.allowOverlap === true;
+    const requestedPropertyId = req.body?.propertyId || null;
+    const requestedScheduledServiceId = req.body?.scheduledServiceId || null;
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(customer.id)],
       );
       await lockAndAssertNoAnnualPrepayOverlap(
-        trx, customer.id, termStart, req.body?.allowOverlap === true,
+        trx, customer.id, termStart, allowOverlap,
         'Customer already has an active annual prepay term through',
       );
       await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
         customerId: customer.id,
         coverageServiceType,
-        propertyId: req.body?.propertyId || null,
-        scheduledServiceId: req.body?.scheduledServiceId || null,
+        propertyId: requestedPropertyId,
+        scheduledServiceId: requestedScheduledServiceId,
         acquirePropertyLock: false,
       });
       // Fee-free TOCTOU guard under the trx (same posture as the draft
