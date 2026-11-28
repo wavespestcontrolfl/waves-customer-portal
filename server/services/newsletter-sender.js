@@ -2067,24 +2067,25 @@ async function processScheduledSends() {
     // touches only a claim this tick made, never another worker's send in progress.
     const claimToken = crypto.randomUUID();
     try {
-      // Proof-approved rows remain governed by the proof kill switch even
-      // after approval. A manual future schedule has no proof_approved_at and
-      // is unaffected; an approved autopilot send stays queued until the gate
-      // is deliberately re-enabled.
-      if (row.proof_approved_at && process.env.GATE_NEWSLETTER_PROOF_APPROVAL !== 'true') {
-        logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
-        continue;
-      }
       // An issue an auto-send switch queued: approved with no approving email.
       const autoQueued = Boolean(row.proof_approved_at) && !row.proof_approval_email_id;
       const pestInsider = row.newsletter_type === PEST_INSIDER_TYPE;
       // A reply-approved Pest Insider issue is never dispatched: planned Pest
       // Insider sends go through the auto-send path (GATE_PEST_INSIDER_AUTO_SEND),
       // and a manual schedule has no proof_approved_at. Return any legacy row to
-      // draft via the version-bound revert so it cannot hold a due-queue slot forever.
+      // draft via the version-bound revert before the global proof gate check so
+      // it cannot hold a due-queue slot forever even when the proof gate is off.
       if (row.proof_approved_at && pestInsider && !autoQueued) {
         logger.warn(`[newsletter-scheduler] send ${row.id} is a reply-approved Pest Insider issue — returning to draft`);
         await revertBlockedScheduledSend(row, 'an APPROVED reply does not dispatch a Waves Pest Insider issue; it goes out only through the planned schedule');
+        continue;
+      }
+      // Proof-approved rows remain governed by the proof kill switch even
+      // after approval. A manual future schedule has no proof_approved_at and
+      // is unaffected; an approved autopilot send stays queued until the gate
+      // is deliberately re-enabled.
+      if (row.proof_approved_at && process.env.GATE_NEWSLETTER_PROOF_APPROVAL !== 'true') {
+        logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
         continue;
       }
       // An issue an auto-send switch queued stays queued while that switch is

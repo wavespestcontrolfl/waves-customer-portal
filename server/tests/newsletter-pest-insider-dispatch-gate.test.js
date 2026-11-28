@@ -102,6 +102,33 @@ describe('processScheduledSends: reply-approved Pest Insider guard', () => {
     }));
   });
 
+  test('a reply-approved Pest Insider issue is returned to draft even when GATE_NEWSLETTER_PROOF_APPROVAL is off', async () => {
+    delete process.env.GATE_NEWSLETTER_PROOF_APPROVAL;
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {};
+      ['where', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.limit = jest.fn(async () => [APPROVED_INSIDER]);
+      q.first = jest.fn(async () => undefined);
+      q.update = jest.fn(async (patch) => {
+        updates.push({ table, patch });
+        return table === 'pest_insider_issues' ? 0 : 1;
+      });
+      return q;
+    });
+
+    await processScheduledSends();
+
+    expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates).toContainEqual({
+      table: 'newsletter_sends',
+      patch: expect.objectContaining({ status: 'draft', scheduled_for: null, proof_approved_at: null }),
+    });
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      sendId: 'send-pi-1',
+    }));
+  });
+
   test('a Pest Insider issue scheduled by hand (no proof approval) is not held', async () => {
     wireDue([{ ...APPROVED_INSIDER, proof_approved_at: null }]);
 
