@@ -813,15 +813,13 @@ async function computeCoreKpis(period = 'mtd', range = null) {
     }
 
     // Autopay coverage — share of LIVE recurring-plan members (active,
-    // not-deleted, CUSTOMER_STAGES, real WaveGuard tier + monthly_rate > 0,
-    // test accounts excluded) actually on CHARGEABLE autopay. Scoped to
-    // recurring plans (not one-time jobs) via the shared
-    // whereRecurringPlanCustomer + autopayActivePredicate definitions so this
-    // tile matches Action Inbox's autopay_coverage_low alert exactly.
+    // not-deleted, real WaveGuard tier + monthly_rate > 0, test accounts
+    // excluded) actually on CHARGEABLE autopay. Uses the exact same
+    // whereRecurringPlanCustomer definition as computeRecurringPlans and
+    // Action Inbox's autopay_coverage_low alert so all three agree on the base.
     let autopayPct = null, autopayCount = 0, customerBase = 0;
     try {
-      const recurringBase = (qb) => whereRecurringPlanCustomer(qb, db, 'c')
-        .whereIn('c.pipeline_stage', CUSTOMER_STAGES);
+      const recurringBase = (qb) => whereRecurringPlanCustomer(qb, db, 'c');
       const baseRow = await recurringBase(db('customers as c')).count({ c: '*' }).first();
       customerBase = parseInt(baseRow?.c || 0);
 

@@ -22,7 +22,6 @@ const { LEAD_RESPONSE_SLA_MINUTES, applyLeadsAwaitingContactFilter, countWaiting
 const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
 const { listAtRiskMrrAccounts, whereRecurringPlanCustomer } = require('./mrr-breakdown');
-const { CUSTOMER_STAGES } = require('./customer-stages');
 const { autopayActivePredicate } = require('./autopay-eligibility');
 const { loadCloseoutStatuses, closeoutIssuesForVisit, factsFullyKnown } = require('./closeout-alerts');
 
@@ -777,12 +776,11 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   } catch (err) { failures.push({ id: 'at_risk_mrr' }); logger.error(`[dashboard-alerts] at_risk_mrr: ${err.message}`); }
 
   // 11. Autopay coverage below target — measured on live recurring-plan
-  //     members (excluding one-time customers) using the shared
-  //     whereRecurringPlanCustomer + autopayActivePredicate definitions so
-  //     this alert matches the Cash Autopay Coverage tile exactly.
+  //     members (excluding one-time customers) using the exact same
+  //     whereRecurringPlanCustomer + autopayActivePredicate definitions as
+  //     computeRecurringPlans and the Cash Autopay Coverage tile.
   try {
-    const recurringBase = (qb) => whereRecurringPlanCustomer(qb, db, 'c')
-      .whereIn('c.pipeline_stage', CUSTOMER_STAGES);
+    const recurringBase = (qb) => whereRecurringPlanCustomer(qb, db, 'c');
     const baseRow = await recurringBase(db('customers as c')).count({ c: '*' }).first();
     const base = parseInt(baseRow?.c || 0);
     if (base > 0) {
@@ -798,13 +796,16 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
       // surfaces always show the same number.
       const pct = (covered / base) * 100;
       if (pct < AUTOPAY_COVERAGE_TARGET_PCT) {
-        const manual = base - covered;
+        // Recurring base includes annual prepaid members as well as monthly
+        // accounts without autopay — label accurately instead of calling
+        // prepaid accounts "billed manually".
+        const uncovered = base - covered;
         alerts.push({
           id: 'autopay_coverage_low',
           kind: 'action',
           severity: 'warn',
-          count: manual,
-          label: `Autopay covers ${Math.round(pct * 10) / 10}% of recurring plans — ${manual} billed manually`,
+          count: uncovered,
+          label: `Autopay covers ${Math.round(pct * 10) / 10}% of recurring plans — ${uncovered} without chargeable autopay`,
           href: '/admin/customers',
         });
       }

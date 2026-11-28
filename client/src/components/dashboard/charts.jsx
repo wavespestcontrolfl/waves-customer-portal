@@ -528,15 +528,22 @@ function buildEstimateFunnelStages(funnel, rates) {
   const accepted = funnel.accepted || 0;
   const declined = funnel.declined || 0;
   const pending = funnel.pending || 0;
-  const pctOfSent = (val) => (sent > 0 ? val : null);
+  const counts = [sent, viewed, accepted, declined, pending];
+  const maxCount = Math.max(...counts, 1);
+  // Short periods (e.g. Today) can include carry-over views/acceptances/declines
+  // from earlier sends. Conversion percentages come from the sent cohort
+  // (0–100%); guard against any legacy >100% rate.
+  const hasCarryOver = maxCount > sent;
+  const pctOfSent = (val) => (sent > 0 && val != null && val <= 100 ? val : null);
   return {
-    hasActivity: [sent, viewed, accepted, declined, pending].some((n) => n > 0),
-    maxCount: Math.max(sent, viewed, accepted, declined, pending, 1),
+    hasActivity: counts.some((n) => n > 0),
+    hasCarryOver,
+    maxCount,
     stages: [
       { label: 'Sent',     count: sent,     pct: pctOfSent(100) },
-      { label: 'Viewed',   count: viewed,   pct: pctOfSent(rates.view_rate || 0) },
-      { label: 'Accepted', count: accepted, pct: pctOfSent(rates.close_rate || 0) },
-      { label: 'Declined', count: declined, pct: pctOfSent(rates.decline_rate || 0), dim: true },
+      { label: 'Viewed',   count: viewed,   pct: pctOfSent(rates.view_rate ?? 0) },
+      { label: 'Accepted', count: accepted, pct: pctOfSent(rates.close_rate ?? 0) },
+      { label: 'Declined', count: declined, pct: pctOfSent(rates.decline_rate ?? 0), dim: true },
       // Neither won nor lost yet — these are the follow-up work, so they earn a
       // visible row instead of hiding in the sent-minus-decided arithmetic.
       { label: 'Pending',  count: pending,  pct: pctOfSent(Math.round((pending / (sent || 1)) * 100)), dim: true },
@@ -548,12 +555,14 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, by
   // A short window like Today can have accepted/declined activity from quotes
   // sent on an earlier day even when sent === 0; only show empty when every
   // stage is zero.
-  const { hasActivity, maxCount, stages } = buildEstimateFunnelStages(funnel, rates);
+  const { hasActivity, hasCarryOver, maxCount, stages } = buildEstimateFunnelStages(funnel, rates);
   if (!hasActivity) return <EmptyState>No estimates sent this period</EmptyState>;
   return (
     <div className="space-y-3">
       {stages.map((s) => {
-        const widthPct = s.pct != null ? Math.min(100, s.pct) : Math.round((s.count / maxCount) * 100);
+        const widthPct = !hasCarryOver && s.pct != null
+          ? Math.min(100, s.pct)
+          : Math.round((s.count / maxCount) * 100);
         return (
           <div key={s.label}>
             <div className="mb-1 flex items-baseline justify-between text-ui-caption">
@@ -575,6 +584,11 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, by
           </div>
         );
       })}
+      {hasCarryOver && (
+        <div className="text-ui-caption text-ink-tertiary">
+          Counts include earlier quotes decided this period; percentages reflect this period&apos;s sent cohort.
+        </div>
+      )}
       {totalAcceptedValue != null && (
         <div className="pt-3 mt-3 flex items-baseline justify-between">
           <span className="ui-label text-ink-secondary">Accepted value</span>

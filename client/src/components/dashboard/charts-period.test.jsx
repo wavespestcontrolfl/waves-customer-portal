@@ -27,6 +27,18 @@ describe("Period-driven dashboard chart states", () => {
     expect(screen.getByText("No estimates sent this period")).toBeInTheDocument();
   });
 
+  it("suppresses >100% carry-over rates and explains carry-over activity when acceptances exceed sends", () => {
+    render(
+      <EstimateFunnel
+        funnel={{ sent: 1, viewed: 1, accepted: 2, declined: 0, pending: 0 }}
+        rates={{ view_rate: 100, close_rate: 200, decline_rate: 0 }}
+        totalAcceptedValue={2400}
+      />,
+    );
+    expect(screen.queryByText("200%")).not.toBeInTheDocument();
+    expect(screen.getByText(/Counts include earlier quotes decided this period/)).toBeInTheDocument();
+  });
+
   it("uses period-neutral empty copy for RevenueByCity", () => {
     render(<RevenueByCity cities={[]} total={0} />);
     expect(screen.getByText("No completed-service revenue this period")).toBeInTheDocument();

@@ -52,6 +52,7 @@ const router = require('../routes/admin-dashboard');
 const { errorHandler } = require('../middleware/errors');
 const { DEFAULT_KPI_TARGETS } = require('../../shared/kpi-targets.cjs');
 const grossMarginMigration = require('../models/migrations/20261127180000_kpi_targets_gross_margin_55');
+const recurringAutopayMigration = require('../models/migrations/20261127190000_kpi_targets_recurring_autopay');
 
 const adminToken = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: 'admin-1', scope: 'staff' }, process.env.JWT_SECRET);
 
@@ -132,23 +133,33 @@ describe('Gross margin target 55% alignment', () => {
     });
   });
 
-  test('migration updates only untouched default 40% rows and leaves owner edits intact', async () => {
+  test('migration updates only untouched default 40% rows, copies saved autopay_pct target, and rolls back safely', async () => {
     const rows = [
-      { metric: 'gross_margin', target: 40, updated_by: null },
-      { metric: 'gross_margin', target: 40, updated_by: 'Adam' },
+      { metric: 'gross_margin', target: 40, updated_by: null, updated_at: '2026-07-02T00:00:00Z' },
+      { metric: 'gross_margin', target: 40, updated_by: 'Adam', updated_at: '2026-08-01T00:00:00Z' },
+      { metric: 'autopay_pct', target: 75, amber_band_pct: 10, lower_is_better: false, updated_by: 'Adam', updated_at: '2026-09-01T00:00:00Z' },
     ];
     const makeKnex = () => {
-      const knex = (table) => {
+      const knex = () => {
         let filter = {};
         let nullCols = [];
+        const matches = (row) => (
+          Object.entries(filter).every(([k, v]) => row[k] === v)
+          && nullCols.every((c) => row[c] == null)
+        );
         return {
           where(obj) { filter = { ...filter, ...obj }; return this; },
           whereNull(col) { nullCols.push(col); return this; },
+          async first() { return rows.find(matches); },
+          async insert(row) { rows.push({ ...row }); },
+          async del() {
+            for (let i = rows.length - 1; i >= 0; i -= 1) {
+              if (matches(rows[i])) rows.splice(i, 1);
+            }
+          },
           async update(patch) {
             for (const row of rows) {
-              const matchesObj = Object.entries(filter).every(([k, v]) => row[k] === v);
-              const matchesNull = nullCols.every((c) => row[c] == null);
-              if (matchesObj && matchesNull) Object.assign(row, patch);
+              if (matches(row)) Object.assign(row, patch);
             }
           },
         };
@@ -160,11 +171,20 @@ describe('Gross margin target 55% alignment', () => {
 
     const knex = makeKnex();
     await grossMarginMigration.up(knex);
+    await recurringAutopayMigration.up(knex);
     expect(rows[0].target).toBe(55);
     expect(rows[1].target).toBe(40); // owner-edited row untouched
+    expect(rows.find((r) => r.metric === 'recurring_autopay_pct')).toMatchObject({
+      metric: 'recurring_autopay_pct',
+      target: 75,
+      updated_by: 'Adam',
+      updated_at: '2026-09-01T00:00:00Z',
+    });
 
+    await recurringAutopayMigration.down(knex);
     await grossMarginMigration.down(knex);
     expect(rows[0].target).toBe(40);
     expect(rows[1].target).toBe(40);
+    expect(rows.find((r) => r.metric === 'recurring_autopay_pct')).toBeUndefined();
   });
 });

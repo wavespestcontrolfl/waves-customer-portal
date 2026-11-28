@@ -403,11 +403,13 @@ describe('Action Inbox generators', () => {
     const { alerts } = await computeDashboardAlertsUncached();
     const item = alerts.find((a) => a.id === 'autopay_coverage_low');
     expect(item).toMatchObject({ kind: 'action', tier: 'standing', severity: 'warn', count: 77 });
-    expect(item.label).toContain('Autopay covers 23% of recurring plans');
-    // Recurring-plan scope: filters monthly_rate > 0 and WaveGuard tier, excluding one-time customers.
+    expect(item.label).toContain('Autopay covers 23% of recurring plans — 77 without chargeable autopay');
+    expect(item.label).not.toContain('billed manually');
+    // Recurring-plan scope matches computeRecurringPlans (monthly_rate > 0 + WaveGuard tier, no stage mismatch).
     const recurringCalls = capture.filter((c) => c.table === 'customers as c');
     expect(recurringCalls.some((c) => c.method === 'where' && c.args[0] === 'c.monthly_rate' && c.args[1] === '>' && c.args[2] === 0)).toBe(true);
     expect(recurringCalls.some((c) => c.method === 'whereRaw' && String(c.args[0]).includes('waveguard_tier'))).toBe(true);
+    expect(recurringCalls.some((c) => c.method === 'whereIn' && c.args[0] === 'c.pipeline_stage')).toBe(false);
   });
 
   test('autopay_coverage_low: thresholds on the raw ratio — 49.9% must fire, not round up to 50 and skip', async () => {

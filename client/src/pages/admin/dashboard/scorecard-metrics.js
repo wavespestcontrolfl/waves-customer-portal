@@ -177,8 +177,8 @@ export function funnelVerdict(data) {
   const f = data?.funnel;
   if (!f || !f.sent) return null;
   const { tier } = confidenceTier(f.sent);
-  const viewRate = data.rates?.view_rate ?? null;
-  const closeRate = data.rates?.close_rate ?? null;
+  const viewRate = data.rates?.view_rate != null && data.rates.view_rate <= 100 ? data.rates.view_rate : null;
+  const closeRate = data.rates?.close_rate != null && data.rates.close_rate <= 100 ? data.rates.close_rate : null;
   const happened = `${f.sent} sent → ${f.viewed || 0} viewed → ${f.accepted || 0} accepted${closeRate != null ? ` (${closeRate}% close)` : ""}.`;
   if (tier !== "ok") {
     return { happened, action: "Small batch — send more estimates before tuning the funnel.", tone: "neutral", sampleN: f.sent };
