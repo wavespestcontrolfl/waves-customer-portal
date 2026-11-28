@@ -83,8 +83,8 @@ const URL_PATH_OFFICE_RULES = [
 
 // Verified office-specific URLs whose slug uses "lakewood-ranch" (which on
 // other sites can denote HQ) or omits the city name.
-const EXPLICIT_OFFICE_URLS = new Map([
-  ['citysquares.com/b/waves-pest-control-lakewood-ranch-26663854', 'bradenton-fl'],
+const EXPLICIT_ENTITY_OFFICES = new Map([
+  ['citysquares.com:id:26663854', 'bradenton-fl'],
 ]);
 
 const OFFICE_CITY_KEYS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
@@ -125,7 +125,7 @@ function urlHostAndPath(rawUrl) {
 function inferOfficeSlugFromUrl(rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
-  const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
+  const explicit = EXPLICIT_ENTITY_OFFICES.get(profileEntityKey(hp.host, hp.path));
   if (explicit) {
     if (hp.pathMatches.some((m) => m !== explicit)) return null;
     return explicit;
@@ -137,7 +137,7 @@ function inferOfficeSlugFromUrl(rawUrl) {
 function officeSlugForRow(location, rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
-  const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
+  const explicit = EXPLICIT_ENTITY_OFFICES.get(profileEntityKey(hp.host, hp.path));
   const pathMatches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   if (pathMatches.length > 1) return null;
 
@@ -201,7 +201,7 @@ function profileEntityKey(host, path) {
     const m = path.match(/^\/biz\/(\d+)(?:\/|$)/);
     if (m) return `n49.com:/biz/${m[1]}`;
   } else if (host === 'citysquares.com' || host === 'reviews.birdeye.com') {
-    const m = path.match(/-(\d{6,})$/);
+    const m = path.match(/-(\d+)$/);
     if (m) return `${host}:id:${m[1]}`;
   }
   return `${host}${path}`;

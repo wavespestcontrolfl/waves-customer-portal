@@ -126,9 +126,11 @@ describe('getVerifiedProfilesByOffice', () => {
       // Same N49 listing ID under conflicting Sarasota vs Venice city slugs -> omitted completely
       { live_url: 'https://www.n49.com/biz/999111/waves-pest-control-sarasota/', location: 'sarasota' },
       { live_url: 'https://www.n49.com/biz/999111/waves-pest-control-venice/', location: 'venice' },
-      // Same CitySquares listing ID under conflicting Sarasota vs Venice city slugs -> omitted completely
+      // Same CitySquares listing ID (full or 5-digit short ID) under conflicting slugs -> omitted
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-26999001', location: 'sarasota' },
       { live_url: 'https://citysquares.com/b/waves-pest-control-venice-26999001', location: 'venice' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-55555', location: 'sarasota' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-venice-55555', location: 'venice' },
       // Same N49 listing ID with Englewood (sorts first) and Venice alias -> only valid Venice URL ships
       { live_url: 'https://www.n49.com/biz/888222/waves-pest-control-englewood/', location: 'venice' },
       { live_url: 'https://www.n49.com/biz/888222/waves-pest-control-venice/', location: 'venice' },
@@ -161,7 +163,7 @@ describe('getVerifiedProfilesByOffice', () => {
       // Inherited prototype property name as location -> safely dropped without throwing
       { live_url: 'https://citysquares.com/b/waves-pest-control-33333', location: 'constructor' },
       // Explicit non-default location on allowlisted host with non-conflicting URL
-      { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: 'venice' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-99998', location: 'venice' },
       // Cityless profile claimed by multiple offices -> omitted from both
       { live_url: 'https://citysquares.com/b/waves-pest-control-88888', location: 'venice' },
       { live_url: 'https://citysquares.com/b/waves-pest-control-88888/', location: 'sarasota' },
@@ -182,7 +184,7 @@ describe('getVerifiedProfilesByOffice', () => {
       'https://www.n49.com/biz/6597767/waves-pest-control-sarasota-fl-sarasota-1450-pine-warbler-place/',
     ]);
     expect(offices['venice-fl']).toEqual([
-      'https://citysquares.com/b/waves-pest-control-99999',
+      'https://citysquares.com/b/waves-pest-control-99998',
       'https://citysquares.com/b/waves-pest-control-venice-26858800',
       'https://nextdoor.com/pages/waves-pest-control-venice-venice-fl-9crfqd/',
       'https://reviews.birdeye.com/waves-pest-control-venice-176686916548706',
@@ -202,5 +204,15 @@ describe('getVerifiedProfilesByOffice', () => {
     const out2 = await getVerifiedProfilesByOffice();
     expect(out1['venice-fl']).toEqual(out2['venice-fl']);
     expect(out1['venice-fl']).toHaveLength(1);
+  });
+
+  test('rejects Bradenton-bound CitySquares ID 26663854 when an alias claims another office', async () => {
+    mockRows([
+      { live_url: 'https://citysquares.com/b/waves-pest-control-venice-26663854', location: 'venice' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-venice-26663854', location: null },
+    ]);
+    const offices = await getVerifiedProfilesByOffice();
+    expect(offices['bradenton-fl']).toEqual([]);
+    expect(offices['venice-fl']).toEqual([]);
   });
 });
