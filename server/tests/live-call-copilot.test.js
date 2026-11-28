@@ -111,6 +111,11 @@ describe('matchCatalogPrices (full-catalog affirmative-only lookup)', () => {
     expect(denied.some((r) => r.name === 'Cockroach Treatment')).toBe(false);
     expect(denied[0].name).toBe('One-Time Pest');
 
+    const contractedDenied = matchCatalogPrices("We aren't seeing roaches and we don't see any wasp nest, just ants.", CATALOG);
+    expect(contractedDenied.some((r) => r.name === 'Cockroach Treatment')).toBe(false);
+    expect(contractedDenied.some((r) => r.name === 'Bee/Wasp Removal')).toBe(false);
+    expect(contractedDenied[0].name).toBe('One-Time Pest');
+
     const historical = matchCatalogPrices('We had mice years ago, now there is a wasp nest on the porch', CATALOG);
     expect(historical.map((r) => r.name)).toEqual(['Bee/Wasp Removal']);
   });
@@ -176,6 +181,32 @@ describe('buildCallChecklist (7-item live missing-info checklist)', () => {
       access_notes: true,
     });
 
+    const ordinaryOpenings = buildCallChecklist({
+      customer: null,
+      account: null,
+      prefs: null,
+      assist: null,
+      assistFacts: null,
+      lines: [
+        { speaker: 'caller', text: "I'm calling about ants. This is about roaches and I'm interested in lawn care." },
+      ],
+      catalogPrices: [{ name: 'One-Time Pest', price: 200 }],
+    });
+    expect(byKey(ordinaryOpenings).name).toBe(false);
+
+    const realIntro = buildCallChecklist({
+      customer: null,
+      account: null,
+      prefs: null,
+      assist: null,
+      assistFacts: null,
+      lines: [
+        { speaker: 'caller', text: 'Hi, this is Jordan calling about ants.' },
+      ],
+      catalogPrices: [{ name: 'One-Time Pest', price: 200 }],
+    });
+    expect(byKey(realIntro).name).toBe(true);
+
     const unansweredStaff = buildCallChecklist({
       customer: null,
       account: null,
@@ -223,7 +254,10 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
       properties: [{ id: 'prop-1', address_line1: '123 Maplewood Rd', city: 'Bradenton', zip: '34202', latitude: 27.4989, longitude: -82.5748 }],
       nextVisit: { scheduled_date: '2026-12-01', window_display: '9-11 AM', service_type: 'Quarterly Pest Control' },
       lastVisit: { scheduled_date: '2026-09-01', service_type: 'Quarterly Pest Control' },
-      estimates: [{ status: 'sent', service_interest: 'Mosquito Control', onetime_total: null, monthly_total: 85, annual_total: null }],
+      estimates: [
+        { status: 'sent', service_interest: 'Mosquito Control', onetime_total: null, monthly_total: 85, annual_total: 1020 },
+        { status: 'draft', service_interest: 'Initial + Plan', onetime_total: 200, monthly_total: 50, annual_total: null },
+      ],
       recentCalls: 2,
       recentTexts: 3,
       prefs: {
@@ -269,7 +303,10 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
       lawn_sqft: 2400,
       lot_sqft: 8500,
       next_visit: { date: '2026-12-01', service: 'Quarterly Pest Control', window: '9-11 AM' },
-      open_estimates: [{ service: 'Mosquito Control', status: 'sent', totals: { onetime: null, monthly: 85, annual: null }, price_summary: '$85/mo' }],
+      open_estimates: [
+        { service: 'Mosquito Control', status: 'sent', totals: { onetime: null, monthly: 85, annual: 1020 }, price_summary: '$85/mo ($1020/yr)' },
+        { service: 'Initial + Plan', status: 'draft', totals: { onetime: 200, monthly: 50, annual: null }, price_summary: '$200 one-time + $50/mo' },
+      ],
       recent_48h: { calls: 2, texts: 3 },
     });
     expect(result.brief.home_sqft).toBeUndefined();
@@ -339,6 +376,33 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
     // Staff screening question ("Any German roaches?") must not trigger Cockroach Treatment.
     expect(missingLatRes.catalog_prices.some((p) => p.name === 'Cockroach Treatment')).toBe(false);
     expect(missingLatRes.catalog_prices[0].name).toBe('One-Time Pest');
+
+    // Spoken location change when GATE_CALL_LIVE_ASSIST is off (assistFacts null) must withhold account route slots.
+    resetCaches();
+    const otherLocDb = makeFakeDb({
+      account: baseAccount,
+      properties: [{ id: 'prop-1', address_line1: '123 Maplewood Rd', city: 'Bradenton', zip: '34202', latitude: 27.4989, longitude: -82.5748 }],
+    });
+    const otherCityRes = await buildLiveCallCopilot({
+      call: { id: 'call-other-city', customer_id: 'cust-1' },
+      customer: { id: 'cust-1', name: 'Casey Sample' },
+      meta: {},
+      lines: [{ speaker: 'caller', text: 'This is actually for our place in Venice, 34285.' }],
+      assist: null,
+    }, { db: otherLocDb, isEnabled: () => true, addressMatchesCustomer: () => false, booking: { loadBookingConfig: jest.fn(), buildBookingAvailability } });
+    expect(otherCityRes.route_slots).toEqual([]);
+    expect(buildBookingAvailability).not.toHaveBeenCalled();
+
+    resetCaches();
+    const rentalRes = await buildLiveCallCopilot({
+      call: { id: 'call-rental', customer_id: 'cust-1' },
+      customer: { id: 'cust-1', name: 'Casey Sample' },
+      meta: {},
+      lines: [{ speaker: 'caller', text: "I'm calling about my mother's house." }],
+      assist: null,
+    }, { db: otherLocDb, isEnabled: () => true, addressMatchesCustomer: () => true, booking: { loadBookingConfig: jest.fn(), buildBookingAvailability } });
+    expect(rentalRes.route_slots).toEqual([]);
+    expect(buildBookingAvailability).not.toHaveBeenCalled();
   });
 
   test('preserves checklist evidence from earlier utterances on long calls (>15 lines)', async () => {

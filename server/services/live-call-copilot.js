@@ -76,6 +76,18 @@ function parseMeta(raw) {
 const placeNorm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
 
+const SPOKEN_STREET_RE = /\b\d{2,5}\s+[a-z][a-z0-9'.-]*(?:\s+[a-z0-9'.-]+){0,3}\s+(?:st|street|rd|road|ave|avenue|dr|drive|ln|lane|ct|court|blvd|boulevard|way|cir|circle|pl|place|ter|terrace|pkwy|trl|trail|loop|run|cv|cove)\b/i;
+const SWFL_CITIES = Object.freeze([
+  'bradenton', 'sarasota', 'venice', 'parrish', 'palmetto', 'ellenton', 'englewood',
+  'north port', 'port charlotte', 'lakewood ranch', 'osprey', 'nokomis', 'myakka',
+  'rotonda west', 'punta gorda', 'longboat key', 'siesta key', 'anna maria',
+  'holmes beach', 'bradenton beach', 'sun city center', 'ruskin', 'riverview',
+  'apollo beach', 'wimauma', 'arcadia', 'cape coral', 'fort myers', 'naples', 'tampa',
+]);
+const SWFL_CITY_RE = new RegExp(`\\b(${SWFL_CITIES.map((c) => c.replace(/\s+/g, '\\s+')).join('|')})\\b`, 'gi');
+const OTHER_PROPERTY_CUE_RE = /\b(?:different\s+(?:address|house|property|home|place)|another\s+(?:address|property|home|house)|rental\s+property|investment\s+property|other\s+(?:house|property|home)|my\s+(?:mom'?s|mother'?s|dad'?s|father'?s|son'?s|daughter'?s|sister'?s|brother'?s)\s+(?:house|home|place|property))\b/i;
+const SPOKEN_ZIP_RE = /\b((?:33|34)\d{3})\b/g;
+
 // Compares full street + unit via booking._internals.addressMatchesCustomer
 // (same helper live-call-assist.js uses). Fails closed (true) on error.
 function statesDifferentProperty(target, facts, addressMatcher) {
@@ -90,6 +102,23 @@ function statesDifferentProperty(target, facts, addressMatcher) {
   } catch {
     return true;
   }
+}
+
+// Works even when GATE_CALL_LIVE_ASSIST is off (assistFacts null): detects when
+// the caller speaks a different street, ZIP, SWFL city, or another property.
+function spokenLocationDiffers(target, callerSpeech, addressMatcher) {
+  const speech = String(callerSpeech || '').trim();
+  if (!target || !speech) return false;
+  if (OTHER_PROPERTY_CUE_RE.test(speech)) return true;
+  const targetZip = zip5(target.zip);
+  const zips = [...speech.matchAll(SPOKEN_ZIP_RE)].map((m) => m[1]);
+  if (targetZip && zips.some((z) => z !== targetZip)) return true;
+  const targetCity = placeNorm(target.city);
+  const cities = [...speech.matchAll(SWFL_CITY_RE)].map((m) => placeNorm(m[1]));
+  if (targetCity && cities.some((c) => c !== targetCity)) return true;
+  const streets = [...speech.matchAll(new RegExp(SPOKEN_STREET_RE.source, 'gi'))].map((m) => m[0]);
+  if (!streets.length) return false;
+  return streets.some((street) => statesDifferentProperty(target, { address_line1: street, zip: zips[0] || null }, addressMatcher));
 }
 
 // ── 1. Caller Brief at Ring (DB-only, fail-soft, 60s cache) ──────────────────
@@ -127,8 +156,10 @@ function formatEstimateBrief(row) {
   const annual = positiveAmount(row.annual_total);
   const parts = [];
   if (onetime != null) parts.push(`$${onetime} one-time`);
-  if (monthly != null) parts.push(`$${monthly}/mo`);
-  if (annual != null) parts.push(`$${annual}/yr`);
+  // monthly_total and annual_total represent equivalent recurring bases (never additive).
+  if (monthly != null && annual != null) parts.push(`$${monthly}/mo ($${annual}/yr)`);
+  else if (monthly != null) parts.push(`$${monthly}/mo`);
+  else if (annual != null) parts.push(`$${annual}/yr`);
   return {
     service: cleanSnippet(row.service_interest, 80) || 'Estimate',
     status: String(row.status || 'open').trim().toLowerCase(),
@@ -252,10 +283,10 @@ async function loadCustomerBundle(customerId, callId, conn, now) {
 // ── 2. Full-Catalog Live Pricing Matcher ($0 affirmative-only deterministic) ─
 
 const PALMETTO_RE = /\bpalmetto\s+(?:bugs?|(?:cock)?roach(?:es)?)\b/gi;
-const NEGATION_LEAD = '(?:no|not|never|none|zero|without|don\'t\\s+have|do\\s+not\\s+have|didn\'t\\s+(?:have|see)|haven\'t\\s+(?:had|seen)|free\\s+of)';
-const HISTORICAL_LEAD = '(?:used\\s+to\\s+(?:have|get|see)|years?\\s+ago|months?\\s+ago|last\\s+year|previously\\s+had|before\\s+we\\s+moved|in\\s+the\\s+past|back\\s+in\\s+\\d{4})';
-const HISTORICAL_TAIL = '(?:years?\\s+ago|months?\\s+ago|last\\s+year|in\\s+the\\s+past|before\\s+we\\s+moved|a\\s+long\\s+time\\s+ago)';
-const NON_ADVERSATIVE_WORDS = '(?:\\s+(?!(?:but|however|though|except|just|only|instead|now)\\b)[a-z\']+){0,4}';
+const NEGATION_LEAD = '(?:no|not|never|none|zero|without|free\\s+of|isn[\'’]?t|is\\s+not|aren[\'’]?t|are\\s+not|wasn[\'’]?t|was\\s+not|weren[\'’]?t|were\\s+not|don[\'’]?t|do\\s+not|doesn[\'’]?t|does\\s+not|didn[\'’]?t|did\\s+not|haven[\'’]?t|have\\s+not|hasn[\'’]?t|has\\s+not|hadn[\'’]?t|had\\s+not|ain[\'’]?t)';
+const HISTORICAL_LEAD = '(?:used\\s+to\\s+(?:have|get|see)|years?\\s+ago|months?\\s+ago|last\\s+(?:year|time|visit)|previously(?:\\s+had)?|before\\s+we\\s+moved|in\\s+the\\s+past|back\\s+in\\s+\\d{4})';
+const HISTORICAL_TAIL = '(?:years?\\s+ago|months?\\s+ago|last\\s+(?:year|time|visit)|in\\s+the\\s+past|before\\s+we\\s+moved|a\\s+long\\s+time\\s+ago)';
+const NON_ADVERSATIVE_WORDS = '(?:\\s+(?!(?:but|however|though|except|just|only|instead|now)\\b)[\\w\'’]+){0,5}';
 
 function stripNegatedAndHistorical(text, termPattern) {
   const negRe = new RegExp(`\\b${NEGATION_LEAD}${NON_ADVERSATIVE_WORDS}\\s+(?:${termPattern})\\b`, 'gi');
@@ -355,24 +386,25 @@ function isValidCoord(value) {
   return Number.isFinite(n) && n !== 0;
 }
 
-function resolveSinglePropertyPin(account, properties, assistFacts, addressMatcher) {
+function resolveSinglePropertyPin(account, properties, assistFacts, callerSpeech, addressMatcher) {
   // Null properties = lookup failed → fail closed. >1 active property = ambiguous → withhold.
   if (!account || !Array.isArray(properties) || properties.length > 1) return null;
   if (assistFacts?.place_withdrawn) return null;
   const target = properties.length === 1 ? properties[0] : account;
   if (statesDifferentProperty(target, assistFacts, addressMatcher)) return null;
+  if (spokenLocationDiffers(target, callerSpeech, addressMatcher)) return null;
   if (!isValidCoord(target.latitude) || !isValidCoord(target.longitude)) return null;
   return { lat: Number(target.latitude), lng: Number(target.longitude), cacheTarget: properties.length === 1 ? `prop:${target.id}` : `cust:${account.id}` };
 }
 
-async function resolveRouteSlots({ account, properties, assist, assistFacts, now, deps }) {
+async function resolveRouteSlots({ account, properties, assist, assistFacts, callerSpeech, now, deps }) {
   const fromAssist = slotsFromAssist(assist);
   if (fromAssist.length) return fromAssist;
 
   const isEnabled = deps.isEnabled || require('../config/feature-gates').isEnabled;
   if (!isEnabled('selfBooking')) return [];
 
-  const pin = resolveSinglePropertyPin(account, properties, assistFacts, deps.addressMatchesCustomer);
+  const pin = resolveSinglePropertyPin(account, properties, assistFacts, callerSpeech, deps.addressMatchesCustomer);
   if (!pin) return [];
 
   const todayDay = etDateString(now);
@@ -413,8 +445,31 @@ async function resolveRouteSlots({ account, properties, assist, assistFacts, now
 
 // ── 4. Live Missing-Info Checklist ($0 pure deterministic across whole call) ─
 
-const SPOKEN_NAME_RE = /\b(?:my name is|this is|i'?m|name'?s)\s+([a-z]{2,20})\b/i;
-const SPOKEN_STREET_RE = /\b\d{2,5}\s+[a-z][a-z0-9'.-]*(?:\s+[a-z0-9'.-]+){0,3}\s+(?:st|street|rd|road|ave|avenue|dr|drive|ln|lane|ct|court|blvd|boulevard|way|cir|circle|pl|place|ter|terrace|pkwy|trl|trail|loop|run|cv|cove)\b/i;
+const INTRO_NAME_EXPLICIT_RE = /\b(?:my\s+name\s+is|name['’]?s)\s+([a-z][a-z'-]{1,20})\b/gi;
+const INTRO_NAME_SELF_RE = /(?:^|[\n.!?]\s*|(?:hi|hello|hey|yes|yeah)[,\s]+)(?:this\s+is|i['’]?m|i\s+am)\s+([a-z][a-z'-]{1,20})\b/gi;
+const NON_NAME_WORDS = new Set([
+  'about', 'actually', 'already', 'also', 'an', 'at', 'available', 'back', 'busy',
+  'closed', 'currently', 'fine', 'for', 'from', 'good', 'great', 'her', 'here', 'his',
+  'in', 'interested', 'it', 'just', 'located', 'my', 'new', 'not', 'ok', 'okay', 'on',
+  'only', 'open', 'our', 'ready', 'really', 'so', 'sorry', 'still', 'sure', 'that',
+  'the', 'their', 'there', 'this', 'too', 'unavailable', 'very', 'with', 'your',
+]);
+
+function isPlausibleFirstName(word) {
+  const low = String(word || '').toLowerCase();
+  return low.length >= 2 && !NON_NAME_WORDS.has(low) && !low.endsWith('ing');
+}
+
+function hasSpokenCallerName(callerText) {
+  const text = String(callerText || '');
+  for (const re of [INTRO_NAME_EXPLICIT_RE, INTRO_NAME_SELF_RE]) {
+    for (const match of text.matchAll(re)) {
+      if (isPlausibleFirstName(match[1])) return true;
+    }
+  }
+  return false;
+}
+
 const EMAIL_RE = /\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/i;
 const SPOKEN_EMAIL_RE = /\b(?:at|@)\s*(?:gmail|yahoo|icloud|outlook|hotmail|aol|comcast|verizon|me|live|msn|proton)\b/i;
 const PRICE_SPOKEN_RE = /\$\s*\d{2,4}\b|\b\d{2,4}\s*(?:dollars?|bucks?)\b|\b(?:it'?s|would be|is|quoted?|total|price|cost|runs?|starts?\s+at)\s+\d{2,4}\b/i;
@@ -432,7 +487,7 @@ function hasSpokenOrStoredAddress(ctx) {
 
 // Every caller-fact item requires stored account/assist facts or CALLER speech (never an unanswered staff question).
 const CHECKLIST_RULES = Object.freeze([
-  { key: 'name', label: 'Name', test: (c) => Boolean(c.customer?.name || c.account?.first_name || SPOKEN_NAME_RE.test(c.callerText)) },
+  { key: 'name', label: 'Name', test: (c) => Boolean(c.customer?.name || c.account?.first_name || hasSpokenCallerName(c.callerText)) },
   { key: 'address', label: 'Address', test: hasSpokenOrStoredAddress },
   { key: 'email', label: 'Email', test: (c) => EMAIL_RE.test(String(c.account?.email || '')) || EMAIL_RE.test(c.callerText) || SPOKEN_EMAIL_RE.test(c.callerText) },
   { key: 'scope', label: 'Pest / Scope', test: (c) => Boolean(c.assist?.intent || c.assistFacts?.service || c.catalogPrices.length) },
@@ -498,7 +553,7 @@ async function buildLiveCallCopilot(input, deps) {
     const callerSpeech = joinSpeakerLines(evidenceLines, (l) => l?.speaker !== 'staff');
     const catalogPrices = matchCatalogPrices(`${intent}\n${callerSpeech}`, catalogRows);
     const routeSlots = await resolveRouteSlots({
-      account: bundle.account, properties: bundle.properties, assist: opts.assist, assistFacts, now, deps: cfg,
+      account: bundle.account, properties: bundle.properties, assist: opts.assist, assistFacts, callerSpeech, now, deps: cfg,
     });
     const checklist = buildCallChecklist({
       customer: opts.customer, account: bundle.account, prefs: bundle.prefs, assist: opts.assist, assistFacts, lines: evidenceLines, catalogPrices,
@@ -518,6 +573,8 @@ module.exports = {
     resetCaches,
     cleanSnippet,
     statesDifferentProperty,
+    spokenLocationDiffers,
+    hasSpokenCallerName,
     resolveSinglePropertyPin,
     formatPropertyNotes,
     slotsFromAssist,
