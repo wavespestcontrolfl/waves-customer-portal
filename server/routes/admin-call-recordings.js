@@ -1087,11 +1087,15 @@ router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
       }
       // Soft-mark the call row as spam rather than hard-deleting it so #8592
       // call-health metrics stay accurate and call_live_utterances are never
-      // orphaned. sms_log rows are deliberately KEPT as the A2P audit trail.
+      // orphaned. Revoke processing_token and bump processing_generation so any
+      // in-flight recording worker or queued webhook timer cannot overwrite the
+      // manual spam verdict. sms_log rows are deliberately KEPT as the A2P trail.
       await db('call_log').where({ id: call.id }).update({
         disposition: 'spam',
         processing_status: 'spam',
         invalid_reason: 'spam',
+        processing_token: null,
+        processing_generation: db.raw('COALESCE(processing_generation, 0) + 1'),
         updated_at: new Date(),
       });
       res.json({ success: true, disposition, blocked: Boolean(call.from_phone) });

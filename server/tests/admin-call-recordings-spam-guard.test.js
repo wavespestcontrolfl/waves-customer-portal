@@ -42,6 +42,7 @@ function withServer(fn) {
 
 function setup({ call, linkedCustomer = null, phoneCustomer = null }) {
   const tables = {};
+  db.raw = jest.fn((sql) => ({ __raw: sql }));
   db.mockImplementation((table) => {
     const q = chain(
       table === 'call_log' ? call
@@ -176,7 +177,13 @@ describe('PUT /calls/:id/disposition spam guard & validation (C2-29)', () => {
     expect(tables.blocked_numbers).toHaveLength(1);
     expect(tables.blocked_numbers[0].insert).toHaveBeenCalledWith(expect.objectContaining({ number: '+19415551234', block_type: 'hard_block' }));
     expect(tables.call_log.some((q) => q.del.mock.calls.length > 0)).toBe(false);
-    expect(tables.call_log.some((q) => q.update.mock.calls.some((c) => c[0]?.disposition === 'spam' && c[0]?.processing_status === 'spam' && c[0]?.invalid_reason === 'spam'))).toBe(true);
+    expect(tables.call_log.some((q) => q.update.mock.calls.some((c) => (
+      c[0]?.disposition === 'spam'
+      && c[0]?.processing_status === 'spam'
+      && c[0]?.invalid_reason === 'spam'
+      && c[0]?.processing_token === null
+      && c[0]?.processing_generation?.__raw === 'COALESCE(processing_generation, 0) + 1'
+    )))).toBe(true);
     expect(tables.call_live_utterances).toBeUndefined();
     expect(tables.sms_log).toBeUndefined();
     const logLines = logger.info.mock.calls.map((c) => c[0]).join(' ');
