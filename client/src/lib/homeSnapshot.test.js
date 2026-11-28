@@ -202,5 +202,13 @@ describe('saved home reads', () => {
     delete stored.reads['next-visit'].data.next.customerPickBy;
     localStorage.setItem(HOME_READS_KEY, JSON.stringify(stored));
     expect(readHomeReads(identity, 'cust-1:p1')['next-visit']).toBeUndefined();
+
+    // A pre-upgrade day_only visit has a real date and arrival note even without windowStart/customerPickBy.
+    const dayOnlyVisit = { id: 'v3', serviceType: 'Pest Control', date: '2026-12-10', windowStart: null, day_only: true, arrival_note: 'We text your 2-hour window the day before.' };
+    writeHomeRead(identity, 'cust-1:p1', 'next-visit', { next: dayOnlyVisit }, Date.now());
+    const storedDayOnly = JSON.parse(localStorage.getItem(HOME_READS_KEY));
+    delete storedDayOnly.reads['next-visit'].data.next.customerPickBy;
+    localStorage.setItem(HOME_READS_KEY, JSON.stringify(storedDayOnly));
+    expect(readHomeReads(identity, 'cust-1:p1')['next-visit'].data.next).toEqual(dayOnlyVisit);
   });
 });

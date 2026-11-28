@@ -217,6 +217,7 @@ const isLegacyWindowlessNextVisit = (key, data) => (
   key === 'next-visit'
   && !!data?.next
   && !data.next.windowStart
+  && !data.next.day_only
   && !Object.prototype.hasOwnProperty.call(data.next, 'customerPickBy')
 );
 
