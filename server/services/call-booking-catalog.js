@@ -22,6 +22,7 @@ const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-d
 
 const logger = require('./logger');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { recurringIntentEvidence, callerOnlyText } = require('./call-cadence-intent');
 
 const BOOKABLE_SERVICE_COLUMNS = [
@@ -819,7 +820,7 @@ function hasExplicitOneTimeOnlyIntent({ extracted = {}, v2Extraction = null, tra
 
 function followUpDateScheduled(extracted = {}, v2Extraction = null) {
   if (v2Extraction?.scheduling?.follow_up_start_at) return true;
-  return Boolean(extracted?.follow_up_date_time && /^\d{4}-\d{2}-\d{2}/.test(String(extracted.follow_up_date_time).trim()));
+  return Boolean(extracted?.follow_up_date_time && dateOnlyString(String(extracted.follow_up_date_time).trim()));
 }
 
 function followUpExplicitlyDiscussed(extracted = {}, v2Extraction = null) {
