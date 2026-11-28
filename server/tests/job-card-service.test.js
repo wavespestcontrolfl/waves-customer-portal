@@ -3785,5 +3785,71 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(fgProducts.map((p) => p.id)).toEqual(['cat-ace']);
     jobCard._test.attachMixSprayVerdicts([fgEntry], [{ productId: 'cat-ace', verdict: 'caution', reason: 'Rain within 48 hours' }]);
     expect(fgEntry.procedure.fieldGuide.mixRates[0].sprayCheck).toEqual({ verdict: 'caution', reason: 'Rain within 48 hours' });
+
+    // Decimal max/min volume bounds ("at most 4.5 gal", "at least 1.5 gal") parse complete decimals and warn only outside the bound.
+    const floramiteRow = () => ({
+      product: 'Floramite SC',
+      sprayers: ['bg', 'flowzone', 'rig'],
+      perGallon: { amount: 0.04, unit: 'fl oz', amountMax: 0.08 },
+      limit: 'At most 2 sprays a year. At 8 fl oz per 100 gal, at most 4.5 gal of mix per 1,000 sq ft.',
+    });
+    const minRow = () => ({
+      product: 'Acelepryn Insecticide',
+      sprayers: ['bg', 'flowzone', 'rig'],
+      perGallon: { amount: 0.02, unit: 'fl oz', amountMax: 0.16 },
+      limit: 'Apply at least 1.5 gal of mix per 1,000 sq ft.',
+    });
+    const belowMax = { fieldGuide: { mixRates: [floramiteRow(), minRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: belowMax, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 4 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(belowMax.fieldGuide.mixRates[0].calibrationWarnings).toBeUndefined();
+    expect(belowMax.fieldGuide.mixRates[1].calibrationWarnings).toBeUndefined();
+
+    const aboveMax = { fieldGuide: { mixRates: [floramiteRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: aboveMax, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 5 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(aboveMax.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('above the label maximum of 4.5 gal per 1,000 sq ft'),
+    ]);
+
+    const belowMin = { fieldGuide: { mixRates: [minRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: belowMin, lines: [] }],
+      { source: 'rig', systemName: 'B&G #1', tankCapacityGal: 1, carrierGalPer1000: 1 },
+      { equipmentSystemId: 'sys-bg' },
+      [{ id: 'sys-bg', name: 'B&G #1', system_type: 'hand_pump', tank_capacity_gal: 1 }],
+    );
+    expect(belowMin.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('below the label minimum of 1.5 gal per 1,000 sq ft'),
+    ]);
+
+    // System-only rig assignment filters out another technician's calibration and treats an empty match as uncalibrated.
+    const otherTechCals = [
+      { id: 'cal-other', equipment_system_id: 'sys-fz', technician_id: 'tech-b', system_name: 'FlowZone #1', carrier_gal_per_1000: 1, tank_capacity_gal: 4 },
+    ];
+    const tankForTechA = jobCard._test.procedureCalibrationTank(otherTechCals, { equipmentSystemId: 'sys-fz', calibrationId: null }, 'tech-a');
+    expect(tankForTechA.source).toBeNull();
+    const scopedProc = { mixRates: [{ product: 'Tekko Pro IGR', sprayers: ['flowzone_4_gal'], perGallon: { amount: 2, unit: 'fl oz' }, sprayVolume: '1 gal per 1,000 sq ft' }] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: scopedProc, lines: [] }],
+      tankForTechA,
+      { equipmentSystemId: 'sys-fz', calibrationId: null },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(scopedProc.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('No carrier rate on file'),
+    ]);
+    // Shared calibration and the assigned technician's own calibration are still used.
+    const sharedCal = [{ id: 'cal-shared', equipment_system_id: 'sys-fz', technician_id: null, system_name: 'FlowZone #1', carrier_gal_per_1000: 1, tank_capacity_gal: 4 }];
+    expect(jobCard._test.procedureCalibrationTank(sharedCal, { equipmentSystemId: 'sys-fz', calibrationId: null }, 'tech-a')).toMatchObject({ source: 'rig', carrierGalPer1000: 1 });
+    expect(jobCard._test.procedureCalibrationTank(otherTechCals, { equipmentSystemId: 'sys-fz', calibrationId: null }, 'tech-b')).toMatchObject({ source: 'rig', carrierGalPer1000: 1 });
   });
 });
