@@ -28,7 +28,7 @@ const southDayKept = require('./south-day-kept');
 const { resolveGeo } = require('./geo');
 const { scoreAppointmentPlacement } = require('./scoring');
 const {
-  applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
+  applyAutoDispatchMove, applyAutoDispatchPairMove, revalidatePlacement, unitMoveSize, previewGroupMove,
 } = require('./apply');
 const { startPointRefusal } = require('./start-point-fence');
 const { techChangeRefusal } = require('./keep-tech');
@@ -49,6 +49,7 @@ const needsPerson = require('./needs-person-notice');
 const moveCheck = require('./proofreader/nightly');
 const checkDown = require('./check-down-notice');
 const rainTerm = require('./rain-term');
+const twoStopClear = require('./two-stop-clear');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -1341,6 +1342,17 @@ async function eligibilityWithGeoHeal(service, eligCtx, run) {
   return { elig: res.recheck, planCheck };
 }
 
+function recordPassOneNoChange(run, service, prefs, ctx, evalResult, noChange) {
+  noteUnmoved(run, service, noChange.reason_code);
+  if (twoStopClear.isEnabled(run.config) && twoStopClear.isEligibleEntry(service, evalResult)) {
+    run.pairEligible.set(String(service.id), { service, prefs, ctx, evalResult, noChange });
+    return undefined;
+  }
+  return audit.logDecision(run.runId, {
+    action: 'no_change', service, reason_code: noChange.reason_code, reason_description: noChange.reason_description, ...evalResult.audit,
+  });
+}
+
 // Pass 1 for one visit: eligibility (with the geo self-heal), the day-move
 // guard, the plan and preference gates and scoring — then, in dry_run, a
 // recommendation, or in apply mode a planned move for pass 2. Every early
@@ -1432,10 +1444,7 @@ async function evaluateServiceForRun(service, run) {
     : null;
   const noChange = evalResult.kind === 'no_change' ? evalResult : refusal && guardSkipReason(refusal);
   if (noChange) {
-    noteUnmoved(run, service, noChange.reason_code);
-    return audit.logDecision(run.runId, {
-      action: 'no_change', service, reason_code: noChange.reason_code, reason_description: noChange.reason_description, ...evalResult.audit,
-    });
+    return recordPassOneNoChange(run, service, prefs, ctx, evalResult, noChange);
   }
 
   // A qualifying move. In dry_run we recommend it immediately (order is
@@ -1734,8 +1743,8 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
 
 // The customer's scheduling preferences as they stand now differ from the
 // ones this move was scored on. A read error throws: the move fails closed.
-async function preferencesChanged(pm) {
-  const now = await getCustomerSchedulingPreferences(pm.service.customer_id, pm.service.service_type, db, { serviceId: pm.service.service_id, serviceKey: pm.service.service_key_snapshot });
+async function preferencesChanged(pm, conn = db) {
+  const now = await getCustomerSchedulingPreferences(pm.service.customer_id, pm.service.service_type, conn, { serviceId: pm.service.service_id, serviceKey: pm.service.service_key_snapshot });
   return moveCheck.preferencesPrint(now) !== moveCheck.preferencesPrint(pm.prefs);
 }
 
@@ -1799,6 +1808,258 @@ async function runPassTwo(run) {
   }
 }
 
+async function flushDeferredNoChanges(run) {
+  if (!run.pairEligible || !run.pairEligible.size) return;
+  for (const [id, entry] of [...run.pairEligible.entries()]) {
+    run.pairEligible.delete(id);
+    if (run.claimedPairIds.has(id)) continue;
+    run.claimedPairIds.add(id);
+    await audit.logDecision(run.runId, {
+      action: 'no_change',
+      service: entry.service,
+      reason_code: entry.noChange.reason_code,
+      reason_description: entry.noChange.reason_description,
+      ...entry.evalResult.audit,
+    });
+  }
+}
+
+async function logPairRecheckRefusal(entry, run, { reason_code, reason_description, markUnmoved = false }) {
+  run.claimedPairIds.add(String(entry.service.id));
+  if (markUnmoved) noteUnmoved(run, entry.service, reason_code);
+  await audit.logDecision(run.runId, {
+    action: 'no_change',
+    service: entry.service,
+    reason_code,
+    reason_description,
+    ...entry.evalResult.audit,
+  });
+}
+
+async function recheckPairEntry(entry, run) {
+  const live = await revalidatePlacement(entry.service);
+  if (!live.ok) {
+    await logPairRecheckRefusal(entry, run, {
+      reason_code: 'SUPERSEDED_DURING_RUN',
+      reason_description: `Superseded by an operator during the run — ${live.reason}`,
+    });
+    return false;
+  }
+  const guardSkip = await recheckPlannedMove(entry, run);
+  if (guardSkip) {
+    await logPairRecheckRefusal(entry, run, {
+      reason_code: guardSkip.code,
+      reason_description: guardSkip.description,
+      markUnmoved: true,
+    });
+    return false;
+  }
+  const limited = await recheckMoveLimit(entry, run);
+  if (limited) {
+    await logPairRecheckRefusal(entry, run, {
+      reason_code: limited.reason_code,
+      reason_description: limited.reason_description,
+    });
+    return false;
+  }
+  return true;
+}
+
+async function checkPairProofreader(entry, best, evalAudit, run) {
+  const checked = await moveCheck.checkMove({ service: entry.service, best, run });
+  if (checked && checked.broke) run.guardReadDegraded = true;
+  if (checked && await preferencesChanged(entry)) {
+    run.claimedPairIds.add(String(entry.service.id));
+    noteUnmoved(run, entry.service, 'SUPERSEDED_DURING_RUN');
+    await audit.logDecision(run.runId, {
+      action: 'no_change', service: entry.service, reason_code: 'SUPERSEDED_DURING_RUN',
+      reason_description: 'The customer\'s scheduling preferences changed while the move was checked',
+      ...evalAudit, constraints: { ...evalAudit.constraints, proofreader: checked.audit },
+    });
+    return { ok: false, checked };
+  }
+  if (checked && !checked.allowed) {
+    run.claimedPairIds.add(String(entry.service.id));
+    noteUnmoved(run, entry.service, checked.reason_code);
+    await audit.logDecision(run.runId, {
+      action: 'no_change', service: entry.service, reason_code: checked.reason_code,
+      reason_description: checked.reason_description,
+      ...evalAudit, constraints: { ...evalAudit.constraints, proofreader: checked.audit },
+    });
+    return { ok: false, checked };
+  }
+  return { ok: true, checked };
+}
+
+function pairMoveRefusal(attempt, err) {
+  const base = ordinaryRefusal(attempt, err);
+  if (base) return base;
+  if (err && ['SLOT_TAKEN', 'ROUTE_ORDER_CHANGED', 'STALE_PLACEMENT'].includes(err.code)) {
+    return { reason_code: err.code, reason_description: err.message || 'Pair destination slot changed before commit' };
+  }
+  return null;
+}
+
+function pairMoveConfig(entry, evalResult, checked, run) {
+  const { config, totals, lockBoundary } = run;
+  return {
+    ...config,
+    remainingChanges: config.maxChangesPerRun - totals.changed,
+    prefs: entry.prefs,
+    assertPreferencesUnchanged: true,
+    lockBoundary,
+    sourceConflict: null,
+    startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(entry.ctx, technicianId),
+    sourceDayTechnicianId: (evalResult.current && evalResult.current.day_technician_id) || null,
+    ...moveCheck.writeOptions(checked, { alternateCandidates: [] }),
+  };
+}
+
+async function logCommittedPairLeg(entry, evalResult, checked, result, run) {
+  const { runId, lockBoundary } = run;
+  const appliedAudit = buildAppliedPlacementAudit(evalResult, entry.service, entry.prefs, entry.ctx, lockBoundary, result);
+  const pairMeta = evalResult.audit.constraints && evalResult.audit.constraints.two_stop_pair_clear;
+  const note = pairMeta ? ` (2-stop day clear, -${pairMeta.pair_drive_saving_minutes} min drive)` : '';
+  await audit.logDecision(runId, {
+    action: 'changed',
+    service: entry.service,
+    reason_code: 'CHANGE_APPLIED',
+    reason_description: `${movedDescription(appliedAudit)}${note}`,
+    oldPlacement: {
+      date: toDateStr(entry.service.scheduled_date),
+      window_start: entry.service.window_start,
+      window_end: entry.service.window_end,
+      technician_id: entry.service.technician_id,
+      status: result.pre_status,
+    },
+    newPlacement: { ...appliedAudit.newPlacement, status: result.post_status },
+    scores: appliedAudit.scores,
+    prefsSnapshot: evalResult.audit.prefsSnapshot,
+    routeMetrics: { ...appliedAudit.routeMetrics, attempts: appliedAudit.attempts },
+    constraints: {
+      ...appliedAudit.constraints,
+      ...(pairMeta ? { two_stop_pair_clear: pairMeta } : {}),
+      ...(checked ? { proofreader: checked.audit } : {}),
+    },
+    appliedBy: 'auto_dispatch',
+  });
+}
+
+async function logPairSuperseded(entry, evalAudit, checked, run) {
+  run.claimedPairIds.add(String(entry.service.id));
+  noteUnmoved(run, entry.service, 'SUPERSEDED_DURING_RUN');
+  await audit.logDecision(run.runId, {
+    action: 'no_change', service: entry.service, reason_code: 'SUPERSEDED_DURING_RUN',
+    reason_description: 'The customer\'s scheduling preferences changed while the pair move was checked',
+    ...evalAudit, constraints: checked ? { ...evalAudit.constraints, proofreader: checked.audit } : evalAudit.constraints,
+  });
+}
+
+async function recordPairError(entryA, entryB, err, run) {
+  run.guardReadDegraded = true;
+  run.totals.failed += 1;
+  for (const entry of [entryA, entryB]) {
+    const id = String(entry.service.id);
+    if (run.claimedPairIds.has(id)) continue;
+    run.claimedPairIds.add(id);
+    noteUnmoved(run, entry.service, 'ERROR');
+    try {
+      await audit.logDecision(run.runId, {
+        action: 'failed',
+        service: entry.service,
+        reason_code: 'ERROR',
+        reason_description: `Two-stop pair evaluation failed: ${err.message}`,
+        ...entry.evalResult.audit,
+        error: err.message,
+      });
+    } catch { /* swallow */ }
+  }
+}
+
+async function recordPairCommitFailure({ entryA, evalA, checkedA, entryB, evalB, checkedB, applyErr, run }) {
+  run.claimedPairIds.add(String(entryA.service.id));
+  run.claimedPairIds.add(String(entryB.service.id));
+  const failedId = applyErr && applyErr.failedServiceId != null ? String(applyErr.failedServiceId) : null;
+  const legA = { entry: entryA, evalResult: evalA, checked: checkedA };
+  const legB = { entry: entryB, evalResult: evalB, checked: checkedB };
+  const [primary, partner] = failedId === String(entryB.service.id) ? [legB, legA] : [legA, legB];
+  const primaryAttempt = { fresh: primary.evalResult, checked: primary.checked };
+  const partnerAttempt = { fresh: partner.evalResult, checked: partner.checked };
+  const notAFailure = pairMoveRefusal(primaryAttempt, applyErr);
+  if (notAFailure) {
+    await logOrdinaryRefusal(primary.entry, primaryAttempt, run, notAFailure);
+    const partnerReason = failedId
+      ? { reason_code: notAFailure.reason_code, reason_description: `Pair commit rolled back because partner visit ${primary.entry.service.id} could not move (${notAFailure.reason_description})` }
+      : notAFailure;
+    await logOrdinaryRefusal(partner.entry, partnerAttempt, run, partnerReason);
+    return;
+  }
+  await recordApplyFailure(primary.entry, primary.evalResult, applyErr, run);
+  await logOrdinaryRefusal(partner.entry, partnerAttempt, run, {
+    reason_code: 'PAIR_COMMIT_ROLLED_BACK',
+    reason_description: `Pair commit rolled back because partner visit ${primary.entry.service.id} failed to apply (${applyErr.message})`,
+  });
+}
+
+async function commitAtomicPair({ entryA, evalA, checkedA, entryB, evalB, checkedB, sourceTechId, sourceDate, verifySourceInTrx, run }) {
+  const { runId, totals } = run;
+  let applied;
+  try {
+    applied = await applyAutoDispatchPairMove(
+      { service: entryA.service, best: evalA.best, config: pairMoveConfig(entryA, evalA, checkedA, run) },
+      { service: entryB.service, best: evalB.best, config: pairMoveConfig(entryB, evalB, checkedB, run) },
+      runId,
+      { sourceTechId, sourceDate, verifySourceInTrx },
+    );
+  } catch (applyErr) {
+    await recordPairCommitFailure({ entryA, evalA, checkedA, entryB, evalB, checkedB, applyErr, run });
+    return false;
+  }
+  const { resultA, resultB } = applied;
+  totals.changed += (resultA.movedCount || 1) + (resultB.movedCount || 1);
+  run.southDays.invalidate();
+  run.claimedPairIds.add(String(entryA.service.id));
+  run.claimedPairIds.add(String(entryB.service.id));
+  if (resultA.postCommitError || resultB.postCommitError) run.guardReadDegraded = true;
+  for (const [entry, evalResult, checked, result] of [
+    [entryA, evalA, checkedA, resultA],
+    [entryB, evalB, checkedB, resultB],
+  ]) {
+    try {
+      await logCommittedPairLeg(entry, evalResult, checked, result, run);
+    } catch (auditErr) {
+      run.guardReadDegraded = true;
+      logger.error(`[auto-dispatch] pair post-commit audit failed for ${entry.service.id}: ${auditErr.message}`);
+    }
+  }
+  return true;
+}
+
+function pairClearHelpers() {
+  return {
+    recheckPairEntry,
+    checkProofreader: checkPairProofreader,
+    preferencesChanged,
+    logPairSuperseded,
+    recordPairError,
+    buildPlacementAudit,
+    commitAtomicPair,
+    logDryRunPair: (service, evalResult, pair, road, run) => logDryRunRecommendation(
+      run, service, evalResult, ` (2-stop day clear, -${road ? road.saving_minutes : pair.saving} min drive)`,
+    ),
+  };
+}
+
+async function runPostPasses(run) {
+  try {
+    if (run.config.mode === 'dry_run') await recommendOverlapFixes(run);
+    else await runPassTwo(run);
+    await twoStopClear.runTwoStopClearPass(run, pairClearHelpers());
+  } finally {
+    await flushDeferredNoChanges(run);
+  }
+}
+
 // The run log's day-move rule, worded for the guard mode that is really in
 // force. Legacy keeps the flat lock boundary; tiers and flex do not use it.
 function describeGuardRule(guardMode, lockBoundary, today) {
@@ -1851,6 +2112,8 @@ async function runAutoDispatch(opts = {}) {
     // best-improvement-first in pass 2 so the change cap funds the largest gains.
     plannedMoves: [],
     dryRunOverlaps: [],
+    pairEligible: new Map(),
+    claimedPairIds: new Set(),
     quarantinedIds: new Set(),
     // Visits auto-dispatch cannot fix alone; raised once at run end (needs-person-notice.js).
     needsPerson: new Map(),
@@ -1911,11 +2174,11 @@ async function runAutoDispatch(opts = {}) {
 
     run.pass1Complete = totals.failed === 0;
 
-    if (config.mode === 'dry_run') await recommendOverlapFixes(run);
-    else await runPassTwo(run);
+    await runPostPasses(run);
 
     if (totals.failed > 0 || run.guardReadDegraded) runStatus = 'completed_with_errors';
   } catch (fatal) {
+    await flushDeferredNoChanges(run).catch(() => {});
     runStatus = 'failed';
     runError = fatal.message;
     logger.error(`[auto-dispatch] run ${runId} fatal: ${fatal.message}`);
@@ -1957,4 +2220,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, freezeReadArgs, conflictsToSettle, unloadedLiveVisitIds } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, freezeReadArgs, conflictsToSettle, unloadedLiveVisitIds, recordPairCommitFailure, recordPairError } };

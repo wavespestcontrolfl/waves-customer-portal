@@ -7,6 +7,8 @@
   "server/routes/pay-v2.js": { "max": 1, "reason": "Echoes credit_applied for the Account credit line; amountDue comes from invoice.js amount_due (invoiceAmountDue)." },
   "server/routes/receipt-v2.js": { "max": 1, "reason": "Receipt shows the credit line; a receipt reports cash paid." },
   "server/routes/stripe-webhook.js": { "max": 3, "reason": "The ACH amount check (amount due comes from invoiceAmountDue; the spread keeps amount_paid) and the dispute reopen/restore of a card surcharge in total. The settlement rewrites now carry amount_paid. Known limit: a chargeback on a card payment that completed a part-paid invoice reopens it for the part again." },
+  "server/services/accounting/statements.js": { "max": 2, "reason": "Cash-basis fallback invoice profile computes original billed A/R (total minus applied account credit); partial payments clear 1100 A/R via their own payment journal entries." },
+  "server/services/accounting/sync-bridge.js": { "max": 5, "reason": "Accrual invoice posting, statement allocation, and Stripe gap receipt recovery compute original billed principal minus applied credit; partial payments credit 1100 A/R independently." },
   "server/services/appointment-cancel-impact.js": { "max": 1, "reason": "Reports the credit as a fact on the cancel notice; computes no amount due." },
   "server/services/intelligence-bar/authorization-contract.js": { "max": 1, "reason": "Confirm-card text that names the credit; computes no amount due." },
   "server/services/intelligence-bar/billing-mode-change.js": { "max": 1, "reason": "Version pin over open dues (updated_at moves on every invoice write, so a part payment changes it)." },

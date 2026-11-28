@@ -8262,7 +8262,7 @@ function commercialAssessmentBookableFor({ extracted = {}, preAdoptionExtracted 
       views.push(extracted || {});
       const finalView = v2BookingServiceView(extracted || {}, v2Extraction);
       if (finalView) views.push(finalView);
-      if (views.some((view) => hasCallReServiceIntent(view))) return false;
+      if (views.some((view) => hasCallReServiceIntent(view, v2Extraction))) return false;
       const serviceNames = services.map((sv) => sv.name).filter(Boolean);
       return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every((view) => {
         const coarse = resolveSchedulableCallService(view, { transcription });
@@ -8302,7 +8302,7 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
       views.push(extracted || {});
       const finalView = v2BookingServiceView(extracted || {}, v2Extraction);
       if (finalView) views.push(finalView);
-      if (views.some((view) => hasCallReServiceIntent(view))) return false;
+      if (views.some((view) => hasCallReServiceIntent(view, v2Extraction))) return false;
       // The approved booking re-asserts the owner's recurring-intent rule over the
       // V2-merged service before it books (the singular-to-program override): judge
       // each view as the booking will book it, so a one-time pick that becomes a
@@ -8316,7 +8316,7 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
           services,
           coarseServiceLabel: coarse.ok ? coarse.service : null,
         });
-        return !!row && resolveCallBookingPrice({ quotedPrice: quoted, catalogRow: row }).price === quoted;
+        return !!row && resolveCallBookingPrice({ quotedPrice: quoted, catalogRow: row, v2Extraction }).price === quoted;
       });
     } catch (_e) {
       return false;
@@ -20287,7 +20287,7 @@ const CallRecordingProcessor = {
     // revisit-shaped calls; fail-closed — an error grants no lanes (generic
     // anchoring, never a free visit).
     let callReServiceLanes = [];
-    if (customerId && callReServiceRows.length > 0 && hasCallReServiceIntent(extracted)) {
+    if (customerId && callReServiceRows.length > 0 && hasCallReServiceIntent(extracted, v2ApprovedExtraction)) {
       try {
         const { reserviceLanesForCustomer } = require('./reservice-scheduler');
         const reServiceCustomerRow = await db('customers').where({ id: customerId }).first();
@@ -20310,6 +20310,7 @@ const CallRecordingProcessor = {
       reServices: callReServiceRows,
       reServiceLanes: callReServiceLanes,
       coarseServiceLabel: serviceResolution.ok ? serviceResolution.service : null,
+      v2Extraction: v2ApprovedExtraction,
     });
     // Never book a made-up service (owner directive 2026-07-10): service_type
     // MUST be a real admin-catalog service. When the service was UNCLEAR
@@ -20755,6 +20756,7 @@ const CallRecordingProcessor = {
             const priceInfo = resolveCallBookingPrice({
               quotedPrice: bookingExtracted.quoted_price,
               catalogRow: callBookingCatalogRow,
+              v2Extraction: v2ApprovedExtraction,
             });
             // GATE_CALL_AGREED_ONE_TIME_JOB (owner 2026-11-22, "make it an admin notification"): the
             // agreed-one-time-job hold changed this booking's service (a label
@@ -21097,6 +21099,7 @@ const CallRecordingProcessor = {
                   catalogRow: callBookingCatalogRow,
                   parentDate: scheduledDate,
                   parentWindowStart: windowStart || '09:00',
+                  v2Extraction: v2ApprovedExtraction,
                 });
               let reusedExistingSchedule = false;
               // The reuse branch below may assign the default tech to an
@@ -21330,6 +21333,7 @@ const CallRecordingProcessor = {
                       catalogRow: callBookingCatalogRow,
                       parentDate: primaryActualDate,
                       parentWindowStart: String(primaryRow.window_start || '').slice(0, 5) || windowStart || '09:00',
+                      v2Extraction: v2ApprovedExtraction,
                     });
                     if (!fuPlan) return null;
                   }

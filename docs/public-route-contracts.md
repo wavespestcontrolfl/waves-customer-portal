@@ -4850,9 +4850,13 @@ on that phone-and-line conversation, a move was logged since the offer, a
 staff schedule-change request or an unanswered reminder reply-1/2 offer is
 open, or the booking is under office review or dispatch-owned. A move sends
 the customer the standard `appointment_rescheduled` text (the series text for
-a series move), subject to STOP and the send window: after hours it is held
-and the confirmation sweep sends it at 8:00 AM. The webhook response and
-status codes are unchanged by either gate.
+a series move), subject to STOP and the send window: for a live webhook reply
+from the account holder's verified US primary phone (re-checked at dispatch in
+canonical US E.164 format), the account holder's confirmation sends immediately
+even outside the 8:00 AM–8:00 PM ET quiet-hours fence (owner rulings 2026-11-02
+and 2026-11-27, `resched A`); other contacts, non-US numbers, recovered sweep
+replies, and delayed series-reconciler retries remain held until 8:00 AM ET.
+The webhook response and status codes are unchanged by either gate.
 The shared SMS-alert delivery protocol uses a two-minute owned sender lease,
 confirmed to four hours only after actual bell/push delivery evidence and a
 durable legacy receipt. Committed bells keep immutable message keys so lost
