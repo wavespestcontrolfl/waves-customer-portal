@@ -6150,6 +6150,9 @@ const EstimateConverter = {
         split_by_service: !groupedEstimateAccept,
       });
     }
+    const prepayPriorRateSnapshot = await require('./plan-rate-ledger').capturePrepayPriorRateSnapshot(database, {
+      customerId, effectiveCustomer, estimateData, billingTerm, suppressRecurringConversion, groupedEstimateAccept,
+    });
     if (!suppressRecurringConversion && !groupedEstimateAccept) {
       ({ ledgerScalar, ledgerAdvisoryScalar, planRateReviewNeeded } = await applyPlanRateLedgerForAccept(database, {
         customerId, estimateId, estimateData, monthlyRate, effectiveCustomer, addOnContext, addOnPreservedRateBase,
@@ -6387,6 +6390,9 @@ const EstimateConverter = {
         convertedMonthlyRate = Math.round(returnedRate * 100) / 100;
       }
     }
+    await require('./plan-rate-ledger').persistPrepayPriorRateSnapshot(database, {
+      estimateId, snapshot: prepayPriorRateSnapshot, writtenMonthlyRate: convertedMonthlyRate,
+    });
     // Kill-switch consistency (codex #3245 r8): a GATE-OFF accept whose
     // dual-written component sum diverges from the committed legacy scalar
     // (a seeded multi-plan re-quote under legacy replace semantics) must

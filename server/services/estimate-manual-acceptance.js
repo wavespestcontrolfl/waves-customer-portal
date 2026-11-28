@@ -931,7 +931,80 @@ async function assertNoExistingPlanForPrepay(trx, ctx, estimate) {
     hasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null, ctx.bookedAppointmentIds);
   }
   if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || livePreservesMembership || hasLivePlan) {
-    throw httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
+    const err = httpError('Annual prepay is not available for an existing customer’s add-on — accept it as pay-at-visit (or per-application) so the customer’s existing plan keeps billing.', 400);
+    err.status = 400;
+    err.code = 'ANNUAL_PREPAY_EXISTING_PLAN';
+    throw err;
+  }
+}
+
+function customerHasActiveMonthlyMembership(customer) {
+  if (!customer) return false;
+  if (customerPreservesMonthlyMembership(customer)) return true;
+  const inactive = new Set(['cancelled', 'canceled', 'churned', 'inactive']);
+  return customer.billing_mode === 'monthly_membership'
+    && Number(customer.monthly_rate) > 0
+    && !inactive.has(String(customer.status || '').toLowerCase());
+}
+
+// Customer 360 annual-prepay conversion guard: converting one service to
+// annual prepay stamps customer-wide billing_mode='annual_prepay' and
+// suppresses customer-wide monthly dues. Refuse (409) under the customer lock
+// when the account already holds an active monthly membership OR another live
+// recurring plan (different service family or different property) that would
+// silently stop billing. Single-service renewals and prepay-on-book for the
+// same service continue untouched.
+async function assertCustomer360NoConflictingPlanForPrepay(trx, {
+  customerId, coverageServiceType, propertyId = null, acquirePropertyLock = true,
+} = {}) {
+  if (!customerId) return;
+  if (acquirePropertyLock) {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(customerId)],
+    );
+  }
+  const lockedCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+  if (customerHasActiveMonthlyMembership(lockedCustomer)) {
+    const err = httpError(
+      'This customer is on an active monthly membership — annual prepay switches the whole account to annual_prepay billing, which would silence their monthly dues. Switch their billing mode first.',
+      409,
+    );
+    err.status = 409;
+    err.code = 'ANNUAL_PREPAY_EXISTING_PLAN';
+    err.existingPlanConflict = {
+      error: err.message,
+      code: 'ANNUAL_PREPAY_EXISTING_PLAN',
+      reason: 'monthly_membership',
+    };
+    throw err;
+  }
+  const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  const { serviceMatchesCoverage, normalizeCoverageServiceType } = require('./annual-prepay-renewals');
+  const liveRows = await trx('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true })
+    .whereNotIn('status', TERMINAL_STATUSES)
+    .select('id', 'service_type', 'property_id');
+  const targetType = normalizeCoverageServiceType(coverageServiceType);
+  const conflict = (liveRows || []).find((row) => {
+    if (propertyId && row.property_id && String(row.property_id) !== String(propertyId)) return true;
+    if (!targetType || !row.service_type) return false;
+    return !serviceMatchesCoverage(row, targetType);
+  });
+  if (conflict) {
+    const err = httpError(
+      `This customer already has another active recurring plan (${conflict.service_type || 'other service'}) — annual prepay switches the whole account to annual_prepay billing, which would stop billing that plan.`,
+      409,
+    );
+    err.status = 409;
+    err.code = 'ANNUAL_PREPAY_EXISTING_PLAN';
+    err.existingPlanConflict = {
+      error: err.message,
+      code: 'ANNUAL_PREPAY_EXISTING_PLAN',
+      reason: 'other_recurring_plan',
+      serviceType: conflict.service_type || null,
+    };
+    throw err;
   }
 }
 
@@ -1581,5 +1654,7 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   bookedVisitsPinOf,
   bookedVisitsHaveAddons,
   BOOKED_VISIT_PIN_FIELDS,
+  assertNoExistingPlanForPrepay,
+  assertCustomer360NoConflictingPlanForPrepay,
   _private: { manualPrepayBlockingOneTimeCharge },
 };

@@ -146,6 +146,8 @@ describe('prepay year end bell next year', () => {
     ['a second plan that began mid-year', { term_start: '2026-05-01' }, false],
     ['the same year itself', { id: 'term-1', term_start: '2026-11-25' }, false],
     ['the same service named with other spacing and case', { term_start: '2026-11-25', coverage_service_type: ' quarterly  pest control ' }, true],
+    ['the same service with a variant label (Pest Control vs Quarterly Pest Control, B-60)', { term_start: '2026-11-25', coverage_service_type: 'Pest Control' }, true],
+    ['the same service with a longer variant label (General Pest Control Service, B-60)', { term_start: '2026-11-25', coverage_service_type: 'General Pest Control Service' }, true],
     ['another named service', { term_start: '2026-11-25', coverage_service_type: 'Monthly Lawn Care' }, false],
     ['an unnamed coverage', { term_start: '2026-11-25', coverage_service_type: null }, true],
   ])('%s', (_name, laterFields, expected) => {

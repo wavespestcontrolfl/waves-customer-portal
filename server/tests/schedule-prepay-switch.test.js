@@ -1370,3 +1370,105 @@ describe('on-site prepay switch — estimate-origin rodent setup is carried, nev
     }
   });
 });
+
+describe('B-12 & B-23: itemized estimate-discount lines and estimate-origin prepay floor/savings', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    stubTables();
+  });
+
+  test('B-12: accepts negative _kind: discount lines on first-application invoice and stays eligible on switch and payPage', async () => {
+    stubTables({
+      invoices: [{
+        ...ACCEPT_INVOICE,
+        total: '214.20',
+        line_items: [
+          { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
+          { description: 'First service application', quantity: 1, unit_price: 128, amount: 128 },
+          { _kind: 'discount', description: 'Military Discount (10%)', quantity: 1, unit_price: -12.8, amount: -12.8 },
+        ],
+      }],
+    });
+    const { status, body } = await preview();
+    expect(status).toBe(200);
+    expect(body.eligible).toBe(true);
+    expect(body.supersedes).toHaveLength(1);
+    expect(body.setupFee).toEqual({ amount: 99, waivedWithPrepay: true });
+  });
+
+  test('B-12: still refuses positive _kind: discount lines or arbitrary extra charges (fail closed)', async () => {
+    stubTables({
+      invoices: [{
+        ...ACCEPT_INVOICE,
+        total: '250.00',
+        line_items: [
+          { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
+          { description: 'First service application', quantity: 1, unit_price: 128, amount: 128 },
+          { _kind: 'discount', description: 'Bogus positive adjustment', quantity: 1, unit_price: 23, amount: 23 },
+        ],
+      }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/carries charges beyond/i);
+  });
+
+  test('B-23: operator-waived solo Pest estimate gets the 5% prepay discount via EstimateConverter instead of $0 savings', async () => {
+    stubTables({
+      estimate: {
+        id: 'est-1',
+        status: 'accepted',
+        accepted_at: '2026-08-10T14:40:05.527Z',
+        estimate_data: {
+          operatorPriceAdjustment: { waiveSetupFee: true },
+          recurring: { services: [{ service: 'pest_control', name: 'Quarterly Pest Control', annualTotal: 512, monthly: 42.67, visitsPerYear: 4 }] },
+        },
+      },
+      invoices: [{
+        ...ACCEPT_INVOICE,
+        total: '128.00',
+        line_items: [{ description: 'First service application', quantity: 1, unit_price: 128, amount: 128 }],
+      }],
+    });
+    const { status, body } = await preview();
+    expect(status).toBe(200);
+    expect(body.eligible).toBe(true);
+    // 512 * 0.95 = 486.40 (5% prepay discount because operator already waived setup fee)
+    expect(body.prepayTotal).toBe(486.4);
+    expect(body.discountAmount).toBe(25.6);
+  });
+
+  test('B-23: lawn estimate at lawnProgramMinimumProtectedAnnual never undercuts the protected floor and refuses payPage when savings <= 0', async () => {
+    const lawnEstimateData = {
+      pricingMetadata: { lawnProgramMinimumMonthly: 50 },
+      recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', annualTotal: 600, monthly: 50, visitsPerYear: 9 }] },
+    };
+    const lawnVisit = {
+      ...ACCEPTED_SERIES_VISIT,
+      service_type: 'Lawn Care',
+      estimated_price: 66.67,
+      recurring_pattern: 'lawn_rounds_9',
+    };
+    const lawnInvoice = {
+      ...ACCEPT_INVOICE,
+      status: 'sent',
+      sent_at: '2026-08-10T15:00:00Z',
+      total: '66.67',
+      line_items: [{ description: 'First service application', quantity: 1, unit_price: 66.67, amount: 66.67 }],
+    };
+    stubTables({
+      visit: lawnVisit,
+      seriesCount: 9,
+      estimate: { id: 'est-1', status: 'accepted', accepted_at: '2026-08-10T14:40:05.527Z', estimate_data: lawnEstimateData },
+      invoices: [lawnInvoice],
+    });
+    const previewRes = await router.computeAnnualPrepayPreview(
+      { scheduledServiceId: 'svc-1' },
+      db,
+      { switchLane: true, payPageInvoiceId: lawnInvoice.id },
+    );
+    expect(previewRes.eligible).toBe(false);
+    expect(previewRes.blockReason).toMatch(/no annual prepay savings/i);
+  });
+});

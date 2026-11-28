@@ -13681,6 +13681,15 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         if (!customerId) {
           throw estimateAcceptError('annual prepay acceptance requires a customer record before creating the prepay invoice');
         }
+        // Live locked existing-plan fence (B-24): never trust only the stale
+        // pre-send membershipSnapshot — a customer who started a plan after
+        // quote creation or matched an existing account by phone at accept
+        // time must not open an annual prepay that silences their live plan.
+        await require('../services/estimate-manual-acceptance').assertNoExistingPlanForPrepay(
+          trx,
+          { bookedAppointmentIds: rowIds(capacityHold, existingAppointmentRow) },
+          { ...estimate, customer_id: customerId, estimate_data: estData },
+        );
         // ATOMIC overlap guard (money-path audit P1): every ADMIN term-creation
         // surface asserts no overlapping term under the per-customer advisory
         // lock — this customer-facing accept was the one unguarded lane. The

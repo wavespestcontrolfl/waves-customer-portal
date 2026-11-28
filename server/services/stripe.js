@@ -763,6 +763,22 @@ const SETUP_RECOVERABLE_PI_STATUSES = new Set(
   [...REPLACEABLE_PI_STATUSES].filter(status => status !== 'requires_capture')
 );
 
+async function lockPlanChoicePairIfPresent(trx, invoice) {
+  const mod = require('./pay-plan-choice');
+  if (typeof mod.lockPlanChoicePair === 'function') await mod.lockPlanChoicePair(trx, invoice);
+}
+
+async function assertPlanChoiceCounterpartIfPresent(conn, invoice, opts) {
+  const mod = require('./pay-plan-choice');
+  if (typeof mod.assertPlanChoiceCounterpartPayable === 'function') {
+    await mod.assertPlanChoiceCounterpartPayable(conn, invoice, opts);
+  }
+}
+
+function isPassthroughFinalizeError(err) {
+  return Boolean(err && (err.staleBalance || err.planChoiceConflict));
+}
+
 const StripeService = {
   // =========================================================================
   // AVAILABILITY
@@ -4056,12 +4072,14 @@ const StripeService = {
             stripeCustomerId = await this.ensureStripeCustomer(ownerId);
           }
         }
+        await lockPlanChoicePairIfPresent(trx, invoice);
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
+        await assertPlanChoiceCounterpartIfPresent(trx, lockedInvoice, { inspectStripe: true });
         // Preserve the original collectible status and provenance. Full
         // account-credit coverage below changes lockedInvoice to prepaid,
         // which the deposit guard correctly skips for pre-existing invoices.
@@ -4823,6 +4841,7 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
+    await assertPlanChoiceCounterpartIfPresent(db, invoice, { inspectStripe: true });
     if (!invoice.stripe_payment_intent_id) {
       throw new Error('PaymentIntent does not belong to this invoice');
     }
@@ -5514,12 +5533,14 @@ const StripeService = {
           // Stable-owner lock (codex r37 P1) — same contract as setup.
           await require('./pay-combined').lockCombinedCustomerStable(finalizeTrx, invoiceId, invoice.customer_id);
         }
+        await lockPlanChoicePairIfPresent(finalizeTrx, invoice);
         const lockedInvoice = await finalizeTrx('invoices')
           .where({ id: invoiceId })
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
+        await assertPlanChoiceCounterpartIfPresent(finalizeTrx, lockedInvoice, { inspectStripe: true });
         if (String(lockedInvoice.stripe_payment_intent_id || '')
           !== String(invoice.stripe_payment_intent_id)) {
           throw new Error('Invoice has a different active payment');
@@ -5649,9 +5670,9 @@ const StripeService = {
         err.savedCardPending = true;
         throw err;
       }
-      // The consent-stamp fence's reloadable 409 reaches the route as-is
-      // (same contract as /update-amount's staleBalance), never wrapped.
-      if (err && err.staleBalance) throw err;
+      // The consent-stamp fence and plan-choice counterpart conflict reach the
+      // route as-is (409), never wrapped as a generic finalize error.
+      if (isPassthroughFinalizeError(err)) throw err;
       logger.error(`[stripe] Finalize failed for PI ${invoice.stripe_payment_intent_id}: ${err.message}`);
       throw new Error(`Failed to finalize payment: ${err.message}`);
     }
@@ -6059,6 +6080,7 @@ const StripeService = {
     // against debt that now belongs to AP. After the paid branch so a replayed
     // PI still returns its recorded payment.
     assertInvoiceNotWithdrawnFromCustomer(invoice);
+    await assertPlanChoiceCounterpartIfPresent(db, invoice, { inspectStripe: true });
     if (invoice.status === 'processing'
       && String(invoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
       throw new Error('Bank payment is already processing');

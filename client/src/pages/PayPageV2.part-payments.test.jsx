@@ -30,7 +30,7 @@ function response(status, body = {}) {
   return { ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) };
 }
 
-function payload({ amountPaid = 40, creditApplied = 0, stripe = { available: false, publishableKey: null }, invoice = {} } = {}) {
+function payload({ amountPaid = 40, creditApplied = 0, stripe = { available: false, publishableKey: null }, invoice = {}, planChoice = null } = {}) {
   return {
     invoice: {
       id: 'inv-1',
@@ -62,6 +62,7 @@ function payload({ amountPaid = 40, creditApplied = 0, stripe = { available: fal
     payer: null,
     processor: 'stripe',
     stripe,
+    ...(planChoice ? { planChoice } : {}),
   };
 }
 
@@ -158,5 +159,67 @@ describe('pay page — part-paid invoice summary', () => {
     expect(rowValue('Military Discount')).toHaveTextContent('− $4.95');
     expect(screen.queryByText('WaveGuard Silver + Military Discount')).not.toBeInTheDocument();
     expect(rowValue('Total due')).toHaveTextContent('$94.05');
+  });
+
+  it('clears an unchosen plan-choice offer when mount-time /setup applies partial credit (B-22)', async () => {
+    const stripe = { available: true, publishableKey: 'pk_test_1' };
+    const planChoice = {
+      selected: false,
+      serviceType: 'Quarterly Pest Control',
+      visitsPerYear: 4,
+      perApplication: { perVisit: 100, setupFee: 99, yearTotal: 499 },
+      prepay: { total: 400, setupFeeWaived: 99, discount: 0, discountLabel: null, savings: 99 },
+    };
+    let releaseSetup;
+    const setupGate = new Promise((resolve) => { releaseSetup = resolve; });
+    const fetchMock = vi.fn(async (url, init) => {
+      if (String(url).endsWith('/setup')) {
+        await setupGate;
+        return response(200, {
+          clientSecret: 'cs_1', paymentIntentId: 'pi_1', amount: 80, baseAmount: 80,
+          publishableKey: 'pk_test_1', status: 'requires_payment_method', version: 1,
+        });
+      }
+      if (!init || !init.method || init.method === 'GET') {
+        return response(200, payload({ amountPaid: 0, stripe, planChoice }));
+      }
+      return response(204, {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = renderPage();
+    await screen.findByText('Review and pay');
+    expect(container.querySelector('[data-section="plan-choice"]')).not.toBeNull();
+    await act(async () => { releaseSetup(); await setupGate; });
+    await waitFor(() => expect(container.querySelector('[data-section="plan-choice"]')).toBeNull());
+    expect(rowValue('Account credit applied')).toHaveTextContent('− $20.00');
+  });
+
+  it('clears plan-choice offer when mount-time /setup settles the invoice via credit (B-22)', async () => {
+    const stripe = { available: true, publishableKey: 'pk_test_1' };
+    const planChoice = {
+      selected: false,
+      serviceType: 'Quarterly Pest Control',
+      visitsPerYear: 4,
+      perApplication: { perVisit: 100, setupFee: 99, yearTotal: 499 },
+      prepay: { total: 400, setupFeeWaived: 99, discount: 0, discountLabel: null, savings: 99 },
+    };
+    let releaseSetup;
+    const setupGate = new Promise((resolve) => { releaseSetup = resolve; });
+    const fetchMock = vi.fn(async (url, init) => {
+      if (String(url).endsWith('/setup')) {
+        await setupGate;
+        return response(200, { coveredByCredit: true, status: 'prepaid' });
+      }
+      if (!init || !init.method || init.method === 'GET') {
+        return response(200, payload({ amountPaid: 0, stripe, planChoice }));
+      }
+      return response(204, {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = renderPage();
+    await screen.findByText('Review and pay');
+    expect(container.querySelector('[data-section="plan-choice"]')).not.toBeNull();
+    await act(async () => { releaseSetup(); await setupGate; });
+    await waitFor(() => expect(container.querySelector('[data-section="plan-choice"]')).toBeNull());
   });
 });

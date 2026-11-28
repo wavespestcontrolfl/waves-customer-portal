@@ -36,6 +36,8 @@ jest.mock('../services/invoice-email', () => ({ sendReceiptEmail: jest.fn() }));
 // term creation stays faked.
 jest.mock('../services/annual-prepay-renewals', () => ({
   inferCoverageCadence: (...args) => jest.requireActual('../services/annual-prepay-renewals').inferCoverageCadence(...args),
+  serviceMatchesCoverage: (...args) => jest.requireActual('../services/annual-prepay-renewals').serviceMatchesCoverage(...args),
+  normalizeCoverageServiceType: (...args) => jest.requireActual('../services/annual-prepay-renewals').normalizeCoverageServiceType(...args),
   createTermForAnnualPrepay: jest.fn(async ({ conn, customerId, prepayInvoiceId, prepayAmount, termStart, termEnd }) => {
     const [term] = await conn('annual_prepay_terms').insert({
       id: 'term-1', customer_id: customerId, prepay_invoice_id: prepayInvoiceId,
@@ -84,9 +86,18 @@ function table(rows, name) {
     if (condition && typeof condition === 'object') {
       selected = selected.filter((row) => Object.entries(condition).every(([key, value]) => row[key] === value));
     }
+    result = selected;
+    return q;
+  };
+  q.whereNotIn = (col, vals) => {
+    const blocked = new Set(vals || []);
+    selected = selected.filter((row) => !blocked.has(row[col]));
+    result = selected;
     return q;
   };
   q.whereNull = () => q;
+  q.forUpdate = () => q;
+  q.select = () => q;
   q.orderBy = () => q;
   q.first = async () => selected[0] || null;
   q.update = (values) => {
@@ -125,6 +136,7 @@ beforeEach(() => {
     // route's flow never involves one.
     estimates: [],
     'estimates as e': [],
+    scheduled_services: [],
     invoices: [], payments: [], annual_prepay_terms: [], activity_log: [], receipt_delivery_jobs: [],
   };
   db.mockImplementation((name) => {
@@ -391,5 +403,42 @@ describe('retired-plan gate reads the effective count/cadence (codex r17)', () =
     expect(retiredServicesNotHeldBy).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'customer-1' }));
     expect(committed.invoices).toHaveLength(0);
     expect(committed.annual_prepay_terms).toHaveLength(0);
+  });
+
+  test('POST /:id/annual-prepay refuses active monthly-membership customers before any write (B-24)', async () => {
+    committed.customers = [{
+      id: 'customer-1', status: 'active', billing_mode: 'monthly_membership', monthly_rate: 49, deleted_at: null,
+    }];
+    const { res, next } = await recordPrepay();
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ANNUAL_PREPAY_EXISTING_PLAN' }));
+    expect(committed.invoices).toHaveLength(0);
+    expect(committed.annual_prepay_terms).toHaveLength(0);
+  });
+
+  test('POST /:id/annual-prepay refuses when another live recurring service exists on the account (B-24)', async () => {
+    committed.scheduled_services = [
+      { id: 'ss-lawn', customer_id: 'customer-1', is_recurring: true, status: 'pending', service_type: 'Lawn Care' },
+    ];
+    const { res, next } = await recordPrepay({ serviceType: 'Quarterly Pest Control' });
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ANNUAL_PREPAY_EXISTING_PLAN' }));
+    expect(committed.invoices).toHaveLength(0);
+    expect(committed.annual_prepay_terms).toHaveLength(0);
+  });
+
+  test('POST /:id/annual-prepay allows converting the customer\'s own sole matching recurring service (B-24)', async () => {
+    committed.customers = [{
+      id: 'customer-1', status: 'active', billing_mode: 'per_application', monthly_rate: null, deleted_at: null,
+    }];
+    committed.scheduled_services = [
+      { id: 'ss-pest', customer_id: 'customer-1', is_recurring: true, status: 'pending', service_type: 'Quarterly Pest Control' },
+    ];
+    const { res, next } = await recordPrepay({ serviceType: 'Quarterly Pest Control' });
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(201);
+    expect(committed.annual_prepay_terms).toHaveLength(1);
   });
 });

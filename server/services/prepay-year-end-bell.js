@@ -200,14 +200,22 @@ function shiftDay(day, days) {
 
 const coverageKey = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase() || null;
 
+function sameCoverageService(laterType, rowType) {
+  const a = coverageKey(laterType);
+  const b = coverageKey(rowType);
+  if (!a || !b || a === b) return true;
+  const { serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  return serviceMatchesCoverage({ service_type: laterType }, rowType);
+}
+
 // Next year's prepay for this year: another term starting no earlier than a month before this year
 // ends, covering the same service when both terms name one (an unnamed coverage matches any).
+// Matches variant labels ("Pest Control" vs "Quarterly Pest Control Service") via the shared
+// serviceMatchesCoverage matcher from annual-prepay-renewals.js.
 function isNextYearOf(later, row) {
-  const laterCoverage = coverageKey(later.coverage_service_type);
-  const rowCoverage = coverageKey(row.coverage_service_type);
   return later.id !== row.id
     && later.term_start >= shiftDay(row.term_end, -NEXT_YEAR_START_SLACK_DAYS)
-    && (!laterCoverage || !rowCoverage || laterCoverage === rowCoverage);
+    && sameCoverageService(later.coverage_service_type, row.coverage_service_type);
 }
 
 const hasLaterPaidTerm = (row, byCustomer) => (byCustomer.get(row.customer_id) || [])

@@ -101,21 +101,61 @@ function cents(n) {
 // the prepay invoice too). It rides prepay.total (the page total must equal
 // the minted invoice) while prepay.coverageTotal stays the per-visit
 // coverage money the term is sliced from (codex #3591 r9 P1).
-function computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee = 0 }) {
+// Estimate-origin switches price through the converter's single source of truth
+// (resolveAnnualPrepayInvoiceTotal) so lawn program-minimum / cost floors and
+// operator-waived setup fees (owner 2026-07-23 → 5% prepay path) are never
+// bypassed by a flat series discount.
+function resolveEstimateSeriesCoverage(annualBase, { estimateData, recurringServices, serviceKey, serviceType }) {
+  const converter = require('./estimate-converter');
+  const fromEstimate = converter.recurringServicesFromEstimateData(estimateData);
+  const services = Array.isArray(recurringServices) && recurringServices.length > 0
+    ? recurringServices
+    : (fromEstimate.length > 0
+      ? fromEstimate
+      : (serviceKey ? [{ service: serviceKey, service_key: serviceKey, ...(serviceType ? { name: serviceType } : {}) }] : []));
+  const resolved = converter.resolveAnnualPrepayInvoiceTotal({
+    baseAnnual: annualBase,
+    recurringServices: services,
+    estimateData,
+  });
+  const coverageTotal = cents(resolved.amount);
+  const discount = cents(resolved.discount);
+  return {
+    coverageTotal,
+    discount,
+    ratePctLabel: discount > 0 ? converter.annualPrepayDiscountPctLabel(resolved.rate) : '',
+  };
+}
+
+function computeSeriesPrepayPricing({
+  perVisit, visitsPerYear, planClass, unwaivedSetupFee = 0,
+  estimateData = null, recurringServices = null, serviceKey = null, serviceType = null,
+}) {
   const annualBase = cents(Number(perVisit) * Number(visitsPerYear));
-  const discountRate = planClass === 'discount' ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
-  const coverageTotal = cents(annualBase * (1 - discountRate));
   const setup = cents(Math.max(0, Number(unwaivedSetupFee) || 0));
+  let coverageTotal;
+  let discount;
+  let ratePctLabel;
+  if (estimateData && typeof estimateData === 'object') {
+    ({ coverageTotal, discount, ratePctLabel } = resolveEstimateSeriesCoverage(annualBase, {
+      estimateData, recurringServices, serviceKey, serviceType,
+    }));
+  } else {
+    const discountRate = planClass === 'discount' ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
+    coverageTotal = cents(annualBase * (1 - discountRate));
+    discount = cents(annualBase - coverageTotal);
+    ratePctLabel = discountRate > 0 ? `${Math.round(discountRate * 1000) / 10}%` : '';
+  }
   return {
     annualBase,
     prepay: {
       total: cents(coverageTotal + setup),
       coverageTotal,
       setupAmount: setup,
-      discount: cents(annualBase - coverageTotal),
+      discount,
       // Rendered label, server-derived so the client never holds a rate
       // constant. '' for the waiver class (the waiver line is the pitch).
-      ratePctLabel: discountRate > 0 ? `${Math.round(discountRate * 1000) / 10}%` : '',
+      ratePctLabel,
     },
     setupFee: planClass === 'fee_waiver'
       ? { amount: WAVEGUARD_SETUP_FEE, waivedWithPrepay: true }

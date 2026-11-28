@@ -82,6 +82,7 @@ function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db }
       'id', 'invoice_number', 'status', 'service_type', 'service_date',
       'due_date', 'created_at', 'subtotal', 'discount_amount', 'total',
       'credit_applied', 'amount_paid', 'scheduled_service_id', 'stripe_payment_intent_id',
+      'notes',
       database.raw("? AS is_overdue", [invoiceOverdueSql(database)]),
     );
   if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);

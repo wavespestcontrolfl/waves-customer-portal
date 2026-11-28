@@ -6086,6 +6086,10 @@ router.get('/:id/deposit-credit', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function annualPrepayConflictPayload(err) {
+  return err ? (err.annualPrepayOverlap || err.existingPlanConflict || null) : null;
+}
+
 // POST /api/admin/customers/:id/annual-prepay-invoice - create and send an
 // unpaid annual prepay invoice. The linked annual_prepay_terms row stays
 // payment_pending until Stripe/manual payment marks the invoice paid; the
@@ -6323,10 +6327,19 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     let depositCreditEstimateId = null;
     let settledByDepositCredit = false;
     await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customer.id)],
+      );
       await lockAndAssertNoAnnualPrepayOverlap(
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an annual prepay term through',
       );
+      await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
+        customerId: customer.id,
+        coverageServiceType,
+        acquirePropertyLock: false,
+      });
       // The credit consumes ONLY the estimate the operator was shown in the
       // preview banner (echoed back as depositCreditEstimateId) — never a
       // server-side pick, so an unrelated job's rolled-forward deposit can't
@@ -6649,7 +6662,8 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       ...(overlapWarning ? { warnings: [overlapWarning] } : {}),
     });
   } catch (err) {
-    if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+    const conflict = annualPrepayConflictPayload(err);
+    if (conflict) return res.status(409).json(conflict);
     if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
     if (err && err.chargeInPersonPayerBlocked) return res.status(400).json({ error: err.message });
     if (err && err.depositCreditUnavailable) return res.status(409).json({ error: err.message });
@@ -6794,10 +6808,19 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const sendReceipt = require('../config/feature-gates').gates.recordedAnnualPrepayReceipt;
     let result;
     await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customer.id)],
+      );
       await lockAndAssertNoAnnualPrepayOverlap(
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an active annual prepay term through',
       );
+      await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
+        customerId: customer.id,
+        coverageServiceType,
+        acquirePropertyLock: false,
+      });
       // Fee-free TOCTOU guard under the trx (same posture as the draft
       // mint, codex #3591 r48/r50): a claim restored or a waiving family
       // lost in the gap must abort, not mint coverage-only.
@@ -7017,7 +7040,8 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       },
     });
   } catch (err) {
-    if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+    const conflict = annualPrepayConflictPayload(err);
+    if (conflict) return res.status(409).json(conflict);
     if (err && err.noticedRenewalAmount) return res.status(409).json(err.noticedRenewalAmount);
     next(err);
   }

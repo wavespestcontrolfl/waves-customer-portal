@@ -507,6 +507,21 @@ async function itemizeFirstApplicationDiscounts({ estimateId, customerId, schedu
   }
 }
 
+// Recognizes a negative itemized estimate-discount line emitted on a first-application
+// invoice (firstApplicationDiscountLines / labeled manual discount itemization).
+// Rejects deposit_credit lines, catalog line-item discounts (discount_id/discount_for),
+// and any positive, negative-quantity, or non-finite line so office-edited charges fail closed.
+function isRecognizedAcceptDiscountLine(li) {
+  if (!li || li._kind !== 'discount' || String(li.category || '') === 'deposit_credit') return false;
+  if (li.discount_id || li.discount_for) return false;
+  const qty = li.quantity != null ? Number(li.quantity) : 1;
+  if (!Number.isFinite(qty) || qty <= 0) return false;
+  const unit = li.unit_price != null ? Number(li.unit_price) : null;
+  if (unit !== null && (!Number.isFinite(unit) || unit > 0)) return false;
+  const amt = li.amount != null ? Number(li.amount) : (unit !== null ? unit * qty : NaN);
+  return Number.isFinite(amt) && amt <= 0;
+}
+
 // The visit's accept-time first-application stamp
 // (scheduled_services.first_application_invoice_id — written once, by
 // estimate-converter.js stampCombinedFirstApplicationInvoiceCoverage or the
@@ -948,6 +963,7 @@ function sumVisitChargeCents(rows, visitId) {
 module.exports = {
   itemizeFirstApplication,
   itemizeFirstApplicationDiscounts,
+  isRecognizedAcceptDiscountLine,
   dateOnly,
   findFirstApplicationInvoiceForEstimateService,
   // Shared with billing-lane.js's REFUSE-AFTER-A-VOID guard so the lookup and
