@@ -237,16 +237,19 @@ async function evaluateAll({ arrivalRoute, slots, target, durationMinutes, conn,
   return remove;
 }
 
-// Removals that would leave nothing dated today..today+6 keep the list whole, unless the caller has no floor.
+// Removals that would empty an existing today..today+6 window keep the list whole, unless the caller has no floor.
+// If the input pool itself starts after today+6 (week-2 search, future move-in, funneled days), removals stand as long
+// as at least one offered start remains; removing every start still trips the floor so the picker never empties.
 function floorBlocks({ slots, remove, pick, today, floor }) {
   if (floor === false || !remove.size) return false;
   const todayEt = todayEtString(today);
   const end = floorEndDate(todayEt);
-  return !slots.some((slot, i) => {
-    if (remove.has(i)) return false;
+  const inFloor = (slot) => {
     const date = pick(slot)?.date;
     return date != null && date >= todayEt && date <= end;
-  });
+  };
+  if (!slots.some(inFloor)) return !slots.some((_, i) => !remove.has(i));
+  return !slots.some((slot, i) => !remove.has(i) && inFloor(slot));
 }
 
 /**
@@ -317,4 +320,4 @@ function uncheckedReason(report) {
   return report.floorKept ? 'floor_kept' : null;
 }
 
-module.exports = { customerRouteCheckMode, filterOfferedSlots, uncheckedReason, _internals: { defaultPick, floorEndDate, DEFAULT_BUDGET_MS } };
+module.exports = { customerRouteCheckMode, filterOfferedSlots, uncheckedReason, _internals: { defaultPick, floorEndDate, floorBlocks, DEFAULT_BUDGET_MS } };

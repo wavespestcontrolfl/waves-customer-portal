@@ -48,7 +48,7 @@ maybeDescribe('Same family link (TEMP tables)', () => {
     await conn('customers').insert({
       id, first_name: 'Sample', last_name: `Example${n}`, phone: `+1941555${String(3000 + n)}`,
       address_line1: `${100 + n} Example Loop`, city: 'Sarasota', state: 'FL', zip: '34231',
-      pipeline_stage: 'new_lead', active: true, ...extra,
+      pipeline_stage: 'active_customer', active: true, ...extra,
     });
     return id;
   }

@@ -3111,6 +3111,8 @@ router._internals = {
   // own catalog, window, availability, slot match, commit and success shape.
   ASSESSMENT_EXPECTED_IDENTITY,
   addressDisplay,
+  customerAddressFields,
+  zoneFunnelInputs,
   maskPhone,
   serviceAreaFailure,
   bookingRange,

@@ -654,11 +654,15 @@ async function autoAssignParkedAlert({ alertId, actorId, qualityDates = null } =
   // them will really leave that window (Codex r3–r5 on #4759), so a window
   // any other live stop overlaps stays parked for a human.
   const window = { start: stop.window_start, end: stop.window_end };
-  // occupancyTechBlind: the preview's target technician is the ABSENT one (the
-  // stop's own), not the candidate the move will land on, so it stays the
-  // deliberately tech-blind gate it was; the commit probes the destination.
-  const conflicts = await SmartRebooker.previewMoveConflicts(stop.id, date, window, { occupancyTechBlind: true });
-  if (conflicts.length) return refuseOrClose(alertId, 'window_occupied', stop.id, absentTechId, date);
+  // In single-tech mode (GATE_MULTI_TECH_CONFIRM off), the tech-blind preview
+  // stops early if any live visit occupies the window. Once multi-tech
+  // tech-scoped confirmation is live, another tech's occupied hour must not
+  // block a free candidate — attemptMoves checks the chosen destination tech
+  // inside its move transaction (P1-12).
+  if (!require('./scheduling/occupancy').techScopedConfirmActive()) {
+    const conflicts = await SmartRebooker.previewMoveConflicts(stop.id, date, window, { occupancyTechBlind: true });
+    if (conflicts.length) return refuseOrClose(alertId, 'window_occupied', stop.id, absentTechId, date);
+  }
 
   const ranked = await eligibleRankedCandidates(stop, absentTechId, date);
   if (!ranked.length) return refuseOrClose(alertId, 'no_eligible_candidate', stop.id, absentTechId, date);

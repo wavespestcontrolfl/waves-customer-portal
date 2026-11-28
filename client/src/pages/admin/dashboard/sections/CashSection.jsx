@@ -13,6 +13,13 @@ import { agingVerdict } from "../scorecard-metrics";
 
 // CASH — are we collecting what we earned? Collections, AR aging, and the
 // autopay/billing machinery that turns MRR into money.
+const AUTOPAY_UNIT = { recurring_plans: "recurring plans" };
+
+function autopaySub(billing) {
+  const unit = AUTOPAY_UNIT[billing?.autopayScope] || "customers";
+  return billing?.customerBase ? `${billing.autopayCount} of ${billing.customerBase} ${unit}` : `no ${unit}`;
+}
+
 export default function CashSection({
   kpis,
   kpisLoading,
@@ -68,7 +75,7 @@ export default function CashSection({
               />
               <KpiTile
                 label="Autopay Coverage"
-                metricKey="autopay_pct"
+                metricKey="recurring_autopay_pct"
                 targets={kpiTargets}
                 history={kpiHistory}
                 value={
@@ -76,11 +83,7 @@ export default function CashSection({
                     ? `${kpis.billing.autopayPct}%`
                     : "—"
                 }
-                sub={
-                  kpis.billing?.customerBase
-                    ? `${kpis.billing.autopayCount} of ${kpis.billing.customerBase} customers`
-                    : "no customers"
-                }
+                sub={autopaySub(kpis.billing)}
                 chart={{ kind: "gauge", value: kpis.billing?.autopayPct, max: 100 }}
               />
               {/* Deposits live in their own ledger (estimate_deposits) and

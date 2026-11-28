@@ -9649,7 +9649,7 @@ const CONTACT_CHOICE_CHANNELS = [
   { value: "sms", label: "Text" },
   { value: "email", label: "Email" },
 ];
-function CustomerContactNotificationChoices({ customerId, isAdmin }) {
+function CustomerContactNotificationChoices({ customerId, isAdmin, refreshKey }) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [openSlot, setOpenSlot] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -9666,18 +9666,19 @@ function CustomerContactNotificationChoices({ customerId, isAdmin }) {
     adminFetch(`/admin/customers/${customerId}/contact-notification-prefs`)
       .then((data) => { if (seqRef.current === seq) setState({ loading: false, error: "", data }); })
       .catch((err) => { if (seqRef.current === seq) setState({ loading: false, error: err.message || "Could not load contact notification choices", data: null }); });
-  }, [customerId]);
+  }, [customerId, refreshKey]);
   const contacts = state.data?.contacts || [];
   if (!state.loading && !state.error && !contacts.length) return null;
-  const save = async (slot, patch) => {
+  const save = async (slot, patch, contactPhone = "") => {
     if (!isAdmin || saving) return;
     const seq = seqRef.current;
     setSaving(true);
     setSaveErr("");
     try {
+      const payload = contactPhone ? { ...patch, expectedPhoneKey: contactPhone } : patch;
       const response = await adminFetch(`/admin/customers/${customerId}/contact-notification-prefs/${slot}`, {
         method: "PUT",
-        body: JSON.stringify(patch),
+        body: JSON.stringify(payload),
       });
       if (seqRef.current === seq && response?.contacts) setState({ loading: false, error: "", data: response });
     } catch (err) {
@@ -9687,10 +9688,12 @@ function CustomerContactNotificationChoices({ customerId, isAdmin }) {
     }
   };
   const summaryFor = (contact) => {
-    const on = CONTACT_CHOICE_ROWS.filter((r) => contact.preferences?.[r.key] !== false).length;
+    const visibleRows = CONTACT_CHOICE_ROWS.filter((r) => r.key !== "serviceCompleted" || !contact.reportsWithheld);
+    const on = visibleRows.filter((r) => contact.preferences?.[r.key] !== false).length;
     const parts = [
       contact.preferences?.smsEnabled === false ? "Texts off" : "Texts on",
-      `${on} of ${CONTACT_CHOICE_ROWS.length} alerts`,
+      ...(contact.emailAvailable ? [contact.preferences?.emailEnabled === false ? "Emails off" : "Emails on"] : []),
+      `${on} of ${visibleRows.length} alerts`,
       contact.hasOwnChoices ? "Own choices" : "Account defaults",
     ];
     if (contact.consentAttestedAt) parts.push("Agreed to texts in the app");
@@ -9735,8 +9738,15 @@ function CustomerContactNotificationChoices({ customerId, isAdmin }) {
                 <div className="flex items-center justify-between py-1">
                   <span className="ui-label text-ink-secondary">Text messages</span>
                   <Switch aria-label={`Text messages for ${contact.name || `contact ${contact.slot}`}`} checked={contact.preferences?.smsEnabled !== false} disabled={saving}
-                    onChange={(next) => save(contact.slot, { smsEnabled: !!next })} />
+                    onChange={(next) => save(contact.slot, { smsEnabled: !!next }, contact.phone)} />
                 </div>
+                {contact.emailAvailable && (
+                  <div className="flex items-center justify-between py-1">
+                    <span className="ui-label text-ink-secondary">Email messages</span>
+                    <Switch aria-label={`Email messages for ${contact.name || `contact ${contact.slot}`}`} checked={contact.preferences?.emailEnabled !== false} disabled={saving}
+                      onChange={(next) => save(contact.slot, { emailEnabled: !!next }, contact.phone)} />
+                  </div>
+                )}
                 {CONTACT_CHOICE_ROWS.filter((row) => row.key !== "serviceCompleted" || !contact.reportsWithheld).map((row) => {
                   const holderOff = contact.accountOff?.[row.key] === true;
                   const on = !holderOff && contact.preferences?.[row.key] !== false;
@@ -9750,11 +9760,11 @@ function CustomerContactNotificationChoices({ customerId, isAdmin }) {
                       <div className="flex items-center gap-2 shrink-0">
                         <Select size="sm" className="!w-auto" aria-label={`Delivery for ${row.label} (${contact.name || `contact ${contact.slot}`})`}
                           value={contact.preferences?.[row.channelKey] || "both"} disabled={saving || holderOff || !on}
-                          onChange={(e) => save(contact.slot, { [row.channelKey]: e.target.value })}>
+                          onChange={(e) => save(contact.slot, { [row.channelKey]: e.target.value }, contact.phone)}>
                           {channels.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                         </Select>
                         <Switch aria-label={`${row.label} for ${contact.name || `contact ${contact.slot}`}`} checked={on} disabled={saving || holderOff}
-                          onChange={(next) => save(contact.slot, { [row.key]: !!next })} />
+                          onChange={(next) => save(contact.slot, { [row.key]: !!next }, contact.phone)} />
                       </div>
                     </div>
                   );
@@ -9775,21 +9785,23 @@ function CustomerContactNotificationChoices({ customerId, isAdmin }) {
 // People named on a call ("text my husband Bob too"): visit texts only, no app
 // login. Staff can stop or restart each one (admin only on the server). Hidden
 // when the list is empty or fails to load.
-function CustomerReminderContacts({ customerId, isAdmin }) {
+function CustomerReminderContacts({ customerId, isAdmin, refreshKey }) {
   const [list, setList] = useState([]);
+  const [loadErr, setLoadErr] = useState("");
   const [busyId, setBusyId] = useState(null);
   const [err, setErr] = useState("");
   const seqRef = useRef(0);
   useEffect(() => {
     const seq = ++seqRef.current;
     setList([]);
+    setLoadErr("");
     setErr("");
     setBusyId(null);
     adminFetch(`/admin/customers/${customerId}/reminder-contacts`)
-      .then((data) => { if (seqRef.current === seq) setList(Array.isArray(data?.reminderContacts) ? data.reminderContacts : []); })
-      .catch(() => { if (seqRef.current === seq) setList([]); });
-  }, [customerId]);
-  if (!list.length) return null;
+      .then((data) => { if (seqRef.current === seq) { setLoadErr(""); setList(Array.isArray(data?.reminderContacts) ? data.reminderContacts : []); } })
+      .catch((e) => { if (seqRef.current === seq) { setList([]); setLoadErr(e?.message || "Could not load call-named reminder contacts"); } });
+  }, [customerId, refreshKey]);
+  if (!list.length && !loadErr) return null;
   const toggle = async (person) => {
     if (!isAdmin || busyId) return;
     const seq = seqRef.current;
@@ -9818,6 +9830,7 @@ function CustomerReminderContacts({ customerId, isAdmin }) {
   return (
     <div className="mt-3" data-testid="reminder-contacts">
       <div className="text-ui-caption ui-label text-ink-tertiary mb-1.5">Named on a call (texts only)</div>
+      {loadErr && <div className="text-ui-label text-alert-fg mb-1.5">{loadErr}</div>}
       {list.map((person) => {
         const name = [person.firstName, person.lastName].filter(Boolean).join(" ") || "Contact";
         return (
@@ -9847,6 +9860,7 @@ function CustomerRecipientDetails({
   payer,
   recipientRoutesDiffer,
   isAdmin,
+  profileVersion,
   recipientPrefsDraft,
   setRecipientPrefsDraft,
   saveRecipientPrefs,
@@ -9932,8 +9946,8 @@ function CustomerRecipientDetails({
             </div>
           ))}
         </div>
-        <CustomerContactNotificationChoices customerId={c.id} isAdmin={isAdmin} />
-        <CustomerReminderContacts customerId={c.id} isAdmin={isAdmin} />
+        <CustomerContactNotificationChoices customerId={c.id} isAdmin={isAdmin} refreshKey={profileVersion} />
+        <CustomerReminderContacts customerId={c.id} isAdmin={isAdmin} refreshKey={profileVersion} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
           <label className="block">
             <span className="ui-label text-ink-tertiary block mb-1">
@@ -10986,7 +11000,7 @@ function useCustomerRecipientPreferences({
   const c = data?.customer || {};
   const notificationPrefs = data?.notificationPrefs || {};
   const recipientRoutesDiffer =
-    !!c.payerId ||
+    [c.payerId, c.serviceContactPhone, c.serviceContact2Phone, c.serviceContact3Phone].some(Boolean) ||
     [
       c.serviceContactEmail,
       c.serviceContact2Email,
@@ -11987,6 +12001,7 @@ export default function Customer360ProfileV2({
       c={c}
       recipientRoutesDiffer={recipientRoutesDiffer}
       isAdmin={isAdmin}
+      profileVersion={profileVersion}
       recipientPrefsDraft={recipientPrefsDraft}
       setRecipientPrefsDraft={setRecipientPrefsDraft}
       saveRecipientPrefs={saveRecipientPrefs}

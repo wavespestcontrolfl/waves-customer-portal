@@ -172,6 +172,8 @@ const RERING = [
     decision: 'expire: only a new message the customer writes in their portal thread raises it again (one open row per thread)' },
   { emitter: 'billing-lane-review', files: ['routes/admin-customers.js'], prefixes: ['billing-lane-review:'], kind: 'event',
     decision: 'expire: only a new save that stamps monthly_membership without an explicit lane raises it again' },
+  { emitter: 'family-drop-below-two', files: ['services/multi-home-family.js'], prefixes: ['family-drop-below-two:'], kind: 'event',
+    decision: 'expire: only another family unlink, archive, or cancellation that drops a family below 2 active homes raises it again' },
 ];
 
 const parseMeta = (metadata) => {

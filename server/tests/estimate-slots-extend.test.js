@@ -578,9 +578,9 @@ describe('capacity slot generation excludes the own hold', () => {
   const availability = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-slot-availability.js'), 'utf8');
   const findTime = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduling', 'find-time.js'), 'utf8');
 
-  test('both findAvailableSlots call sites pass excludeEstimateId', () => {
+  test('findAvailableSlots and routeCheckedPool call sites pass excludeEstimateId', () => {
     const calls = availability.match(/excludeEstimateId: estimateId,/g) || [];
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
   });
 
   test('findCapacitySlots threads it into the route context', () => {

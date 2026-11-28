@@ -30,6 +30,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/scheduling/blackout-dates', () => ({
+  getBlackoutDates: jest.fn(async () => new Set()),
   getBlackoutLayers: jest.fn(async () => ({ dates: new Set() })),
 }));
 jest.mock('../services/technician-capabilities', () => ({

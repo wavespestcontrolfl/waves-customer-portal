@@ -14,7 +14,7 @@ const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
-const { computeMrrBreakdown, computeRecurringPlans } = require('../services/mrr-breakdown');
+const { computeMrrBreakdown, computeRecurringPlans, whereRecurringPlanCustomer } = require('../services/mrr-breakdown');
 const leadAttribution = require('../services/lead-attribution');
 const { CUSTOMER_STAGES, CONVERSION_DATE_SQL } = require('../services/customer-stages');
 const { buildCohortSeries, makeRateAt } = require('../services/retention-cohort');
@@ -162,6 +162,7 @@ function applyETTimestampWindow(qb, column, from, to) {
 // bare ET date string would shift the cutoff by the ET offset (the same trap
 // applyETTimestampWindow guards for ranges).
 const ET_MIDNIGHT_TS = "?::timestamp AT TIME ZONE 'America/New_York'";
+const ET_NEXT_MIDNIGHT_TS = "(?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'";
 function etDayStart(dateStr) { return `${dateStr}T00:00:00`; }
 
 // Real-customer stages live in a shared module so the dashboard, Intelligence
@@ -811,23 +812,19 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       logger.error(`[admin-dashboard] collection rate failed: ${err.message}`);
     }
 
-    // Autopay coverage — share of LIVE customers (CUSTOMER_STAGES, real customers
-    // not leads) actually on CHARGEABLE autopay, NOT the raw autopay_enabled flag.
-    // Uses the shared autopayActivePredicate() (services/autopay-eligibility.js) —
-    // the single source of truth also used by Billing Recovery — so the coverage
-    // count can't drift from the "would we actually charge them" definition (not
-    // disabled, not paused, default Stripe autopay method present, ACH-active or
-    // card). Set form so it's one aggregate query, not one per customer.
-    // Point-in-time, not windowed.
+    // Autopay coverage — share of LIVE recurring-plan members (active,
+    // not-deleted, real WaveGuard tier + monthly_rate > 0, test accounts
+    // excluded) actually on CHARGEABLE autopay. Uses the exact same
+    // whereRecurringPlanCustomer definition as computeRecurringPlans and
+    // Action Inbox's autopay_coverage_low alert so all three agree on the base.
     let autopayPct = null, autopayCount = 0, customerBase = 0;
     try {
-      const liveBase = (qb) => qb
-        .where('active', true).whereNull('deleted_at').whereIn('pipeline_stage', CUSTOMER_STAGES);
-      const baseRow = await liveBase(db('customers')).count({ c: '*' }).first();
+      const recurringBase = (qb) => whereRecurringPlanCustomer(qb, db, 'c');
+      const baseRow = await recurringBase(db('customers as c')).count({ c: '*' }).first();
       customerBase = parseInt(baseRow?.c || 0);
 
       const { sql: autopaySql, binding: autopayBinding } = autopayActivePredicate();
-      const coveredRow = await liveBase(db('customers as c'))
+      const coveredRow = await recurringBase(db('customers as c'))
         .whereRaw(autopaySql, [autopayBinding])
         .count({ c: '*' }).first();
       autopayCount = parseInt(coveredRow?.c || 0);
@@ -1115,6 +1112,7 @@ async function computeCoreKpis(period = 'mtd', range = null) {
         autopayPct,
         autopayCount,
         customerBase,
+        autopayScope: 'recurring_plans',
       },
       retention: { pct: retentionPct, lost },
       deposits,
@@ -1170,12 +1168,29 @@ function ibError(toolName) {
   };
 }
 
-// GET /api/admin/dashboard/funnel — estimate funnel for the current month
+// Period window for non-attribution dashboard panels (sales-capture, funnel,
+// revenue-by-city, service-mix). Defaults to MTD when omitted; accepts every
+// named period plus ?period=custom&from=YYYY-MM-DD, ending today ET without
+// clipping to ATTRIBUTION_FRESH_START.
+function resolveDashboardWindow(query = {}) {
+  const range = parseCustomRange(query);
+  if (range && range.from) {
+    return { from: range.from, to: etDateString(), label: `Since ${range.from}` };
+  }
+  const p = String(query.period || 'mtd').toLowerCase();
+  return { from: periodStartDate(p), to: etDateString(), label: periodLabel(p) };
+}
+
+// GET /api/admin/dashboard/funnel — estimate funnel for the selected period (defaults to MTD)
 router.get('/funnel', dashboardCache, async (req, res, next) => {
   try {
-    const result = await executeDashboardTool('get_estimate_funnel', {}).catch(ibError('get_estimate_funnel'));
+    const win = resolveDashboardWindow(req.query);
+    const result = await executeDashboardTool('get_estimate_funnel', {
+      date_from: win.from,
+      date_to: win.to,
+    }).catch(ibError('get_estimate_funnel'));
     if (result?.error) return res.status(500).json({ error: result.error });
-    res.json(result);
+    res.json({ ...result, period: { ...(result.period || { from: win.from, to: win.to }), label: win.label } });
   } catch (err) { next(err); }
 });
 
@@ -1760,35 +1775,41 @@ router.get('/lead-source', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/dashboard/service-mix — completed service mix by category (MTD)
+// GET /api/admin/dashboard/service-mix — completed service mix by category (period-driven, defaults to MTD)
 router.get('/service-mix', dashboardCache, async (req, res, next) => {
   try {
-    const result = await executeDashboardTool('get_service_mix', {}).catch(ibError('get_service_mix'));
+    const win = resolveDashboardWindow(req.query);
+    const result = await executeDashboardTool('get_service_mix', {
+      date_from: win.from,
+      date_to: win.to,
+    }).catch(ibError('get_service_mix'));
     if (result?.error) return res.status(500).json({ error: result.error });
-    res.json(result);
+    res.json({ ...result, period: { ...(result.period || { from: win.from, to: win.to }), label: win.label } });
   } catch (err) { next(err); }
 });
 
 // GET /api/admin/dashboard/sales-capture — ServiceTitan-style "captured vs
 // missed" hero gauge: won estimate value vs lost estimate value for the
-// current ET month, bounded on the RESOLUTION date (when the estimate was
-// won/lost), not when it was created.
+// selected ET period (default MTD), bounded on the RESOLUTION date (when the
+// estimate was won/lost), not when it was created.
 //
-// Won = status 'accepted' resolved this month (accepted_at). Missed = status
-// 'declined' or 'expired' resolved this month (declined_at, else expires_at).
+// Won = status 'accepted' resolved in the period (accepted_at). Missed = status
+// 'declined' or 'expired' resolved in the period (declined_at, else expires_at).
 // This mirrors estimate-winloss.js's RESOLVED_STATUSES/resolutionDate
 // semantics (won=accepted, lost=declined-or-expired), restricted here to the
-// current month's resolutions. Value = annualized recurring + one-time, the
+// selected window's resolutions. Value = annualized recurring + one-time, the
 // same monthly_total*12 + onetime_total basis the funnel's accepted-value uses.
 // Archived estimates are excluded so a cleaned-up row can't skew the rate.
 router.get('/sales-capture', dashboardCache, async (req, res, next) => {
   try {
-    const cutoff = etDayStart(startOfMonth()); // ET month start; ET-midnight-bound below
+    const win = resolveDashboardWindow(req.query);
+    const cutoff = etDayStart(win.from); // ET period start; ET-midnight-bound below
+    const endDay = etDayStart(win.to);   // ET period end (exclusive next midnight)
     const valueSum = 'COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)), 0)';
 
     // estimates `e` + customers `c` so the internal/test-account exclusion
     // (Adam Martinez et al.) matches the funnel's excludeInternalEstimates — a
-    // test estimate accepted/declined this month must not skew the hero totals.
+    // test estimate accepted/declined this period must not skew the hero totals.
     const base = () => {
       const qb = db('estimates as e')
         .leftJoin('customers as c', 'e.customer_id', 'c.id')
@@ -1804,30 +1825,38 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
     };
 
     const [capturedRow, missedRow] = await Promise.all([
-      // Won = accepted, resolved this month, plus an expired offer whose customer
+      // Won = accepted, resolved in window, plus an expired offer whose customer
       // booked another way (the daily reclaim's code; estimate-winloss
       // isBookedOtherWayRow), which resolves at its expiry. Resolution date
       // matches estimate-winloss.resolutionDate: accepted_at, else created_at.
-      // Bound ET-midnight so the cutoff doesn't drift at the UTC boundary on Railway.
+      // Bound both sides at ET-midnight so future expires_at rows or UTC drift
+      // cannot leak across window boundaries.
       base()
         .where((q) => q
-          .whereRaw(`(e.status = 'accepted' AND COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS})`, [cutoff])
-          .orWhereRaw(`(${bookedWinSql('e')} AND COALESCE(e.expires_at, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS})`, [cutoff]))
+          .whereRaw(
+            `(e.status = 'accepted' AND COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS} AND COALESCE(e.accepted_at, e.created_at) < ${ET_NEXT_MIDNIGHT_TS})`,
+            [cutoff, endDay],
+          )
+          .orWhereRaw(
+            `(${bookedWinSql('e')} AND COALESCE(e.expires_at, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS} AND COALESCE(e.expires_at, e.updated_at, e.created_at) < ${ET_NEXT_MIDNIGHT_TS})`,
+            [cutoff, endDay],
+          ))
         // Dollars stay accepted-only (as MRR won does): a booked win is a win in the COUNT, but
         // the customer did not necessarily buy at this offer's price.
         .select(db.raw(`COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)) FILTER (WHERE e.status = 'accepted'), 0) as total`), db.raw('COUNT(*) as cnt'))
         .first(),
-      // Missed = declined/expired, resolved this month. declined → declined_at,
+      // Missed = declined/expired, resolved in window. declined → declined_at,
       // expired → expires_at, then updated_at, else created_at — matching
       // resolutionDate so AGE-expired rows (status set by the worker, no
-      // expires_at) still count instead of dropping to NULL.
+      // expires_at) still count instead of dropping to NULL. Upper bound
+      // prevents expired rows with a future expires_at from leaking into Today.
       base()
         .whereIn('e.status', ['declined', 'expired'])
         // An expired offer whose customer booked another way is a win (counted above), never missed.
         .whereRaw(`NOT ${bookedWinSql('e')}`)
         .whereRaw(
-          `COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS}`,
-          [cutoff],
+          `COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS} AND COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) < ${ET_NEXT_MIDNIGHT_TS}`,
+          [cutoff, endDay],
         )
         .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
         .first(),
@@ -1839,12 +1868,12 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
     res.json({
       captured,
       missed,
-      // null (not 0) when nothing resolved this month — the gauge renders its
+      // null (not 0) when nothing resolved in the period — the gauge renders its
       // "unavailable" state instead of a misleading red 0% capture failure.
       captureRate: denom > 0 ? Math.round((captured / denom) * 100) : null,
       wonCount: parseInt(capturedRow?.cnt || 0),
       lostCount: parseInt(missedRow?.cnt || 0),
-      period: { label: 'Month to Date' },
+      period: { from: win.from, to: win.to, label: win.label },
     });
   } catch (err) {
     logger.error(`[admin-dashboard] /sales-capture failed: ${err.message}`);
@@ -1853,19 +1882,17 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
 });
 
 // GET /api/admin/dashboard/revenue-by-city — completed-service revenue grouped
-// by the customer's city for the current ET month (ServiceTitan-style geo cut).
-// service_date is a DATE column, so a string compare against the ET month-start
-// string is exact. Top 8 cities by revenue; the remainder folds into 'Other'.
+// by the customer's city for the selected ET period (default MTD).
+// service_date is a DATE column, so a string compare against ET calendar dates
+// is exact. Top 8 cities by revenue; the remainder folds into 'Other'.
 router.get('/revenue-by-city', dashboardCache, async (req, res, next) => {
   try {
-    const monthStart = startOfMonth(); // ET month-start date string
-    const todayStr = etDateString();   // ET today — upper bound so a future-dated
-                                       // completed/import row can't inflate the MTD cut
+    const win = resolveDashboardWindow(req.query);
 
     let qb = db('service_records as sr')
       .join('customers as c', 'sr.customer_id', 'c.id')
-      .where('sr.service_date', '>=', monthStart)
-      .where('sr.service_date', '<=', todayStr)
+      .where('sr.service_date', '>=', win.from)
+      .where('sr.service_date', '<=', win.to)
       .where('sr.status', 'completed')
       .whereNotNull('sr.revenue');
     if (INTERNAL_TEST_CUSTOMERS.length) {
@@ -1904,7 +1931,7 @@ router.get('/revenue-by-city', dashboardCache, async (req, res, next) => {
       cities = top;
     }
 
-    res.json({ cities, total, period: { label: 'Month to Date' } });
+    res.json({ cities, total, period: { from: win.from, to: win.to, label: win.label } });
   } catch (err) {
     logger.error(`[admin-dashboard] /revenue-by-city failed: ${err.message}`);
     next(err);
