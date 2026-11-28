@@ -1785,7 +1785,7 @@ async function loadServiceCalibrations(knex, service, options = {}, { strict = f
   const calibrationId = options.calibrationId || service.assigned_calibration_id;
   const rows = await getActiveCalibrations(knex, { equipmentSystemId, calibrationId }, { strict });
   if (!equipmentSystemId || calibrationId) return rows;
-  const technicianId = options.technicianId || service.technician_id || null;
+  const technicianId = options.equipmentSystemId ? (options.technicianId || service.technician_id || null) : (service.technician_id || null);
   return rows.filter((row) => !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId)));
 }
 

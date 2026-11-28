@@ -4098,6 +4098,48 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(taurus100.warnings.join(' ')).toContain('only when the work order names Taurus');
     const taurus4 = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(taurus4).toMatchObject({ amount: 3.2, amountMax: null, unit: 'fl_oz' });
+    // The 100-gal exception applies only at 100 gal; 110 gal uses the 0.8 fl oz/gal rate (88 fl oz).
+    const taurus110 = await jobCard.mixForProduct('taurus', 110, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurus110).toMatchObject({ amount: 88, amountMax: null, unit: 'fl_oz' });
+
+    // March DiPel uses the structured dry-ounce rate (0.08-0.16 oz/gal) even when catalog lacks a per-gallon rate, never prose teaspoons.
+    const dipelNoCatRate = { ...dipel, default_rate: null, default_unit: null };
+    const dipelNoRateDb = dbFor({
+      scheduled_services: [{ id: 'svc11', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [dipelNoCatRate],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const dipelStructured = await jobCard.mixForProduct('dipel', 100, { serviceId: 'svc11', dbh: dipelNoRateDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(dipelStructured).toMatchObject({ amount: 8, amountMax: 16, unit: 'oz' });
+
+    // Direct-dose-only products (Merit 2F soil drench) skip tank math and surface the direct dose in warnings.
+    const merit = { id: 'merit', name: 'Merit 2F', epa_reg_number: '432-1312', default_rate: '0.1', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const meritDb = dbFor({
+      scheduled_services: [{ id: 'svc12', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [merit],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const meritCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc12', dbh: meritDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(meritCalc.amount).toBeNull();
+    expect(meritCalc.warnings.join(' ')).toContain('Soil drench, FlowZone soil injector: 0.1 to 0.2 fl oz per inch of trunk diameter');
+
+    // Unassigned visits (no visit technician) use only shared calibrations for appointment-assigned rigs, even when a technician opens the calculator.
+    const unassignedDb = dbFor({
+      scheduled_services: [{ id: 'svc13', customer_id: 'c1', technician_id: null, scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const unassignedCalc = await jobCard.mixForProduct('oil', 4, { serviceId: 'svc13', technicianId: 'tech-b', dbh: unassignedDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(unassignedCalc.tank.source).toBeNull();
 
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
