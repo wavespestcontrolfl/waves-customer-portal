@@ -411,7 +411,7 @@ async function recordManualPayment(id, {
   // no longer says what was owed.
   let settledAmount = null;
   const updatedInvoice = await db.transaction(async (trx) => {
-    const prelocked = requireSelfPay ? await lockInvoiceOwnerCustomerFirst(trx, invoice) : null;
+    const prelocked = await lockInvoiceOwnerCustomerFirst(trx, invoice);
     if (prelocked?.ownerId) invoice.customer_id = prelocked.ownerId;
     // Combined-session reservation INSIDE the collection transaction
     // (codex #3427 r30 P0, serialized r31 P0): the helper takes the
