@@ -3887,15 +3887,18 @@ const StripeService = {
       // Return any applied account credit to the customer's balance — a full
       // refund gives back the cash, so the credit they used must return too
       // (else it stays consumed). Idempotent vs the charge.refunded webhook.
+      let refundedInvoice = null;
       try {
-        const inv = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first('id');
-        if (inv) {
+        refundedInvoice = await db('invoices')
+          .where({ stripe_payment_intent_id: payment.stripe_payment_intent_id })
+          .first('id', 'customer_id', 'notes', 'scheduled_service_id', 'service_record_id');
+        if (refundedInvoice) {
           const { returnAppliedCreditOnRefund } = require('./customer-credit');
           // Gate first (Codex #4971 r4 P1): returning credit is money the
           // renewal charge could consume — same entry rule as the stamp.
           await db.transaction(async (trx) => {
             await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
-            return returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx);
+            return returnAppliedCreditOnRefund({ invoiceId: refundedInvoice.id, createdBy: 'system:refund' }, trx);
           });
         }
       } catch (creditErr) {
@@ -3910,12 +3913,20 @@ const StripeService = {
       // the invoice by this payment's PI, i.e. only an invoice it still
       // owns.) A restore that throws is logged above and never skips this:
       // the sync runs regardless, as it always has, just on a read that is
-      // then not pinned by the terminal status.
+      // then not pinned by the terminal status. Pass status: 'refunded'
+      // because stampRefundOnPayment already committed that transition above.
       try {
-        await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
+        await require('./annual-prepay-renewals').syncTermForRefundedPayment({ ...payment, status: 'refunded' });
       } catch (syncErr) {
         logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
       }
+      // Best-effort setup-fee alert reconcile after refund + prepay claw-back (B-43).
+      // reconcileSetupFeeAlertForInvoice no-ops on null and catches its own errors.
+      await Promise.resolve()
+        .then(() => require('./setup-fee-alert-reconcile').reconcileSetupFeeAlertForInvoice(refundedInvoice))
+        .catch((reconcileErr) => {
+          logger.error(`[setup-fee-reconcile] refund reconcile failed for payment ${paymentId}: ${reconcileErr.message}`);
+        });
     }
 
     let updated = null;

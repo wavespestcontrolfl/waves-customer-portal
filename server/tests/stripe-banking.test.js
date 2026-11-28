@@ -775,4 +775,197 @@ describe('stripe banking service', () => {
       expect(payoutUpdate).toMatchObject({ reconciled: true });
     });
   });
+
+  describe('B-10: resolveTxnLinkMaps refund attribution (re_... sources)', () => {
+    const CUST_ID = '11111111-1111-4111-8111-111111111111';
+    const INV_1 = '22222222-2222-4222-8222-222222222222';
+    const INV_2 = '33333333-3333-4333-8333-333333333333';
+
+    function makePaymentsAndCustomersMock(paymentsRows, customerRows = []) {
+      const capturedQueries = [];
+      db.mockImplementation((table) => {
+        if (table === 'payments') {
+          const ops = [];
+          const q = {
+            where(arg) {
+              if (typeof arg === 'function') arg.call(q);
+              else ops.push(['where', arg]);
+              return q;
+            },
+            whereIn(col, vals) { ops.push(['whereIn', col, vals]); return q; },
+            orWhereIn(col, vals) { ops.push(['orWhereIn', col, vals]); return q; },
+            orWhereRaw(sql, bindings) { ops.push(['orWhereRaw', sql, bindings]); return q; },
+            whereNot(col, val) { ops.push(['whereNot', col, val]); return q; },
+            then(resolve, reject) {
+              capturedQueries.push(ops);
+              const rows = paymentsRows.filter((row) => {
+                if (ops.some(([op, col, val]) => op === 'whereNot' && row[col] === val)) return false;
+                const matchers = ops.filter(([op]) => ['whereIn', 'orWhereIn', 'orWhereRaw'].includes(op));
+                if (!matchers.length) return true;
+                return matchers.some(([op, a, b]) => {
+                  if (op === 'whereIn' || op === 'orWhereIn') return b.includes(row[a]);
+                  if (op === 'orWhereRaw') {
+                    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+                    return Array.isArray(meta.stamped_refund_ids)
+                      && meta.stamped_refund_ids.some((id) => b[0].includes(id));
+                  }
+                  return false;
+                });
+              });
+              return Promise.resolve(rows).then(resolve, reject);
+            },
+          };
+          return q;
+        }
+        if (table === 'customers') {
+          let wantedIds = [];
+          const q = {
+            whereIn(_col, ids) { wantedIds = ids; return q; },
+            select() { return Promise.resolve(customerRows.filter((c) => wantedIds.includes(c.id))); },
+          };
+          return q;
+        }
+        throw new Error(`Unexpected table ${table}`);
+      });
+      return capturedQueries;
+    }
+
+    test('attributes re_ refund txns via stripe_refund_id and metadata.stamped_refund_ids without duplicating a single payment', async () => {
+      const paySingle = {
+        id: 'pay-ref-1',
+        customer_id: CUST_ID,
+        status: 'refunded',
+        amount: '125.00',
+        stripe_charge_id: 'ch_1',
+        stripe_refund_id: 're_latest',
+        metadata: JSON.stringify({
+          invoice_id: INV_1,
+          stamped_refund_ids: ['re_earlier', 're_latest'],
+        }),
+      };
+      const captured = makePaymentsAndCustomersMock(
+        [paySingle],
+        [{ id: CUST_ID, first_name: 'Jordan', last_name: 'Taylor' }],
+      );
+
+      const txns = [
+        { id: 'txn_r1', type: 'refund', reporting_category: 'refund', source: 're_latest', amount: -7500, fee: 0, net: -7500, description: 'REFUND', created: 1770000100 },
+        { id: 'txn_r2', type: 'refund', reporting_category: 'refund', source: 're_earlier', amount: -5000, fee: 0, net: -5000, description: 'REFUND', created: 1770000000 },
+      ];
+      const maps = await service._resolveTxnLinkMaps(txns);
+
+      // Guarded jsonb array overlap query ran for refund sources.
+      const rawClause = captured[0].find(([op]) => op === 'orWhereRaw');
+      expect(rawClause[1]).toContain("jsonb_typeof(metadata->'stamped_refund_ids') = 'array'");
+      expect(rawClause[1]).toContain('\\?| ?::text[]');
+
+      // Deduped: matching BOTH stripe_refund_id and stamped_refund_ids produces 1 link, not 2.
+      expect(maps.paymentsBySource.get('re_latest')).toHaveLength(1);
+      expect(maps.paymentsBySource.get('re_earlier')).toHaveLength(1);
+
+      const rowLatest = service._txnRowFromStripe(txns[0], maps, null);
+      const rowEarlier = service._txnRowFromStripe(txns[1], maps, null);
+      for (const row of [rowLatest, rowEarlier]) {
+        expect(row.customer_id).toBe(CUST_ID);
+        expect(row.customer_name).toBe('Jordan Taylor');
+        expect(row.invoice_id).toBe(INV_1);
+        expect(row.payment_id).toBe('pay-ref-1');
+        expect(row.description).toBe('REFUND');
+      }
+    });
+
+    test('attributes a combined full-refund re_ txn onto the anchor row and exposes every share', async () => {
+      const sibling = {
+        id: 'pay-comb-sib',
+        customer_id: CUST_ID,
+        status: 'refunded',
+        amount: '40.00',
+        stripe_charge_id: 'ch_comb',
+        stripe_refund_id: 're_comb',
+        metadata: JSON.stringify({ invoice_id: INV_2, combined_payment: true, combined_anchor_invoice_id: INV_1 }),
+      };
+      const anchor = {
+        id: 'pay-comb-anc',
+        customer_id: CUST_ID,
+        status: 'refunded',
+        amount: '60.00',
+        stripe_charge_id: 'ch_comb',
+        stripe_refund_id: 're_comb',
+        metadata: JSON.stringify({ invoice_id: INV_1, combined_payment: true, combined_anchor_invoice_id: INV_1 }),
+      };
+      makePaymentsAndCustomersMock([sibling, anchor], [{ id: CUST_ID, first_name: 'Jordan', last_name: 'Taylor' }]);
+
+      const txn = { id: 'txn_comb_ref', type: 'refund', reporting_category: 'refund', source: 're_comb', amount: -10000, fee: 0, net: -10000, description: 'REFUND', created: 1770000200 };
+      const maps = await service._resolveTxnLinkMaps([txn]);
+      const row = service._txnRowFromStripe(txn, maps, null);
+
+      expect(row.payment_id).toBe('pay-comb-anc');
+      expect(row.customer_id).toBe(CUST_ID);
+      expect(row.customer_name).toBe('Jordan Taylor');
+      expect(row.invoice_id).toBeNull();
+      expect(row.description).toContain('combined:');
+      expect(row.description).toContain(INV_1);
+      expect(row.description).toContain(INV_2);
+    });
+
+    test('falls back to Stripe refund -> charge lookup for legacy unstamped refunds and ignores retrieve errors', async () => {
+      const legacyPay = {
+        id: 'pay-legacy-1',
+        customer_id: CUST_ID,
+        status: 'paid',
+        amount: '80.00',
+        stripe_charge_id: 'ch_legacy_1',
+        stripe_refund_id: null,
+        metadata: JSON.stringify({ invoice_id: INV_1 }),
+      };
+      makePaymentsAndCustomersMock([legacyPay], [{ id: CUST_ID, first_name: 'Sam', last_name: 'Lee' }]);
+      stripeClient.refunds = {
+        retrieve: jest.fn(async (rid) => {
+          if (rid === 're_legacy_ok') return { id: rid, charge: 'ch_legacy_1' };
+          throw new Error('stripe 404');
+        }),
+      };
+
+      const txns = [
+        { id: 'txn_leg_ok', type: 'refund', source: 're_legacy_ok', amount: -8000, fee: 0, net: -8000, description: 'REFUND', created: 1770000300 },
+        { id: 'txn_leg_err', type: 'refund', source: 're_legacy_missing', amount: -2000, fee: 0, net: -2000, description: 'REFUND', created: 1770000400 },
+      ];
+      const maps = await service._resolveTxnLinkMaps(txns, stripeClient);
+
+      const okRow = service._txnRowFromStripe(txns[0], maps, null);
+      expect(okRow).toMatchObject({
+        customer_id: CUST_ID,
+        customer_name: 'Sam Lee',
+        invoice_id: INV_1,
+        payment_id: 'pay-legacy-1',
+      });
+      const errRow = service._txnRowFromStripe(txns[1], maps, null);
+      expect(errRow).toMatchObject({
+        customer_id: null,
+        customer_name: null,
+        invoice_id: null,
+        payment_id: null,
+      });
+    });
+
+    test('maps malformed legacy non-UUID metadata.invoice_id safely to null via ledgerInvoiceId', async () => {
+      const legacyNonUuid = {
+        id: 'pay-bad-meta',
+        customer_id: CUST_ID,
+        status: 'refunded',
+        amount: '50.00',
+        stripe_charge_id: 'ch_bad_meta',
+        stripe_refund_id: 're_bad_meta',
+        metadata: JSON.stringify({ invoice_id: 'legacy-not-a-uuid' }),
+      };
+      makePaymentsAndCustomersMock([legacyNonUuid], [{ id: CUST_ID, first_name: 'Alex', last_name: 'Kim' }]);
+      const txn = { id: 'txn_bad', type: 'refund', source: 're_bad_meta', amount: -5000, fee: 0, net: -5000, description: 'REFUND', created: 1770000500 };
+
+      const maps = await service._resolveTxnLinkMaps([txn]);
+      const row = service._txnRowFromStripe(txn, maps, null);
+      expect(row.payment_id).toBe('pay-bad-meta');
+      expect(row.customer_id).toBe(CUST_ID);
+      expect(row.invoice_id).toBeNull();
+    });
+  });
 });

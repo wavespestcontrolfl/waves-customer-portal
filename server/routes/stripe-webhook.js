@@ -36,6 +36,7 @@ const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCu
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
+const { ledgerInvoiceId } = require('../services/payment-failed-allocation');
 const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(s => s !== 'processing');
 const OBSERVABLE_SETUP_INTENT_BRANCHES = new Set([
   'estimate_card_hold',
@@ -1291,6 +1292,75 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
  * allocation-vs-captured cents check inside the settle itself. Any refusal
  * records the orphan so captured money is never silently unaccounted.
  */
+/**
+ * Best-effort post-commit setup-fee alert reconciliation for one or more
+ * invoices whose settlement, refund, or dispute state just changed (B-43).
+ * Accepts invoice rows or invoice IDs; never throws into webhook settlement.
+ */
+async function reconcileSetupFeeAlertsForInvoices(invoicesOrIds) {
+  const seen = new Set();
+  const { reconcileSetupFeeAlertForInvoice } = require('../services/setup-fee-alert-reconcile');
+  for (const item of invoicesOrIds || []) {
+    const isObj = Boolean(item && typeof item === 'object');
+    const id = isObj ? item.id : item;
+    if (!id || seen.has(String(id))) continue;
+    seen.add(String(id));
+    try {
+      const row = isObj && 'notes' in item
+        ? item
+        : await db('invoices')
+          .where({ id })
+          .first('id', 'customer_id', 'notes', 'scheduled_service_id', 'service_record_id');
+      if (row) await reconcileSetupFeeAlertForInvoice(row);
+    } catch (err) {
+      logger.warn(`[stripe-webhook] setup-fee alert reconcile failed for invoice ${id}: ${err.message}`);
+    }
+  }
+}
+
+/**
+ * Resolve the invoice (and its id) backing an ACH PaymentIntent, even after
+ * saved-card failure resolution cleared invoices.stripe_payment_intent_id
+ * (B-07). Shared by handleAchFailure and resetAchFailureStateForSucceededIntent.
+ */
+async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice = null) {
+  let invoice = preResolvedInvoice || null;
+  const piId = paymentIntent?.id || null;
+  if (!invoice && piId) {
+    invoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null)
+      || await findInvoiceForPaymentIntent(paymentIntent).catch(() => null);
+  }
+  const ledgerId = ledgerInvoiceId(payment);
+  if (!invoice && ledgerId) {
+    invoice = await db('invoices').where({ id: ledgerId }).first().catch(() => null);
+  }
+  const invoiceId = invoice?.id || ledgerId || paymentIntent?.metadata?.waves_invoice_id || null;
+  return { invoice, invoiceId };
+}
+
+/**
+ * In-lock bounce-fence check shared by fee, combined, and single-invoice
+ * charge.refunded lanes (B-01, B-06): returns true if refund.failed already
+ * fenced `refundId` on any locked payment row's metadata.failed_refund_ids or
+ * in the pre-settlement stripe_failed_refunds table.
+ */
+async function isRefundFencedInTx(trx, refundId, lockedRows = []) {
+  if (!refundId) return false;
+  const rows = Array.isArray(lockedRows) ? lockedRows : (lockedRows ? [lockedRows] : []);
+  const rowFenced = rows.some((row) => {
+    const meta = parsePaymentMeta(row);
+    return Array.isArray(meta.failed_refund_ids) && meta.failed_refund_ids.includes(refundId);
+  });
+  if (rowFenced) return true;
+  if (await db.schema.hasTable('stripe_failed_refunds')) {
+    const tableRow = await trx('stripe_failed_refunds')
+      .where({ stripe_refund_id: refundId })
+      .first('stripe_refund_id');
+    if (tableRow) return true;
+  }
+  return false;
+}
+
 async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated = null) {
   const PayCombined = require('../services/pay-combined');
   const piId = paymentIntent.id;
@@ -1493,6 +1563,7 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
       }
     }
     if (reviewNotRecorded) throw reviewNotRecorded;
+    await reconcileSetupFeeAlertsForInvoices(combinedSettleOutcome.invoiceIds);
   }
 
   // ACH failure-state reset BEFORE the mirror (codex r3 P1, same ordering
@@ -2359,6 +2430,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
     });
     ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
+    await reconcileSetupFeeAlertsForInvoices([paidInvoice]);
   }
 
   // ── Bell + push for the admin team ──
@@ -2411,7 +2483,7 @@ async function resetAchFailureStateForSucceededIntent(paymentIntent) {
         // the payer's payment row sits under the service customer's id but is
         // not the homeowner's bank account. (Symmetric to the handleAchFailure
         // guard.)
-        const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
+        const { invoice: achInvoice } = await resolveAchInvoice(paymentIntent, payment);
         if (achInvoice?.payer_id) {
           logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
         } else {
@@ -3136,7 +3208,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = 
   // ── ACH failure handling ──
   const pmType = paymentIntent.last_payment_error?.payment_method?.type;
   if (pmType === 'us_bank_account') {
-    await handleAchFailure(paymentIntent, failureMessage, eventId);
+    await handleAchFailure(paymentIntent, failureMessage, eventId, { invoice: failedAttemptInvoice });
   }
 
   // ── Customer email for interactive (non-autopay, non-ACH) failures ──
@@ -3635,7 +3707,10 @@ async function handleChargeRefunded(charge) {
   // it with the customer's returned credit stranded. Safe to retry: keyed on
   // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
-  let feeRefundFencedInLock = false;
+  let refundFencedInLock = false;
+  let combinedParkedInTx = false;
+  // Owned invoices transitioned to 'refunded' inside the tx (single or combined): setup-fee alerts reconcile post-commit (B-43).
+  const refundedInvoiceIds = [];
   // Full refunds that terminalized an invoice paid partly by hand (single or combined): the office is told after commit (alertMixedRefund).
   const mixedRefunds = [];
   // Combined-charge refund alerts (partial, cumulative-full, pre-settlement): emitted after commit so raiseAdminAlert never opens a second DB transaction while refund locks are held.
@@ -3672,27 +3747,11 @@ async function handleChargeRefunded(charge) {
       // afterwards would mark the bounced refund successful while the
       // failed event's replay sees its fence and skips the unwind. A
       // fence-read failure throws (fail closed → Stripe retries).
-      if (refundId) {
-        if (await db.schema.hasTable('stripe_failed_refunds')) {
-          const fencedInLock = await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
-          if (fencedInLock) {
-            logger.warn(`[stripe-webhook] fee refund ${refundId} was fenced as failed while waiting for the lock — skipping stamp + side effects`);
-            feeRefundFencedInLock = true;
-            return null;
-          }
-        }
-        const rowForFence = await trx('payments').where({ stripe_charge_id: chargeId }).first('metadata');
-        if (rowForFence) {
-          let fenceMeta = {};
-          try {
-            fenceMeta = rowForFence.metadata ? (typeof rowForFence.metadata === 'string' ? JSON.parse(rowForFence.metadata) : rowForFence.metadata) : {};
-          } catch { fenceMeta = {}; }
-          if (Array.isArray(fenceMeta.failed_refund_ids) && fenceMeta.failed_refund_ids.includes(refundId)) {
-            logger.warn(`[stripe-webhook] fee refund ${refundId} already recorded as failed on the payments row — skipping stamp + side effects`);
-            feeRefundFencedInLock = true;
-            return null;
-          }
-        }
+      const feeFenceRow = refundId ? await trx('payments').where({ stripe_charge_id: chargeId }).first('metadata') : null;
+      if (await isRefundFencedInTx(trx, refundId, feeFenceRow)) {
+        logger.warn(`[stripe-webhook] fee refund ${refundId} was fenced as failed while waiting for the lock — skipping stamp + side effects`);
+        refundFencedInLock = true;
+        return null;
       }
     }
     // Combined full-balance charge: N per-invoice ledger rows share this
@@ -3704,9 +3763,7 @@ async function handleChargeRefunded(charge) {
     // operator and touch nothing.
     {
       let combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
-      const rowMeta = (row) => {
-        try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
-      };
+      const rowMeta = (row) => parsePaymentMeta(row);
       if (combinedRows.some((r) => rowMeta(r).combined_payment)) {
         // Serialize with refund.failed's combined unwind (codex r12 P1):
         // both combined-row paths take this per-charge lock, rows are
@@ -3719,19 +3776,10 @@ async function handleChargeRefunded(charge) {
           ['combined.refund.fence', String(chargeId)],
         );
         combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
-        if (refundId) {
-          const rowFenced = combinedRows.some((r) => {
-            const m = rowMeta(r);
-            return Array.isArray(m.failed_refund_ids) && m.failed_refund_ids.includes(refundId);
-          });
-          let tableFenced = false;
-          if (!rowFenced && await db.schema.hasTable('stripe_failed_refunds')) {
-            tableFenced = !!(await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id'));
-          }
-          if (rowFenced || tableFenced) {
-            logger.warn(`[stripe-webhook] combined refund ${refundId} on charge ${chargeId} was already fenced as FAILED — skipping the refund stamp (Stripe kept the money)`);
-            return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
-          }
+        if (await isRefundFencedInTx(trx, refundId, combinedRows)) {
+          logger.warn(`[stripe-webhook] combined refund ${refundId} on charge ${chargeId} was already fenced as FAILED — skipping the refund stamp (Stripe kept the money)`);
+          refundFencedInLock = true;
+          return null;
         }
         if (isFullRefund && combinedRows.every((r) => rowMeta(r).pre_settlement && r.status === 'refunded')) {
           combinedRefundAlerts.push(buildPreSettlementFullRefundAlert({
@@ -3745,6 +3793,7 @@ async function handleChargeRefunded(charge) {
           return combinedRows[0] || null;
         }
         if (!isFullRefund) {
+          combinedParkedInTx = true;
           logger.error(`[stripe-webhook] PARTIAL refund on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
           await trx('stripe_orphan_charges')
             .insert({
@@ -3800,6 +3849,7 @@ async function handleChargeRefunded(charge) {
         // takes the clean full unwind below.
         const combinedChargeCents = Number(charge.amount) || 0;
         if (combinedChargeCents && Math.round(refundAmountDollars * 100) < combinedChargeCents) {
+          combinedParkedInTx = true;
           logger.error(`[stripe-webhook] Combined charge ${chargeId} reached FULLY refunded via multiple partials — final contribution parked; operator reconciles all constituents`);
           await trx('stripe_orphan_charges')
             .insert({
@@ -3882,6 +3932,7 @@ async function handleChargeRefunded(charge) {
                 .where({ id: invId })
                 .whereIn('status', ['paid', 'processing'])
                 .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+              refundedInvoiceIds.push(invId);
               const combinedHandCents = await handPartsPaidCents(trx, invId);
               if (combinedHandCents > 0) mixedRefunds.push({ invoiceId: invId, handCents: combinedHandCents });
             } else {
@@ -3961,12 +4012,10 @@ async function handleChargeRefunded(charge) {
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
             ['combined.refund.fence', String(chargeId)],
           );
-          if (refundId && await db.schema.hasTable('stripe_failed_refunds')) {
-            const bounceFenced = await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
-            if (bounceFenced) {
-              logger.warn(`[stripe-webhook] pre-settlement combined refund ${refundId} was already fenced as FAILED — skipping the refunded marker (Stripe kept the money)`);
-              return null;
-            }
+          if (await isRefundFencedInTx(trx, refundId)) {
+            logger.warn(`[stripe-webhook] pre-settlement combined refund ${refundId} was already fenced as FAILED — skipping the refunded marker (Stripe kept the money)`);
+            refundFencedInLock = true;
+            return null;
           }
           // Serialize with COMBINED SETTLEMENT too (codex r10 P1): the
           // succeeded handler settles under stripe.pi.payment, not the
@@ -3995,6 +4044,7 @@ async function handleChargeRefunded(charge) {
             && preChargeCents > 0
             && Math.round(refundAmountDollars * 100) < preChargeCents;
           if (!isFullRefund || cumulativeFullPreSettle) {
+            combinedParkedInTx = true;
             logger.error(`[stripe-webhook] ${cumulativeFullPreSettle ? 'CUMULATIVE-full' : 'PARTIAL'} refund on unsettled combined charge ${chargeId} — parked for operator`);
             await trx('stripe_orphan_charges')
               .insert({
@@ -4057,6 +4107,24 @@ async function handleChargeRefunded(charge) {
           return refundFence;
         }
       }
+    }
+    // Serialize with handleRefundFailed's pre-settlement fence write (and lock
+    // any existing payments rows FOR UPDATE against handleRefundFailed's
+    // row-based unwind) before stamping or inserting a pre-settlement marker
+    // (B-06). If refund.failed committed its fence while this event was in
+    // flight, Stripe kept the money — skip the stamp, marker, and side effects.
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['combined.refund.fence', String(chargeId)],
+    );
+    let singleLockedRows = await trx('payments').where({ stripe_charge_id: chargeId }).forUpdate();
+    if (!singleLockedRows.length && charge.payment_intent) {
+      singleLockedRows = await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).forUpdate();
+    }
+    if (await isRefundFencedInTx(trx, refundId, singleLockedRows)) {
+      logger.warn(`[stripe-webhook] single-invoice refund ${refundId} on charge ${chargeId} was fenced as FAILED while waiting for the lock — skipping stamp + side effects`);
+      refundFencedInLock = true;
+      return null;
     }
     await trx('payments')
       .where({ stripe_charge_id: chargeId })
@@ -4132,6 +4200,7 @@ async function handleChargeRefunded(charge) {
       if (invId && invoiceOwned) {
         const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
         await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+        refundedInvoiceIds.push(invId);
         // Part of this bill was paid by hand (a part payment): the card refund cannot return it, so the office decides.
         const handCents = await handPartsPaidCents(trx, invId);
         if (handCents > 0) mixedRefunds.push({ invoiceId: invId, handCents });
@@ -4165,9 +4234,9 @@ async function handleChargeRefunded(charge) {
     return result;
   });
   // A fence discovered under the lock means the refund BOUNCED — nothing
-  // was stamped, and no refund email/notification may fire for money
+  // was stamped, and no refund email/clawback/alerts/bell may fire for money
   // Stripe kept (the refund.failed handler already notified the office).
-  if (feeRefundFencedInLock) return;
+  if (refundFencedInLock) return;
   for (const mixed of mixedRefunds) await alertMixedRefund(mixed, { chargeId, refundId });
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
@@ -4195,22 +4264,24 @@ async function handleChargeRefunded(charge) {
   // webhook with active coverage still riding on refunded money, and no
   // cron reconciles active terms whose invoices are refunded. Propagate so
   // Stripe redelivers; the refund stamps above are idempotent on replay.
-  {
-    const refundSyncAnchor = await db('payments').where({ stripe_charge_id: chargeId }).first();
-    if (isFullRefund && refundSyncAnchor) {
-      // A combined charge refunds N per-invoice rows — the annual-prepay
-      // sync must see EVERY refunded share, not the arbitrary first row
-      // (codex r4 P1: a prepay invoice elsewhere in the allocation would
-      // keep active coverage on refunded money). Single-invoice charges
-      // have exactly one row, preserving the original behavior.
-      const refundSyncRows = await db('payments')
-        .where({ stripe_charge_id: chargeId, status: 'refunded' });
-      const rowsToSync = refundSyncRows.length ? refundSyncRows : [refundSyncAnchor];
-      for (const refundedRow of rowsToSync) {
-        await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(refundedRow);
-      }
+  // Never fall back to a non-refunded row and skip completely when the
+  // combined charge was parked (B-01): parked cumulative-full partials and
+  // fenced refunds deliberately leave rows 'paid' and must never cancel terms.
+  if (isFullRefund && !combinedParkedInTx) {
+    // A combined charge refunds N per-invoice rows — the annual-prepay
+    // sync must see EVERY refunded share, not the arbitrary first row
+    // (codex r4 P1: a prepay invoice elsewhere in the allocation would
+    // keep active coverage on refunded money). Single-invoice charges
+    // have exactly one row, preserving the original behavior.
+    const refundSyncRows = await db('payments')
+      .where({ stripe_charge_id: chargeId, status: 'refunded' });
+    for (const refundedRow of refundSyncRows) {
+      await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(refundedRow);
     }
   }
+
+  // Best-effort setup-fee alert reconcile after refund + prepay claw-back (B-43).
+  await reconcileSetupFeeAlertsForInvoices(refundedInvoiceIds);
 
   // Fire-and-forget health rescore after refund
   try {
@@ -4237,7 +4308,7 @@ async function handleChargeRefunded(charge) {
     await triggerNotification('payment_refunded', {
       amount: refundAmountDollars,
       isFullRefund,
-      invoiceId: refundedPayment?.invoice_id || null,
+      invoiceId: ledgerInvoiceId(refundedPayment) || null,
     }, { dedupeKey: refundNotificationDedupeKey(chargeId, refundId) });
   } catch (e) {
     logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);
@@ -4546,6 +4617,7 @@ async function handleRefundFailed(refund) {
           logger.error(`[stripe-webhook] annual-prepay resync after combined refund bounce failed for invoice ${restoredId}: ${syncErr.message}`);
         }
       }
+      await reconcileSetupFeeAlertsForInvoices(restored);
       // Bounced pre-settlement refund → the money never left after all. If
       // the PI actually succeeded (its settle was fenced into an orphan),
       // run the FULL succeeded lifecycle now — guard chain, allocation
@@ -4928,6 +5000,7 @@ async function handleRefundFailed(refund) {
     } catch (err) {
       logger.error(`[stripe-webhook] annual-prepay resync after refund bounce failed for invoice ${restoredInvoiceId}: ${err.message}`);
     }
+    await reconcileSetupFeeAlertsForInvoices([restoredInvoiceId]);
   }
   // A replacement dues invoice (or a collected month) that now sits beside the
   // restored original: voided if unpaid, otherwise an office alert (best effort).
@@ -5925,7 +5998,7 @@ function termiteRenewalReconcilerLive() {
   return typeof gates.gateEnvValue === 'function' && Boolean(gates.gateEnvValue('GATE_TERMITE_ANNUAL_PLAN'));
 }
 
-async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
+async function handleAchFailure(paymentIntent, failureReason, eventId = null, opts) {
   const piId = paymentIntent.id;
 
   try {
@@ -5935,7 +6008,14 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // Third-party Bill-To: an AP bank failure on a payer-billed invoice must not
     // mutate the homeowner's ACH status (suspension, card-default flip) or text
     // them the retry/suspension notices — that bank account is the payer's.
-    const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
+    // Resolves pre-passed invoice, PI-linked invoice, metadata fallback, or
+    // payments.metadata.invoice_id so clearing stripe_payment_intent_id during
+    // saved-card failure resolution never blinds these guards (B-07).
+    const { invoice: achInvoice, invoiceId: achInvoiceId } = await resolveAchInvoice(
+      paymentIntent,
+      payment,
+      opts?.invoice,
+    );
     if (achInvoice?.payer_id) {
       logger.info(`[stripe-webhook] ACH failure on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — skipping homeowner ACH handling`);
       return;
@@ -5953,7 +6033,6 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // GATE_TERMITE_ANNUAL_PLAN is off, so a renewal debit that fails after
     // the gate was turned off would have NO owner at all — with the gate
     // off this generic ladder keeps handling it like any other ACH failure.
-    const achInvoiceId = achInvoice?.id || payment.invoice_id || null;
     if (achInvoiceId && termiteRenewalReconcilerLive() && (await isTermiteRenewalPrepayInvoice(achInvoiceId))) {
       logger.info(`[stripe-webhook] ACH failure on termite renewal invoice ${achInvoiceId} (PI ${piId}) — left to the renewal charge's own follow-through, generic ACH ladder skipped`);
       return;
@@ -8037,6 +8116,7 @@ async function handleDisputeCreated(dispute) {
         }
       });
       if (disputeAlreadyFinalized) return; // closure owns the outcome — no reopens, no notification
+      const reopenedCombinedInvoiceIds = [];
       for (const { invoiceId: reopenInvoiceId, rowId: reopenRowId } of reopenPlan) {
         // Same lifecycle hook as the single-invoice reopen (codex r4 P1):
         // prepaid coverage must not ride on provisionally clawed-back
@@ -8071,8 +8151,10 @@ async function handleDisputeCreated(dispute) {
             stripe_charge_id: null,
             updated_at: trx.fn.now(),
           });
+          reopenedCombinedInvoiceIds.push(reopenInvoiceId);
         });
       }
+      await reconcileSetupFeeAlertsForInvoices(reopenedCombinedInvoiceIds);
       try {
         await NotificationService.notifyAdmin(
           'dispute',
@@ -8289,6 +8371,7 @@ async function handleDisputeCreated(dispute) {
         await removeCardSurchargeFromReopenedInvoice(trx, { invoice: lockedInvoice, payment });
       });
         reopenedInvoice = true;
+        await reconcileSetupFeeAlertsForInvoices([invoice]);
       } catch (reopenErr) {
         if (!reopenErr?.disputeReopenSuperseded) throw reopenErr;
         logger.warn(`[stripe-webhook] dispute ${dispute.id}: invoice ${invoice.id} not reopened — the dispute is already final or the invoice is no longer settled by disputed PI ${disputedPi}`);
@@ -8779,7 +8862,10 @@ async function handleDisputeClosed(dispute) {
               // redelivers and the idempotent loop (including the
               // already-restored replay shape) re-runs the sync.
               const freshWon = await db('invoices').where({ id: invoice.id }).first();
-              if (freshWon) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(freshWon);
+              if (freshWon) {
+                await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(freshWon);
+                await reconcileSetupFeeAlertsForInvoices([freshWon]);
+              }
             }
           }
           continue;
@@ -8822,6 +8908,7 @@ async function handleDisputeClosed(dispute) {
             if (lostDisputeOwnsInvoice) {
               await require('../services/annual-prepay-renewals')
                 .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
+              await reconcileSetupFeeAlertsForInvoices([invId]);
             }
           }
         }
@@ -9177,6 +9264,7 @@ async function handleDisputeClosed(dispute) {
         if (freshWonInvoice) {
           await require('../services/annual-prepay-renewals')
             .syncTermForInvoicePayment(freshWonInvoice);
+          await reconcileSetupFeeAlertsForInvoices([freshWonInvoice]);
         }
       }
     } else if (status === 'lost') {
@@ -9279,6 +9367,7 @@ async function handleDisputeClosed(dispute) {
       if (lostDisputeOwnedInvoice) {
         await require('../services/annual-prepay-renewals')
           .syncTermForInvoicePayment({ id: lostInvoice.id, status: 'refunded', paid_at: null });
+        await reconcileSetupFeeAlertsForInvoices([lostInvoice]);
       }
     }
   }

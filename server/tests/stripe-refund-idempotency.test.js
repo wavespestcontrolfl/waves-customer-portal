@@ -96,6 +96,9 @@ describe('StripeService.refund', () => {
     jest.doMock('../services/customer-credit', () => ({
       returnAppliedCreditOnRefund: jest.fn(async () => undefined),
     }));
+    jest.doMock('../services/setup-fee-alert-reconcile', () => ({
+      reconcileSetupFeeAlertForInvoice: jest.fn(async () => undefined),
+    }));
   });
 
   test('an invoice that was also paid in part by hand is not refunded here: the refund math assumes one payment covered the bill', async () => {
@@ -659,6 +662,7 @@ describe('StripeService.refund', () => {
     let statusSeenBySync;
     let creditMock;
     let syncMock;
+    let reconcileMock;
 
     // The invoices lookup the credit-restore block runs (by the payment's PI).
     function stubInvoiceLookup(row) {
@@ -672,6 +676,7 @@ describe('StripeService.refund', () => {
       const StripeService = loadService();
       creditMock = require('../services/customer-credit').returnAppliedCreditOnRefund;
       syncMock = require('../services/annual-prepay-renewals').syncTermForRefundedPayment;
+      reconcileMock = require('../services/setup-fee-alert-reconcile').reconcileSetupFeeAlertForInvoice;
       return StripeService;
     }
 
@@ -690,9 +695,12 @@ describe('StripeService.refund', () => {
         order.push('sync');
         statusSeenBySync = invoiceRow.status;
       });
+      reconcileMock.mockImplementation(async (inv) => {
+        if (inv) order.push('reconcile');
+      });
     }
 
-    test('an owned invoice is terminalized by the credit restore BEFORE the term sync reads it', async () => {
+    test('an owned invoice is terminalized by the credit restore BEFORE the term sync reads it, and setup-fee reconcile runs post-commit', async () => {
       const invoicesQuery = stubInvoiceLookup(invoiceRow);
       const StripeService = loadWithRecorders();
       recordOrder();
@@ -700,9 +708,22 @@ describe('StripeService.refund', () => {
       await StripeService.refund('pay-1', {});
 
       expect(invoicesQuery.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_abc' });
-      expect(order).toEqual(['credit', 'sync']);
+      expect(order).toEqual(['credit', 'sync', 'reconcile']);
       expect(statusSeenBySync).toBe('refunded');
-      expect(syncMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'pay-1', stripe_payment_intent_id: 'pi_abc' }));
+      expect(syncMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'pay-1', stripe_payment_intent_id: 'pi_abc', status: 'refunded' }));
+      expect(reconcileMock).toHaveBeenCalledWith(invoiceRow);
+    });
+
+    test('a setup-fee reconcile failure never masks the successful refund (B-43)', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      reconcileMock.mockRejectedValueOnce(new Error('setup-fee reconcile failed'));
+
+      const result = await StripeService.refund('pay-1', {});
+
+      expect(order).toEqual(['credit', 'sync']);
+      expect(result.refund_issued_amount).toBe(100);
     });
 
     test('no invoice owned by this PI (credit restore does not apply): the sync still runs, as before', async () => {
@@ -724,7 +745,7 @@ describe('StripeService.refund', () => {
 
       const result = await StripeService.refund('pay-1', {});
 
-      expect(order).toEqual(['credit', 'sync']);
+      expect(order).toEqual(['credit', 'sync', 'reconcile']);
       // The refund itself still reports success.
       expect(result.refund_issued_amount).toBe(100);
     });
@@ -737,12 +758,12 @@ describe('StripeService.refund', () => {
 
       const result = await StripeService.refund('pay-1', {});
 
-      expect(order).toEqual(['credit', 'sync']);
+      expect(order).toEqual(['credit', 'sync', 'reconcile']);
       expect(invoiceRow.status).toBe('refunded');
       expect(result.refund_issued_amount).toBe(100);
     });
 
-    test('a PARTIAL refund runs neither the credit restore nor the claw-back', async () => {
+    test('a PARTIAL refund runs neither the credit restore, claw-back, nor setup-fee reconcile', async () => {
       stubInvoiceLookup(invoiceRow);
       const StripeService = loadWithRecorders();
       recordOrder();
@@ -750,6 +771,7 @@ describe('StripeService.refund', () => {
       await StripeService.refund('pay-1', { amount: 40 });
 
       expect(order).toEqual([]);
+      expect(reconcileMock).not.toHaveBeenCalled();
       expect(invoiceRow.status).toBe('paid');
     });
   });

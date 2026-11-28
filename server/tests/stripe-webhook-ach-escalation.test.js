@@ -73,12 +73,26 @@ jest.mock('../services/invoice-followups', () => ({
   handleAutopayFailure: (...a) => mockHandleAutopayFailure(...a),
 }));
 
+const mockResolveFailedSavedCard = jest.fn(async () => true);
+jest.mock('../services/stripe', () => ({
+  friendlyStripeError: jest.fn((err) => err?.message || 'Payment failed'),
+  resolveFailedInvoiceSavedCardChargeAttempt: (...a) => mockResolveFailedSavedCard(...a),
+}));
+jest.mock('../services/payment-failure-notifications', () => ({
+  enqueuePaymentFailureNotification: jest.fn(async () => {}),
+}));
+jest.mock('../services/customer-health', () => ({
+  scoreCustomer: jest.fn(async () => {}),
+}));
+
 // Mutable fixtures behind the shared db mock.
 const mockState = {};
 function resetMockState() {
   Object.assign(mockState, {
     paymentRow: { id: 'pay-1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_ach_1' },
     invoiceRow: null,
+    invoiceLookup: null,      // optional (wheres) => row for PI-cleared lookup tests
+    savedCardAttemptRow: null,
     termiteRenewalTerm: null, // annual_prepay_terms row for invoiceRow (a renewal successor when set)
     termiteGateOn: false,     // GATE_TERMITE_ANNUAL_PLAN — the renewal reconciler is live
     achEmailOn: false,        // GATE_ACH_FAILURE_EMAIL
@@ -155,7 +169,8 @@ jest.mock('../models/db', () => {
     b.first = async () => {
       if (table === 'autopay_log' && mockState.failConsentLookup) throw new Error('consent lookup failed');
       if (table === 'payments') return mockState.paymentRow;
-      if (table === 'invoices') return mockState.invoiceRow;
+      if (table === 'invoices') return mockState.invoiceLookup ? mockState.invoiceLookup(b._wheres) : mockState.invoiceRow;
+      if (table === 'stripe_invoice_charge_attempts') return mockState.savedCardAttemptRow;
       if (table === 'annual_prepay_terms') return mockState.termiteRenewalTerm;
       if (table === 'customers') return mockState.customer;
       if (table === 'autopay_log') return mockState.lastAutopayToggle;
@@ -191,7 +206,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-const { _handleAchFailure: handleAchFailure } = require('../routes/stripe-webhook');
+const {
+  _handleAchFailure: handleAchFailure,
+  _handlePaymentIntentFailed: handlePaymentIntentFailed,
+} = require('../routes/stripe-webhook');
 // Real predicate — the whole point of the fallback fix is that this
 // starts returning the card after the flip.
 const { getChargeableAutopayMethod } = jest.requireActual('../services/autopay-eligibility');
@@ -676,5 +694,130 @@ describe('handleAchFailure — fallback card vanishes before the transaction (Co
     const bank = mockState.paymentMethodRows.find((r) => r.id === 'pm-bank');
     expect(bank.autopay_enabled).toBe(false);
     expect(await getChargeableAutopayMethod({ id: 'cust-1' }, stubKnex)).toBeFalsy();
+  });
+});
+
+describe('B-07: handleAchFailure resolves invoice even after saved-card failure clears stripe_payment_intent_id', () => {
+  const INV_UUID = '11111111-1111-4111-8111-111111111111';
+  const helpers = require('../routes/stripe-webhook-helpers');
+
+  test('handlePaymentIntentFailed passes failedAttemptInvoice so termite renewal ACH skips generic ladder after PI clear', async () => {
+    const liveInvoice = {
+      id: INV_UUID,
+      customer_id: 'cust-1',
+      invoice_number: 'INV-TERM-1',
+      status: 'processing',
+      payer_id: null,
+      stripe_payment_intent_id: 'pi_ach_renewal',
+    };
+    mockState.paymentRow = { id: 'pay-r1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_ach_renewal' };
+    mockState.savedCardAttemptRow = { id: 'att-1', invoice_id: INV_UUID, status: 'claimed', stripe_payment_intent_id: 'pi_ach_renewal' };
+    mockState.termiteRenewalTerm = { id: 'succ-term-1' };
+    mockState.termiteGateOn = true;
+    mockState.achEmailOn = true;
+    helpers.savedCardAttemptMatchesPaymentIntent.mockReturnValueOnce(true);
+    mockState.invoiceLookup = (wheres) => {
+      const piWhere = wheres.find((w) => 'stripe_payment_intent_id' in w);
+      if (piWhere) return liveInvoice.stripe_payment_intent_id === piWhere.stripe_payment_intent_id ? { ...liveInvoice } : null;
+      const idWhere = wheres.find((w) => 'id' in w);
+      if (idWhere) return idWhere.id === liveInvoice.id ? { ...liveInvoice } : null;
+      return null;
+    };
+    // Simulate resolveFailedInvoiceSavedCardChargeAttempt clearing invoices.stripe_payment_intent_id before handleAchFailure runs.
+    mockResolveFailedSavedCard.mockImplementationOnce(async () => {
+      liveInvoice.stripe_payment_intent_id = null;
+      return true;
+    });
+
+    await handlePaymentIntentFailed({
+      id: 'pi_ach_renewal',
+      metadata: { source: 'admin_card_on_file', saved_card_attempt_id: 'att-1' },
+      last_payment_error: { message: 'NSF', code: 'insufficient_funds', payment_method: { type: 'us_bank_account' } },
+    }, 'evt_b07_renewal');
+
+    expect(liveInvoice.stripe_payment_intent_id).toBeNull();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+  });
+
+  test('handlePaymentIntentFailed passes failedAttemptInvoice so payer-billed ACH skips homeowner handling after PI clear', async () => {
+    const liveInvoice = {
+      id: INV_UUID,
+      customer_id: 'cust-1',
+      invoice_number: 'INV-PAYER-1',
+      status: 'processing',
+      payer_id: 'payer-99',
+      stripe_payment_intent_id: 'pi_ach_payer',
+    };
+    mockState.paymentRow = { id: 'pay-p1', customer_id: 'cust-1', stripe_payment_intent_id: 'pi_ach_payer' };
+    mockState.savedCardAttemptRow = { id: 'att-2', invoice_id: INV_UUID, status: 'claimed', stripe_payment_intent_id: 'pi_ach_payer' };
+    mockState.achEmailOn = true;
+    helpers.savedCardAttemptMatchesPaymentIntent.mockReturnValueOnce(true);
+    mockState.invoiceLookup = (wheres) => {
+      const piWhere = wheres.find((w) => 'stripe_payment_intent_id' in w);
+      if (piWhere) return liveInvoice.stripe_payment_intent_id === piWhere.stripe_payment_intent_id ? { ...liveInvoice } : null;
+      return null;
+    };
+    mockResolveFailedSavedCard.mockImplementationOnce(async () => {
+      liveInvoice.stripe_payment_intent_id = null;
+      return true;
+    });
+
+    await handlePaymentIntentFailed({
+      id: 'pi_ach_payer',
+      metadata: { source: 'admin_card_on_file', saved_card_attempt_id: 'att-2' },
+      last_payment_error: { message: 'NSF', code: 'insufficient_funds', payment_method: { type: 'us_bank_account' } },
+    }, 'evt_b07_payer');
+
+    expect(liveInvoice.stripe_payment_intent_id).toBeNull();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+  });
+
+  test('direct handleAchFailure falls back to metadata waves_invoice_id and ledgerInvoiceId when PI binding is cleared', async () => {
+    mockState.achEmailOn = true;
+    mockState.recentFailures = 1;
+    mockState.paymentRow = {
+      id: 'pay-meta-1',
+      customer_id: 'cust-1',
+      stripe_payment_intent_id: 'pi_cleared',
+      metadata: JSON.stringify({ invoice_id: INV_UUID }),
+    };
+    const clearedInvoice = { id: INV_UUID, customer_id: 'cust-1', payer_id: null, stripe_payment_intent_id: null };
+    mockState.invoiceLookup = (wheres) => {
+      const idWhere = wheres.find((w) => 'id' in w);
+      return idWhere && idWhere.id === INV_UUID ? clearedInvoice : null;
+    };
+
+    await handleAchFailure({ id: 'pi_cleared', metadata: {} }, 'R01', 'evt_b07_ledger');
+
+    expect(mockSendAchFailureNotice).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      invoiceId: INV_UUID,
+      paymentId: 'pay-meta-1',
+    }));
+  });
+
+  test('direct handleAchFailure resolves payer-billed invoice via ledgerInvoiceId when PI binding is cleared', async () => {
+    mockState.achEmailOn = true;
+    mockState.paymentRow = {
+      id: 'pay-meta-payer',
+      customer_id: 'cust-1',
+      stripe_payment_intent_id: 'pi_cleared_payer',
+      metadata: JSON.stringify({ invoice_id: INV_UUID }),
+    };
+    const clearedPayerInvoice = { id: INV_UUID, customer_id: 'cust-1', invoice_number: 'INV-P2', payer_id: 'payer-42', stripe_payment_intent_id: null };
+    mockState.invoiceLookup = (wheres) => {
+      const idWhere = wheres.find((w) => 'id' in w);
+      return idWhere && idWhere.id === INV_UUID ? clearedPayerInvoice : null;
+    };
+
+    await handleAchFailure({ id: 'pi_cleared_payer', metadata: {} }, 'R01', 'evt_b07_ledger_payer');
+
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
   });
 });

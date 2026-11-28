@@ -6281,6 +6281,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
 
 async function syncTermForRefundedPayment(payment, conn = db) {
   if (!(await annualPrepayTableExists()) || !payment) return [];
+  // Defensive guard (B-01): never unwind coverage for a payment row that is
+  // not actually refunded (e.g. a parked partial or bounced refund that left
+  // the row 'paid').
+  if (String(payment.status || '').toLowerCase() !== 'refunded') {
+    logger.warn(`[annual-prepay] syncTermForRefundedPayment skipped for payment ${payment.id || payment.stripe_charge_id || 'unknown'} — status is "${payment.status || 'missing'}", not refunded`);
+    return [];
+  }
   const invoiceId = await findInvoiceIdForRefundedPayment(payment, conn);
   if (!invoiceId) return [];
 
@@ -6314,8 +6321,12 @@ async function syncTermForRefundedPayment(payment, conn = db) {
   // same invoice and can deadlock a replacement payment or a dispute.
   const invoiceRow = await conn('invoices')
     .where({ id: invoiceId })
-    .first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
-  if (invoiceRow && !require('./invoice-helpers').refundedPaymentOwnsInvoice(invoiceRow, {
+    .first('id', 'status', 'stripe_payment_intent_id', 'stripe_charge_id');
+  if (!invoiceRow || String(invoiceRow.status || '').toLowerCase() !== 'refunded') {
+    logger.warn(`[annual-prepay] refund of payment ${payment.id || payment.stripe_charge_id} skipped term clawback — invoice ${invoiceId} status is "${invoiceRow?.status || 'missing'}", not refunded`);
+    return [];
+  }
+  if (!require('./invoice-helpers').refundedPaymentOwnsInvoice(invoiceRow, {
     paymentIntentId: payment.stripe_payment_intent_id,
     chargeId: payment.stripe_charge_id,
   })) {
