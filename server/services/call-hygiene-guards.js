@@ -12,12 +12,11 @@ const logger = require('./logger');
 const COMPETITOR_ENTITY = '(?:terminix|orkin|truly\\s*nolen|massey|aptive|home\\s*team|eco\\s*shield|bulwark|previous\\s+(?:pest\\s+)?company|other\\s+(?:pest\\s+)?company|former\\s+(?:pest\\s+)?company|old\\s+(?:pest\\s+)?company)';
 const COMPETITOR_CAUSED_RE = new RegExp(
   `\\b(?:(?:frustrated|unhappy|upset|mad|angry|dissatisfied|disappointed|issues?|problems?|trouble|complaints?)\\s+(?:with|about|against)\\s+${COMPETITOR_ENTITY}`
-  + `|(?:leaving|left|quitting|canceling|cancelling|dropping|switching\\s+from)\\s+${COMPETITOR_ENTITY}`
   + `|${COMPETITOR_ENTITY}\\s+(?:never\\s+showed|missed|skipped|failed|didn'?t|did\\s+not|overcharged|raised|ignored|damaged|ruined|dropped|cancelled|canceled|was\\s+(?:late|rude|terrible|awful|bad)))\\b`,
   'i',
 );
 const SWITCHING_TO_COMPETITOR_RE = new RegExp(`\\b(?:switch(?:ing)?|mov(?:e|ing)|go(?:ing)?|call(?:ing)?)\\s+(?:to|with)\\s+${COMPETITOR_ENTITY}\\b`, 'i');
-const WAVES_FAULT_RE = /\b(?:your\s+(?:tech|technician|office|billing|invoice|charge|service|driver|company|team|crew)|waves\s+(?:tech|technician|office|billing|invoice|missed|skipped|failed|never|didn'?t|did\s+not|overcharged|charged|billed|damaged|ruined|late)|billed\s+us|charged\s+us|you\s+guys)\b/i;
+const WAVES_FAULT_RE = /\b(?:your\s+(?:tech|technician|office|billing|invoice|charge|service|driver|company|team|crew)|waves\b[^.!?\n]{0,30}\b(?:tech|technician|office|billing|invoice|missed|skipped|failed|never|didn'?t|did\s+not|overcharged|charged|billed|damaged|ruined|late|rude|bad|awful|terrible|wrong|no[- ]?show|problem|issue|complaint|upset|frustrated|unhappy)|billed\s+us|charged\s+us|you\s+guys)\b/i;
 
 const OUTAGE_WINDOW_MS = 60 * 60 * 1000;
 const OUTAGE_MIN_FAILURES = 3;
@@ -49,8 +48,7 @@ function isCompetitorOrNonWavesComplaint(v2Extraction = null) {
 
 function isActiveKnownCustomerCall({ knownCaller = null, knownCallerLookupFailed = false, call = null } = {}) {
   if (knownCallerLookupFailed || !knownCaller?.id || knownCaller.isExistingCustomer !== true) return false;
-  if (call?.customer_id && String(call.customer_id) !== String(knownCaller.id)) return false;
-  return true;
+  return Boolean(call?.customer_id && String(call.customer_id) === String(knownCaller.id));
 }
 
 function clearSpamForActiveCustomer({ extracted, knownCaller = null, knownCallerLookupFailed = false, call = null } = {}) {
@@ -101,14 +99,14 @@ async function maybeAlertExtractionOutage({ db: conn, err, now = new Date() } = 
     return await raiseAdminAlert('agents', {
       area: 'System',
       action: 'check call extraction failures',
-      why: `${recentFailures} call extractions failed in the last hour.`,
+      why: `${recentFailures} calls failed extraction in the last hour.`,
       severity: 'needs-you',
       link: '/admin/agents',
       subject: { type: 'check', id: 'call-extraction-outage-60m' },
       doneWhen: 'extraction_recovers',
       who: 'person',
     }, {
-      detail: `Call extraction failed ${recentFailures} times in the last 60 minutes (latest category: ${category}${statusText}). Check AI provider status and reprocess failed calls.`,
+      detail: `${recentFailures} distinct calls failed extraction in the last 60 minutes (latest category: ${category}${statusText}). Check AI provider status and reprocess failed calls.`,
       bell: true,
       dedupeKey: OUTAGE_DEDUPE_KEY,
       dedupeWindowMs: OUTAGE_WINDOW_MS,

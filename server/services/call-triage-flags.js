@@ -3447,20 +3447,15 @@ function streetNameParts(tokens) {
 
 function singleTypoStreetMatch(partName, expectedName) {
   if (!partName || !expectedName || partName[0] !== expectedName[0]) return false;
-  if (partName.length < 5 || expectedName.length < 5) return false;
-  if (Math.abs(partName.length - expectedName.length) > 1) return false;
-  let i = 0;
-  let j = 0;
-  let edits = 0;
-  while (i < partName.length && j < expectedName.length) {
-    if (partName[i] === expectedName[j]) { i += 1; j += 1; continue; }
-    edits += 1;
-    if (edits > 1) return false;
-    if (partName.length > expectedName.length) i += 1;
-    else if (expectedName.length > partName.length) j += 1;
-    else { i += 1; j += 1; }
+  if (partName.length < 5 || partName.length !== expectedName.length) return false;
+  let diffs = 0;
+  for (let i = 0; i < partName.length; i += 1) {
+    if (partName[i] !== expectedName[i]) {
+      diffs += 1;
+      if (diffs > 1) return false;
+    }
   }
-  return edits + (partName.length - i) + (expectedName.length - j) <= 1;
+  return diffs === 1;
 }
 
 function fuzzyComponentsAgree(part, expected) {
@@ -3479,7 +3474,8 @@ function streetPartMatchesExpected(part, expected, allowFuzzySingleTypo, fromCom
 
 function isCityMatchingCommunity(spokenCommunity, savedCity, savedZip, structured) {
   if (!spokenCommunity || !savedCity || structured.length) return false;
-  if (!/[a-z]/i.test(spokenCommunity) || /^(?:fl|florida)$/i.test(spokenCommunity)) return false;
+  const nonStateWords = cityKey(spokenCommunity).replace(/\b(?:fl|florida)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  if (nonStateWords !== savedCity) return false;
   return rawIsPureLocalityPhrase(spokenCommunity, savedCity, savedZip);
 }
 
@@ -3539,7 +3535,11 @@ function restatesOnFileAddress(sa, knownCustomer) {
     return line === cityUnitLine || line.endsWith(` ${cityUnitLine}`);
   });
   const tailAgrees = [!rawCity, rawCity === savedCity, cityIsUnit].some(Boolean);
-  const hasPositiveLocality = Boolean(cities.length || zips.length || (rawCity && rawCity === savedCity));
+  const hasPositiveLocality = Boolean(
+    (savedCity && cities.some((c) => c === savedCity))
+    || (savedZip && zips.some((z) => z === savedZip))
+    || (savedCity && rawCity === savedCity),
+  );
   const { agree, streetEvidenceCount, communityMatchesSavedCity } = restatesStreetEvidence({
     sa, structured, parsed, raw, rawIsLocality, acknowledgment, tailAgrees, hasPositiveLocality, rawAddress, savedCity, savedZip, savedUnit, onFile,
   });

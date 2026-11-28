@@ -59,9 +59,16 @@ describe('PR A2: brand fix, routing version bump, and on-file partial address re
       addressValidation: { status: 'missing_component', inServiceArea: true },
     })).toMatchObject({ allowed: true, usesOnFileAddress: true });
 
-    // Without caller-stated city or ZIP, fuzzy street typo MUST still hold
+    // Without caller-stated city or ZIP (or with a partial/invalid ZIP), fuzzy street typo MUST still hold
     expect(statesNewAddress({
       property: { service_address: { street_line_1: 'Mapliwood Rd' } },
+    }, knownMaple)).toBe(true);
+    expect(statesNewAddress({
+      property: { service_address: { street_line_1: 'Mapliwood Rd', postal_code: '342' } },
+    }, knownMaple)).toBe(true);
+    // Different-length street name ("Maplewoods Rd" vs "Maplewood Rd") must not fuzzy-match
+    expect(statesNewAddress({
+      property: { service_address: { street_line_1: 'Maplewoods Rd', city: 'Sampletown' } },
     }, knownMaple)).toBe(true);
 
     const knownBayview = {
@@ -90,6 +97,9 @@ describe('PR A2: brand fix, routing version bump, and on-file partial address re
     }, knownBayview)).toBe(true);
     expect(statesNewAddress({
       property: { service_address: { subdivision_or_community: 'Bayview 99999' } },
+    }, knownBayview)).toBe(true);
+    expect(statesNewAddress({
+      property: { service_address: { subdivision_or_community: 'FL.' } },
     }, knownBayview)).toBe(true);
   });
 
@@ -159,9 +169,13 @@ describe('PR A2: complaint alert guard, active-customer spam guard, and outage m
       sentiment_and_lead: { objections_raised: ['Missed appointment'] },
     })).toBe(false);
 
-    // Unclear attribution stays active
+    // Unclear attribution or mixed Waves complaint after competitor history stays active
     expect(isCompetitorOrNonWavesComplaint({
       meta: { call_summary: 'Caller unhappy with service and mentioned Orkin.' },
+      sentiment_and_lead: { objections_raised: [] },
+    })).toBe(false);
+    expect(isCompetitorOrNonWavesComplaint({
+      meta: { call_summary: 'Caller left Orkin last year. Waves was late today.' },
       sentiment_and_lead: { objections_raised: [] },
     })).toBe(false);
 
@@ -189,6 +203,10 @@ describe('PR A2: complaint alert guard, active-customer spam guard, and outage m
     expect(isActiveKnownCustomerCall({
       knownCaller: { id: 'cust-1', isExistingCustomer: true, pipelineStage: 'active_customer' },
       call: { customer_id: 'cust-other' },
+    })).toBe(false);
+    expect(isActiveKnownCustomerCall({
+      knownCaller: { id: 'cust-1', isExistingCustomer: true, pipelineStage: 'active_customer' },
+      call: { customer_id: null },
     })).toBe(false);
     expect(isActiveKnownCustomerCall({
       knownCaller: { id: 'cust-1', isExistingCustomer: true },
@@ -253,7 +271,7 @@ describe('PR A2: complaint alert guard, active-customer spam guard, and outage m
     expect(notifyAdmin).toHaveBeenCalledWith(
       'agents',
       'System — check call extraction failures',
-      '3 call extractions failed in the last hour.',
+      '3 calls failed extraction in the last hour.',
       expect.objectContaining({
         bell: true,
         link: '/admin/agents',
