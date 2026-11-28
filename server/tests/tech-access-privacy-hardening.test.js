@@ -235,6 +235,39 @@ describe('visitMatchesPrimaryHomeForTechAccess & recheckTechFeedAccessRows', () 
     expect(futureRoute.stops[0].notes).not.toContain('7722');
     expect(futureRoute.next_stop.notes).not.toContain('7722');
   });
+
+  test('sameHomeForTechVisitPrefs loads customer primary address when zero active properties exist', async () => {
+    jest.resetModules();
+    const { sameHomeForTechVisitPrefs } = require('../services/technician-visit-scope');
+    const conn = jest.fn((table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        whereNull: () => q,
+        whereNotNull: () => q,
+        orderBy: () => q,
+        select: async () => (table === 'customer_properties' ? [] : []),
+        first: async () => (table === 'customers'
+          ? { address_line1: '100 Main St', address_line2: null, city: 'Tampa', zip: '33601' }
+          : null),
+      };
+      return q;
+    });
+    const matchingVisit = {
+      customer_id: 'cust-legacy',
+      service_address_line1: '100 Main St',
+      service_address_city: 'Tampa',
+      service_address_zip: '33601',
+    };
+    const otherVisit = {
+      customer_id: 'cust-legacy',
+      service_address_line1: '999 Other Rd',
+      service_address_city: 'Tampa',
+      service_address_zip: '33602',
+    };
+    await expect(sameHomeForTechVisitPrefs(conn, 'tech-1', 'cust-legacy', matchingVisit)).resolves.toBe(true);
+    await expect(sameHomeForTechVisitPrefs(conn, 'tech-1', 'cust-legacy', otherVisit)).resolves.toBe(false);
+  });
 });
 
 describe('admin-assessment-analytics GET /tech-context/:customerId scoping', () => {

@@ -280,11 +280,19 @@ async function isVisitLiveForTechAccess(conn, { visitId, techId, customerId, tod
 async function sameHomeForTechVisitPrefs(conn, techId, customerId, visit, customerPrimaryAddress = null) {
   if (!techId) return true;
   const homesMap = await loadActiveHomesByCustomerIds(conn, [customerId]);
+  const homes = homesMap ? (homesMap.get(customerId) || []) : null;
+  let primaryAddress = customerPrimaryAddress;
+  if (!primaryAddress && Array.isArray(homes) && homes.length === 0 && customerId) {
+    primaryAddress = await conn('customers')
+      .where({ id: customerId })
+      .first('address_line1', 'address_line2', 'city', 'zip')
+      .catch(() => null);
+  }
   return visitMatchesPrimaryHomeForTechAccess(
     conn,
     visit,
-    homesMap ? (homesMap.get(customerId) || []) : null,
-    customerPrimaryAddress,
+    homes,
+    primaryAddress,
   );
 }
 
