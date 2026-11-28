@@ -1300,7 +1300,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
 
   test('the scheduled T&S guide keeps the mix and warns beside it for an unverified product label (owner 2026-11-26)', async () => {
     const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
-      products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: null }] });
+      products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: null }] });
     const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
     const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
     expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
@@ -1324,7 +1324,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
         const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null, recordSprayRainShadow: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
         return card.protocol.procedure.fieldGuide.products.tritek;
       };
-      const oil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: '2027-12-01' };
+      const oil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01' };
       const shown = await guide(oil);
       expect(shown.mix).toEqual([1.28, 1.28]);
       expect(shown.summary).not.toMatch(/Mix withheld/);
@@ -2704,6 +2704,13 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const out = await jobCard.mixForProduct('pz', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
     expect(out).toMatchObject({ sprayVolumeGalPer1000: 0.6667, rigSprayGalPer1000: 1 });
     expect(out.warnings.join(' ')).toMatch(/The card's rate is for 0\.67 gal per 1,000 sq ft\. Mist blower sprays 1/);
+    // A rig calibrated at DB precision 0.667 matches 1 gal per 1,500 sq ft cleanly in the tank calculator while keeping exact 6,000 sq ft coverage.
+    rig.carrier_gal_per_1000 = 0.667;
+    const matched = await jobCard.mixForProduct('pz', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(matched.sprayVolumeGalPer1000).toBe(0.6667);
+    expect(matched.coversSqft).toBe(6000);
+    expect(matched.rigSprayGalPer1000).toBeUndefined();
+    expect(matched.warnings.join(' ')).not.toMatch(/The card's rate is for/);
   });
 
   // Owner 2026-11-26: two services that each list the product only as "if needed" are rows of their own, with the full line text.
@@ -3516,5 +3523,1271 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     // The combined service places traps: its follow-up is a trap check.
     const combinedFollow = await card({ serviceType: 'Rodent Exclusion & Trapping Service', serviceKey: 'rodent_exclusion', isFollowup: true });
     expect([combinedFollow.visit.visit, combinedFollow.lines]).toEqual([4, []]);
+  });
+
+  test('procedure.mixRates resolves unique catalog productId (with EPA disambiguation) and checks label verification and catalog band', async () => {
+    const proto = {
+      mosquito: {
+        name: 'Mosquito Control Protocol',
+        safety_rules: ['No spray above 15 mph wind.'],
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Spray barrier',
+          secondary: '',
+          notes: '',
+          mixRates: [
+            { product: 'Suspend Polyzone', where: 'Shaded foliage', perGallon: { amount: 1.1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'], epa: '101563-143' },
+            { product: 'Tekko Pro IGR', where: 'Same tank', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'], epa: '53883-335' },
+            { product: 'Demand CS', where: 'Over ceiling', perGallon: { amount: 1.5, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
+            { product: 'Duplicate Item', where: 'Ambiguous', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
+            { product: 'Tekko Pro IGR', where: 'Roach label rate', perGallon: { amount: 2, unit: 'fl oz' }, sprayers: ['bg_1_gal'], epa: '53883-335' },
+            { product: 'Blank Epa Product', where: 'Needs exact EPA', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['bg_1_gal'], epa: '99999-999' },
+            { product: 'Antapex Mass', where: 'Compatible mass units', perGallon: { amount: 10, unit: 'g' }, sprayers: ['bg_1_gal'] },
+            { product: 'Mismatched Unit Product', where: 'Mass vs volume', perGallon: { amount: 10, unit: 'g' }, sprayers: ['bg_1_gal'] },
+          ],
+          lineMeta: {
+            'Apply growth regulator at 2 fl oz/gal': {
+              scope: 'interior',
+              treatmentApplied: true,
+              catalogProductHints: ['Tekko Pro IGR'],
+              labelRatePerGallon: { amount: 2, unit: 'fl_oz', use: 'cockroaches', epa: '53883-335', carrierGalPer1000: 1 },
+            },
+          },
+        }],
+      },
+    };
+    const catalog = [
+      { id: 'cat-poly', name: 'Suspend PolyZone', label_verified_at: null, epa_reg_number: '101563-143' },
+      { id: 'cat-tekko', name: 'Tekko Pro IGR', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '1', default_unit: 'fl_oz/gal', epa_reg_number: '53883-335' },
+      { id: 'cat-tekko-other', name: 'Tekko Pro IGR', label_verified_at: null, epa_reg_number: '99999-1' },
+      { id: 'cat-demand', name: 'Demand CS', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
+      { id: 'cat-dup-1', name: 'Duplicate Item', label_verified_at: '2026-08-01T00:00:00Z' },
+      { id: 'cat-dup-2', name: 'Duplicate Item', label_verified_at: '2026-08-01T00:00:00Z' },
+      { id: 'cat-blank-epa', name: 'Blank Epa Product', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '1', default_unit: 'fl_oz/gal' },
+      { id: 'cat-antapex-mass', name: 'Antapex Mass', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '0.35-1.05', default_unit: 'oz/gal' },
+      { id: 'cat-mismatch-unit', name: 'Mismatched Unit Product', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '0.5-1.0', default_unit: 'fl_oz/gal' },
+    ];
+    const out = await jobCard.resolveVisitProducts({
+      facts: { isLawn: false, serviceType: 'Mosquito Treatment - IGR', scheduledDate: '2026-09-04' },
+      protocols: proto,
+      catalog,
+      dbh: () => ({}),
+    });
+    expect(out.procedure.mixRates).toEqual([
+      expect.objectContaining({ product: 'Suspend Polyzone', productId: 'cat-poly', labelWarning: 'Label rate not yet verified' }),
+      expect.objectContaining({ product: 'Tekko Pro IGR', productId: 'cat-tekko' }),
+      expect.objectContaining({ product: 'Demand CS', productId: 'cat-demand', labelWarning: 'Protocol dilution exceeds verified catalog label rate — confirm label before mixing.' }),
+      expect.objectContaining({ product: 'Duplicate Item', productId: null }),
+      expect.objectContaining({ product: 'Tekko Pro IGR', productId: 'cat-tekko' }),
+      expect.objectContaining({ product: 'Blank Epa Product', productId: null }),
+      expect.objectContaining({ product: 'Antapex Mass', productId: 'cat-antapex-mass' }),
+      expect.objectContaining({ product: 'Mismatched Unit Product', productId: 'cat-mismatch-unit', labelWarning: 'Protocol and catalog rates use different units — verify against container label.' }),
+    ]);
+    expect(out.procedure.mixRates[1].labelWarning).toBeUndefined();
+    expect(out.procedure.mixRates[4].labelWarning).toBeUndefined();
+    expect(out.procedure.mixRates[6].labelWarning).toBeUndefined();
+
+    // Assigned sprayer carrier-volume and area-cap warnings ride on each procedure's own rows:
+    // shared products across primary + add-ons do not borrow each other's lineCarrier, 1,500 sq ft volumes normalize
+    // to per 1,000 sq ft, and published "at most" area caps warn when the assigned rig exceeds them.
+    const primaryProc = {
+      mixRates: [{
+        product: 'Tekko Pro IGR',
+        productId: 'cat-tekko',
+        perGallon: { amount: 2, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,000 sq ft',
+        limit: 'no more than 3 fl oz per 1,000 sq ft in one spray',
+      }],
+    };
+    const addonMosquitoProc = {
+      mixRates: [{
+        product: 'Tekko Pro IGR',
+        productId: 'cat-tekko',
+        perGallon: { amount: 1, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,500 sq ft',
+      }, {
+        product: 'LESCO Crosscheck Plus',
+        productId: 'cat-cross',
+        perGallon: { amount: 0.625, unit: 'fl oz' },
+        limit: '1 fl oz per 1,000 sq ft at most',
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [
+        { procedure: primaryProc, lines: out.lines },
+        { procedure: addonMosquitoProc, lines: [] },
+      ],
+      { source: 'rig', systemName: 'FlowZone #2', carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-2' },
+    );
+    expect(primaryProc.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining("The card's rate is for 1 gal per 1,000 sq ft"),
+      expect.stringContaining('allows no more than 3 fl oz per 1,000 sq ft in one spray'),
+    ]);
+    expect(addonMosquitoProc.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining("The card's rate is for 0.67 gal per 1,000 sq ft"),
+    ]);
+    expect(addonMosquitoProc.mixRates[1].calibrationWarnings).toEqual([
+      expect.stringContaining('allows no more than 1 fl oz per 1,000 sq ft in one spray'),
+    ]);
+
+    // Database-precision 0.667 gal/1,000 matches 1 gal per 1,500 sq ft cleanly when FlowZone is compatible.
+    const matchedFlowZone = {
+      mixRates: [{
+        product: 'Suspend Polyzone',
+        sprayers: ['flowzone_4_gal'],
+        perGallon: { amount: 1.1, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,500 sq ft',
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: matchedFlowZone, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 0.667 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(matchedFlowZone.mixRates[0].calibrationWarnings).toBeUndefined();
+
+    // Assigned truck rig skips FlowZone-only mosquito dosage check without falsely prohibiting Termidor 100-gal tank rows.
+    const truckMismatch = {
+      mixRates: [{
+        product: 'Suspend Polyzone',
+        sprayers: ['flowzone_4_gal'],
+        perGallon: { amount: 1.1, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,500 sq ft',
+      }, {
+        product: 'Termidor SC',
+        sprayers: ['bg_1_gal', 'flowzone_4_gal'],
+        perGallon: { amount: 0.8, unit: 'fl oz' },
+        sprayVolume: '4 gal per 10 linear ft. 100 gal tank: 78 fl oz',
+      }, {
+        product: 'Explicitly Restricted Item',
+        allowedSprayers: ['flowzone_4_gal'],
+        perGallon: { amount: 1, unit: 'fl oz' },
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: truckMismatch, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(truckMismatch.mixRates[0].calibrationWarnings).toBeUndefined();
+    expect(truckMismatch.mixRates[1].calibrationWarnings).toBeUndefined();
+    expect(truckMismatch.mixRates[2].calibrationWarnings).toEqual([
+      'Truck Rig #1 is not allowed for Explicitly Restricted Item.',
+    ]);
+
+    // Catalog-matched mixRates rows join the spray check and carry their verdict back.
+    const entries = [{ procedure: { mixRates: [{ product: 'Taurus SC', productId: 'cat-taurus' }] }, lines: [] }];
+    const merged = jobCard._test.mergeSprayCheckProducts([], entries, [{ id: 'cat-taurus', name: 'Taurus SC' }]);
+    expect(merged.map((p) => p.id)).toEqual(['cat-taurus']);
+    jobCard._test.attachMixSprayVerdicts(entries, [{ productId: 'cat-taurus', verdict: 'hold', reason: 'Rain within 2 hours' }]);
+    expect(entries[0].procedure.mixRates[0].sprayCheck).toEqual({ verdict: 'hold', reason: 'Rain within 2 hours' });
+
+    // Assigned compatible sprayer with no usable calibration warns beside rows with sprayVolume or area limit.
+    const uncalibratedRig = {
+      mixRates: [{
+        product: 'Tekko Pro IGR',
+        sprayers: ['flowzone_4_gal'],
+        perGallon: { amount: 2, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,000 sq ft',
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: uncalibratedRig, lines: [] }],
+      { source: 'protocol_default', reason: 'No carrier rate on file', carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(uncalibratedRig.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('No carrier rate on file'),
+    ]);
+
+    // Crossfire finished-gallon coverage falls back to line.raw ("makes 1 gallon for 1,000 sq ft"),
+    // while minimum-volume floors ("at least 1 gal of mix per 1,000 sq ft") do not trigger mismatch warnings.
+    const crossfireProc = {
+      mixRates: [{
+        product: 'MGK Crossfire Bed Bug Concentrate',
+        productId: 'cat-crossfire',
+        sprayers: ['bg_1_gal'],
+        perGallon: { amount: 13, unit: 'fl oz' },
+        sprayVolume: '13 fl oz plus 115 fl oz of water makes 1 gal',
+      }, {
+        product: 'Acelepryn Insecticide',
+        productId: 'cat-ace',
+        sprayers: ['bg_1_gal'],
+        perGallon: { amount: 0.1, unit: 'fl oz' },
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{
+        procedure: crossfireProc,
+        lines: [
+          { product: { id: 'cat-crossfire' }, raw: 'Crossfire on mattress seams: 13 fl oz in 115 fl oz of water makes 1 gallon for 1,000 sq ft, damp not wet' },
+          { product: { id: 'cat-ace' }, raw: 'Acelepryn: at least 1 gal of mix per 1,000 sq ft' },
+        ],
+      }],
+      { source: 'rig', systemName: 'B&G #1', tankCapacityGal: 1, carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-bg' },
+      [{ id: 'sys-bg', name: 'B&G #1', system_type: 'hand_pump', tank_capacity_gal: 1 }],
+    );
+    expect(crossfireProc.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining("The card's rate is for 1 gal per 1,000 sq ft"),
+    ]);
+    expect(crossfireProc.mixRates[1].calibrationWarnings).toBeUndefined();
+
+    // sprayServicesForProduct combines host lines and add-on mixRates (keeping add-on serviceKey) without duplicates.
+    const combinedServices = jobCard._test.sprayServicesForProduct(
+      { id: 'cat-cross' },
+      [{ product: { id: 'cat-cross' }, source: null }],
+      [
+        { name: 'General Pest Control', serviceKey: 'pest_quarterly', procedure: { mixRates: [{ productId: 'cat-cross' }] } },
+        { name: 'Custom Exterior Add-On', serviceKey: 'tree_shrub_care', procedure: { mixRates: [{ productId: 'cat-cross' }] } },
+      ],
+      { serviceType: 'General Pest Control', serviceKey: 'pest_quarterly', addons: [] },
+    );
+    expect(combinedServices).toEqual([
+      { name: 'General Pest Control', serviceKey: 'pest_quarterly' },
+      { name: 'Custom Exterior Add-On', serviceKey: 'tree_shrub_care' },
+    ]);
+
+    // Tree & Shrub fieldGuide.mixRates rows map short sprayer keys ('bg'/'flowzone'/'rig') and warn on Acelepryn
+    // per-application limits and Distance IGR spray-volume mismatches, plus join spray-check verdicts.
+    const fgEntry = {
+      name: 'Tree & Shrub Care',
+      serviceKey: 'tree_shrub_care',
+      procedure: {
+        fieldGuide: {
+          mixRates: [{
+            product: 'Acelepryn Insecticide',
+            productId: 'cat-ace',
+            sprayers: ['bg', 'flowzone', 'rig'],
+            perGallon: { amount: 0.02, unit: 'fl oz', amountMax: 0.16 },
+            limit: 'At 16 fl oz per 100 gal, at most 2.3 gal of mix per 1,000 sq ft (0.37 fl oz of product per 1,000 sq ft per spray).',
+          }, {
+            product: 'Distance IGR',
+            productId: 'cat-dist',
+            sprayers: ['bg', 'flowzone', 'rig'],
+            perGallon: { amount: 0.06, unit: 'fl oz', amountMax: 0.08 },
+            limit: '5 gal of mix per 1,000 sq ft (100 gal treats 20,000 sq ft).',
+          }],
+        },
+      },
+      lines: [],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [fgEntry],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 3 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(fgEntry.procedure.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('allows no more than 0.37 fl oz per 1,000 sq ft in one spray'),
+    ]);
+    expect(fgEntry.procedure.fieldGuide.mixRates[1].calibrationWarnings).toEqual([
+      expect.stringContaining("The card's rate is for 5 gal per 1,000 sq ft"),
+    ]);
+    const fgProducts = jobCard._test.mergeSprayCheckProducts([], [fgEntry], [{ id: 'cat-ace', name: 'Acelepryn Insecticide' }]);
+    expect(fgProducts.map((p) => p.id)).toEqual(['cat-ace']);
+    jobCard._test.attachMixSprayVerdicts([fgEntry], [{ productId: 'cat-ace', verdict: 'caution', reason: 'Rain within 48 hours' }]);
+    expect(fgEntry.procedure.fieldGuide.mixRates[0].sprayCheck).toEqual({ verdict: 'caution', reason: 'Rain within 48 hours' });
+
+    // Decimal max/min volume bounds ("at most 4.5 gal", "at least 1.5 gal") parse complete decimals and warn only outside the bound.
+    const floramiteRow = () => ({
+      product: 'Floramite SC',
+      sprayers: ['bg', 'flowzone', 'rig'],
+      perGallon: { amount: 0.04, unit: 'fl oz', amountMax: 0.08 },
+      limit: 'At most 2 sprays a year. At 8 fl oz per 100 gal, at most 4.5 gal of mix per 1,000 sq ft.',
+    });
+    const minRow = () => ({
+      product: 'Acelepryn Insecticide',
+      sprayers: ['bg', 'flowzone', 'rig'],
+      perGallon: { amount: 0.02, unit: 'fl oz', amountMax: 0.16 },
+      limit: 'Apply at least 1.5 gal of mix per 1,000 sq ft.',
+    });
+    const belowMax = { fieldGuide: { mixRates: [floramiteRow(), minRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: belowMax, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 4 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(belowMax.fieldGuide.mixRates[0].calibrationWarnings).toBeUndefined();
+    expect(belowMax.fieldGuide.mixRates[1].calibrationWarnings).toBeUndefined();
+
+    const aboveMax = { fieldGuide: { mixRates: [floramiteRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: aboveMax, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 5 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(aboveMax.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
+      'Truck Rig #1 sprays 5 gal per 1,000 sq ft, above the label maximum of 4.5 gal per 1,000 sq ft at 8 fl oz per 100 gal. Use a lower rate or less water per 1,000 sq ft',
+    ]);
+
+    // A lower fixed Floramite concentration (4 fl oz per 100 gal) does not trigger the 8 fl oz per 100 gal water cap at 5 gal/1,000 sq ft.
+    const lowConcFloramite = { fieldGuide: { mixRates: [{ ...floramiteRow(), perGallon: { amount: 0.04, unit: 'fl oz' } }] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: lowConcFloramite, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 5 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(lowConcFloramite.fieldGuide.mixRates[0].calibrationWarnings).toBeUndefined();
+
+    const belowMin = { fieldGuide: { mixRates: [minRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: belowMin, lines: [] }],
+      { source: 'rig', systemName: 'B&G #1', tankCapacityGal: 1, carrierGalPer1000: 1 },
+      { equipmentSystemId: 'sys-bg' },
+      [{ id: 'sys-bg', name: 'B&G #1', system_type: 'hand_pump', tank_capacity_gal: 1 }],
+    );
+    expect(belowMin.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('below the label minimum of 1.5 gal per 1,000 sq ft'),
+    ]);
+
+    // System-only rig assignment filters out another technician's calibration and treats an empty match as uncalibrated.
+    const otherTechCals = [
+      { id: 'cal-other', equipment_system_id: 'sys-fz', technician_id: 'tech-b', system_name: 'FlowZone #1', carrier_gal_per_1000: 1, tank_capacity_gal: 4 },
+    ];
+    const tankForTechA = jobCard._test.procedureCalibrationTank(otherTechCals, { equipmentSystemId: 'sys-fz', calibrationId: null }, 'tech-a');
+    expect(tankForTechA.source).toBeNull();
+    const scopedProc = { mixRates: [{ product: 'Tekko Pro IGR', sprayers: ['flowzone_4_gal'], perGallon: { amount: 2, unit: 'fl oz' }, sprayVolume: '1 gal per 1,000 sq ft' }] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: scopedProc, lines: [] }],
+      tankForTechA,
+      { equipmentSystemId: 'sys-fz', calibrationId: null },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(scopedProc.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('No carrier rate on file'),
+    ]);
+    // Shared calibration and the assigned technician's own calibration are still used.
+    const sharedCal = [{ id: 'cal-shared', equipment_system_id: 'sys-fz', technician_id: null, system_name: 'FlowZone #1', carrier_gal_per_1000: 1, tank_capacity_gal: 4 }];
+    expect(jobCard._test.procedureCalibrationTank(sharedCal, { equipmentSystemId: 'sys-fz', calibrationId: null }, 'tech-a')).toMatchObject({ source: 'rig', carrierGalPer1000: 1 });
+    expect(jobCard._test.procedureCalibrationTank(otherTechCals, { equipmentSystemId: 'sys-fz', calibrationId: null }, 'tech-b')).toMatchObject({ source: 'rig', carrierGalPer1000: 1 });
+
+    // Approximate spray volumes ("about 1.5 gal per 1,000 sq ft") stay distinct from exact requirements:
+    // 1.55 gal/1,000 under Crosscheck's 1 fl oz cap stays clean while 2.0 gal/1,000 triggers the explicit area cap.
+    const crosscheckRow = () => ({
+      product: 'LESCO Crosscheck Plus',
+      sprayers: ['bg_1_gal', 'flowzone_4_gal'],
+      perGallon: { amount: 0.625, unit: 'fl oz' },
+      sprayVolume: 'about 1.5 gal per 1,000 sq ft',
+      limit: '1 fl oz per 1,000 sq ft at most; 7 days between applications',
+    });
+    const approxOk = { mixRates: [crosscheckRow()] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: approxOk, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 1.55 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(approxOk.mixRates[0].calibrationWarnings).toBeUndefined();
+
+    const approxOverCap = { mixRates: [crosscheckRow()] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: approxOverCap, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(approxOverCap.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('allows no more than 1 fl oz per 1,000 sq ft in one spray'),
+    ]);
+
+    // Per-acre carrier minimums (DiPel: "At least 50 gal of mix per acre" ≈ 1.148 gal/1,000 sq ft) warn below and pass above.
+    const dipelRow = () => ({
+      product: 'DiPel PRO DF',
+      dose: '0.2 to 0.7 oz per 1,000 sq ft',
+      limit: 'Measure by area, not by gallons sprayed. At least 50 gal of mix per acre.',
+    });
+    const dipelLow = { fieldGuide: { mixRates: [dipelRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: dipelLow, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 1 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(dipelLow.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('below the label minimum of 1.15 gal per 1,000 sq ft'),
+    ]);
+    const dipelOk = { fieldGuide: { mixRates: [dipelRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: dipelOk, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 1.5 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(dipelOk.fieldGuide.mixRates[0].calibrationWarnings).toBeUndefined();
+
+    // Reciprocal coverage limits (Bora-Care: "up to 400 sq ft per gal" => at least 2.5 gal per 1,000 sq ft)
+    // warn below 2.5 gal/1,000 sq ft and pass at or above 2.5 gal/1,000 sq ft.
+    const boraCareRow = () => ({
+      product: 'Bora-Care',
+      sprayers: ['bg_1_gal', 'flowzone_4_gal'],
+      perGallon: { amount: 64, unit: 'fl oz' },
+      sprayVolume: '1 part Bora-Care to 1 part water; up to 400 sq ft per gal',
+    });
+    const boraLow = { mixRates: [boraCareRow()] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: boraLow, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(boraLow.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('below the label minimum of 2.5 gal per 1,000 sq ft'),
+    ]);
+    const boraOk = { mixRates: [boraCareRow()] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: boraOk, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 2.5 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(boraOk.mixRates[0].calibrationWarnings).toBeUndefined();
+  });
+
+  test('buildJobCard and mixForProduct both ignore another technician calibration on a system-only assignment and carry field-guide label warnings into product details', async () => {
+    const dbFor = (tables) => {
+      const dbh = (t) => {
+        const table = String(t).split(' as ')[0];
+        const chain = {};
+        for (const m of ['join', 'leftJoin', 'where', 'andWhere', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'select', 'orderByRaw', 'orderBy', 'limit', 'modify']) chain[m] = () => chain;
+        chain.first = () => Object.assign(Promise.resolve((tables[table] || [])[0] ?? null), { catch: async () => (tables[table] || [])[0] ?? null });
+        chain.catch = (fn) => Promise.resolve(tables[table] || []).catch(fn);
+        chain.then = (res, rej) => Promise.resolve(tables[table] || []).then(res, rej);
+        return chain;
+      };
+      dbh.raw = (sql) => sql;
+      return dbh;
+    };
+    const otherCal = [{ id: 'cal-b', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 2, tank_capacity_gal: '110.00' }];
+    const systems = [{ id: 'sys-1', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }];
+    const oil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '0.5-1.0', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const dbh = dbFor({
+      scheduled_services: [{ id: 'svc1', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(card.tank.source).toBeNull();
+    expect(card.protocol.procedure.fieldGuide.products.tritek.mixWarning).toContain('Protocol dilution exceeds verified catalog label rate');
+    const calc = await jobCard.mixForProduct('oil', 4, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(calc.tank.source).toBeNull();
+
+    // A wrong-EPA verified product never clears the field-guide detail warning when mixRates could not match its registration.
+    const wrongEpaOil = { id: 'oil-wrong', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '99999-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const wrongEpaDb = dbFor({
+      scheduled_services: [{ id: 'svc2', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [wrongEpaOil],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const wrongCard = await jobCard.buildJobCard('svc2', { dbh: wrongEpaDb, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(wrongCard.protocol.procedure.fieldGuide.mixRates.find((r) => r.product === 'TriTek 1%').productId).toBeNull();
+    expect(wrongCard.protocol.procedure.fieldGuide.products.tritek.mixWarning).toContain('Label rate not yet verified');
+
+    // A lawn plan whose carrierSource is 'rig' does not restore another technician's rejected calibration as a protocol default.
+    const lawnDb = dbFor({
+      scheduled_services: [{ id: 'svc3', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-05-10', service_type: 'Lawn Care', service_category: 'lawn_care', assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [{ id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.1, rate_unit: 'oz', label_verified_at: '2027-12-01', active: true }],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const mockPlan = { propertyGate: { blocks: [] }, protocol: { structured: { window: { defaultCarrierGalPer1000: 1.5 } } }, mixCalculator: { carrierGalPer1000: 2, carrierSource: 'rig', items: [], conditionalOptions: [] } };
+    const lawnCard = await jobCard.buildJobCard('svc3', { dbh: lawnDb, deps: { buildPlan: jest.fn().mockResolvedValue(mockPlan), getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-05-10T15:00:00Z') });
+    expect(lawnCard.tank).toMatchObject({ source: 'protocol_default', carrierGalPer1000: 1.5 });
+    const lawnCalc = await jobCard.mixForProduct('p1', 100, { serviceId: 'svc3', dbh: lawnDb, deps: { buildPlan: jest.fn().mockResolvedValue(mockPlan) }, now: new Date('2028-05-10T15:00:00Z') });
+    expect(lawnCalc.tank).toMatchObject({ source: 'protocol_default', carrierGalPer1000: 1.5 });
+
+    // The tank calculator also checks minimum and maximum spray-volume bounds against the picked or assigned rig.
+    const ace = { id: 'ace', name: 'Acelepryn Insecticide', epa_reg_number: '100-1489', default_rate: '0.02-0.16', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const lowRig = [{ id: 'cal-low', equipment_system_id: 'sys-low', technician_id: 'tech-a', system_type: 'backpack', system_name: 'FlowZone #2', carrier_gal_per_1000: 0.5, tank_capacity_gal: '4.00' }];
+    const aceProtocols = { tree_shrub: { visits: [{ visit: 3, month: 'Mar', primary: 'Acelepryn Insecticide: 2-16 fl oz/100 gal; at least 1 gal of mix per 1,000 sq ft; no more than 0.37 fl oz per 1,000 sq ft in one spray' }] } };
+    const aceDb = dbFor({
+      scheduled_services: [{ id: 'svc4', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-low', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [ace],
+      product_aliases: [],
+      equipment_calibrations: lowRig,
+      equipment_systems: [{ id: 'sys-low', name: 'FlowZone #2', system_type: 'backpack', tank_capacity_gal: '4.00' }],
+      scheduled_service_addons: [],
+    });
+    const aceCalc = await jobCard.mixForProduct('ace', 4, { serviceId: 'svc4', dbh: aceDb, deps: { buildPlan: jest.fn(), protocols: aceProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(aceCalc.warnings.join(' ')).toContain('below the label minimum of 1 gal per 1,000 sq ft');
+
+    // Structured mixRates spray limits (e.g. Bora-Care's "up to 400 sq ft per gal" = 2.5 gal/1,000 minimum) also warn in the tank calculator.
+    const bora = { id: 'bora', name: 'Bora-Care', epa_reg_number: '64405-1', default_rate: '64', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const boraRig = [{ id: 'cal-bora', equipment_system_id: 'sys-bora', technician_id: 'tech-a', system_type: 'backpack', system_name: 'FlowZone #1', carrier_gal_per_1000: 2, tank_capacity_gal: '4.00' }];
+    const boraDb = dbFor({
+      scheduled_services: [{ id: 'svc5', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Bora-Care Wood Treatment', service_category: 'termite', assigned_equipment_system_id: 'sys-bora', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [bora],
+      product_aliases: [],
+      equipment_calibrations: boraRig,
+      equipment_systems: [{ id: 'sys-bora', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: '4.00' }],
+      scheduled_service_addons: [],
+    });
+    const boraCalc = await jobCard.mixForProduct('bora', 4, { serviceId: 'svc5', dbh: boraDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(boraCalc.warnings.join(' ')).toContain('below the label minimum of 2.5 gal per 1,000 sq ft');
+
+    // A product identified only by mixRates (Taurus SC on pest perimeter visit) keeps its protocol dose (0.4 fl oz/gal) instead of the broader catalog range.
+    const taurus = { id: 'taurus', name: 'Taurus SC', epa_reg_number: '53883-279', default_rate: '0.4-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const pestDb = dbFor({
+      scheduled_services: [{ id: 'svc6', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const taurusCalc = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc6', dbh: pestDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurusCalc).toMatchObject({ rateSource: 'protocol', amount: 1.6, amountMax: null, unit: 'fl_oz' });
+    expect(taurusCalc.warnings.join(' ')).toContain('2 qt per 160 linear ft');
+
+    // Multi-use products keep spray-volume limits scoped to each use: DiPel's shrub-and-bed 50 gal/acre minimum does not warn on its foliar tree dilution,
+    // and TriStar's three labeled uses render separately so only Whitefly/soft scale enforces the 3.5 gal/1,000 max.
+    const dipel = { id: 'dipel', name: 'DiPel PRO DF', epa_reg_number: '73049-39', default_rate: '0.08-0.16', default_unit: 'oz/gal', label_verified_at: '2027-12-01', active: true };
+    const tristar = { id: 'tristar', name: 'TriStar 8.5 SL', epa_reg_number: '8033-106-1001', default_rate: '0.04-0.165', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const tsRigLow = [{ id: 'cal-ts-low', equipment_system_id: 'sys-ts', technician_id: 'tech-a', system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 1, tank_capacity_gal: '110.00' }];
+    const tsRigHigh = [{ id: 'cal-ts-high', equipment_system_id: 'sys-ts', technician_id: 'tech-a', system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 4, tank_capacity_gal: '110.00' }];
+    const dipelDb = dbFor({
+      scheduled_services: [{ id: 'svc7', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [dipel],
+      product_aliases: [],
+      equipment_calibrations: tsRigLow,
+      equipment_systems: [{ id: 'sys-ts', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }],
+      scheduled_service_addons: [],
+    });
+    const dipelCalc = await jobCard.mixForProduct('dipel', 100, { serviceId: 'svc7', dbh: dipelDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(dipelCalc.warnings.join(' ')).not.toContain('below the label minimum');
+    expect(dipelCalc.warnings).toEqual(expect.arrayContaining([
+      'Tank amount is for: Ornamental and shade trees',
+      expect.stringContaining('Shrubs, flowers and bedding plants: 0.2 to 0.7 oz of product per 1,000 sq ft treated'),
+    ]));
+
+    // Zylam (mixed foliar tank + soil-drench direct dose) identifies the foliar tank use and preserves the soil-drench instruction.
+    const zylam = { id: 'zylam', name: 'Zylam Liquid', epa_reg_number: '2217-937', default_rate: '0.0725-0.16', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const zylamDb = dbFor({
+      scheduled_services: [{ id: 'svc9', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-12-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [zylam],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const zylamCalc = await jobCard.mixForProduct('zylam', 4, { serviceId: 'svc9', dbh: zylamDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-12-10T15:00:00Z') });
+    expect(zylamCalc.warnings).toEqual(expect.arrayContaining([
+      'Tank amount is for: Foliar spray, ornamentals',
+      expect.stringContaining('Soil drench, shrubs and sagos: 0.18 to 0.4 fl oz per foot of height'),
+    ]));
+
+    // Termite trench Taurus SC honors the 100-gal label-table amount (78 fl oz, not 80) and preserves the work-order restriction.
+    const termiteTaurusDb = dbFor({
+      scheduled_services: [{ id: 'svc10', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const taurus100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurus100).toMatchObject({ rateSource: 'protocol', amount: 78, amountMax: null, unit: 'fl_oz', basis: 'tank_table', tankTableOverride: true, ratePerGallon: null, context: { conditional: true } });
+    expect(taurus100.warnings.join(' ')).toContain('only when the work order names Taurus');
+    expect(taurus100.warnings.join(' ')).toContain('Label tank table: 78 fl oz for a 100 gal tank');
+    const taurus4 = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurus4).toMatchObject({ amount: 3.2, amountMax: null, unit: 'fl_oz', basis: 'per_gallon', ratePerGallon: { lo: 0.8, hi: 0.8, unit: 'fl_oz' } });
+    // The 100-gal exception applies only at 100 gal; 110 gal uses the 0.8 fl oz/gal rate (88 fl oz).
+    const taurus110 = await jobCard.mixForProduct('taurus', 110, { serviceId: 'svc10', dbh: termiteTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurus110).toMatchObject({ amount: 88, amountMax: null, unit: 'fl_oz', basis: 'per_gallon', ratePerGallon: { lo: 0.8, hi: 0.8, unit: 'fl_oz' } });
+
+    // March DiPel uses the structured dry-ounce rate (0.08-0.16 oz/gal) even when catalog lacks a per-gallon rate, never prose teaspoons.
+    const dipelNoCatRate = { ...dipel, default_rate: null, default_unit: null };
+    const dipelNoRateDb = dbFor({
+      scheduled_services: [{ id: 'svc11', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [dipelNoCatRate],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const dipelStructured = await jobCard.mixForProduct('dipel', 100, { serviceId: 'svc11', dbh: dipelNoRateDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(dipelStructured).toMatchObject({ amount: 8, amountMax: 16, unit: 'oz' });
+
+    // Direct-dose-only products (Merit 2F soil drench) skip tank math, hide unrelated catalog area rates, and surface the direct dose in warnings.
+    const merit = { id: 'merit', name: 'Merit 2F', epa_reg_number: '432-1312', default_rate: '0.1', default_unit: 'fl_oz/gal', default_rate_per_1000: 0.14, rate_unit: 'fl_oz', label_verified_at: '2027-12-01', active: true };
+    const meritDb = dbFor({
+      scheduled_services: [{ id: 'svc12', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [merit],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const meritCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc12', dbh: meritDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(meritCalc.amount).toBeNull();
+    expect(meritCalc.ratePer1000).toBeNull();
+    expect(meritCalc.ratePerGallon).toBeNull();
+    expect(meritCalc.reason).toBe('Dose by plant size — follow the protocol dose below; no tank amount');
+    expect(meritCalc.warnings.join(' ')).toContain('Soil drench, FlowZone soil injector: 0.1 to 0.2 fl oz per inch of trunk diameter');
+    expect(meritCalc.warnings.join(' ')).toContain('Trees 15 inches across or more have separate borer directions on the label.');
+
+    // Unassigned visits (no visit technician) use only shared calibrations for appointment-assigned rigs, even when a technician opens the calculator.
+    const unassignedDb = dbFor({
+      scheduled_services: [{ id: 'svc13', customer_id: 'c1', technician_id: null, scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const unassignedCalc = await jobCard.mixForProduct('oil', 4, { serviceId: 'svc13', technicianId: 'tech-b', dbh: unassignedDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(unassignedCalc.tank.source).toBeNull();
+
+    // Tank-table overrides apply only when the protocol rate governs (if catalog ceiling rejects 0.8 fl oz, 100 gal falls back to catalog band, never 78 fl oz)
+    // and the mismatch warning rides beside the fallback amount.
+    const cappedTaurus = { ...taurus, default_rate: '0.2-0.5', default_unit: 'fl_oz/gal' };
+    const cappedTaurusDb = dbFor({
+      scheduled_services: [{ id: 'svc14', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [cappedTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const capped100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc14', dbh: cappedTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(capped100).toMatchObject({ rateSource: 'catalog', amount: 20, amountMax: 50, unit: 'fl_oz' });
+    expect(capped100.warnings).toContain('Protocol dilution exceeds verified catalog label rate — confirm label before mixing.');
+    expect(capped100.warnings.join(' ')).toContain('4 gal per 10 linear ft for each foot of depth');
+    expect(capped100.warnings.join(' ')).not.toContain('78 fl oz');
+
+    // February TriTek 1% and 1.5% share placement text and EPA; each keeps its distinct condition label, original restrictions, and conditional warning.
+    const febOil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const febOilDb = dbFor({
+      scheduled_services: [{ id: 'svc15', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-02-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [febOil],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const febOilCalc = await jobCard.mixForProduct('oil', 4, { serviceId: 'svc15', dbh: febOilDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-02-10T15:00:00Z') });
+    expect(febOilCalc.serviceAmounts.map((r) => r.service)).toEqual([
+      'Tree & Shrub Care — TriTek 1% · If you find: Live scale crawlers, nymphs or mites',
+      'Tree & Shrub Care — TriTek 1.5% · If you find: Heavy scale or mites',
+    ]);
+    expect(febOilCalc.warnings.join(' ')).toContain('Heavy scale or mites');
+    expect(febOilCalc.warnings.join(' ')).toContain('under 90°F');
+
+    // Compatible cross-unit rates (10 g/gal protocol vs 0.35-1.05 oz/gal catalog) keep the protocol's 10 g/gal dose in the calculator
+    // and carry single-use placement and limits (including Antapex's Pharaoh-ant exclusion).
+    const antapexOz = { id: 'antapex-oz', name: 'Atticus Antapex WSG', epa_reg_number: '91234-401', default_rate: '0.35-1.05', default_unit: 'oz/gal', label_verified_at: '2027-12-01', active: true };
+    const antapexDb = dbFor({
+      scheduled_services: [{ id: 'svc16', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
+      products_catalog: [antapexOz],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const antapexCalc = await jobCard.mixForProduct('antapex-oz', 4, { serviceId: 'svc16', dbh: antapexDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(antapexCalc).toMatchObject({ rateSource: 'protocol', amount: 40, amountMax: null, unit: 'g' });
+    expect(antapexCalc.warnings.join(' ')).toContain('Not for Pharaoh ants');
+
+    // Selecting an uncalibrated sprayer for Bora-Care warns that its minimum spray volume could not be checked.
+    const uncalBoraDb = dbFor({
+      scheduled_services: [{ id: 'svc17', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Bora-Care Wood Treatment', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [bora],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [{ id: 'sys-bora', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: '4.00' }],
+      scheduled_service_addons: [],
+    });
+    const uncalBoraCalc = await jobCard.mixForProduct('bora', 4, { serviceId: 'svc17', equipmentSystemId: 'sys-bora', dbh: uncalBoraDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(uncalBoraCalc.amount).toBe(256);
+    expect(uncalBoraCalc.warnings.join(' ')).toContain('verify FlowZone #1 output against this product\'s spray volume or area limit.');
+
+    // Unresolved Copper rows (labelRateMissing) never fuzzy-match a catalog fungicide on the card or calculator.
+    const copperFungicide = { id: 'cu', name: 'Southern Ag Copper Fungicide', epa_reg_number: '829-123', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const copperDb = dbFor({
+      scheduled_services: [{ id: 'svc18', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-06-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [copperFungicide],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const copperCard = await jobCard.buildJobCard('svc18', { dbh: copperDb, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-06-10T15:00:00Z') });
+    const copperRow = (copperCard.protocol.procedure.fieldGuide?.mixRates || []).find((r) => r.product === 'Copper');
+    expect(copperRow).toBeDefined();
+    expect(copperRow.productId).toBeNull();
+    expect(copperRow.sprayCheck).toBeUndefined();
+    const copperCalc = await jobCard.mixForProduct('cu', 4, { serviceId: 'svc18', dbh: copperDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-06-10T15:00:00Z') });
+    expect(copperCalc).toMatchObject({ rateSource: 'catalog', context: { line: null } });
+
+    // Direct dosing is evaluated per booked service: a direct-dose primary does not suppress an add-on's tank spray amount (and vice versa).
+    const mixedProtocols = {
+      tree_shrub: {
+        name: 'Tree & Shrub Care',
+        visits: [{
+          visit: 1,
+          month: 'Jan',
+          primary: 'Merit 2F soil drench',
+          mixRates: [{ product: 'Merit 2F', where: 'Soil drench', dose: '0.1 to 0.2 fl oz per inch', epa: '432-1312' }],
+        }],
+      },
+      pest: {
+        name: 'Pest Control',
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Merit 2F foliar spray',
+          mixRates: [{ product: 'Merit 2F', where: 'Foliar spray', perGallon: { amount: 0.1, unit: 'fl oz' }, epa: '432-1312' }],
+        }],
+      },
+    };
+    const directFirstDb = dbFor({
+      scheduled_services: [{ id: 'svc19', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [merit],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control', service_key: 'pest_general_quarterly' }],
+    });
+    const directFirstCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc19', dbh: directFirstDb, deps: { buildPlan: jest.fn(), protocols: mixedProtocols }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(directFirstCalc.serviceAmounts).toEqual([
+      expect.objectContaining({ service: 'Tree & Shrub Care', amount: null, fromCard: false }),
+      expect.objectContaining({ service: 'Quarterly Pest Control', amount: 0.4, fromCard: true }),
+    ]);
+    expect(directFirstCalc.warnings.join(' ')).toContain('Tree & Shrub Care: Soil drench: 0.1 to 0.2 fl oz per inch');
+
+    // Home + vehicle cockroach visits share Tekko Pro's rate and carrier; both services keep their own placement/limit warnings beside the shared amount.
+    const tekko = { id: 'tekko', name: 'Tekko Pro IGR', epa_reg_number: '53883-335', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const sharedRoachDb = dbFor({
+      scheduled_services: [{ id: 'svc20', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'German Cockroach Cleanout', service_category: 'pest_control', service_key: 'cockroach_initial', first_name: 'A', last_name: 'B' }],
+      products_catalog: [tekko],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Vehicle Cockroach Cleanout', category: 'pest_control', service_key: 'cockroach_vehicle_initial' }],
+    });
+    const sharedRoachCalc = await jobCard.mixForProduct('tekko', 1, { serviceId: 'svc20', dbh: sharedRoachDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(sharedRoachCalc.amount).toBe(2);
+    expect(sharedRoachCalc.warnings.join(' ')).toContain('German Cockroach Cleanout: Protocol use: Inside: cracks, crevices and spots');
+    expect(sharedRoachCalc.warnings.join(' ')).toContain('Vehicle Cockroach Cleanout: Protocol use: Vehicle: cracks and spots, light application — Do not wet carpet; keep off electrical parts');
+
+    // March Mainspring preserves the field guide's visit-specific condition ("If you find: Whitefly") alongside its broader foliar line.
+    const mainspring = { id: 'ms', name: 'Mainspring GNL', epa_reg_number: '100-1543', default_rate: '0.02-0.08', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const mainspringDb = dbFor({
+      scheduled_services: [{ id: 'svc22', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [mainspring],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const mainspringCalc = await jobCard.mixForProduct('ms', 100, { serviceId: 'svc22', dbh: mainspringDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(mainspringCalc).toMatchObject({ amount: 4, amountMax: 8, unit: 'fl_oz' });
+    expect(mainspringCalc.warnings.join(' ')).toContain('If you find: Whitefly');
+
+    // Dispatch readiness uses required mixRates-only products for both weather and stock checks (while keeping optional mix rows out of stock holds).
+    const windyEmptyTaurus = { ...taurus, max_wind_mph: 10, inventory_on_hand: 0, inventory_unit: 'fl_oz' };
+    const readinessHourly = [15, 16, 17, 18].map((h) => ({ startTime: `2028-03-10T${h}:00:00Z`, temperatureF: 75, windMph: 18, rainChance: 0 }));
+    const readinessDb = dbFor({
+      scheduled_services: [{ id: 'svc21', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [windyEmptyTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const readiness = await jobCard.buildJobCard('svc21', {
+      dbh: readinessDb,
+      readinessOnly: true,
+      deps: { getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(readiness.issues.some((i) => i.kind === 'protocol')).toBe(false);
+    expect(readiness.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'weather', status: 'caution', label: 'Wind caution · Taurus SC' }),
+      expect.objectContaining({ kind: 'stock', status: 'hold', label: 'Company stock short' }),
+    ]));
+
+    // Optional mixRates-only products (work-order-only Taurus SC on termite trench) do not trigger a stock hold when zero on hand.
+    const optionalReadinessDb = dbFor({
+      scheduled_services: [{ id: 'svc23', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [windyEmptyTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const optionalReadiness = await jobCard.buildJobCard('svc23', {
+      dbh: optionalReadinessDb,
+      readinessOnly: true,
+      deps: { getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(optionalReadiness.issues.some((i) => i.kind === 'stock')).toBe(false);
+    expect(optionalReadiness.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'weather', status: 'caution', label: 'Wind caution · Taurus SC' }),
+    ]));
+
+    // The full Job Card also surfaces required mixRates-only products (preserving add-on service names) so shortages flagged by dispatch readiness are visible,
+    // and an unselected/optional line on one service never suppresses a required mixRates stock check from another booked service.
+    const fullReadinessCard = await jobCard.buildJobCard('svc21', {
+      dbh: readinessDb,
+      deps: { getRecentCalls: async () => [], getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(fullReadinessCard.products).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'taurus', name: 'Taurus SC', onHand: 0, lowStock: true }),
+    ]));
+
+    const optPlusReqProtocols = {
+      termite: {
+        name: 'Termite Liquid Trench & Rod',
+        visits: [{ visit: 3, month: 'Any', primary: 'Inspect trench', secondary: 'Taurus SC only when work order names Taurus' }],
+      },
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Exterior perimeter',
+          mixRates: [{ product: 'Taurus SC', where: 'Outside: foundation band', perGallon: { amount: 0.4, unit: 'fl oz' }, epa: '53883-279' }],
+        }],
+      },
+    };
+    const optPlusReqDb = dbFor({
+      scheduled_services: [{ id: 'svc24', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [windyEmptyTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control', service_key: 'pest_general_quarterly' }],
+    });
+    const optPlusReqReadiness = await jobCard.buildJobCard('svc24', {
+      dbh: optPlusReqDb,
+      readinessOnly: true,
+      deps: { protocols: optPlusReqProtocols, getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(optPlusReqReadiness.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'stock', status: 'hold', label: 'Company stock short' }),
+    ]));
+    const optPlusReqCard = await jobCard.buildJobCard('svc24', {
+      dbh: optPlusReqDb,
+      deps: { protocols: optPlusReqProtocols, getRecentCalls: async () => [], getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(optPlusReqCard.products).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'taurus', conditional: false, line: expect.stringContaining('Quarterly Pest Control:') }),
+    ]));
+
+    // When catalog ceiling rejects a protocol dilution that had an exact spray volume (e.g. Antapex 10 g/gal at 1 gal/1,000 sq ft vs 2-5 g/gal catalog),
+    // the fallback result keeps the protocol spray-volume instruction visible beside the catalog amount.
+    const cappedAntapex = { id: 'antapex-cap', name: 'Atticus Antapex WSG', epa_reg_number: '91234-401', default_rate: '2-5', default_unit: 'g/gal', label_verified_at: '2027-12-01', active: true };
+    const cappedAntapexDb = dbFor({
+      scheduled_services: [{ id: 'svc25', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
+      products_catalog: [cappedAntapex],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const cappedAntapexCalc = await jobCard.mixForProduct('antapex-cap', 4, { serviceId: 'svc25', dbh: cappedAntapexDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(cappedAntapexCalc).toMatchObject({ rateSource: 'catalog', amount: 8, amountMax: 20, unit: 'g' });
+    expect(cappedAntapexCalc.sprayVolumeGalPer1000).toBeUndefined();
+    expect(cappedAntapexCalc.warnings).toContain('Protocol dilution exceeds verified catalog label rate — confirm label before mixing.');
+    expect(cappedAntapexCalc.warnings).toContain('Protocol spray volume: 1 gal per 1,000 sq ft');
+
+    // A procedure's own conditional product line (Summit Bti Dunks on mosquito visits) stays conditional even when its mixRates row does not repeat "if needed".
+    const bti = { id: 'bti', name: 'Summit Bti Dunks', epa_reg_number: '6218-47', application_method: 'granular', inventory_on_hand: 0, inventory_unit: 'each', label_verified_at: '2027-12-01', active: true };
+    const mosquitoBtiDb = dbFor({
+      scheduled_services: [{ id: 'svc26', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Mosquito Control', service_category: 'mosquito', service_key: 'mosquito_monthly', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [bti],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const mosquitoBtiReadiness = await jobCard.buildJobCard('svc26', {
+      dbh: mosquitoBtiDb,
+      readinessOnly: true,
+      deps: { getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(mosquitoBtiReadiness.issues.some((i) => i.kind === 'stock')).toBe(false);
+    const mosquitoBtiCard = await jobCard.buildJobCard('svc26', {
+      dbh: mosquitoBtiDb,
+      deps: { getRecentCalls: async () => [], getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(mosquitoBtiCard.products).toEqual([expect.objectContaining({ id: 'bti', conditional: true })]);
+
+    // Per-service results also suppress the generic ratePerGallon and emit the label tank-table note when a 100-gal override fires.
+    const taurusConflictDb = dbFor({
+      scheduled_services: [{ id: 'svc27', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Termite Liquid Trench & Rod', category: 'termite' }],
+    });
+    const taurusConflict100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc27', dbh: taurusConflictDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurusConflict100.serviceAmounts).toEqual([
+      expect.objectContaining({ service: 'Quarterly Pest Control', amount: 40, ratePerGallon: { lo: 0.4, hi: 0.4, unit: 'fl_oz' } }),
+      expect.objectContaining({ service: 'Termite Liquid Trench & Rod', amount: 78, basis: 'tank_table', tankTableOverride: true, ratePerGallon: null }),
+    ]);
+    expect(taurusConflict100.warnings.join(' ')).toContain('Termite Liquid Trench & Rod: Label tank table: 78 fl oz for a 100 gal tank');
+
+    // Bed-bug follow-up visits list CimeXa only to top up where dust was removed; zero stock stays conditional and never puts dispatch on hold.
+    const cimexa = { id: 'cimexa', name: 'CimeXa Insecticide Dust', epa_reg_number: '73079-12', application_method: 'dust', inventory_on_hand: 0, inventory_unit: 'oz', label_verified_at: '2027-12-01', active: true };
+    const bedBugFollowupDb = dbFor({
+      scheduled_services: [{ id: 'svc28', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Bed Bug Treatment', service_category: 'specialty', service_key: 'bed_bug_treatment', followup_source_service_id: 'svc-prior', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [cimexa],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const bedBugReadiness = await jobCard.buildJobCard('svc28', {
+      dbh: bedBugFollowupDb,
+      readinessOnly: true,
+      deps: { getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(bedBugReadiness.issues.some((i) => i.kind === 'stock')).toBe(false);
+    const bedBugCimexaCalc = await jobCard.mixForProduct('cimexa', 1, { serviceId: 'svc28', dbh: bedBugFollowupDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(bedBugCimexaCalc.context.conditional).toBe(true);
+
+    // Required mixRates rows are deduplicated per service, so a primary service selecting Taurus does not drop an add-on's Taurus placement text.
+    const bothReqProtocols = {
+      termite: {
+        name: 'Termite Liquid Trench & Rod',
+        visits: [{ visit: 3, month: 'Any', primary: 'Taurus SC trench along foundation' }],
+      },
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Exterior perimeter',
+          mixRates: [{ product: 'Taurus SC', where: 'Outside: foundation band', perGallon: { amount: 0.4, unit: 'fl oz' }, epa: '53883-279' }],
+        }],
+      },
+    };
+    const bothReqDb = dbFor({
+      scheduled_services: [{ id: 'svc29', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [windyEmptyTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control', service_key: 'pest_general_quarterly' }],
+    });
+    const bothReqCard = await jobCard.buildJobCard('svc29', {
+      dbh: bothReqDb,
+      deps: { protocols: bothReqProtocols, getRecentCalls: async () => [], getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(bothReqCard.products).toEqual([
+      expect.objectContaining({ id: 'taurus', line: expect.stringContaining('Quarterly Pest Control: Taurus SC — Outside: foundation band') }),
+    ]);
+
+    // Picking the visit's own assigned rig preserves its calibration pin (including calibration-only pins) instead of switching to a replacement calibration.
+    const pinnedActiveRig = [{ id: 'cal-new', equipment_system_id: 'sys-1', technician_id: null, system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 2.5, tank_capacity_gal: '110.00' }];
+    const pinnedVisitDb = dbFor({
+      scheduled_services: [{ id: 'svc30', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: null, assigned_calibration_id: 'cal-superseded', first_name: 'A', last_name: 'B' }],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: pinnedActiveRig,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    // Stub equipment_calibrations.first() to resolve the superseded pin's system_id while active calibrations only hold cal-new.
+    const pinnedDbWrap = (t) => {
+      const chain = pinnedVisitDb(t);
+      if (String(t) === 'equipment_calibrations') {
+        chain.first = () => Object.assign(Promise.resolve({ equipment_system_id: 'sys-1' }), { catch: async () => ({ equipment_system_id: 'sys-1' }) });
+      }
+      return chain;
+    };
+    pinnedDbWrap.raw = pinnedVisitDb.raw;
+    const pickedSamePinned = await jobCard.mixForProduct('oil', 110, { serviceId: 'svc30', equipmentSystemId: 'sys-1', dbh: pinnedDbWrap, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(pickedSamePinned.tank.source).toBeNull();
+
+    // Unassigned visits (no assigned rig or calibration) also exclude another technician's lone calibration.
+    const noRigOtherTechDb = dbFor({
+      scheduled_services: [{ id: 'svc31', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: null, assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const noRigCard = await jobCard.buildJobCard('svc31', { dbh: noRigOtherTechDb, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(noRigCard.tank.source).toBeNull();
+
+    // areaCapWarning converts compatible catalog fallback units (e.g. mL/gal fallback against a fl oz/1,000 sq ft cap).
+    const aceMl = { id: 'ace-ml', name: 'Acelepryn Insecticide', epa_reg_number: '100-1489', default_rate: '5-6', default_unit: 'ml/gal', label_verified_at: '2027-12-01', active: true };
+    const highRig = [{ id: 'cal-hi', equipment_system_id: 'sys-hi', technician_id: 'tech-a', system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 5, tank_capacity_gal: '110.00' }];
+    const aceMlDb = dbFor({
+      scheduled_services: [{ id: 'svc32', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-hi', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [aceMl],
+      product_aliases: [],
+      equipment_calibrations: highRig,
+      equipment_systems: [{ id: 'sys-hi', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }],
+      scheduled_service_addons: [],
+    });
+    const aceMlCalc = await jobCard.mixForProduct('ace-ml', 100, { serviceId: 'svc32', dbh: aceMlDb, deps: { buildPlan: jest.fn(), protocols: aceProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(aceMlCalc.rateSource).toBe('catalog');
+    expect(aceMlCalc.warnings.join(' ')).toContain('allows no more than 0.37 fl oz per 1,000 sq ft in one spray');
+
+    // A dual-rate product (carrying both default_rate_per_1000 and a per-gallon default_rate) still enforces its catalog per-gallon ceiling
+    // instead of dosing above the ceiling through the protocol-only fallback.
+    const dualRateAce = { id: 'ace-dual', name: 'Acelepryn Insecticide', epa_reg_number: '100-1489', default_rate_per_1000: 0.37, rate_unit: 'fl_oz', default_rate: '0.02-0.10', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const dualRateDb = dbFor({
+      scheduled_services: [{ id: 'svc33', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [dualRateAce],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const dualRateCalc = await jobCard.mixForProduct('ace-dual', 100, { serviceId: 'svc33', dbh: dualRateDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(dualRateCalc).toMatchObject({ rateSource: 'catalog', amount: 2, amountMax: 10, unit: 'fl_oz' });
+    expect(dualRateCalc.warnings).toContain('Protocol dilution exceeds verified catalog label rate — confirm label before mixing.');
+
+    // Admin rig picks on a technician-assigned visit obey the assigned technician's calibration scope (matching the plan engine and tank sheet),
+    // and a failed lookup for a calibration-only pin fails closed instead of switching to a replacement calibration.
+    const adminPickVisitDb = dbFor({
+      scheduled_services: [{ id: 'svc34', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const adminPickedOtherTech = await jobCard.mixForProduct('oil', 110, { serviceId: 'svc34', equipmentSystemId: 'sys-1', technicianId: null, dbh: adminPickVisitDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(adminPickedOtherTech.tank.source).toBeNull();
+
+    const failedPinDbWrap = (t) => {
+      const chain = pinnedVisitDb(t);
+      if (String(t) === 'equipment_calibrations') {
+        chain.first = () => Promise.reject(new Error('lookup failed'));
+      }
+      return chain;
+    };
+    failedPinDbWrap.raw = pinnedVisitDb.raw;
+    const failedPinPick = await jobCard.mixForProduct('oil', 110, { serviceId: 'svc30', equipmentSystemId: 'sys-1', dbh: failedPinDbWrap, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(failedPinPick.tank.source).toBeNull();
+
+    // Two booked services sharing the same dilution and exact spray volume still split when their carrier bounds differ.
+    const diffBoundsProtocols = {
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{ visit: 1, month: 'Any', primary: 'Acelepryn Insecticide 0.1 fl oz/gal', mixRates: [{ product: 'Acelepryn Insecticide', where: 'Perimeter', perGallon: { amount: 0.1, unit: 'fl oz' }, epa: '100-1489' }] }],
+      },
+      tree_shrub: {
+        name: 'Tree & Shrub Care',
+        visits: [{ visit: 3, month: 'Mar', primary: 'Acelepryn Insecticide 0.1 fl oz/gal; at most 2 gal of mix per 1,000 sq ft', mixRates: [{ product: 'Acelepryn Insecticide', where: 'Foliar', perGallon: { amount: 0.1, unit: 'fl oz' }, limit: 'At most 2 gal of mix per 1,000 sq ft.', epa: '100-1489' }] }],
+      },
+    };
+    const diffBoundsDb = dbFor({
+      scheduled_services: [{ id: 'svc35', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', assigned_equipment_system_id: 'sys-hi', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [ace],
+      product_aliases: [],
+      equipment_calibrations: highRig,
+      equipment_systems: [{ id: 'sys-hi', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }],
+      scheduled_service_addons: [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }],
+    });
+    const diffBoundsCalc = await jobCard.mixForProduct('ace', 100, { serviceId: 'svc35', dbh: diffBoundsDb, deps: { buildPlan: jest.fn(), protocols: diffBoundsProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(diffBoundsCalc.serviceAmounts).toHaveLength(2);
+    expect(diffBoundsCalc.warnings.join(' ')).toContain('Tree & Shrub Care: Truck Rig #1 sprays 5 gal per 1,000 sq ft, above the label maximum of 2 gal per 1,000 sq ft.');
+
+    // Two booked services sharing the same per-gallon rate and carrier limits still split when one has a tank-table override for the requested fill.
+    const diffOverrideProtocols = {
+      termite: {
+        name: 'Termite Liquid Trench & Rod',
+        visits: [{ visit: 3, month: 'Any', primary: 'Taurus SC trench', mixRates: [{ product: 'Taurus SC', where: 'Trench', perGallon: { amount: 0.8, unit: 'fl oz' }, sprayVolume: '4 gal per 10 linear ft. 100 gal tank: 78 fl oz (label table)', epa: '53883-279' }] }],
+      },
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{ visit: 1, month: 'Any', primary: 'Taurus SC perimeter', mixRates: [{ product: 'Taurus SC', where: 'Perimeter', perGallon: { amount: 0.8, unit: 'fl oz' }, epa: '53883-279' }] }],
+      },
+    };
+    const diffOverrideDb = dbFor({
+      scheduled_services: [{ id: 'svc36', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control', service_key: 'pest_general_quarterly' }],
+    });
+    const diffOverride100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc36', dbh: diffOverrideDb, deps: { buildPlan: jest.fn(), protocols: diffOverrideProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(diffOverride100.serviceAmounts).toEqual([
+      expect.objectContaining({ service: 'Termite Liquid Trench & Rod', amount: 78, basis: 'tank_table', ratePerGallon: null }),
+      expect.objectContaining({ service: 'Quarterly Pest Control', amount: 80, ratePerGallon: { lo: 0.8, hi: 0.8, unit: 'fl_oz' } }),
+    ]);
+
+    const tristarDb = dbFor({
+      scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [tristar],
+      product_aliases: [],
+      equipment_calibrations: tsRigHigh,
+      equipment_systems: [{ id: 'sys-ts', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }],
+      scheduled_service_addons: [],
+    });
+    const tristarCalc = await jobCard.mixForProduct('tristar', 100, { serviceId: 'svc8', dbh: tristarDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(tristarCalc.context.conditional).toBe(true);
+    expect(tristarCalc.serviceAmounts.map((row) => row.service)).toEqual([
+      'Tree & Shrub Care — Aphids',
+      'Tree & Shrub Care — Mealybugs',
+      'Tree & Shrub Care — Whiteflies or soft scales (higher rate for high pressure)',
+    ]);
+    expect(tristarCalc.serviceAmounts.every((row) => row.conditional === true)).toBe(true);
+    expect(tristarCalc.warnings.join(' ')).toContain('foliar only');
+    expect(tristarCalc.warnings.join(' ')).toContain('not for armored scale');
+    expect(tristarCalc.warnings.filter((w) => w.includes('above the label maximum of 3.5 gal'))).toEqual([
+      expect.stringContaining('Tree & Shrub Care — Whiteflies or soft scales (higher rate for high pressure)'),
+    ]);
+
+    // A selected prose line paired with a single conditional mixRates row keeps conditional=true while preserving verified rates and label holds.
+    const singleCondProduct = { id: 'cond-p', name: 'Mainspring GNL', epa_reg_number: '100-1543', default_rate: '0.04', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const singleCondProtocols = {
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Mainspring GNL 8 fl oz/100 gal',
+          lineMeta: {
+            'Mainspring GNL 8 fl oz/100 gal': {
+              catalogProductHints: ['Mainspring GNL'],
+              labelRatePerGallon: { amount: 0.08, unit: 'fl_oz', use: 'whiteflies', epa: '100-1543', carrierGalPer1000: 1 },
+            },
+          },
+          mixRates: [{ product: 'Mainspring GNL', condition: 'If you find: Whitefly', where: 'Foliar', perGallon: { amount: 0.08, unit: 'fl oz' }, allowedSprayers: ['flowzone_4_gal'] }],
+        }],
+      },
+    };
+    const singleCondDb = dbFor({
+      scheduled_services: [{ id: 'svc37', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', assigned_equipment_system_id: 'sys-truck', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [singleCondProduct],
+      product_aliases: [],
+      equipment_calibrations: [{ id: 'cal-truck', equipment_system_id: 'sys-truck', technician_id: null, active: true, system_name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00', carrier_rate_gal_per_1000: '2.000' }],
+      equipment_systems: [
+        { id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' },
+        { id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: '4.00' },
+      ],
+      scheduled_service_addons: [],
+    });
+    const condAssignedTruck = await jobCard.mixForProduct('cond-p', 100, { serviceId: 'svc37', dbh: singleCondDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(condAssignedTruck.context.conditional).toBe(true);
+    expect(condAssignedTruck.amount).toBe(8);
+    expect(condAssignedTruck.rateVerified).toBe(true);
+    expect(condAssignedTruck.warnings).toContain('Truck Rig #1 is not allowed for Mainspring GNL.');
+    expect(condAssignedTruck.warnings.join(' ')).toContain('If you find: Whitefly');
+
+    // Explicitly selecting a disallowed sprayer warns beside the computed fill; selecting an allowed sprayer clears that warning.
+    const pickedTruck = await jobCard.mixForProduct('cond-p', 4, { serviceId: 'svc37', equipmentSystemId: 'sys-truck', dbh: singleCondDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(pickedTruck.amount).toBe(8.8);
+    expect(pickedTruck.warnings).toContain('Truck Rig #1 is not allowed for Mainspring GNL.');
+    const pickedFlowZone = await jobCard.mixForProduct('cond-p', 100, { serviceId: 'svc37', equipmentSystemId: 'sys-fz', dbh: singleCondDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(pickedFlowZone.amount).toBe(0.32);
+    expect(pickedFlowZone.warnings.join(' ')).not.toContain('is not allowed for Mainspring GNL.');
+
+    // A mismatched EPA label hold on the prose line is also preserved when merged with a single conditional mixRates row.
+    const heldSingleDb = dbFor({
+      scheduled_services: [{ id: 'svc38', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', first_name: 'A', last_name: 'B' }],
+      products_catalog: [{ ...singleCondProduct, epa_reg_number: '99999-1' }],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const heldSingle = await jobCard.mixForProduct('cond-p', 10, { serviceId: 'svc38', dbh: heldSingleDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(heldSingle.context.conditional).toBe(true);
+    expect(heldSingle.amount).toBe(0.4);
+    expect(heldSingle.warnings.join(' ')).toContain('If you find: Whitefly');
+
+    // Dispatch readiness and job-card product cards reconcile the same single conditional mix row so zero stock does not hold dispatch.
+    const condReadinessDb = dbFor({
+      scheduled_services: [{ id: 'svc39', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', first_name: 'A', last_name: 'B' }],
+      products_catalog: [{ ...singleCondProduct, inventory_on_hand: 0, inventory_unit: 'fl_oz' }],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const condReadiness = await jobCard.buildJobCard('svc39', { dbh: condReadinessDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z'), readinessOnly: true });
+    expect(condReadiness.status).not.toBe('hold');
+    const condCard = await jobCard.buildJobCard('svc39', { dbh: condReadinessDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(condCard.products.find((p) => p.id === 'cond-p')).toMatchObject({ role: 'conditional', conditional: true });
+
+    // Termidor SC's "Work order's product and rate" limit keeps the primary trench product required while Taurus SC's "only when the work order names Taurus" stays conditional.
+    const termidor = { id: 'termidor', name: 'Termidor SC', epa_reg_number: '7969-210', default_rate: '0.8', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const termiteTermidorDb = dbFor({
+      scheduled_services: [{ id: 'svc40', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [termidor, taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const termidorCalc = await jobCard.mixForProduct('termidor', 4, { serviceId: 'svc40', dbh: termiteTermidorDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(termidorCalc.context.conditional).toBe(false);
+    const termiteTaurusAltDb = dbFor({
+      scheduled_services: [{ id: 'svc40b', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus, termidor],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const taurusAltCalc = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc40b', dbh: termiteTaurusAltDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurusAltCalc.context.conditional).toBe(true);
+
+    // Published Tree & Shrub guide carries Merit 2F's FlowZone soil-injector equipment restriction into both job-card calibration warnings and mixForProduct.
+    const meritEquipDb = dbFor({
+      scheduled_services: [{ id: 'svc41', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-truck', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [merit],
+      product_aliases: [],
+      equipment_calibrations: [{ id: 'cal-truck', equipment_system_id: 'sys-truck', technician_id: null, active: true, system_name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00', carrier_rate_gal_per_1000: '2.000' }],
+      equipment_systems: [
+        { id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' },
+        { id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: '4.00' },
+      ],
+      scheduled_service_addons: [],
+    });
+    const meritCard = await jobCard.buildJobCard('svc41', { dbh: meritEquipDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    const meritRow = meritCard.protocol.procedure.fieldGuide.mixRates.find((r) => r.product === 'Merit 2F');
+    expect(meritRow.calibrationWarnings).toEqual(['Truck Rig #1 is not allowed for Merit 2F.']);
+    const meritTruckCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc41', equipmentSystemId: 'sys-truck', dbh: meritEquipDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(meritTruckCalc.warnings).toContain('Truck Rig #1 is not allowed for Merit 2F.');
+    const meritFzCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc41', equipmentSystemId: 'sys-fz', dbh: meritEquipDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(meritFzCalc.warnings.join(' ')).not.toContain('is not allowed for Merit 2F.');
   });
 });

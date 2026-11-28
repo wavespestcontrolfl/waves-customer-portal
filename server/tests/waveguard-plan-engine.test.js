@@ -1236,3 +1236,101 @@ describe('turf profile completeness (owner 2026-10-31: soil tests run on trigger
     expect(summary.missing.map((field) => field.key)).toEqual(['cultivar']);
   });
 });
+
+describe('loadServiceCalibrations technician scoping', () => {
+  const { loadServiceCalibrations } = require('../services/waveguard-plan-engine');
+  const stubKnex = (rows) => () => {
+    const q = {
+      join: () => q,
+      where: () => q,
+      select: () => q,
+      orderBy: () => q,
+      then: (res, rej) => Promise.resolve(rows).then(res, rej),
+    };
+    return q;
+  };
+
+  test('system-only assignments keep shared and assigned-technician calibrations, never another technician', async () => {
+    const rows = [
+      { id: 'cal-shared', equipment_system_id: 'sys-1', technician_id: null, carrier_gal_per_1000: 2 },
+      { id: 'cal-a', equipment_system_id: 'sys-1', technician_id: 'tech-a', carrier_gal_per_1000: 1.5 },
+      { id: 'cal-b', equipment_system_id: 'sys-1', technician_id: 'tech-b', carrier_gal_per_1000: 3 },
+    ];
+    const forTechA = await loadServiceCalibrations(
+      stubKnex(rows),
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(forTechA.map((r) => r.id)).toEqual(['cal-shared', 'cal-a']);
+    const otherOnly = await loadServiceCalibrations(
+      stubKnex([rows[2]]),
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(otherOnly).toEqual([]);
+    const unassignedOtherOnly = await loadServiceCalibrations(
+      stubKnex([rows[2]]),
+      { assigned_equipment_system_id: null, assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(unassignedOtherOnly).toEqual([]);
+  });
+
+  test('selecting a different rig clears the visit calibration pin instead of intersecting rig B with rig A calibration', async () => {
+    const whereCalls = [];
+    const knex = () => {
+      const q = {
+        join: () => q,
+        where: (...args) => { whereCalls.push(args); return q; },
+        select: () => q,
+        orderBy: () => q,
+        then: (res, rej) => Promise.resolve([{ id: 'cal-b', equipment_system_id: 'rig-b', technician_id: null, carrier_gal_per_1000: 2 }]).then(res, rej),
+      };
+      return q;
+    };
+    const out = await loadServiceCalibrations(
+      knex,
+      { assigned_equipment_system_id: 'rig-a', assigned_calibration_id: 'cal-a', technician_id: 'tech-a' },
+      { equipmentSystemId: 'rig-b' },
+    );
+    expect(out.map((r) => r.id)).toEqual(['cal-b']);
+    expect(whereCalls).toContainEqual(['ec.equipment_system_id', 'rig-b']);
+    expect(whereCalls).not.toContainEqual(['ec.id', 'cal-a']);
+  });
+
+  test('selecting the pinned calibration own rig keeps the calibration pin even when assigned_equipment_system_id is null', async () => {
+    const whereCalls = [];
+    const knex = (table) => {
+      const q = {
+        join: () => q,
+        where: (...args) => { if (table === 'equipment_calibrations as ec') whereCalls.push(args); return q; },
+        select: () => q,
+        orderBy: () => q,
+        first: () => Promise.resolve({ equipment_system_id: 'rig-a' }),
+        then: (res, rej) => Promise.resolve([{ id: 'cal-a', equipment_system_id: 'rig-a', technician_id: null, carrier_gal_per_1000: 1.8 }]).then(res, rej),
+      };
+      return q;
+    };
+    const out = await loadServiceCalibrations(
+      knex,
+      { assigned_equipment_system_id: null, assigned_calibration_id: 'cal-a', technician_id: 'tech-a' },
+      { equipmentSystemId: 'rig-a' },
+    );
+    expect(out.map((r) => r.id)).toEqual(['cal-a']);
+    expect(whereCalls).toContainEqual(['ec.id', 'cal-a']);
+  });
+
+  test('a caller-selected calibrationId owned by another technician is filtered out unless it matches the visit stored pin', async () => {
+    const otherRow = { id: 'cal-other', equipment_system_id: 'rig-b', technician_id: 'tech-b', carrier_gal_per_1000: 2.5 };
+    const rejected = await loadServiceCalibrations(
+      stubKnex([otherRow]),
+      { assigned_equipment_system_id: 'rig-a', assigned_calibration_id: 'cal-pin', technician_id: 'tech-a' },
+      { calibrationId: 'cal-other', technicianId: 'tech-a' },
+    );
+    expect(rejected).toEqual([]);
+
+    const storedPin = await loadServiceCalibrations(
+      stubKnex([otherRow]),
+      { assigned_equipment_system_id: 'rig-b', assigned_calibration_id: 'cal-other', technician_id: 'tech-a' },
+      { calibrationId: 'cal-other', technicianId: 'tech-a' },
+    );
+    expect(storedPin.map((r) => r.id)).toEqual(['cal-other']);
+  });
+});

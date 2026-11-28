@@ -317,6 +317,12 @@ router.put('/preferences', async (req, res, next) => {
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(req.customerId)],
       );
+      const liveCustomer = await trx('customers')
+        .where({ id: req.customerId, active: true })
+        .whereNull('deleted_at')
+        .forShare()
+        .first('id');
+      if (!liveCustomer) return { customerGone: true };
       const current = await trx('property_preferences')
         .where({ customer_id: req.customerId })
         .first();
@@ -364,6 +370,9 @@ router.put('/preferences', async (req, res, next) => {
       return current;
     });
 
+    if (existing?.customerGone) {
+      return res.status(403).json({ error: 'This account is not active.' });
+    }
     if (existing === NOTHING_SAVED) {
       return res.status(400).json({ error: [...new Set(rejected.map((r) => r.message))].join('; '), rejected });
     }

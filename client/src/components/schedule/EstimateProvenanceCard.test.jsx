@@ -283,4 +283,25 @@ describe('EstimateProvenanceCard quoted framing', () => {
     expect(screen.getByText(/Invoice drafted — not sent to the customer yet/)).toBeTruthy();
     expect(screen.queryByText(/do not collect at the visit/)).toBeNull();
   });
+
+  it('technician-redacted payload omits Quoted $0.00, keeps custom intervalDays, and shows verified annual prepay coverage without dollar amounts', () => {
+    render(
+      <EstimateProvenanceCard
+        currentPrice={null}
+        lines={[
+          { name: 'Quarterly Pest Control', cadence: 'quarterly' },
+          { name: 'Mosquito Control', cadence: 'custom', intervalDays: 42 },
+        ]}
+        payment={{ annualPrepayCovered: true }}
+        estimateRef="EST-2026-9906"
+      />,
+    );
+    expect(screen.queryByText(/Quoted/i)).toBeNull();
+    expect(screen.queryByText(/\$0\.00/)).toBeNull();
+    expect(screen.queryByText(/no prepay record on file/i)).toBeNull();
+    expect(screen.getByText('Quarterly Pest Control')).toBeTruthy();
+    expect(screen.getByText('Every 6 weeks')).toBeTruthy();
+    expect(screen.getByText('Covered')).toBeTruthy();
+    expect(screen.getByText('Do not collect at the visit')).toBeTruthy();
+  });
 });

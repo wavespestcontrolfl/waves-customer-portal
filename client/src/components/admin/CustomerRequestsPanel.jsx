@@ -18,7 +18,7 @@ function fmtDate(d) {
   if (!d) return "";
   const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return "";
-  return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return dt.toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" });
 }
 
 function RequestPhotos({ request, detail, onLoad }) {
@@ -30,11 +30,11 @@ function RequestPhotos({ request, detail, onLoad }) {
       </Button>
     );
   }
-  if (detail.loading) return <div className="text-12 text-ink-tertiary mt-2">Loading photos…</div>;
+  if (detail.loading) return <div className="text-14 text-ink-tertiary mt-2">Loading photos…</div>;
   if (detail.error) {
     return (
       <div className="mt-2">
-        <div className="text-13 text-alert-fg">{detail.error}</div>
+        <div className="text-14 text-alert-fg">{detail.error}</div>
         <Button className="mt-1.5" variant="secondary" size="sm" onClick={() => onLoad(request.id)}>Retry photos</Button>
       </div>
     );
@@ -44,11 +44,11 @@ function RequestPhotos({ request, detail, onLoad }) {
     <>
       {unavailableCount > 0 && (
         <div className="mt-2">
-          <div className="text-12 text-ink-tertiary">Some attached photos are unavailable.</div>
+          <div className="text-14 text-ink-tertiary">Some attached photos are unavailable.</div>
           <Button className="mt-1.5" variant="secondary" size="sm" onClick={() => onLoad(request.id)}>Retry unavailable photos</Button>
         </div>
       )}
-      {!detail.photos?.length && <div className="text-12 text-ink-tertiary mt-2">No request photos are available.</div>}
+      {!detail.photos?.length && <div className="text-14 text-ink-tertiary mt-2">No request photos are available.</div>}
       {selectedPhoto && (
         <div className="mt-2">
           <img src={selectedPhoto} alt={`Expanded request evidence for ${request.subject}`} className="w-full max-h-[420px] object-contain bg-zinc-50 rounded-sm border-hairline border-zinc-200" />
@@ -202,7 +202,7 @@ export default function CustomerRequestsPanel({ customerId }) {
                   {r.urgency === "urgent" ? " · Urgent" : ""}
                 </div>
                 {r.property?.address && (
-                  <div className="text-12 text-ink-secondary mt-0.5" data-testid="request-property">
+                  <div className="text-14 text-ink-secondary mt-0.5" data-testid="request-property">
                     {r.property.label ? `${r.property.label} · ` : ""}{r.property.address}
                     {r.property.isPrimary ? "" : " (secondary property)"}
                   </div>

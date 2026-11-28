@@ -21,7 +21,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
 const { postCreditMovement, round2 } = require('./customer-credit');
 const { storedManualDiscountCandidates } = require('./estimate-manual-discount-replay');
 
@@ -49,7 +49,9 @@ const VOID_REASONS = {
   office_discount: 'the office added a discount to the estimate after the code was entered',
 };
 
-const gateOn = () => isEnabled('estimatePromoCode');
+const gateOn = () => (typeof featureGates.isEnabled === 'function'
+  ? featureGates.isEnabled('estimatePromoCode')
+  : Boolean(featureGates.gates?.estimatePromoCode));
 
 function normalizeCode(raw) {
   const code = String(raw == null ? '' : raw).trim().toUpperCase();
@@ -82,6 +84,15 @@ function creditAmountOf(discount, now = new Date()) {
   if (discount.promo_code_expiry && new Date(discount.promo_code_expiry) < now) return null;
   const amount = round2(discount.amount);
   return amount > 0 ? amount : null;
+}
+
+// Re-verify a discount row at redemption time: must still be active, still carry
+// the same promo code (not cleared or renamed), remain a fixed-dollar credit
+// with no unsupported rules, and not be expired.
+function isRedeemableDiscount(discount, expectedCode, now = new Date()) {
+  if (!discount || discount.is_active !== true) return false;
+  if (normalizeCode(discount.promo_code) !== normalizeCode(expectedCode)) return false;
+  return creditAmountOf(discount, now) !== null;
 }
 
 // `exceptVisit`: the visit an invoice bills ({ serviceRecordId,
@@ -128,32 +139,60 @@ async function customerBlocked(conn, customerId, discount, { exceptVisit = null 
   return customerAlreadyUsed(conn, customerId, discount.id);
 }
 
+async function countActiveEstimatePromoHolds(conn, discountId, { customerId = null } = {}) {
+  const query = conn('estimate_promo_codes as p')
+    .join('estimates as e', 'e.id', 'p.estimate_id')
+    .where({ 'p.discount_id': discountId, 'p.status': 'entered' })
+    .whereNotIn('e.status', DEAD_ESTIMATE_STATUSES)
+    .whereNull('e.archived_at')
+    .where(function notExpired() {
+      this.where('e.status', 'accepted')
+        .orWhereNull('e.expires_at')
+        .orWhere('e.expires_at', '>', conn.fn.now());
+    });
+  if (customerId) query.where('e.customer_id', customerId);
+  const held = await query.count('* as c').first();
+  return Number(held?.c || 0);
+}
+
+async function countActiveInvoicePromoHolds(conn, discountId, { customerId = null } = {}) {
+  // Only on collectible self-pay invoices still open: a code left on a closed,
+  // payer-billed, withdrawn, or chemical-review-held invoice holds nothing.
+  const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview } = require('./invoice-helpers');
+  const query = conn('invoice_promo_codes as p')
+    .join('invoices as i', 'i.id', 'p.invoice_id')
+    .where({ 'p.discount_id': discountId, 'p.status': 'entered' })
+    .whereNotIn('i.status', CLOSED_INVOICE_STATUSES)
+    .whereNull('i.payer_id')
+    .whereNull('i.payer_statement_id');
+  if (customerId) query.where('p.customer_id', customerId);
+  const openInvoiceRows = await query.select('i.id', 'i.scheduled_send_error');
+  return openInvoiceRows.filter(
+    (inv) => !invoiceWithdrawnFromCustomer(inv) && !invoiceHeldForChemicalReview(inv),
+  ).length;
+}
+
+async function customerHasPendingPromoHold(conn, customerId, discountId) {
+  if (!customerId || !discountId) return false;
+  if (await countActiveEstimatePromoHolds(conn, discountId, { customerId }) > 0) return true;
+  return (await countActiveInvoicePromoHolds(conn, discountId, { customerId })) > 0;
+}
+
 // Uses already counted, plus codes waiting on estimates that can still be
 // accepted, plus codes entered on a pay page and not redeemed yet.
 async function usesLeft(conn, discount) {
   const max = Number(discount.promo_code_max_uses);
   if (!(max > 0)) return true;
-  const held = await conn('estimate_promo_codes as p')
-    .join('estimates as e', 'e.id', 'p.estimate_id')
-    .where({ 'p.discount_id': discount.id, 'p.status': 'entered' })
-    .whereNotIn('e.status', DEAD_ESTIMATE_STATUSES)
-    .whereNull('e.archived_at')
-    .count('* as c').first();
-  // Only on invoices still open: a code left on one that was paid another way
-  // or voided is never redeemed and holds nothing.
-  const onInvoices = await conn('invoice_promo_codes as p')
-    .join('invoices as i', 'i.id', 'p.invoice_id')
-    .where({ 'p.discount_id': discount.id, 'p.status': 'entered' })
-    .whereNotIn('i.status', CLOSED_INVOICE_STATUSES)
-    .count('* as c').first();
-  return Number(discount.promo_code_current_uses || 0) + Number(held?.c || 0) + Number(onInvoices?.c || 0) < max;
+  const activeOnEstimates = await countActiveEstimatePromoHolds(conn, discount.id);
+  const activeOnInvoices = await countActiveInvoicePromoHolds(conn, discount.id);
+  return Number(discount.promo_code_current_uses || 0) + activeOnEstimates + activeOnInvoices < max;
 }
 
 // Count one use of the code and post its credit, in the caller's transaction.
 // The count and its cap are one statement: two redemptions can never both take
 // the last use. Returns the ledger entry, or null when the uses ran out (then
 // nothing was written).
-async function mintPromoCredit(trx, { discountId, customerId, amount, note }) {
+async function mintPromoCredit(trx, { discountId, customerId, amount, note, createdBy = CREATED_BY }) {
   const counted = await trx('discounts').where({ id: discountId })
     .where(function underCap() {
       this.whereNull('promo_code_max_uses').orWhere('promo_code_max_uses', '<=', 0)
@@ -162,7 +201,7 @@ async function mintPromoCredit(trx, { discountId, customerId, amount, note }) {
     .update({ promo_code_current_uses: trx.raw('COALESCE(promo_code_current_uses, 0) + 1') });
   if (!counted) return null;
   const { entry } = await postCreditMovement({
-    customerId, delta: round2(amount), source: 'promo_code', note, createdBy: CREATED_BY,
+    customerId, delta: round2(amount), source: 'promo_code', note, createdBy,
   }, trx);
   return entry;
 }
@@ -274,7 +313,7 @@ async function redeemInTransaction(trx, estimateId) {
   // Locked: a redemption of the same code on a pay page (invoice-promo-code.js)
   // takes this lock too, so the once-per-customer check below sees it.
   const discount = await trx('discounts').where({ id: row.discount_id }).forUpdate().first();
-  if (!discount || discount.is_active !== true) return voidRow(trx, { row, customerId, reason: 'code_inactive' });
+  if (!isRedeemableDiscount(discount, row.code)) return voidRow(trx, { row, customerId, reason: 'code_inactive' });
   if (await customerBlocked(trx, customerId, discount)) return voidRow(trx, { row, customerId, reason: 'customer_not_eligible' });
 
   const amount = round2(row.credit_amount);
@@ -297,6 +336,54 @@ async function redeemInTransaction(trx, estimateId) {
     metadata: JSON.stringify({ code: row.code, discountId: discount.id, creditAmount: amount, ledgerId: entry.id }),
   });
   return 'redeemed';
+}
+
+/**
+ * Read-only projection of an entered promo code's credit on an open estimate
+ * (used by annual-prepay accept quoting so the quote and in-tx redemption agree).
+ */
+async function projectPendingEstimatePromoAmount(estimate, customerId = null, conn = db) {
+  if (!gateOn() || !estimate?.id || estimateHasStaffDiscount(estimate)) return 0;
+  const row = await conn('estimate_promo_codes').where({ estimate_id: estimate.id, status: 'entered' }).first();
+  if (!row) return 0;
+  const discount = await conn('discounts').where({ id: row.discount_id }).first();
+  if (!isRedeemableDiscount(discount, row.code)) return 0;
+  if (customerId && await customerBlocked(conn, customerId, discount)) return 0;
+  const max = Number(discount.promo_code_max_uses);
+  if (max > 0 && Number(discount.promo_code_current_uses || 0) >= max) return 0;
+  return round2(row.credit_amount);
+}
+
+/**
+ * Acquire estimate_promo_codes -> discounts FOR UPDATE locks before accept
+ * acquires any customer row locks so prepay accept matches invoice promo
+ * redemption's discounts -> customers lock ordering (prevents 40P01 deadlocks).
+ */
+async function preLockPromoDiscountInAcceptTransaction(trx, estimateId) {
+  if (!gateOn() || !estimateId) return false;
+  const row = await trx('estimate_promo_codes')
+    .where({ estimate_id: estimateId, status: 'entered' })
+    .forUpdate()
+    .first('discount_id');
+  if (!row?.discount_id) return false;
+  await trx('discounts').where({ id: row.discount_id }).forUpdate().first('id');
+  return true;
+}
+
+/**
+ * Redeem an estimate's entered promo code inside an active accept transaction
+ * (in a savepoint so a promo failure never aborts acceptance). Used before
+ * applyAccountCreditToInvoice on annual-prepay accepts so the customer's promo
+ * credit applies to the annual prepay invoice instead of stranding post-charge.
+ */
+async function redeemPromoCodeInAcceptTransaction(trx, estimateId) {
+  if (!gateOn() || !estimateId) return 'off';
+  try {
+    return await trx.transaction((sp) => redeemInTransaction(sp, estimateId));
+  } catch (err) {
+    logger.error(`[estimate-promo-code] in-tx redemption failed for estimate ${estimateId}: ${err?.code || err?.message}`);
+    return 'failed';
+  }
 }
 
 /**
@@ -351,11 +438,17 @@ async function sweepAcceptedPromoCodes() {
 
 module.exports = {
   customerBlocked,
+  customerAlreadyUsed,
+  customerHasPendingPromoHold,
+  isRedeemableDiscount,
   usesLeft,
   mintPromoCredit,
   isPromoCode,
   sweepAcceptedPromoCodes,
   customerRedeemedPromoCredit,
+  projectPendingEstimatePromoAmount,
+  preLockPromoDiscountInAcceptTransaction,
+  redeemPromoCodeInAcceptTransaction,
   normalizeCode,
   creditAmountOf,
   estimateHasStaffDiscount,

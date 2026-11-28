@@ -148,8 +148,8 @@ function sectionHead(index, label, emoji, title) {
   const palette = newsletterPalette();
   const theme = newsletterSectionTheme(index);
   return [
-    ...(label ? [`<p style="margin:0 0 6px 0;font-size:12px;line-height:1.4;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${theme.text};">${escapeHtml(label)}</p>`] : []),
-    `<h2 class="dm-chip" style="font-family:${palette.font};font-size:20px;line-height:1.35;font-weight:800;color:${theme.text};background:${theme.background};border-left:4px solid ${theme.accent};border-radius:8px;padding:10px 12px;margin:0 0 14px 0;"><span class="dm-lightcard" style="display:inline-block;background:#FFFFFF;border-radius:8px;padding:2px 6px;line-height:1.25;font-style:normal;">${emoji}</span> <strong><em>${escapeHtml(title)}</em></strong></h2>`,
+    ...(label ? [`<p style="margin:0 0 6px 0;font-size:14px;line-height:1.4;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${theme.text};">${escapeHtml(label)}</p>`] : []),
+    `<h2 class="dm-chip" style="font-family:${palette.font};font-size:20px;line-height:1.35;font-weight:700;color:${theme.text};background:${theme.background};border-left:4px solid ${theme.accent};border-radius:8px;padding:10px 12px;margin:0 0 14px 0;"><span class="dm-lightcard" style="display:inline-block;background:#FFFFFF;border-radius:8px;padding:2px 6px;line-height:1.25;font-style:normal;">${emoji}</span> <strong><em>${escapeHtml(title)}</em></strong></h2>`,
   ].join('\n');
 }
 
@@ -199,7 +199,7 @@ function creditHtml(credits) {
   const one = (c) => `${a(c.source, c.license === 'CC BY 4.0' ? `© ${c.author}` : c.author || 'photo')} (${c.licenseUrl ? a(c.licenseUrl, c.license) : escapeHtml(c.license)})`;
   const list = credits.length === 1 ? one(credits[0]) : credits.map((c) => `${escapeHtml(c.subject)}, ${one(c)}`).join('; ');
   const sites = [...new Set(credits.map((c) => c.site))].join(' and ');
-  return `<p class="dm-muted" style="margin:0 0 14px 0;font-size:11px;line-height:1.5;color:${palette.muted};">Photo${credits.length > 1 ? 's' : ''} via ${escapeHtml(sites)}: ${list}. Cropped and labeled by Waves.</p>`;
+  return `<p class="dm-muted" style="margin:0 0 14px 0;font-size:14px;line-height:1.5;color:${palette.muted};">Photo${credits.length > 1 ? 's' : ''} via ${escapeHtml(sites)}: ${list}. Cropped and labeled by Waves.</p>`;
 }
 
 // A part picture (parts.js) and its credit line, or nothing. The JPEG's
@@ -244,7 +244,7 @@ function openingBlock(issue, minutes) {
   const dateline = datelineText(issue.sendDate, minutes);
   const result = pollResultLine(issue.lastPoll || undefined);
   const html = [
-    `<p class="dm-muted" style="margin:0 0 14px 0;text-align:center;font-size:12px;line-height:1.5;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${palette.muted};">${escapeHtml(dateline)}</p>`,
+    `<p class="dm-muted" style="margin:0 0 14px 0;text-align:center;font-size:14px;line-height:1.5;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${palette.muted};">${escapeHtml(dateline)}</p>`,
     heroHtml(issue.lead),
     `<p style="margin:0 0 8px 0;font-size:22px;line-height:1.4;">👋 <strong><em>${escapeHtml(GREETING)}</em></strong></p>`,
     result && resultParagraph(result),
@@ -299,7 +299,7 @@ function speciesCardHtml(species, factText, page) {
   const latin = typeof species.scientific === 'string' ? species.scientific.trim() : '';
   const tags = [
     ...(latin ? [`<em class="dm-muted" style="color:${palette.muted};">${escapeHtml(latin)}</em>`] : []),
-    ...(verdict ? [`<span class="dm-chip-lite" style="display:inline-block;padding:4px 12px;border-radius:999px;background:${verdict.background};color:${verdict.text};font-size:13px;line-height:1.3;font-weight:700;font-style:normal;">${escapeHtml(verdict.label)}</span>`] : []),
+    ...(verdict ? [`<span class="dm-chip-lite" style="display:inline-block;padding:4px 12px;border-radius:999px;background:${verdict.background};color:${verdict.text};font-size:14px;line-height:1.3;font-weight:700;font-style:normal;">${escapeHtml(verdict.label)}</span>`] : []),
   ];
   return [
     `<div class="dm-box" style="margin:0 0 16px 0;padding:14px 16px;background:${palette.cardBg};border-radius:12px;">`,

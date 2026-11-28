@@ -315,7 +315,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, o
               // row opens the completion, as for any open visit.
               <Badge tone="warn">Paid, report not sent</Badge>
             )}
-            {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
+            {(service.prepaidAmount ?? service.checkoutPrepaidCredit) != null && Number(service.prepaidAmount ?? service.checkoutPrepaidCredit) > 0 && (
               <span
                 className="inline-flex items-center rounded-full uppercase tracking-label font-medium"
                 style={{

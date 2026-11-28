@@ -245,19 +245,56 @@ function productCautions(item, exclusions, products) {
   ].filter(Boolean);
 }
 
-// Amounts come from the server calculation, from the selected rig's last
-// sprayer test. Every check is a warning beside the amount, never in place of
-// it (owner 2026-11-26); only a missing sprayer test leaves an amount out.
+// Amounts come from the server calculation, from the selected rig's
+// sprayer output. Every check is a warning beside the amount, never in place of
+// it (owner 2026-11-26); only a missing sprayer figure leaves an amount out.
+const SCOPE_LABELS = {
+  BROADCAST_FULL: "Broadcast (full lawn)",
+  BROADCAST_BED: "Broadcast (beds)",
+  SPOT_WEED: "Spot treatment (weeds)",
+  SPOT_INSECT: "Spot treatment (insects)",
+  SPOT_DISEASE: "Spot treatment (disease)",
+  SPOT_DRY: "Spot treatment (dry areas)",
+};
+function formatApplicationScope(scope) {
+  if (!scope) return scope;
+  if (SCOPE_LABELS[scope]) return SCOPE_LABELS[scope];
+  if (/^[A-Z0-9_]+$/.test(scope)) return scope.toLowerCase().replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  return scope;
+}
+
+function mixingDirectionsText(item) {
+  if (item.product?.mixingInstructions) return item.product.mixingInstructions;
+  if (isSpreader(item)) return null;
+  return "Mixing directions are not on file. Consult the product label.";
+}
+
+// Only rules whose own subject is a seasonal blackout or county/city ordinance collapse into
+// "Seasonal & county rules" on screen (and stay open on print). Product limits and general
+// safety rules (such as "Fertilizer safety: ...") always stay visible, even if they mention a county.
+const SEASONAL_COUNTY_RULE_RE = /^(?:(?:n(?:\s+and\s+p)?\s+)?blackout\b|(?:north port|sarasota|manatee|charlotte|pinellas|hillsborough)\b|[^:]*\b(?:seasonal|county|municipal)\s+(?:rule|restriction|blackout|ordinance|ban)\b)/i;
+
+function splitSafetyRules(safetyRules = []) {
+  const productRules = [];
+  const seasonalCountyRules = [];
+  for (const rule of safetyRules) {
+    if (SEASONAL_COUNTY_RULE_RE.test(String(rule || ""))) seasonalCountyRules.push(rule);
+    else productRules.push(rule);
+  }
+  return { productRules, seasonalCountyRules };
+}
+
 export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
   const equipment = plan.equipment;
   const products = (plan.items || []).filter((item) => item.product);
-  const sheet = (
+  const { productRules, seasonalCountyRules } = splitSafetyRules(safetyRules);
+  const renderSheet = (isPrint = false) => (
     <>
-      <FieldMasthead variant="staff" />
+      <FieldMasthead variant="staff" subtitle="Tank & Spreader Reference" />
       <FieldTitle
         eyebrow="Protocol reference"
         title="110-gallon tank mixing reference"
-        subtitle={`St. Augustine · ${plan.month} · ${equipment?.systemName || "No calibrated tank selected"}`}
+        subtitle={`St. Augustine · ${plan.month} · ${equipment?.systemName || "No sprayer selected"}`}
         reference={plan.month}
       />
       <div className="protocol-tank-content space-y-4 text-zinc-900">
@@ -279,7 +316,17 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
         {[...(plan.warnings || []), ...(plan.blocks || [])].map((warning, index) => (
           <p key={`${warning.code}-${index}`} className={warning.severity === "note" ? undefined : "text-alert-fg"}>{warning.message}</p>
         ))}
-        {safetyRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
+        {productRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
+        {seasonalCountyRules.length > 0 && (
+          <details open={isPrint} className="rounded-sm border border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
+            <summary className="cursor-pointer text-12 font-medium text-ink-primary">
+              Seasonal &amp; county rules ({seasonalCountyRules.length})
+            </summary>
+            <div className="mt-2 space-y-1.5">
+              {seasonalCountyRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
+            </div>
+          </details>
+        )}
         {plan.mixCheck?.status === "unavailable" && <p className="font-medium text-alert-fg">{MIX_CHECK_UNAVAILABLE}</p>}
         {!products.length && <p>No mapped products are available for this month.</p>}
         {products.map((item, index) => {
@@ -298,7 +345,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
           ["Active ingredient", product.activeIngredient],
           ["Application instruction", item.raw && <>{item.raw}{directionLines(tankWarnings, { productId: product.id, verdicts: ["never", "caution"] })
             .map((text) => <span key={text} className="block font-medium text-alert-fg">{text}</span>)}</>],
-          ["Application scope", item.scope],
+          ["Application scope", formatApplicationScope(item.scope)],
           ["Signal word", product.signalWord],
           ["PPE", ppe || "Not on file — consult the product label"],
           ["Re-entry", product.reentryText || "Consult the product label"],
@@ -325,7 +372,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
             {/* The LESCO spreader number for a spreader card (server: spreader-settings.js), or why it has none. */}
             {item.spreader?.text && <p className="mt-2 font-medium">{item.spreader.text}</p>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}
-            <p className="mt-2">{product.mixingInstructions || "Mixing directions are not on file. Consult the product label."}</p>
+            {mixingDirectionsText(item) && <p className="mt-2">{mixingDirectionsText(item)}</p>}
             {product.mixingInstructions && directionLines(tankWarnings, { productId: product.id }).map((text) => <p key={text} className="mt-1 font-medium text-alert-fg">{text}</p>)}
             {exclusions.length > 0 && <p className="mt-2 text-alert-fg">Excluded turf: {exclusions.join(", ")}</p>}
             <dl className="protocol-tank-meta mt-3 grid gap-3 md:grid-cols-2">{safety.map(([label, value]) => <div key={label}><dt className="font-medium">{label}</dt><dd>{typeof value === "string" || typeof value === "number" ? String(value) : value}</dd></div>)}</dl>
@@ -340,18 +387,19 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
       <FieldFooter label="Tank mixing reference" reference={plan.month} />
     </>
   );
+
   return (
     <>
       <Card className="p-4">
         <div className="waves-field-no-print mb-4 flex justify-end"><Button variant="secondary" onClick={() => window.print()}>Print mixing reference</Button></div>
         <FieldDocumentBody className="field-document-scroll protocol-tank-document">
-          {sheet}
+          {renderSheet(false)}
         </FieldDocumentBody>
       </Card>
       {createPortal(
         <div className="protocol-print-sheet">
           <FieldDocument className="protocol-tank-print-document">
-            {sheet}
+            {renderSheet(true)}
           </FieldDocument>
         </div>, document.body,
       )}

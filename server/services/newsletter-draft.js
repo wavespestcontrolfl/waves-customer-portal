@@ -796,14 +796,18 @@ async function assembleWavesNewsletter(draft) {
   // ── Hero ──
   if (hero) {
     const heroParts = [];
-    heroParts.push(`<p style="margin:0 0 4px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">This week's top pick</p>`);
+    heroParts.push(`<p style="margin:0 0 4px 0;font-size:14px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">This week's top pick</p>`);
     const heroImg = safeUrl(hero.imageUrl);
     if (heroImg) {
-      heroParts.push(`<div style="margin:0 0 10px 0;"><img src="${heroImg}" alt="${escapeHtml(hero.sourceTitle || '')}" style="max-width:100%;height:auto;border-radius:10px;display:block;" /></div>`);
+      const heroAlt = escapeHtml(hero.sourceTitle || '');
+      heroParts.push(`<div style="margin:0 0 10px 0;">
+<!--[if !mso]><!--><img src="${heroImg}" alt="${heroAlt}" style="max-width:100%;height:auto;border-radius:10px;display:block;" /><!--<![endif]-->
+<!--[if mso]><img src="${heroImg}" alt="${heroAlt}" width="544" /><![endif]-->
+</div>`);
     }
     heroParts.push(`<h2 style="margin:0 0 6px 0;font-size:20px;line-height:1.35;">${escapeHtml(hero.sourceTitle || '')}</h2>`);
     const heroMeta = metaLine(hero);
-    if (heroMeta) heroParts.push(`<p style="margin:0 0 8px 0;font-size:13px;color:${COLORS.muted};">${heroMeta}</p>`);
+    if (heroMeta) heroParts.push(`<p style="margin:0 0 8px 0;font-size:14px;color:${COLORS.muted};">${heroMeta}</p>`);
     if (hero.hook) heroParts.push(`<p style="margin:0 0 8px 0;font-size:15px;line-height:1.6;">${markdownToHtml(hero.hook)}</p>`);
     if (hero.heroWhy) heroParts.push(`<p style="margin:0 0 8px 0;font-size:14px;line-height:1.5;"><strong>Why it made the cut:</strong> ${markdownToHtml(hero.heroWhy)}</p>`);
     const heroCta = detailsLink(hero, 'Details & tickets');
@@ -831,7 +835,7 @@ async function assembleWavesNewsletter(draft) {
     }
     card.push(`<h2 style="margin:0 0 6px 0;font-size:17px;line-height:1.35;">${escapeHtml(ev.sourceTitle || '')}</h2>`);
     const meta = metaLine(ev);
-    if (meta) card.push(`<p style="margin:0 0 6px 0;font-size:13px;color:${COLORS.muted};">${meta}</p>`);
+    if (meta) card.push(`<p style="margin:0 0 6px 0;font-size:14px;color:${COLORS.muted};">${meta}</p>`);
     // The DB-locked details link renders regardless of model prose — a
     // partially valid response must never ship a card with no way in.
     const link = detailsLink(ev);
@@ -850,7 +854,7 @@ async function assembleWavesNewsletter(draft) {
   if (notes.length) {
     const noteLines = notes.map((n) => `<p style="margin:0 0 4px 0;font-size:14px;line-height:1.5;">• ${markdownToHtml(n)}</p>`);
     parts.push(`<div class="dm-box" style="margin:0 0 24px 0;padding:14px 18px;background:#FFF8EC;border-radius:10px;">
-<p style="margin:0 0 6px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">Community notes</p>
+<p style="margin:0 0 6px 0;font-size:14px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">Community notes</p>
 ${noteLines.join('\n')}
 </div>`);
   }

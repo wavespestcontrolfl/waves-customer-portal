@@ -226,12 +226,14 @@ async function applyFlags(ids, now) {
 const WINBACK_QUIZ_ID = 'stay-subscribed-v1';
 const WINBACK_SUBJECT = 'Should we keep sending you these?';
 const WINBACK_HTML = [
+  '<div class="dm-text">',
   '<p>Hi{{greeting-name}},</p>',
   "<p>It's been a while since you've opened one of these, so we're checking in before we keep filling your inbox.</p>",
   "<p>If you'd like to keep getting our local events guide and lawn &amp; pest tips, tap below and confirm — that's it:</p>",
   `{{quiz:${WINBACK_QUIZ_ID}}}`,
   "<p>If not, no hard feelings — use the unsubscribe link below, or simply do nothing and we'll stop sending after this note.</p>",
   '<p>— The Waves Pest Control Team</p>',
+  '</div>',
 ].join('\n');
 const WINBACK_TEXT = [
   'Hi{{greeting-name}},',

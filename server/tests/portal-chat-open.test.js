@@ -8,6 +8,7 @@ process.env.ANTHROPIC_API_KEY = 'test-key';
 
 const fs = require('fs');
 const path = require('path');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 // Real Knex SQL compilation with an in-memory transport (same pattern as
 // portal-chat-email-change.test.js).
@@ -721,7 +722,7 @@ describe('escalate under the gate', () => {
 });
 
 describe('a turn that ends without a model reply', () => {
-  const FALLBACK = "I'm having trouble right now. Please try calling us at (941) 318-7612.";
+  const FALLBACK = `I'm having trouble right now. Please try calling us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
   const HAND_OFF = "Thanks Pat. I've sent this to our team, and they'll reply by text or email, usually within one business hour between 8 AM and 8 PM. Is there anything else you'd like me to pass along?";
   const MESSAGE = "I was supposed to have a lawn service on Thursday but I don't think a tech came.";
 
@@ -838,7 +839,7 @@ describe('a turn that ends without a model reply', () => {
 
       const result = await say(MESSAGE);
 
-      expect(result).toEqual({ reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false });
+      expect(result).toEqual({ reply: `I'm having a brief connection issue. Please try again in a moment, or call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, escalated: false });
     });
 
     test('the rescue does nothing', async () => {

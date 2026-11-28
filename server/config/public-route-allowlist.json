@@ -68,7 +68,7 @@
         "USE /api/public/secure-card (rejectUndecodablePath#ca2df0c3)",
         "USE /api/public/secure-card (inline function#8abc12e6)",
         "USE /api/public/track (trackPublicPreparser#28c4556d)",
-        "USE /api/public/email-resubscribe (preParserGuard#47ed312e)",
+        "USE /api/public/email-resubscribe (preParserGuard#8ee23bda)",
         "USE /api/public/home (preLimiterGuard#fcbfa1c4)",
         "USE /api/social/series (inline function#033624d5)",
         "USE /api/stripe/terminal/save-card-handoff (inline function#371094d5)"
@@ -391,7 +391,7 @@
       "mount": "/api/public/email-resubscribe",
       "reason": "Emailed 'Turn Waves emails back on?' confirm link (gap #18; owner 2026-11-04 chose confirm email incl. 'a small confirm page', copy approved): GET renders a read-only page, POST (the deliberate tap from that mailbox) lifts the customer's own unsubscribe; 32-byte token stored as sha256 only, 7-day expiry, single use; generic 404 page while GATE_PORTAL_EMAIL_RESUBSCRIBE is dark",
       "routes": [
-        "USE /api/public/email-resubscribe (preParserGuard#47ed312e)",
+        "USE /api/public/email-resubscribe (preParserGuard#8ee23bda)",
         "GET /api/public/email-resubscribe/:token",
         "POST /api/public/email-resubscribe/:token"
       ]

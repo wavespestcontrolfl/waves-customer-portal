@@ -114,6 +114,7 @@ beforeEach(() => {
   protocols.lawn.st_augustine.visits = [visit];
   db.mockImplementation((table) => {
     if (table === 'equipment_calibrations as ec') return calibrationQuery();
+    if (table === 'equipment_systems') return readQuery([{ id: 'sys-1', system_type: 'tank', tank_capacity_gal: 110, system_name: 'Truck #1' }]);
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery(CATALOG.flatMap((product) => (
       product.aliases.map((alias_name) => ({ product_id: product.id, alias_name }))
@@ -446,6 +447,166 @@ describe('resolveMixWith: the tank sheet ties a mix by product id, from the plan
     expect(seller.tankAmounts.mixWithProductIds).toEqual([]);
     expect(unknown.tankAmounts.mixWithProductIds).toEqual([]);
     expect(none.tankAmounts).toEqual({ mixWith: null });
+  });
+});
+
+describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like the plan engine', () => {
+  const { loadSheetCalibration, getBackpackCalibration, getActiveBigTanks } = adminProtocolsRouter._internals;
+
+  test('system-only visit assignment excludes another technician calibration and keeps shared or assigned technician rows', async () => {
+    const otherTechRow = { id: 'cal-b', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_name: 'Truck #1', carrier_gal_per_1000: 2.5 };
+    const ownTechRow = { id: 'cal-a', equipment_system_id: 'sys-1', technician_id: 'tech-a', system_name: 'Truck #1', carrier_gal_per_1000: 1.5 };
+    const sharedRow = { id: 'cal-shared', equipment_system_id: 'sys-1', technician_id: null, system_name: 'Truck #1', carrier_gal_per_1000: 2 };
+
+    calibration = [otherTechRow];
+    const rejected = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(rejected).toMatchObject({ rigId: 'sys-1', calibration: null, calibrationScope: { scopeByTechnician: true, technicianId: 'tech-a' } });
+
+    // The backpack fallback and alternate 110-gal tank options obey the same technician scope.
+    backpackCalibration = [{ id: 'bp-b', equipment_system_id: 'bp-sys', technician_id: 'tech-b', system_name: 'FlowZone Typhoon 3.0', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.5 }];
+    expect(await getBackpackCalibration(rejected.calibration, rejected.calibrationScope)).toBeNull();
+    backpackCalibration = [
+      ...backpackCalibration,
+      { id: 'bp-a', equipment_system_id: 'bp-sys', technician_id: 'tech-a', system_name: 'FlowZone Typhoon 3.0', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.2 },
+    ];
+    expect(await getBackpackCalibration(rejected.calibration, rejected.calibrationScope)).toMatchObject({ id: 'bp-a' });
+
+    calibration = [
+      { id: 'tank-b', equipment_system_id: 'sys-2', technician_id: 'tech-b', system_name: '110-Gallon Spray Tank #2', system_type: 'tank', tank_capacity_gal: 110, carrier_gal_per_1000: 3 },
+      { id: 'tank-shared', equipment_system_id: 'sys-1', technician_id: null, system_name: '110-Gallon Spray Tank #1', system_type: 'tank', tank_capacity_gal: 110, carrier_gal_per_1000: 2 },
+    ];
+    expect((await getActiveBigTanks(rejected.calibrationScope)).map((r) => r.id)).toEqual(['tank-shared']);
+    expect((await getActiveBigTanks({ scopeByTechnician: false })).map((r) => r.id)).toEqual(['tank-b', 'tank-shared']);
+
+    calibration = [otherTechRow, ownTechRow];
+    const matchedOwn = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(matchedOwn.calibration).toEqual(ownTechRow);
+
+    calibration = [otherTechRow, sharedRow];
+    const matchedShared = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(matchedShared.calibration).toEqual(sharedRow);
+  });
+
+  test('admin explicit rig pick on the reference tab (no scheduled visit) honors technician-owned calibrations', async () => {
+    const techOwnedRow = { id: 'cal-b', equipment_system_id: 'sys-b', technician_id: 'tech-b', system_name: 'Truck #2', carrier_gal_per_1000: 2.5 };
+    calibration = [techOwnedRow];
+    const picked = await loadSheetCalibration({ query: { equipmentSystemId: 'sys-b' }, admin: { role: 'admin' } }, null);
+    expect(picked).toMatchObject({ rigId: 'sys-b', calibration: techOwnedRow, calibrationScope: { scopeByTechnician: false } });
+  });
+
+  test('explicit assigned_calibration_id queries that calibration directly, and overriding to a different rig clears the stale pin', async () => {
+    const pinned = { id: 'cal-pinned', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_name: 'Truck #1', carrier_gal_per_1000: 2.2 };
+    const whereCalls = [];
+    db.mockImplementation((table) => {
+      if (table === 'equipment_calibrations as ec') {
+        const q = readQuery([pinned]);
+        q.where = jest.fn((...args) => { whereCalls.push(args); return q; });
+        return q;
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const out = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: 'cal-pinned', technician_id: 'tech-a' },
+    );
+    expect(out).toMatchObject({ rigId: 'sys-1', calibration: pinned });
+    expect(whereCalls).toContainEqual(['ec.id', 'cal-pinned']);
+
+    whereCalls.length = 0;
+    await loadSheetCalibration(
+      { query: { equipmentSystemId: 'sys-2' }, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: 'cal-pinned', technician_id: 'tech-a' },
+    );
+    expect(whereCalls).not.toContainEqual(['ec.id', 'cal-pinned']);
+    expect(whereCalls).toContainEqual(['ec.equipment_system_id', 'sys-2']);
+  });
+
+  test('an unresolved/superseded FlowZone calibration pin suppresses replacement and other-backpack FlowZone fills even when the pinned FlowZone has no active calibrations', async () => {
+    const otherFlowZone = { id: 'bp-other', equipment_system_id: 'bp-sys-2', technician_id: null, system_name: 'FlowZone Typhoon 3.0 #2', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.5 };
+    db.mockImplementation((table) => {
+      if (table === 'equipment_calibrations as ec') {
+        const q = readQuery([]);
+        let backpackOnly = false;
+        q.where = jest.fn((col, val) => { if (col === 'es.system_type' && val === 'backpack') backpackOnly = true; return q; });
+        const rows = () => (backpackOnly ? [otherFlowZone] : []);
+        q.first = jest.fn(async () => rows()[0] || null);
+        q.then = (res, rej) => Promise.resolve(rows()).then(res, rej);
+        q.catch = (rej) => Promise.resolve(rows()).catch(rej);
+        return q;
+      }
+      if (table === 'equipment_systems') {
+        let queriedId = null;
+        const q = readQuery([]);
+        q.where = jest.fn((arg) => { queriedId = arg?.id || null; return q; });
+        q.first = jest.fn(async () => (queriedId === 'bp-sys-1'
+          ? { system_type: 'backpack', tank_capacity_gal: 4, system_name: 'FlowZone Typhoon 3.0 #1' }
+          : { system_type: 'tank', tank_capacity_gal: 110, system_name: '110-Gallon Spray Tank #1' }));
+        return q;
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const fzPin = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'bp-sys-1', assigned_calibration_id: 'bp-old-superseded', technician_id: 'tech-a' },
+    );
+    expect(fzPin.calibration).toBeNull();
+    expect(fzPin.calibrationScope.unresolvedPinRigId).toBe('bp-sys-1');
+    expect(await getBackpackCalibration(fzPin.calibration, fzPin.calibrationScope)).toBeNull();
+
+    // A stale pin on a 110-gal truck tank still permits the independent 4-gal FlowZone spot column.
+    const truckPin = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'tank-sys-1', assigned_calibration_id: 'tank-old-superseded', technician_id: 'tech-a' },
+    );
+    expect(await getBackpackCalibration(truckPin.calibration, truckPin.calibrationScope)).toEqual(otherFlowZone);
+
+    // A system-only FlowZone assignment with no eligible calibration also suppresses other-backpack fallback.
+    const fzSystemOnly = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'bp-sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(fzSystemOnly.calibration).toBeNull();
+    expect(fzSystemOnly.calibrationScope.unresolvedRigId).toBe('bp-sys-1');
+    expect(await getBackpackCalibration(fzSystemOnly.calibration, fzSystemOnly.calibrationScope)).toBeNull();
+  });
+
+  test('an unresolved calibration-only pin skips the alternate 110-gal tank fallback even when two tanks have different outputs', async () => {
+    const tank1 = { id: 'tank-1', equipment_system_id: 'sys-1', technician_id: null, system_name: '110-Gallon Spray Tank #1', system_type: 'tank', tank_capacity_gal: 110, carrier_gal_per_1000: 1.5 };
+    const tank2 = { id: 'tank-2', equipment_system_id: 'sys-2', technician_id: null, system_name: '110-Gallon Spray Tank #2', system_type: 'tank', tank_capacity_gal: 110, carrier_gal_per_1000: 2.5 };
+    db.mockImplementation((table) => {
+      if (table === 'equipment_calibrations') {
+        const q = readQuery([]);
+        q.first = jest.fn(() => Promise.reject(new Error('lookup failed')));
+        return q;
+      }
+      if (table === 'equipment_calibrations as ec') {
+        let filteredOut = false;
+        const q = readQuery([tank1, tank2]);
+        q.where = jest.fn((col, val) => { if (col === 'ec.id' && val === 'cal-missing') filteredOut = true; return q; });
+        q.first = jest.fn(async () => (filteredOut ? null : tank1));
+        q.then = (res, rej) => Promise.resolve(filteredOut ? [] : [tank1, tank2]).then(res, rej);
+        q.catch = (rej) => Promise.resolve(filteredOut ? [] : [tank1, tank2]).catch(rej);
+        return q;
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const sheetCal = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: null, assigned_calibration_id: 'cal-missing', technician_id: 'tech-a' },
+    );
+    expect(sheetCal.rigId).toBeNull();
+    expect(sheetCal.calibrationScope.unresolvedPinRigId).toBe('__unknown__');
+    expect(await getActiveBigTanks(sheetCal.calibrationScope)).toEqual([]);
+    expect(await getBackpackCalibration(sheetCal.calibration, sheetCal.calibrationScope)).toBeNull();
   });
 });
 
