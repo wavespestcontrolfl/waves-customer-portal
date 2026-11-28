@@ -1856,6 +1856,52 @@ describe('DB-backed history-total auto-order policy (Sticker Mule)', () => {
     expect(a.readCharge).not.toHaveBeenCalled();
   });
 
+  test('resolveBindingTotal refuses vendor_sku_order_live before monthly/per-order cap refusal when a competing SKU order is in flight', async () => {
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 50000 });
+    mockState.monthly = 40000; // competing in-flight hold exhausts monthly budget
+    mockState.liveSkuOrder = { id: 'ledger-a', restock_request_id: 'req-a', status: 'placing', external_order_number: null, product_name: 'Product A' };
+    const a = historyAdapter();
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+    expect(a.place).not.toHaveBeenCalled();
+    const ev = JSON.parse(lastLedgerPatch().evidence);
+    expect(ev).toMatchObject({
+      outstandingOrder: { number: null, why: 'coming' },
+      competingOrder: { ledgerId: 'ledger-a', requestId: 'req-a' },
+    });
+    expect(ev.bell.body).toMatch(/Do NOT order by hand/i);
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [, headline, reason] = notify.mock.calls[0];
+    expect(headline).toMatch(/wait on/i);
+    expect(reason).toMatch(/wait for it to settle before buying/i);
+  });
+
+  test('settleRequestLedgerBells preserves duplicate_sku_mapping warning during sweep handoff until the mapping is resolved', async () => {
+    const dbFn = require('../models/db');
+    mockState.requestLedger = {
+      id: 'ledger-dup',
+      status: 'needs_review',
+      placed_at: null,
+      vendor_id: 'vend-sm',
+      adapter: 'stickermule',
+      request_payload: { productId: 'prod-1', vendorSku: '4242' },
+      evidence: {
+        duplicateSkuProducts: [{ productId: 'prod-other', name: 'Duplicate Sticker' }],
+        bell: { v: 'v-dup', title: 'Auto-order needs review: Yard sign sticker (Sticker Mule)', body: 'Multiple active auto-reorder products share Sticker Mule SKU 4242. Fix the duplicate SKU mapping before buying.' },
+      },
+    };
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    const preserved = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true }));
+    expect(preserved).toEqual({ preserved: 'duplicate_sku_mapping' });
+    expect(mockState.updates.filter((u) => u.table === 'notifications')).toHaveLength(0);
+
+    // Once the duplicate mapping is resolved, the sweep handoff retires the warning normally.
+    mockState.otherVendorProducts = [];
+    const settled = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true }));
+    expect(settled).toEqual({ settled: true });
+    expect(mockState.updates.filter((u) => u.table === 'notifications' && closedDone(u))).toHaveLength(1);
+  });
+
   test('settleRequestLedgerBells rewrites landedAfterReceive cap-alert wording after the second receipt clears landedAfterReceive', async () => {
     const dbFn = require('../models/db');
     mockState.freshRequestStatus = 'received';

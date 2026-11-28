@@ -613,11 +613,38 @@ maybeDescribe('order-revoke (live Postgres)', () => {
       expect(dupNotices[0].title).not.toMatch(/order .* by hand/i);
       expect(dupNotices[0].message).toMatch(/fix the mapping before buying/i);
 
-      // 3) Product A places while Product B is disabled, then Product B is re-enabled with a fresh request:
-      // authorizeHistoryOrder blocks Product B unsent via vendor_sku_order_live with a wait-for-reconciliation headline.
+      // 2b) If the vendor gate closes while the duplicate mapping still exists, sweep handoff
+      // preserves the duplicate-SKU warning instead of retiring it and telling staff to buy by hand.
+      const keptDup = await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqBDup.id, { preserveOutstanding: true }));
+      expect(keptDup).toEqual({ preserved: 'duplicate_sku_mapping' });
+      expect((await db('vendor_orders').where({ id: voDup.id }).first('evidence')).evidence.bell).toBeTruthy();
+
+      // Once the duplicate mapping is resolved (Product B auto_reorder disabled), handoff retires it.
       await db('products_catalog').where({ id: prodB.id }).update({ auto_reorder_enabled: false });
-      const resA = await dispatch.dispatchRestockOrder(a.request.id, { conn: db, notify: ringOnly(), adapters: { stickermule: adapterCharging(31400, { ledger: a.ledger }) }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
-      expect(resA).toMatchObject({ status: 'placed' });
+      const resolvedDup = await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqBDup.id, { preserveOutstanding: true }));
+      expect(resolvedDup).toEqual({ settled: true });
+      expect((await db('vendor_orders').where({ id: voDup.id }).first('evidence')).evidence.bell).toBeUndefined();
+
+      // 3) Product A's authorized POST is in flight holding the remaining monthly budget; Product B
+      // requests the same SKU while Product A's POST hasn't finished yet -> Product B must park
+      // vendor_sku_order_live (wait-for-reconciliation), NEVER over_monthly_cap ("buy by hand").
+      const spentBefore = await dispatch.monthlySpentCents(db);
+      await savePolicy(key, { enabled: true, approvedItems: [`stickermule:${a.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: spentBefore + 60000, expectedRevision: 1 });
+      let aAtPost;
+      let releaseA;
+      const aReachedPost = new Promise((r) => { aAtPost = r; });
+      const adapterAInFlight = {
+        ...adapterCharging(31400, { ledger: a.ledger }),
+        place: jest.fn(async ({ beforeSubmit }) => {
+          const v = await beforeSubmit();
+          expect(v).toEqual({ ok: true });
+          aAtPost();
+          await new Promise((r) => { releaseA = r; });
+          return { externalOrderNumber: `SM-IF-DUP-${crypto.randomUUID().slice(0, 6)}`, amountCents: null, response: {}, evidence: { totalSource: 'none' } };
+        }),
+      };
+      const pendingA = dispatch.dispatchRestockOrder(a.request.id, { conn: db, notify: ringOnly(), adapters: { stickermule: adapterAInFlight }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      await aReachedPost;
       const voA = await a.ledger();
       made.vendor_orders.push(voA.id);
 
@@ -631,12 +658,14 @@ maybeDescribe('order-revoke (live Postgres)', () => {
       const captureLive = async (cat, title, message, opts) => { liveNotices.push({ title, message, opts }); return { id: 'n-live' }; };
       const adapterB = adapterCharging(31400, { ledger: () => db('vendor_orders').where({ restock_request_id: reqB.id }).first() });
       const resB = await dispatch.dispatchRestockOrder(reqB.id, { conn: db, notify: captureLive, adapters: { stickermule: adapterB }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      releaseA();
+      expect(await pendingA).toMatchObject({ status: 'placed' });
       expect(resB).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
       const voB = await db('vendor_orders').where({ restock_request_id: reqB.id }).first();
       made.vendor_orders.push(voB.id);
       expect(voB.placed_at).toBeNull();
       expect(voB.evidence).toMatchObject({
-        outstandingOrder: { number: voA.external_order_number, why: 'coming' },
+        outstandingOrder: { number: null, why: 'coming' },
         competingOrder: { ledgerId: voA.id, requestId: a.request.id },
       });
       // vendor_sku_order_live must NEVER tell staff to buy by hand (headline, reason, or detail).

@@ -410,12 +410,33 @@ async function assertManualActionAllowed(trx, requestId, action) {
 // The ledger row is LOCKED before its notifications — the order deliverBell
 // and the manual restock actions take, so a caller that holds no ledger lock
 // yet (the sweep's hand-off) cannot deadlock against them (hook r31 P1).
-const isOutstandingParkRow = (row) => (
+const isPreSubmitParkRow = (row) => (
   !!row
   && !row.placed_at
   && ['needs_review', 'failed'].includes(row.status)
+);
+const isOutstandingParkRow = (row) => (
+  isPreSubmitParkRow(row)
   && meta(row.evidence).outstandingOrder != null
 );
+async function duplicateSkuMappingStillActive(trx, row, ev) {
+  if (!isPreSubmitParkRow(row) || !Array.isArray(ev.duplicateSkuProducts) || ev.duplicateSkuProducts.length === 0) return false;
+  const payload = meta(row.request_payload);
+  const vendorSku = payload.vendorSku ? String(payload.vendorSku).trim() : null;
+  if (!row.vendor_id || !vendorSku || !payload.productId) return true;
+  const self = await trx('products_catalog')
+    .where({ id: payload.productId, active: true, auto_reorder_enabled: true, auto_reorder_vendor_id: row.vendor_id })
+    .first('id');
+  if (!self) return false;
+  const selfPricing = await require('./auto-reorder').vendorPricingFor(trx, payload.productId, row.vendor_id);
+  if (String(selfPricing?.vendor_sku || '').trim() !== vendorSku) return false;
+  const conflicts = await findDuplicateSkuProducts(trx, {
+    vendorId: row.vendor_id,
+    vendorSku,
+    excludeProductId: payload.productId,
+  });
+  return conflicts.length > 0;
+}
 
 async function rewriteCapAlertOnReceipt(trx, { row, requestId, ev }) {
   if (ev.landedAfterReceive || !ev.bell?.body) return;
@@ -443,10 +464,11 @@ async function settleRequestLedgerBells(trx, requestId, { preserveOutstanding = 
   const row = await trx('vendor_orders')
     .where({ restock_request_id: requestId })
     .forUpdate()
-    .first('id', 'status', 'placed_at', 'evidence', 'vendor_id', 'external_order_number', 'adapter');
+    .first('id', 'status', 'placed_at', 'evidence', 'vendor_id', 'external_order_number', 'adapter', 'request_payload');
   if (!row) return { settled: false };
-  if (preserveOutstanding && isOutstandingParkRow(row)) return { preserved: 'vendor_order_outstanding' };
   const ev = meta(row.evidence);
+  if (preserveOutstanding && isOutstandingParkRow(row)) return { preserved: 'vendor_order_outstanding' };
+  if (preserveOutstanding && await duplicateSkuMappingStillActive(trx, row, ev)) return { preserved: 'duplicate_sku_mapping' };
   if (capAlert(ev)) {
     await rewriteCapAlertOnReceipt(trx, { row, requestId, ev });
     return { preserved: 'cap_alert' };
@@ -558,24 +580,35 @@ async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = 
 // `authorize` (a history-total order's last check, authorizeHistoryOrder) runs inside the same
 // transaction, right after the cap lock: what it checks cannot change before the hold is granted.
 // `capsOverride` lets DB-backed history-total orders use their DB limits instead of Railway env vars.
+function capInputError({ perOrder, monthly, cents }) {
+  if (perOrder == null || monthly == null) return { ok: false, reason: 'caps_unconfigured', message: 'AUTO_ORDER_MAX_PER_ORDER_CENTS and AUTO_ORDER_MAX_MONTHLY_CENTS must both be set' };
+  if (!Number.isFinite(cents) || cents <= 0) return { ok: false, reason: 'no_binding_total', message: 'no positive vendor total to reserve' };
+  return null;
+}
+
 async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env, accountingAt = null, postPlacement = false, authorize = null, capsOverride = null, markPostAuthorized = false } = {}) {
   const now = new Date();
   const monthAnchor = accountingAt || now;
-  const { perOrder, monthly } = capsOverride || caps(env);
-  if (perOrder == null || monthly == null) return { ok: false, reason: 'caps_unconfigured', message: 'AUTO_ORDER_MAX_PER_ORDER_CENTS and AUTO_ORDER_MAX_MONTHLY_CENTS must both be set' };
-  if (!Number.isFinite(cents) || cents <= 0) return { ok: false, reason: 'no_binding_total', message: 'no positive vendor total to reserve' };
-  const overPerOrder = cents > perOrder ? { ok: false, reason: 'over_per_order_cap', message: `${dollars(cents)} exceeds the per-order cap ${dollars(perOrder)}` } : null;
-  // Before the vendor call an over-cap figure is simply refused. After it
-  // (postPlacement) the money has MOVED: the actual charge is written under
-  // the cap lock whatever the verdict, so no concurrent reservation can read
-  // the stale lower amount in the gap before the park (pre-push P0).
-  if (overPerOrder && !postPlacement) return overPerOrder;
+  const limits = capsOverride || caps(env);
+  const inputErr = capInputError({ ...limits, cents });
+  const overPerOrder = !inputErr && cents > limits.perOrder ? { ok: false, reason: 'over_per_order_cap', message: `${dollars(cents)} exceeds the per-order cap ${dollars(limits.perOrder)}` } : null;
+  // Before the vendor call an over-cap figure is simply refused (unless an
+  // authorize hook must run under CAPS_LOCK_KEY first, e.g. competing SKU check).
+  // After it (postPlacement) the money has MOVED: the actual charge is written
+  // under the cap lock whatever the verdict, so no concurrent reservation can
+  // read the stale lower amount in the gap before the park (pre-push P0).
+  if (!authorize) {
+    if (inputErr) return inputErr;
+    if (overPerOrder && !postPlacement) return overPerOrder;
+  }
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
     const refusal = authorize ? await authorize(trx) : null;
     if (refusal) return refusal;
+    if (inputErr) return inputErr;
+    if (overPerOrder && !postPlacement) return overPerOrder;
     const spent = await monthlySpentCents(trx, { now: monthAnchor, excludeId: ledgerId });
-    const overMonthly = spent + cents > monthly ? { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(monthly)}` } : null;
+    const overMonthly = spent + cents > limits.monthly ? { ok: false, reason: 'over_monthly_cap', message: `${dollars(cents)} would take this month to ${dollars(spent + cents)}, over the monthly cap ${dollars(limits.monthly)}` } : null;
     if (overMonthly && !postPlacement) return overMonthly;
     const patch = {
       amount_cents: cents,
@@ -1207,6 +1240,17 @@ function unapprovedHistoryNote(policy, vendorSku) {
   return '';
 }
 
+function capRefusalParkArgs(cap, { vendor, bq, holdCents, quoteCents }) {
+  if (cap.reason === 'vendor_sku_order_live') {
+    return { reason: cap.reason, message: cap.message, amountCents: quoteCents, evidence: cap.evidence };
+  }
+  const lastOrder = `the last identical order${bq.source ? `, ${bq.source}` : ''}`;
+  const refused = holdCents === quoteCents
+    ? `${vendor.name} total for ${lastOrder}`
+    : `the amount held for a ${vendor.name} order with no price shown first; ${lastOrder}, was ${dollars(quoteCents)}`;
+  return { reason: cap.reason, message: `${cap.message} (${refused})`, amountCents: quoteCents };
+}
+
 async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quantity, env }) {
   let bq;
   let delivery = { countedAt: null, receivedOrders: [] };
@@ -1240,11 +1284,14 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
   const { policy, history, policyCaps } = await historyPolicyFor(conn, { adapter, adapterKey: ctx.adapterKey, vendorSku, env });
   // A history-total order approved in the DB policy HOLDS the full DB per-order cap, never the old
   // quote: until Sticker Mule confirms the paid charge, every fallback counts the order at that hold.
+  // Check competing live/in-flight SKU orders under CAPS_LOCK_KEY BEFORE any cap refusal so a
+  // request blocked by a sibling's in-flight hold never gets a "buy by hand" cap-refusal bell.
   const holdCents = history ? Math.max(quoteCents, policyCaps.perOrder) : quoteCents;
-  const cap = await reserveUnderCaps(conn, ctx.ledger.id, holdCents, { env, capsOverride: policyCaps });
-  const lastOrder = `the last identical order${bq.source ? `, ${bq.source}` : ''}`;
-  const refused = holdCents === quoteCents ? `${vendor.name} total for ${lastOrder}` : `the amount held for a ${vendor.name} order with no price shown first; ${lastOrder}, was ${dollars(quoteCents)}`;
-  if (!cap.ok) return { parked: await park(conn, { ...ctx, reason: cap.reason, message: `${cap.message} (${refused})`, amountCents: quoteCents }) };
+  const checkCompeting = noTotalBeforeOrder(adapter)
+    ? (trx) => liveSkuOrderRefusal(trx, { adapterKey: ctx.adapterKey, vendorSku, vendorName: vendor.name, excludeLedgerId: ctx.ledger.id })
+    : null;
+  const cap = await reserveUnderCaps(conn, ctx.ledger.id, holdCents, { env, capsOverride: policyCaps, authorize: checkCompeting });
+  if (!cap.ok) return { parked: await park(conn, { ...ctx, ...capRefusalParkArgs(cap, { vendor, bq, holdCents, quoteCents }) }) };
   if (noTotalBeforeOrder(adapter) && !history) {
     return { parked: await park(conn, { ...ctx, reason: 'no_vendor_confirmed_total', message: `${vendor.name}'s API confirms no current total before ordering; the last identical order (${bq.source || 'history'}) was ${dollars(quoteCents)}, which fits the caps. A reorder by hand is item ${vendorSku} × ${quantity}.${unapprovedHistoryNote(policy, vendorSku)}`, amountCents: quoteCents }) };
   }
