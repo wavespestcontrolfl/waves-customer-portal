@@ -24,7 +24,6 @@ import { useGlassMotion } from '../glass/glass-motion';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-const NAVY = '#04395E';
 const AQUA = '#9BD4EA';
 
 // Apple glyph + Play triangle mirror the footer badge SVGs (BrandFooter.jsx)
@@ -162,6 +161,50 @@ const SMS_ICON = (
   </svg>
 );
 
+function CardTerminalScene({ status, scene, onRetry }) {
+  return (
+    <main id="main-content" tabIndex={-1} style={scene}>
+      {status === 'loading' && (
+        <div role="status" style={{
+          marginTop: 60,
+          padding: '18px 24px',
+          borderRadius: 20,
+          background: 'rgba(255,255,255,0.14)',
+          border: '1px solid rgba(255,255,255,0.28)',
+          color: '#FFFFFF',
+          fontSize: 16,
+          fontWeight: 500,
+        }}>
+          Loading your card…
+        </div>
+      )}
+      {status === 'error' && (
+        <PublicStateCard
+          state="error"
+          tone="light"
+          title="We couldn&rsquo;t load that card"
+          onRetry={onRetry}
+          style={{ marginTop: 60 }}
+        >
+          This looks temporary. Your link is still valid&mdash;check your connection and try again.
+        </PublicStateCard>
+      )}
+      {status === 'missing' && (
+        <PublicStateCard
+          state="not-found"
+          tone="light"
+          title="This card isn&rsquo;t available"
+          contact="none"
+          style={{ marginTop: 60 }}
+        >
+          The link may be incomplete. Reach us any time at{' '}
+          <a href="https://wavespestcontrol.com" style={{ color: AQUA }}>wavespestcontrol.com</a>.
+        </PublicStateCard>
+      )}
+    </main>
+  );
+}
+
 export default function CardPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -220,47 +263,7 @@ export default function CardPage() {
   };
 
   if (status !== 'ready') {
-    return (
-      <main id="main-content" tabIndex={-1} style={scene}>
-        {status === 'loading' && (
-          <div role="status" style={{
-            marginTop: 60,
-            padding: '18px 24px',
-            borderRadius: 20,
-            background: 'rgba(255,255,255,0.14)',
-            border: '1px solid rgba(255,255,255,0.28)',
-            color: '#FFFFFF',
-            fontSize: 16,
-            fontWeight: 500,
-          }}>
-            Loading your card…
-          </div>
-        )}
-        {status === 'error' && (
-          <PublicStateCard
-            state="error"
-            tone="light"
-            title="We couldn&rsquo;t load that card"
-            onRetry={() => setLoadAttempt(a => a + 1)}
-            style={{ marginTop: 60 }}
-          >
-            This looks temporary. Your link is still valid&mdash;check your connection and try again.
-          </PublicStateCard>
-        )}
-        {status === 'missing' && (
-          <PublicStateCard
-            state="not-found"
-            tone="light"
-            title="This card isn&rsquo;t available"
-            contact="none"
-            style={{ marginTop: 60 }}
-          >
-            The link may be incomplete. Reach us any time at{' '}
-            <a href="https://wavespestcontrol.com" style={{ color: AQUA }}>wavespestcontrol.com</a>.
-          </PublicStateCard>
-        )}
-      </main>
-    );
+    return <CardTerminalScene status={status} scene={scene} onRetry={() => setLoadAttempt(a => a + 1)} />;
   }
 
   // Business layer is Eastern-only: pin the timezone so an evening ET

@@ -63,6 +63,17 @@ const LEAD_FIXTURE = {
   has_address: true,
 };
 
+const getOnly = (expectedPath, bodyFn) => ({ method, path }) => (
+  method === 'GET' && path === expectedPath ? bodyFn() : null
+);
+
+const mailHomeHandle = (bodyFn) => ({ method, path }) => {
+  if (method !== 'GET') return null;
+  if (path === `/api/public/home/${MAIL_HOME_TOKEN}`) return bodyFn('home');
+  if (path === `/api/public/home/${MAIL_HOME_TOKEN}/times`) return bodyFn('times');
+  return null;
+};
+
 module.exports = [
   {
     id: 'moving',
@@ -73,7 +84,7 @@ module.exports = [
     url: `/moving/${MOVE_TOKEN}`,
     ready: 'Moving, Jordan?',
     settle: 900,
-    handle: ({ method, path }) => (method === 'GET' && path === `/api/public/moving/${MOVE_TOKEN}` ? ok({
+    handle: getOnly(`/api/public/moving/${MOVE_TOKEN}`, () => ok({
       firstName: 'Jordan',
       services: ['Quarterly Pest Control'],
       status: 'pending',
@@ -82,10 +93,10 @@ module.exports = [
       newCity: null,
       verdict: null,
       addressOnFile: false,
-    }) : null),
+    })),
     states: [
       { name: 'default' },
-      { name: 'error', ready: 'load that page', handle: () => serverError() },
+      { name: 'error', ready: 'load that page', handle: getOnly(`/api/public/moving/${MOVE_TOKEN}`, serverError) },
     ],
   },
   {
@@ -97,28 +108,22 @@ module.exports = [
     url: `/h/${MAIL_HOME_TOKEN}`,
     ready: 'Welcome to your new home',
     settle: 900,
-    handle: ({ method, path }) => {
-      if (method === 'GET' && path === `/api/public/home/${MAIL_HOME_TOKEN}`) {
-        return ok({
+    handle: mailHomeHandle((kind) => (kind === 'home'
+      ? ok({
           address: { line1: '1200 SAMPLE LN', city: 'VENICE', zip: '34285' },
           price: { monthly: 37, annual: 444, setupFee: 99 },
           plan: 'pest_quarterly',
-        });
-      }
-      if (method === 'GET' && path === `/api/public/home/${MAIL_HOME_TOKEN}/times`) {
-        return ok({
+        })
+      : ok({
           offers: [
             { date: DAY1, start_time: '09:00', slot_sig: 'sig-1' },
             { date: DAY1, start_time: '13:00', slot_sig: 'sig-2' },
             { date: DAY2, start_time: '10:00', slot_sig: 'sig-3' },
           ],
-        });
-      }
-      return null;
-    },
+        }))),
     states: [
       { name: 'default' },
-      { name: 'error', ready: 'This page is not available', handle: () => serverError() },
+      { name: 'error', ready: 'This page is not available', handle: getOnly(`/api/public/home/${MAIL_HOME_TOKEN}`, serverError) },
     ],
   },
   {
@@ -131,7 +136,7 @@ module.exports = [
     ready: 'Confirm interview time',
     settle: 900,
     sheet: { sheetH1Min: 26 },
-    handle: ({ method, path }) => (method === 'GET' && path === `/api/public/careers/interview/${INTERVIEW_TOKEN}` ? ok({
+    handle: getOnly(`/api/public/careers/interview/${INTERVIEW_TOKEN}`, () => ok({
       first_name: 'Jordan',
       language: 'en',
       status: 'open',
@@ -143,10 +148,10 @@ module.exports = [
         { date: DAY1, start: `${DAY1}T14:00:00Z`, end: `${DAY1}T14:30:00Z`, label: `${shortDateOf(DAY1)}, 10:00 AM` },
         { date: DAY1, start: `${DAY1}T15:00:00Z`, end: `${DAY1}T15:30:00Z`, label: `${shortDateOf(DAY1)}, 11:00 AM` },
       ],
-    }) : null),
+    })),
     states: [
       { name: 'default' },
-      { name: 'error', ready: 'interview link', handle: () => serverError() },
+      { name: 'error', ready: 'interview link', handle: getOnly(`/api/public/careers/interview/${INTERVIEW_TOKEN}`, serverError) },
     ],
   },
   {
@@ -156,18 +161,18 @@ module.exports = [
     role: 'public token',
     route: '/visit/:token',
     url: `/visit/${VISIT_TOKEN}`,
-    ready: 'Your visit summary',
+    ready: 'View service report',
     settle: 900,
-    handle: ({ method, path }) => (method === 'GET' && path === `/api/visit-summary/${VISIT_TOKEN}` ? ok({
+    handle: getOnly(`/api/visit-summary/${VISIT_TOKEN}`, () => ok({
       serviceDate: ymdOut(-1),
       services: [
         { id: 1, serviceType: 'Quarterly Pest Control', outcome: 'completed', reportUrl: `/report/${REPORT_TOKEN_A}` },
         { id: 2, serviceType: 'Lawn Care Program', outcome: 'completed', reportUrl: `/report/${REPORT_TOKEN_B}` },
       ],
-    }) : null),
+    })),
     states: [
       { name: 'default' },
-      { name: 'error', ready: 'visit summary', handle: () => serverError() },
+      { name: 'error', ready: 'Try again', handle: getOnly(`/api/visit-summary/${VISIT_TOKEN}`, serverError) },
     ],
   },
   {
@@ -180,17 +185,17 @@ module.exports = [
     ready: 'Free consultation',
     settle: 900,
     sheet: { sheetH1Min: 30 },
-    handle: ({ method, path }) => (method === 'GET' && path === `/api/public/inspection/${INSPECT_TOKEN}` ? ok({
+    handle: getOnly(`/api/public/inspection/${INSPECT_TOKEN}`, () => ok({
       state: 'ok',
       lead: LEAD_FIXTURE,
       availability: AVAILABILITY,
       needs_address: false,
       selfServeNotice: true,
       durationMinutes: 30,
-    }) : null),
+    })),
     states: [
       { name: 'default' },
-      { name: 'error', ready: 'consultation options', handle: () => serverError() },
+      { name: 'error', ready: 'consultation options', handle: getOnly(`/api/public/inspection/${INSPECT_TOKEN}`, serverError) },
     ],
   },
   {
@@ -203,17 +208,17 @@ module.exports = [
     ready: 'Free Waves Assessment',
     settle: 900,
     sheet: { sheetH1Min: 30 },
-    handle: ({ method, path }) => (method === 'GET' && path === `/api/public/estimate-assessment/${ASSESS_TOKEN}` ? ok({
+    handle: getOnly(`/api/public/estimate-assessment/${ASSESS_TOKEN}`, () => ok({
       state: 'ok',
       lead: LEAD_FIXTURE,
       availability: AVAILABILITY,
       needs_address: false,
       selfServeNotice: true,
       durationMinutes: 30,
-    }) : null),
+    })),
     states: [
       { name: 'default' },
-      { name: 'error', ready: 'assessment times', handle: () => serverError() },
+      { name: 'error', ready: 'assessment times', handle: getOnly(`/api/public/estimate-assessment/${ASSESS_TOKEN}`, serverError) },
     ],
   },
 ];

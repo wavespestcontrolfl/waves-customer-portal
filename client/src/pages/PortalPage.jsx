@@ -1839,6 +1839,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     );
   };
 
+  const desktopScrimBlur = compact ? 'none' : 'blur(5px)';
+
   // Portaled to <body>: the launch button lives inside a data-glass card
   // whose backdrop-filter makes it the fixed-position containing block —
   // rendered in place, the overlay pins to the card instead of the viewport
@@ -1847,8 +1849,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
       background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
-      backdropFilter: compact ? 'none' : 'blur(5px)',
-      WebkitBackdropFilter: compact ? 'none' : 'blur(5px)',
+      backdropFilter: desktopScrimBlur,
+      WebkitBackdropFilter: desktopScrimBlur,
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',
@@ -17206,6 +17208,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
   if (!open) return null;
 
+  const overlayBackdropBlur = compact ? 'none' : 'blur(5px)';
+
   return (
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
@@ -17213,8 +17217,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       // Mobile: full-screen sheet — keep the backdrop clear so the glass
       // modal frosts the portal scene instead of an opaque tan wash.
       background: compact ? 'transparent' : 'rgba(15,23,42,0.48)',
-      backdropFilter: compact ? 'none' : 'blur(5px)',
-      WebkitBackdropFilter: compact ? 'none' : 'blur(5px)',
+      backdropFilter: overlayBackdropBlur,
+      WebkitBackdropFilter: overlayBackdropBlur,
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',

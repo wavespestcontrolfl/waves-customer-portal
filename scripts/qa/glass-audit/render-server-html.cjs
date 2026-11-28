@@ -273,16 +273,69 @@ function renderNewsletterLanding() {
   };
   for (const [name, { heading, bodyHtml }] of Object.entries(pages)) write(name, renderConfirmPage(heading, bodyHtml));
 
-  // Public email-resubscribe confirmation landing (GET /api/public/email-resubscribe/:token).
-  const resubCopy = require(path.join(root, 'server/services/email-resubscribe-copy'));
-  const resubBody = `
-    <p>${resubCopy.PAGE.confirmBody(`<span class="email">${emailAddr}</span>`)}</p>
-    <form method="POST" action="/api/public/email-resubscribe/${tokenSafe}">
-      <button type="submit" class="btn">${resubCopy.PAGE.confirmButton}</button>
-    </form>
-    <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">${resubCopy.PAGE.confirmNote}</p>
-  `;
-  write('email-resubscribe', renderConfirmPage(resubCopy.PAGE.confirmHeading, resubBody));
+  const escapeFn = typeof escapeHtml === 'function'
+    ? escapeHtml
+    : (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  write('email-resubscribe', renderResubscribeLanding(renderConfirmPage, escapeFn, emailAddr, tokenSafe));
+}
+
+function renderResubscribeLanding(renderConfirmPage, escapeFn, emailAddr, tokenSafe) {
+  const acorn = require('acorn');
+  const walk = require('acorn-walk');
+  const vm = require('vm');
+  const routePath = path.join(root, 'server/routes/public-email-resubscribe.js');
+  const src = fs.readFileSync(routePath, 'utf8');
+  const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script' });
+
+  let confirmFormSrc = null;
+  let bodyExprSrc = null;
+  walk.simple(ast, {
+    VariableDeclarator(node) {
+      if (node.id?.type === 'Identifier' && node.id.name === 'confirmForm' && node.init) {
+        confirmFormSrc = src.slice(node.init.start, node.init.end);
+      }
+    },
+    CallExpression(node) {
+      const isGetToken =
+        node.callee?.type === 'MemberExpression' &&
+        node.callee.object?.name === 'router' &&
+        node.callee.property?.name === 'get' &&
+        node.arguments[0]?.type === 'Literal' &&
+        node.arguments[0].value === '/:token';
+      if (!isGetToken) return;
+      const handler = node.arguments[node.arguments.length - 1];
+      walk.simple(handler, {
+        CallExpression(inner) {
+          if (
+            inner.callee?.type === 'Identifier' &&
+            inner.callee.name === 'page' &&
+            inner.arguments.length >= 4 &&
+            inner.arguments[1]?.type === 'Literal' &&
+            inner.arguments[1].value === 200
+          ) {
+            bodyExprSrc = src.slice(inner.arguments[3].start, inner.arguments[3].end);
+          }
+        },
+      });
+    },
+  });
+
+  if (!confirmFormSrc || !bodyExprSrc) {
+    throw new Error('Failed to extract confirmForm or GET /:token body from public-email-resubscribe.js');
+  }
+
+  const copySvc = require(path.join(root, 'server/services/email-resubscribe-copy'));
+  const sandbox = {
+    PAGE: copySvc.PAGE,
+    escapeHtml: escapeFn,
+    req: { params: { token: tokenSafe } },
+    request: { email: emailAddr },
+    confirmForm: null,
+    __resubBody: '',
+  };
+  const ctx = vm.createContext(sandbox);
+  vm.runInContext(`confirmForm = (${confirmFormSrc}); __resubBody = (${bodyExprSrc});`, ctx);
+  return renderConfirmPage(copySvc.PAGE.confirmHeading, sandbox.__resubBody);
 }
 
 fs.mkdirSync(outDir, { recursive: true });
