@@ -1037,3 +1037,58 @@ describe('siblingCoverageRefusal — covered copy follows the combined invoice s
     expect(siblingCoverageRefusal({ status: 'covered', invoice: { ...base, status: 'paid' } }).reason).toBe('sibling_invoice_covered');
   });
 });
+
+describe('POST /:id/invoice — technician extraLineItems RBAC (P0-6)', () => {
+  const PRICED_SVC = {
+    ...SVC_ROW,
+    source_estimate_id: null,
+    estimated_price: 125,
+    cust_billing_mode: 'per_visit',
+  };
+
+  test('rejects non-empty extraLineItems from a technician with 403 without minting', async () => {
+    mockDb.__svcRow = PRICED_SVC;
+    const { req, res, next } = makeReqRes({
+      extraLineItems: [{ description: 'Custom Discount', quantity: 1, unit_price: -25, amount: -25 }],
+    });
+    req.techRole = 'technician';
+    req.technicianId = 'tech-1';
+    await handler(req, res, next);
+    expect(res.statusCode).toBe(403);
+    expect(res.body?.error).toMatch(/Only admins can add extra items or discounts/i);
+    expect(mockMint).not.toHaveBeenCalled();
+  });
+
+  test('allows a technician to collect at the server-calculated visit price when extraLineItems is empty', async () => {
+    mockDb.__svcRow = PRICED_SVC;
+    mockMint.mockResolvedValue({
+      invoice: { id: 'inv-tech-1', total: 125, token: 'tok-tech-1', status: 'sent', credit_applied: 0 },
+      reused: false,
+      prepaidCredit: 0,
+    });
+    const { req, res, next } = makeReqRes({ extraLineItems: [] });
+    req.techRole = 'technician';
+    req.technicianId = 'tech-1';
+    await handler(req, res, next);
+    expect(res.statusCode).toBe(200);
+    expect(res.body?.invoiceId).toBe('inv-tech-1');
+    expect(mockMint).toHaveBeenCalledTimes(1);
+  });
+
+  test('allows an admin to append extraLineItems during checkout', async () => {
+    mockDb.__svcRow = PRICED_SVC;
+    mockMint.mockResolvedValue({
+      invoice: { id: 'inv-admin-1', total: 155, token: 'tok-admin-1', status: 'sent', credit_applied: 0 },
+      reused: false,
+      prepaidCredit: 0,
+    });
+    const { req, res, next } = makeReqRes({
+      extraLineItems: [{ description: 'Spot Ant Treatment', quantity: 1, unit_price: 30, amount: 30 }],
+    });
+    req.techRole = 'admin';
+    await handler(req, res, next);
+    expect(res.statusCode).toBe(200);
+    expect(res.body?.invoiceId).toBe('inv-admin-1');
+    expect(mockMint).toHaveBeenCalledTimes(1);
+  });
+});
