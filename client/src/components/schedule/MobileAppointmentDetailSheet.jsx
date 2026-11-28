@@ -127,7 +127,7 @@ function cancelPermissionsFor(service, adminActions, canCompleteService) {
 
 function formatDetailMoney(amount, { adminActions, rawPrice, service, visitInvoice }) {
   const unavailable = !adminActions && rawPrice == null && !service.isCallback
-    && !service.billingLane?.prediction && !visitInvoice;
+    && service.billingLane?.prediction?.amount == null && !visitInvoice;
   return unavailable ? '—' : `$${amount.toFixed(2)}`;
 }
 
