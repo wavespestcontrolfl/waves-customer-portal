@@ -37,7 +37,7 @@ describe('stripe-email-sync processJob', () => {
           && (!q.dueOnly || r.due)
           && !(q.skip && table === 'customers' && lockedCustomers.includes(r.id)));
       const note = (rs) => { if (q.locked) rs.forEach((r) => locks.push(`${table}:${r.id}`)); return rs; };
-      q.first = async () => { if (state.throwOn === table) throw new Error('boom'); const r = note(rows().slice(0, 1))[0]; return r ? { ...r } : undefined; };
+      q.first = async () => { if (state.throwOn === table) { if (state.onThrow) state.onThrow(); throw new Error('boom'); } const r = note(rows().slice(0, 1))[0]; return r ? { ...r } : undefined; };
       // drainDue selects id + updated_at::text AS version; the fake's updated_at is already a text version.
       q.whereNotNull = (col) => { q.notNull = col; return q; };
       q.select = async (...cols) => note(rows()).filter((r) => !q.notNull || r[q.notNull] != null)
@@ -55,18 +55,35 @@ describe('stripe-email-sync processJob', () => {
     };
     const trx = Object.assign((t) => builder(t), { fn: { now: () => 'NOW' }, raw: (sql) => ({ sql }) });
     trx.transaction = async (fn) => fn(trx);
-    const db = Object.assign((t) => builder(t), { transaction: async (fn) => fn(trx), fn: trx.fn, raw: trx.raw });
+    let activeTxDepth = 0;
+    const db = Object.assign((t) => builder(t), {
+      transaction: async (fn) => {
+        activeTxDepth += 1;
+        locks.push('tx-start');
+        try {
+          return await fn(trx);
+        } finally {
+          activeTxDepth -= 1;
+          locks.push('tx-end');
+        }
+      },
+      fn: trx.fn,
+      raw: trx.raw,
+    });
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     updateEmail = jest.fn(async () => {
-      locks.push('stripe-call');
+      locks.push(activeTxDepth === 0 ? 'stripe-call-unlocked' : 'stripe-call-in-tx');
       if (stripeResult instanceof Error) throw stripeResult;
       return stripeResult;
     });
     // By default each Stripe profile names the customer row that links it.
-    readOwner = jest.fn(async (sid) => (owner === undefined
-      ? { deleted: false, customerId: (state.customers.find((c) => c.stripe_customer_id === sid) || {}).id || null, payerId: null }
-      : owner));
+    readOwner = jest.fn(async (sid) => {
+      if (activeTxDepth !== 0) locks.push('read-owner-in-tx');
+      return owner === undefined
+        ? { deleted: false, customerId: (state.customers.find((c) => c.stripe_customer_id === sid) || {}).id || null, payerId: null }
+        : owner;
+    });
     jest.doMock('../services/stripe', () => ({ updateCustomerEmail: updateEmail, readCustomerOwner: readOwner }));
     raiseAdminAlert = jest.fn(async () => ({ id: 'n1' }));
     jest.doMock('../services/admin-alert-compose', () => ({ raiseAdminAlert }));
@@ -75,13 +92,48 @@ describe('stripe-email-sync processJob', () => {
 
   const cust = (over = {}) => ({ id: 'c1', email: 'new@example.test', stripe_customer_id: 'cus_1', deleted_at: null, phone: '+19415550100', ...over });
 
-  test('updates Stripe with the email on file, holding the job and customer locks through the call', async () => {
+  test('updates Stripe with the email on file, releasing the customer lock before Stripe HTTP and re-locking in order to commit', async () => {
     const sync = load({ customers: [cust()] });
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
     expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', { timeout: 10000, maxNetworkRetries: 0, idempotencyKey: 'stripe-email-sync:job-1:cus_1:0' });
-    // Customer first, then the job: the same order as an email confirm (no deadlock).
-    expect(locks).toEqual(['customers:c1', 'stripe_email_sync_jobs:job-1', 'stripe-call']);
+    // Tx 1 locks customer -> job and commits before Stripe HTTP; Tx 2 re-locks customer -> job to commit outcome.
+    expect(locks).toEqual([
+      'tx-start', 'customers:c1', 'stripe_email_sync_jobs:job-1', 'tx-end',
+      'stripe-call-unlocked',
+      'tx-start', 'customers:c1', 'stripe_email_sync_jobs:job-1', 'tx-end',
+    ]);
     expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'updated' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a newer email edit during Stripe HTTP supersedes the job cleanly without retrying or alerting', async () => {
+    const sync = load({ customers: [cust()], stripeResult: new Error('network timeout') });
+    updateEmail.mockImplementationOnce(async () => {
+      state.customers[0].email = 'newer@example.test';
+      throw new Error('network timeout');
+    });
+    await expect(sync.processJob('job-1')).resolves.toBe('superseded');
+    expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'superseded' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('pushBack checks superseded/gone before raising a worker_error gave-up alert', async () => {
+    const sync = load({ job: { attempts: 8 }, customers: [cust()] });
+    state.throwOn = 'customer_merge_journal';
+    // Customer email changes after the worker throws, before pushBack runs its transaction.
+    state.onThrow = () => { state.customers[0].email = 'newer@example.test'; };
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
+    await expect(sync.drainDue()).resolves.toEqual({ error: 1 });
+    expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'superseded' });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+
+    // Same for a customer row merged away right before pushBack runs.
+    const gone = load({ job: { attempts: 8 }, customers: [cust()] });
+    state.throwOn = 'customer_merge_journal';
+    state.onThrow = () => { state.customers[0].deleted_at = '2026-11-27T00:00:00Z'; state.customers[0].phone = 'merged-1'; };
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
+    await expect(gone.drainDue()).resolves.toEqual({ error: 1 });
+    expect(state.jobs[0]).toMatchObject({ status: 'skipped', result: 'gone' });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 

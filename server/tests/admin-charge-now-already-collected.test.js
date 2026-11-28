@@ -294,7 +294,14 @@ describe('charge-now already-collected guard', () => {
         body: JSON.stringify({ amount: 25, description: 'One-off flea add-on' }),
       });
       expect(res.status).toBe(200);
-      expect(chargeOneTimeMock).toHaveBeenCalledWith('cust-1', 25, 'One-off flea add-on', null, { initiated_by: 'machine' }, CHARGE_NOW_OVERRIDE);
+      expect(chargeOneTimeMock).toHaveBeenCalledWith(
+        'cust-1',
+        25,
+        'One-off flea add-on',
+        expect.stringMatching(/^admin_charge_one_time_cust-1_2500_/),
+        { initiated_by: 'machine' },
+        CHARGE_NOW_OVERRIDE,
+      );
     });
   });
 

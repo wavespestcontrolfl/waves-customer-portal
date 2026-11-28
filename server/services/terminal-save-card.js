@@ -25,6 +25,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
 
 // The two shapes secure-card-public.js accepts (22-char base64url, or legacy
 // 64-hex). Anything else is not a token.
@@ -102,8 +103,10 @@ async function saveCardEligibility(request) {
  * because the missing cap cannot be repaired after completion.
  */
 async function disclosedCapEligibility(request) {
-  const visit = await db('scheduled_services').where({ id: request.scheduled_service_id }).first('is_recurring');
-  if (visit?.is_recurring === true) return { ok: true };
+  const visit = await db('scheduled_services')
+    .where({ id: request.scheduled_service_id })
+    .first('is_recurring', 'recurring_parent_id', 'recurring_pattern');
+  if (isRecurringLineageVisit(visit)) return { ok: true };
   if (request.accepted_amount != null && Number(request.accepted_amount) > 0) return { ok: true };
   return { ok: false, code: 'price_not_disclosed' };
 }

@@ -243,17 +243,20 @@ async function readDrafts(database) {
   return r.rows[0] || { n: 0, total: 0 };
 }
 
-// A member's dues billing days after today through `to`: the run bills on that day of the month only
-// (billing-helpers isBillingDayMatch), so a month without the day is skipped; no billing day is the 1st.
+// A member's dues billing days after today through `to`: mirrors billing-helpers
+// effectiveBillingDay / isBillingDayMatch — no billing day defaults to the 1st,
+// and days 29-31 clamp to the target month's last day so shorter months bill on
+// month-end instead of skipping.
 function duesBillingDays(customer, { today, to }) {
-  const day = Math.max(1, Number(customer.billing_day) || 1);
+  const { effectiveBillingDay } = require('../billing-helpers');
   const [y, mo] = today.split('-').map(Number);
   const days = [];
   for (let m = 0; m < 5; m += 1) {
     const ym = new Date(Date.UTC(y, mo - 1 + m, 1)).toISOString().slice(0, 7);
     const last = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0)).getUTCDate();
+    const day = effectiveBillingDay(customer.billing_day, last);
     const due = `${ym}-${String(day).padStart(2, '0')}`;
-    if (day <= last && due > today && due <= to) days.push(due);
+    if (due > today && due <= to) days.push(due);
   }
   return days;
 }

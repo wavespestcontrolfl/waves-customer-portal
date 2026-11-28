@@ -26,24 +26,38 @@
 //     attempt's own ledger row; covers alerts raised before the stamp fix).
 const db = require('../models/db');
 const logger = require('./logger');
-const { parseJson, isFailedAllocationSettled } = require('./payment-failed-allocation');
+const { parseJson, validBilledMonth, classifySettledFailedAttempt } = require('./payment-failed-allocation');
 
 const RESOLUTION = 'The invoice was paid';
+const MONTHLY_RESOLUTION = 'Monthly dues were paid';
 const TRIGGER_KEYS = ['payment_failed', 'bill_payment_error'];
 const TRIGGER_KEYS_SQL = "metadata->>'triggerKey' IN (?, ?)";
 
-// Which of these open bells are obsolete. A bill_payment_error bell is about
-// payload.invoiceId alone (its PaymentIntent may be a combined one); a
-// payment_failed bell judges its whole allocation.
-async function settledBellIds(conn, rows) {
+function attemptFromBell(row) {
+  const meta = parseJson(row?.metadata);
+  const payload = meta.payload || {};
+  if (meta.triggerKey === 'bill_payment_error') {
+    return { invoiceId: payload.invoiceId };
+  }
+  return {
+    paymentIntentId: payload.paymentIntentId,
+    invoiceId: payload.invoiceId,
+    allocationInvoiceIds: payload.allocationInvoiceIds,
+    allocationUnreadable: payload.allocationUnreadable,
+    customerId: payload.customerId || null,
+    billedMonth: payload.billedMonth || null,
+  };
+}
+
+// Which of these open bells are obsolete for the expected settlement kind
+// ('invoice' or 'monthly'). A bill_payment_error bell is about payload.invoiceId
+// alone (its PaymentIntent may be a combined one); a payment_failed bell judges
+// its whole allocation or monthly-dues obligation.
+async function settledBellIds(conn, rows, expectedKind = null) {
   const closable = [];
   for (const row of rows || []) {
-    const meta = parseJson(row.metadata);
-    const payload = meta.payload || {};
-    const attempt = meta.triggerKey === 'bill_payment_error'
-      ? { invoiceId: payload.invoiceId }
-      : { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable };
-    if (await isFailedAllocationSettled(conn, attempt)) closable.push(row.id);
+    const kind = await classifySettledFailedAttempt(conn, attemptFromBell(row));
+    if (kind && (!expectedKind || kind === expectedKind)) closable.push(row.id);
   }
   return closable;
 }
@@ -68,10 +82,37 @@ async function closeRows(invoiceId, conn) {
     .select('id', 'metadata');
   // A combined attempt's one bell covers several invoices: close it only when
   // its whole allocation is settled, not when just this invoice is.
-  const closable = await settledBellIds(conn, candidates);
+  const closable = await settledBellIds(conn, candidates, 'invoice');
   if (!closable.length) return 0;
   return openToCloser(conn('notifications').whereIn('id', closable), 'payments')
     .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
+}
+
+async function closeMonthlyRows(customerId, billedMonth, conn) {
+  const { doneColumns, openToCloser } = require('./notification-service')._private;
+  const cid = String(customerId);
+  const candidates = await openToCloser(conn('notifications')
+    .where({ recipient_type: 'admin', category: 'payment' })
+    .whereRaw("metadata->>'triggerKey' = ?", ['payment_failed']), 'payments')
+    .whereRaw("COALESCE(metadata->'payload'->>'invoiceId', '') = ''")
+    .where(function aboutThisMonthlyObligation() {
+      this.where(function byCustomerPayload() {
+        this.whereRaw("metadata->'payload'->>'customerId' = ?", [cid])
+          .whereRaw("(metadata->'payload'->>'billedMonth' = ? OR COALESCE(metadata->'payload'->>'billedMonth', '') = '')", [billedMonth]);
+      }).orWhereRaw(
+        `metadata->'payload'->>'paymentIntentId' IN (
+          SELECT p.stripe_payment_intent_id FROM payments p
+          WHERE p.customer_id::text = ? AND p.stripe_payment_intent_id IS NOT NULL
+            AND (p.metadata->>'billed_month' = ?
+              OR (p.metadata->>'billed_month' IS NULL AND p.description LIKE '%WaveGuard Monthly%')))`,
+        [cid, billedMonth],
+      );
+    })
+    .select('id', 'metadata');
+  const closable = await settledBellIds(conn, candidates, 'monthly');
+  if (!closable.length) return 0;
+  return openToCloser(conn('notifications').whereIn('id', closable), 'payments')
+    .update(doneColumns({ by: 'payments', resolution: MONTHLY_RESOLUTION, keepExisting: true, conn }));
 }
 
 // `conn` is a transaction (a savepoint is opened on it) or the pool. Returns
@@ -86,6 +127,22 @@ async function closePaymentFailedAlertsForPaidInvoice(invoiceId, conn = db) {
   }
 }
 
+// Best-effort close for invoice-less monthly Auto Pay payment_failed bells
+// once that customer's billed_month dues are collected (retry, Charge Now,
+// async ACH settlement, or completion-minted dues invoice paid).
+async function closePaymentFailedAlertsForMonthlyDues({ customerId, billedMonth, paymentIntent } = {}, conn = db) {
+  const piMeta = paymentIntent?.metadata || {};
+  const cid = customerId || piMeta.waves_customer_id;
+  const month = validBilledMonth(billedMonth || piMeta.billed_month);
+  if (!cid || !month) return 0;
+  try {
+    return await conn.transaction((trx) => closeMonthlyRows(cid, month, trx));
+  } catch (err) {
+    logger.warn(`[payment-failed-alert-close] monthly dues ${cid}/${month}: ${err.message}`);
+    return 0;
+  }
+}
+
 // Repair sweep (scheduler, every 15 minutes). The hook above runs inside the
 // payment transaction, so two races can leave an obsolete bell open with no
 // later hook to close it: the failure bell is inserted after the paying
@@ -94,8 +151,9 @@ async function closePaymentFailedAlertsForPaidInvoice(invoiceId, conn = db) {
 // attempt at once and each sees the other's invoice as unpaid. The sweep
 // re-judges bells from COMMITTED state outside any payment transaction, so
 // both races settle within a few ticks. It also closes bells about invoices
-// paid through a path that does not call the hook, and bells open from before
-// this change. Candidates use openToCloser like the hook (a row a person
+// paid through a path that does not call the hook, monthly Auto Pay bells
+// whose dues settled via retry/Charge Now/dues invoice, and bells open from
+// before this change. Candidates use openToCloser like the hook (a row a person
 // marked Done is taken over, so their Reopen cannot bring it back). Each run
 // reads one bounded page in id order from a durable cursor and wraps at the
 // end, so every candidate is reached however many stay legitimately unpaid.
@@ -118,14 +176,34 @@ async function sweepSettledPaymentFailedAlerts({ conn = db, page = SWEEP_PAGE } 
     const nextCursor = (candidates || []).length === page ? candidates[candidates.length - 1].id : null;
     await conn('system_settings').insert({ key: SWEEP_CURSOR_KEY, value: nextCursor, category: 'notifications' })
       .onConflict('key').merge({ value: nextCursor, updated_at: conn.fn.now() });
-    const closable = await settledBellIds(conn, candidates);
-    if (!closable.length) return 0;
-    return await openToCloser(conn('notifications').whereIn('id', closable), 'payments')
-      .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
+    const invoiceClosable = [];
+    const monthlyClosable = [];
+    for (const row of candidates || []) {
+      const kind = await classifySettledFailedAttempt(conn, attemptFromBell(row));
+      if (kind === 'monthly') monthlyClosable.push(row.id);
+      else if (kind === 'invoice') invoiceClosable.push(row.id);
+    }
+    let closed = 0;
+    if (invoiceClosable.length) {
+      closed += await openToCloser(conn('notifications').whereIn('id', invoiceClosable), 'payments')
+        .update(doneColumns({ by: 'payments', resolution: RESOLUTION, keepExisting: true, conn }));
+    }
+    if (monthlyClosable.length) {
+      closed += await openToCloser(conn('notifications').whereIn('id', monthlyClosable), 'payments')
+        .update(doneColumns({ by: 'payments', resolution: MONTHLY_RESOLUTION, keepExisting: true, conn }));
+    }
+    return closed;
   } catch (err) {
     logger.warn(`[payment-failed-alert-close] repair sweep failed: ${err.message}`);
     return 0;
   }
 }
 
-module.exports = { closePaymentFailedAlertsForPaidInvoice, sweepSettledPaymentFailedAlerts, RESOLUTION, TRIGGER_KEYS };
+module.exports = {
+  closePaymentFailedAlertsForPaidInvoice,
+  closePaymentFailedAlertsForMonthlyDues,
+  sweepSettledPaymentFailedAlerts,
+  RESOLUTION,
+  MONTHLY_RESOLUTION,
+  TRIGGER_KEYS,
+};

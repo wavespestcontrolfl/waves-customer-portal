@@ -37,7 +37,6 @@
   },
   "calendar-day-mutation": {
     "routes/admin-analytics.js": 2,
-    "routes/admin-billing-health.js": 3,
     "routes/admin-customers.js": 1,
     "routes/admin-equipment.js": 1,
     "routes/admin-protocols.js": 1,

@@ -14,7 +14,7 @@ const { undoManualPaymentLive, partialPaymentsLive, techCardOnFileLive, checkout
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, isStaleClaimReviewHold } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer, visitRefusesSettlement, isStaleClaimReviewHold } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
 const PaymentPlans = require('../services/payment-plans');
 const { generateInvoiceSummary, generateThankYouMessage } = require('../services/invoice-ai-summary');
@@ -1799,6 +1799,35 @@ router.put('/:id', requireAdmin, invoiceUpdateHandler);
 // channel status so the UI can toast accordingly. Missing phone / email
 // on the customer record is treated as "channel skipped", not an error.
 router.post('/:id/send', requireAdmin, invoiceSendHandler);
+function validateSendCcEmail(invoiceCcEmail) {
+  if (invoiceCcEmail != null && typeof invoiceCcEmail !== 'string') {
+    return { error: 'The CC must be one email address' };
+  }
+  const ccEmail = cleanEmail(invoiceCcEmail);
+  if (ccEmail && ccEmail.length > BILLING_RECIPIENT_EMAIL_MAX_LENGTH) {
+    return { error: `CC email address must be ${BILLING_RECIPIENT_EMAIL_MAX_LENGTH} characters or fewer` };
+  }
+  if (ccEmail && !isEmailLike(ccEmail)) {
+    return { error: 'Invalid CC email address' };
+  }
+  return { ccEmail };
+}
+
+async function persistBillingRecipientAfterSend(invoiceId, { email, name }) {
+  try {
+    const invoice = await db('invoices')
+      .where({ id: invoiceId })
+      .select('customer_id', 'payer_id', 'payer_statement_id', 'scheduled_send_error')
+      .first();
+    // Third-party Bill-To / withdrawn invoice: never persist an AP address onto
+    // the homeowner's billing recipient prefs.
+    if (!invoice || invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) return;
+    await saveBillingRecipientPreference(invoice.customer_id, { email, name });
+  } catch (err) {
+    logger.warn(`[admin-invoices:send] saveBillingRecipientPreference failed for invoice ${invoiceId}: ${err.message}`);
+  }
+}
+
 async function invoiceSendHandler(req, res, next) {
   try {
     const { id } = req.params;
@@ -1840,13 +1869,11 @@ async function invoiceSendHandler(req, res, next) {
     const overrideEmail = cleanEmail(invoiceRecipientEmail);
     const overrideName = cleanOptionalText(invoiceRecipientName);
     // One CC address for the invoice email (a copy of the same email and PDF). Never saved.
-    const ccEmail = cleanEmail(invoiceCcEmail);
-    if (invoiceCcEmail != null && typeof invoiceCcEmail !== 'string') {
-      return res.status(400).json({ error: 'The CC must be one email address', code: 'invalid_cc' });
+    const ccCheck = validateSendCcEmail(invoiceCcEmail);
+    if (ccCheck.error) {
+      return res.status(400).json({ error: ccCheck.error, code: 'invalid_cc' });
     }
-    if (ccEmail && !isEmailLike(ccEmail)) {
-      return res.status(400).json({ error: 'Invalid CC email address', code: 'invalid_cc' });
-    }
+    const ccEmail = ccCheck.ccEmail;
     const shouldSaveBillingRecipient = saveBillingRecipient === true;
     let emailRecipientOverride = null;
 
@@ -1859,25 +1886,6 @@ async function invoiceSendHandler(req, res, next) {
         email: overrideEmail,
         name: overrideName || undefined,
       };
-
-      if (shouldSaveBillingRecipient) {
-        const invoice = await db('invoices')
-          .where({ id })
-          .select('customer_id', 'payer_id')
-          .first();
-        if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-        // Third-party Bill-To: a one-off AP override on a payer invoice is the
-        // payer's address — never persist it to the homeowner's billing prefs
-        // (that would reroute the homeowner's own future self-pay invoices to
-        // the third party). The payer snapshot/AP path (payer.freezeApEmail)
-        // handles persisting the delivered AP email for payer invoices.
-        if (!invoice.payer_id) {
-          await saveBillingRecipientPreference(invoice.customer_id, {
-            email: overrideEmail,
-            name: overrideName,
-          });
-        }
-      }
     }
 
     let result;
@@ -1977,6 +1985,9 @@ async function invoiceSendHandler(req, res, next) {
         error: result.error || result.sms?.error || result.email?.error
           || 'Invoice send failed on both channels',
       });
+    }
+    if (shouldSaveBillingRecipient && overrideEmail) {
+      await persistBillingRecipientAfterSend(id, { email: overrideEmail, name: overrideName });
     }
     res.json(result);
   } catch (err) {
@@ -3161,6 +3172,54 @@ router.get('/:id/credit-context', async (req, res, next) => {
 // session can't charge the card after the credit is consumed; if that PI has
 // money in flight the request is refused for manual review.
 
+async function runApplyCreditPostCommitEffects({
+  id, covered, cover, balanceAfter, recordedBy, trimmedNote, technicianId,
+}) {
+  try {
+    const FollowUps = require('../services/invoice-followups');
+    await FollowUps.stopOnPayment(id);
+  } catch (err) {
+    logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
+  }
+
+  try {
+    const ReviewService = require('../services/review-request');
+    await ReviewService.enrollForPaidInvoice(covered, { source: 'apply_credit' });
+  } catch (err) {
+    logger.warn(`[admin-invoices:apply-credit] review enrollment failed: ${err.message}`);
+  }
+
+  const final = await db('invoices').where({ id }).first();
+  try {
+    await AnnualPrepayRenewals.syncTermForInvoicePayment(final);
+  } catch (err) {
+    logger.warn(`[admin-invoices:apply-credit] annual prepay activation failed: ${err.message}`);
+  }
+
+  try {
+    await require('../services/setup-fee-alert-reconcile').reconcileSetupFeeAlertForInvoice(final);
+  } catch (err) {
+    logger.warn(`[admin-invoices:apply-credit] setup-fee alert reconcile failed: ${err.message}`);
+  }
+
+  try {
+    const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+    await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: technicianId || null });
+  } catch (err) {
+    logger.warn(`[admin-invoices:apply-credit] visit closeout failed: ${err.message}`);
+  }
+
+  await db('activity_log').insert({
+    customer_id: covered.customer_id,
+    action: 'invoice_marked_prepaid',
+    description: `$${cover.toFixed(2)} account credit applied to ${covered.invoice_number}`
+      + ` — marked PREPAID (remaining credit $${balanceAfter.toFixed(2)}) — ${recordedBy}`
+      + (trimmedNote ? ` — ${trimmedNote.slice(0, 120)}` : ''),
+  }).catch((err) => logger.warn(`[admin-invoices:apply-credit] activity_log insert failed: ${err.message}`));
+
+  return final;
+}
+
 router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -3172,11 +3231,11 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     const invoice = await db('invoices').where({ id }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     // Third-party Bill-To: account credit belongs to the homeowner. A
-    // payer-billed invoice is owed by the payer, not the homeowner — drawing
-    // down the service customer's credit to mark the AP invoice prepaid would
-    // consume the wrong party's money. Reject it before any state change (a
-    // payer-facing credit flow is Phase 2).
-    if (invoice.payer_id) {
+    // payer-billed or statement-accrued invoice is owed by the payer, not the
+    // homeowner — drawing down the service customer's credit to mark the AP
+    // invoice prepaid would consume the wrong party's money. Reject it before
+    // any state change (and re-check inside the locked transaction below).
+    if (invoice.payer_id || invoice.payer_statement_id || invoiceWithdrawnFromCustomer(invoice)) {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
     }
     try {
@@ -3235,6 +3294,10 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // (server/services/invoice.js) exists to close. Re-verify here too.
         if (locked.customer_id !== invoice.customer_id) {
           const err = new Error('This invoice\'s owner changed — retry applying credit');
+          err.statusCode = 409; err.isOperational = true; throw err;
+        }
+        if (locked.payer_id || locked.payer_statement_id || invoiceWithdrawnFromCustomer(locked)) {
+          const err = new Error('Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices');
           err.statusCode = 409; err.isOperational = true; throw err;
         }
         try {
@@ -3347,45 +3410,15 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     }
 
     const { invoice: covered, cover, balanceAfter } = outcome;
-
-    // Stop reminders + activate any linked annual-prepay term, mirroring the
-    // manual/Stripe paid paths (term activation keys on paid_at, now stamped).
-    try {
-      const FollowUps = require('../services/invoice-followups');
-      await FollowUps.stopOnPayment(id);
-    } catch (err) {
-      logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
-    }
-
-    // Full-credit settlement is a payment event too: a completion invoice
-    // delivered unpaid deferred its review ask to payment, and this path
-    // reaches neither the Stripe webhook nor record-payment — enroll here or
-    // the requested ask is permanently lost (Codex P2, PR #3104 r3). Guards
-    // (completion opt-out, visit outcome, dedupe) live in the helper;
-    // standalone invoices no-op.
-    try {
-      const ReviewService = require('../services/review-request');
-      await ReviewService.enrollForPaidInvoice(covered, { source: 'apply_credit' });
-    } catch (err) {
-      logger.warn(`[admin-invoices:apply-credit] review enrollment failed: ${err.message}`);
-    }
-
-    try {
-      const final = await db('invoices').where({ id }).first();
-      await AnnualPrepayRenewals.syncTermForInvoicePayment(final);
-    } catch (err) {
-      logger.warn(`[admin-invoices:apply-credit] annual prepay activation failed: ${err.message}`);
-    }
-
-    await db('activity_log').insert({
-      customer_id: covered.customer_id,
-      action: 'invoice_marked_prepaid',
-      description: `$${cover.toFixed(2)} account credit applied to ${covered.invoice_number}`
-        + ` — marked PREPAID (remaining credit $${balanceAfter.toFixed(2)}) — ${recordedBy}`
-        + (trimmedNote ? ` — ${trimmedNote.slice(0, 120)}` : ''),
-    }).catch((err) => logger.warn(`[admin-invoices:apply-credit] activity_log insert failed: ${err.message}`));
-
-    const final = await db('invoices').where({ id }).first();
+    const final = await runApplyCreditPostCommitEffects({
+      id,
+      covered,
+      cover,
+      balanceAfter,
+      recordedBy,
+      trimmedNote,
+      technicianId: req.technicianId || null,
+    });
     res.json({
       ok: true,
       invoice: final,

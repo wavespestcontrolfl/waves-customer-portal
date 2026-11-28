@@ -33,6 +33,9 @@ const {
 // whose links are already in customers' hands). Both are unguessable bearer
 // credentials; anything else 404s with no existence oracle.
 const TOKEN_RE = /^(?:[A-Za-z0-9_-]{22}|[a-f0-9]{64})$/;
+// Never log raw err.message on token routes: Knex/driver error messages can
+// echo SQL + bound bearer tokens or customer PII.
+const safeErrorCode = (err) => String(err?.code || err?.name || 'error').slice(0, 64);
 
 // Privacy headers on EVERY outcome — including 404s, errors, AND the rate
 // limiter's own 429s, which is why this mounts BEFORE the limiter (Codex
@@ -125,7 +128,7 @@ router.get('/:token', async (req, res) => {
     if (inPerson) Object.assign(data, inPerson);
     return res.json(data);
   } catch (err) {
-    logger.error(`[secure-card-public] page load failed: ${err.message}`);
+    logger.error(`[secure-card-public] page load failed: ${safeErrorCode(err)}`);
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -156,7 +159,7 @@ router.post('/:token/select-plan', async (req, res) => {
       // update) — the page refetches and renders whatever state is true.
       return res.status(409).json({ error: 'That option is no longer available. Refresh to see current options.', code: 'plan_unavailable' });
     }
-    logger.error(`[secure-card-public] select-plan failed: ${err.message}`);
+    logger.error(`[secure-card-public] select-plan failed: ${safeErrorCode(err)}`);
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -216,7 +219,7 @@ router.post('/:token/replace-intent', async (req, res) => {
       publishableKey: require('../config/stripe-config').publishableKey,
     });
   } catch (err) {
-    logger.error(`[secure-card-public] replace-intent failed: ${err.message}`);
+    logger.error(`[secure-card-public] replace-intent failed: ${safeErrorCode(err)}`);
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });
@@ -328,7 +331,7 @@ router.post('/:token/complete', async (req, res) => {
     }
     return res.json({ success: true, alreadyCompleted: !!result.alreadyCompleted });
   } catch (err) {
-    logger.error(`[secure-card-public] complete failed: ${err.message}`);
+    logger.error(`[secure-card-public] complete failed: ${safeErrorCode(err)}`);
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });

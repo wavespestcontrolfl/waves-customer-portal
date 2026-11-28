@@ -23,6 +23,13 @@ const {
 
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 
+// No-store on EVERY outcome — including 404s, errors, and the rate limiter's
+// own 429s, which is why this mounts BEFORE the limiter.
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  next();
+});
+
 // Per-route read limit on top of the global /api limiter — same bar as the
 // sibling public token routes (prep, lawn-diagnostic).
 router.use(rateLimit({
@@ -37,9 +44,6 @@ router.get('/:token', async (req, res, next) => {
   try {
     const data = await CardService.getCardData(req.params.token);
     if (!data) return res.status(404).json({ error: 'Card not found' });
-    // Bearer-token payload (name, review flag, referral link, presigned tech
-    // photo) — same no-store treatment as the /card/:token shell.
-    res.set('Cache-Control', 'private, no-store');
     res.json(data);
   } catch (err) {
     next(err);
@@ -52,10 +56,6 @@ router.get('/:token', async (req, res, next) => {
 // when a tap can succeed. Kill switch = unset the PASS_* env vars.
 router.get('/:token/wallet.pkpass', async (req, res, next) => {
   try {
-    // no-store on EVERY outcome, including the early 404s — a cached 404
-    // from a pre-rollout tap must not outlive the PASS_* config flip
-    // (Codex P2 #2592).
-    res.set('Cache-Control', 'no-store');
     const WalletPass = require('../services/wallet-pass');
     if (!WalletPass.walletConfigured()) return res.status(404).send('Not found');
     const buf = await WalletPass.generateForToken(req.params.token);
@@ -103,7 +103,6 @@ router.get('/:token/contact.vcf', async (req, res, next) => {
       .replace(/^-+|-+$/g, '') || 'waves';
     res.set('Content-Type', 'text/vcard; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="waves-${slug}.vcf"`);
-    res.set('Cache-Control', 'private, no-store');
     res.send(vcf);
   } catch (err) {
     next(err);

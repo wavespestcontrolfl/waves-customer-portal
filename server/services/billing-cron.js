@@ -602,7 +602,7 @@ const BillingCron = {
         const catchUpMonth = pendingHoldDeferrals.get(String(customer.id));
         const holdCatchUp = catchUpMonth === `${year}-${String(month).padStart(2, '0')}`;
         if (catchUpMonth && !holdCatchUp) pendingHoldDeferrals.delete(String(customer.id));
-        if (!holdCatchUp && !isBillingDayMatch(customer.billing_day, todayDay)) {
+        if (!holdCatchUp && !isBillingDayMatch(customer.billing_day, todayDay, lastDay)) {
           continue;
         }
 
@@ -761,8 +761,15 @@ const BillingCron = {
 
         const paymentResult = lockOutcome.paymentResult;
         const settled = paymentResult?.status === 'paid';
-        if (settled) charged++;
-        else processing++;
+        if (settled) {
+          charged++;
+          await require('./payment-failed-alert-close').closePaymentFailedAlertsForMonthlyDues({
+            customerId: customer.id,
+            billedMonth: `${year}-${String(month).padStart(2, '0')}`,
+          });
+        } else {
+          processing++;
+        }
 
         // Log settlement state + update next_charge_date (next month, same billing_day)
         await logAutopay(customer.id, settled ? 'charge_success' : 'charge_processing', {
@@ -2040,8 +2047,15 @@ const BillingCron = {
       }
 
       const settled = newPayment?.status === 'paid';
-      if (settled) succeeded++;
-      else processing++;
+      if (settled) {
+        succeeded++;
+        await require('./payment-failed-alert-close').closePaymentFailedAlertsForMonthlyDues({
+          customerId: payment.customer_id,
+          billedMonth: obligationMonth,
+        });
+      } else {
+        processing++;
+      }
 
       // Log what was ACTUALLY collected — the retry recomputes the
       // total for the customer's current tender (a credit-card failure

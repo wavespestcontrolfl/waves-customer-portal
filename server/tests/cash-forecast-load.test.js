@@ -341,7 +341,7 @@ describe('loadForecastInput', () => {
     ]));
   });
 
-  test('dues: the dues run cohort and verdict; billing day NULL = the 1st; a day the month lacks is skipped', async () => {
+  test('dues: the dues run cohort and verdict; billing day NULL = the 1st; days 29-31 clamp to month end', async () => {
     const database = fakeDb({ tables: { customers: [
       { id: 'm1', billing_mode: 'monthly_membership', monthly_rate: 80, billing_day: null },
       { id: 'm2', billing_mode: 'monthly_membership', monthly_rate: 60, billing_day: 31 },
@@ -350,7 +350,7 @@ describe('loadForecastInput', () => {
     const input = await loadForecastInput({ database, now: NOW, readCashBalances: cashOk, readStripeBalance: async () => ({}) });
     expect(input.dues).toEqual([
       { day: '2026-12-01', amountUsd: 80, customerId: 'm1' }, { day: '2027-01-01', amountUsd: 80, customerId: 'm1' },
-      { day: '2026-12-31', amountUsd: 60, customerId: 'm2' }, { day: '2027-01-31', amountUsd: 60, customerId: 'm2' },
+      { day: '2026-11-30', amountUsd: 60, customerId: 'm2' }, { day: '2026-12-31', amountUsd: 60, customerId: 'm2' }, { day: '2027-01-31', amountUsd: 60, customerId: 'm2' },
     ]);
   });
 
