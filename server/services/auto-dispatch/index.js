@@ -1743,8 +1743,8 @@ async function recordApplyFailure(pm, fresh, applyErr, run) {
 
 // The customer's scheduling preferences as they stand now differ from the
 // ones this move was scored on. A read error throws: the move fails closed.
-async function preferencesChanged(pm) {
-  const now = await getCustomerSchedulingPreferences(pm.service.customer_id, pm.service.service_type, db, { serviceId: pm.service.service_id, serviceKey: pm.service.service_key_snapshot });
+async function preferencesChanged(pm, conn = db) {
+  const now = await getCustomerSchedulingPreferences(pm.service.customer_id, pm.service.service_type, conn, { serviceId: pm.service.service_id, serviceKey: pm.service.service_key_snapshot });
   return moveCheck.preferencesPrint(now) !== moveCheck.preferencesPrint(pm.prefs);
 }
 

@@ -152,27 +152,36 @@ function homeDepartureMin(home, stopGeo, startMin, vanDepartureMin = SHIFT.start
   return startMin >= shiftStart ? Math.max(shiftStart, startMin - estOut) : Math.max(0, startMin - estOut);
 }
 
-function disjointRoadEntryFor(located, idx, startMin, home, vanDepartureMin) {
+function chainStopSpec(stop, startMin) {
+  return {
+    geo: stop.geo,
+    startMin: Number.isFinite(startMin) ? startMin : stop.startMin,
+    durationMin: stop.minutes || stopPlanningMinutes(stop),
+  };
+}
+
+function subChainRoadSpec({ located, lo, hi, startMinById, home, vanDepartureMin }) {
   const durOf = (stop) => stop.minutes || stopPlanningMinutes(stop);
   const atGeo = (i) => (i >= 0 && i < located.length ? located[i].geo : home);
-  const prevStop = idx > 0 ? located[idx - 1] : null;
-  const nextStop = idx + 1 < located.length ? located[idx + 1] : null;
+  const prevStop = lo > 0 ? located[lo - 1] : null;
+  const nextStop = hi + 1 < located.length ? located[hi + 1] : null;
+  const startOf = (stop) => (startMinById.has(String(stop.id)) ? startMinById.get(String(stop.id)) : stop.startMin);
+  const proposedStops = located.slice(lo, hi + 1).map((s) => chainStopSpec(s, startOf(s)));
+  const baselineStops = located.slice(lo + 1, hi).map((s) => chainStopSpec(s, startOf(s)));
   const prevDepMin = prevStop && Number.isFinite(prevStop.startMin)
     ? Math.round(prevStop.startMin + durOf(prevStop))
-    : homeDepartureMin(home, located[idx].geo, startMin, vanDepartureMin);
+    : homeDepartureMin(home, proposedStops[0].geo, proposedStops[0].startMin, vanDepartureMin);
+  const firstBase = baselineStops[0] || (nextStop && Number.isFinite(nextStop.startMin) ? nextStop : null);
   const baseDepMin = prevStop
     ? prevDepMin
-    : (nextStop && Number.isFinite(nextStop.startMin)
-      ? homeDepartureMin(home, nextStop.geo, nextStop.startMin, vanDepartureMin)
-      : prevDepMin);
+    : (firstBase ? homeDepartureMin(home, firstBase.geo, firstBase.startMin, vanDepartureMin) : prevDepMin);
   return {
-    prev: atGeo(idx - 1),
-    stop: located[idx].geo,
-    next: atGeo(idx + 1),
-    startMin,
+    prev: atGeo(lo - 1),
+    next: atGeo(hi + 1),
     prevDepMin,
     baseDepMin,
-    durationMin: durOf(located[idx]),
+    proposedStops,
+    baselineStops,
   };
 }
 
@@ -181,42 +190,14 @@ function sameDestRoadSpecFor(finalChain, idA, idB, { date, startMinA, startMinB,
   const idxA = located.findIndex((s) => String(s.id) === String(idA));
   const idxB = located.findIndex((s) => String(s.id) === String(idB));
   if (idxA < 0 || idxB < 0) return null;
-  const atGeo = (i) => (i >= 0 && i < located.length ? located[i].geo : home);
-  const durOf = (stop) => stop.minutes || stopPlanningMinutes(stop);
   const lo = Math.min(idxA, idxB);
   const hi = Math.max(idxA, idxB);
-  if (hi === lo + 1) {
-    const firstStartMin = lo === idxA ? startMinA : startMinB;
-    const secondStartMin = lo === idxA ? startMinB : startMinA;
-    const prevStop = lo > 0 ? located[lo - 1] : null;
-    const nextStop = hi + 1 < located.length ? located[hi + 1] : null;
-    const prevDepMin = prevStop && Number.isFinite(prevStop.startMin)
-      ? Math.round(prevStop.startMin + durOf(prevStop))
-      : homeDepartureMin(home, located[lo].geo, firstStartMin, vanDepartureMin);
-    const baseDepMin = prevStop
-      ? prevDepMin
-      : (nextStop && Number.isFinite(nextStop.startMin)
-        ? homeDepartureMin(home, nextStop.geo, nextStop.startMin, vanDepartureMin)
-        : prevDepMin);
-    return {
-      date, startMin: firstStartMin,
-      adjacent: {
-        prev: atGeo(lo - 1), first: located[lo].geo, second: located[hi].geo, next: atGeo(hi + 1),
-        prevDepMin,
-        baseDepMin,
-        firstStartMin,
-        firstDurationMin: durOf(located[lo]),
-        secondStartMin,
-        secondDurationMin: durOf(located[hi]),
-      },
-    };
-  }
+  const startMinById = new Map([[String(idA), startMinA], [String(idB), startMinB]]);
+  const sub = subChainRoadSpec({ located, lo, hi, startMinById, home, vanDepartureMin });
   return {
-    date, startMin: startMinA,
-    disjoint: [
-      disjointRoadEntryFor(located, idxA, startMinA, home, vanDepartureMin),
-      disjointRoadEntryFor(located, idxB, startMinB, home, vanDepartureMin),
-    ],
+    date,
+    startMin: lo === idxA ? startMinA : startMinB,
+    subChain: sub,
   };
 }
 
@@ -331,10 +312,17 @@ function routeSignatureOf(rows) {
   return (rows || [])
     .map((r) => [
       String(r.id),
+      r.visit_id ?? '',
+      r.customer_id ?? '',
       r.route_order ?? '',
       String(r.window_start || '').slice(0, 5),
       String(r.window_end || '').slice(0, 5),
+      r.time_window ?? '',
       r.estimated_duration_minutes ?? '',
+      r.service_type ?? '',
+      r.is_recurring === true ? 1 : 0,
+      r.is_callback === true ? 1 : 0,
+      r.preserveCapacity === true ? 1 : 0,
       coordKey(r.geo || resolveGeo(r)),
     ].join(':'))
     .sort()
@@ -518,9 +506,12 @@ function singleDestEvaluation(destStops, stop, cand, destHome, vanDepartureMin) 
   const located = finalChain.filter((s) => s.geo);
   const idx = located.findIndex((s) => String(s.id) === String(stop.id));
   if (idx < 0) return null;
+  const sub = subChainRoadSpec({
+    located, lo: idx, hi: idx, startMinById: new Map([[String(stop.id), startMin]]), home: destHome, vanDepartureMin,
+  });
   return {
     detour: round2(cost.detourMinutes),
-    roadSpec: { date: cand.date, ...disjointRoadEntryFor(located, idx, startMin, destHome, vanDepartureMin) },
+    roadSpec: { date: cand.date, startMin, subChain: sub },
     signature: routeSignatureOf(destStops),
   };
 }
@@ -795,10 +786,12 @@ async function tryClearOneTwoStopDay(entryA, entryB, run, helpers) {
     checkedB: proof.checkedB,
     sourceTechId: verified.techId,
     sourceDate: verified.sourceDate,
-    verifySourceInTrx: async (trx) => Boolean(
-      await verifyExactTwoStopDay(trx, entryA, entryB, { expectedOrder })
-      && await verifyDestinationSignatures(trx, destExpected, excludeIds),
-    ),
+    verifySourceInTrx: async (trx) => {
+      if (!(await verifyExactTwoStopDay(trx, entryA, entryB, { expectedOrder }))) return false;
+      if (!(await verifyDestinationSignatures(trx, destExpected, excludeIds))) return false;
+      if (await helpers.preferencesChanged(entryA, trx) || await helpers.preferencesChanged(entryB, trx)) return false;
+      return true;
+    },
     run,
   });
 }

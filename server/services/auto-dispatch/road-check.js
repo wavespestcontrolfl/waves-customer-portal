@@ -344,58 +344,36 @@ async function sourceDayRoadDrive(sourceLegs, travel) {
   return t3 == null ? null : round2(t1 + t2 + t3);
 }
 
-async function adjacentDestRoadAdded(date, startMin, adjacent, travel) {
-  const { prev, first, second, next } = adjacent;
-  const leg = (from, to, dep) => ({ date, from, to, departureMin: dep });
-  const firstStart = Number.isFinite(adjacent.firstStartMin) ? adjacent.firstStartMin : startMin;
-  const secondStart = Number.isFinite(adjacent.secondStartMin) ? adjacent.secondStartMin : firstStart;
-  const dep1 = Number.isFinite(adjacent.prevDepMin) ? adjacent.prevDepMin : firstStart;
-  const baseDep = Number.isFinite(adjacent.baseDepMin) ? adjacent.baseDepMin : dep1;
-  const firstPair = await lookupGoogleLegs([leg(prev, first, dep1), leg(prev, next, baseDep)], travel);
-  if (!firstPair) return null;
-  const [t1, tBase] = firstPair;
-  const start1 = Math.max(dep1 + t1, firstStart);
-  const dep2 = Number.isFinite(adjacent.firstDurationMin)
-    ? Math.round(start1 + adjacent.firstDurationMin)
-    : secondStart;
-  const t2 = await lookupOneGoogleLeg(leg(first, second, dep2), travel);
-  if (t2 == null) return null;
-  const start2 = Math.max(dep2 + t2, secondStart);
-  const dep3 = Number.isFinite(adjacent.secondDurationMin)
-    ? Math.round(start2 + adjacent.secondDurationMin)
-    : dep2;
-  const t3 = await lookupOneGoogleLeg(leg(second, next, dep3), travel);
-  return t3 == null ? null : Math.max(0, round2(t1 + t2 + t3 - tBase));
+async function chainRoadDrive(date, startGeo, startDepMin, stops, endGeo, travel) {
+  let cursorGeo = startGeo;
+  let clock = startDepMin;
+  let total = 0;
+  for (const stop of stops || []) {
+    const mins = await lookupOneGoogleLeg({ date, from: cursorGeo, to: stop.geo, departureMin: clock }, travel);
+    if (mins == null) return null;
+    total += mins;
+    const startAt = Math.max(clock + mins, Number.isFinite(stop.startMin) ? stop.startMin : clock + mins);
+    clock = Math.round(startAt + (Number.isFinite(stop.durationMin) ? stop.durationMin : 0));
+    cursorGeo = stop.geo;
+  }
+  const endMins = await lookupOneGoogleLeg({ date, from: cursorGeo, to: endGeo, departureMin: clock }, travel);
+  return endMins == null ? null : round2(total + endMins);
 }
 
-async function disjointStopRoadAdded(date, entry, fallbackStartMin, travel) {
-  const leg = (from, to, dep) => ({ date, from, to, departureMin: dep });
-  const stopStart = Number.isFinite(entry.startMin) ? entry.startMin : fallbackStartMin;
-  const depIn = Number.isFinite(entry.prevDepMin) ? entry.prevDepMin : stopStart;
-  const baseDep = Number.isFinite(entry.baseDepMin) ? entry.baseDepMin : depIn;
-  const firstPair = await lookupGoogleLegs([leg(entry.prev, entry.stop, depIn), leg(entry.prev, entry.next, baseDep)], travel);
-  if (!firstPair) return null;
-  const [tIn, tBase] = firstPair;
-  const startAt = Math.max(depIn + tIn, stopStart);
-  const depOut = Number.isFinite(entry.durationMin) ? Math.round(startAt + entry.durationMin) : stopStart;
-  const tOut = await lookupOneGoogleLeg(leg(entry.stop, entry.next, depOut), travel);
-  return tOut == null ? null : Math.max(0, round2(tIn + tOut - tBase));
+async function subChainRoadAdded(date, subChain, travel) {
+  if (!subChain || !Number.isFinite(subChain.prevDepMin) || !Number.isFinite(subChain.baseDepMin)) return null;
+  const proposed = await chainRoadDrive(date, subChain.prev, subChain.prevDepMin, subChain.proposedStops, subChain.next, travel);
+  if (proposed == null) return null;
+  const baseline = await chainRoadDrive(date, subChain.prev, subChain.baseDepMin, subChain.baselineStops, subChain.next, travel);
+  return baseline == null ? null : Math.max(0, round2(proposed - baseline));
 }
 
 // Real-road added detour for a pair landing on the same destination day:
-// adjacent inserted stops propagate travel, waiting, and service durations across
-// all 4 legs; disjoint stops propagate arrival and service duration per detour.
+// propagates travel, waiting, and service durations across the affected sub-chain
+// (covering both adjacent and disjoint insertions, including intervening stops).
 async function sameDestRoadAdded(destSpec, travel) {
   if (!destSpec || !destSpec.date) return null;
-  const { date, startMin, adjacent, disjoint } = destSpec;
-  if (adjacent) return adjacentDestRoadAdded(date, startMin, adjacent, travel);
-  if (disjoint) {
-    const [a, b] = disjoint;
-    const addedA = await disjointStopRoadAdded(date, a, startMin, travel);
-    if (addedA == null) return null;
-    const addedB = await disjointStopRoadAdded(date, b, startMin, travel);
-    return addedB == null ? null : round2(addedA + addedB);
-  }
+  if (destSpec.subChain) return subChainRoadAdded(destSpec.date, destSpec.subChain, travel);
   return null;
 }
 
@@ -403,9 +381,9 @@ async function pairAddedRoadDrive(pair, travel) {
   if (pair.sameDest) return sameDestRoadAdded(pair.sameDestRoadSpec, travel);
   if (Array.isArray(pair.splitDestRoadSpecs) && pair.splitDestRoadSpecs.length === 2) {
     const [specA, specB] = pair.splitDestRoadSpecs;
-    const detA = await disjointStopRoadAdded(specA.date, specA, specA.startMin, travel);
+    const detA = await sameDestRoadAdded(specA, travel);
     if (detA == null) return null;
-    const detB = await disjointStopRoadAdded(specB.date, specB, specB.startMin, travel);
+    const detB = await sameDestRoadAdded(specB, travel);
     return detB == null ? null : round2(detA + detB);
   }
   const detA = await roadDetour(pair.slotA, travel);
