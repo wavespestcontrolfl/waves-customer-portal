@@ -42,6 +42,7 @@ const builder = {
   orWhere: jest.fn(() => builder),
   orderBy: jest.fn(() => builder),
   offset: jest.fn(() => builder),
+  forNoKeyUpdate: jest.fn(() => builder),
   first: jest.fn(async () => explicitEstimateRow),
   limit: jest.fn(async () => pages.shift() || []),
 };
@@ -724,7 +725,7 @@ describe('send_lead_response dispatch-boundary price verification', () => {
     });
   });
 
-  test('passes texts without prices immediately without reading estimates', async () => {
+  test('passes texts without prices immediately without reading estimates, including non-price quote reminders', async () => {
     const res = await verifyLeadSmsQuotedPrices(
       'Hello Pat! Ants are active in Bradenton right now. Reply to this text and we will send an estimate.',
       mockDb,
@@ -733,5 +734,110 @@ describe('send_lead_response dispatch-boundary price verification', () => {
     );
     expect(res).toEqual({ ok: true, hasPrice: false });
     expect(builder.limit).not.toHaveBeenCalled();
+
+    const expiryReminder = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your quote expires in 7 days. Reply here if you have any questions.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(expiryReminder).toEqual({ ok: true, hasPrice: false });
+    expect(builder.limit).not.toHaveBeenCalled();
+  });
+
+  test('evaluates unread rows past the 5-row display cap in both lookup and dispatch (6 delivered estimates, rows 5 & 6 match property)', async () => {
+    mockLead.property_id = 'prop-1';
+    mockPricing.perApplicationAverage = {
+      model: { planMonthly: 49.67, services: [{ label: 'General Pest Control — 4 applications/yr', perApplication: 149, visits: 4, monthly: 49.67 }], credit: null },
+      inputs: { oneTime: null },
+    };
+    const sixRows = [
+      row({ id: 'e-1', property_id: 'prop-other' }),
+      row({ id: 'e-2', property_id: 'prop-other' }),
+      row({ id: 'e-3', property_id: 'prop-other' }),
+      row({ id: 'e-4', property_id: 'prop-other' }),
+      row({ id: 'e-5', property_id: 'prop-1', monthly_total: '49.67', onetime_total: '0.00' }),
+      row({ id: 'e-6', property_id: 'prop-1', monthly_total: '59.67', onetime_total: '0.00' }),
+    ];
+    pages.push([...sixRows]);
+    const lookupOut = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(lookupOut.estimates).toHaveLength(5);
+    expect(lookupOut.estimates[4]).toMatchObject({
+      id: 'e-5',
+      pricingUnavailable: 'ambiguous_multiple_estimates',
+      token: null,
+      viewUrl: null,
+      viewUrlWithheld: 'ambiguous_multiple_estimates',
+    });
+
+    pages.push([...sixRows]);
+    const dispatchRes = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists General Pest Control at $149 per application, 4 applications a year.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(dispatchRes).toEqual({ ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' });
+  });
+
+  test('finds explicit lead ownership on row 6 even when rows 1-5 are unstamped', async () => {
+    mockPricing.perApplicationAverage = {
+      model: { planMonthly: 49.67, services: [{ label: 'General Pest Control — 4 applications/yr', perApplication: 149, visits: 4, monthly: 49.67 }], credit: null },
+      inputs: { oneTime: null },
+    };
+    pages.push([
+      row({ id: 'e-1' }),
+      row({ id: 'e-2' }),
+      row({ id: 'e-3' }),
+      row({ id: 'e-4' }),
+      row({ id: 'e-5' }),
+      row({ id: 'e-6', monthly_total: '49.67', onetime_total: '0.00', estimate_data: { lead_id: 'l1' } }),
+    ]);
+    const out = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(out.estimates[0]).toMatchObject({
+      id: 'e-6',
+      viewUrl: 'https://portal.wavespestcontrol.com/estimate/tk-e-6',
+    });
+    expect(out.estimates[0].pricing.priceSentences).toEqual([
+      'Your estimate lists General Pest Control at $149 per application, 4 applications a year.',
+    ]);
+  });
+
+  test('rechecks positive property ownership after locking the estimate row and blocks scope-expanding surrounding text', async () => {
+    mockLead.property_id = 'prop-1';
+    mockPricing.perApplicationAverage = {
+      model: { planMonthly: 49.67, services: [{ label: 'General Pest Control — 4 applications/yr', perApplication: 149, visits: 4, monthly: 49.67 }], credit: null },
+      inputs: { oneTime: null },
+    };
+    // Unlocked read sees property_id='prop-1', but locked row has property_id cleared to null -> must fail closed.
+    pages.push([row({ id: 'e-lock', property_id: 'prop-1', monthly_total: '49.67', onetime_total: '0.00' })]);
+    explicitEstimateRow = row({ id: 'e-lock', property_id: null, monthly_total: '49.67', onetime_total: '0.00' });
+    const lostProp = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists General Pest Control at $149 per application, 4 applications a year.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate, lockQuotedEstimate: true },
+    );
+    expect(lostProp).toEqual({ ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' });
+
+    // Valid locked row + approved link + inert closer passes; appending unquoted scope claim fails closed.
+    pages.push([row({ id: 'e-lock', property_id: 'prop-1', monthly_total: '49.67', onetime_total: '0.00' })]);
+    explicitEstimateRow = row({ id: 'e-lock', property_id: 'prop-1', monthly_total: '49.67', onetime_total: '0.00' });
+    const withLink = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists General Pest Control at $149 per application, 4 applications a year. You can review your estimate here: https://portal.wavespestcontrol.com/estimate/tk-e-lock. Let us know if you have any questions!',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate, lockQuotedEstimate: true },
+    );
+    expect(withLink).toEqual({ ok: true, hasPrice: true });
+
+    pages.push([row({ id: 'e-lock', property_id: 'prop-1', monthly_total: '49.67', onetime_total: '0.00' })]);
+    const scopeExpand = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists General Pest Control at $149 per application, 4 applications a year. That also covers termite treatment.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate, lockQuotedEstimate: true },
+    );
+    expect(scopeExpand).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
   });
 });

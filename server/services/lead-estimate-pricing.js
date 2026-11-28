@@ -24,7 +24,12 @@ const {
   estimateIsPriceLocked,
   resolveLivePricing,
 } = require('./estimate-proposal-billing');
-const { remainderHasMoney } = require('./payment-status-contract');
+const {
+  copiedSentences,
+  withoutCopies,
+  remainderHasMoney,
+  remainderIsInert,
+} = require('./payment-status-contract');
 const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 const VIEWABLE_LIMIT = 5;
@@ -34,8 +39,9 @@ const OPEN_QUOTABLE_STATUSES = new Set(['sent', 'viewed']);
 // Supplements payment-status-contract.remainderHasMoney with explicit currency
 // and billing-unit signals so any price wording outside verbatim sentences
 // fails closed (including spelled-out amounts like "fifty dollars" via
-// remainderHasMoney / sms-suggest-mode.hasPriceQuote).
-const EXTRA_PRICE_SIGNAL_RE = /\$|\busd\b|\b(?:per\s+(?:application|month|visit|year|treatment|service)|\/\s*(?:mo|month|yr|year|app|visit))\b|\b(?:costs?|price[ds]?|quoted?|rate|fee|charge[ds]?|total)\b[^.!?\n]*\d/i;
+// remainderHasMoney / sms-suggest-mode.hasPriceQuote), while letting ordinary
+// non-price quote reminders ("Your quote expires in 7 days.") pass.
+const EXTRA_PRICE_SIGNAL_RE = /\$|\busd\b|\b(?:per\s+(?:application|month|visit|year|treatment|service)|\/\s*(?:mo|month|yr|year|app|visit))\b|\b(?:costs?|price[ds]?|quoted?|rate|fee|charge[ds]?|total)\s*(?:is|are|was|were|at|of|for|starts?\s+at|:)?\s*\$?\d/i;
 
 function hasUnverifiedPriceSignal(text) {
   const normalized = normalizeForMatch(text);
@@ -398,17 +404,12 @@ async function loadExplicitLinkedEstimate(conn, customerId, explicitEstimateId) 
   return evaluateDeliveredEstimateRow(conn, row);
 }
 
-// Scans beyond the 5-row display cap ONLY when needed to resolve implicit lead
-// ownership (either to detect a second ambiguous match or to find an explicitly
-// owned estimate past row 5 when the first 5 were all unrelated). Stops right
-// away when the first 5 already contain >= 2 eligible unstamped matches.
+// Evaluates any unread rows from the first page (zero extra queries) before
+// deciding lead binding, and scans additional pages whenever needed to detect
+// an ambiguous second match or an older property/explicit match.
 async function resolveFullBindingBeyondLimit(conn, customerId, lead, ownersByEstimate, entries, seenIds, unreadRows, nextOffset, exhausted) {
-  const initialPlan = resolveLeadBindingPlan(entries, lead, ownersByEstimate);
-  if (lead?.estimate_id || exhausted) return { entries, bindingPlan: initialPlan };
-  const initialNonConflicting = entries.filter((e) => !rowIdentifierConflict(e, lead, ownersByEstimate));
-  const initialOwned = initialNonConflicting.filter((e) => rowExplicitlyOwnedByLead(e, lead, ownersByEstimate));
-  if (!initialOwned.length && !lead?.property_id && initialNonConflicting.length >= 2) {
-    return { entries, bindingPlan: initialPlan };
+  if (lead?.estimate_id) {
+    return { entries, allEntries: entries, bindingPlan: resolveLeadBindingPlan(entries, lead, ownersByEstimate) };
   }
   const extraEntries = [];
   const inspectRows = async (rows) => {
@@ -420,11 +421,18 @@ async function resolveFullBindingBeyondLimit(conn, customerId, lead, ownersByEst
     }
   };
   await inspectRows(unreadRows);
-  for (let offset = nextOffset; ; offset += VIEWABLE_PAGE) {
-    const rows = await conn('estimates').where({ customer_id: customerId })
-      .orderBy('created_at', 'desc').offset(offset).limit(VIEWABLE_PAGE);
-    await inspectRows(rows);
-    if (rows.length < VIEWABLE_PAGE) break;
+  const pageOneCombined = [...entries, ...extraEntries];
+  const pageOneNonConflicting = pageOneCombined.filter((e) => !rowIdentifierConflict(e, lead, ownersByEstimate));
+  const pageOneOwned = pageOneNonConflicting.filter((e) => rowExplicitlyOwnedByLead(e, lead, ownersByEstimate));
+  const skipExtraPages = exhausted
+    || (!pageOneOwned.length && !lead?.property_id && pageOneNonConflicting.length >= 2);
+  if (!skipExtraPages) {
+    for (let offset = nextOffset; ; offset += VIEWABLE_PAGE) {
+      const rows = await conn('estimates').where({ customer_id: customerId })
+        .orderBy('created_at', 'desc').offset(offset).limit(VIEWABLE_PAGE);
+      await inspectRows(rows);
+      if (rows.length < VIEWABLE_PAGE) break;
+    }
   }
   const combined = [...entries, ...extraEntries];
   const fullPlan = resolveLeadBindingPlan(combined, lead, ownersByEstimate);
@@ -433,7 +441,7 @@ async function resolveFullBindingBeyondLimit(conn, customerId, lead, ownersByEst
     const match = extraEntries.find((e) => String(e.row.id) === fullPlan.boundId);
     if (match) display = [match, ...entries.slice(0, VIEWABLE_LIMIT - 1)];
   }
-  return { entries: display, bindingPlan: fullPlan };
+  return { entries: display, allEntries: combined, bindingPlan: fullPlan };
 }
 
 async function loadDeliveredViewableEstimates(conn, customerId, lead) {
@@ -476,7 +484,13 @@ async function loadDeliveredViewableEstimates(conn, customerId, lead) {
   const resolved = await resolveFullBindingBeyondLimit(
     conn, customerId, lead, ownersByEstimate, entries, seenIds, unreadInLastPage, nextOffset, exhausted,
   );
-  return { entries: resolved.entries, hiddenCount, bindingPlan: resolved.bindingPlan, ownersByEstimate };
+  return {
+    entries: resolved.entries,
+    allEntries: resolved.allEntries,
+    hiddenCount,
+    bindingPlan: resolved.bindingPlan,
+    ownersByEstimate,
+  };
 }
 
 async function checkExistingEstimatesForLead(conn, subject, { estimateDeliverableUnderGate, shortenOrPassthrough }) {
@@ -529,28 +543,59 @@ function normalizeForMatch(text) {
     .trim();
 }
 
-function stripVerifiedPriceSentences(message, sentences) {
-  let remainder = normalizeForMatch(message);
-  const sorted = [...new Set((sentences || []).map(normalizeForMatch).filter(Boolean))]
-    .sort((a, b) => b.length - a.length);
-  for (const sentence of sorted) {
-    const escaped = sentence.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    remainder = remainder.replace(new RegExp(escaped, 'gi'), ' ');
+// When a reply quotes verified verbatim priceSentences, surrounding text is
+// limited to inert greetings/closers, the bound estimate's portal link, or a
+// simple scheduling/reply CTA so free text cannot extend the price to unquoted
+// services or discounts ("That also covers termite treatment.").
+const ALLOWED_PRICE_WRAPPER_RES = [
+  /^(?:here(?:'s| is) (?:the |your )?(?:full )?estimate(?: link)?|(?:you can )?(?:view|review|see|open|check|approve)(?: and approve)? (?:your |the )?(?:full )?estimate(?: (?:details|online|here))?(?: at| here)?)$/,
+  /^(?:(?:please )?reply(?: (?:here|to this text))?(?: (?:if|when) you(?:'d| would| want| are ready)?(?: (?:like|want|ready))? to (?:schedule|get started|move forward|get on the schedule|book))?|(?:would you like|want|ready) to (?:schedule|get started|move forward|get on the schedule|book)(?: a visit| your service| your first visit)?|(?:let me|let us) know (?:if you(?:'d| would| want)?(?: (?:like|want))? to (?:schedule|get started|move forward|get on the schedule)|what works best for you)|happy to help)$/,
+];
+
+function stripAllowedEstimateLink(clause, boundToken) {
+  const escapedToken = boundToken ? String(boundToken).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null;
+  let out = String(clause || '');
+  if (escapedToken) {
+    out = out.replace(new RegExp(`(?:https?://)?portal\\.wavespestcontrol\\.com/estimate/${escapedToken}\\b`, 'gi'), ' ');
   }
-  return remainder.replace(/\s+/g, ' ').trim();
+  return out.replace(/(?:https?:\/\/)?portal\.wavespestcontrol\.com\/l\/[a-z0-9-]+\b/gi, ' ');
 }
 
-async function lockAndRevalidateBoundEstimate(conn, customerId, estimateId, lead, ownersByEstimate, estimateDeliverableUnderGate) {
+function isAllowedPriceWrapperClause(rawClause, boundToken) {
+  const trimmed = String(rawClause || '').trim();
+  if (!trimmed) return true;
+  if (remainderIsInert(trimmed)) return true;
+  const withoutLink = stripAllowedEstimateLink(trimmed, boundToken)
+    .toLowerCase()
+    .replace(/[^a-z' ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!withoutLink) return true;
+  return ALLOWED_PRICE_WRAPPER_RES.some((re) => re.test(withoutLink));
+}
+
+function remainderIsAllowedPriceWrapper(remainder, boundToken) {
+  const clauses = String(remainder || '').split(/(?<=[.!?])\s+|[;\n]+/);
+  return clauses.every((clause) => isAllowedPriceWrapperClause(clause, boundToken));
+}
+
+async function lockAndRevalidateBoundEstimate(conn, customerId, estimateId, lead, allEntries, ownersByEstimate, estimateDeliverableUnderGate) {
   const query = conn('estimates').where({ id: estimateId, customer_id: customerId });
   const lockedRow = typeof query.forNoKeyUpdate === 'function'
     ? await query.forNoKeyUpdate().first()
     : await query.first();
   if (!lockedRow) return null;
   const evaluated = await evaluateDeliveredEstimateRow(conn, lockedRow);
-  if (!evaluated || rowIdentifierConflict(evaluated, lead, ownersByEstimate)) return null;
+  if (!evaluated) return null;
+  const refreshedEntries = allEntries.map((e) => (String(e.row.id) === String(estimateId) ? evaluated : e));
+  const rebound = resolveLeadBindingPlan(refreshedEntries, lead, ownersByEstimate);
+  if (rebound.boundId !== String(estimateId)) return null;
   const authorityOk = await estimateDeliverableUnderGate(conn, evaluated.row);
   if (!authorityOk) return null;
-  return customerFacingEstimatePricing(evaluated.row, evaluated.data);
+  return {
+    pricingFields: await customerFacingEstimatePricing(evaluated.row, evaluated.data),
+    token: evaluated.row.token || null,
+  };
 }
 
 async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliverableUnderGate, lockQuotedEstimate = false }) {
@@ -559,28 +604,34 @@ async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliv
     return { ok: true, hasPrice: false };
   }
   try {
-    const { entries, bindingPlan, ownersByEstimate } = await loadDeliveredViewableEstimates(conn, subject.customer.id, subject.lead);
+    const { allEntries, bindingPlan, ownersByEstimate } = await loadDeliveredViewableEstimates(conn, subject.customer.id, subject.lead);
     if (!bindingPlan.boundId) {
       return { ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' };
     }
-    let pricingFields;
+    let resolved = null;
     if (lockQuotedEstimate) {
-      pricingFields = await lockAndRevalidateBoundEstimate(
-        conn, subject.customer.id, bindingPlan.boundId, subject.lead, ownersByEstimate, estimateDeliverableUnderGate,
+      resolved = await lockAndRevalidateBoundEstimate(
+        conn, subject.customer.id, bindingPlan.boundId, subject.lead, allEntries, ownersByEstimate, estimateDeliverableUnderGate,
       );
     } else {
-      const boundEntry = entries.find((e) => String(e.row.id) === bindingPlan.boundId);
+      const boundEntry = allEntries.find((e) => String(e.row.id) === bindingPlan.boundId);
       const authorityOk = boundEntry ? await estimateDeliverableUnderGate(conn, boundEntry.row) : false;
-      pricingFields = boundEntry && authorityOk ? await customerFacingEstimatePricing(boundEntry.row, boundEntry.data) : null;
+      resolved = boundEntry && authorityOk
+        ? { pricingFields: await customerFacingEstimatePricing(boundEntry.row, boundEntry.data), token: boundEntry.row.token || null }
+        : null;
     }
-    const allowedSentences = Array.isArray(pricingFields?.pricing?.priceSentences)
-      ? pricingFields.pricing.priceSentences
+    const allowedSentences = Array.isArray(resolved?.pricingFields?.pricing?.priceSentences)
+      ? resolved.pricingFields.pricing.priceSentences
       : [];
     if (!allowedSentences.length) {
       return { ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' };
     }
-    const remainder = stripVerifiedPriceSentences(normalized, allowedSentences);
-    if (hasUnverifiedPriceSignal(remainder)) {
+    const copied = copiedSentences(normalized, allowedSentences);
+    if (!copied.length) {
+      return { ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' };
+    }
+    const remainder = withoutCopies(normalized, copied);
+    if (hasUnverifiedPriceSignal(remainder) || !remainderIsAllowedPriceWrapper(remainder, resolved.token)) {
       return { ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' };
     }
     return { ok: true, hasPrice: true };
