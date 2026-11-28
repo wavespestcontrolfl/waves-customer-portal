@@ -157,7 +157,7 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
     return { ok: false, error: 'no_ap_email', payerId: statement.payer_id };
   }
 
-  const lines = await loadStatementLines(statementId, database);
+  const lines = await loadStatementLines(statementId, database, { status: statement.status });
   const pdfBuffer = await buildPayerStatementPDFBuffer({ statement, payer: snapshot, lines });
   const fileName = `waves-statement-S${statement.id}.pdf`;
   const recipient = { email: apEmail, company, count: lines.length };

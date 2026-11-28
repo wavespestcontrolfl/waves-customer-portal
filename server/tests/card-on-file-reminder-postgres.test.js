@@ -349,11 +349,16 @@ maybeDescribe('card on file reminder (real schema, fake provider)', () => {
     const deleted = await dueCustomer({ deleted_at: new Date('2026-11-20T00:00:00Z') });
     expect(await sweep.runCardOnFileReminderSweep({ now: NOW, customerIds: [inactive, churned, deleted] })).toMatchObject({ shadow: 0, skipped: { customer_not_active: 3 } });
 
-    jest.spyOn(guard, 'findActivePrepayTerm').mockResolvedValue({ id: 'term-1' });
     const prepaid = await dueCustomer();
-    expect(await run(prepaid)).toMatchObject({ shadow: 0, skipped: { prepaid_nothing_due: 1 } });
-    await invoice(prepaid);
-    expect(await run(prepaid)).toMatchObject({ shadow: 1 });
+    const prepaySpy = jest.spyOn(require('../services/annual-prepay-renewals'), 'annualPrepayCoversVisit')
+      .mockImplementation(async (v) => String(v?.customer_id) === String(prepaid));
+    try {
+      expect(await run(prepaid)).toMatchObject({ shadow: 0, skipped: { prepaid_nothing_due: 1 } });
+      await invoice(prepaid);
+      expect(await run(prepaid)).toMatchObject({ shadow: 1 });
+    } finally {
+      prepaySpy.mockRestore();
+    }
   });
 
   test('a customer whose only visits bill a third-party payer is not emailed, and an unreadable payer picture fails closed', async () => {

@@ -36,7 +36,7 @@
         "USE /api/integrations/commitments-worker (commitmentsDarkGuard#fc9288cf)",
         "USE /api/pay (darkRoutePreGuard#3364a5c1)",
         "USE /api/pay (rejectUndecodablePath#5ebba315)",
-        "USE /api/pay/statement (inline function#cf970c43)",
+        "USE /api/pay/statement (statementDarkPreGuard#bc009b2c)",
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/appointment (inline function#e6220f30)",
         "USE /api/public/appointment (visitPrepPreParserGuard#0755b055)",
@@ -821,11 +821,11 @@
       "mount": "/api/pay/statement",
       "reason": "Tokenized account-statement payment page from customer comms; the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/pay/statement (inline function#d7bd2d4a)",
         "GET /api/pay/statement/:token",
         "POST /api/pay/statement/:token/finalize",
         "POST /api/pay/statement/:token/quote",
-        "POST /api/pay/statement/:token/setup"
+        "POST /api/pay/statement/:token/setup",
+        "USE /api/pay/statement (statementDarkPreGuard#bc009b2c)"
       ]
     },
     {
