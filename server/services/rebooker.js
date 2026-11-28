@@ -1364,11 +1364,83 @@ async function loadSeriesClosedDays(conn, { initiatedBy = null, deferred = false
   }
 }
 
+function blackoutWithTechWorkDays(closedDays, workDays) {
+  if (!Array.isArray(workDays) || !workDays.length) return closedDays;
+  const offWeekdays = new Set(closedDays?.weeklyDaysOff || []);
+  for (let dow = 0; dow < 7; dow += 1) {
+    if (!workDays.includes(dow)) offWeekdays.add(dow);
+  }
+  return {
+    dates: closedDays?.dates || new Set(),
+    weeklyDaysOff: offWeekdays,
+    closedHolidays: closedDays?.closedHolidays || new Set(),
+  };
+}
+
+async function loadSeriesTechWorkDays(conn, { initiatedBy = null, technicianIds = [] } = {}) {
+  if (initiatedBy === 'admin' || !techWorkDaysLive()) return null;
+  const ids = [...new Set(technicianIds.filter(Boolean).map(String))];
+  if (!ids.length) return null;
+  try {
+    const rows = await conn('technicians').whereIn('id', ids).select('id', 'work_days');
+    const map = new Map();
+    for (const row of rows) {
+      if (Array.isArray(row.work_days) && row.work_days.length) map.set(String(row.id), row.work_days);
+    }
+    return map.size ? map : null;
+  } catch (err) {
+    logger.warn(`[rebooker] tech work_days unreadable; series dates projected without them: ${err.message}`);
+    return null;
+  }
+}
+
 // The per-occurrence date projection a series shift writes — shared by
 // rescheduleSeries (inside its transaction) and previewSeriesMove (read-only
 // counts for the surfaces), so what a surface previews is exactly what the
 // move probes and writes.
-async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db, prefersNoWeekends, closedDays = null }) {
+async function loadSeriesTechWorkDaysForParent(conn, { initiatedBy = null, service, parent, parentId } = {}) {
+  if (initiatedBy === 'admin' || !techWorkDaysLive()) return null;
+  const seriesTechIds = [service?.technician_id, parent?.technician_id].filter(Boolean);
+  if (parentId) {
+    const sibTechRows = await conn('scheduled_services')
+      .where((q) => q.where('id', parentId).orWhere('recurring_parent_id', parentId))
+      .whereNotIn('status', ['completed', 'cancelled'])
+      .whereNotNull('technician_id')
+      .distinct('technician_id');
+    seriesTechIds.push(...sibTechRows.map((r) => r.technician_id));
+  }
+  return loadSeriesTechWorkDays(conn, { initiatedBy, technicianIds: seriesTechIds });
+}
+
+async function loadCandidateDayLoadAndArea(dateStr, service) {
+  const scopeTech = techScopedConfirmActive() && service.technician_id ? service.technician_id : null;
+  const { excludeHeld } = require('./visit-hold');
+  const dayLoad = await excludeHeld(
+    db('scheduled_services')
+      .where('scheduled_date', dateStr)
+      .whereIn('status', ['pending', 'confirmed'])
+      .modify((q) => { if (scopeTech) q.where('technician_id', scopeTech); }),
+    'scheduled_services',
+  ).count('* as count').first();
+
+  const nearbyServices = await excludeHeld(
+    db('scheduled_services')
+      .where('scheduled_date', dateStr)
+      .whereIn('status', ['pending', 'confirmed'])
+      .modify((q) => { if (scopeTech) q.where('scheduled_services.technician_id', scopeTech); })
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id'),
+    'scheduled_services',
+  ).select('scheduled_services.service_address_zip', 'customers.zip', 'customers.city');
+
+  const serviceZip = service.service_address_zip || service.zip;
+  const sameAreaCount = nearbyServices.filter((s) => (
+    (serviceZip && (s.service_address_zip || s.zip) === serviceZip)
+    || (s.city || '').toLowerCase() === (service.city || '').toLowerCase()
+  )).length;
+  return { dayLoad, sameAreaCount };
+}
+
+async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db, prefersNoWeekends, closedDays = null, techWorkDaysById = null }) {
   const pattern = parent.recurring_pattern;
   const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
   // Seasonal series keep their seeded weekend/season contract on re-anchor
@@ -1394,7 +1466,10 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // stays as picked. Null = projected as before.
   // `roundSlot` (lawn rounds only): the cadence slot whose round the date must
   // stay in. Defaults to `raw`'s own round, which is right for a cadence date.
-  const projectSeriesDate = (raw, roundSlot = null) => {
+  const effectiveClosedFor = (techId) => (
+    techWorkDaysById && techId ? blackoutWithTechWorkDays(closedDays, techWorkDaysById.get(String(techId))) : closedDays
+  );
+  const projectSeriesDate = (raw, roundSlot = null, techId = null) => {
     let out = String(raw).split('T')[0];
     // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
     // the old seasonal-only scoping predates the ruling): a weekend-
@@ -1410,28 +1485,16 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
         out = etDateString(addETDays(at, delta));
       }
     }
-    // Off a closed day (null closedDays = no-op). An exhausted search (three
-    // closed weeks) keeps the date: this projector always returns a date
-    // (its write sites are not null-safe).
-    out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
-    // A lawn round is a window too: the weekend shift or a closed-day nudge
-    // must not carry the date into the next round. A cadence date stays in its
-    // own round. A date exception's shifted date (the anchor delta can carry it
-    // past its round's end) stays in the round of the occurrence's own cadence
-    // slot, never the shifted date's round: that would leave a round empty and
-    // put two visits in the next one. The clamp starts at the crossed round
-    // edge, so a distant exception (an admin move months away) still lands in
-    // its own round. If every day of the round is closed, the round's edge day
-    // itself is kept (closures ignored): the date never leaves its round.
+    const dayClosed = effectiveClosedFor(techId);
+    // Off a closed day or kept tech's weekly off-day (null = no-op).
+    out = clearOfBlackout(out, dayClosed, { skipWeekends: seriesSkipWeekends }) || out;
     if (pattern === LAWN_ROUNDS_9) {
       const intendedDate = String(roundSlot || raw).split('T')[0];
-      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays, intendedDate })
+      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: dayClosed, intendedDate })
         || clampDateToRound(pattern, out, { intendedDate }) || out;
     }
     if (pattern !== SEASONAL_FEB_OCT) return out;
-    // The clamp can exhaust only on 75 straight in-season closed or weekend
-    // days; the || keeps the always-a-date contract above if it ever does.
-    return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays }) || out;
+    return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends, blackoutDates: dayClosed }) || out;
   };
   const opts = {
     ...(isMonthBasedPattern
@@ -1457,8 +1520,10 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   const deltaDays = calendarDaysBetween(dateOnly(service.scheduled_date), seriesDateStr);
   const anchorDate = String(newDate).split('T')[0];
   // `step`: how many cadence steps after the anchor (see cadenceStep).
-  const pureCadenceDate = (step) => projectSeriesDate(
+  const pureCadenceDate = (step, techId = null) => projectSeriesDate(
     nextRecurringDate(newDate, parent.recurring_pattern, step, opts),
+    null,
+    techId,
   );
   // Lawn rounds: a later visit keeps its distance in ROUNDS from the moved
   // visit (its series position against the anchor's), not its place in the
@@ -1479,8 +1544,9 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   const usedDates = new Set();
   // `roundSlot` (lawn rounds only): the cadence slot whose round the walk stays
   // in; defaults to `start`.
-  const advancePastUsed = (start, roundSlot = start) => {
+  const advancePastUsed = (start, roundSlot = start, techId = null) => {
     let out = start;
+    const dayClosed = effectiveClosedFor(techId);
     for (let guard = 0; guard < 31 && usedDates.has(out); guard++) {
       let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
       if (seriesSkipWeekends) {
@@ -1488,13 +1554,13 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
         if (dayOfWeek === 0 || dayOfWeek === 6) at = addETDays(at, dayOfWeek === 6 ? 2 : 1);
       }
       out = etDateString(at);
-      out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
+      out = clearOfBlackout(out, dayClosed, { skipWeekends: seriesSkipWeekends }) || out;
       if (pattern === LAWN_ROUNDS_9) {
         // Same at a round edge: walk back into the round the slot belongs to,
         // skipping the dates already handed out.
         out = clampDateToRound(pattern, out, {
           skipWeekends: seriesSkipWeekends,
-          blackoutDates: { ...closedDays, dates: new Set([...(closedDays?.dates || []), ...usedDates]) },
+          blackoutDates: { ...dayClosed, dates: new Set([...(dayClosed?.dates || []), ...usedDates]) },
           intendedDate: roundSlot,
         }) || out;
       }
@@ -1505,27 +1571,22 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
         // visits on one day (Codex #6500 r1 P2).
         out = clampDateToSeason(SEASONAL_FEB_OCT, out, {
           skipWeekends: seriesSkipWeekends,
-          blackoutDates: { ...closedDays, dates: new Set([...(closedDays?.dates || []), ...usedDates]) },
+          blackoutDates: { ...dayClosed, dates: new Set([...(dayClosed?.dates || []), ...usedDates]) },
         }) || out;
       }
     }
     usedDates.add(out);
     return out;
   };
-  // The cadence SLOT an occurrence index owns after collision handling —
-  // where a plain cadence row at that index is written, and the series
-  // POSITION a date exception at that index records
-  // (date_exception_cadence_date). Collision-adjusted, never the raw
-  // cadence date (codex r8 P2): under weekend avoidance a Saturday and a
-  // Sunday occurrence both map to Monday and the second one's slot is
-  // Tuesday — recording Monday for an exception there would tie it with
-  // the Monday row and let a later collective move reorder the two.
-  // Slots are reserved in index order, so positions stay strictly
-  // increasing and unique against every date the sweep writes.
   const cadenceSlotByOccurrence = new Map();
   const cadenceSlotDate = (occurrenceIndex, sib = null) => {
     if (cadenceSlotByOccurrence.has(occurrenceIndex)) return cadenceSlotByOccurrence.get(occurrenceIndex);
-    const slot = advancePastUsed(occurrenceIndex === 0 ? anchorDate : pureCadenceDate(cadenceStep(occurrenceIndex, sib)));
+    const techId = occurrenceIndex === 0 ? null : (sib ? (sib.technician_id || null) : (service?.technician_id || null));
+    const slot = advancePastUsed(
+      occurrenceIndex === 0 ? anchorDate : pureCadenceDate(cadenceStep(occurrenceIndex, sib), techId),
+      undefined,
+      techId,
+    );
     cadenceSlotByOccurrence.set(occurrenceIndex, slot);
     return slot;
   };
@@ -1535,9 +1596,10 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     const slot = cadenceSlotDate(occurrenceIndex, sib);
     let out = slot;
     if (occurrenceIndex > 0 && sib && sib.date_exception === true) {
-      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)), slot);
+      const techId = sib.technician_id || null;
+      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)), slot, techId);
       // Landing exactly on its own slot = the row rejoins the cadence.
-      out = shifted === slot ? slot : advancePastUsed(shifted, slot);
+      out = shifted === slot ? slot : advancePastUsed(shifted, slot, techId);
     }
     projectedByOccurrence.set(occurrenceIndex, out);
     return out;
@@ -1583,7 +1645,7 @@ async function loadNextVisitSweep(conn, serviceId) {
     .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
     .whereNotIn('status', ['completed', 'cancelled'])
     .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', ...require('./visit-hold').heldColumn());
+    .select('id', 'status', 'technician_id', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', ...require('./visit-hold').heldColumn());
   const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
   if (droppedIdx === -1) return null;
   // GATE_VISIT_HOLD: a held sibling is counted, never the next visit the move shifts (the writer classifies it the same way).
@@ -1674,15 +1736,16 @@ class SmartRebooker {
       etDateString(addETDays(today, 10)),
     );
 
-    // Work days (GATE_TECH_WORK_DAYS): the options keep the visit's own
-    // technician, so a non-admin flow (a call with a `reason`: rain-out, the
-    // customer's own move) is not offered a weekday that technician does not
-    // work; the commit would refuse it. The admin picker (no reason) lists every
-    // day: office moves warn instead. One extra read, only with the gate on.
-    let keptTechWorkDays = null;
-    if (reason && service.technician_id && techWorkDaysLive()) {
-      keptTechWorkDays = await db('technicians').where({ id: service.technician_id }).first('id', 'work_days');
-    }
+    // Work days + absences (GATE_TECH_WORK_DAYS + technician_absences):
+    // non-admin flows keep the visit's technician, so never offer an absent or
+    // off day that commit would reject with 409 SLOT_TAKEN (P1-14).
+    const keptTechAbsentDays = reason && service.technician_id
+      ? await require('./technician-eligibility').absentTechDays(db, {
+        dateFrom: etDateString(addETDays(today, 1)),
+        dateTo: etDateString(addETDays(today, 10)),
+        technicianIds: [service.technician_id],
+      })
+      : null;
 
     // Shift hours (GATE_TECH_SHIFT_HOURS). A non-admin commit of one of these
     // options refuses a window the kept technician's shift does not hold
@@ -1803,7 +1866,7 @@ class SmartRebooker {
 
       const dateStr = etDateString(candidateDate);
       if (blackout.has(dateStr)) continue;
-      if (keptTechWorkDays && require('./technician-eligibility').isOffDay(keptTechWorkDays, dateStr)) continue;
+      if (keptTechAbsentDays && keptTechAbsentDays.has(`${service.technician_id}:${dateStr}`)) continue;
       // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option to
       // flows that commit with a non-admin initiator: rain-out calls
       // reschedule() as 'tech', whose season guard would reject the target —
@@ -1820,20 +1883,7 @@ class SmartRebooker {
       // the visit's round, so do not offer one.
       if (reason && leavesOwnRound(service.recurring_pattern, service.scheduled_date, dateStr)) continue;
 
-      const dayLoad = await db('scheduled_services')
-        .where('scheduled_date', dateStr)
-        .whereIn('status', ['pending', 'confirmed'])
-        .count('* as count').first();
-
-      const nearbyServices = await db('scheduled_services')
-        .where('scheduled_date', dateStr)
-        .whereIn('status', ['pending', 'confirmed'])
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .select('customers.zip', 'customers.city');
-
-      const sameAreaCount = nearbyServices.filter(s =>
-        s.zip === service.zip || (s.city || '').toLowerCase() === (service.city || '').toLowerCase()
-      ).length;
+      const { dayLoad, sameAreaCount } = await loadCandidateDayLoadAndArea(dateStr, service);
 
       let score = 100;
       const load = parseInt(dayLoad.count);
@@ -3145,7 +3195,12 @@ class SmartRebooker {
     const {
       isMonthBasedPattern, seriesSkipWeekends, opts, deltaDays, cadenceSlotDate, projectOccurrenceDate, assertClosedDaysUnchanged,
     } = await makeSeriesProjector({
-      service, parent, newDate, seriesDateStr, closedDays: await loadSeriesClosedDays(db, { initiatedBy, deferred: deferFuturePlacement }),
+      service,
+      parent,
+      newDate,
+      seriesDateStr,
+      closedDays: await loadSeriesClosedDays(db, { initiatedBy, deferred: deferFuturePlacement }),
+      techWorkDaysById: await loadSeriesTechWorkDaysForParent(db, { initiatedBy, service, parent, parentId }),
     });
     // The call-created follow-ups this move shifts — planned before the
     // locks (their destination days join rung 1) and handed to the shift
@@ -5044,12 +5099,15 @@ class SmartRebooker {
     // …and the closed days a deferred-placement move skips for the later
     // visits it hands to dispatch, so the date named is the date it writes.
     const closedDays = await loadSeriesClosedDays(conn, { deferred });
+    const techWorkDaysById = await loadSeriesTechWorkDays(conn, {
+      technicianIds: [service.technician_id, parent?.technician_id, ...swept.map((r) => r.technician_id)],
+    });
     for (const raw of candidateDates) {
       const seriesDateStr = dateOnly(raw);
       // No entry for a time-only date, a repeat, or a lawn rounds one-off (size rule): that date moves this visit alone.
       if (!datesMoveSeries(service, currentDate, seriesDateStr) || byDate[seriesDateStr]) continue;
       const { cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
-        service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends, closedDays,
+        service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends, closedDays, techWorkDaysById,
       });
       // Walk the rows before it in sweep order, exactly as the move does: a
       // row that does not move still reserves its cadence slot.

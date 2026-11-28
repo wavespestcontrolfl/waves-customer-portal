@@ -336,7 +336,7 @@ async function scorePickedHour({
     ? pickedByArrivalChecker({
       pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone, paidRoads, roadSpender, pickerBudget,
     })
-    : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason });
+    : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason, technicianId });
 }
 
 /**

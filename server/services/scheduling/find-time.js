@@ -206,6 +206,50 @@ function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
 // other cases). No shift: the option is not passed.
 const shiftEndOf = (shift) => (shift ? { shiftEndMin: shift.endMin } : {});
 
+function recordDateRejection(rejectionsByDate, date, reason) {
+  if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
+  rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + 1;
+}
+
+async function resolveCapacityRequestedServices(opts) {
+  let requested = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
+    .filter(Boolean)
+    .map((service_type) => ({ service_type, ...(!opts.serviceTypes && opts.serviceKey ? { service_key: opts.serviceKey } : {}) }));
+  if (opts.excludeServiceIds?.length && !requested.length) {
+    requested = await db('scheduled_services').whereIn('id', opts.excludeServiceIds).select('service_type', 'service_id', 'service_key_snapshot');
+  }
+  if (Array.isArray(opts.serviceAddons) && opts.serviceAddons.length) {
+    requested.push(...opts.serviceAddons.filter(Boolean));
+  } else if (opts.excludeServiceIds?.length && !Array.isArray(opts.serviceAddons)) {
+    const addonRows = await db('scheduled_service_addons')
+      .whereIn('scheduled_service_id', opts.excludeServiceIds)
+      .select('service_name as service_type', 'service_id');
+    if (addonRows.length) requested.push(...addonRows);
+  }
+  return requested;
+}
+
+async function arrivalTargetServicesForCapabilityCheck(target, opts) {
+  const services = [...(target.memberServices || [target])];
+  if (Array.isArray(opts.serviceAddons) && opts.serviceAddons.length) {
+    services.push(...opts.serviceAddons.filter(Boolean));
+    return services;
+  }
+  if (Array.isArray(opts.serviceAddons)) return services;
+  const serviceIds = [
+    ...new Set([
+      opts.arrivalWindow?.serviceId,
+      ...services.map((s) => s?.id || s?.scheduled_service_id),
+    ].filter(Boolean)),
+  ];
+  if (!serviceIds.length) return services;
+  const addonRows = await db('scheduled_service_addons')
+    .whereIn('scheduled_service_id', serviceIds)
+    .select('service_name as service_type', 'service_id');
+  if (addonRows.length) services.push(...addonRows);
+  return services;
+}
+
 async function findArrivalWindowSlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
@@ -240,7 +284,10 @@ async function findArrivalWindowSlots(opts) {
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today) continue;
     for (const tech of techs) {
-      if (absentDays.has(`${tech.id}:${date}`)) continue;
+      if (absentDays.has(`${tech.id}:${date}`)) {
+        recordDateRejection(rejectionsByDate, date, 'tech_absent');
+        continue;
+      }
       // `changes` is the caller's pending edit (duration, a re-picked
       // service address) — the same shape the save probe hands the
       // checker, so the ranking simulates the visit being saved, not the
@@ -346,13 +393,7 @@ async function findCapacitySlots(opts) {
   const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
   const shiftOf = await loadTechShifts(db, { technicianIds: techs.map((tech) => tech.id), now });
   const { getBlackoutLayers } = require('./blackout-dates');
-  // `service_key`: the new job's catalog identity, when it is the one service asked about
-  // (GATE_TECH_JOB_TYPE_CHECKS reads it; the name-only path ignores it).
-  let requestedServices = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
-    .filter(Boolean).map(service_type => ({ service_type, ...(!opts.serviceTypes && opts.serviceKey ? { service_key: opts.serviceKey } : {}) }));
-  if (!requestedServices.length && opts.excludeServiceIds?.length) {
-    requestedServices = await db('scheduled_services').whereIn('id', opts.excludeServiceIds).select('service_type', 'service_id', 'service_key_snapshot');
-  }
+  const requestedServices = await resolveCapacityRequestedServices(opts);
   const inactive = opts.arrivalWindow?.serviceId ? []
     : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
   const inactiveTechs = new Set(inactive.map(row => row.technician_id));
@@ -368,12 +409,20 @@ async function findCapacitySlots(opts) {
   // cache there would silently degrade every neighbour to window-length
   // (no credit) for the whole loop, not just the first candidate.
   if (opts.packEnds === true) await ensureCatalogLoaded(db);
+  const rejections = {};
+  const rejectionsByDate = {};
+  const reject = (reason, date) => {
+    rejections[reason] = (rejections[reason] || 0) + 1;
+    if (!date) return;
+    if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
+    rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + 1;
+  };
   const candidates = [];
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today || blackout.has(date)) continue;
     for (const tech of techs) {
-      if (inactiveTechs.has(tech.id)) continue;
-      if (absentDays.has(`${tech.id}:${date}`)) continue;
+      if (inactiveTechs.has(tech.id)) { reject('tech_capability', date); continue; }
+      if (absentDays.has(`${tech.id}:${date}`)) { reject('tech_absent', date); continue; }
       const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
         excludeServiceIds: opts.excludeServiceIds,
         // The requesting estimate's OWN uncommitted hold must not occupy the
@@ -416,9 +465,9 @@ async function findCapacitySlots(opts) {
       });
       if (!context) continue;
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
-        // A whole visit carries every member's service: the technician must
-        // be able to do all of them.
-        .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices || [context.target])).length) continue;
+        // A whole visit carries every member's service plus add-ons: the technician
+        // must be able to do all of them.
+        .inactiveCapabilitiesForServices(db, [tech.id], await arrivalTargetServicesForCapabilityCheck(context.target, opts))).length) continue;
       // This technician's own hours inside the shared shift (shiftBounds): no
       // set hours = the shared shift, and the loop below admits what it did.
       const shift = shiftOf(tech.id, date);
@@ -466,18 +515,6 @@ async function findCapacitySlots(opts) {
   // one bounded, request-local budget across the complete calendar horizon.
   await preloadCandidateTravel(candidates, travel, opts);
   const slots = [];
-  // Why each refused candidate was refused (arrival_window, day_overcommitted,
-  // return_time, detour_cap, ...), so a thin week explains itself.
-  const rejections = {};
-  // The same counts per date, so a picker can tell a day the route could not
-  // be verified on (in progress, coordless stop) from a day that is full.
-  const rejectionsByDate = {};
-  const reject = (reason, date) => {
-    rejections[reason] = (rejections[reason] || 0) + 1;
-    if (!date) return;
-    if (!rejectionsByDate[date]) rejectionsByDate[date] = {};
-    rejectionsByDate[date][reason] = (rejectionsByDate[date][reason] || 0) + 1;
-  };
   // Zone route days (GATE_ZONE_ROUTE_DAYS): a customer-facing caller that
   // resolved the request's zone (opts.zoneSlug — /book and the estimate
   // picker) gets a per-candidate cap, lifted on that zone's route weekday
@@ -1591,10 +1628,14 @@ async function findAvailableSlots(opts) {
   // technician working. Auto-dispatch's audit lists these, so a closed day or
   // a day nobody works never reads as "searched, nothing open".
   const searchedDates = [];
+  const rejectionsByDate = {};
   for (const date of dates) {
     let searched = false;
     for (const tech of techs) {
-      if (absentDays.has(`${tech.id}:${date}`)) continue;
+      if (absentDays.has(`${tech.id}:${date}`)) {
+        recordDateRejection(rejectionsByDate, date, 'tech_absent');
+        continue;
+      }
       searched = true;
       const { candidates: dayCandidates, evaluatedGaps } = candidatesForDay(date, tech, withShift(dayParams, shiftOf(tech.id, date)));
       evaluated += evaluatedGaps;
@@ -1611,6 +1652,7 @@ async function findAvailableSlots(opts) {
     evaluated,
     total_feasible: candidates.length,
     searched_dates: searchedDates,
+    rejections_by_date: rejectionsByDate,
   };
 }
 
