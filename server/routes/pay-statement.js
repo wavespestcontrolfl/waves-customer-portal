@@ -24,24 +24,33 @@ const { isEnabled } = require('../config/feature-gates');
 const { loadStatementLines } = require('../services/payer-statements');
 const { markStatementViewed, isPayableStatementStatus } = require('../services/payer-statement-settle');
 const { CONFIGURED_COST_BPS } = require('../services/stripe-pricing');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 
-// Public-route rate limit (per IP) — this is an unauthenticated by-token surface.
+function setStatementPrivacyHeaders(res) {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+}
+
+// Pre-limiter dark guard mounted on /api/pay/statement in server/index.js BEFORE
+// the global limiter so disabled GATE_PAYER_STATEMENTS cannot be probed via 429/400 (B-55).
+function statementDarkPreGuard(_req, res, next) {
+  setStatementPrivacyHeaders(res);
+  if (!isEnabled('payerStatements')) return res.status(404).json({ error: 'Not found' });
+  next();
+}
+
+// Public-route rate limit (per IP, /64 IPv6-normalized) — unauthenticated by-token surface.
 const statementPayLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many requests — please slow down.' },
 });
 
-// Gate FIRST — off ⇒ the public statement-pay surface does not exist (always
-// 404, before the limiter, so a disabled gate can't be probed via a 429 once an
-// IP exceeds the rate). Then rate-limit the enabled surface. A 64-hex token
-// format gate lives in loadStatementByToken.
-router.use((req, res, next) => {
-  if (!isEnabled('payerStatements')) return res.status(404).json({ error: 'Not found' });
-  next();
-}, statementPayLimiter);
+router.use(statementDarkPreGuard, statementPayLimiter);
 
 const TOKEN_RE = /^[0-9a-f]{64}$/i; // payer_statements.token = randomBytes(32).hex
 
@@ -53,7 +62,9 @@ function parseSnapshot(value) {
 
 async function loadStatementByToken(token) {
   if (!token || !TOKEN_RE.test(token)) return null; // format gate → generic 404
-  return db('payer_statements').where({ token }).first();
+  const row = await db('payer_statements').where({ token }).first();
+  if (!row || row.status === 'open') return null;
+  return row;
 }
 
 // GET /api/pay/statement/:token — statement summary + visit lines for the AP pay
@@ -157,7 +168,11 @@ router.post('/:token/quote', async (req, res, next) => {
     res.json(result);
   } catch (err) {
     logger.error(`[pay-statement] quote error: ${err.message}`);
-    res.status(400).json({ error: err.message });
+    const status = err.statusCode === 409 ? 409 : 400;
+    const message = status === 409 || err.statusCode === 400
+      ? err.message
+      : 'Unable to calculate payment quote right now — please try again.';
+    res.status(status).json({ error: message });
   }
 });
 
@@ -174,8 +189,13 @@ router.post('/:token/finalize', async (req, res, next) => {
     res.json(result);
   } catch (err) {
     logger.error(`[pay-statement] finalize error: ${err.message}`);
-    res.status(400).json({ error: err.message });
+    const status = err.statusCode === 409 ? 409 : 400;
+    const message = status === 409 || err.statusCode === 400
+      ? err.message
+      : 'Unable to finalize statement payment right now — please try again.';
+    res.status(status).json({ error: message });
   }
 });
 
 module.exports = router;
+module.exports.statementDarkPreGuard = statementDarkPreGuard;

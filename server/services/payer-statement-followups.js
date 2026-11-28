@@ -252,12 +252,17 @@ async function runPending({ now = new Date() } = {}) {
     .whereIn('s.status', DUNNABLE_STATEMENT_STATUSES)
     .whereNotNull('s.due_date')
     .where('s.due_date', '<=', today) // past due+0 (step 0 anchor)
-    .select('s.id', 's.due_date', 'f.status as f_status', 'f.step_index as f_step_index');
+    .select('s.id', 's.due_date', 'f.status as f_status', 'f.step_index as f_step_index', 'f.paused_until as f_paused_until');
 
   let sent = 0, skipped = 0;
   for (const row of rows) {
-    // Admin override on an existing row halts the chain.
-    if (['paused', 'stopped', 'completed'].includes(row.f_status)) { skipped++; continue; }
+    // Timed pauses auto-resume once paused_until elapses (B-55).
+    if (row.f_status === 'paused' && row.f_paused_until && new Date(row.f_paused_until) <= now) {
+      await resumeSequence(row.id);
+    } else if (['paused', 'stopped', 'completed'].includes(row.f_status)) {
+      skipped++;
+      continue;
+    }
     const stepIndex = row.f_status ? row.f_step_index : 0;
     const step = config.steps[stepIndex];
     if (!step) { skipped++; continue; } // chain exhausted; fireStep would mark completed, but nothing to send

@@ -657,6 +657,8 @@ app.use('/api/estimates', estimatePublicRoutes.darkEstimateRoutePreGuard);
 // are stamped by the secure-card mount further up.
 app.use(['/api/estimates', '/api/pay', '/api/public/secure-card', '/api/public/careers/interview', '/api/public/careers/offer'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
 
+// Payer statement pay (GATE_PAYER_STATEMENTS): the dark 404 + noStore/noindex headers land before the global limiter (B-55).
+app.use('/api/pay/statement', require('./routes/pay-statement').statementDarkPreGuard);
 // Invoice pay page promo code (GATE_PAY_PROMO_CODE) and plan choice (GATE_PAY_PLAN_CHOICE): the dark 404 lands before the global limiter.
 app.use('/api/pay', require('./routes/pay-v2').darkRoutePreGuard);
 // Dark Hermes worker lanes (GATE_HERMES_COMMITMENTS, GATE_HERMES_WATCHDOG): the lane's own 404 lands before the global limiter.

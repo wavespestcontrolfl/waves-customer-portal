@@ -4965,8 +4965,19 @@ async function handleRefundFailed(refund) {
  * dedupes replays. Gated by GATE_CARD_DETAILS_SYNC.
  */
 async function handlePaymentMethodAutomaticallyUpdated(paymentMethod) {
-  if (require('../config/feature-gates').gates?.cardDetailsSync !== true) {
+  const featureGates = require('../config/feature-gates');
+  const syncLive = typeof featureGates.cardDetailsSyncLive === 'function'
+    ? featureGates.cardDetailsSyncLive()
+    : featureGates.gates?.cardDetailsSync === true;
+  if (!syncLive) {
     logger.info(`[stripe-webhook] Card auto-update ignored (GATE_CARD_DETAILS_SYNC off): ${paymentMethod.id}`);
+    return;
+  }
+  const hasLocal = await db('payment_methods')
+    .where({ stripe_payment_method_id: paymentMethod.id })
+    .first('id');
+  if (!hasLocal) {
+    logger.info(`[stripe-webhook] Card auto-update skipped (unknown local PM): ${paymentMethod.id}`);
     return;
   }
   const result = await require('../services/card-details-sync')
@@ -5080,6 +5091,17 @@ async function handlePaymentMethodDetached(paymentMethod) {
 
   for (const row of disabledCustomers) {
     logger.info(`[stripe-webhook] Auto Pay disabled for customer ${row.customer_id} — in-charge method ${row.id} detached out-of-band`);
+  }
+
+  // Record a canonical payment_method_removed audit event so card-on-file
+  // reminders catch out-of-band detachments even if email or email gate is off (B-50).
+  for (const row of removedRows) {
+    await require('../services/autopay-log').logAutopay(row.customer_id, 'payment_method_removed', {
+      paymentMethodId: row.id,
+      details: { source: 'stripe_webhook_detached', stripe_payment_method_id: pmId, method_type: row.method_type || null },
+    }).catch((logErr) => {
+      logger.warn(`[stripe-webhook] payment_method_removed log failed for customer ${row.customer_id}: ${logErr.message}`);
+    });
   }
 
   // The customer cares about the resulting account state, not which surface

@@ -34,11 +34,17 @@ const { auditCardDetailsSynced } = require('./audit-log');
 // Expiry within this many months of the current ET month is inside the
 // 60-day warning window (and the Auto Pay walk), so it is worth re-reading.
 const WINDOW_MONTHS = 2;
+// Skip cards expired further back than this (dead/abandoned cards aren't
+// refreshed by Stripe Account Updater forever) and cap daily Stripe calls (B-52).
+const MAX_PAST_MONTHS = 18;
+const MAX_DAILY_SYNC_CARDS = 200;
 
-// Gate read lazily: several suites mock feature-gates wholesale, and a
-// missing property just means "off".
+// Gate read at call time when cardDetailsSyncLive() is available; falls back to
+// gates.cardDetailsSync for suites that mock feature-gates directly.
 function gateOn() {
-  return require('../config/feature-gates').gates?.cardDetailsSync === true;
+  const fg = require('../config/feature-gates');
+  if (typeof fg.cardDetailsSyncLive === 'function') return fg.cardDetailsSyncLive();
+  return fg.gates?.cardDetailsSync === true;
 }
 
 // Same normalization isExpiredCardMethod uses: legacy rows hold 2-digit years.
@@ -184,10 +190,13 @@ async function refreshCardFromStripe(pmId, { source = 'webhook', database } = {}
 }
 
 function inRefreshWindow(row, now) {
+  if (row.deleted_at || row.detached_at) return false;
   const expiry = normalizedExpiry(row.exp_month, row.exp_year);
   if (!expiry) return true;
   const [curYear, curMonth] = etDateString(now).split('-').map(Number);
-  return expiry.year * 12 + expiry.month <= curYear * 12 + curMonth + WINDOW_MONTHS;
+  const nowMonths = curYear * 12 + curMonth;
+  const cardMonths = expiry.year * 12 + expiry.month;
+  return cardMonths >= nowMonths - MAX_PAST_MONTHS && cardMonths <= nowMonths + WINDOW_MONTHS;
 }
 
 // One Stripe card. Returns { updated, detached, error } counters.
@@ -207,6 +216,7 @@ async function syncNearExpiryCards({ now = new Date(), database } = {}) {
     .select('id', 'method_type', 'stripe_payment_method_id', 'exp_month', 'exp_year');
   const ids = new Set();
   for (const row of rows) {
+    if (ids.size >= MAX_DAILY_SYNC_CARDS) break;
     if (!isBankMethodType(row.method_type) && inRefreshWindow(row, now)) {
       ids.add(row.stripe_payment_method_id);
     }

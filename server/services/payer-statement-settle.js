@@ -140,20 +140,38 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     updated_at: paidAt,
   });
 
-  // Cascade — accrued children are `draft`; settle every non-void/non-paid one.
-  // The packet-owned children are captured BEFORE the update: a review the
-  // closeout deferred behind an unpaid invoice is enrolled by the settlement
-  // signal, and this rail (NET statement payment) never sent one (Codex
-  // #4311 r29 P1). After the update those rows are indistinguishable from
-  // children settled by an earlier statement run.
-  const packetChildren = await database('invoices')
+  // Guard + cascade (B-34): refuse settlement if any linked child invoice is
+  // processing, disputed, or held for chemical add-on review; and never flip
+  // refunded, canceled, prepaid, or already-settled children to 'paid'.
+  const NON_SETTLEABLE_CHILD_STATUSES = [
+    'void', 'paid', 'prepaid', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'disputed', 'processing',
+  ];
+  const { invoiceHeldForChemicalReview } = require('./invoice-helpers');
+  const childRows = await database('invoices')
     .where({ payer_statement_id: statementId })
-    .whereNotIn('status', ['void', 'paid'])
-    .whereNotNull('visit_completion_packet_id')
-    .select('id', 'invoice_number', 'customer_id', 'visit_completion_packet_id');
-  const childrenSettled = await database('invoices')
+    .whereNot('status', 'void')
+    .select('id', 'invoice_number', 'customer_id', 'status', 'scheduled_send_error', 'visit_completion_packet_id');
+  const blockedChild = (childRows || []).find((row) => (
+    ['processing', 'disputed'].includes(String(row?.status || '').toLowerCase())
+    || invoiceHeldForChemicalReview(row)
+  ));
+  if (blockedChild) {
+    const err = new Error(
+      `Cannot settle statement S-${statementId}: child invoice ${blockedChild.invoice_number || blockedChild.id} is held or has a payment in flight.`,
+    );
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const packetChildren = (childRows || []).filter((row) => row.visit_completion_packet_id != null
+    && !NON_SETTLEABLE_CHILD_STATUSES.includes(String(row.status || '').toLowerCase()));
+  const cascadeQuery = database('invoices')
     .where({ payer_statement_id: statementId })
-    .whereNotIn('status', ['void', 'paid'])
+    .whereNotIn('status', NON_SETTLEABLE_CHILD_STATUSES);
+  if (typeof cascadeQuery.whereRaw === 'function') {
+    cascadeQuery.whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'chemical_addon_review:%')");
+  }
+  const childrenSettled = await cascadeQuery
     .update({ status: 'paid', paid_at: paidAt, updated_at: paidAt });
 
   // ONE payer-scoped ledger row (customer_id NULL — a statement spans many homes).

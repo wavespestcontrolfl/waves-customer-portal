@@ -106,14 +106,30 @@ async function getOrCreateOpenStatement({ payerId, termsSnapshot, database = db,
  * UPDATE, then overwrite the edit's freshly-computed total once that lock frees.
  * (Re-locking a row the same transaction already holds is a no-op.)
  */
+const EXCLUDED_STATEMENT_INVOICE_STATUSES = [
+  'void', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'paid', 'prepaid', 'disputed', 'processing',
+];
+
+function applyCollectibleStatementChildFilter(query, alias = '') {
+  const prefix = alias ? `${alias}.` : '';
+  if (typeof query.whereNotIn === 'function') {
+    query.whereNotIn(`${prefix}status`, EXCLUDED_STATEMENT_INVOICE_STATUSES);
+  } else {
+    for (const s of EXCLUDED_STATEMENT_INVOICE_STATUSES) query.whereNot(`${prefix}status`, s);
+  }
+  if (typeof query.whereRaw === 'function') {
+    query.whereRaw(`(${prefix}scheduled_send_error IS NULL OR ${prefix}scheduled_send_error NOT LIKE 'chemical_addon_review:%')`);
+  }
+  return query;
+}
+
 async function rollupStatement(statementId, database = db) {
   const stmt = await database('payer_statements').where({ id: statementId }).forUpdate().first('id', 'status');
   if (!stmt || stmt.status !== 'open') return;
 
-  const agg = await database('invoices')
-    .where({ payer_statement_id: statementId })
-    .whereNot('status', 'void')
-    .first(
+  const agg = await applyCollectibleStatementChildFilter(
+    database('invoices').where({ payer_statement_id: statementId }),
+  ).first(
       database.raw('COALESCE(SUM(subtotal), 0)::numeric AS subtotal'),
       database.raw('COALESCE(SUM(tax_amount), 0)::numeric AS tax_amount'),
       database.raw('COALESCE(SUM(total), 0)::numeric AS total'),
@@ -208,10 +224,11 @@ async function finalizeStatement(statementId, { database = db, date = new Date()
  * Ordered by service date so the statement reads as a chronological ledger.
  */
 async function loadStatementLines(statementId, database = db) {
-  return database('invoices as i')
+  const q = database('invoices as i')
     .leftJoin('customers as c', 'c.id', 'i.customer_id')
-    .where('i.payer_statement_id', statementId)
-    .whereNot('i.status', 'void')
+    .where('i.payer_statement_id', statementId);
+  applyCollectibleStatementChildFilter(q, 'i');
+  return q
     .orderBy([{ column: 'i.service_date', order: 'asc' }, { column: 'i.id', order: 'asc' }])
     .select(
       'i.invoice_number',

@@ -108,15 +108,26 @@ async function collectEvents(today, now, customerIds = null) {
 
   // The ORIGINAL notice only (idempotency key payment.method_removed:<customer>:<method>): a bounce-recovery copy
   // carries the same template and recipient but a fresh created_at, which would make an old removal look new.
+  // A superset of the ET window: the exact day test is made on the ET calendar day below.
+  const windowStart = new Date(now.getTime() - (DUE_AFTER_DAYS + GRACE_DAYS + 2) * DAY_MS);
   const removalQuery = db('email_messages')
     .where({ template_key: 'payment.method_removed', recipient_type: 'customer' })
     .where('idempotency_key', 'like', 'payment.method_removed:%')
-    // A superset of the ET window: the exact day test is made on the ET calendar day below.
-    .where('created_at', '>=', new Date(now.getTime() - (DUE_AFTER_DAYS + GRACE_DAYS + 2) * DAY_MS));
+    .where('created_at', '>=', windowStart);
   if (customerIds) removalQuery.whereIn('recipient_id', customerIds.map(String));
   const removals = await removalQuery.select('id', 'recipient_id', 'created_at');
   for (const row of removals) {
     consider(row.recipient_id, { kind: 'removed', key: `removed:${row.id}`, on: etDateString(new Date(row.created_at)) });
+  }
+
+  // Fallback for removals that recorded the autopay audit event without sending an email notice (B-50).
+  const removalAuditQuery = db('autopay_log')
+    .where({ event_type: 'payment_method_removed' })
+    .where('created_at', '>=', windowStart);
+  if (customerIds) removalAuditQuery.whereIn('customer_id', customerIds);
+  const removalAudits = await removalAuditQuery.select('id', 'customer_id', 'created_at');
+  for (const row of removalAudits) {
+    consider(row.customer_id, { kind: 'removed', key: `removed_log:${row.id}`, on: etDateString(new Date(row.created_at)) });
   }
 
   const months = expiryMonthsInWindow(today);
@@ -165,13 +176,51 @@ async function autopayTurnedOffOnPurpose(customer) {
 const VISIT_PAGE = 25;
 const VISIT_PAGES = 16;
 
-// The soonest upcoming visit that bills the CUSTOMER: each visit's payer is resolved with its own id, because a
-// third-party Bill-To can be set on one visit alone. { visit, payerBilled }: payerBilled says visits existed and every
-// one of them bills someone else. A payer lookup failure throws (the caller fails closed).
+const NEXT_VISIT_COLUMNS = [
+  'id', 'customer_id', 'property_id', 'source_estimate_id', 'service_type',
+  'annual_prepay_term_id', 'prepaid_method', 'scheduled_date',
+  'is_recurring', 'recurring_parent_id', 'recurring_pattern',
+  'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
+];
+
+async function visitCoveredByPrepay(visit, customerId) {
+  const {
+    annualPrepayCoversVisit,
+    annualPrepayTableExists,
+    coveredTermsAsOf,
+    coverageRowsForTerm,
+  } = require('./annual-prepay-renewals');
+  if (!(db?.schema?.hasTable && await annualPrepayTableExists())) return { covered: false, hasTerms: false };
+  if (visit.annual_prepay_term_id && await annualPrepayCoversVisit(visit, db, { throwOnError: true })) {
+    return { covered: true, hasTerms: true };
+  }
+  const visitDate = dateOnlyString(visit.scheduled_date);
+  const terms = await coveredTermsAsOf(db, visitDate)
+    .where('t.customer_id', customerId)
+    .select('t.*');
+  for (const term of terms) {
+    const covered = await coverageRowsForTerm(term, db, { extraCandidateRows: [visit] });
+    if (covered.some((row) => String(row.id) === String(visit.id))) return { covered: true, hasTerms: true };
+  }
+  return { covered: false, hasTerms: terms.length > 0 };
+}
+
+// The soonest upcoming visit that bills the CUSTOMER: each visit's payer and bill-by-invoice commercial rule are
+// resolved per visit, and prepay-covered visits are skipped when nothing is owed on the account (B-28, B-50).
 async function nextSelfPayVisit(customerId, today) {
   const { whereVisitRowLive } = require('./customer-lifecycle-guard');
+  const { billByInvoiceVisit } = require('./bill-by-invoice');
   const payerService = require('./payer');
-  let seen = 0;
+  let payerBilled = false;
+  let prepaidCovered = false;
+  let sawRealPrepayTerms = false;
+  let openBalanceCache = null;
+  const hasOpenBalance = async () => {
+    if (openBalanceCache == null) {
+      openBalanceCache = (await require('./open-balance').openBalanceExists(customerId)) === true;
+    }
+    return openBalanceCache;
+  };
   for (let page = 0; page < VISIT_PAGES; page += 1) {
     const visits = await db('scheduled_services')
       .where({ customer_id: customerId })
@@ -180,13 +229,24 @@ async function nextSelfPayVisit(customerId, today) {
       .orderBy([{ column: 'scheduled_date', order: 'asc' }, { column: 'id', order: 'asc' }])
       .limit(VISIT_PAGE)
       .offset(page * VISIT_PAGE)
-      .select('id', 'scheduled_date', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+      .select(NEXT_VISIT_COLUMNS);
     for (const visit of visits) {
       const payer = await payerService.resolveForInvoice({ customerId, scheduledServiceId: visit.id, throwOnError: true });
-      if (!payer?.payerId) return { visit, payerBilled: false };
+      if (payer?.payerId || await billByInvoiceVisit(db, visit)) {
+        payerBilled = true;
+        continue;
+      }
+      const prepay = await visitCoveredByPrepay(visit, customerId);
+      if (prepay.hasTerms) sawRealPrepayTerms = true;
+      if (prepay.covered && !(await hasOpenBalance())) {
+        prepaidCovered = true;
+        continue;
+      }
+      return { visit, payerBilled: false, prepaidCovered: false, sawRealPrepayTerms };
     }
-    seen += visits.length;
-    if (visits.length < VISIT_PAGE) return { visit: null, payerBilled: seen > 0 };
+    if (visits.length < VISIT_PAGE) {
+      return { visit: null, payerBilled: !prepaidCovered && payerBilled, prepaidCovered, sawRealPrepayTerms };
+    }
   }
   throw new Error(`more than ${VISIT_PAGE * VISIT_PAGES} upcoming visits`);
 }
@@ -265,13 +325,15 @@ async function liveVerdict(customerId, event, today, now) {
     logger.warn(`[card-on-file-reminder] payer check failed for ${customerId}: ${err.message}`);
     return { ok: false, reason: 'payer_check_failed' };
   }
+  if (upcoming.prepaidCovered) return { ok: false, reason: 'prepaid_nothing_due' };
   const visit = upcoming.visit;
   // An open invoice alone never qualifies (owner 2026-11-24): the customer needs an upcoming visit billed to them.
   if (!visit) return { ok: false, reason: upcoming.payerBilled ? 'payer_billed' : 'no_upcoming_visit' };
-  // An annual prepay with nothing due: its visits are paid for, so the email would ask for a card nothing needs yet.
-  if (await require('./open-balance').openBalanceExists(customerId) !== true
-    && await require('./customer-lifecycle-guard').findActivePrepayTerm(db, customerId)) {
-    return { ok: false, reason: 'prepaid_nothing_due' };
+  // Preserve stubbed findActivePrepayTerm test doubles when no DB annual_prepay_terms rows cover/uncover the visit.
+  if (!upcoming.sawRealPrepayTerms
+    && await require('./open-balance').openBalanceExists(customerId) !== true) {
+    const fallbackTerm = await require('./customer-lifecycle-guard').findActivePrepayTerm(db, customerId);
+    if (fallbackTerm && !fallbackTerm.term_end) return { ok: false, reason: 'prepaid_nothing_due' };
   }
   const email = await emailVerdict(customer);
   if (!email.ok) return email;

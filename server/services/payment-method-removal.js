@@ -107,6 +107,15 @@ async function removePaymentMethod({ customerId, methodId, guard, source }) {
     return { ...outcome, removedMethod: null };
   }
 
+  // Record a canonical payment_method_removed audit event so card-on-file
+  // reminders still fire even if customer email or change-email gate is off (B-50).
+  void logAutopay(customerId, 'payment_method_removed', {
+    paymentMethodId: removedMethod.id,
+    details: { source, method_type: removedMethod.method_type || null },
+  }).catch((logErr) => {
+    logger.warn(`[payment-method-removal] payment_method_removed log failed for customer ${customerId}: ${logErr.message}`);
+  });
+
   // Lifecycle notice (gated inside the sender). The customer cares about the
   // resulting account state, not which surface removed the method (owner
   // ruling 2026-08-27). The row is gone — pass the snapshot. Under the guard

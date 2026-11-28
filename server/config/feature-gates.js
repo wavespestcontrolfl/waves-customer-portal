@@ -56,7 +56,7 @@
  *   GATE_CAGE_TWO_SIZES=true (owner 2026-11-19, reply "cage 1000": the pool cage size has two sizes, Medium for a cage up to 1,000 sq ft and Large above, in place of Small, Medium, Large and Oversized. The property lookup sizes a county-measured cage that way, the satellite answer maps Small, Medium and Large to Medium and Oversized to Large, and the estimate tool offers only Medium and Large. The 2,000 sq ft Medium start of GATE_CAGE_START_MEDIUM no longer applies while this is on. Not changed: any saved estimate keeps its saved size and price; the price of each size; the satellite prompt; every automatic customer price (website quote, service-report offer card, restart offer) keeps today's manual-quote hold for a cage that today's four sizes call Large or Oversized. It has a gate because it changes a starting price. Read at call time via cageTwoSizesLive(), strict 'true', dark by default; off or unset = four sizes exactly as before.)
  *   GATE_PEST_PRICE_PHOTO_FACTS=true (owner 2026-11-21, reply "1, 2": an automatic pest price keeps the three photo facts it reads, shrubs, landscape complexity and near water, when the property lookup's only doubt is the lawn area. Today a lawn-area flag drops all three and the price uses "moderate, moderate, no water"; the estimate tool keeps them. Applies to every price from the customer price path: the plan offer after a one-time job, the plan card in the customer portal, the offer card on the service report, the plan start and the one-tap purchase. Pest only: mosquito, lawn, tree and shrub and termite lines keep today's facts. A one-time pest price shown beside the plan is the plan's quarterly rate times a multiplier, so it follows the plan price; a one-time job priced alone does not change. Still dropped: a weak photo (grade under 60 or no grade), a photo that conflicts with county records, a lookup with no lawn number from the photo, a lookup with any other flag (wrong address, a lot shared by a development, a doubted home size, a flag on a pool, shrub, tree or landscape read), and any one fact the AI providers disagreed on. Not changed: the estimate tool, the website quote, any saved estimate. It has a gate because it changes a price. Read at call time via pestPricePhotoFactsLive(), strict 'true', dark by default; off or unset = today's prices.)
  *   GATE_CALL_BOOKING_LINK_REACH=shadow|true (owner 2026-11-17 "link", page "Call Agent Improvements" idea 3: the booking-link text after a call gets two wider rules. Rule A: a caller who was promised a quote is no longer stopped at once. The text waits its 2 hours (8 AM after a 6 PM call) and then goes only to a caller with no estimate in any state and no visit. Rule B: a caller with an earlier lead record is no longer read as a current customer. The text stops only for a caller whose record is past the lead stages, or who has a visit, an invoice or an estimate. A caller who asked for a WDO report, a rodent inspection or exclusion work is left out (reason fee_visit): those visits carry a fee and the text says free. shadow = RECORDS ONLY: no text goes to these callers, and the call ends with the reason reach_shadow_would_send. true = the text is SENT to them, through the same send path, locks and last-moment checks as every other booking-link text; that flip is the owner's because it texts customers. Every caller today's rules text gets the text exactly as before, in every mode. It has a gate because it decides who gets a customer text. Off = today's rules. Kill = unset, read at call time)
- *   GATE_CARD_ON_FILE_REMINDER=shadow|true (owner 2026-11-24, "go with your recs": a customer whose last usable payment method was removed, or whose card expired, gets one "add a card" email 3 days later, only when they still have no usable payment method, still have an upcoming visit or an open invoice, are active, are not paid up on an annual prepay, are not billed to a third-party payer, have no active email suppression, and were not sent this email in the last 30 days. Every one of these is checked again at send time. A customer who turned Auto Pay off on purpose and kept a card is never emailed. The email link opens the billing tab's Add card form in save-only mode: saving the card never turns Auto Pay on. Runs inside the daily 10:05 AM lifecycle email sweep. Values: shadow = decide and record who would get it (card_on_file_reminders rows with outcome shadow), send nothing; true = send. Strict: exactly 'shadow' or 'true' (trimmed, any case), read at call time via cardOnFileReminderMode(). Anything else = off, no query. Removal triggers read the payment.method_removed email rows, so they need GATE_PAYMENT_METHOD_CHANGE_EMAILS on; expiry triggers do not. Kill: unset)
+ *   GATE_CARD_ON_FILE_REMINDER=shadow|true (owner 2026-11-24, "go with your recs": a customer whose last usable payment method was removed, or whose card expired, gets one "add a card" email 3 days later, only when they still have no usable payment method, still have an upcoming self-pay visit (not payer-billed, not commercial bill_by_invoice, and not covered by prepay), are active, are not paid up on an annual prepay for that visit, have no active email suppression, and were not sent this email in the last 30 days. Every one of these is checked again at send time. A customer who turned Auto Pay off on purpose and kept a card is never emailed. The email link opens the billing tab's Add card form in save-only mode: saving the card never turns Auto Pay on. Runs inside the daily 10:05 AM lifecycle email sweep. Values: shadow = decide and record who would get it (card_on_file_reminders rows with outcome shadow), send nothing; true = send. Strict: exactly 'shadow' or 'true' (trimmed, any case), read at call time via cardOnFileReminderMode(). Anything else = off, no query. Removal triggers read payment.method_removed email rows or autopay_log payment_method_removed events. Kill: unset)
  *   GATE_ACH_FAILURE_EMAIL=true (owner 2026-11-16: a customer whose bank (ACH) payment fails gets one email for the stage the failure reached: the retry notice, the switch to the card on file, or the bank suspension with a link to update the bank account. The three bank-failure texts stay off (owner 2026-09-28) and get no text fallback. One email per payment intent and Stripe event; a replayed event sends it only when it is missing. Strict `=== 'true'`, read at call time via achFailureEmailLive(); dark by default. Off = no email, nothing else changes. Kill: unset)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
@@ -484,6 +484,7 @@
  */
 
 const isProd = process.env.NODE_ENV === 'production';
+const isTest = process.env.NODE_ENV === 'test';
 
 const gates = {
   // GATE_AI_CREDIT_KEYS (credit-only API key pool for Anthropic and OpenAI calls, dark). Boot-log entry only; the wrapper is installed at boot by credit-key-pool.js.
@@ -1816,7 +1817,7 @@ const gates = {
   // can offer the existing tokenized /pay checkout in-app instead of the
   // audit's pay-a-balance dead end (S2-1). Read-only surface over invoices
   // that already exist; gate off = payload byte-identical to today.
-  portalPayNow: isProd ? process.env.GATE_PORTAL_PAY_NOW === 'true' : true,
+  portalPayNow: isTest ? process.env.GATE_PORTAL_PAY_NOW !== 'false' : process.env.GATE_PORTAL_PAY_NOW === 'true',
 
   // Estimate accept — widen existing-appointment detection to ANY upcoming
   // pending/confirmed appointment belonging to the estimate's customer (not
@@ -3046,13 +3047,13 @@ const gates = {
   // (services/estimate-promo-code.js). Off, a code already entered stays on
   // its row and posts nothing. Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_PROMO_CODE=true.
-  estimatePromoCode: isProd ? process.env.GATE_ESTIMATE_PROMO_CODE === 'true' : true,
+  estimatePromoCode: isTest ? process.env.GATE_ESTIMATE_PROMO_CODE !== 'false' : process.env.GATE_ESTIMATE_PROMO_CODE === 'true',
   // Promo code on the invoice pay page (owner 2026-11-18): gates the
   // `promoCode` block of GET /api/pay/:token, POST /api/pay/:token/promo-code
   // and the redemption inside the pay page's payment setup
-  // (services/invoice-promo-code.js). Dev-open, prod dark.
+  // (services/invoice-promo-code.js). Dark in prod and dev; test-open unless 'false'.
   // Enable with GATE_PAY_PROMO_CODE=true.
-  payPromoCode: isProd ? process.env.GATE_PAY_PROMO_CODE === 'true' : true,
+  payPromoCode: isTest ? process.env.GATE_PAY_PROMO_CODE !== 'false' : process.env.GATE_PAY_PROMO_CODE === 'true',
   // Referral code in the same field (owner 2026-11-18): gates referral
   // codes on POST /:token/promo-code and in the `promoCode` block, and the
   // referrer confirm that follows an accepted estimate
@@ -3472,7 +3473,7 @@ const gates = {
   // bill. Money movement on real invoices, so off by default in prod until
   // verified; the Stripe/Terminal charge paths bill total − credit_applied and
   // the void paths restore the credit, so partial application is safe.
-  autoApplyAccountCredit: isProd ? process.env.GATE_AUTO_APPLY_ACCOUNT_CREDIT === 'true' : true,
+  autoApplyAccountCredit: isTest ? process.env.GATE_AUTO_APPLY_ACCOUNT_CREDIT !== 'false' : process.env.GATE_AUTO_APPLY_ACCOUNT_CREDIT === 'true',
 
   // Divert Micro-deposit Dunning — when an unpaid invoice's only blocker is an
   // unfinished ACH micro-deposit verification (its PaymentIntent is stuck in
@@ -3481,7 +3482,7 @@ const gates = {
   // "your invoice is overdue, pay now" dunning, the late-payment + per-invoice
   // follow-up sweeps send a verification re-nudge on the same cadence. Changes
   // customer-facing messaging, so off by default in prod until verified.
-  divertMicrodepositDunning: isProd ? process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION === 'true' : true,
+  divertMicrodepositDunning: isTest ? process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION !== 'false' : process.env.GATE_MICRODEPOSIT_DUNNING_DIVERSION === 'true',
 
   // Weekly Irrigation Recommendation Email — Monday-morning "cut back / add
   // water" email to lawn-care customers who entered weekly irrigation inches
@@ -3512,7 +3513,7 @@ const gates = {
   // behaves exactly as before: it records the prepayment and nothing is minted
   // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
   // stay individually available regardless of this gate.
-  prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
+  prepaidInvoiceReceipt: isTest ? process.env.GATE_PREPAID_INVOICE !== 'false' : process.env.GATE_PREPAID_INVOICE === 'true',
 
   // Record collected annual prepay: commit a receipt job with the payment,
   // then deliver through the standard receipt queue. Customer communications
@@ -3530,7 +3531,7 @@ const gates = {
   // still runs). Read at CALL time (gateEnvValue) by
   // services/zelle-notice-reconciler.js, so unsetting
   // GATE_ZELLE_BANK_RECONCILE is a live kill switch.
-  zelleBankReconcile: isProd ? gateEnvValue('GATE_ZELLE_BANK_RECONCILE') : process.env.GATE_ZELLE_BANK_RECONCILE !== 'false',
+  zelleBankReconcile: isTest ? process.env.GATE_ZELLE_BANK_RECONCILE !== 'false' : gateEnvValue('GATE_ZELLE_BANK_RECONCILE'),
 
   // Treatment Zone Mapper — tech traces the treated perimeter over a satellite
   // photo of the property; the traced path + snapshot replace the generic
@@ -3550,7 +3551,8 @@ const gates = {
   // follows Stripe because it drives the card surcharge. Sends nothing to a
   // customer and changes no price rule. Off = nothing is read or written, as
   // today. Read at boot; kill switch: unset the variable.
-  cardDetailsSync: isProd ? process.env.GATE_CARD_DETAILS_SYNC === 'true' : true,
+  // Call-time reader is cardDetailsSyncLive() below (dark in prod and dev; test-open unless 'false').
+  cardDetailsSync: isTest ? process.env.GATE_CARD_DETAILS_SYNC !== 'false' : process.env.GATE_CARD_DETAILS_SYNC === 'true',
 
   // Stale-visit sweep — nightly admin bell for past-dated appointments still
   // sitting in an open status (pending/confirmed/en_route/on_site).
@@ -5054,6 +5056,14 @@ const gates = {
   wdoReportHold: process.env.GATE_WDO_REPORT_HOLD === 'true',
   // GATE_VISIT_HOLD (visit on hold, customer will call, dark). Boot-log entry only; the call-time reader is visitHoldLive().
   visitHold: process.env.GATE_VISIT_HOLD === 'true',
+  // GATE_CARD_ON_FILE_REMINDER=shadow|true (owner 2026-11-24). Boot-log entry only; call-time reader is cardOnFileReminderMode().
+  cardOnFileReminder: ['shadow', 'true'].includes(String(process.env.GATE_CARD_ON_FILE_REMINDER || '').trim().toLowerCase()),
+  // GATE_PAYER_INVOICE_SMS read at CALL time via payerInvoiceSmsLive().
+  payerInvoiceSms: process.env.GATE_PAYER_INVOICE_SMS === 'true',
+  // GATE_PAYER_PACKET_AUTOSEND read at CALL time via payerPacketAutosendLive().
+  payerPacketAutosend: process.env.GATE_PAYER_PACKET_AUTOSEND === 'true',
+  // GATE_ACH_FAILURE_EMAIL read at CALL time via achFailureEmailLive().
+  achFailureEmail: process.env.GATE_ACH_FAILURE_EMAIL === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -6187,7 +6197,7 @@ function rateReviewLive() {
 // disagree with the billed rate are expected pre-flip data, not a defect, and parking them would bake
 // half-collected data into the lines a later flip bills. Off = no query, no write, no alert.
 function planRateLedgerReconcileLive() {
-  return process.env.GATE_PLAN_RATE_LEDGER_RECONCILE === 'true' && gates.planRateLedger === true;
+  return process.env.GATE_PLAN_RATE_LEDGER_RECONCILE === 'true' && process.env.GATE_PLAN_RATE_LEDGER === 'true';
 }
 
 // Same live-read contract. Kill = unset GATE_CANCEL_RESEED_IN_TERM (the
@@ -7480,7 +7490,7 @@ function outlinkTrackingLive() {
 // without the first the cadence is the legacy Day 30 one, without the second
 // the page shows one invoice while a reminder names the set.
 function dunningCustomerSchedulePrereqsLive() {
-  return process.env.GATE_DUNNING_LADDER_90 === 'true' && gates.payIncludeBalance === true;
+  return process.env.GATE_DUNNING_LADDER_90 === 'true' && process.env.GATE_PAY_INCLUDE_BALANCE === 'true';
 }
 
 function dunningCustomerScheduleLive() {
@@ -9262,3 +9272,9 @@ function accountingGlLive() {
 }
 // GATE_ACCOUNTING_GL reader, on its own line so gate PRs never conflict.
 module.exports.accountingGlLive = accountingGlLive;
+
+// GATE_CARD_DETAILS_SYNC read at CALL time (dark in prod and dev; test-open unless 'false').
+function cardDetailsSyncLive() {
+  return isTest ? process.env.GATE_CARD_DETAILS_SYNC !== 'false' : process.env.GATE_CARD_DETAILS_SYNC === 'true';
+}
+module.exports.cardDetailsSyncLive = cardDetailsSyncLive;
