@@ -192,5 +192,6 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
 }
 
 module.exports = {
-  scoreAppointmentPlacement, WEIGHTS, weekdayOf, _internals: { hhmmToMin, ROUTE_MINUTES_FULL_CREDIT, ROUTE_MINUTES_NO_CREDIT },
+  scoreAppointmentPlacement, WEIGHTS, weekdayOf,
+  _internals: { hhmmToMin, ROUTE_MINUTES_FULL_CREDIT, ROUTE_MINUTES_NO_CREDIT, workloadScoreFor },
 };
