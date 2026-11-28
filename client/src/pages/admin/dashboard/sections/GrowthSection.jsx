@@ -266,8 +266,9 @@ export default function GrowthSection({
         >
           <DashboardFeed value={funnel} pending={pending.funnel} label="estimate funnel" onRetry={onRetry}>
             <EstimateFunnel
-              funnel={funnel?.funnel || {}}
-              rates={funnel?.rates || {}}
+              funnel={funnel?.funnel}
+              rates={funnel?.rates}
+              cohort={funnel?.cohort}
               totalAcceptedValue={funnel?.total_accepted_value}
               byService={funnel?.by_service}
             />

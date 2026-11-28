@@ -39,6 +39,20 @@ describe("Period-driven dashboard chart states", () => {
     expect(screen.getByText(/Counts include earlier quotes decided this period/)).toBeInTheDocument();
   });
 
+  it("detects carry-over when acceptances stay below sends but exceed the sent cohort", () => {
+    const { container } = render(
+      <EstimateFunnel
+        funnel={{ sent: 10, viewed: 4, accepted: 3, declined: 0, pending: 10 }}
+        cohort={{ sent: 10, viewed: 4, accepted: 0, declined: 0 }}
+        rates={{ view_rate: 40, close_rate: 0, decline_rate: 0 }}
+        totalAcceptedValue={3600}
+      />,
+    );
+    expect(screen.getByText(/Counts include earlier quotes decided this period/)).toBeInTheDocument();
+    // Accepted bar width scales by count/maxCount (30%) rather than collapsing to 0%.
+    expect(container.innerHTML).toContain("width: 30%");
+  });
+
   it("uses period-neutral empty copy for RevenueByCity", () => {
     render(<RevenueByCity cities={[]} total={0} />);
     expect(screen.getByText("No completed-service revenue this period")).toBeInTheDocument();

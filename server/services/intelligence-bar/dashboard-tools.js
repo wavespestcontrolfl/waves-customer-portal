@@ -770,8 +770,11 @@ async function getEstimateFunnel(input) {
     stageQuery(sentAtSql('e')).select(
       db.raw('COUNT(*) as c'),
       db.raw(`COUNT(*) FILTER (WHERE ${countableViewAtSql('e')} IS NOT NULL) as cohort_viewed`),
-      db.raw("COUNT(*) FILTER (WHERE e.status = 'accepted') as cohort_accepted"),
-      db.raw("COUNT(*) FILTER (WHERE e.status = 'declined') as cohort_declined"),
+      // Require acceptance/decline at or after the effective send instant so a
+      // pre-delivery self-serve decision never inflates the staff-sent cohort's
+      // conversion rate (matches avgResponse right below).
+      db.raw(`COUNT(*) FILTER (WHERE e.status = 'accepted' AND e.accepted_at >= ${sentAtSql('e')}) as cohort_accepted`),
+      db.raw(`COUNT(*) FILTER (WHERE e.status = 'declined' AND e.declined_at >= ${sentAtSql('e')}) as cohort_declined`),
     ).first(),
     stageQuery(countableViewAtSql('e')).count('* as c').first(),
     stageQuery('e.accepted_at', 'accepted').count('* as c').first(),

@@ -134,13 +134,18 @@ describe('Gross margin target 55% alignment', () => {
   });
 
   test('migration updates only untouched default 40% rows, copies saved autopay_pct target, and rolls back safely', async () => {
-    const rows = [
-      { metric: 'gross_margin', target: 40, updated_by: null, updated_at: '2026-07-02T00:00:00Z' },
-      { metric: 'gross_margin', target: 40, updated_by: 'Adam', updated_at: '2026-08-01T00:00:00Z' },
-      { metric: 'autopay_pct', target: 75, amber_band_pct: 10, lower_is_better: false, updated_by: 'Adam', updated_at: '2026-09-01T00:00:00Z' },
-    ];
+    const tables = {
+      kpi_targets: [
+        { metric: 'gross_margin', target: 40, updated_by: null, updated_at: '2026-07-02T00:00:00Z' },
+        { metric: 'gross_margin', target: 40, updated_by: 'Adam', updated_at: '2026-08-01T00:00:00Z' },
+        { metric: 'autopay_pct', target: 75, amber_band_pct: 10, lower_is_better: false, updated_by: 'Adam', updated_at: '2026-09-01T00:00:00Z' },
+      ],
+      audit_log: [],
+    };
+    const rows = tables.kpi_targets;
     const makeKnex = () => {
-      const knex = () => {
+      const knex = (table) => {
+        const list = tables[table];
         let filter = {};
         let nullCols = [];
         const matches = (row) => (
@@ -150,21 +155,22 @@ describe('Gross margin target 55% alignment', () => {
         return {
           where(obj) { filter = { ...filter, ...obj }; return this; },
           whereNull(col) { nullCols.push(col); return this; },
-          async first() { return rows.find(matches); },
-          async insert(row) { rows.push({ ...row }); },
+          orderBy() { return this; },
+          async first() { return list.find(matches); },
+          async insert(row) { list.push({ created_at: '2026-11-27T19:00:00Z', ...row }); },
           async del() {
-            for (let i = rows.length - 1; i >= 0; i -= 1) {
-              if (matches(rows[i])) rows.splice(i, 1);
+            for (let i = list.length - 1; i >= 0; i -= 1) {
+              if (matches(list[i])) list.splice(i, 1);
             }
           },
           async update(patch) {
-            for (const row of rows) {
+            for (const row of list) {
               if (matches(row)) Object.assign(row, patch);
             }
           },
         };
       };
-      knex.schema = { hasTable: async () => true };
+      knex.schema = { hasTable: async (t) => Boolean(tables[t]) };
       knex.fn = { now: () => 'NOW' };
       return knex;
     };
@@ -186,5 +192,15 @@ describe('Gross margin target 55% alignment', () => {
     expect(rows[0].target).toBe(40);
     expect(rows[1].target).toBe(40);
     expect(rows.find((r) => r.metric === 'recurring_autopay_pct')).toBeUndefined();
+
+    // A pre-existing recurring_autopay_pct row (not inserted by up()) survives down() even if timestamps match.
+    tables.audit_log.length = 0;
+    rows.push({
+      metric: 'recurring_autopay_pct', target: 85, amber_band_pct: 5, lower_is_better: false,
+      updated_by: 'Adam', updated_at: '2026-09-01T00:00:00Z',
+    });
+    await recurringAutopayMigration.up(knex);
+    await recurringAutopayMigration.down(knex);
+    expect(rows.find((r) => r.metric === 'recurring_autopay_pct')?.target).toBe(85);
   });
 });

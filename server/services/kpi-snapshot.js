@@ -95,7 +95,11 @@ async function recordKpiSnapshot(snapshotDate, conn) {
 async function readSnapshotMissing(snapshotDate, conn) {
   snapshotDate = snapshotDate || etDateString();
   conn = conn || require('../models/db');
-  const row = await conn('kpi_snapshots').where({ snapshot_date: snapshotDate }).count({ n: '*' }).first();
+  const expectedKeys = SNAPSHOT_METRICS.map(([key]) => key);
+  const row = await conn('kpi_snapshots')
+    .where({ snapshot_date: snapshotDate })
+    .whereIn('metric', expectedKeys)
+    .count({ n: '*' }).first();
   return Number(row?.n || 0) < SNAPSHOT_METRICS.length;
 }
 

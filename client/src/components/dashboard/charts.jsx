@@ -522,7 +522,7 @@ export function ServiceMixDonut({ mix = [], height = 220 }) {
 // Each stage shrinks proportionally to the top of the funnel (sent).
 // Pass `funnel` { sent, viewed, accepted, declined } and `rates` { view_rate,
 // close_rate, decline_rate }.
-function buildEstimateFunnelStages(funnel, rates) {
+function buildEstimateFunnelStages(funnel, rates, cohort) {
   const sent = funnel.sent || 0;
   const viewed = funnel.viewed || 0;
   const accepted = funnel.accepted || 0;
@@ -531,9 +531,16 @@ function buildEstimateFunnelStages(funnel, rates) {
   const counts = [sent, viewed, accepted, declined, pending];
   const maxCount = Math.max(...counts, 1);
   // Short periods (e.g. Today) can include carry-over views/acceptances/declines
-  // from earlier sends. Conversion percentages come from the sent cohort
-  // (0–100%); guard against any legacy >100% rate.
-  const hasCarryOver = maxCount > sent;
+  // from earlier sends even when acceptances stay below sends (e.g. 10 sent
+  // today, 3 older quotes accepted, 0 of today's cohort accepted). Compare
+  // stage counts against returned cohort counts when available, else fall back
+  // to maxCount > sent.
+  const cohortMismatch = Boolean(cohort) && (
+    viewed !== (cohort.viewed || 0)
+    || accepted !== (cohort.accepted || 0)
+    || declined !== (cohort.declined || 0)
+  );
+  const hasCarryOver = maxCount > sent || cohortMismatch;
   const pctOfSent = (val) => (sent > 0 && val != null && val <= 100 ? val : null);
   return {
     hasActivity: counts.some((n) => n > 0),
@@ -551,11 +558,11 @@ function buildEstimateFunnelStages(funnel, rates) {
   };
 }
 
-export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, byService }) {
+export function EstimateFunnel({ funnel = {}, rates = {}, cohort = null, totalAcceptedValue, byService }) {
   // A short window like Today can have accepted/declined activity from quotes
   // sent on an earlier day even when sent === 0; only show empty when every
   // stage is zero.
-  const { hasActivity, hasCarryOver, maxCount, stages } = buildEstimateFunnelStages(funnel, rates);
+  const { hasActivity, hasCarryOver, maxCount, stages } = buildEstimateFunnelStages(funnel, rates, cohort);
   if (!hasActivity) return <EmptyState>No estimates sent this period</EmptyState>;
   return (
     <div className="space-y-3">
