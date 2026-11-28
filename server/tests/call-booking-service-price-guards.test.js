@@ -70,6 +70,39 @@ describe('PR A1: package Visit 2 & single-treatment guards (call 819d3d1f)', () 
     expect(resolveCallFollowUpPlan({ extracted, catalogRow: SERVICES[0], parentDate: '2026-11-28', parentWindowStart: '16:00', v2Extraction: v2 })).toBeNull();
   });
 
+  test('does NOT downgrade when caller rejects a single treatment and wants the full two-visit package', () => {
+    const transcript = "Caller: I don't want just a single treatment, I need the full package.\nAgent: Great, $350 covers both visits.";
+    const v2 = {
+      service_request: {
+        specific_service_name: 'Cockroach Treatment Service',
+        price: { amount_usd: 350, stated_by: 'agent', caller_response: 'accepted' },
+      },
+      scheduling: { status: 'confirmed', follow_up_mentioned: true },
+    };
+    const svc = resolveCallBookingCatalogService({
+      extracted: {
+        matched_service: 'Cockroach Treatment Service',
+        specific_service_name: 'Cockroach Treatment Service',
+        quoted_price: 350,
+        follow_up_visit_mentioned: true,
+      },
+      v2Extraction: v2,
+      services: SERVICES,
+      transcription: transcript,
+    });
+    expect(svc?.service_key).toBe('cockroach_control');
+
+    const plan = resolveCallFollowUpPlan({
+      catalogRow: svc,
+      extracted: { follow_up_visit_mentioned: true, quoted_price: 350 },
+      v2Extraction: v2,
+      transcription: transcript,
+      parentDate: '2026-11-28',
+      parentWindowStart: '16:00',
+    });
+    expect(plan).toMatchObject({ scheduledDate: '2026-12-12', windowStart: '16:00' });
+  });
+
   test('full-price $350 Cockroach mentioning "one-time treatment" OR changing back to "two visits" keeps package Visit 2', () => {
     const v2 = {
       scheduling: { status: 'confirmed', follow_up_mentioned: false },
@@ -573,6 +606,26 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
           price_is_final: true,
           price_accepted_by_caller: true,
           price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
+
+    // Agent question about earlier visit rejected by caller asking for a separate treatment is rejected
+    selectChain.select.mockResolvedValueOnce([pestVisit]);
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-rejected-q', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      transcription: 'Agent: Are you calling about the price for the earlier visit?\nCaller: No. I want a separate treatment for the shed.\nAgent: That is $199.\nCaller: Sounds good.',
+      v2Extraction: {
+        scheduling: { status: 'none' },
+        service_request: {
+          service_intent: 'new_booking_inquiry',
+          specific_service_name: 'One-Time Pest',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true, evidence_quote: '$199 for the shed' },
         },
       },
     })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });

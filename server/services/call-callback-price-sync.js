@@ -150,7 +150,8 @@ function requestedMatchesVisitExactly(requestedName, visitRow, catalogRows = [])
   return Boolean(resolved && String(resolved.id) === String(visitRow.service_id));
 }
 
-const SEPARATE_FROM_PRIOR_VISIT_RE = /\b(?:separate\s+from|not\s+(?:for|part\s+of|including)|different\s+from|in\s+addition\s+to|aside\s+from|other\s+than|unrelated\s+to)\b[^.!?\n]{0,40}\b(?:price|quote|rate|total|cost|visit|appointment|booking|service)\b/i;
+const SEPARATE_FROM_PRIOR_VISIT_RE = /\b(?:separate\s+from|not\s+(?:for|part\s+of|including)|different\s+from|in\s+addition\s+to|aside\s+from|other\s+than|unrelated\s+to)\b[^.!?\n]{0,40}\b(?:price|quote|rate|total|cost|visit|appointment|booking|service)\b|\b(?:want|need|book(?:ing)?|schedul(?:e|ing)|quote|asking\s+for|looking\s+for)\s+(?:a\s+|an\s+)?(?:separate|different|additional|another|new)\s+(?:treatment|job|visit|appointment|service|booking)\b/i;
+const QUESTION_CLAUSE_RE = /\?$|^(?:(?:agent|caller)\s*:\s*)?(?:are|is|was|were|do|did|does|would|could|can)\s+you\b/i;
 
 function hasExplicitPriorVisitLink(v2Extraction, transcription) {
   const sr = v2Extraction?.service_request || {};
@@ -161,8 +162,12 @@ function hasExplicitPriorVisitLink(v2Extraction, transcription) {
     transcription,
   ].filter(Boolean).join('\n');
   if (!contextText) return false;
-  const clauses = contextText.split(/[.!?\n;]+/).map((s) => s.trim()).filter(Boolean);
-  return clauses.some((clause) => EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE.test(clause) && !SEPARATE_FROM_PRIOR_VISIT_RE.test(clause));
+  // Any explicit separation / separate-job statement in the call blocks retroactive pricing on the earlier visit.
+  if (SEPARATE_FROM_PRIOR_VISIT_RE.test(contextText)) return false;
+  // Preserve `?` so unanswered or rejected questions ("Are you calling about the price for the earlier visit?")
+  // cannot satisfy affirmative prior-visit linkage.
+  const clauses = contextText.split(/(?<=\?)|[.!\n;]+/).map((s) => s.trim()).filter(Boolean);
+  return clauses.some((clause) => !QUESTION_CLAUSE_RE.test(clause) && EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE.test(clause));
 }
 
 function callbackMatchesVisitService(v2Extraction, visitRow, transcription = '', { customer = null, catalogRows = [] } = {}) {

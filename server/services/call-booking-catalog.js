@@ -378,10 +378,10 @@ const REJECTED_V2_PRICE_RESPONSES = new Set(['declined', 'no_response', 'not_at_
 const PRICE_HEDGE_OR_ADDON_RE = /\b(?:varies|vary|depend(?:s|ing)?|before|plus\s+(?:a|any|\$|tax|\d)|extra|additional|on\s+top\s+of|starting\s+at|at\s+least|estimate\s+only|up\s+to|more\s+if|trip\s+fee|probably|maybe|might\s+be|could\s+be|looking\s+at|ballpark|guess(?:ing)?|roughly|approximately|optional|if\s+you\s+(?:want|need|decide)|instead|or\s+(?:the|a)\s+(?:treatment|plan))\b|\b(?:like|around|about)\s+\$?\d/i;
 const PACKAGE_DISCOUNT_SINGLE_RATIO = 0.75;
 const NEGATED_TWO_VISIT_RE = /\b(?:no|not|without|skip(?:ping)?|don['’]?t\s+(?:want|need)|never)\s+(?:a\s+|the\s+|any\s+)?(?:second|two|2)[-\s]?(?:visits?|treatments?|times?|package)\b/gi;
-const TWO_VISIT_EXPLICIT_RE = /\b(?:two|2)\s*[-\s]?(?:visits?|treatments?|times?)\b|\bsecond\s+(?:visit|treatment)\b|\b(?:two[-\s]?treatment|2[-\s]?treatment)\s+package\b/i;
+const TWO_VISIT_EXPLICIT_RE = /\b(?:two|2)\s*[-\s]?(?:visits?|treatments?|times?)\b|\bsecond\s+(?:visit|treatment)\b|\b(?:(?:two|2)[-\s]?treatment|full|complete)\s+(?:(?:two|2)[-\s]?visit\s+|cockroach\s+)?package\b/i;
 const FOLLOWUP_OMITTED_RE = /\b(?:no\s+(?:follow[-\s]?up|second\s+visit|return\s+visit)|without\s+(?:a\s+|the\s+)?(?:follow[-\s]?up|second\s+visit|return\s+visit)|skip(?:ping)?\s+(?:the\s+)?(?:follow[-\s]?up|second\s+visit)|not\s+(?:a|the)\s+(?:two[-\s]?(?:visit|treatment)|package)|just\s+(?:the\s+|this\s+|a\s+)?(?:one|single)\s+(?:\$\d[\d,.]*\s+)?(?:visit|treatment)|(?:a|one)\s+single\s+(?:\$\d[\d,.]*\s+)?(?:treatment|visit)|single\s+(?:\$\d[\d,.]*\s+)?(?:treatment|visit)\s+only|one[-\s]?time\s+only)\b/i;
 const SINGLE_TREATMENT_EXPLICIT_RE = /\b(?:single\s+(?:\$\d[\d,.]*\s+)?(?:treatment|visit)|just\s+(?:a\s+)?single\s+(?:treatment|visit))\b/i;
-const NEGATED_SINGLE_TREATMENT_RE = /\b(?:not|isn['’]?t|won['’]?t\s+be)\s+(?:just\s+)?(?:a\s+)?(?:one[-\s]?time|single\s+(?:visit|treatment))\b/i;
+const NEGATED_SINGLE_TREATMENT_RE = /\b(?:not|isn['’]?t|won['’]?t\s+be|(?:don['’]?t|do\s+not|didn['’]?t|did\s+not|doesn['’]?t|does\s+not|wouldn['’]?t|would\s+not)\s+(?:just\s+)?(?:want|need|prefer|do|book)|not\s+(?:want(?:ing)?|looking\s+for)|rather\s+not\s+(?:just\s+)?(?:do|get|have)|more\s+than|instead\s+of)\s+(?:just\s+|only\s+)?(?:a\s+|the\s+|one\s+)?(?:one[-\s]?time(?:\s+(?:visit|treatment|service))?|single\s+(?:\$\d[\d,.]*\s+)?(?:visit|treatment)|one\s+(?:\$\d[\d,.]*\s+)?(?:visit|treatment))\b/gi;
 const WDO_CLAUSE_REFUSAL_RE = /\b(?:(?:don['’]?t|do\s+not|didn['’]?t|did\s+not|doesn['’]?t|does\s+not|won['’]?t|will\s+not)\s+(?:want|need|require|get|do|order|book|schedule)|declin(?:e[ds]?|ing)|refus(?:e[ds]?|ing)|skip(?:p(?:ed|ing))?|without|rather\s+not|instead\s+of|no\s+need\s+for|not\s+looking\s+for|no|not)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|paperwork|certificate|service))?|termite\s+(?:letter|clearance(?:\s+letter)?|report|form)|wood[- ]destroying[- ]organism\s+(?:inspection|report|form|letter))\b/i;
 const WDO_CLAUSE_AFFIRM_RE = /\b(?:need|want|would\s+like|require[sd]?|book|schedule|order(?:ing)?|get(?:ting)?|do(?:ing)?)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|certificate))?|termite\s+(?:letter|clearance(?:\s+letter)?))\b/i;
 const ONE_TIME_ONLY_INTENT_RE = /\b(?:(?:just|only)\s+(?:want(?:ed)?|need(?:ed)?|looking\s+for|do(?:ing)?)?\s*(?:a|the|this)?\s*one[- ]?time(?:\s+(?:treatment|service|visit|spray|job))?|one[- ]?time\s+(?:only|treatment|service|visit)|(?:just|only)\s+once|no\s+(?:ongoing|recurring|monthly|quarterly|plan|package|membership)|(?:don['’]?t|do\s+not|not)\s+(?:want(?:ing)?|need(?:ing)?|looking\s+for|interested\s+in)\s+(?:a\s+|an\s+)?(?:ongoing|recurring|monthly|quarterly|plan|package|membership|subscription))\b/i;
@@ -840,16 +840,22 @@ function lastRegexMatchIndex(re, text) {
   return lastIdx;
 }
 
+function stripNegatedSingleTreatment(text) {
+  return String(text || '').replace(NEGATED_SINGLE_TREATMENT_RE, (m) => ' '.repeat(m.length));
+}
+
 function resolvePackageVisitCountChoice(combined) {
   let finalChoice = null;
   for (const rawClause of String(combined || '').split(/(?<=\?)|[.!\n,;]+/)) {
     const clause = rawClause.trim();
     if (!clause || QUESTION_OR_CHECK_RE.test(clause)) continue;
     const withoutNegTwo = clause.replace(NEGATED_TWO_VISIT_RE, (m) => ' '.repeat(m.length));
+    const withoutNegSingle = stripNegatedSingleTreatment(clause);
     const twoIdx = lastRegexMatchIndex(TWO_VISIT_EXPLICIT_RE, withoutNegTwo);
-    const singleIdx = NEGATED_SINGLE_TREATMENT_RE.test(clause)
-      ? -1
-      : Math.max(lastRegexMatchIndex(FOLLOWUP_OMITTED_RE, clause), lastRegexMatchIndex(SINGLE_TREATMENT_EXPLICIT_RE, clause));
+    const singleIdx = Math.max(
+      lastRegexMatchIndex(FOLLOWUP_OMITTED_RE, withoutNegSingle),
+      lastRegexMatchIndex(SINGLE_TREATMENT_EXPLICIT_RE, withoutNegSingle),
+    );
     if (twoIdx > singleIdx) finalChoice = 'two';
     else if (singleIdx > twoIdx) finalChoice = 'single';
   }
@@ -860,8 +866,9 @@ function hasExplicitFollowUpRefusal({ extracted = {}, v2Extraction = null, trans
   if (followUpDateScheduled(extracted, v2Extraction)) return false;
   const callerText = transcription ? callerOnlyText(transcription) : '';
   const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
-  if (!combined || NEGATED_SINGLE_TREATMENT_RE.test(combined)) return false;
-  return resolvePackageVisitCountChoice(combined) === 'single' && FOLLOWUP_OMITTED_RE.test(combined);
+  if (!combined) return false;
+  const withoutNegSingle = stripNegatedSingleTreatment(combined);
+  return resolvePackageVisitCountChoice(combined) === 'single' && FOLLOWUP_OMITTED_RE.test(withoutNegSingle);
 }
 
 function isDiscountedSinglePackageTreatment({
@@ -874,7 +881,6 @@ function isDiscountedSinglePackageTreatment({
   if (followUpExplicitlyDiscussed(extracted, v2Extraction)) return false;
   const callerText = transcription ? callerOnlyText(transcription) : '';
   const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
-  if (NEGATED_SINGLE_TREATMENT_RE.test(combined)) return false;
   if (resolvePackageVisitCountChoice(combined) !== 'single') return false;
   const listPrice = Number(catalogRow?.base_price);
   const price = resolvedPrice != null ? Number(resolvedPrice) : agreedOneTimeVisitPrice(extracted, v2Extraction);
