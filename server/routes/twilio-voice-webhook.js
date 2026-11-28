@@ -2344,6 +2344,22 @@ async function appendSecondFailureTransfer(req, twiml, callSid, recoveryFallback
 const RELAY_SANDBOX_CELL_ACTION = '/api/webhooks/twilio/relay-sandbox/cell';
 const RELAY_COMPLETE_ACTION_SANDBOX = `${RELAY_COMPLETE_ACTION}?sandbox=1`;
 const SANDBOX_CELL_GATHER_TIMEOUT_SEC = 6;
+// Remastered telephony disclosure WAV (-16 LUFS, 8 kHz mono PCM, trimmed dead air,
+// exact FL §934.03 spoken notice preserved). Served publicly via express.static
+// from client/public/audio/waves-greeting-notice.wav (same path pattern as
+// ringback-us.wav and voicemail-tone.wav).
+const PRACTICE_GREETING_PATH = '/audio/waves-greeting-notice.wav';
+
+function practiceGreetingUrl(req) {
+  const override = String(process.env.VOICE_SANDBOX_GREETING_URL || '').trim();
+  if (override) {
+    try {
+      const parsed = new URL(override);
+      if (parsed.protocol === 'https:' && parsed.hostname) return parsed.toString();
+    } catch { /* fall through to deploy-local remastered WAV */ }
+  }
+  return `https://${sandboxRelayHost(req)}${PRACTICE_GREETING_PATH}`;
+}
 
 // ⭐ FAIL CLOSED ON A LIVE LINE. The sandbox is a DRY RUN: a registered Waves
 // number pointed here would silently swallow genuine callers (no lead, no
@@ -2620,11 +2636,53 @@ router.post('/tech-voice-complete', (req, res) => {
   res.type('text/xml').send(twiml.toString());
 });
 
+async function respondSandboxGatherRelay(req, res, callSid, recordingOk) {
+  const twiml = new VoiceResponse();
+  // The recording disclosure (FL §934.03 — the sandbox number is publicly
+  // dialable and the relay transcribes every caller) plays INSIDE the cell
+  // <Gather>, so digits count from the first second of the call: a runner
+  // that sends its cell code at answer is heard (Twilio drops digits sent
+  // before a <Gather> starts). A human caller presses nothing, hears the
+  // whole disclosure, and falls through to the default relay in the SAME
+  // document after the timeout. The cell continuation replays the
+  // disclosure (a digit cut it short) and then renders the relay.
+  const gather = twiml.gather({
+    input: 'dtmf',
+    numDigits: 2,
+    timeout: SANDBOX_CELL_GATHER_TIMEOUT_SEC,
+    action: RELAY_SANDBOX_CELL_ACTION,
+    method: 'POST',
+    // A document that records must not let a key cut the disclosure short
+    // and then fall through to the recording. Twilio's default finish key
+    // does exactly that: a lone "#" ends the <Gather> with no digits, so no
+    // action is requested and the next verb runs. With no finish key every
+    // key press is input, so it reaches the cell handler, which replays the
+    // disclosure outside any <Gather> before it records.
+    ...(recordingOk ? { finishOnKey: '' } : {}),
+  });
+  gather.play(practiceGreetingUrl(req));
+  const gatherInner = twiml.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
+  // No digits ⇒ this document's relay opens with the production profile.
+  await stampRelayProfile(callSid, activeRelayTwiMLOptions());
+  const relayXml = sandboxRelayXml({ callSid, req });
+  logger.info(`[relay-sandbox] answering ${maskSid(callSid)} from=${maskPhone(req.body?.From)}`);
+  return res.type('text/xml').send(relayXml.replace('<Response>', `<Response>${gatherInner}${recordingOk ? SANDBOX_RECORDING_XML : ''}`));
+}
+
 router.post('/relay-sandbox', async (req, res) => {
   try {
     if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
     const { CallSid, From, To, CallStatus } = req.body || {};
     if (!CallSid) return refuseSandbox(req, res, 'no CallSid');
+    // GATE_VOICE_GPT_LIVE_TEST on (owner 2026-11-28): direct GPT-Live Marin
+    // spends money (ledger reservation + Twilio REST time limit), so fail
+    // closed on unsigned/tampered deliveries BEFORE any DB write, matching
+    // /relay-sandbox/cell.
+    const liveDefault = Boolean(require('../config/feature-gates').voiceGptLiveTestLive());
+    if (liveDefault && !gptLiveRequestSigned(req)) {
+      logger.warn(`[gpt-live] unsigned or invalid Twilio signature — refused ${maskSid(CallSid)}`);
+      return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
+    }
     const twiml = new VoiceResponse();
     const { VOICE_RELAY_SANDBOX_SOURCE, RELAY_FAILED_OUTCOME } = require('../services/voice-agent/relay-protocol');
     // EVERY sandbox call gets its row (the public-route contract), the
@@ -2702,35 +2760,12 @@ router.post('/relay-sandbox', async (req, res) => {
       twiml.hangup();
       return res.type('text/xml').send(twiml.toString());
     }
-    // The recording disclosure (FL §934.03 — the sandbox number is publicly
-    // dialable and the relay transcribes every caller) plays INSIDE the cell
-    // <Gather>, so digits count from the first second of the call: a runner
-    // that sends its cell code at answer is heard (Twilio drops digits sent
-    // before a <Gather> starts). A human caller presses nothing, hears the
-    // whole disclosure, and falls through to the default relay in the SAME
-    // document after the timeout. The cell continuation replays the
-    // disclosure (a digit cut it short) and then renders the relay.
-    const gather = twiml.gather({
-      input: 'dtmf',
-      numDigits: 2,
-      timeout: SANDBOX_CELL_GATHER_TIMEOUT_SEC,
-      action: RELAY_SANDBOX_CELL_ACTION,
-      method: 'POST',
-      // A document that records must not let a key cut the disclosure short
-      // and then fall through to the recording. Twilio's default finish key
-      // does exactly that: a lone "#" ends the <Gather> with no digits, so no
-      // action is requested and the next verb runs. With no finish key every
-      // key press is input, so it reaches the cell handler, which replays the
-      // disclosure outside any <Gather> before it records.
-      ...(recordingOk ? { finishOnKey: '' } : {}),
-    });
-    gather.play(wavesGreetingUrl());
-    const gatherInner = twiml.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
-    // No digits ⇒ this document's relay opens with the production profile.
-    await stampRelayProfile(CallSid, activeRelayTwiMLOptions());
-    const relayXml = sandboxRelayXml({ callSid: CallSid, req });
-    logger.info(`[relay-sandbox] answering ${maskSid(CallSid)} from=${maskPhone(From)}`);
-    return res.type('text/xml').send(relayXml.replace('<Response>', `<Response>${gatherInner}${recordingOk ? SANDBOX_RECORDING_XML : ''}`));
+    // Direct GPT-Live Marin default: one short remastered disclosure clip, then
+    // straight into the Media Stream with no 6-second keypad wait or replay.
+    if (liveDefault) {
+      return await respondGptLiveCell(req, res, CallSid, GPT_LIVE_DEFAULT_CELL, recordingOk ? SANDBOX_RECORDING_XML : '');
+    }
+    return await respondSandboxGatherRelay(req, res, CallSid, recordingOk);
   } catch (err) {
     logger.error(`[relay-sandbox] error: ${err.message}`);
     return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
@@ -2739,14 +2774,15 @@ router.post('/relay-sandbox', async (req, res) => {
 
 // =========================================================================
 // GPT-Live trial (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19, spend cap $5).
-// Cell codes 71 / 72 on the sandbox number connect the call to OpenAI's
-// GPT-Live model through Twilio Media Streams (services/voice-agent/
-// live-bridge.js) instead of ConversationRelay, so the owner can compare the
-// two by ear. Twilio does not allow a query string on a <Stream> url, so the
-// CallSid and the per-call token ride as path segments of /ws/voice-live/.
+// Owner 2026-11-28: when GATE_VOICE_GPT_LIVE_TEST is on, /relay-sandbox
+// answers directly into cell 71 (Marin) after one remastered disclosure clip
+// (no keypad wait). Cell codes 71 / 72 on /relay-sandbox/cell remain intact.
+// Twilio does not allow a query string on a <Stream> url, so the CallSid and
+// the per-call token ride as path segments of /ws/voice-live/.
 // =========================================================================
 const GPT_LIVE_COMPLETE_ACTION = '/api/webhooks/twilio/relay-sandbox/live-complete';
 const GPT_LIVE_CELLS = new Map([['71', 'marin'], ['72', 'delta']]);
+const GPT_LIVE_DEFAULT_CELL = Object.freeze({ cell: '71', voice: 'marin' });
 const GPT_LIVE_TIME_LIMIT_S = 600;
 const GPT_LIVE_DEFAULT_MAX_USD = 5; // the owner's spend yes, 2026-11-19: $5 of OpenAI charges in all
 const GPT_LIVE_BUDGET_LOCK = 'voice_gpt_live_budget';
@@ -2855,11 +2891,11 @@ function gptLiveSayAndHangup(res, text) {
   return res.type('text/xml').send(twiml.toString());
 }
 
-// The disclosure replay the cell handler always plays (a digit cut the
-// answer-time copy short), then the media stream.
+// Plays the remastered FL §934.03 disclosure clip once in full before any
+// recording or media stream begins (direct /relay-sandbox answer or /cell).
 function gptLiveStreamXml(req, callSid, token, recordingXml = '') {
   const twiml = new VoiceResponse();
-  twiml.play(wavesGreetingUrl());
+  twiml.play(practiceGreetingUrl(req));
   const connect = twiml.connect({ action: GPT_LIVE_COMPLETE_ACTION });
   connect.stream({ url: require('../services/voice-agent/relay-protocol').liveStreamUrl(sandboxRelayHost(req), callSid, token) });
   return twiml.toString().replace('<Connect', `${recordingXml}<Connect`);
@@ -2929,7 +2965,7 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     // the <Play> completed — so the continuation replays the complete
     // disclosure before the relay transcribes a word. Unconditional.
     const replay = new VoiceResponse();
-    replay.play(wavesGreetingUrl());
+    replay.play(practiceGreetingUrl(req));
     const replayInner = replay.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
     return res.type('text/xml').send(sandboxRelayXml({ callSid: CallSid, cell, req }).replace('<Response>', `<Response>${replayInner}${recordingXml}`));
   } catch (err) {
