@@ -24,15 +24,21 @@
  */
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { errorTag } = require('../services/bid-kit-log');
 const { getSlotDebug } = require('../services/estimate-slot-availability');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.use(adminAuthenticate, requireAdmin);
 
 // GET /api/admin/estimates/:id/slot-debug
 router.get('/:id/slot-debug', async (req, res) => {
   try {
+    if (!UUID_RE.test(req.params.id)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const proximityDriveMinutes = Number.parseInt(req.query.proximityDriveMinutes, 10);
     const opts = {};
@@ -49,8 +55,8 @@ router.get('/:id/slot-debug', async (req, res) => {
     if (err.code === 'ESTIMATE_NOT_FOUND') {
       return res.status(404).json({ error: 'Estimate not found' });
     }
-    logger.error(`[admin-estimate-slots] ${err.message}`, { stack: err.stack });
-    return res.status(500).json({ error: err.message });
+    logger.error(`[admin-estimate-slots] slot-debug failed (${errorTag(err)})`);
+    return res.status(500).json({ error: 'Could not load slot debug data.' });
   }
 });
 
