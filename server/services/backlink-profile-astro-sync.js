@@ -85,6 +85,9 @@ const EXPLICIT_OFFICE_URLS = new Map([
   ['citysquares.com/b/waves-pest-control-lakewood-ranch-26663854', 'bradenton-fl'],
 ]);
 
+const NON_OFFICE_CITY_RE =
+  /(?:^|[-_/])(?:englewood|north[-_]?port|rotonda[-_]?west|port[-_]?charlotte|palmetto|ellenton|nokomis|osprey|siesta[-_]?key|longboat[-_]?key|anna[-_]?maria|holmes[-_]?beach|bradenton[-_]?beach)(?:$|[-_/])/;
+
 function urlHostAndPath(rawUrl) {
   let u;
   try { u = new URL(rawUrl); } catch { return null; }
@@ -97,7 +100,7 @@ function urlHostAndPath(rawUrl) {
 function inferOfficeSlugFromUrl(rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
-  if (/(?:^|[-_/])englewood(?:$|[-_/])/.test(hp.path)) return null;
+  if (NON_OFFICE_CITY_RE.test(hp.path)) return null;
   const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
   const matches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   if (explicit) {
@@ -111,7 +114,7 @@ function inferOfficeSlugFromUrl(rawUrl) {
 function officeSlugForRow(location, rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
-  if (/(?:^|[-_/])englewood(?:$|[-_/])/.test(hp.path)) return null;
+  if (NON_OFFICE_CITY_RE.test(hp.path)) return null;
   const pathMatches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
   if (pathMatches.length > 1) return null;
@@ -135,14 +138,14 @@ function officeSlugForRow(location, rawUrl) {
 }
 
 // Strict allowlist of verified, publicly crawlable per-office directory hosts
-// and their business-profile path shapes. Keeps SaaS launch directories, PBN
-// blogs, Englewood duplicates, corporate handles, and community posts out of
-// per-office LocalBusiness sameAs.
+// and their full Waves Pest Control business-profile path shapes. Keeps SaaS
+// launch directories, PBN blogs, Englewood/service-area duplicates, corporate
+// handles, and community posts/subpaths out of per-office LocalBusiness sameAs.
 const SAMEAS_ALLOWED_OFFICE_HOSTS = new Map([
-  ['citysquares.com', /^\/b\/[^/]*waves/],
-  ['n49.com', /^\/biz\/\d+\/[^/]*waves/],
-  ['nextdoor.com', /^\/pages\/[^/]*waves/],
-  ['reviews.birdeye.com', /^\/[^/]*waves[^/]*$/],
+  ['citysquares.com', /^\/b\/waves-pest-control(?:-[^/]+)?$/],
+  ['n49.com', /^\/biz\/\d+\/waves-pest-control(?:-[^/]+)?$/],
+  ['nextdoor.com', /^\/pages\/waves-pest-control(?:-[^/]+)?$/],
+  ['reviews.birdeye.com', /^\/waves-pest-control(?:-[^/]+)?$/],
 ]);
 
 // Specific excluded pages on allowlisted (or legacy) hosts — e.g. wrong phone,

@@ -78,6 +78,10 @@ describe('sameAsRejectReason', () => {
 
   test('query strings or non-profile paths on allowlisted hosts are not profiles', () => {
     expect(sameAsRejectReason('https://citysquares.com/b/waves-pest-control-venice-26858800?ref=x')).toBe('not_profile');
+    expect(sameAsRejectReason('https://citysquares.com/b/waves-pest-control-venice-26858800/reviews')).toBe('not_profile');
+    expect(sameAsRejectReason('https://www.n49.com/biz/6597767/waves-pest-control-sarasota-fl/reviews')).toBe('not_profile');
+    expect(sameAsRejectReason('https://nextdoor.com/pages/waves-pest-control-sarasota/posts/123')).toBe('not_profile');
+    expect(sameAsRejectReason('https://nextdoor.com/pages/other-waves-business-sarasota-fl/')).toBe('not_profile');
     expect(sameAsRejectReason('https://nextdoor.com/pages/other-pest-control-sarasota-fl/')).toBe('not_profile');
     expect(sameAsRejectReason('https://nextdoor.com/p/waves-pest-control-sarasota-fl/')).toBe('not_profile');
     expect(sameAsRejectReason('https://citysquares.com/articles/waves-pest-control-sarasota')).toBe('not_profile');
@@ -95,10 +99,12 @@ describe('getVerifiedProfilesByOffice', () => {
       ...ALLOWED_OFFICE_PAGES.map((live_url) => ({ live_url, location: null })),
       ...SAAS_DIRECTORIES.map((live_url) => ({ live_url, location: null })),
       ...NON_ALLOWLISTED_OR_BAD.map((live_url) => ({ live_url, location: null })),
-      // Ambiguous, HQ-only lakewood-ranch, or non-office city on allowlisted host -> dropped
+      // Ambiguous, HQ-only lakewood-ranch, or non-office service-area city on allowlisted host -> dropped
       { live_url: 'https://citysquares.com/b/waves-pest-control-englewood-1234', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-englewood-1234', location: 'venice' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-north-port-1234', location: 'venice' },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-bradenton-fl/', location: null },
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota/posts/123', location: 'sarasota' },
       { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-lakewood-ranch-99999', location: null },
       // Stored default 'bradenton' with unmapped Lakewood Ranch HQ URL or conflicting Sarasota URL -> dropped
