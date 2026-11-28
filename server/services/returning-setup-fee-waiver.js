@@ -421,8 +421,11 @@ async function hasActivePlanAtQuotedProperty(database, customerId, customer, sco
   const { isMembershipCustomerRow, isLiveObligationRow, TERMINAL_STATUSES } = require('./waveguard-existing-services');
   const { sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
   const { etDateString } = require('../utils/datetime-et');
-  const today = etDateString();
   const accountHasActiveTier = Boolean(customer && customer.active !== false && isMembershipCustomerRow(customer));
+  // Non-members with live non-WaveGuard recurring visits (e.g. palm injection)
+  // are never covered by the existing-member waiver — check membership first (Codex P2).
+  if (!accountHasActiveTier) return false;
+  const today = etDateString();
   const rawActiveRows = await database('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNotIn('status', TERMINAL_STATUSES)
@@ -435,7 +438,6 @@ async function hasActivePlanAtQuotedProperty(database, customerId, customer, sco
   const matchingActive = await filterRowsToQuotedProperty(database, activeRows, scope, cache);
   if (matchingActive.length > 0) return true;
   if (activeRows.length > 0) return false; // active plan rows exist only on other property(ies)
-  if (!accountHasActiveTier) return false;
   if (scope.customerPrimaryStreet && scope.estimateStreet
     && !(sameScopeKey(scope.customerPrimaryStreet, scope.estimateStreet)
       && scopeKeysShareLocality(scope.customerPrimaryStreet, scope.estimateStreet))) {

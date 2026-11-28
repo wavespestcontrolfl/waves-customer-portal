@@ -563,10 +563,24 @@ describe('B-17: Bill-and-send open-lead pre-check, deferred reconcile, unsent-dr
       }],
       'annual_prepay_terms as t': [{
         id: 'term-cancelled-active-period', status: 'cancelled', covered_until: '2027-06-01', property_id: 'prop-a',
-        invoice_id: 'inv-term-1', invoice_status: 'paid',
+        prepay_invoice_id: 'inv-term-1', invoice_status: 'paid',
       }],
     });
     expect((await setupFeeSettledElsewhere(connCancelledTerm, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST })).settled).toBe(true);
+
+    // Prepay term with prepay_invoice_id only (no source_estimate_id / linked visits) resolves property via invoice -> visit.
+    const connPrepayInvOnly = makeObligationConn({
+      estimates: { id: EST, created_at: '2026-11-01T15:00:00Z', property_id: 'prop-a', address: '100 Oak St, Testville, FL 34200' },
+      invoices: [{ id: 'inv-prepay-only', status: 'paid', scheduled_service_id: 'ss-prop-a', line_items: [] }],
+      scheduled_services: [{
+        id: 'ss-prop-a', property_id: 'prop-a', service_address_line1: '100 Oak St', service_address_city: 'Testville', service_address_zip: '34200',
+      }],
+      'annual_prepay_terms as t': [{
+        id: 'term-prepay-inv-only', status: 'cancelled', covered_until: '2027-06-01',
+        source_estimate_id: null, prepay_invoice_id: 'inv-prepay-only', invoice_status: 'paid',
+      }],
+    });
+    expect((await setupFeeSettledElsewhere(connPrepayInvOnly, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST })).settled).toBe(true);
 
     // Unlinked term with null source_estimate_id and no linked visits does NOT settle a scoped estimate.
     const connUnlinkedTerm = makeObligationConn({
@@ -575,7 +589,7 @@ describe('B-17: Bill-and-send open-lead pre-check, deferred reconcile, unsent-dr
       scheduled_services: [],
       'annual_prepay_terms as t': [{
         id: 'term-unlinked', status: 'cancelled', covered_until: '2027-06-01',
-        source_estimate_id: null, invoice_id: null, invoice_status: 'paid',
+        source_estimate_id: null, prepay_invoice_id: null, invoice_status: 'paid',
       }],
     });
     expect((await setupFeeSettledElsewhere(connUnlinkedTerm, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST })).settled).toBe(false);

@@ -710,8 +710,8 @@ async function resolveTermPropertyScope(conn, term) {
     await fillScopeFromServiceRow(conn, row, acc, cache);
     if (acc.propertyId && acc.streetKey) break;
   }
-  if (!acc.propertyId && !acc.streetKey && term.invoice_id) {
-    const inv = await loadEstimateScopeRowFromInvoice(conn, term.invoice_id, cache);
+  if (!acc.propertyId && !acc.streetKey && term.prepay_invoice_id) {
+    const inv = await loadEstimateScopeRowFromInvoice(conn, term.prepay_invoice_id, cache);
     if (inv) return inv;
   }
   return acc.propertyId || acc.streetKey ? acc : null;
@@ -747,7 +747,7 @@ async function findMatchingCoveredPrepayTerm(conn, { customerId, visitDate, scop
   if (!scope.propertyId && !scope.streetKey) {
     return baseQ.first('t.id', 't.source_estimate_id');
   }
-  const terms = await baseQ.select('t.id', 't.source_estimate_id', 't.invoice_id');
+  const terms = await baseQ.select('t.id', 't.source_estimate_id', 't.prepay_invoice_id');
   for (const term of terms || []) {
     if (await termMatchesPropertyScope(conn, term, scope, sourceEstimateId)) return term;
   }

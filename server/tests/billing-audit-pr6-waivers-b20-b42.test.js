@@ -593,15 +593,20 @@ describe('B-42: Admin create/revise strips forged waivers & estimate-public fall
         now: new Date('2026-11-01T15:00:00Z'),
         address: '100 Oak St, Testville, FL 34200',
       });
-      expect(historyNonMember).toBeNull();
+      expect(historyNonMember.lastByFamily).toEqual({});
     } finally {
       delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
     }
 
-    // Same street in another city (with only street on one side -> no shared locality) does NOT trigger active-plan match.
+    // Non-member with a live non-WaveGuard recurring visit does NOT defer to existing-member waiver.
     expect(await Returning.hasActivePlanAtQuotedAddress(conn, {
       ...customer, waveguard_tier: null, monthly_rate: 0,
-    }, { address: '100 Oak St, Othertown, FL 33999' })).toBe(false);
+    }, { address: '100 Oak St, Testville, FL 34200' })).toBe(false);
+
+    // Active member at same street in another city (no shared locality) does NOT match.
+    expect(await Returning.hasActivePlanAtQuotedAddress(conn, customer, {
+      address: '100 Oak St, Othertown, FL 33999',
+    })).toBe(false);
 
     // Pre-existing oneTime.items without oneTime.total preserves row.onetime_total ($150 + $99 = $249).
     const legacyWithItems = { recurring: { services: [{ name: 'Pest Control', frequency: 'quarterly', mo: 45 }] }, oneTime: { items: [{ price: 150 }] } };
