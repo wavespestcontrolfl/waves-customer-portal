@@ -564,4 +564,49 @@ describe('B-17: Bill-and-send open-lead pre-check, deferred reconcile, unsent-dr
     });
     expect((await setupFeeSettledElsewhere(connCancelledTerm, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST })).settled).toBe(true);
   });
+
+  test('setupFeeSettledElsewhere fixes P0s: ignores customer_address_snapshot fallback, honors timestamp lower bounds, and reads durable payment metadata keys', async () => {
+    const { setupFeeSettledElsewhere } = require('../services/setup-fee-obligation');
+
+    // 1. Unlinked invoice with Prop A customer_address_snapshot cannot settle Prop B estimate (ambiguous -> excluded)
+    const connAmbiguous = makeObligationConn({
+      estimates: { id: EST, created_at: '2026-11-01T15:00:00Z', property_id: 'prop-b', address: '200 Pine St, Testville, FL 34200' },
+      invoices: [{
+        id: 'inv-ambiguous', status: 'paid', created_at: '2026-11-20T15:00:00Z',
+        scheduled_service_id: null, service_record_id: null,
+        customer_address_snapshot: { address_line1: '200 Pine St', city: 'Testville', zip: '34200' },
+        line_items: [{ description: 'WaveGuard Membership', amount: 99 }],
+      }],
+      'annual_prepay_terms as t': [],
+    });
+    expect((await setupFeeSettledElsewhere(connAmbiguous, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST })).settled).toBe(false);
+
+    // 2. Same-day morning invoice before afternoon estimate creation timestamp is excluded (instant comparison)
+    const connSameDayEarlier = makeObligationConn({
+      estimates: { id: EST, created_at: '2026-11-20T15:00:00Z', property_id: 'prop-a', address: '100 Oak St, Testville, FL 34200' },
+      invoices: [{
+        id: 'inv-morning', status: 'paid', created_at: '2026-11-20T10:00:00Z',
+        scheduled_service_id: 'ss-prop-a',
+        line_items: [{ description: 'WaveGuard Membership', amount: 99 }],
+      }],
+      scheduled_services: { id: 'ss-prop-a', property_id: 'prop-a', service_address_line1: '100 Oak St', service_address_city: 'Testville', service_address_zip: '34200' },
+      'annual_prepay_terms as t': [],
+    });
+    expect((await setupFeeSettledElsewhere(connSameDayEarlier, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST })).settled).toBe(false);
+
+    // 3. Payment matched via durable waves_invoice_id marks paid invoice as partiallyRefunded
+    const connWavesMetaRefund = makeObligationConn({
+      estimates: { id: EST, created_at: '2026-11-01T15:00:00Z', property_id: 'prop-a', address: '100 Oak St, Testville, FL 34200' },
+      invoices: [{
+        id: 'inv-meta-ref', status: 'paid', created_at: '2026-11-20T15:00:00Z',
+        scheduled_service_id: 'ss-prop-a',
+        line_items: [{ description: 'WaveGuard Membership', amount: 99 }],
+      }],
+      scheduled_services: { id: 'ss-prop-a', property_id: 'prop-a', service_address_line1: '100 Oak St', service_address_city: 'Testville', service_address_zip: '34200' },
+      payments: [{ id: 'pay-r1', refund_amount: 20, metadata: { waves_invoice_id: 'inv-meta-ref' } }],
+      'annual_prepay_terms as t': [],
+    });
+    expect(await setupFeeSettledElsewhere(connWavesMetaRefund, { customerId: CUST, expectedFeeCents: 9900, sourceEstimateId: EST }))
+      .toMatchObject({ settled: true, reason: 'paid_fee', partiallyRefunded: true });
+  });
 });

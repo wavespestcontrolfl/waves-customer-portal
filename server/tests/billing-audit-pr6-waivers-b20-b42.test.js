@@ -524,4 +524,78 @@ describe('B-42: Admin create/revise strips forged waivers & estimate-public fall
     expect(patch).toEqual({ onetime_total: 99 });
     expect(data.result.oneTime).toEqual({ membershipFee: 99, total: 99 });
   });
+
+  test('restoreFallbackSetupFeeOnData preserves top-level legacy recurring shape when data.result is absent', () => {
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const data = {
+      recurring: { services: [{ name: 'Pest Control', frequency: 'quarterly', mo: 45 }] },
+      totals: { year1: 540 },
+    };
+    const patch = Returning.restoreFallbackSetupFeeOnData(data, { onetime_total: 0 });
+    expect(patch).toEqual({ onetime_total: 99 });
+    expect(data.result).toBeUndefined();
+    expect(data.oneTime).toEqual({ membershipFee: 99, total: 99 });
+    expect(data.totals.year1).toBe(639);
+  });
+
+  test('hasActivePlanAtQuotedAddress rejects active plan at Property A when quoting Property B, and loadReturningVisitHistory rejects unstamped visits', async () => {
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const customer = {
+      id: CUST_ID, active: true, waveguard_tier: 'Core', monthly_rate: 59,
+      address_line1: '100 Oak St', city: 'Testville', zip: '34200',
+    };
+    const conn = Object.assign((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        whereNotIn: jest.fn(() => q),
+        leftJoin: jest.fn(() => q),
+        join: jest.fn(() => q),
+        select: jest.fn(async () => {
+          if (table === 'scheduled_services') {
+            return [{ id: 'ss-prop-a', property_id: 'prop-a', service_address_line1: '100 Oak St', service_address_city: 'Testville', service_address_zip: '34200' }];
+          }
+          if (table.startsWith('scheduled_services as s')) {
+            return [{
+              id: 'ss-unstamped', status: 'completed', service_type: 'General Pest Control',
+              scheduled_date: '2026-10-01', performed_date: '2026-10-01', outcome_status: 'completed',
+              is_recurring: true, recurring_pattern: 'quarterly',
+              property_id: null, source_estimate_id: null,
+              service_address_line1: null, service_address_city: null, service_address_zip: null,
+            }];
+          }
+          return [];
+        }),
+        first: jest.fn(async () => {
+          if (table === 'customers') return customer;
+          return null;
+        }),
+      };
+      return q;
+    }, { raw: jest.fn((s) => s) });
+
+    expect(await Returning.hasActivePlanAtQuotedAddress(conn, customer, { address: '200 Pine St, Testville, FL 34200' })).toBe(false);
+    expect(await Returning.hasActivePlanAtQuotedAddress(conn, customer, { address: '100 Oak St, Testville, FL 34200' })).toBe(true);
+
+    process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+    try {
+      const history = await Returning.loadReturningVisitHistory(conn, {
+        customerId: CUST_ID,
+        now: new Date('2026-11-01T15:00:00Z'),
+        address: '200 Pine St, Testville, FL 34200',
+      });
+      expect(history).toEqual([]);
+      // Even when no active plan rows exist at all, a moved non-member at a new
+      // address matching customerPrimaryStreet still excludes unstamped completed visits.
+      customer.waveguard_tier = null;
+      customer.monthly_rate = 0;
+      const historyNonMember = await Returning.loadReturningVisitHistory(conn, {
+        customerId: CUST_ID,
+        now: new Date('2026-11-01T15:00:00Z'),
+        address: '100 Oak St, Testville, FL 34200',
+      });
+      expect(historyNonMember).toEqual([]);
+    } finally {
+      delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
+    }
+  });
 });

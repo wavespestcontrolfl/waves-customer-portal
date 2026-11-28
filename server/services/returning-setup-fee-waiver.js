@@ -364,25 +364,30 @@ function stampedStreetForVisitOrParent(row) {
   );
 }
 
-async function rowMatchesQuotedProperty(database, row, scope, cache, { requirePositiveMatch = false } = {}) {
-  const propId = row.property_id || row.parent_property_id || null;
-  if (scope.propertyId && propId) {
-    return String(propId) === scope.propertyId;
-  }
-  const { normalizedEstimateStreet, sameScopeKey } = require('./estimate-property-linkage');
+async function resolveRowPropertyEvidence(database, row, cache) {
+  const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+  const directPropId = row.property_id || row.parent_property_id || null;
   let street = stampedStreetForVisitOrParent(row);
-  if (!street && propId) {
-    street = await cachedPropertyStreet(database, propId, cache);
-  }
+  if (!street && directPropId) street = await cachedPropertyStreet(database, directPropId, cache);
   const sourceEstimateId = row.source_estimate_id || row.parent_source_estimate_id || null;
-  if (!street && sourceEstimateId) {
-    const est = await cachedEstimateRow(database, sourceEstimateId, cache);
-    if (scope.propertyId && est?.property_id) return String(est.property_id) === scope.propertyId;
-    street = est?.address ? normalizedEstimateStreet(est.address) : null;
-  }
-  const effectiveStreet = street || scope.customerPrimaryStreet || null;
-  if (!effectiveStreet) return !requirePositiveMatch;
-  return scope.estimateStreet ? sameScopeKey(effectiveStreet, scope.estimateStreet) : false;
+  if (street || !sourceEstimateId) return { propId: directPropId, street };
+  const est = await cachedEstimateRow(database, sourceEstimateId, cache);
+  return {
+    propId: directPropId || est?.property_id || null,
+    street: est?.address ? normalizedEstimateStreet(est.address) : null,
+  };
+}
+
+async function rowMatchesQuotedProperty(database, row, scope, cache, opts = {}) {
+  const { sameScopeKey } = require('./estimate-property-linkage');
+  const requirePositiveMatch = Boolean(opts && opts.requirePositiveMatch);
+  const directPropId = row.property_id || row.parent_property_id;
+  if (scope.propertyId && directPropId) return String(directPropId) === scope.propertyId;
+  const { propId, street } = await resolveRowPropertyEvidence(database, row, cache);
+  if (scope.propertyId && propId) return String(propId) === scope.propertyId;
+  const candidateStreet = street || (!requirePositiveMatch ? scope.customerPrimaryStreet : null);
+  if (!candidateStreet) return !street && !requirePositiveMatch;
+  return Boolean(scope.estimateStreet && sameScopeKey(candidateStreet, scope.estimateStreet));
 }
 
 async function filterRowsToQuotedProperty(database, rows, scope, cache, opts) {
@@ -392,6 +397,17 @@ async function filterRowsToQuotedProperty(database, rows, scope, cache, opts) {
     if (await rowMatchesQuotedProperty(database, row, scope, cache, opts)) kept.push(row);
   }
   return kept;
+}
+
+async function hasActivePlanAtQuotedAddress(database, customer, { address = null, propertyId = null } = {}) {
+  if (!customer?.id) return false;
+  const scope = await resolveQuotedPropertyScope(database, customer, { address, propertyId });
+  if (!scope) {
+    const { isMembershipCustomerRow } = require('./waveguard-existing-services');
+    return customer.active !== false && isMembershipCustomerRow(customer);
+  }
+  const cache = { props: new Map(), ests: new Map() };
+  return hasActivePlanAtQuotedProperty(database, customer.id, customer, scope, cache);
 }
 
 // Property-scoped active-plan check (B-21): an active plan on Property A must NOT block a lapsed
@@ -677,10 +693,21 @@ function restoreFallbackSetupFeeOnData(data, row) {
   }
   const priorOneTime = Number(row?.onetime_total || 0);
   const nextTotal = Math.round((priorOneTime + fee) * 100) / 100;
-  data.result = (data.result && typeof data.result === 'object') ? data.result : {};
-  data.result.oneTime = { membershipFee: fee, total: nextTotal };
-  if (data.result.totals && typeof data.result.totals === 'object' && Number.isFinite(Number(data.result.totals.year1))) {
-    data.result.totals.year1 = Math.round((Number(data.result.totals.year1) + fee) * 100) / 100;
+  if (data.result && typeof data.result === 'object') {
+    data.result.oneTime = { membershipFee: fee, total: nextTotal };
+    if (data.result.totals && typeof data.result.totals === 'object' && Number.isFinite(Number(data.result.totals.year1))) {
+      data.result.totals.year1 = Math.round((Number(data.result.totals.year1) + fee) * 100) / 100;
+    }
+    return { onetime_total: nextTotal };
+  }
+  // Legacy estimates store recurring services at the top level with no
+  // `data.result`: keep oneTime/totals at the top level rather than creating
+  // an empty `data.result` that would hide `data.recurring` on display.
+  data.oneTime = (data.oneTime && typeof data.oneTime === 'object')
+    ? { ...data.oneTime, membershipFee: fee, total: nextTotal }
+    : { membershipFee: fee, total: nextTotal };
+  if (data.totals && typeof data.totals === 'object' && Number.isFinite(Number(data.totals.year1))) {
+    data.totals.year1 = Math.round((Number(data.totals.year1) + fee) * 100) / 100;
   }
   return { onetime_total: nextTotal };
 }
@@ -770,5 +797,6 @@ module.exports = {
   returningWaiverForUnpricedSave,
   refreshReturningWaiverOnExtend,
   restoreFallbackSetupFeeOnData,
+  hasActivePlanAtQuotedAddress,
   FROZEN_WAIVED_REASON,
 };

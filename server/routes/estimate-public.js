@@ -31012,10 +31012,12 @@ async function buildPricingBundleInner(estimate) {
     && !estData?.membershipSnapshot?.isExistingCustomer
     && recurringMixHasSeasonalMosquito(engineRecurringServices);
   if (!oneTimeOnly && engineMembershipFeeMixApplies && (enginePrepayEligible || engineSeasonalFeeDue)) {
-    // Frozen wizard disclosure first — see the v1 branch. An explicit
-    // { amount: 0, waived } quote suppresses the card entirely.
-    const engineFrozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
-    const engineFrozenQuoteWaived = !!estData?.setupFeeQuote && !(engineFrozenQuoteFee > 0);
+    // Frozen wizard disclosure first — see the v1 branch. Keep kind-aware
+    // resolution via waveguardFrozenSetupFeeQuote so rodent quotes never hide
+    // or misprice WaveGuard membership setup fees.
+    const frozenQuote = require('../services/estimate-converter').waveguardFrozenSetupFeeQuote(estData);
+    const engineFrozenQuoteFee = frozenQuote ? frozenQuote.amount : 0;
+    const engineFrozenQuoteWaived = Boolean(frozenQuote?.waived);
     if (!engineFrozenQuoteWaived) {
       engineFirstVisitFees.push({
         service: 'waveguard_setup',

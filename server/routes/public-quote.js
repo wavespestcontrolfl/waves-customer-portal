@@ -3280,6 +3280,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
           const memberRow = await q('customers').where({ id: customerId }).first();
           activeMember = !!memberRow && memberRow.active !== false && isMembershipCustomerRow(memberRow);
+          if (activeMember && quoteFullAddress) {
+            const { hasActivePlanAtQuotedAddress } = require('../services/returning-setup-fee-waiver');
+            activeMember = await hasActivePlanAtQuotedAddress(q, memberRow, { address: quoteFullAddress });
+          }
           // An outstanding setup-fee claim anywhere on the account also
           // waives: ANY nonzero pending_setup_fee counts — completion
           // temporarily flips the durable claim negative, and a failed mint

@@ -496,62 +496,108 @@ async function resolveScopeStreetKey(conn, resolvedAddress, resolvedPropertyId) 
   } catch { return null; }
 }
 
+function isDateOnlyBound(value) {
+  return typeof value === 'string' && require('../utils/date-only').validDateOnly(value.trim());
+}
+
 async function resolveSettlementScope(conn, { sourceEstimateId, sinceDate, propertyId, serviceAddress }) {
   const needsEst = Boolean(sourceEstimateId) && (!sinceDate || (!propertyId && !serviceAddress));
   const est = needsEst ? await loadEstimateScopeRow(conn, sourceEstimateId) : null;
   const resolvedPropertyId = propertyId || est?.property_id || null;
   const resolvedAddress = serviceAddress || est?.address || null;
   const streetKey = await resolveScopeStreetKey(conn, resolvedAddress, resolvedPropertyId);
-  const sinceDay = etDayOf(sinceDate || earlierTimestamp(est?.created_at, est?.accepted_at));
+  const rawBound = sinceDate || earlierTimestamp(est?.created_at, est?.accepted_at);
+  let sinceDay = null;
+  let sinceInstantMs = null;
+  if (rawBound) {
+    if (isDateOnlyBound(rawBound)) {
+      sinceDay = rawBound.trim();
+    } else {
+      const ms = new Date(rawBound).getTime();
+      if (Number.isFinite(ms)) sinceInstantMs = ms;
+      else sinceDay = etDayOf(rawBound);
+    }
+  }
   return {
     sinceDay,
+    sinceInstantMs,
     propertyId: resolvedPropertyId ? String(resolvedPropertyId) : null,
     streetKey: streetKey || null,
   };
 }
 
-function invoicePassesDateLowerBound(row, sinceDay) {
-  if (!sinceDay || !row?.created_at) return true;
-  const invDay = etDayOf(row.created_at);
-  return !invDay || invDay >= sinceDay;
+function invoicePassesDateLowerBound(row, scopeOrSinceDay) {
+  if (!scopeOrSinceDay || !row?.created_at) return true;
+  if (typeof scopeOrSinceDay === 'string') {
+    const invDay = etDayOf(row.created_at);
+    return !invDay || invDay >= scopeOrSinceDay;
+  }
+  if (scopeOrSinceDay.sinceInstantMs != null) {
+    const invMs = new Date(row.created_at).getTime();
+    return !Number.isFinite(invMs) || invMs >= scopeOrSinceDay.sinceInstantMs;
+  }
+  if (scopeOrSinceDay.sinceDay) {
+    const invDay = etDayOf(row.created_at);
+    return !invDay || invDay >= scopeOrSinceDay.sinceDay;
+  }
+  return true;
+}
+
+async function lookupPropertyStreet(conn, propertyId, cache) {
+  if (!propertyId) return null;
+  const key = String(propertyId);
+  if (!cache.props.has(key)) {
+    try {
+      const { normalizedStampedStreet } = require('./estimate-property-linkage');
+      const prop = await conn('customer_properties').where({ id: propertyId }).first('address_line1', 'address_line2', 'city', 'zip');
+      cache.props.set(key, prop ? normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip) : null);
+    } catch { cache.props.set(key, null); }
+  }
+  return cache.props.get(key) || null;
+}
+
+async function loadVisitScopeRow(conn, visitId) {
+  try {
+    return await conn('scheduled_services')
+      .where({ id: visitId })
+      .first(
+        'id', 'property_id', 'recurring_parent_id', 'source_estimate_id',
+        'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+      );
+  } catch { return null; }
+}
+
+async function fillScopeFromServiceRow(conn, ss, acc, cache) {
+  if (!ss) return;
+  const { normalizedStampedStreet } = require('./estimate-property-linkage');
+  if (!acc.propertyId && ss.property_id) acc.propertyId = String(ss.property_id);
+  if (!acc.streetKey) {
+    acc.streetKey = normalizedStampedStreet(ss.service_address_line1, ss.service_address_line2, ss.service_address_city, ss.service_address_zip);
+  }
+  if (!acc.streetKey && ss.property_id) acc.streetKey = await lookupPropertyStreet(conn, ss.property_id, cache);
 }
 
 async function resolveVisitScope(conn, visitId, cache) {
   const key = String(visitId);
   if (cache.visits.has(key)) return cache.visits.get(key);
-  let ss = null;
-  try {
-    ss = await conn('scheduled_services')
-      .where({ id: visitId })
-      .first(
-        'id', 'property_id', 'source_estimate_id',
-        'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
-      );
-  } catch { ss = null; }
-  const { normalizedStampedStreet, normalizedEstimateStreet } = require('./estimate-property-linkage');
-  let propertyId = ss?.property_id ? String(ss.property_id) : null;
-  let streetKey = ss
-    ? normalizedStampedStreet(ss.service_address_line1, ss.service_address_line2, ss.service_address_city, ss.service_address_zip)
-    : null;
-  if (!streetKey && propertyId) {
-    if (!cache.props.has(propertyId)) {
-      try {
-        const prop = await conn('customer_properties')
-          .where({ id: propertyId })
-          .first('address_line1', 'address_line2', 'city', 'zip');
-        cache.props.set(propertyId, prop ? normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip) : null);
-      } catch { cache.props.set(propertyId, null); }
+  const ss = await loadVisitScopeRow(conn, visitId);
+  const acc = { propertyId: null, streetKey: null };
+  await fillScopeFromServiceRow(conn, ss, acc, cache);
+  let parent = null;
+  if (ss && ss.recurring_parent_id && (!acc.propertyId || !acc.streetKey)) {
+    parent = await loadVisitScopeRow(conn, ss.recurring_parent_id);
+    await fillScopeFromServiceRow(conn, parent, acc, cache);
+  }
+  const estId = (ss && ss.source_estimate_id) || (parent && parent.source_estimate_id);
+  if (estId && (!acc.propertyId || !acc.streetKey)) {
+    const est = await loadEstimateScopeRow(conn, estId);
+    if (est) {
+      if (!acc.propertyId && est.property_id) acc.propertyId = String(est.property_id);
+      if (!acc.streetKey && est.address) acc.streetKey = require('./estimate-property-linkage').normalizedEstimateStreet(est.address);
     }
-    streetKey = cache.props.get(propertyId) || null;
   }
-  if ((!propertyId || !streetKey) && ss?.source_estimate_id) {
-    const est = await loadEstimateScopeRow(conn, ss.source_estimate_id);
-    if (!propertyId && est?.property_id) propertyId = String(est.property_id);
-    if (!streetKey && est?.address) streetKey = normalizedEstimateStreet(est.address);
-  }
-  const result = { propertyId, streetKey };
-  cache.visits.set(key, result);
-  return result;
+  cache.visits.set(key, acc);
+  return acc;
 }
 
 async function resolveInvoiceVisitId(conn, row, cache) {
@@ -567,24 +613,35 @@ async function resolveInvoiceVisitId(conn, row, cache) {
   return cache.records.get(key);
 }
 
+function scopeEvidenceMatches(candidate, scope) {
+  if (!candidate) return null;
+  if (scope.propertyId && candidate.propertyId) return String(candidate.propertyId) === scope.propertyId;
+  if (scope.streetKey && candidate.streetKey) return require('./estimate-property-linkage').sameScopeKey(candidate.streetKey, scope.streetKey);
+  return null;
+}
+
 async function invoiceMatchesPropertyScope(conn, row, scope, cache) {
   if (!scope.propertyId && !scope.streetKey) return true;
-  const { sameScopeKey } = require('./estimate-property-linkage');
   const visitId = await resolveInvoiceVisitId(conn, row, cache);
   if (visitId) {
-    const visitScope = await resolveVisitScope(conn, visitId, cache);
-    if (scope.propertyId && visitScope.propertyId) {
-      return visitScope.propertyId === scope.propertyId;
-    }
-    if (scope.streetKey && visitScope.streetKey) {
-      return sameScopeKey(visitScope.streetKey, scope.streetKey);
+    const visitVerdict = scopeEvidenceMatches(await resolveVisitScope(conn, visitId, cache), scope);
+    if (visitVerdict !== null) return visitVerdict;
+  }
+  const { AUTO_MINT_RE, namedIn } = require('./payment-refund-facts');
+  const mintedEstimateId = namedIn(row.notes, AUTO_MINT_RE)[0] || null;
+  if (mintedEstimateId) {
+    const est = await loadEstimateScopeRow(conn, mintedEstimateId);
+    if (est) {
+      const estScope = {
+        propertyId: est.property_id ? String(est.property_id) : null,
+        streetKey: est.address ? require('./estimate-property-linkage').normalizedEstimateStreet(est.address) : null,
+      };
+      const estVerdict = scopeEvidenceMatches(estScope, scope);
+      if (estVerdict !== null) return estVerdict;
     }
   }
-  const snapKey = invoiceStreetKeyFromSnapshot(row.customer_address_snapshot);
-  if (scope.streetKey && snapKey) {
-    return sameScopeKey(snapKey, scope.streetKey);
-  }
-  return true;
+  // Never infer the serviced property from customer_address_snapshot: treat unlinked/ambiguous invoices as unresolved.
+  return false;
 }
 
 function paymentMatchesInvoice(payment, row) {
@@ -594,8 +651,12 @@ function paymentMatchesInvoice(payment, row) {
     && String(payment.stripe_charge_id) === String(row.stripe_charge_id)) return true;
   let meta = payment.metadata;
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-  if (meta?.invoice_id && String(meta.invoice_id) === String(row.id)) return true;
-  if (Array.isArray(meta?.invoice_ids) && meta.invoice_ids.map(String).includes(String(row.id))) return true;
+  const { PAYMENT_INVOICE_METADATA_KEYS, COMBINED_ANCHOR_INVOICE_KEY } = require('./payment-refund-facts');
+  const targetId = String(row.id);
+  if ([...PAYMENT_INVOICE_METADATA_KEYS, COMBINED_ANCHOR_INVOICE_KEY].some((k) => meta?.[k] && String(meta[k]) === targetId)) {
+    return true;
+  }
+  if (Array.isArray(meta?.invoice_ids) && meta.invoice_ids.map(String).includes(targetId)) return true;
   return false;
 }
 
@@ -609,9 +670,10 @@ async function loadPartiallyRefundedInvoiceIds(conn, customerId, candidateRows) 
   if (!paidRows.length) return result;
   let refundPayments = [];
   try {
+    const { paymentRefundShownSql } = require('./payment-refund-facts');
     refundPayments = await conn('payments')
       .where({ customer_id: customerId })
-      .whereRaw("(COALESCE(refund_amount, 0) > 0 OR refund_status IN ('partial', 'full'))")
+      .whereRaw(`(${paymentRefundShownSql('payments')} OR payments.refund_status IN ('partial', 'full'))`)
       .select('id', 'stripe_payment_intent_id', 'stripe_charge_id', 'refund_amount', 'refund_status', 'metadata');
   } catch { return result; }
   if (!Array.isArray(refundPayments) || !refundPayments.length) return result;
@@ -756,7 +818,7 @@ async function filterLiveInvoicesInScope(conn, rows, scope) {
   const kept = [];
   for (const row of rows) {
     if (dead.has(String(row.status || '').toLowerCase())) continue;
-    if (!invoicePassesDateLowerBound(row, scope.sinceDay)) continue;
+    if (!invoicePassesDateLowerBound(row, scope)) continue;
     if (!(await invoiceMatchesPropertyScope(conn, row, scope, scopeCache))) continue;
     kept.push(row);
   }
@@ -785,7 +847,7 @@ async function setupFeeSettledElsewhere(conn, {
     .whereRaw(`(setup_fee_waived = true OR line_items::text ILIKE '%fee%' OR line_items::text ILIKE '%membership%' OR line_items::text ILIKE '%prepay%' OR line_items::text ILIKE '%prepaid%')`);
   if (lock) query = query.forUpdate();
   const rows = await query.select(
-    'id', 'invoice_number', 'status', 'line_items', 'created_at',
+    'id', 'invoice_number', 'status', 'line_items', 'notes', 'created_at',
     'setup_fee_waived', 'scheduled_service_id', 'service_record_id', 'customer_address_snapshot',
     'stripe_payment_intent_id', 'stripe_charge_id',
   );
