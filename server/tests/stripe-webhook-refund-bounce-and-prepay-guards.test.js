@@ -726,6 +726,47 @@ describe('B-06: single-invoice charge.refunded in-lock bounce fence', () => {
     expect(invoices[0].status).not.toBe('paid');
     expect(invoices[0].status).not.toBe('refunded');
   });
+
+  test('late refund bounce does not reopen or alter an invoice now owned by a replacement charge', async () => {
+    const { _handleRefundFailed: handleRefundFailed } = require('../routes/stripe-webhook');
+    payments.push({
+      id: 'pay-old-bounced',
+      customer_id: CUST_1,
+      status: 'refunded',
+      amount: 100,
+      refund_amount: 100,
+      stripe_refund_id: 're_old_bounce',
+      stripe_charge_id: 'ch_old_orig',
+      stripe_payment_intent_id: 'pi_old_orig',
+      metadata: JSON.stringify({ invoice_id: INV_1, payment_state: 'processing', stamped_refund_ids: ['re_old_bounce'] }),
+    });
+    invoices.push({
+      id: INV_1,
+      customer_id: CUST_1,
+      invoice_number: 'INV-REPL-1',
+      status: 'refunded',
+      stripe_payment_intent_id: 'pi_replacement_charge',
+      stripe_charge_id: 'ch_replacement_charge',
+    });
+    mockStripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_old_orig',
+      status: 'requires_payment_method',
+      metadata: {},
+    });
+
+    await handleRefundFailed({
+      id: 're_old_bounce',
+      amount: 10000,
+      charge: 'ch_old_orig',
+      payment_intent: 'pi_old_orig',
+      failure_reason: 'expired_or_canceled_card',
+    });
+
+    // Invoice belongs to replacement charge — must NOT have its Stripe IDs wiped or status reopened.
+    expect(invoices[0].status).toBe('refunded');
+    expect(invoices[0].stripe_payment_intent_id).toBe('pi_replacement_charge');
+    expect(invoices[0].stripe_charge_id).toBe('ch_replacement_charge');
+  });
 });
 
 describe('B-01: syncTermForRefundedPayment defensive guards', () => {

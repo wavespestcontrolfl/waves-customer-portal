@@ -1392,12 +1392,21 @@ async function resolveBouncedAchProcessingState(row, nextMeta, fallbackPiId) {
   return { wasStillProcessing, debitAlreadyTerminal };
 }
 
-async function restoreSingleInvoiceOnRefundBounce(trx, { linkedInvoice, rowId, nextMeta, achBounceState }) {
+async function restoreSingleInvoiceOnRefundBounce(trx, { linkedInvoice, paymentRow, rowId, nextMeta, achBounceState }) {
+  const lockedInvoice = await trx('invoices').where({ id: linkedInvoice.id }).forUpdate().first();
+  if (!lockedInvoice || lockedInvoice.status !== 'refunded') {
+    return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+  }
+  const { refundedPaymentOwnsInvoice } = require('../services/invoice-helpers');
+  if (!refundedPaymentOwnsInvoice(lockedInvoice, {
+    paymentIntentId: paymentRow?.stripe_payment_intent_id,
+    chargeId: paymentRow?.stripe_charge_id,
+  })) {
+    return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+  }
   const duesRestore = await require('../services/invoice').prepareMembershipDuesRestore(trx, linkedInvoice.id, { exceptPaymentId: rowId });
   if (achBounceState.debitAlreadyTerminal) {
-    const termInvoice = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).first();
-    if (!termInvoice) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
-    const reopenedStatus = nextInvoiceStatusAfterFailedPayment(termInvoice);
+    const reopenedStatus = nextInvoiceStatusAfterFailedPayment(lockedInvoice);
     const reopened = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).update({
       status: reopenedStatus,
       paid_at: null,
@@ -5046,6 +5055,7 @@ async function handleRefundFailed(refund) {
     if (linkedInvoice && nextRefundCents < rowPaidCents) {
       const restoredOutcome = await restoreSingleInvoiceOnRefundBounce(trx, {
         linkedInvoice,
+        paymentRow: row,
         rowId: row.id,
         nextMeta,
         achBounceState,

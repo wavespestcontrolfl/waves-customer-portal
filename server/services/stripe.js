@@ -74,7 +74,13 @@ const {
   invoicePaymentStatusForIntent,
   nextInvoiceStatusAfterFailedPayment,
 } = require('./stripe-invoice-state');
-const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
+const {
+  assertInvoiceCollectible,
+  assertInvoiceNotWithdrawnFromCustomer,
+  isInvoiceCollectibleStatus,
+  invoiceAmountDue,
+  refundedPaymentOwnsInvoice,
+} = require('./invoice-helpers');
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -133,17 +139,30 @@ function stripPendingRefundMeta(meta) {
   return out;
 }
 
-function refundedPaymentOwnsInvoice(invoice, payment) {
-  if (!invoice || !payment) return false;
-  if (payment.stripe_payment_intent_id
-    && String(invoice.stripe_payment_intent_id || '') === String(payment.stripe_payment_intent_id)) {
-    return true;
+function reconcileLockedRefundTotals(lockedRow, opts) {
+  const {
+    refund, isFullRefund, totalRefundedCents, surchargeCents,
+    alreadyRefundedSurchargeCents, requestCents, bounceFence, bouncedIds,
+  } = opts;
+  const paidCents = Math.round(Number(lockedRow?.amount || 0) * 100);
+  const priorBounces = Array.isArray(bouncedIds) ? bouncedIds.length : 0;
+  let effTotal = totalRefundedCents;
+  let effPriorSurcharge = alreadyRefundedSurchargeCents;
+  if (lockedRow && bounceFence.size > priorBounces) {
+    const livePriorCents = Math.round(Number(lockedRow.refund_amount || 0) * 100);
+    const refundAmtCents = Number(refund?.amount) || 0;
+    effTotal = lockedRow.stripe_refund_id === refund?.id
+      ? livePriorCents
+      : Math.min(paidCents, livePriorCents + refundAmtCents);
+    effPriorSurcharge = Number(lockedRow.refunded_surcharge_cents || 0);
   }
-  if (!payment.stripe_payment_intent_id && payment.stripe_charge_id
-    && String(invoice.stripe_charge_id || '') === String(payment.stripe_charge_id)) {
-    return true;
-  }
-  return false;
+  const effFull = paidCents > 0 ? effTotal >= paidCents : isFullRefund;
+  const nextSurcharge = surchargeCents > 0
+    ? (effFull
+      ? surchargeCents
+      : Math.min(surchargeCents, effPriorSurcharge + Math.max(0, (Number(refund?.amount) || 0) - (requestCents || 0))))
+    : null;
+  return { effTotal, effFull, nextSurcharge };
 }
 
 function mergeRefundMetadata(lockedMeta, baseClearedMeta, bounceFence, refundId) {
@@ -169,8 +188,7 @@ async function isRefundFencedTableInTrx(trx, refundId) {
 
 async function stampRefundInTransaction(trx, opts) {
   const {
-    paymentId, refund, isFullRefund, totalRefundedCents, surchargeCents,
-    alreadyRefundedSurchargeCents, requestCents, baseClearedMeta, bouncedIds,
+    paymentId, refund, surchargeCents, baseClearedMeta, bouncedIds,
   } = opts;
   const lockedRow = await trx('payments').where({ id: paymentId }).forUpdate().first();
   const lockedMeta = parsePaymentMetaSafe(lockedRow?.metadata);
@@ -180,27 +198,29 @@ async function stampRefundInTransaction(trx, opts) {
   ]);
   const refundId = refund?.id || null;
   if (refundId && (bounceFence.has(refundId) || await isRefundFencedTableInTrx(trx, refundId))) {
+    // Persist table-only bounce IDs into failed_refund_ids before clearing
+    // pending_refund_* so the next identical retry derives a fresh key.
+    bounceFence.add(refundId);
     const abortMeta = stripPendingRefundMeta(lockedMeta);
-    if (bounceFence.size) abortMeta.failed_refund_ids = [...bounceFence];
+    abortMeta.failed_refund_ids = [...bounceFence];
     await trx('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(abortMeta) });
-    return { abortedByBounce: true };
+    return { abortedByBounce: true, isFullRefund: false, totalRefundedCents: opts.totalRefundedCents };
   }
+  const { effTotal, effFull, nextSurcharge } = reconcileLockedRefundTotals(lockedRow, { ...opts, bounceFence });
   const mergedMeta = mergeRefundMetadata(lockedMeta, baseClearedMeta, bounceFence, refundId);
   const patch = {
-    status: isFullRefund ? 'refunded' : 'paid',
-    refund_amount: totalRefundedCents / 100,
+    status: effFull ? 'refunded' : 'paid',
+    refund_amount: effTotal / 100,
     refund_status: refund.status,
     stripe_refund_id: refundId,
     metadata: JSON.stringify(mergedMeta),
     updated_at: new Date(),
   };
-  if (surchargeCents > 0) {
-    patch.refunded_surcharge_cents = isFullRefund
-      ? surchargeCents
-      : Math.min(surchargeCents, alreadyRefundedSurchargeCents + Math.max(0, (Number(refund.amount) || 0) - (requestCents || 0)));
+  if (surchargeCents > 0 && nextSurcharge !== null) {
+    patch.refunded_surcharge_cents = nextSurcharge;
   }
   await trx('payments').where({ id: paymentId }).update(patch);
-  return { abortedByBounce: false };
+  return { abortedByBounce: false, isFullRefund: effFull, totalRefundedCents: effTotal };
 }
 
 function isPaymentStillRefundedFor(row, refundId) {
@@ -3892,13 +3912,13 @@ const StripeService = {
     } catch (chargeErr) {
       logger.warn(`[stripe] refund cumulative lookup failed for payment ${paymentId} (falling back to local accumulation): ${chargeErr.message}`);
     }
-    const isFullRefund = totalRefundedCents >= paidCents;
+    let isFullRefund = totalRefundedCents >= paidCents;
 
     // Stamp inside a locked transaction (re-reading the live payment row
     // FOR UPDATE, checking failed_refund_ids + stripe_failed_refunds under
-    // lock, and merging current metadata so a concurrent refund.failed bounce
-    // cannot be erased or accepted as a successful refund).
-    let stampOutcome = { abortedByBounce: false };
+    // lock, reconciling cumulative totals against any concurrent partial bounce,
+    // and merging current metadata).
+    let stampOutcome = { abortedByBounce: false, isFullRefund, totalRefundedCents };
     try {
       // Chokepoint B (Codex #4971 r4 P1): the stamp runs in its own
       // transaction whose FIRST lock is the renewal parent-decision gate —
@@ -3932,6 +3952,8 @@ const StripeService = {
       logger.error(`[stripe] refund ${refund.id} for payment ${paymentId} already bounced at the bank — attempt aborted under lock, nothing stamped`);
       throw new Error('This refund attempt already bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
     }
+    isFullRefund = stampOutcome.isFullRefund;
+    totalRefundedCents = stampOutcome.totalRefundedCents;
 
     // Side effects past this point never mask the successful refund as
     // "Refund processing failed" — each degrades on its own.
@@ -3965,7 +3987,10 @@ const StripeService = {
               .where({ id: refundedInvoice.id })
               .forUpdate()
               .first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
-            if (!refundedPaymentOwnsInvoice(lockedInvoice, lockedPayment)) {
+            if (!refundedPaymentOwnsInvoice(lockedInvoice, {
+              paymentIntentId: lockedPayment.stripe_payment_intent_id,
+              chargeId: lockedPayment.stripe_charge_id,
+            })) {
               logger.warn(`[stripe] refund ${refund.id} for payment ${paymentId} no longer owns invoice ${refundedInvoice.id} — skipping credit restore`);
               return;
             }
@@ -4013,9 +4038,8 @@ const StripeService = {
       logger.warn(`[stripe] refund post-update read failed for payment ${paymentId}: ${readErr.message}`);
     }
     if (refundReverted) {
-      logger.warn(`[stripe] Refund ${refund.id} for payment ${paymentId} bounced before completion — suppressing refund-issued email and reporting bounce`);
-      const bouncedRow = updated || { ...payment, status: 'paid', refund_status: 'failed' };
-      return { ...bouncedRow, refund_bounced: true, refund_issued_amount: 0 };
+      logger.warn(`[stripe] Refund ${refund.id} for payment ${paymentId} bounced before completion — suppressing refund-issued email and surfacing bounce failure`);
+      throw new Error('This refund attempt bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
     }
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: updated?.customer_id || payment.customer_id,

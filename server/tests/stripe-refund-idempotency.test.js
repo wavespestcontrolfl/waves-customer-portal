@@ -725,7 +725,7 @@ describe('StripeService.refund', () => {
       expect(reconcileMock).toHaveBeenCalledWith(invoiceRow);
     });
 
-    test('racing refund.failed before credit restore prevents invoice terminalization, coverage clawback, and setup-fee reconcile', async () => {
+    test('racing refund.failed before credit restore prevents invoice terminalization, coverage clawback, and setup-fee reconcile and throws bounce failure', async () => {
       stubInvoiceLookup(invoiceRow);
       const StripeService = loadWithRecorders();
       recordOrder();
@@ -742,18 +742,16 @@ describe('StripeService.refund', () => {
         return baseTx(cb);
       });
 
-      const result = await StripeService.refund('pay-1', {});
+      await expect(StripeService.refund('pay-1', {})).rejects.toThrow(/bounced at the bank/i);
 
       expect(order).toEqual([]);
       expect(invoiceRow.status).toBe('paid');
       expect(creditMock).not.toHaveBeenCalled();
       expect(syncMock).not.toHaveBeenCalled();
       expect(reconcileMock).not.toHaveBeenCalled();
-      expect(result.refund_bounced).toBe(true);
-      expect(result.refund_issued_amount).toBe(0);
     });
 
-    test('racing refund.failed between credit restore and prepay sync skips coverage clawback and setup-fee reconcile and reports bounce', async () => {
+    test('racing refund.failed between credit restore and prepay sync skips coverage clawback and setup-fee reconcile and throws bounce failure', async () => {
       stubInvoiceLookup(invoiceRow);
       const StripeService = loadWithRecorders();
       recordOrder();
@@ -770,13 +768,75 @@ describe('StripeService.refund', () => {
         return baseTx(cb);
       });
 
-      const result = await StripeService.refund('pay-1', {});
+      await expect(StripeService.refund('pay-1', {})).rejects.toThrow(/bounced at the bank/i);
 
       expect(order).toEqual(['credit']);
       expect(syncMock).not.toHaveBeenCalled();
       expect(reconcileMock).not.toHaveBeenCalled();
-      expect(result.refund_bounced).toBe(true);
-      expect(result.refund_issued_amount).toBe(0);
+    });
+
+    test('reconciles cumulative refund total under lock when an earlier partial bounced mid-flight', async () => {
+      paymentRow.amount = '100.00';
+      paymentRow.refund_amount = '50.00';
+      paymentRow.stripe_refund_id = 're_prior';
+      stripeClient.refunds.create.mockResolvedValueOnce({ id: 're_second', amount: 5000, status: 'succeeded', charge: 'ch_1' });
+      stripeClient.charges = { retrieve: jest.fn(async () => ({ id: 'ch_1', amount_refunded: 10000 })) };
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      const baseTx = dbMock.transaction.getMockImplementation();
+      let txNum = 0;
+      dbMock.transaction.mockImplementation(async (cb) => {
+        txNum += 1;
+        if (txNum === 1) {
+          // Simulate re_prior bouncing after charges.retrieve returned 10000:
+          // refund.failed subtracted $50 back to $0 and recorded re_prior in failed_refund_ids.
+          paymentRow.refund_amount = '0.00';
+          paymentRow.stripe_refund_id = null;
+          paymentRow.metadata = JSON.stringify({ failed_refund_ids: ['re_prior'] });
+        }
+        return baseTx(cb);
+      });
+
+      const res = await StripeService.refund('pay-1', { amount: 50 });
+
+      // Must stay partially refunded at $50 (not full $100) and skip full-refund side effects.
+      expect(paymentRow.status).toBe('paid');
+      expect(Number(paymentRow.refund_amount)).toBe(50);
+      expect(order).toEqual([]);
+      expect(res.refund_issued_amount).toBe(50);
+    });
+
+    test('persists table-only stripe_failed_refunds bounce ID into metadata.failed_refund_ids before clearing pending key', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      const origDb = dbMock.getMockImplementation();
+      dbMock.mockImplementation((table) => {
+        if (table === 'stripe_failed_refunds') {
+          return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => ({ stripe_refund_id: 're_1' })) };
+        }
+        return origDb(table);
+      });
+      dbMock.schema = { hasTable: jest.fn(async (t) => t === 'stripe_failed_refunds') };
+
+      await expect(StripeService.refund('pay-1', {})).rejects.toThrow(/already bounced at the bank/i);
+      const lastPatch = updatePayments.mock.calls[updatePayments.mock.calls.length - 1][0];
+      const savedMeta = JSON.parse(lastPatch.metadata);
+      expect(savedMeta.failed_refund_ids).toContain('re_1');
+      expect(savedMeta.pending_refund_key).toBeUndefined();
+    });
+
+    test('skips credit restore when reused PI matches but invoice points to a different charge', async () => {
+      paymentRow.stripe_charge_id = 'ch_old';
+      invoiceRow.stripe_charge_id = 'ch_replacement';
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+
+      await StripeService.refund('pay-1', {});
+      expect(creditMock).not.toHaveBeenCalled();
+      expect(invoiceRow.status).toBe('paid');
     });
 
     test('racing refund.failed inside stamp transaction aborts stamp without erasing failed_refund_ids or returning credit', async () => {
