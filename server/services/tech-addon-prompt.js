@@ -79,7 +79,7 @@ const PILLAR_PROMPTS = Object.freeze({
 
 const CUSTOMER_PROMPT_COLUMNS = Object.freeze([
   ...SERIES_CUSTOMER_COLUMNS,
-  'property_type', 'building_use', 'waveguard_tier', 'contact_role',
+  'property_type', 'building_use', 'waveguard_tier', 'contact_role', 'monthly_rate',
   'address_line1', 'address_line2', 'city', 'zip', 'has_multi_home',
 ]);
 
@@ -110,13 +110,11 @@ async function resolvePrimaryVisitStreetScope(svc, customer, dbh, deps = {}) {
 
   const resolveScope = deps.resolveVisitPropertyScope || resolveVisitPropertyScope;
   const scope = await resolveScope(svc, dbh);
-  if (scope.hasEvidence) {
-    if (!scope.key || !sameResolvedProperty(scope.key, primaryStreet)) return null;
-  } else {
-    const proveSingle = deps.customerHasOnlyPrimaryPremises || customerHasOnlyPrimaryPremises;
-    const onlyPrimary = await proveSingle(dbh, svc.customer_id, customer, primaryStreet, { unresolvedFails: true });
-    if (!onlyPrimary) return null;
-  }
+  if (scope.hasEvidence && (!scope.key || !sameResolvedProperty(scope.key, primaryStreet))) return null;
+
+  const proveSingle = deps.customerHasOnlyPrimaryPremises || customerHasOnlyPrimaryPremises;
+  const onlyPrimary = await proveSingle(dbh, svc.customer_id, customer, primaryStreet, { unresolvedFails: true });
+  if (!onlyPrimary) return null;
 
   return {
     estimateStreet: primaryStreet,
@@ -176,7 +174,12 @@ async function loadScopedVisitAddonKeys(dbh, visitIds) {
 
 async function loadScopedLiveRows(dbh, customerId, { streetScope }) {
   const joined = await loadLiveRecurringObligationRows(dbh, customerId);
-  return filterRowsToStreet(dbh, joined, streetScope);
+  const scoped = await filterRowsToStreet(dbh, joined, streetScope);
+  const missingKeyIds = scoped.filter((r) => !r.service_key && r.id).map((r) => r.id);
+  if (!missingKeyIds.length) return scoped;
+  const snapRows = await dbh('scheduled_services').whereIn('id', missingKeyIds).select('id', 'service_key_snapshot');
+  const snapById = new Map((snapRows || []).map((r) => [r.id, r.service_key_snapshot]));
+  return scoped.map((r) => ({ ...r, service_key: r.service_key || snapById.get(r.id) || null }));
 }
 
 async function loadScopedOffCalendarRows(dbh, customerId, { streetScope, catalogById }) {
@@ -328,6 +331,7 @@ async function techAddonPromptFacts(svc, dbh, deps = {}) {
 
     const activeRates = planComponents.filter((row) => Number(row.monthly_rate) > 0);
     if (activeRates.some((row) => !row.family_key || row.family_key === 'unattributed')) return null;
+    if (Number(customer.monthly_rate) > 0 && !activeRates.length) return null;
 
     return pickTechAddonPrompt([...new Set([...visitKeys, ...addonKeys])], {
       isCommercial: false,

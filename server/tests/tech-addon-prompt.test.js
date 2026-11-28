@@ -12,7 +12,7 @@ const {
 
 const REAL_CUSTOMER_COLUMNS = new Set([
   'id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage',
-  'property_type', 'building_use', 'waveguard_tier', 'contact_role',
+  'property_type', 'building_use', 'waveguard_tier', 'contact_role', 'monthly_rate',
   'address_line1', 'address_line2', 'city', 'zip', 'has_multi_home',
 ]);
 
@@ -84,6 +84,7 @@ const LAWN_LIVE_ROW = {
 
 const BASE_DEPS = {
   planStartBlocker: async () => 'has_plan',
+  customerHasOnlyPrimaryPremises: async () => true,
   loadCatalogFieldsByRowId: async () => new Map([['svc-1', { service_key: 'pest-quarterly', service_category: 'pest' }]]),
   loadScopedLiveRows: async () => [PEST_LIVE_ROW],
   loadScopedOffCalendarRows: async () => [],
@@ -318,6 +319,15 @@ describe('techAddonPromptFacts', () => {
     })).toBeNull();
     expect(await techAddonPromptFacts(STAMPED_VISIT, dbh, {
       ...BASE_DEPS, loadActivePlanHoldFamilies: async () => ['lawn_care'], loadPlanComponents: async () => [],
+    })).toBeNull();
+    // Legacy positive monthly_rate with zero attributed ledger components -> suppress
+    const legacyRateDb = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, monthly_rate: 89 } });
+    expect(await techAddonPromptFacts(STAMPED_VISIT, legacyRateDb, {
+      ...BASE_DEPS, loadPlanComponents: async () => [],
+    })).toBeNull();
+    // Stamped primary visit on multi-home account (single-premises proof false) -> suppress
+    expect(await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      ...BASE_DEPS, customerHasOnlyPrimaryPremises: async () => false, loadPlanComponents: async () => [],
     })).toBeNull();
 
     const secondaryVisit = {

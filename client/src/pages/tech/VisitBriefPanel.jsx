@@ -1262,8 +1262,8 @@ function firstAddonPromptMember(memberBits) {
   return match ? { prompt: match.facts.addon_prompt, service: match.service } : null;
 }
 
-function AddonPromptBanner({ ready, memberBits, fallbackService, onLead }) {
-  if (!ready) return null;
+function AddonPromptBanner({ detail, memberBits, fallbackService, onLead }) {
+  if (detail?.status !== 'ready') return null;
   const match = firstAddonPromptMember(memberBits);
   if (!match) return null;
   const { prompt, service } = match;
@@ -1540,7 +1540,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         </div>
       )}
 
-      <AddonPromptBanner ready={detail?.status === 'ready'} memberBits={memberBits} fallbackService={service} onLead={onLead} />
+      <AddonPromptBanner detail={detail} memberBits={memberBits} fallbackService={service} onLead={onLead} />
 
       <SectionLabel>Actions</SectionLabel>
       {stop.services.map((s) => (
