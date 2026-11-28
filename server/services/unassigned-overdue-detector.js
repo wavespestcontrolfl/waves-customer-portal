@@ -44,6 +44,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { createAlert } = require('./dispatch-alerts');
+const { dateOnlyString } = require('../utils/date-only');
 
 const UNASSIGNED_OVERDUE_GRACE_MINUTES = 30;
 const UNASSIGNED_OVERDUE_CRITICAL_MINUTES = 60;
@@ -53,8 +54,7 @@ const UNASSIGNED_OVERDUE_FALLBACK_DURATION_MINUTES = 60;
 
 function normalizeDateOnly(value) {
   if (!value) return value;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return String(value).slice(0, 10);
+  return dateOnlyString(value) || value;
 }
 
 // In-process mutex matches dashboard-alerts-cron.js + tech-late-detector.js.
