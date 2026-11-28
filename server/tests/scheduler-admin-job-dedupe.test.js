@@ -141,9 +141,9 @@ describe('morning email digest', () => {
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('counts only real Gmail drafts: a claim, a settled thread or a draft refused for a blank is not one', async () => {
+  test('counts only real Gmail drafts: a claim, a settled thread or a refused draft is not one', async () => {
     const tick = tickFor('30 7 * * *', 'email-digest-daily');
-    const rows = ['r-123', 'pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank', null]
+    const rows = ['r-123', 'pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank', 'refused_verifier', null]
       .map((draftId, i) => ({ id: `e${i}`, draft_gmail_id: draftId }));
     db.mockImplementation(() => {
       const q = {

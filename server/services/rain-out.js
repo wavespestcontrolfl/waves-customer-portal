@@ -3378,6 +3378,7 @@ function pickLandedStatus(status) {
 // The first visit rule the row fails, or null. Judged on the loaded row and
 // again on the locked row inside the write.
 function pickVisitRefusal(row, now) {
+  if (require('./visit-hold').rowIsHeld(row)) return 'visit_on_hold';
   if (row.is_recurring !== true || !row.recurring_parent_id) return 'not_recurring_plan_visit';
   if (row.visit_id) return 'grouped_stop';
   if (!PICK_STATUSES.has(String(row.status))) return 'status_not_eligible';
@@ -3755,6 +3756,7 @@ function handOffResult({ locked, dueDate, pickBy, text }) {
 const PICK_REFUSAL_COPY = {
   not_found: 'Visit not found.',
   bad_reason: 'Pick a weather or schedule reason to hand this visit off.',
+  visit_on_hold: 'This visit is on hold — release the hold before handing it off.',
   not_recurring_plan_visit: 'Only recurring plan visits can be handed to the customer.',
   grouped_stop: 'This stop is grouped with another visit, so the customer cannot pick a day for it.',
   status_not_eligible: 'This visit can no longer be handed off.',

@@ -6,6 +6,19 @@ const NavigationLock = createContext(null);
 let busyLocks = 0;
 registerReloadHold('visit-step', () => busyLocks > 0);
 
+// Shared ref-counted handle for surfaces outside TechFieldShell (e.g.
+// DispatchPageV2 closeout/checkout sheets) so they participate in the same
+// 'visit-step' hold without overwriting TechNavigationLock's registration.
+export function acquireVisitStepReloadHold() {
+  let released = false;
+  busyLocks += 1;
+  return () => {
+    if (released) return;
+    released = true;
+    busyLocks = Math.max(0, busyLocks - 1);
+  };
+}
+
 function HistoryGuard({ lockedIndex }) {
   useLayoutEffect(() => {
     const guardHistory = (event) => {

@@ -159,4 +159,31 @@ describe('callers pass their surface', () => {
     expect(read('../services/voice-agent/relay-booking.js')).not.toContain("surface: 'voice'");
     expect(read('../routes/booking.js')).toContain('return buildBookingAvailability({ ...args, selfServeNotice: true');
   });
+
+  test('non-/book surfaces omit redeemable slot_sig offers while /book keeps them (P0-2)', async () => {
+    const bookResult = await build({ surface: 'book', serviceKey: 'pest_control' });
+    expect(bookResult.slots[0].slot_sig).toBeTruthy();
+    expect(bookResult.days[0].slots[0].slot_sig).toBeTruthy();
+
+    const optedOut = await build({ mintSignedOffers: false, serviceKey: 'pest_control' });
+    expect(optedOut.slots[0].slot_sig).toBeUndefined();
+    expect(optedOut.days[0].slots[0].slot_sig).toBeUndefined();
+
+    for (const surface of ['reschedule', 'reservice', 'inspection', 'commercial_first_visit', 'voice']) {
+      const res = await build({ surface, serviceKey: 'pest_control' });
+      expect(res.slots.every((s) => s.slot_sig === undefined)).toBe(true);
+      expect(res.days.every((d) => d.slots.every((s) => s.slot_sig === undefined))).toBe(true);
+    }
+
+    for (const file of [
+      '../routes/reschedule-public.js',
+      '../routes/reservice-public.js',
+      '../routes/inspection-public.js',
+      '../services/commercial-first-visit.js',
+      '../services/voice-agent/relay-tools.js',
+      '../services/voice-agent/relay-booking.js',
+    ]) {
+      expect(read(file)).toContain('mintSignedOffers: false');
+    }
+  });
 });

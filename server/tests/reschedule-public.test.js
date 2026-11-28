@@ -1192,7 +1192,7 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     const recheckIdx = src.indexOf('const noticeRecheck = async () => {');
     expect(recheckIdx).toBeGreaterThan(-1);
     const recheck = src.slice(recheckIdx, recheckIdx + 1400);
-    expect(recheck).toMatch(/!elig\.missed && visitInsideMoveNoticeWindow\(svc\)/);
+    expect(recheck).toMatch(/!elig\.missed && isUnheldMoveNoticeBlocked\(svc\)/);
     expect(recheck).toMatch(/code: 'SELF_SERVE_NOTICE'/);
     // The DESTINATION is re-checked under the locks too (Codex r1 P1) —
     // a missed visit's only guard, since it skips the current-visit check.
@@ -1208,10 +1208,10 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     expect(src.slice(seriesIdx, singleIdx)).toMatch(/moveGuard: async \(ctx\) => \{\s*await officeApprovalRecheck\(ctx\);/);
     const guardIdx = src.indexOf('const officeApprovalRecheck = async ({ trx }) => {');
     expect(guardIdx).toBeGreaterThan(-1);
-    const guard = src.slice(guardIdx, guardIdx + 2400);
+    const guard = src.slice(guardIdx, guardIdx + 3200);
     expect(guard).toMatch(/if \(elig\.missed\) return;/);
-    expect(guard).toMatch(/\.forUpdate\(\)\s*\.first\('scheduled_date', 'window_start', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',/);
-    expect(guard).toMatch(/visitInsideMoveNoticeWindow\(locked\)/);
+    expect(guard).toMatch(/\.forUpdate\(\)\s*\.first\('scheduled_date', 'window_start', 'window_end', 'status', 'office_move_approved_for', 'recurring_pattern', 'recurring_interval_days',/);
+    expect(guard).toMatch(/isUnheldMoveNoticeBlocked\(locked\)/);
     expect(guard).toMatch(/code: 'SELF_SERVE_NOTICE'/);
   });
 });

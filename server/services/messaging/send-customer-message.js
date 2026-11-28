@@ -488,7 +488,7 @@ function normalizeRecipient(phone) {
 // Entry points whose recipient may have no notification_prefs row (a stranger who texted us), so the phone-keyed STOP list is
 // their only opt-out check: an unreadable suppression row refuses (retryable) and is re-read at the provider handoff, the
 // same as policy.requireVerifiedSuppression, instead of failing open for SMS.
-const VERIFIED_SUPPRESSION_ENTRY_POINTS = new Set(['mail_home_text_to_book']);
+const VERIFIED_SUPPRESSION_ENTRY_POINTS = new Set(['mail_home_text_to_book', 'new_lead_phone_sms_drip']);
 
 // Purposes with policy.requireVerifiedSuppression (payer_payment_link): the phone-keyed suppression row is read AGAIN at the
 // provider handoff, so a STOP that committed while the send was prepared still stops it, and an unreadable row refuses
@@ -527,6 +527,12 @@ function reportHoldSmsHandoffAllowed(input) {
   return input.audience === 'customer' && REPORT_HOLD_SMS_HANDOFFS.some((row) => row.purpose === input.purpose
     && row.entryPoint === input.entryPoint && row.messageType === input.metadata?.original_message_type
     && (!row.heldMark || input.metadata?.report_hold === true));
+}
+
+function isLeadDripOrBookingHandoff(input, providerPreSendCheck) {
+  if (input.audience !== 'lead' || typeof providerPreSendCheck !== 'function') return false;
+  return (input.purpose === 'missed_call_followup' && input.entryPoint === 'call_booking_link_text')
+    || (input.purpose === 'lead_promotional_followup' && input.entryPoint === 'new_lead_phone_sms_drip');
 }
 
 async function sendCustomerMessageCore(input) {
@@ -681,9 +687,7 @@ async function sendCustomerMessageCore(input) {
     // STOP writer's own lockSmsPhone) applies. Suppression/consent reload
     // under that lock, then the lane's own providerPreSendCheck (its mutable
     // never-send checks) re-runs on the SAME held connection right after.
-    || (input.audience === 'lead' && input.purpose === 'missed_call_followup'
-      && input.entryPoint === 'call_booking_link_text'
-      && typeof providerPreSendCheck === 'function')
+    || isLeadDripOrBookingHandoff(input, providerPreSendCheck)
     // Manual Leads-page compose (admin-leads.js POST /:id/send-sms, codex
     // #5018 r15 P2): staff can type any message, a manual consultation
     // link included — the SAME phone lock the automated lane above takes

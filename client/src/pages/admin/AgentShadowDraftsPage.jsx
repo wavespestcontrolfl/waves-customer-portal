@@ -90,7 +90,11 @@ function DraftCard({ draft }) {
         <span className="text-14 font-medium text-zinc-900">{draft.customerName || "Unknown customer"}</span>
         <Chip>{intentLabel(draft.intent)}</Chip>
         {draft.schedulingIntent && <Chip>scheduling</Chip>}
-        {tone ? <Chip tone={tone}>{tone.label}</Chip> : <Chip>Awaiting judge</Chip>}
+        {tone
+          ? <Chip tone={tone}>{tone.label}</Chip>
+          : draft.draftTrigger === "post_visit_closeout"
+            ? <Chip>Post-visit revision</Chip>
+            : <Chip>Awaiting judge</Chip>}
         <span className="ml-auto text-ui-caption text-ink-secondary u-nums">{timeLabel(draft.createdAt)}</span>
       </div>
 
