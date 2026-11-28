@@ -1656,7 +1656,7 @@ router.get('/shadow-drafts', async (req, res, next) => {
         'message_drafts.id', 'message_drafts.customer_id', 'message_drafts.inbound_message',
         'message_drafts.draft_response', 'message_drafts.intent', 'message_drafts.scheduling_intent',
         'message_drafts.intended_actions', 'message_drafts.draft_ms', 'message_drafts.created_at',
-        'message_drafts.flags',
+        'message_drafts.flags', 'message_drafts.draft_trigger', 'message_drafts.supersedes_draft_id',
         'customers.first_name', 'customers.last_name',
         'shadow_draft_judgments.verdict', 'shadow_draft_judgments.scores',
         'shadow_draft_judgments.human_replied', 'shadow_draft_judgments.human_reply_text',
@@ -1678,6 +1678,8 @@ router.get('/shadow-drafts', async (req, res, next) => {
         intendedActions: r.intended_actions || null,
         draftMs: r.draft_ms,
         createdAt: r.created_at,
+        draftTrigger: r.draft_trigger || 'inbound',
+        supersedesDraftId: r.supersedes_draft_id || null,
         // comms-lint failures recorded on the draft (flags also carries
         // account/context entries; only the lint ones belong in the cohort
         // readout — the reviewer is grading the DRAFT, not the account).
@@ -1708,6 +1710,7 @@ router.get('/shadow-scores', async (req, res, next) => {
   try {
     const totals = await db('message_drafts')
       .where('status', 'shadow')
+      .where('draft_trigger', 'inbound')
       .select('intent')
       .count('* as drafts')
       .groupBy('intent');

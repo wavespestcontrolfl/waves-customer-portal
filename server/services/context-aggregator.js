@@ -1385,6 +1385,22 @@ function deriveInvoiceFacts({ invoiceRows, liveOwned, failedFacts, payerLinkage,
   };
 }
 
+async function prioritizeServiceRecord(serviceHistory, customerId, focusServiceRecordId) {
+  if (!focusServiceRecordId) return serviceHistory;
+  const idx = serviceHistory.findIndex((r) => String(r.id) === String(focusServiceRecordId));
+  if (idx === 0) return serviceHistory;
+  if (idx > 0) {
+    return [serviceHistory[idx], ...serviceHistory.slice(0, idx), ...serviceHistory.slice(idx + 1)];
+  }
+  const focused = await db('service_records')
+    .where({ id: focusServiceRecordId, customer_id: customerId, status: 'completed' })
+    .first();
+  if (!focused) {
+    throw Object.assign(new Error('Focused service record unavailable'), { code: 'FOCUS_SERVICE_RECORD_UNAVAILABLE' });
+  }
+  return [focused, ...serviceHistory.slice(0, Math.max(0, SERVICE_HISTORY_LIMIT - 1))];
+}
+
 class ContextAggregator {
   async getFullCustomerContext(phone, options = {}) {
     const clean = (phone || '').replace(/\D/g, '');
@@ -1425,7 +1441,7 @@ class ContextAggregator {
   // Booking, invoice and visit state still reads as of now; that state has no history to rewind to.
   // `includeRouteStatus` (texting AI gap 4): TODAY's pre-en-route stop count sentence (loadRouteStatusFacts). Only the shadow drafter
   // opts in, with the real-answers gate on; every other caller pays no read and gets no key.
-  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus, smsPrepGuideFamily, asOf = null } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus, smsPrepGuideFamily, asOf = null, focusServiceRecordId } = {}) {
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
     const cappedAt = (qb) => (asOfDate ? qb.where('created_at', '<=', asOfDate) : qb);
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
@@ -1548,9 +1564,10 @@ class ContextAggregator {
       loadFailedPaymentFacts(customer.id, undefined, { statuses: ['failed', 'pending', 'overdue'], strict: true }).catch((err) => { logger.warn(`[context-aggregator] failed-payment read failed for ${customer.id}: ${err.message}`); return null; }),
     ]);
 
-    const lastService = serviceHistory[0] || null;
-    const latestVisitFindings = await loadLatestVisitFindings(serviceHistory[0]);
-        const { estimateFacts, prepaidPlans, prepGuide, reportFacts, olderVisitFindings } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn: includeSmsStaffFacts, prepGuideFamily: smsPrepGuideFamily });
+    const orderedServiceHistory = await prioritizeServiceRecord(serviceHistory, customer.id, focusServiceRecordId);
+    const lastService = orderedServiceHistory[0] || null;
+    const latestVisitFindings = await loadLatestVisitFindings(orderedServiceHistory[0]);
+    const { estimateFacts, prepaidPlans, prepGuide, reportFacts, olderVisitFindings } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory: orderedServiceHistory, asOfDate, optedIn: includeSmsStaffFacts, prepGuideFamily: smsPrepGuideFamily });
     const visitFindings = [latestVisitFindings, ...olderVisitFindings];
     // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
     // against a payer-billed invoice is the PAYER's even though the row sits
@@ -1728,7 +1745,7 @@ class ContextAggregator {
       lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: customerSafeVisitNotes(lastService) } : null,
       // v10 grounding: the last few visits with reviewed notes + areas —
       // "what did you do last time" is a routine customer text.
-      serviceHistory: serviceHistory.slice(0, SERVICE_HISTORY_FINDINGS_VISITS).map((s, i) => ({
+      serviceHistory: orderedServiceHistory.slice(0, SERVICE_HISTORY_FINDINGS_VISITS).map((s, i) => ({
         type: s.service_type,
         date: s.service_date,
         notes: customerSafeVisitNotes(s),

@@ -6932,15 +6932,46 @@ function parseShadowResponse(text) {
 //           so a draft written minutes after the text reads what a draft written at the text did.
 //   liveEta false forces the LIVE ETA lookup (a GPS + Distance Matrix call) off. Only false has an
 //           effect; true or unset leaves the GATE_SMS_REAL_ANSWERS rule below in charge.
-async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false, source = null, hasMedia = false, asOf = null, liveEta }) {
+function isPostVisitRevision(draftTrigger, supersedesDraftId) {
+  return draftTrigger === 'post_visit_closeout' || Boolean(supersedesDraftId);
+}
+
+function revisionColumnPatch(isRevision, draftTrigger, supersedesDraftId) {
+  return isRevision ? { draft_trigger: draftTrigger || 'post_visit_closeout', supersedes_draft_id: supersedesDraftId || null } : {};
+}
+
+function unansweredReplyStampForDraft(isRevision, args) {
+  return isRevision ? {} : require('./sms-unanswered-reply').draftStamp(args);
+}
+
+function loadUnansweredFactsForDraft(isRevision, customer, opts) {
+  return isRevision ? Promise.resolve(null) : require('./sms-unanswered-reply').draftFactsFingerprint(customer, opts);
+}
+
+function allowAutoSendForDraft({ skipAutoSend, isRevision, deliveryMode, autoSendMode, lintPass }) {
+  return !skipAutoSend && !isRevision && deliveryMode === autoSendMode && lintPass;
+}
+
+function isGratitudeDraftCandidate({ isRevision, source, hasMedia, schedulingIntent, customer, smsLogId, inboundMessage }) {
+  return !isRevision && GRATITUDE_CLASSIFY_SOURCES.has(source) && !hasMedia && !schedulingIntent
+    && Boolean(customer?.id) && Boolean(smsLogId) && isGratitudeOnly(inboundMessage);
+}
+
+async function draftShadowReply({
+  inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false,
+  source = null, hasMedia = false, asOf = null, liveEta,
+  draftTrigger, supersedesDraftId, skipAutoSend, serviceRecordId = null,
+}) {
   const startedAt = Date.now();
+  const isRevision = isPostVisitRevision(draftTrigger, supersedesDraftId);
   try {
     const classifiedIntent = intent;
     // A late Mac draft (source 'mac_late') takes the same gratitude classification and prompt as a live
     // one, so its cohort matches; its stamp below keeps source 'mac_late', which the gratitude send sweep
     // refuses (sms-gratitude-context.js: provenance must be 'live_webhook'), so it can never be sent.
-    let gratitudeCandidate = GRATITUDE_CLASSIFY_SOURCES.has(source) && !hasMedia && !schedulingIntent
-      && customer?.id && smsLogId && isGratitudeOnly(inboundMessage);
+    let gratitudeCandidate = isGratitudeDraftCandidate({
+      isRevision, source, hasMedia, schedulingIntent, customer, smsLogId, inboundMessage,
+    });
     if (gratitudeCandidate) {
       intent = { intent: GRATITUDE_INTENT, confidence: 1, approvedReply: buildGratitudeReply(customer.first_name) };
     }
@@ -6966,16 +6997,17 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // (texting AI gap 5) a text that names ONE service ("the lawn treatment") gets the prep guide of that service's upcoming visit
     const prepGuideFamily = labelFactsLib.namedServiceFamily(inboundMessage);
     const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true, smsPrepGuideFamily: prepGuideFamily } : {};
+    const focusRecordOpt = serviceRecordId ? { focusServiceRecordId: serviceRecordId } : {};
     const loadContext = (withLiveEta) => (customer
-      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
-      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...focusRecordOpt, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...focusRecordOpt, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
     // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
     // a fingerprint of this customer's facts that a delayed send re-derives
     // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE
     // the drafting context loads, so the reply is never written from data
     // older than its fingerprint: a change landing in between makes the
     // send-time comparison fail, which keeps the text with staff.
-    const unansweredFacts = await require('./sms-unanswered-reply').draftFactsFingerprint(customer, { prepGuideFamily });
+    const unansweredFacts = await loadUnansweredFactsForDraft(isRevision, customer, { prepGuideFamily });
     let context = await loadContext(includeLiveEta);
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a promise we owe, an ask they are waiting on) is not a
@@ -7047,7 +7079,14 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // to a person, never auto-send, gate on or off (claimAutoSend refuses it again at the claim). A reply that states a photo reading the facts
     // did not give stays a shadow row (photoReply.held, gate on).
     const photoReply = photoFact.replyPhotoVerdict({ reply: parsed.reply, context, photoCheck, inboundHasPhoto: hasMedia });
-    const requireReview = [openLoopThanks, factsListOpenLoop(factsForDraft), labelFactsLib.factsBlockCarriesProductNotes(factsForDraft), Boolean(hasMedia)].some(Boolean);
+    const requireReview = [
+      openLoopThanks,
+      factsListOpenLoop(factsForDraft),
+      labelFactsLib.factsBlockCarriesProductNotes(factsForDraft),
+      Boolean(hasMedia),
+      isRevision,
+      Boolean(skipAutoSend),
+    ].some(Boolean);
     // Only an ANSWER may leave the silent shadow lane (owner 2026-11-25). An ACK is the fixed acknowledgement and an ABSTAIN has no text:
     // routing sees an empty reply for both (deliverableReply), which is never eligible, so they stay shadow rows for the judge whatever the
     // suggest and auto-send gates say, and no card and no send can come from them.
@@ -7158,15 +7197,21 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           } : {}),
           // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; {} while it is off):
           // what a later sweep needs to know about this draft and cannot re-derive.
-          ...require('./sms-unanswered-reply').draftStamp({
+          // Post-visit revision rows never enter the unanswered-text auto-send lane.
+          ...unansweredReplyStampForDraft(isRevision, {
             autoSendSafe: parsed.auto_send_safe, requireReview, lintPass: lint.pass, verifierEnabled: VERIFY_ENABLED,
             factsFingerprint: unansweredFacts,
           }),
         }),
+        ...revisionColumnPatch(isRevision, draftTrigger, supersedesDraftId),
         scheduling_intent: Boolean(schedulingIntent),
         draft_ms: Date.now() - startedAt,
       })
       .returning('id');
+
+    // Post-visit closeout revisions stay in shadow status only: never supersede or
+    // alter the original draft's status/card and never auto-send.
+    if (isRevision) return row?.id || null;
 
     // Gratitude is never sent or published from the webhook/drafter. The
     // existing scheduled sweep rechecks the immutable source, entire recent
@@ -7227,7 +7272,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
     if (row?.id && converged && !replyHasPlaceholder && !replyHasUngroundedAmount && !photoReply.held) {
-      if (deliveryMode === suggestMode.AUTO_SEND_MODE && lint.pass) {
+      if (allowAutoSendForDraft({ skipAutoSend, isRevision, deliveryMode, autoSendMode: suggestMode.AUTO_SEND_MODE, lintPass: lint.pass })) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,
           customer,
