@@ -11,9 +11,10 @@
 // recorded last time (labeled "last time"), else it is blank and required.
 // AI never guesses an amount. The "Search products" box in the Products
 // section (one tap adds the row; "+ Other product" hands off to the full form
-// when the catalog did not load) adds any other catalog product except an injection (the server hard-blocks injections on a T&S
+// when the catalog did not load) adds any other catalog product except an injection (the server redirects injections on a T&S
 // visit: they belong to the palm injection flow). A product the server flags
-// as an N/P fertilizer in the summer blackout cannot be turned on.
+// as an N/P fertilizer in the summer blackout shows a warning and remains
+// selectable so the tech is never blocked from recording what was applied.
 //
 // Since 2026-10-05 the screen follows the lawn sheet's rulings (#5951): the
 // mic sits inside the note box, a Customer row (who was home, the shared
@@ -29,12 +30,13 @@
 // while it still describes the exact photos on the sheet. A failed read never
 // blocks Complete: the server scores the photos itself.
 //
-// The server decides everything regulatory and this sheet pre-empts each of
-// its blocks in screen order: pollinator status (insect rows only), the
-// IRAC / FRAC rotation (the app's own check when the context loaded it, the
-// tech's tap when it could not), actual amounts, the 2-photo floor, and the
-// two required findings (plant groups, landscape condition). The body never
-// carries treatments_completed (the server derives it from the products).
+// Compliance and safety checks (N/P blackout, pollinator status, manual
+// IRAC / FRAC, NutriRoot basis, 2-photo floor, pest check, yearly neonicotinoid
+// cap) surface as visible warnings without disabling Complete (owner ruling
+// 2026-11-26), matching the non-blocking server closeout. Only data-integrity
+// requirements (amounts, 13-0-13 bed area, plant groups, landscape condition,
+// in-flight dictation/photo loading) hold Complete. The body never carries
+// treatments_completed (the server derives it from the products).
 //
 // GATE_TS_WATCH_LIST: when the context carries `watchList`, a "This month's
 // watch list" block follows the photo read's finding tiles. Items the read
@@ -103,7 +105,7 @@ const POLLINATOR_OPTIONS = ['No blooms or no bees', 'Blooming — no bees active
 const BEES_ACTIVE = 'Blooming — bees active';
 // The server's own words for this block (tree-shrub-closeout.js).
 const BEES_ACTIVE_MESSAGE = 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.';
-const NP_BLACKOUT_TEXT = 'N/P blackout — can’t apply Jun 1–Sep 30';
+const NP_BLACKOUT_TEXT = 'N/P blackout warning (Jun 1–Sep 30) — office will review';
 const NUTRIROOT_SOIL_TEST_BASIS = FERTILIZER_EVIDENCE.nutriRoot.soilTestBasis;
 const NUTRIROOT_ALREADY_APPLIED_BASIS = FERTILIZER_EVIDENCE.nutriRoot.alreadyAppliedBasis;
 
@@ -176,8 +178,8 @@ const CUSTOMER_TEXT_FLAGS = { sendCompletionSms: true, requestReview: true, incl
 // The approved shot guide: standing on the ground, about a minute for all of
 // them. The first two are the floor.
 const PHOTO_SLOTS = [
-  { key: 'front_beds', label: 'Front beds', when: 'Required', required: true, caption: 'Whole front bed line, same spot as last time.' },
-  { key: 'back_landscape', label: 'Back or side landscape', when: 'Required', required: true, caption: 'Back beds, or a side bed if the back is gated.' },
+  { key: 'front_beds', label: 'Front beds', when: 'Recommended', required: true, caption: 'Whole front bed line, same spot as last time.' },
+  { key: 'back_landscape', label: 'Back or side landscape', when: 'Recommended', required: true, caption: 'Back beds, or a side bed if the back is gated.' },
   { key: 'whole_palm', label: 'Whole palm', when: 'If palms', caption: 'The worst palm, top to bottom, from the ground.' },
   { key: 'oldest_fronds', label: 'Oldest fronds', when: 'If palms', caption: 'Lowest fronds you can reach, at arm’s length.' },
   { key: 'leaf_close_up', label: 'Leaf close-up', when: 'If something’s wrong', caption: 'One leaf or stem with the problem, close up.' },
@@ -274,7 +276,7 @@ function productRow(product, { method, last = null, added = false, bedSqft = nul
     method,
     added,
     active: false,
-    blocked: !!flags.npBlackout,
+    npBlackout: !!flags.npBlackout,
     heldReason,
     dimension,
     totalAmount: seeded.amount,
@@ -370,7 +372,6 @@ function monthRows(data, products, lastVisit) {
 // Reasons that are a failed read, not this visit's eligibility: a retry fixes them.
 const RETRYABLE_REASONS = new Set(['catalog_unavailable', 'profile_unavailable']);
 
-const firstText = (...texts) => texts.find(Boolean) || '';
 const objectOrNull = (value) => (value && typeof value === 'object' ? value : null);
 const positiveOrNull = (value) => (Number(value) > 0 ? Number(value) : null);
 
@@ -467,11 +468,11 @@ function useProductRows(ctx) {
         ...productRow(product, {
           method: catalogMethod(product), last: lastAmounts[String(product.id)] || null, added: true, bedSqft: ctx.bedSqft, heldReason,
         }),
-        // An interval/history hold is advisory for an application the tech is
-        // already recording, so selecting the catalog result opens its editor.
-        // NutriRoot's ordinance/evidence hold requires a separate confirmation
-        // tap before its application-basis controls and actuals are enabled.
-        active: !flags.npBlackout && !flags.nutriRootHoldReason,
+        // An interval/history or N/P blackout warning is advisory for an
+        // application the tech is already recording, so selecting the catalog
+        // result opens its editor. NutriRoot's ordinance/evidence notice still
+        // starts on the tile so the tech sees its basis guidance before tapping.
+        active: !flags.nutriRootHoldReason,
       },
     ]));
   }, [lastAmounts, ctx.bedSqft, ctx.monthProductHolds]);
@@ -513,32 +514,53 @@ function StockNotices({ rows, checking, locked, onCheck }) {
   );
 }
 
-function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPending }) {
+function missingRequirement({ form, rows, photoBusy, ctx, dictationPending }) {
   const active = rows.filter((row) => row.active);
   const outOfStock = stockState(rows, ctx).hold;
   const missingAmount = active.find((row) => !hasAmount(row));
   const missingArea = active.find((row) => !hasBedArea(row));
-  const insect = active.some((row) => flagsOf(row.product).insectFamily);
-  const manualIrac = needsManualIrac(rows, ctx);
-  const nutriRoot = active.find((row) => flagsOf(row.product).nutriRoot);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
     [photoBusy, 'Wait for the photo to finish loading.'],
-    [!slots.front_beds, 'Add a front beds photo.'],
-    [!slots.back_landscape, 'Add a back or side landscape photo.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [missingArea, missingArea && `Enter the treated square feet for ${missingArea.name}.`],
-    [insect && !form.pollinator, 'Select the flowering / bee status.'],
-    [insect && form.pollinator === BEES_ACTIVE, BEES_ACTIVE_MESSAGE],
-    [manualIrac && form.irac !== 'Yes', 'Confirm the IRAC / FRAC rotation was checked and logged.'],
-    [nutriRoot && ![NUTRIROOT_SOIL_TEST_BASIS, NUTRIROOT_ALREADY_APPLIED_BASIS].includes(form.nutriRootBasis), 'Record the NutriRoot application basis.'],
-    [nutriRoot && form.nutriRootBasis === NUTRIROOT_SOIL_TEST_BASIS && !String(form.nutriRootSoilTestReference || '').trim(), 'Enter the P-deficient soil-test report date or file reference.'],
     [!form.plantGroups.size, 'Select the plant groups serviced.'],
     [!form.condition, 'Select the overall landscape condition.'],
   ].find(([missing]) => missing) || [];
   return reason;
+}
+
+function complianceWarnings({ form, rows, ctx }) {
+  const active = rows.filter((row) => row.active);
+  const insect = active.some((row) => flagsOf(row.product).insectFamily);
+  const manualIrac = needsManualIrac(rows, ctx);
+  const nutriRoot = active.some((row) => flagsOf(row.product).nutriRoot);
+  const warnings = [];
+  if (active.some((row) => row.npBlackout)) warnings.push(NP_BLACKOUT_TEXT);
+  if (insect && !form.pollinator) warnings.push('Select the flowering / bee status (warning only — office will review).');
+  if (insect && form.pollinator === BEES_ACTIVE) warnings.push(BEES_ACTIVE_MESSAGE);
+  if (manualIrac && form.irac !== 'Yes') warnings.push('Confirm the IRAC / FRAC rotation was checked and logged (warning only — office will review).');
+  if (nutriRoot && ![NUTRIROOT_SOIL_TEST_BASIS, NUTRIROOT_ALREADY_APPLIED_BASIS].includes(form.nutriRootBasis)) {
+    warnings.push('Record the NutriRoot application basis (warning only — office will review).');
+  }
+  if (nutriRoot && form.nutriRootBasis === NUTRIROOT_SOIL_TEST_BASIS && !String(form.nutriRootSoilTestReference || '').trim()) {
+    warnings.push('Enter the P-deficient soil-test report date or file reference (warning only — office will review).');
+  }
+  return warnings;
+}
+
+function closeoutWarnings({ form, rows, slots, ctx, pestCheck, neonicCap }) {
+  const warnings = [];
+  if (!slots.front_beds) warnings.push('Add a front beds photo (at least 2 photos recommended).');
+  if (!slots.back_landscape) warnings.push('Add a back or side landscape photo (at least 2 photos recommended).');
+  warnings.push(...complianceWarnings({ form, rows, ctx }));
+  if (pestCheck.evaluation.blockMessage) warnings.push(pestCheck.evaluation.blockMessage);
+  for (const hold of neonicCap.holds || []) {
+    if (hold) warnings.push(hold);
+  }
+  return [...new Set(warnings)];
 }
 
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
@@ -565,6 +587,8 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
   const applicationArea = inOptionOrder(AREA_OPTIONS, form.areas);
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
   const irac = active.some((row) => flagsOf(row.product).needsIracFrac);
+  const manualIrac = needsManualIrac(rows, ctx);
+  const iracValue = !irac ? '' : (manualIrac ? form.irac : 'Yes');
   const result = previewCurrent ? preview.result : null;
   const watchItems = watchItemsBody(ctx.watchList, watchChoices, flaggedWatchKeys(ctx.watchList, result));
   return {
@@ -581,10 +605,11 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
         plant_groups: inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups),
         ...(form.areas.size ? { areas_treated: applicationArea } : {}),
         landscape_condition: form.condition,
-        ...(insect ? { pollinator_status: form.pollinator } : {}),
+        ...(insect && form.pollinator ? { pollinator_status: form.pollinator } : {}),
         // Yes when the app ran the rotation check (the context loaded its
-        // warnings) or the tech confirmed it by hand.
-        ...(irac ? { irac_frac_logged: 'Yes' } : {}),
+        // warnings); when manual confirmation was requested, send only what the
+        // tech actually selected so unconfirmed visits stay truthful.
+        ...(iracValue ? { irac_frac_logged: iracValue } : {}),
         ...(active.some((row) => flagsOf(row.product).nutriRoot) && form.nutriRootBasis
           ? { nutriroot_application_basis: form.nutriRootBasis }
           : {}),
@@ -758,10 +783,10 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
   const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
   const removeBlocked = (blockedRows) => blockedRows.forEach((row) => products.updateRow(row.productId, { active: false }));
-  // Yearly neonicotinoid cap: no ctx.neonicCap (not loaded, or the read failed) = no line and no hold. The hold is the sheet's; /complete does not refuse.
+  // Yearly neonicotinoid cap: no ctx.neonicCap (not loaded, or the read failed) = no line and no warning. Warning only — /complete does not refuse.
   const neonicCap = useMemo(() => evaluateNeonicCap(ctx.neonicCap, rows), [ctx.neonicCap, rows]);
-  const productBlock = firstText(pestCheck.evaluation.blockMessage, neonicCap.blockMessage);
-  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || productBlock;
+  const missingReason = missingRequirement({ form, rows, photoBusy: photos.busy, ctx, dictationPending });
+  const advisoryWarnings = closeoutWarnings({ form, rows, slots: photos.slots, ctx, pestCheck, neonicCap });
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
   const { hold: stockRow, notices: stockNotices } = stockState(rows, ctx);
@@ -891,11 +916,14 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <CompleteFooter
         submission={wrapUp.lock(submission)}
         missingReason={missingReason}
-        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!productBlock}
+        warn={!!stockRow}
         label="Complete tree & shrub"
         onSubmit={submit}
         coverProps={picker.coverProps}
       >
+        {advisoryWarnings.map((warning) => (
+          <p key={warning} className="tech-visit-muted tech-visit-status--warn" role="status">{warning}</p>
+        ))}
         <StockNotices rows={stockNotices} checking={checkingStock} locked={locked} onCheck={checkStock} />
         {stockRow && !locked && (
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>
@@ -1286,20 +1314,21 @@ function ProductsSection({ ctx, products, neonicLines, locked, other, popover, i
 }
 
 // A product tile names what goes on the record. A suggestion starts off; a
-// product in the N/P summer blackout says so and cannot be turned on.
+// product in the N/P summer blackout displays its warning and can still be
+// selected so the technician is never blocked from recording what was applied.
 function ProductTile({ row, locked, onClick }) {
   let detail = 'Tap if applied';
-  if (row.blocked) detail = NP_BLACKOUT_TEXT;
-  else if (!row.active && row.heldReason) detail = `Held: ${String(row.heldReason).replace(/\.\s*$/, '')}`;
-  else if (row.active) detail = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'How much?';
+  if (row.active) detail = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'How much?';
+  else if (row.npBlackout) detail = NP_BLACKOUT_TEXT;
+  else if (row.heldReason) detail = `Held: ${String(row.heldReason).replace(/\.\s*$/, '')}`;
   return (
     <ProductTileButton
       row={row}
       detail={detail}
-      off={!row.active && !row.blocked}
+      off={!row.active}
       added={row.added && row.active}
       ariaProps={{ 'aria-pressed': row.active }}
-      disabled={locked || row.blocked}
+      disabled={locked}
       onClick={onClick}
     />
   );
@@ -1355,6 +1384,9 @@ function ProductEditor({ row, warnings, neonicLine, heldLine, locked, onChange, 
         </div>
       ) : (
         <p className="tech-visit-muted">{`How: ${methodLabel(row.method)}`}</p>
+      )}
+      {row.npBlackout && (
+        <p className="tech-visit-warning" role="status"><WarningIcon /> {NP_BLACKOUT_TEXT}</p>
       )}
       {warnings.map((warning) => (
         <p key={`${warning.type}-${warning.productId}-${warning.message}`} className="tech-visit-warning" role="status"><WarningIcon /> {warning.message}</p>

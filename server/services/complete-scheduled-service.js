@@ -164,6 +164,14 @@ const {
 // recorded amount the same way.
 const { calculateInventoryCost } = require('../services/inventory-cost');
 
+function hasTreeShrubCloseoutNotes(summary, warnings) {
+  return !!summary || (Array.isArray(warnings) && warnings.length > 0);
+}
+
+function definedOrUndefined(value) {
+  return value == null ? undefined : value;
+}
+
 async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -7930,8 +7938,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             waveguardCalibrationAdvisory,
             waveguardInventoryAdvisory,
             waveguardTankCleanout,
-            ...(treeShrubCloseoutSummary ? {
-              treeShrubCloseout: treeShrubCloseoutSummary,
+            ...(hasTreeShrubCloseoutNotes(treeShrubCloseoutSummary, treeShrubCloseoutWarnings) ? {
+              treeShrubCloseout: definedOrUndefined(treeShrubCloseoutSummary),
               treeShrubCloseoutWarnings,
             } : {}),
             ...(treeShrubTechFindingsFreeze || {}),

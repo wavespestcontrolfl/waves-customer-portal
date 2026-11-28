@@ -10742,6 +10742,74 @@ export function completionAddOnWarnings(service, rows, isIncompleteVisit = false
   ].filter(Boolean);
 }
 
+// Non-blocking Tree & Shrub pesticide compliance warnings for primary and
+// companion typed forms (owner ruling 2026-11-26: warn, never block closeout).
+export function completionPesticideComplianceWarnings({
+  isTypedFindings = false,
+  isIncompleteVisit = false,
+  typedFindingsSchema = null,
+  findingsValues = {},
+  companionSchemas = [],
+  companionState = {},
+  scope = {},
+  typedInsectEvidencePath = null,
+  companionInsectEvidencePaths = {},
+} = {}) {
+  if (isIncompleteVisit) return [];
+  const warnings = [];
+  if (isTypedFindings && typedFindingsSchema) {
+    const missingPrimary = missingTypedPesticideCompliance(
+      typedFindingsSchema.fields || [],
+      findingsValues,
+      scope,
+      typedInsectEvidencePath,
+    );
+    if (missingPrimary.length) {
+      warnings.push(`Missing pesticide compliance details: ${missingPrimary.join(", ")}.`);
+    }
+  }
+  for (const schema of companionSchemas || []) {
+    const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+    const label = schema.label || schema.type;
+    const missingCompanion = missingTypedPesticideCompliance(
+      schema.fields || [],
+      entry.values,
+      scope,
+      companionInsectEvidencePaths[schema.type] || null,
+    );
+    if (missingCompanion.length) {
+      warnings.push(`${label}: missing pesticide compliance details: ${missingCompanion.join(", ")}.`);
+    }
+  }
+  return warnings;
+}
+
+function PesticideComplianceWarnings({ warnings, warnColor }) {
+  if (!warnings || warnings.length === 0) return null;
+  const color = warnColor || "#b45309";
+  return (
+    <div
+      role="status"
+      data-testid="typed-pesticide-compliance-warnings"
+      style={{
+        background: `${color}14`,
+        border: `1px solid ${color}`,
+        borderRadius: 10,
+        padding: 10,
+        margin: "0 0 16px",
+        color,
+        fontSize: 13,
+        lineHeight: 1.4,
+      }}
+    >
+      {warnings.map((warning) => <div key={warning}>{warning}</div>)}
+      <div style={{ marginTop: 4, fontSize: 12 }}>
+        Warning only — you can still complete this visit. Missing compliance details will be flagged for office review.
+      </div>
+    </div>
+  );
+}
+
 export function completionProductRowProblem(service, rows, typeFor) {
   const treeShrubWork = visitHasTreeShrubWork(service);
   const areaOf = (p) => requiredApplicationArea(productApplicationMethod(p, typeFor(p)), typeFor(p), false, false, p, treeShrubWork);
@@ -15164,6 +15232,17 @@ export function CompletionPanel({
         isIncompleteVisit,
       })
     : [];
+  const typedPesticideComplianceWarnings = completionPesticideComplianceWarnings({
+    isTypedFindings,
+    isIncompleteVisit,
+    typedFindingsSchema,
+    findingsValues,
+    companionSchemas,
+    companionState,
+    scope: typedPesticideComplianceScope,
+    typedInsectEvidencePath,
+    companionInsectEvidencePaths,
+  });
   const structuredCloseoutRequired =
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const baseCompletionCtaLabel = submitting
@@ -18700,12 +18779,9 @@ export function CompletionPanel({
             String(findingsValues[f.key] ?? "").trim() === "",
         )
         .map((f) => f.label);
-      missingTypedRequired.push(...missingTypedPesticideCompliance(
-        typedFindingsSchema.fields || [],
-        findingsValues,
-        typedPesticideComplianceScope,
-        typedInsectEvidencePath,
-      ));
+      // Tree & Shrub pesticide compliance gaps are shown as non-blocking warnings
+      // (completionPesticideComplianceWarnings) and flagged for office review on
+      // the server instead of blocking closeout (owner ruling 2026-11-26).
       // Tech-set-only gauge types (no derive field) still require a score
       // on any completed-side outcome — the server 422s
       // (activity_score_required) the same way. A derive-mapped type has
@@ -18794,12 +18870,8 @@ export function CompletionPanel({
               String(entry.values[f.key] ?? "").trim() === "",
           )
           .map((f) => f.label);
-        missingCompanionRequired.push(...missingTypedPesticideCompliance(
-          schema.fields || [],
-          entry.values,
-          typedPesticideComplianceScope,
-          companionInsectEvidencePaths[schema.type] || null,
-        ));
+        // Companion Tree & Shrub pesticide compliance gaps are non-blocking
+        // warnings (completionPesticideComplianceWarnings, owner 2026-11-26).
         // Same derive-mapped exemption as the primary (owner ruling
         // 2026-09-26): a companion gauge with a findings-derived score is
         // never blocked here, only a tech-set-only one.
@@ -21635,6 +21707,10 @@ export function CompletionPanel({
                 />
               );
             })}
+            <PesticideComplianceWarnings
+              warnings={typedPesticideComplianceWarnings}
+              warnColor={M.warn}
+            />
             <AreaAddOnFields
               service={service}
               selectedProducts={selectedProducts}
@@ -24130,6 +24206,10 @@ export function CompletionPanel({
               />
             );
           })}
+          <PesticideComplianceWarnings
+            warnings={typedPesticideComplianceWarnings}
+            warnColor={D.amber}
+          />
           <AreaAddOnFields
             service={service}
             selectedProducts={selectedProducts}
