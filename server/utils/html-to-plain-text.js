@@ -104,8 +104,8 @@ function applyExitFrame(frame, out) {
   const inner = out.splice(frame.start).join('');
   if (frame.kind === 'anchor-exit') {
     const label = inner.replace(/\s+/g, ' ').trim();
-    const { href } = frame;
-    if (!href || /^(?:javascript|data):/i.test(href)) out.push(label);
+    const { href, includeLinkUrls } = frame;
+    if (!includeLinkUrls || !href || /^(?:javascript|data):/i.test(href)) out.push(label);
     else if (!label || label === href) out.push(href);
     else out.push(`${label} (${href})`);
     return;
@@ -125,25 +125,6 @@ function applyExitFrame(frame, out) {
 function enterElement(node, stack, out, opts, state) {
   const tag = String(node.tagName || '').toLowerCase();
   if (SKIP_TAGS.has(tag) || isHiddenNode(node)) return;
-  if (tag === 'br') { out.push('\n'); return; }
-  if (tag === 'img') {
-    const alt = attrValue(node, 'alt');
-    if (alt) {
-      if (!endsWith(out, /[\s\n]$/)) out.push(' ');
-      out.push(alt);
-    }
-    return;
-  }
-  if (tag === 'a') {
-    stack.push({ kind: 'anchor-exit', href: attrValue(node, 'href'), start: out.length });
-    pushChildren(stack, node);
-    return;
-  }
-  if (CELL_TAGS.has(tag)) {
-    stack.push({ kind: 'cell-exit', start: out.length });
-    pushChildren(stack, node);
-    return;
-  }
   if (isQuoteContainer(node, tag)) {
     state.hasQuoteContainer = true;
     if (opts.stripQuotes) { trimTrailingAttribution(out, opts.attributionPatterns); return; }
@@ -154,6 +135,30 @@ function enterElement(node, stack, out, opts, state) {
   if (isSignatureContainer(node)) {
     if (opts.stripSignatures) return;
     stack.push({ kind: 'sig-exit', start: out.length });
+    pushChildren(stack, node);
+    return;
+  }
+  if (tag === 'br') { out.push('\n'); return; }
+  if (tag === 'img') {
+    const alt = attrValue(node, 'alt');
+    if (alt) {
+      if (!endsWith(out, /[\s\n]$/)) out.push(' ');
+      out.push(alt);
+    }
+    return;
+  }
+  if (tag === 'a') {
+    stack.push({
+      kind: 'anchor-exit',
+      href: attrValue(node, 'href'),
+      includeLinkUrls: opts.includeLinkUrls !== false,
+      start: out.length,
+    });
+    pushChildren(stack, node);
+    return;
+  }
+  if (CELL_TAGS.has(tag)) {
+    stack.push({ kind: 'cell-exit', start: out.length });
     pushChildren(stack, node);
     return;
   }

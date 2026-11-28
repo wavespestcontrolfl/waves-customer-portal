@@ -196,4 +196,16 @@ test('emailPlainText preserves a staff reply below an attributed quote container
     body_html: '<div class="gmail_quote"><p>Please reschedule to Thursday.</p><blockquote>Old thread</blockquote></div>',
   }));
   expect(wrappedInGmailQuote).toBe('Please reschedule to Thursday.');
+
+  const linkedReply = stripQuotedAndSignature(emailPlainText({
+    body_text: 'Check the estimate here.\n> Old thread',
+    body_html: '<p>Check the <a href="https://portal.wavespestcontrol.com/e/1">estimate</a> here.</p><blockquote>Old thread</blockquote>',
+  }));
+  expect(linkedReply).toBe('Check the estimate here.');
+
+  const quotedTableCell = stripQuotedAndSignature(emailPlainText({
+    body_text: '> Old table request',
+    body_html: '<table><tr><td class="gmail_quote">Old table request</td></tr></table>',
+  }));
+  expect(quotedTableCell).toBe('');
 });
