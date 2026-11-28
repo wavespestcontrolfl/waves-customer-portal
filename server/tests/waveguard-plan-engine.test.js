@@ -1266,6 +1266,11 @@ describe('loadServiceCalibrations technician scoping', () => {
       { assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, technician_id: 'tech-a' },
     );
     expect(otherOnly).toEqual([]);
+    const unassignedOtherOnly = await loadServiceCalibrations(
+      stubKnex([rows[2]]),
+      { assigned_equipment_system_id: null, assigned_calibration_id: null, technician_id: 'tech-a' },
+    );
+    expect(unassignedOtherOnly).toEqual([]);
   });
 
   test('selecting a different rig clears the visit calibration pin instead of intersecting rig B with rig A calibration', async () => {

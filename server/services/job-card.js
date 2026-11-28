@@ -2399,7 +2399,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   const [rigs, systems] = await Promise.all([loadRigCalibrations(dbh), equipmentSystemId ? loadRigSystems(dbh, { strict: true }) : []]);
   const pickedRig = equipmentSystemId ? rigOptions(systems).find((r) => r.equipmentSystemId === equipmentSystemId) || null : null;
   if (equipmentSystemId && !pickedRig) return null;
-  const tank = mixTankForRequest(rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback: planProtocolDefaultCarrier(lawnPlan?.plan) });
+  const tank = await resolveMixTank(dbh, rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback: planProtocolDefaultCarrier(lawnPlan?.plan) });
   const volume = pickedRig ? pickedRig.tankCapacityGal : gallons;
   // The lawn plan governs every product it names (rate, blocks, approvals)
   // even when a non-lawn add-on's line names it too — Iron Plus on a lawn
@@ -2624,17 +2624,30 @@ function planProtocolDefaultCarrier(plan) {
 
 function procedureCalibrationTank(calibrations, rig, technicianId, fallbackCarrierGalPer1000 = null) {
   const matched = rigRows(calibrations, rig);
-  // A system-only assignment (no explicit calibrationId) must only use shared calibrations
-  // or the assigned technician's own calibration — never another technician's output.
-  const scoped = rig?.equipmentSystemId && !rig?.calibrationId
-    ? matched.filter((row) => !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId)))
-    : matched;
+  // Unless an explicit calibrationId is pinned, only shared calibrations or the assigned
+  // technician's own calibration may dose the visit — never another technician's output.
+  const scoped = rig?.calibrationId
+    ? matched
+    : matched.filter((row) => !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId)));
   return tankFromCalibrations(scoped, fallbackCarrierGalPer1000);
 }
 
-function mixTankForRequest(rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback }) {
-  if (pickedRig) return tankFromCalibrations(viewerRows(rigRows(rigs, { equipmentSystemId }), technicianId), fallback);
-  return procedureCalibrationTank(rigs, rigAssignment(svc), svc.technician_id || null, fallback);
+async function loadCalibrationSystemId(dbh, calibrationId, activeRigs = []) {
+  const fromActive = activeRigs.find((r) => String(r.id) === String(calibrationId));
+  if (fromActive?.equipment_system_id) return fromActive.equipment_system_id;
+  const row = await dbh('equipment_calibrations').where({ id: calibrationId }).first('equipment_system_id').catch(() => null);
+  return row?.equipment_system_id || null;
+}
+
+async function resolveMixTank(dbh, rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback }) {
+  const assigned = rigAssignment(svc);
+  if (!pickedRig) return procedureCalibrationTank(rigs, assigned, svc.technician_id || null, fallback);
+  const assignedSystem = assigned.equipmentSystemId
+    || (assigned.calibrationId ? await loadCalibrationSystemId(dbh, assigned.calibrationId, rigs) : null);
+  if (assigned.calibrationId && assignedSystem && String(equipmentSystemId) === String(assignedSystem)) {
+    return tankFromCalibrations(rigRows(rigs, { equipmentSystemId, calibrationId: assigned.calibrationId }), fallback);
+  }
+  return tankFromCalibrations(viewerRows(rigRows(rigs, { equipmentSystemId }), technicianId), fallback);
 }
 
 function recordSprayVolumeSpec(out, per1000, qual, { reciprocal = false } = {}) {
@@ -3361,13 +3374,15 @@ function areaCapOf(raw) {
 function areaCapWarning({ band, line, rigName, rigCarrier }) {
   const cap = line?.areaCap;
   const carrier = Number(rigCarrier);
-  const unitKey = (unit) => String(unit || '').toLowerCase().replace(/[_\s]+/g, ' ').trim();
-  if (!band || !cap || !(carrier > 0) || unitKey(band.unit) !== unitKey(cap.unit)) return null;
+  if (!band || !cap || !(carrier > 0)) return null;
+  const loPerGal = convertRateUnit(band.lo, band.unit, cap.unit);
+  const hiPerGal = convertRateUnit(band.hi, band.unit, cap.unit);
+  if (loPerGal == null || hiPerGal == null) return null;
   const round = (v) => Math.round(v * 10000) / 10000;
-  const lo = round(band.lo * carrier);
-  const hi = round(band.hi * carrier);
+  const lo = round(loPerGal * carrier);
+  const hi = round(hiPerGal * carrier);
   if (!(hi > cap.amount + 1e-9)) return null;
-  const unit = unitKey(band.unit);
+  const unit = String(cap.unit || '').toLowerCase().replace(/[_\s]+/g, ' ').trim();
   return `${rigName || 'This rig'} sprays ${fmtGal(carrier)} gal per 1,000 sq ft, so this range puts down ${lo === hi ? lo : `${lo}-${hi}`} ${unit} per 1,000 sq ft. The label allows no more than ${cap.amount} ${unit} per 1,000 sq ft in one spray. Use a lower rate or less water per 1,000 sq ft`;
 }
 

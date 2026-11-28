@@ -4500,6 +4500,56 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       expect.objectContaining({ id: 'taurus', line: expect.stringContaining('Quarterly Pest Control: Taurus SC — Outside: foundation band') }),
     ]);
 
+    // Picking the visit's own assigned rig preserves its calibration pin (including calibration-only pins) instead of switching to a replacement calibration.
+    const pinnedActiveRig = [{ id: 'cal-new', equipment_system_id: 'sys-1', technician_id: null, system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 2.5, tank_capacity_gal: '110.00' }];
+    const pinnedVisitDb = dbFor({
+      scheduled_services: [{ id: 'svc30', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: null, assigned_calibration_id: 'cal-superseded', first_name: 'A', last_name: 'B' }],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: pinnedActiveRig,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    // Stub equipment_calibrations.first() to resolve the superseded pin's system_id while active calibrations only hold cal-new.
+    const pinnedDbWrap = (t) => {
+      const chain = pinnedVisitDb(t);
+      if (String(t) === 'equipment_calibrations') {
+        chain.first = () => Object.assign(Promise.resolve({ equipment_system_id: 'sys-1' }), { catch: async () => ({ equipment_system_id: 'sys-1' }) });
+      }
+      return chain;
+    };
+    pinnedDbWrap.raw = pinnedVisitDb.raw;
+    const pickedSamePinned = await jobCard.mixForProduct('oil', 110, { serviceId: 'svc30', equipmentSystemId: 'sys-1', dbh: pinnedDbWrap, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(pickedSamePinned.tank.source).toBeNull();
+
+    // Unassigned visits (no assigned rig or calibration) also exclude another technician's lone calibration.
+    const noRigOtherTechDb = dbFor({
+      scheduled_services: [{ id: 'svc31', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: null, assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const noRigCard = await jobCard.buildJobCard('svc31', { dbh: noRigOtherTechDb, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(noRigCard.tank.source).toBeNull();
+
+    // areaCapWarning converts compatible catalog fallback units (e.g. mL/gal fallback against a fl oz/1,000 sq ft cap).
+    const aceMl = { id: 'ace-ml', name: 'Acelepryn Insecticide', epa_reg_number: '100-1489', default_rate: '5-6', default_unit: 'ml/gal', label_verified_at: '2027-12-01', active: true };
+    const highRig = [{ id: 'cal-hi', equipment_system_id: 'sys-hi', technician_id: 'tech-a', system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 5, tank_capacity_gal: '110.00' }];
+    const aceMlDb = dbFor({
+      scheduled_services: [{ id: 'svc32', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-hi', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [aceMl],
+      product_aliases: [],
+      equipment_calibrations: highRig,
+      equipment_systems: [{ id: 'sys-hi', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }],
+      scheduled_service_addons: [],
+    });
+    const aceMlCalc = await jobCard.mixForProduct('ace-ml', 100, { serviceId: 'svc32', dbh: aceMlDb, deps: { buildPlan: jest.fn(), protocols: aceProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(aceMlCalc.rateSource).toBe('catalog');
+    expect(aceMlCalc.warnings.join(' ')).toContain('allows no more than 0.37 fl oz per 1,000 sq ft in one spray');
+
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
       products_catalog: [tristar],
