@@ -103,77 +103,6 @@ function stripQuotedAndSignature(bodyText) {
   return text.trim();
 }
 
-const HARD_CUT_PATTERNS = [
-  ...HISTORY_HEADERS.slice(1),
-  /\*?\s*Office:\s*\(941\)/i,
-  /^[ \t]*--[ \t]*$/m,
-];
-
-function normalizeCompare(s) {
-  return String(s || '')
-    .replace(/\s*\((?:https?:\/\/|mailto:)[^)\s]+\)/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function sliceBeforeHardCut(decoded) {
-  const indices = HARD_CUT_PATTERNS
-    .map((re) => {
-      const m = re.exec(decoded);
-      return m ? m.index : null;
-    })
-    .filter((i) => i != null);
-  return indices.length ? decoded.slice(0, Math.min(...indices)) : decoded;
-}
-
-function addCleanRun(byNorm, rawRun) {
-  const cleaned = stripQuotedAndSignature(rawRun.join('\n'));
-  if (!cleaned) return;
-  for (const para of cleaned.split(/\n{2,}/)) {
-    const joinedRaw = para.split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
-    const joinedNorm = normalizeCompare(joinedRaw);
-    if (joinedNorm && !byNorm.has(joinedNorm)) byNorm.set(joinedNorm, joinedRaw);
-    for (const line of para.split('\n')) {
-      const trimmed = line.trim();
-      const lineNorm = normalizeCompare(trimmed);
-      if (lineNorm && !byNorm.has(lineNorm)) byNorm.set(lineNorm, trimmed);
-    }
-  }
-}
-
-function unquotedAfterQuoteParagraphs(text) {
-  const preCut = sliceBeforeHardCut(decodeEntities(text).replace(/\r\n?/g, '\n'));
-  const byNorm = new Map();
-  let sawQuote = false;
-  let run = [];
-  for (const line of preCut.split('\n')) {
-    if (/^[ \t]*>/.test(line)) {
-      if (run.length) { addCleanRun(byNorm, run); run = []; }
-      sawQuote = true;
-    } else if (sawQuote) {
-      run.push(line);
-    }
-  }
-  if (run.length) addCleanRun(byNorm, run);
-  return byNorm;
-}
-
-function recoverBottomPostedReply(text, html) {
-  const parsed = require('../../utils/html-to-plain-text').htmlToPlainTextWithMeta(html, {
-    stripQuotes: true,
-    stripSignatures: true,
-    includeLinkUrls: false,
-    attributionPatterns: HISTORY_HEADERS,
-  });
-  if (!parsed.hasQuoteContainer || !parsed.text) return null;
-  const unquoted = unquotedAfterQuoteParagraphs(text);
-  const confirmed = parsed.text
-    .split('\n')
-    .map((line) => unquoted.get(normalizeCompare(line)))
-    .filter(Boolean);
-  return confirmed.length ? confirmed.join('\n') : null;
-}
-
 // The text of an email row: body_text, or its HTML converted when
 // body_text is empty. Portal sends (admin Email tab, Intelligence Bar) are
 // text/html-only, so Gmail sync stores them in body_html with body_text
@@ -181,19 +110,8 @@ function recoverBottomPostedReply(text, html) {
 // dropped). Required lazily: newsletter-proof loads the send stack.
 function emailPlainText(row) {
   const text = String(row?.body_text || '');
-  const html = String(row?.body_html || '');
-  // Only when body_text has no unquoted prefix above its '>' quotes (a
-  // bottom-posted reply like "<blockquote>Q</blockquote><p>Answer</p>") recover
-  // paragraphs that are unquoted in BOTH body_html and post-quote body_text.
-  if (text.trim() && html.trim() && /^[ \t]*>/m.test(text) && !stripQuotedAndSignature(text)) {
-    try {
-      const recovered = recoverBottomPostedReply(text, html);
-      if (recovered) return recovered;
-    } catch {
-      // Fall back to the existing plain-text part on pathological HTML.
-    }
-  }
   if (text.trim()) return text;
+  const html = String(row?.body_html || '');
   return html.trim() ? require('../newsletter-proof').htmlReplyToText(html) : '';
 }
 

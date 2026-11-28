@@ -1,8 +1,6 @@
-const crypto = require('crypto');
 const { google } = require('googleapis');
 const db = require('../../models/db');
 const logger = require('../logger');
-const { htmlToPlainText } = require('../../utils/html-to-plain-text');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
@@ -288,42 +286,21 @@ async function runBeforeSend(gmail, options) {
   await options.beforeSend();
 }
 
-function encodeMimeBase64(text) {
-  const crlf = String(text || '').replace(/\r?\n/g, '\r\n');
-  const b64 = Buffer.from(crlf, 'utf8').toString('base64');
-  return (b64.match(/.{1,76}/g) || []).join('\r\n');
-}
-
 // The base64url MIME message: our From, the recipient, an encoded subject,
-// multipart/alternative (plain-text + HTML), and In-Reply-To / References when it answers a message.
+// HTML body, and In-Reply-To / References when it answers a message.
 function buildRawMessage(to, subject, body, inReplyTo) {
   const safeTo = sanitizeHeaderValue(to);
   if (!safeTo) throw new Error('Recipient (to) is required');
   const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
-  const boundary = `waves-alt-${crypto.randomBytes(8).toString('hex')}`;
-  const plainBody = htmlToPlainText(body);
   const headers = [
     `From: ${fromHeader()}`,
     `To: ${safeTo}`,
     `Subject: ${encodeHeaderUtf8(subject)}`,
     'MIME-Version: 1.0',
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    'Content-Type: text/html; charset=utf-8',
     ...(safeInReplyTo ? [`In-Reply-To: ${safeInReplyTo}`, `References: ${safeInReplyTo}`] : []),
   ];
-  const parts = [
-    `--${boundary}`,
-    'Content-Type: text/plain; charset=utf-8',
-    'Content-Transfer-Encoding: base64',
-    '',
-    encodeMimeBase64(plainBody),
-    `--${boundary}`,
-    'Content-Type: text/html; charset=utf-8',
-    'Content-Transfer-Encoding: base64',
-    '',
-    encodeMimeBase64(body),
-    `--${boundary}--`,
-  ];
-  return Buffer.from(headers.join('\r\n') + '\r\n\r\n' + parts.join('\r\n')).toString('base64url');
+  return Buffer.from(headers.join('\r\n') + '\r\n\r\n' + body).toString('base64url');
 }
 
 // Marks a messages.send failure that may hide an accepted email
