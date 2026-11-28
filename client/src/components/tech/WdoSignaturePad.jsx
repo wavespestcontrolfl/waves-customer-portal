@@ -195,16 +195,16 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   }
 
   const card = {
-    border: "1px solid #d4d4d8",
+    border: "1px solid var(--border-default, #d4d4d8)",
     borderRadius: 10,
     padding: 14,
-    background: "#fafafa",
+    background: "var(--surface-hover, #fafafa)",
     margin: "12px 0",
   };
-  const label = { fontSize: 13, fontWeight: 600, color: "#3f3f46", marginBottom: 6 };
+  const label = { fontSize: 13, fontWeight: 600, color: "var(--text-primary, #3f3f46)", marginBottom: 6 };
   const btn = {
-    fontSize: 13, padding: "7px 12px", borderRadius: 8, border: "1px solid #d4d4d8",
-    background: "#fff", cursor: "pointer",
+    fontSize: 13, padding: "7px 12px", borderRadius: 8, border: "1px solid var(--border-strong, #d4d4d8)",
+    background: "var(--surface-primary, #fff)", color: "var(--text-primary, #18181b)", cursor: "pointer",
   };
 
   if (signature?.signed && !editing) {
@@ -214,19 +214,19 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
       <div style={card}>
         <div style={label}>Licensee signature</div>
         {stale ? (
-          <div style={{ fontSize: 13, color: "#b45309", marginBottom: 8 }}>
+          <div style={{ fontSize: 13, color: "var(--status-amber, #b45309)", marginBottom: 8 }}>
             ⚠ Signed{signature.signer_name ? ` by ${signature.signer_name}` : ""}{when ? ` · ${when}` : ""}, but the
             report changed after signing — clear &amp; re-sign before it can be sent.
           </div>
         ) : (
-          <div style={{ fontSize: 13, color: "#16a34a", marginBottom: 8 }}>
+          <div style={{ fontSize: 13, color: "var(--status-green, #16a34a)", marginBottom: 8 }}>
             ✓ Signed{signature.signer_name ? ` by ${signature.signer_name}` : ""}{when ? ` · ${when}` : ""}
           </div>
         )}
         <button type="button" style={btn} onClick={clearSaved} disabled={saving}>
           Clear &amp; re-sign
         </button>
-        {error ? <div style={{ color: "#dc2626", fontSize: 13, marginTop: 6 }}>{error}</div> : null}
+        {error ? <div style={{ color: "var(--status-red, #dc2626)", fontSize: 13, marginTop: 6 }}>{error}</div> : null}
       </div>
     );
   }
@@ -239,14 +239,14 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         value={signerName}
         onChange={(e) => setSignerName(e.target.value)}
         placeholder="Licensee / inspector printed name"
-        style={{ width: "100%", maxWidth: 360, padding: "7px 10px", fontSize: 14, border: "1px solid #d4d4d8", borderRadius: 8, marginBottom: 8 }}
+        style={{ width: "100%", maxWidth: 360, padding: "7px 10px", fontSize: 14, border: "1px solid var(--border-strong, #d4d4d8)", borderRadius: 8, marginBottom: 8 }}
       />
       <input
         type="text"
         value={signerIdCard}
         onChange={(e) => setSignerIdCard(e.target.value)}
         placeholder="FDACS ID card number"
-        style={{ width: "100%", maxWidth: 360, padding: "7px 10px", fontSize: 14, border: "1px solid #d4d4d8", borderRadius: 8, marginBottom: 8 }}
+        style={{ width: "100%", maxWidth: 360, padding: "7px 10px", fontSize: 14, border: "1px solid var(--border-strong, #d4d4d8)", borderRadius: 8, marginBottom: 8 }}
       />
       <div style={{ position: "relative", width: "100%", maxWidth: 520 }}>
         <canvas
@@ -264,9 +264,9 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
           onTouchCancel={endDraw}
         />
       </div>
-      {error ? <div style={{ color: "#dc2626", fontSize: 13, marginTop: 6 }}>{error}</div> : null}
+      {error ? <div style={{ color: "var(--status-red, #dc2626)", fontSize: 13, marginTop: 6 }}>{error}</div> : null}
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-        <button type="button" style={{ ...btn, background: "#0f172a", color: "#fff", borderColor: "#0f172a" }} onClick={save} disabled={saving}>
+        <button type="button" style={{ ...btn, background: "var(--text-primary, #0f172a)", color: "var(--surface-page, #fff)", borderColor: "var(--text-primary, #0f172a)" }} onClick={save} disabled={saving}>
           {saving ? "Saving…" : "Save signature"}
         </button>
         <button type="button" style={btn} onClick={() => initCanvas()} disabled={saving}>Clear</button>
@@ -274,7 +274,7 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
           <button type="button" style={btn} onClick={() => setEditing(false)} disabled={saving}>Cancel</button>
         ) : null}
       </div>
-      <div style={{ fontSize: 11, color: "#71717a", marginTop: 6 }}>
+      <div style={{ fontSize: 11, color: "var(--text-tertiary, #71717a)", marginTop: 6 }}>
         By signing, the licensee certifies they performed this inspection and the findings are accurate.
       </div>
     </div>

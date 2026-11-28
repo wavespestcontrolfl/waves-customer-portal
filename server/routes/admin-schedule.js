@@ -442,7 +442,128 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
+const {
+  isTechnicianRequest,
+  adminOnlyFields,
+  technicianCurrentVisitFilter,
+  technicianLiveVisitFilter,
+  technicianMayReadVisitAccessCodes,
+  visitHasDirectPremiseStamp,
+  visitMatchesPrimaryHomeForTechAccess,
+  loadActiveHomesByCustomerIds,
+  loadTechHomesByCustomerIds,
+  loadTechPrimaryAccessIds,
+  recheckTechFeedAccessRows,
+  redactFreeTextAccessCodes,
+  collectStoredAccessCodes,
+  sameHomeForTechVisitPrefs,
+  stripAccessCodePrefs,
+  stripAccessCodesFromBriefBlock,
+} = require('../services/technician-visit-scope');
+
+function redactTechFeedText(allowWindow, text, knownCodes = null) {
+  return allowWindow ? text : redactFreeTextAccessCodes(text, knownCodes);
+}
+
+function redactTechHistoryText(req, text, knownCodes = null) {
+  return isTechnicianRequest(req) ? redactFreeTextAccessCodes(text, knownCodes) : text;
+}
+
+function pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds) {
+  if (!droppedIds.size) return;
+  for (let i = enriched.length - 1; i >= 0; i -= 1) {
+    if (droppedIds.has(enriched[i].id)) enriched.splice(i, 1);
+  }
+  for (let i = unassigned.length - 1; i >= 0; i -= 1) {
+    if (droppedIds.has(unassigned[i].id)) unassigned.splice(i, 1);
+  }
+  for (const [key, tech] of Object.entries(byTech)) {
+    tech.services = tech.services.filter((s) => !droppedIds.has(s.id));
+    if (!tech.services.length) {
+      delete byTech[key];
+      continue;
+    }
+    tech.totalServices = tech.services.length;
+    tech.completedServices = tech.services.filter((s) => s.status === 'completed').length;
+    tech.estimatedServiceMinutes = tech.services.reduce((sum, s) => sum + (s.estimatedDuration || 30), 0);
+    tech.estimatedDriveMinutes = tech.services.length * 8;
+    const zones = {};
+    const materials = {};
+    tech.services.forEach((s) => {
+      zones[s.zone] = (zones[s.zone] || 0) + 1;
+      (s.materialsNeeded || []).forEach((m) => { materials[m.product || m] = true; });
+    });
+    tech.zones = zones;
+    tech.loadList = Object.keys(materials);
+  }
+}
+
+const BILLING_FEED_ALERT_TYPES = new Set(['no_card_on_file', 'unbilled_visit']);
+
+async function applyTechScheduleFeedRecheck(conn, req, candidates, { enriched, byTech, unassigned, date = null }) {
+  const droppedIds = await recheckTechFeedAccessRows(conn, req, candidates, (c, { lostWindow, lostPrimary }) => {
+    const knownCodes = collectStoredAccessCodes(c.prefs, c.visit);
+    const preservedBilling = Array.isArray(c.row.propertyAlerts)
+      ? c.row.propertyAlerts.filter((a) => a && BILLING_FEED_ALERT_TYPES.has(a.type))
+      : [];
+    const safeNotes = lostWindow ? redactFreeTextAccessCodes(c.cleanedNotes, knownCodes) : c.cleanedNotes;
+    const keepNeighborhood = !lostWindow && (visitHasDirectPremiseStamp(c.visit) || !c.visit.source_estimate_id || !lostPrimary);
+    c.row.propertyAlerts = [
+      ...compilePropertyAlerts({
+        prefs: stripAccessCodePrefs(c.prefs, knownCodes),
+        notes: safeNotes,
+        genuinelyNew: c.genuinelyNew,
+        servicePreferences: c.visit.service_preferences,
+        normalizedServiceType: c.normalizedType,
+        neighborhoodGate: keepNeighborhood ? c.neighborhoodGate : null,
+        neighborhoodActions: keepNeighborhood && c.neighborhoodActions,
+      }),
+      ...preservedBilling,
+    ];
+    if (!keepNeighborhood) delete c.row.neighborhoodGateActions;
+    if (lostWindow) {
+      c.row.lastServiceNotes = redactFreeTextAccessCodes(c.row.lastServiceNotes, knownCodes);
+      c.row.lastLineServiceNotes = redactFreeTextAccessCodes(c.row.lastLineServiceNotes, knownCodes);
+    }
+  });
+  if (droppedIds.size) {
+    pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds);
+    require('../services/visit-groups').visitSummariesForRows(enriched);
+    const legsToday = date === etDateString();
+    Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs')
+      .attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
+  }
+}
+
+function normalizeAddonEntry(a) {
+  return {
+    service_type: a.name || a.serviceName || a.service_type || null,
+    service_id: a.serviceId || a.service_id || null,
+    service_key: a.serviceKey || a.service_key || null,
+  };
+}
+
+async function appendVisitCapabilityOffWarnings(trx, technicianId, { primary, addons, serviceId, targetWarnings }) {
+  if (!technicianId) return;
+  const capEntries = [primary];
+  if (Array.isArray(addons)) {
+    for (const a of addons) if (a) capEntries.push(normalizeAddonEntry(a));
+  } else if (serviceId && require('../config/feature-gates').techJobTypeChecksLive?.()) {
+    const readAddons = (conn) => conn('scheduled_service_addons')
+      .where({ scheduled_service_id: serviceId })
+      .select('service_name as service_type', 'service_id');
+    try {
+      const existing = await (trx.isTransaction && typeof trx.transaction === 'function'
+        ? trx.transaction((sp) => readAddons(sp))
+        : readAddons(trx));
+      if (Array.isArray(existing)) capEntries.push(...existing);
+    } catch {
+      // Advisory capability warnings never block saves if the addon read fails.
+    }
+  }
+  const lines = await require('../services/technician-eligibility').capabilityOffWarningsFor(technicianId, capEntries, { conn: trx });
+  for (const line of lines) if (!targetWarnings.includes(line)) targetWarnings.push(line);
+}
 
 // Board/list scoping for technician tokens: the FULL current-assignment
 // predicate, not just technician_id — otherwise ?from=<years ago> or
@@ -1659,7 +1780,10 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
   try {
     const svc = await db('scheduled_services')
       .where({ id: serviceId })
-      .first('customer_id', 'service_type');
+      .first('customer_id', 'service_type', ...visitHoldService.heldColumn());
+    if (visitHoldService.rowIsHeld(svc)) {
+      return { sent: false, error: 'Visit is on hold — reschedule text suppressed' };
+    }
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
     if (!customer) {
       error = 'Customer not found';
@@ -1778,7 +1902,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
     // miss and keeps its fallback reminders. No guard snapshot → skip the
     // mark (worst case is a redundant reminder for the slot we texted,
     // never a silenced newer slot).
-    const guardRow = Array.isArray(guards) && guards.length ? guards[0] : null;
+    const guardRow = Array.isArray(guards) ? guards[0] : null;
     if (guardRow) {
       await AppointmentReminders.markRescheduleNoticeSent(serviceId, {
         guardsByServiceId: { [serviceId]: guardRow },
@@ -6740,6 +6864,9 @@ router.post('/:id/hold', async (req, res, next) => {
     const result = await visitHoldService.putVisitOnHold({
       visitId: req.params.id, note: req.body?.note, heldBy: req.technicianId || null, scopeReq: req, conn: db,
     });
+    if (result.changed) {
+      try { await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId, verifiedAdminsOnly: true }); } catch {}
+    }
     return res.json({ success: true, changed: result.changed, heldAt: result.heldAt });
   } catch (err) {
     if (err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
@@ -6752,6 +6879,9 @@ router.post('/:id/hold/release', requireAdmin, async (req, res, next) => {
   try {
     if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
     const result = await visitHoldService.releaseVisitHold({ visitId: req.params.id, conn: db });
+    if (result.changed) {
+      try { await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId, verifiedAdminsOnly: true }); } catch {}
+    }
     return res.json({ success: true, changed: result.changed });
   } catch (err) {
     if (err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
@@ -6826,7 +6956,7 @@ router.get('/', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         // The primary address on file, for the rain step's stopForecastZone
         // (stampedAddressDiverges): kept on the row only, never in the response.
-        'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
+        'customers.address_line1 as customer_address_line1', 'customers.address_line2 as customer_address_line2', 'customers.city as customer_city', 'customers.zip as customer_zip',
         // Visit coordinates for map-centered tools (treatment-zone mapper):
         // stamped visit coords win; the customer mirror only backfills a
         // NON-divergent stamp — a divergent stamp with no coords must degrade
@@ -7003,6 +7133,12 @@ router.get('/', async (req, res, next) => {
     } catch { deferredPrepayCustomerIds = null; }
     // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
     const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
+    // For technicians, raw property access codes and away-mode dates follow
+    // access-code-capture.js#listForVisit: only active (non-completed/terminal)
+    // visits in [yesterday..tomorrow] ET at the matching home receive them.
+    const activeHomesByCustomer = await loadTechHomesByCustomerIds(db, req, services.map((s) => s.customer_id));
+    const techPrimaryAllowedIds = await loadTechPrimaryAccessIds(db, req, services, activeHomesByCustomer);
+    const techRecheckCandidates = [];
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -7052,14 +7188,25 @@ router.get('/', async (req, res, next) => {
       // Compiled by the shared helper (services/nextstop-alerts.js) so the
       // pre-visit brief's deterministic access block and this day feed can
       // never drift — the block moved verbatim, behavior 1:1.
+      // Primary-home property_preferences codes require BOTH visit-window
+      // eligibility AND a primary-home match; neighborhoodGateByVisit is
+      // already scoped to the visit's own property_id so secondary homes keep
+      // their own neighborhood gate entry while inside the visit window.
+      const knownCodes = isTechnicianRequest(req) ? collectStoredAccessCodes(prefs, s) : null;
+      const allowTechVisitWindow = technicianMayReadVisitAccessCodes(req, s);
+      const allowTechPrimaryPrefs = !isTechnicianRequest(req) || (allowTechVisitWindow && techPrimaryAllowedIds.has(s.id));
+      const allowTechNeighborhood = !isTechnicianRequest(req)
+        || (allowTechVisitWindow && (visitHasDirectPremiseStamp(s) || !s.source_estimate_id || allowTechPrimaryPrefs));
+      const rowNeighborhoodGate = allowTechNeighborhood ? (neighborhoodGateByVisit.get(s.id) || null) : null;
+      const rowNeighborhoodActions = allowTechNeighborhood && gateActionVisits.has(s.id);
       const alerts = compilePropertyAlerts({
-        prefs,
-        notes: cleanedNotes,
+        prefs: allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs, knownCodes),
+        notes: redactTechFeedText(allowTechVisitWindow, cleanedNotes, knownCodes),
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
-        neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
-        neighborhoodActions: gateActionVisits.has(s.id),
+        neighborhoodGate: rowNeighborhoodGate,
+        neighborhoodActions: rowNeighborhoodActions,
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -7212,7 +7359,7 @@ router.get('/', async (req, res, next) => {
             });
           })
         : [];
-      return {
+      const row = {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
         ...(prepPhotosLive ? { customerSentPhotos: customerSentPhotosByServiceId.get(s.id) === true } : {}),
@@ -7350,7 +7497,7 @@ router.get('/', async (req, res, next) => {
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
-        ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(rowNeighborhoodActions ? { neighborhoodGateActions: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
@@ -7359,12 +7506,12 @@ router.get('/', async (req, res, next) => {
         // scheduler-audit filter is for scheduled_services.notes (where ops
         // sessions write audit trails), and would false-positive on genuine
         // tech prose like "No SMS sent because the phone is disconnected".
-        lastServiceNotes: previewText(lastService?.technician_notes),
+        lastServiceNotes: previewText(redactTechHistoryText(req, lastService?.technician_notes, knownCodes)),
         // Line-scoped last visit for the service dashboards (Protocol panel):
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: safeDate(lastLineService?.service_date),
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
-        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
+        lastLineServiceNotes: previewText(redactTechHistoryText(req, lastLineService?.technician_notes, knownCodes)),
         checkOutTime: s.check_out_time,
         // With checkInTime/checkOutTime: the drive line finds where the tech is now.
         enRouteAt: s.en_route_at || null,
@@ -7390,6 +7537,14 @@ router.get('/', async (req, res, next) => {
         visitId: s.visit_id || null,
         trackState: s.track_state || null,
       };
+      if (isTechnicianRequest(req)) {
+        techRecheckCandidates.push({
+          visit: s, row, prefs, cleanedNotes, genuinelyNew, normalizedType,
+          neighborhoodGate: rowNeighborhoodGate, neighborhoodActions: rowNeighborhoodActions,
+          hadWindow: allowTechVisitWindow, hadPrimary: allowTechPrimaryPrefs,
+        });
+      }
+      return row;
     }));
     require('../services/visit-groups').visitSummariesForRows(enriched);
     const visitIds = [...new Set(enriched.map((service) => service.visitId).filter(Boolean))];
@@ -7529,6 +7684,10 @@ router.get('/', async (req, res, next) => {
 
     await attachOfficeToldFields(req, enriched);
     stripTechOwnerOnlyMoney(req, enriched);
+    // Final authorization + access-code recheck runs AFTER all enrichment,
+    // closeout, roster, weather, and office-told awaits so reassigned visits
+    // are removed and completed/changed stops never serialize raw credentials.
+    await applyTechScheduleFeedRecheck(db, req, techRecheckCandidates, { enriched, byTech, unassigned, date });
 
     res.json({
       date, services: enriched,
@@ -8257,10 +8416,12 @@ router.get('/month', async (req, res, next) => {
           completed: daySvcs.filter(s => s.status === 'completed').length,
           categoryCounts,
           techCounts,
-          estimatedRevenue: daySvcs.reduce((sum, s) => {
-            const rev = { pest: 110, lawn: 75, mosquito: 89, termite: 200, tree_shrub: 130, rodent: 95 };
-            return sum + (rev[s.serviceCategory] || 95);
-          }, 0),
+          ...adminOnlyFields(req, {
+            estimatedRevenue: daySvcs.reduce((sum, s) => {
+              const rev = { pest: 110, lawn: 75, mosquito: 89, termite: 200, tree_shrub: 130, rodent: 95 };
+              return sum + (rev[s.serviceCategory] || 95);
+            }, 0),
+          }),
         });
 
         currentDate.setDate(currentDate.getDate() + 1);
@@ -9580,7 +9741,7 @@ async function scheduleCreateHandler(req, res, next) {
       if (!resolvedTechId) {
         const auto = await require('../services/scheduling/office-auto-technician').resolveOfficeAutoTechnician({
           date: scheduledDate, windowStart, windowEnd, durationMinutes: duration,
-          serviceId: serviceId || null, serviceKey: serviceRecord?.service_key, serviceType,
+          serviceId: serviceId || null, serviceKey: serviceRecord?.service_key, serviceType, serviceAddons,
           customerId, lat: bookingProperty?.lat ?? customer?.latitude ?? null, lng: bookingProperty?.lng ?? customer?.longitude ?? null,
           // The selected property's ZIP leads the territory pick (GATE_TERRITORY_ROUTING): a
           // secondary property with no pin must not read as the main one's coordinates.
@@ -10095,13 +10256,11 @@ async function scheduleCreateHandler(req, res, next) {
       }));
       // Job type (GATE_TECH_JOB_TYPE_CHECKS): the chosen technician is set to Off for this
       // service's category - the same advisory path, never a block ([] with the gate off).
-      if (resolvedTechId) {
-        bookingWarnings.push(...await require('../services/technician-eligibility').capabilityOffWarningsFor(
-          resolvedTechId,
-          [{ service_type: serviceType, service_id: serviceId || null, service_key: pricing.primaryServiceKey || null }],
-          { conn: trx },
-        ));
-      }
+      await appendVisitCapabilityOffWarnings(trx, resolvedTechId, {
+        primary: { service_type: serviceType, service_id: serviceId || null, service_key: pricing.primaryServiceKey || null },
+        addons: Array.isArray(serviceAddons) ? serviceAddons : [],
+        targetWarnings: bookingWarnings,
+      });
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -11603,6 +11762,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               await acquireOccupancyLock(trx, bulkTargetDate);
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
+              if (visitHoldService.rowIsHeld(svc)) {
+                throw Object.assign(new Error('visit is on hold — release the hold before rescheduling'), { isValidation: true, code: 'visit_on_hold' });
+              }
               // Terminal rows are one-way (#2717 pattern — see the cancel
               // branch below): a stale board selection must not resurrect a
               // finished visit onto a new date.
@@ -11899,7 +12061,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     // a row grouped since the read misses instead of moving
                     // alone (knex renders null as IS NULL).
                     visit_id: svc.visit_id ?? null,
-                  }),
+                  })
+                  .where(visitHoldService.unheldPredicate()),
                 svc,
               )
                 .update({ ...updates, ...recurringDispatchDuePatch(svc, updates), updated_at: new Date() })
@@ -15774,7 +15937,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // other). One check, on the tech-day fence already taken above, before
       // any write in this transaction — refuse before the first write, same
       // as the create-appointment path.
-      if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
+      if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined || serviceEditPosted || Array.isArray(addons)) {
         const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
           .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', 'window_start', 'window_end', 'estimated_duration_minutes',
             trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
@@ -15800,16 +15963,16 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           const offDayLine = await require('../services/technician-eligibility').dayWarningFor(finalTechnicianId, finalDate, { conn: trx, block: { ...eligibilityRow, ...updates } });
           dayLineAsked = true;
           if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
-          // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
-          // category. Advisory, never a block ([] with the gate off).
-          if (finalTechChanging) {
-            const capabilityLines = await require('../services/technician-eligibility').capabilityOffWarningsFor(finalTechnicianId, [{
-              service_type: updates.service_type !== undefined ? updates.service_type : eligibilityRow?.service_type,
-              service_id: updates.service_id !== undefined ? updates.service_id : eligibilityRow?.service_id,
-              service_key: updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : eligibilityRow?.service_key_snapshot,
-            }], { conn: trx });
-            for (const line of capabilityLines) if (!editWarnings.includes(line)) editWarnings.push(line);
-          }
+        }
+        // Job type (GATE_TECH_JOB_TYPE_CHECKS): check primary service + add-ons
+        // whenever the technician, primary service, or add-ons change (P1-4).
+        if (finalTechChanging || serviceEditPosted || Array.isArray(addons)) {
+          await appendVisitCapabilityOffWarnings(trx, finalTechnicianId, {
+            primary: { ...eligibilityRow, ...updates },
+            addons,
+            serviceId: req.params.id,
+            targetWarnings: editWarnings,
+          });
         }
       }
       // Match customer editors and grouping: maintenance/comms,
@@ -19790,7 +19953,7 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
 // and we split it evenly across every non-completed sibling so each visit
 // completes against its own slice — the per-visit invoice-skip logic keeps
 // working unchanged.
-router.post('/:id/prepaid', async (req, res, next) => {
+router.post('/:id/prepaid', requireAdmin, async (req, res, next) => {
   try {
     // Ownership before money: a technician must not be able to stamp
     // prepayments (or mint receipts) onto another tech's visits, nor onto
@@ -19927,7 +20090,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
 // `?series=1` is passed, every eligible sibling in the recurring family is
 // cleared too — symmetry with the POST flow so the operator doesn't have to
 // hunt down each prepaid visit individually if the customer asks for a refund.
-router.delete('/:id/prepaid', async (req, res, next) => {
+router.delete('/:id/prepaid', requireAdmin, async (req, res, next) => {
   try {
     if (!(await technicianOwnsScheduledService(req, req.params.id, { forMutation: true }))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
@@ -19997,6 +20160,56 @@ router.delete('/:id/prepaid', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+async function buildValidatedCheckoutExtraLines(extras, baseAmount) {
+  const extraLines = extras
+    .map((e) => {
+      const quantity = Number(e?.quantity) || 1;
+      const rawUnitPrice = Number(e?.unit_price) || 0;
+      const rawAmount = Number(e?.amount) || 0;
+      const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (quantity !== 0 ? rawAmount / quantity : 0);
+      const lineAmount = rawAmount || quantity * unit_price;
+      return {
+        description: String(e?.description || '').slice(0, 200),
+        quantity,
+        unit_price,
+        amount: lineAmount,
+        category: e?.category ? String(e.category).slice(0, 100) : null,
+        discount_id: e?.discount_id ? String(e.discount_id) : null,
+      };
+    })
+    .filter((e) => e.description && Number.isFinite(e.unit_price));
+  const invoiceExtraLines = [];
+  const extraServicesSubtotal = extraLines
+    .filter((e) => Number(e.amount) > 0)
+    .reduce((sum, e) => sum + Number(e.amount), 0);
+  const extraDiscountBase = Math.max(0, baseAmount + extraServicesSubtotal);
+  for (const e of extraLines) {
+    if (Number(e.amount) < 0 && e.discount_id) {
+      const discount = await loadInvoiceDiscount(e.discount_id);
+      const resolved = calculateDiscountDollars(discount, extraDiscountBase, discount.amount);
+      const submittedDollars = Math.round(Math.abs(Number(e.amount) || 0) * 100) / 100;
+      const dollars = Math.min(submittedDollars, resolved.dollars);
+      if (!(dollars > 0)) continue;
+      invoiceExtraLines.push({
+        description: e.description || discount.name || 'Discount',
+        quantity: 1,
+        unit_price: -dollars,
+        amount: -dollars,
+        category: e.category,
+        discount_id: discount.id,
+        discount_type: discount.discount_type,
+        discount_amount: Number(discount.amount) || 0,
+        discount_dollars: dollars,
+        use_stored_discount: true,
+        stored_discount_source: 'validated_checkout',
+      });
+    } else {
+      invoiceExtraLines.push(e);
+    }
+  }
+  return invoiceExtraLines;
+}
+
 // POST /api/admin/schedule/:id/invoice — mint an invoice BEFORE the visit is
 // marked complete. Used by "Charge now" so the tech can run Tap-to-Pay at the
 // door before finishing the service report. The completion handler later
@@ -20020,6 +20233,12 @@ router.post('/:id/invoice', async (req, res, next) => {
         'customers.billing_mode as cust_billing_mode')
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
+    // P0-6: Technicians may collect at the server-calculated visit total only —
+    // reject custom items/discounts before payer/prepay/existing-invoice paths.
+    if (extras.length > 0 && isTechnicianRequest(req)) {
+      return res.status(403).json({ error: 'Only admins can add extra items or discounts during checkout.' });
+    }
 
     // Third-party Bill-To: this endpoint mints a collectible invoice and returns
     // its token to the tech checkout sheet for in-person card/ACH collection. A
@@ -20317,53 +20536,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // caller of this endpoint, and any client older than this slice) skips
     // the check entirely — byte-identical to before.
     const expectedDiscountStacking = req.body?.expected_discount_stacking;
-    const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
-    const extraLines = extras
-      .map((e) => {
-        const quantity = Number(e?.quantity) || 1;
-        const rawUnitPrice = Number(e?.unit_price) || 0;
-        const rawAmount = Number(e?.amount) || 0;
-        const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (quantity !== 0 ? rawAmount / quantity : 0);
-        const amount = rawAmount || quantity * unit_price;
-        return {
-          description: String(e?.description || '').slice(0, 200),
-          quantity,
-          unit_price,
-          amount,
-          category: e?.category ? String(e.category).slice(0, 100) : null,
-          discount_id: e?.discount_id ? String(e.discount_id) : null,
-        };
-      })
-      .filter((e) => e.description && Number.isFinite(e.unit_price));
-    const invoiceExtraLines = [];
-    const extraServicesSubtotal = extraLines
-      .filter((e) => Number(e.amount) > 0)
-      .reduce((sum, e) => sum + Number(e.amount), 0);
-    const extraDiscountBase = Math.max(0, amount + extraServicesSubtotal);
-    for (const e of extraLines) {
-      if (Number(e.amount) < 0 && e.discount_id) {
-        const discount = await loadInvoiceDiscount(e.discount_id);
-        const resolved = calculateDiscountDollars(discount, extraDiscountBase, discount.amount);
-        const submittedDollars = Math.round(Math.abs(Number(e.amount) || 0) * 100) / 100;
-        const dollars = Math.min(submittedDollars, resolved.dollars);
-        if (!(dollars > 0)) continue;
-        invoiceExtraLines.push({
-          description: e.description || discount.name || 'Discount',
-          quantity: 1,
-          unit_price: -dollars,
-          amount: -dollars,
-          category: e.category,
-          discount_id: discount.id,
-          discount_type: discount.discount_type,
-          discount_amount: Number(discount.amount) || 0,
-          discount_dollars: dollars,
-          use_stored_discount: true,
-          stored_discount_source: 'validated_checkout',
-        });
-      } else {
-        invoiceExtraLines.push(e);
-      }
-    }
+    const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extras, amount);
 
     const extrasTotal = invoiceExtraLines.reduce((s, e) => s + e.amount, 0);
     if (!(amount > 0) && extrasTotal <= 0) {
@@ -22082,6 +22255,16 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
   // the gate is off or nothing is stamped).
   parent = overlayRecurringTemplateOverrides(parent, cols);
   if (parent && parent.is_recurring && parent.recurring_pattern) {
+    // P1-4b: Do not auto-extend recurring series for inactive, deleted, or
+    // former customers — matches topUpOngoingSeriesLocked's eligibility fence.
+    const seriesCustomer = parent.customer_id
+      ? await conn('customers').where({ id: parent.customer_id }).first(...SERIES_CUSTOMER_COLUMNS)
+      : null;
+    const customerSkip = seriesCustomerSkipReason(seriesCustomer);
+    if (customerSkip) {
+      logger.info(`[recurring] Skipping maintenance for parent=${parentId} (customer ${customerSkip})`);
+      return null;
+    }
     // upcomingCount + latest must reflect the BASE recurring series
     // only — see countUpcomingSeriesVisits for the booster and
     // pending-vs-confirmed rationale.
@@ -24832,7 +25015,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
 });
 
 // GET /api/admin/schedule/zone-density
-router.get('/zone-density', async (req, res, next) => {
+router.get('/zone-density', requireAdmin, async (req, res, next) => {
   try {
     const date = req.query.date || etDateString();
     const density = await db('scheduled_services')
@@ -24871,6 +25054,20 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.*');
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    // Technicians read raw property access codes and absence/Away Watch dates
+    // only on non-ended visits in [yesterday..tomorrow] ET at the matching home.
+    const checkTechBriefCodeEligibility = async (visitRow) => {
+      if (!isTechnicianRequest(req)) return true;
+      if (!technicianMayReadVisitAccessCodes(req, visitRow)) return false;
+      const homesMap = await loadActiveHomesByCustomerIds(db, [visitRow.customer_id]);
+      const homes = homesMap ? (homesMap.get(visitRow.customer_id) || []) : null;
+      let customerPrimary = null;
+      if (Array.isArray(homes) && homes.length === 0) {
+        customerPrimary = await db('customers').where({ id: visitRow.customer_id }).first('address_line1', 'address_line2', 'city', 'zip').catch(() => null);
+      }
+      return visitMatchesPrimaryHomeForTechAccess(db, visitRow, homes, customerPrimary);
+    };
+    const allowTechBriefAccessCodes = await checkTechBriefCodeEligibility(svc);
     const PrevisitBrief = require('../services/previsit-brief');
     // Every `{brief: null}` answer optionally carries a deterministic
     // `facts` block (access codes + last same-line visit's products) for
@@ -24896,7 +25093,9 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
       try {
         const facts = await PrevisitBrief.deterministicVisitFacts(svc, undefined, { pastVisits: true, customerAsked: true });
-        if (facts.customer_asked) customerAskedBound = true;
+        const addonPrompt = await require('../services/tech-addon-prompt').techAddonPromptFacts(svc, db).catch(() => null);
+        if (addonPrompt) facts.addon_prompt = addonPrompt;
+        if (facts.customer_asked || facts.addon_prompt) customerAskedBound = true;
         // Re-verify the assignment AFTER the facts queries (Codex P1 on
         // #3638): they run outside the atomic ownership-scoped fetch
         // above, so a dispatch reassignment during them would otherwise
@@ -24929,7 +25128,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
             .update({ tech_seen_at: db.fn.now() })
             .catch((err) => logger.warn(`[admin-schedule] visit-prep tech_seen_at stamp failed for ${svc.id}: ${err.message}`));
         }
-        return { ...payload, facts };
+        const safeFacts = (!allowTechBriefAccessCodes && facts?.access)
+          ? { ...facts, access: stripAccessCodesFromBriefBlock(facts.access) }
+          : facts;
+        return { ...payload, facts: safeFacts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
         return payload;
@@ -24943,6 +25145,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const withAwayWatch = async (payload) => {
       const AwayWatch = require('../services/away-watch');
       if (!AwayWatch.awayWatchLive()) return payload;
+      // Absence/return dates follow the same visit-window + home eligibility
+      // rule as access codes so far-future or completed stops never expose
+      // when a customer's home stands empty.
+      if (isTechnicianRequest(req) && !allowTechBriefAccessCodes) return payload;
       let awayWatch = null;
       try {
         awayWatch = await AwayWatch.awayWatchCardLines(db, svc.id);
@@ -24976,22 +25182,60 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       // every brief gate off, and withholds the whole answer when the visit was lost during the read or the check cannot run.
       if (out && !out.editable) return payload;
       homeNoteLooked = true;
-      return out ? { ...payload, homeNote: { note: out.note, customerId: out.customerId } } : payload;
+      if (!out) return payload;
+      const safeNote = (isTechnicianRequest(req) && !allowTechBriefAccessCodes && typeof out.note?.body === 'string')
+        ? { ...out.note, body: redactFreeTextAccessCodes(out.note.body) }
+        : out.note;
+      return { ...payload, homeNote: { note: safeNote, customerId: out.customerId } };
     };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
     // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
     // customer the brief was built for (a merge changes the visit's customer while the technician stays assigned).
     // No longer so, or the check itself failing: the whole answer is withheld. All three gates off and no home note looked up: no extra read.
+    const stripCodesFromBriefPayload = (payload) => {
+      const next = { ...payload };
+      delete next.awayWatch;
+      const briefCodes = [
+        ...Object.values(next.facts?.access?.codes || {}),
+        ...Object.values(next.brief?.access?.codes || {}),
+      ].flatMap((v) => {
+        const t = String(v || '').trim();
+        const s = t.replace(/^[#*]+|[#*]+$/g, '');
+        return [t, s].filter((x) => x.length >= 3);
+      });
+      if (next.facts?.access) next.facts = { ...next.facts, access: stripAccessCodesFromBriefBlock(next.facts.access, briefCodes) };
+      if (next.brief?.access) next.brief = { ...next.brief, access: stripAccessCodesFromBriefBlock(next.brief.access, briefCodes) };
+      if (typeof next.homeNote?.note?.body === 'string') {
+        next.homeNote = {
+          ...next.homeNote,
+          note: { ...next.homeNote.note, body: redactFreeTextAccessCodes(next.homeNote.note.body, briefCodes) },
+        };
+      }
+      return next;
+    };
     const finalRecheck = async (payload) => {
-      if (!(homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
+      const techHoldingCodes = isTechnicianRequest(req) && allowTechBriefAccessCodes;
+      if (!(techHoldingCodes || homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
       try {
-        const stillOwned = await db('scheduled_services')
+        const recheckQ = db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
-          .modify((q) => (customerAskedBound ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
-          .modify((q) => technicianCurrentVisitFilter(req, q))
-          .first('scheduled_services.id');
-        return stillOwned ? payload : { brief: null };
+          .modify((q) => ((customerAskedBound || techHoldingCodes) ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
+          .modify((q) => technicianCurrentVisitFilter(req, q));
+        const stillOwned = techHoldingCodes
+          ? await recheckQ.first(
+            'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+            'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
+            'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+            'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+            'scheduled_services.source_estimate_id',
+          )
+          : await recheckQ.first('scheduled_services.id');
+        if (!stillOwned) return { brief: null };
+        if (techHoldingCodes && !(await checkTechBriefCodeEligibility(stillOwned))) {
+          return stripCodesFromBriefPayload(payload);
+        }
+        return payload;
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief final recheck failed for ${svc.id}: ${err.message}`);
         return { brief: null };
@@ -25020,7 +25264,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return answer({ brief: null, stale: staleReason });
       }
     }
-    const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
+    const safeBrief = (!allowTechBriefAccessCodes && parsedBrief?.access)
+      ? { ...parsedBrief, access: stripAccessCodesFromBriefBlock(parsedBrief.access) }
+      : parsedBrief;
+    const served = { brief: safeBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
     // Facts ride along with EVERY served brief (gated): the WDO and
     // legacy shapes carry no access/last_visit at all, and even a served
     // visit brief's access block is a snapshot from the :19/:49 sweep —
@@ -25037,7 +25284,13 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
 // holds the visit row locked in its own transaction, so a reassignment landing during the save refuses it. A stale save
 // (the note changed since the editor read it) is 409 with the current note. Staff only: no customer, report or token
 // route reads this table.
-const HOME_NOTE_VISIT_COLUMNS = ['scheduled_services.id', 'scheduled_services.customer_id'];
+const HOME_NOTE_VISIT_COLUMNS = [
+  'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+  'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
+  'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+  'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+  'scheduled_services.source_estimate_id',
+];
 const homeNoteVisitRefusal = (req, res) => (isTechnicianRequest(req)
   ? res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' })
   : res.status(404).json({ error: 'Scheduled service not found' }));
@@ -25056,8 +25309,22 @@ router.get('/:id/home-note', async (req, res, next) => {
     const stillOwned = await db('scheduled_services')
       .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
       .modify((q) => technicianCurrentVisitFilter(req, q))
-      .first('scheduled_services.id');
+      .first(HOME_NOTE_VISIT_COLUMNS);
     if (!stillOwned) return homeNoteVisitRefusal(req, res);
+    if (isTechnicianRequest(req)) {
+      const mayReadCodes = technicianMayReadVisitAccessCodes(req, stillOwned)
+        && await sameHomeForTechVisitPrefs(db, req.technicianId, stillOwned.customer_id, stillOwned);
+      if (!mayReadCodes) {
+        out.editable = false;
+        if (typeof out?.note?.body === 'string') {
+          const prefs = stillOwned.customer_id
+            ? await db('property_preferences').where({ customer_id: stillOwned.customer_id }).first().catch(() => null)
+            : null;
+          const knownCodes = collectStoredAccessCodes(prefs, stillOwned);
+          out.note = { ...out.note, body: redactFreeTextAccessCodes(out.note.body, knownCodes) };
+        }
+      }
+    }
     HomeNote.sendHomeNote(res, out);
   } catch (err) { next(err); }
 });
@@ -25080,9 +25347,24 @@ router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, a
           : Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });
       }
       if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forShare().first('id');
-      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id'], { allowCompleted: true });
+      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, [
+        'id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'property_id',
+        'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+        'source_estimate_id',
+      ], { allowCompleted: true });
       if (String(peek.customer_id || '') !== String(svc.customer_id || '')) {
         return { status: 409, error: 'This visit now belongs to another customer. Reload it.', code: 'customer_changed' };
+      }
+      if (isTechnicianRequest(req)) {
+        const mayReadCodes = technicianMayReadVisitAccessCodes(req, svc)
+          && await sameHomeForTechVisitPrefs(trx, req.technicianId, svc.customer_id, svc);
+        if (!mayReadCodes) {
+          return {
+            status: 403,
+            error: 'Home notes are read-only outside the active visit window at the matching service address.',
+            code: 'home_note_read_only',
+          };
+        }
       }
       return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
     });
@@ -25257,6 +25539,26 @@ router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function sanitizeEstimatePostureForTech(req, deposit, payment) {
+  if (!isTechnicianRequest(req)) return {};
+  return {
+    deposit: deposit
+      ? { payerBilled: Boolean(deposit.payerBilled), required: Boolean(deposit.required) }
+      : null,
+    payment: payment
+      ? {
+          billingTerm: payment.billingTerm || null,
+          ...(payment.annualPrepay ? {
+            annualPrepay: {
+              coversThisVisit: payment.annualPrepay.coversThisVisit,
+              refunded: Boolean(payment.annualPrepay.refunded),
+            },
+          } : {}),
+        }
+      : null,
+  };
+}
+
 // GET /api/admin/schedule/:id/estimate-source
 router.get('/:id/estimate-source', async (req, res, next) => {
   try {
@@ -25352,22 +25654,28 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       // the tech 360 for exactly this reason. Never hand it to a technician
       // token, which outlives the 7-day tech access window and any
       // reassignment/termination (ADMIN-BUG-R40). No tech client reads this
-      // field.
-      ...(isTechnicianRequest(req) ? {} : { estimateToken: est.token }),
+      // field. Owner-only quote totals/deposit/payment posture are also stripped
+      // for technicians (P1-9).
+      ...adminOnlyFields(req, {
+        estimateToken: est.token,
+        quotedTotal,
+        monthlyTotal: Number(est.monthly_total || 0),
+        annualTotal: Number(est.annual_total || 0),
+        onetimeTotal: Number(est.onetime_total || 0),
+        deposit,
+        payment,
+      }),
+      ...sanitizeEstimatePostureForTech(req, deposit, payment),
       // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
       estimateSlug: est.estimate_slug || null,
-      quotedTotal,
       linkedSeriesCount,
-      monthlyTotal: Number(est.monthly_total || 0),
-      annualTotal: Number(est.annual_total || 0),
-      onetimeTotal: Number(est.onetime_total || 0),
       estimateStatus: est.status,
       createdAt: est.created_at,
-      lines,
-      deposit,
-      payment,
+      lines: isTechnicianRequest(req)
+        ? lines.map((line) => ({ name: line.name, cadence: line.cadence, category: line.category }))
+        : lines,
     });
   } catch (err) { next(err); }
 });
@@ -25444,6 +25752,17 @@ const {
 // or carrying the PaymentIntent that page opens — is the normal state, not a
 // refusal. That lane voids nothing at the choice; every money guard below
 // (collected, part-paid, credited, deposit, payer, foreign lines) still holds.
+function supersedeInvoiceHoldReason(inv) {
+  const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview } = require('../services/invoice-helpers');
+  if (inv.payer_id || inv.payer_statement_id || invoiceWithdrawnFromCustomer(inv)) {
+    return 'isn’t available — this visit’s invoice bills to a third-party payer';
+  }
+  if (invoiceHeldForChemicalReview(inv)) {
+    return 'isn’t available — this visit’s invoice is held for office chemical add-on billing review';
+  }
+  return null;
+}
+
 async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db, delivered = false }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0) {
     return { ok: true, supersedes: [] };
@@ -25489,8 +25808,8 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
           });
       })
       .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid', 'paid_at',
-        'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
-        'notes');
+        'payer_id', 'payer_statement_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
+        'scheduled_send_error', 'notes');
   } catch (err) {
     logger.warn(`[schedule:prepay-switch] attached-invoice lookup failed for ${visitIds.join(',')}: ${err.message} — refusing`);
     return { ok: false, blockReason: 'couldn’t confirm what this visit is already invoiced for — refresh and try again' };
@@ -25557,8 +25876,9 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     if (lines.some((li) => String(li?.category || '') === 'deposit_credit')) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit carries an estimate deposit credit. Mint the prepay from Customer 360 so the deposit is applied to it` };
     }
-    if (inv.payer_id) {
-      return { ok: false, blockReason: 'isn’t available — this visit’s invoice bills to a third-party payer' };
+    const holdBlockReason = supersedeInvoiceHoldReason(inv);
+    if (holdBlockReason) {
+      return { ok: false, blockReason: holdBlockReason };
     }
     supersedes.push({
       id: inv.id,
@@ -25582,8 +25902,17 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
 
 // The series anchor + accepted-estimate provenance for an on-site switch.
 // Shared by the preview and the supersede/undo writes so "is this a legit
-// post-accept switch?" has one answer. Returns { ok, visit, anchor,
-// estimateId } or { ok: false, status, blockReason }.
+function parseEstimateDataJson(raw) {
+  if (!raw) return null;
+  if (typeof raw !== 'string') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function estimatePrepayNoPercent(estimateData) {
+  return estimateData
+    ? require('../services/estimate-converter').estimateHasNoYear1PrepayPercent(estimateData)
+    : false;
+}
 async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   const visit = await conn('scheduled_services')
     .where({ id: scheduledServiceId })
@@ -25648,7 +25977,7 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   try {
     estimate = await conn('estimates')
       .where({ id: anchor.source_estimate_id })
-      .first('id', 'status', 'accepted_at');
+      .first('id', 'status', 'accepted_at', 'estimate_data');
   } catch (err) {
     logger.warn(`[schedule:prepay-switch] estimate lookup failed for ${anchor.id}: ${err.message} — refusing`);
     return { ok: false, status: 409, blockReason: 'couldn’t confirm the linked quote’s status — refresh and try again' };
@@ -25656,12 +25985,14 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   if (!estimate || !estimate.accepted_at || String(estimate.status || '').toLowerCase() !== 'accepted') {
     return { ok: false, status: 409, blockReason: 'is handled by the linked quote — accept it as annual prepay from the estimate instead' };
   }
+  const estimateData = parseEstimateDataJson(estimate.estimate_data);
   return {
     ok: true,
     visit,
     anchor,
     customerId: String(anchor.customer_id || visit.customer_id || ''),
     estimateId: String(anchor.source_estimate_id),
+    estimateData,
     visitIds: seriesIds,
   };
 }
@@ -25802,6 +26133,7 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // supersede match is bound to, so only ITS accept-minted invoice can be
     // replaced.
     let anchorEstimateId = null;
+    let anchorEstimateData = null;
     if (scheduledServiceId) {
       const visit = await conn('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -25844,6 +26176,7 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         if (!target.ok) return blocked(target.blockReason);
         isAcceptedSwitch = true;
         anchorEstimateId = target.estimateId;
+        anchorEstimateData = target.estimateData;
         supersedeVisitIds = target.visitIds;
       }
       // Fail CLOSED on an unreadable add-on count (Codex #3161 r2 P2):
@@ -26188,7 +26521,13 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
       .filter((li) => RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
       .reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
     const unwaivedSetupFee = directSetupFee > 0 ? directSetupFee : supersededRodentSetup;
-    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
+    const pricing = computeSeriesPrepayPricing({
+      perVisit,
+      visitsPerYear,
+      planClass,
+      unwaivedSetupFee,
+      noYear1PrepayPercent: estimatePrepayNoPercent(anchorEstimateData),
+    });
     // payPage: a bait-station setup is carried onto the prepay, never waived,
     // which the two-option block does not explain. Those plans switch through
     // the office.
@@ -26516,6 +26855,7 @@ async function runPrepaySwitch({
       await trx('invoices')
         .where(function supersedeNets() {
           this.whereIn('scheduled_service_id', target.visitIds);
+          if (payPageInvoiceId) this.orWhere({ id: payPageInvoiceId });
           if (target.estimateId) {
             this.orWhere(function customerProvenance() {
               this.where({ customer_id: target.customerId })
@@ -29418,25 +29758,19 @@ router.get('/services-dropdown', async (req, res, next) => {
 });
 
 // GET /api/admin/schedule/recommend-slots — smart slot recommendations
-router.get('/recommend-slots', async (req, res, next) => {
+router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
   try {
-    const { customerId, serviceType, date, serviceId } = req.query;
+    const { date } = req.query;
     if (!date) return res.status(400).json({ error: 'date required' });
 
-    // Try CSR booker first
-    try {
-      const CSRBooker = require('../services/csr-booker');
-      if (CSRBooker.recommendSlots) {
-        const result = await CSRBooker.recommendSlots({ customerId, serviceType, date, serviceId });
-        if (result?.slots?.length) return res.json(result);
-      }
-    } catch (e) { logger.warn(`[recommend-slots] CSR booker unavailable: ${e.message}`); }
-
-    // Basic slot finder: check existing services on that date
-    const existing = await db('scheduled_services')
-      .where({ scheduled_date: date })
-      .whereNotIn('status', ['cancelled'])
-      .select('window_start', 'window_end', 'estimated_duration_minutes');
+    // Basic slot finder: check live non-held, non-cancelled services (including active reservations) on that date
+    const existing = await require('../services/visit-hold').excludeHeld(
+      db('scheduled_services')
+        .where({ scheduled_date: date })
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', db.fn.now())),
+      'scheduled_services'
+    ).select('window_start', 'window_end', 'estimated_duration_minutes');
 
     const busySlots = existing.map(s => {
       const start = s.window_start || '08:00';
@@ -29445,16 +29779,16 @@ router.get('/recommend-slots', async (req, res, next) => {
       return { startMin: sh * 60 + sm, endMin: sh * 60 + sm + dur };
     });
 
-    // Find open 30-min windows between 7 AM (420) and 5 PM (1020)
+    // Find open on-the-hour windows between 8 AM (480) and 5 PM (1020)
     const candidates = [];
-    for (let min = 420; min <= 1020; min += 30) {
+    for (let min = 480; min <= 1020; min += 60) {
       const conflicts = busySlots.filter(b => min < b.endMin && min + 30 > b.startMin).length;
       candidates.push({ min, conflicts });
     }
 
     // Sort by fewest conflicts, pick top 3, spread across morning/midday/afternoon
     candidates.sort((a, b) => a.conflicts - b.conflicts);
-    const morning = candidates.find(c => c.min >= 420 && c.min < 660);
+    const morning = candidates.find(c => c.min >= 480 && c.min < 660);
     const midday = candidates.find(c => c.min >= 660 && c.min < 840);
     const afternoon = candidates.find(c => c.min >= 840 && c.min <= 1020);
 

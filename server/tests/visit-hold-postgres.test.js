@@ -131,7 +131,10 @@ postgres('visit on hold on PostgreSQL', () => {
     test('a technician hold re-checks ownership on the locked row: another technician is refused, the owner is let in', async () => {
       const techA = randomUUID();
       const techB = randomUUID();
-      await trx('technicians').insert([{ id: techA, name: 'Tech A' }, { id: techB, name: 'Tech B' }]);
+      await trx('technicians').insert([
+        { id: techA, name: 'Tech A', employment_status: 'active', field_dispatchable: true, active: true },
+        { id: techB, name: 'Tech B', employment_status: 'active', field_dispatchable: true, active: true },
+      ]);
       const id = await visit({ technician_id: techB });
       const asTech = (technicianId) => ({ techRole: 'technician', technicianId });
       await expect(hold.putVisitOnHold({ visitId: id, scopeReq: asTech(techA) })).rejects.toMatchObject({ status: 404 });
@@ -187,7 +190,10 @@ postgres('visit on hold on PostgreSQL', () => {
     test('with multi-technician confirm on, another technician\'s booking does not block the release', async () => {
       const techA = randomUUID();
       const techB = randomUUID();
-      await trx('technicians').insert([{ id: techA, name: 'Tech A' }, { id: techB, name: 'Tech B' }]);
+      await trx('technicians').insert([
+        { id: techA, name: 'Tech A', employment_status: 'active', field_dispatchable: true, active: true },
+        { id: techB, name: 'Tech B', employment_status: 'active', field_dispatchable: true, active: true },
+      ]);
       const date = ymdOffset(8);
       const id = await visit({ scheduled_date: date, technician_id: techA });
       await hold.putVisitOnHold({ visitId: id });
@@ -467,7 +473,7 @@ postgres('visit on hold on PostgreSQL', () => {
     });
 
     test('day 14 rings ONE bell, never again, and the bell closes when the hold ends', async () => {
-      const id = await visit({ scheduled_date: ymdOffset(-1) });
+      const id = await visit({ scheduled_date: ymdOffset(2) });
       await trx('scheduled_services').where({ id }).update({ held_at: new Date(Date.now() - 15 * 86400000), hold_note: 'x' });
       const young = await visit();
       await trx('scheduled_services').where({ id: young }).update({ held_at: new Date(Date.now() - 5 * 86400000) });

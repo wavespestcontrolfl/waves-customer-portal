@@ -10,9 +10,8 @@
  *
  * Built for GATE_VOICE_RELAY_OPENAI (server/services/voice-agent/
  * relay-conversation.js) — Sandy's benchmark/sandbox lane running on an
- * OpenAI model — and, separately, GATE_VOICE_RELAY_OPENAI_INBOUND for
- * production inbound (dark by default). This file is never imported by
- * anything that isn't provider === 'openai' for the pinned session model.
+ * OpenAI model. This file is never imported by anything that isn't
+ * provider === 'openai' for the pinned session model.
  *
  * This client never substitutes Claude itself on any failure — an OpenAI
  * error, a bad response shape, or an aborted stream all reject

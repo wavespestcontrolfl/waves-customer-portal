@@ -21,7 +21,16 @@ jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(async () => ({ ok: true })) }));
 const mockProfile = { current: { id: 'c', deleted_at: null } };
 jest.mock('../models/db', () => {
-  const dbFn = Object.assign(jest.fn(), { raw: jest.fn(), fn: { now: jest.fn() } });
+  const dbFn = Object.assign(
+    jest.fn(() => ({
+      where: () => ({
+        whereNull: () => ({
+          first: async () => (mockProfile.current && !mockProfile.current.deleted_at ? mockProfile.current : null),
+        }),
+      }),
+    })),
+    { raw: jest.fn(), fn: { now: jest.fn() } },
+  );
   // The write's transaction: trx('customers') answers the locked profile read (mockProfile.current).
   const trx = Object.assign(() => ({ where: () => ({ forUpdate: () => ({ first: async () => mockProfile.current }) }) }), { tag: 'TRX' });
   dbFn.transaction = jest.fn(async (cb) => cb(trx));
@@ -64,6 +73,17 @@ test('staff read the list', async () => {
   const res = await run('get', '/:id/reminder-contacts', { id: CUSTOMER });
   expect(res.body.reminderContacts).toHaveLength(1);
   expect(VisitRecipient.listReminderContacts).toHaveBeenCalledWith(CUSTOMER);
+});
+
+test('archived customer returns 404 on GET reminder-contacts without listing', async () => {
+  mockProfile.current = { id: CUSTOMER, deleted_at: '2026-11-27T10:00:00Z' };
+  try {
+    const res = await run('get', '/:id/reminder-contacts', { id: CUSTOMER });
+    expect(res.status).toBe(404);
+    expect(VisitRecipient.listReminderContacts).not.toHaveBeenCalled();
+  } finally {
+    mockProfile.current = { id: 'c', deleted_at: null };
+  }
 });
 
 test('a staff stop and restart are recorded as staff and audited', async () => {

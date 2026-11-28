@@ -1,6 +1,15 @@
 import { useState } from "react";
 import { cn } from "../ui";
 
+function isSafeHttpsUrl(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return false;
+  try {
+    return new URL(raw).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 // Photo thumbnails inside a message: SMS attachments in Communications, and
 // a customer's photos in a portal thread (PortalInboxTabV2).
 export function MessageMediaV2({ media = [], inverted = false }) {
@@ -9,7 +18,7 @@ export function MessageMediaV2({ media = [], inverted = false }) {
   // reads as a big empty black rectangle. Swap failed loads for a labeled
   // chip that still links to the attachment.
   const [failed, setFailed] = useState({});
-  const items = Array.isArray(media) ? media.filter((m) => m?.url) : [];
+  const items = Array.isArray(media) ? media.filter((m) => isSafeHttpsUrl(m?.url)) : [];
   if (!items.length) return null;
   return (
     <div className="mt-2 grid grid-cols-2 gap-1.5">

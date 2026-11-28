@@ -1,7 +1,13 @@
 // The completed first visit stays historical. Extension writers and coverage
 // readers use the same allowlisted current service/price template, under the
 // existing edit-scope gate. Overrides cannot change dates or ownership.
-const { isEnabled } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
+
+const ONE_TIME_ADDON_SERVICE_KEYS = new Set(['waveguard_membership']);
+const isOneTimeOnlyAddonKey = (serviceKey) => ONE_TIME_ADDON_SERVICE_KEYS.has(serviceKey)
+  || isAreaAddOnCatalogKey(serviceKey)
+  || serviceKey === 'mosquito_misting_refill';
 const PRICE_SERVICE_SERVICE_KEYS = [
   'service_type', 'service_id', 'service_key_snapshot', 'service_category_snapshot', 'is_callback',
 ];
@@ -30,11 +36,12 @@ function parseTemplateOverrides(raw) {
 
 function overlayRecurringTemplateOverrides(parent, cols) {
   if (!parent || !cols?.recurring_template_overrides) return parent;
-  if (!isEnabled('editApptPriceServiceScope')) return parent;
+  if (!featureGates.isEnabled('editApptPriceServiceScope')) return parent;
   const overrides = parseTemplateOverrides(parent.recurring_template_overrides);
   if (!overrides) return parent;
   return { ...parent, ...overrides };
 }
 
 module.exports = { PRICE_SERVICE_SERVICE_KEYS, PRICE_SERVICE_PRICE_KEYS, PRICE_SERVICE_OVERRIDE_KEYS,
+  ONE_TIME_ADDON_SERVICE_KEYS, isOneTimeOnlyAddonKey,
   parseTemplateOverrides, overlayRecurringTemplateOverrides };

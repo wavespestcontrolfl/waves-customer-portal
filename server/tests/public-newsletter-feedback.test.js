@@ -47,6 +47,12 @@ describe('public newsletter feedback routes', () => {
       const r = await fetch(`${baseUrl}/api/public/newsletter/feedback/${TOKEN}/great`);
       const html = await r.text();
       expect(r.status).toBe(200);
+      expect(html).toContain('<html lang="en">');
+      expect(html).toContain('</main>');
+      expect(html).toContain('<footer class="footer" role="contentinfo">');
+      expect(html).toContain('prefers-reduced-transparency: reduce');
+      expect(html).toContain('forced-colors: active');
+      expect(html).toContain('@media print');
       expect(html).toContain('You picked');
       expect(html).toContain('👍 Great');
       expect(html).toContain('method="POST"');

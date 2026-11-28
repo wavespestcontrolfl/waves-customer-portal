@@ -98,6 +98,49 @@ function toISODate(d) {
   return `${y}-${m}-${day}`;
 }
 
+function bulkSelectHint(onToggleSelect) {
+  return onToggleSelect ? '\nShift+click to select for bulk actions' : '';
+}
+
+function isAllDayAssignedStop(service) {
+  if (!service.technicianId) return false;
+  const startMin = parseHHMM(service.windowStart);
+  return startMin == null || startMin >= DAY_END_HOUR * 60;
+}
+
+function dayGridBulkState({ allowBulkActions, selection, pending, date, toggleSelection, onCreateSlot, handleCreateSlot }) {
+  return {
+    bulkToggle: allowBulkActions ? toggleSelection : undefined,
+    confirmDate: pending?.fromDate || date,
+    showBulkBar: allowBulkActions && selection.size > 0,
+    createSlotHandler: onCreateSlot ? handleCreateSlot : undefined,
+  };
+}
+
+function pruneSelection(prev, services, allowBulkActions) {
+  if (prev.size === 0) return prev;
+  if (!allowBulkActions) return new Set();
+  const ids = new Set(services.map((s) => s.id));
+  const filtered = new Set(Array.from(prev).filter((id) => ids.has(id)));
+  return filtered.size === prev.size ? prev : filtered;
+}
+
+function resolveRescheduleAnchor(pending, fallbackDate, target) {
+  const baseDate = pending.fromDate || fallbackDate;
+  const [newDate, newWindow, landMin] = target
+    ? [target.date, target.window, parseHHMM(target.window)]
+    : [baseDate, pending.newWindow, pending.toMin];
+  return { newDate, newWindow, moves: newDate !== baseDate || pending.fromMin !== landMin };
+}
+
+function todayETIso() {
+  try {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  } catch {
+    return toISODate(new Date());
+  }
+}
+
 function isSameISODate(a, b) {
   return a && b && a === b;
 }
@@ -612,10 +655,14 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
     ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
     : {};
 
+  const resizeCleanupRef = useRef(null);
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
+
   const handleResizeStart = useCallback((e) => {
     if (!onResize) return;
     e.preventDefault();
     e.stopPropagation();
+    resizeCleanupRef.current?.();
     const startY = e.clientY;
     const startHeight = Math.max(height, minHeight);
     // Whole slots moved by the pointer, signed: the save applies them to the
@@ -628,9 +675,18 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
       slots = Math.round((ev.clientY - startY) / SLOT_HEIGHT);
       setResizeHeight(Math.max(SLOT_HEIGHT, startHeight + slots * SLOT_HEIGHT));
     };
-    const onUp = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      resizeCleanupRef.current = null;
+    };
+    function onCancel() {
+      cleanup();
+      setResizeHeight(null);
+    }
+    function onUp() {
+      cleanup();
       setResizeHeight(null);
       if (slots !== 0) {
         // Delta-based on the visit's REAL duration, not the drawn height: a
@@ -647,9 +703,11 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
         const nextMin = slots < 0 ? Math.min(baseMin, floored) : floored;
         if (nextMin !== baseMin) onResize(service, nextMin);
       }
-    };
+    }
+    resizeCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [onResize, service, height, durationMin, minHeight]);
 
   const nameRow = (
@@ -725,7 +783,7 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
         borderLeft: outsideWindow ? `3px solid ${OUTSIDE_WINDOW_EDGE}` : accent ? `3px solid ${accent}` : undefined,
         ...dragStyle,
       }}
-      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${planned ? plannedTitleLine(planned, promise) : (offGridAt != null ? offGridTitleLine(offGridAt, promise) : '')}${drive ? `\nDrive: ${drive}` : ''}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || ''}${planned ? plannedTitleLine(planned, promise) : (offGridAt != null ? offGridTitleLine(offGridAt, promise) : '')}${drive ? `\nDrive: ${drive}` : ''}${bulkSelectHint(onToggleSelect)}`}
     >
       {routeOrder != null && !oneLine && (
         <div
@@ -927,9 +985,13 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
   const selRef = useRef(sel);
   useEffect(() => { selRef.current = sel; }, [sel]);
 
+  const createDragCleanupRef = useRef(null);
+  useEffect(() => () => createDragCleanupRef.current?.(), []);
+
   const handleCreateStart = useCallback((e, slotIdx) => {
     if (e.button !== 0) return;
     e.preventDefault();
+    createDragCleanupRef.current?.();
     const startIdx = slotIdx;
     setSel({ startIdx, endIdx: startIdx });
     const gridEl = gridRef.current;
@@ -941,9 +1003,18 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
       const idx = Math.min(SLOT_COUNT - 1, Math.max(0, Math.floor(y / SLOT_HEIGHT)));
       setSel((prev) => (prev ? { ...prev, endIdx: idx } : prev));
     };
-    const onUp = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      createDragCleanupRef.current = null;
+    };
+    function onCancel() {
+      cleanup();
+      setSel(null);
+    }
+    function onUp() {
+      cleanup();
       const cur = selRef.current;
       setSel(null);
       if (!cur) return;
@@ -962,9 +1033,11 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
         windowStart: minutesToHHMM(startMin),
         windowEnd: minutesToHHMM(endMin),
       });
-    };
+    }
+    createDragCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   }, [onCreateSlot, tech.id]);
 
   // Hours an open marker shares with a freed block. Over a skipped or
@@ -1252,7 +1325,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
         isSelected && !isDragging && 'ring-2 ring-zinc-900',
       )}
       style={{ background: statusBlockFill(service.status) || undefined, border: `1px solid ${statusBlockFill(service.status) || '#E4E4E7'}`, ...dragStyle }}
-      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || timeLabel}\nShift+click to select for bulk actions`}
+      title={`${service.customerName || 'Unassigned'} · ${serviceDisplayName(service)} · ${service.windowDisplay || timeLabel}${bulkSelectHint(onToggleSelect)}`}
     >
       <div className="u-nums opacity-90 mb-0.5">{timeLabel}</div>
       <button
@@ -1497,10 +1570,12 @@ export default function TimeGridDay({
   // Open-hour blocks are a booking prompt: only for staff who can create
   // appointments (POST /admin/schedule is admin-only).
   showOpenHours = true,
+  // Bulk move/unassign/separate actions are admin-only (P1-10).
+  allowBulkActions = true,
   // The server's enforced booking hours (day feed `bookingHours`), if any.
   bookingHours = null,
 }) {
-  const todayIso = toISODate(new Date());
+  const todayIso = todayETIso();
   const hourClock = useHourClock();
   const handleCreateSlot = useCallback((slot) => {
     onCreateSlot?.({ date, ...slot });
@@ -1509,6 +1584,15 @@ export default function TimeGridDay({
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(null);
   const [selection, setSelection] = useState(() => new Set());
+  const [dragging, setDragging] = useState(null);
+
+  // Clear day-scoped drag/optimistic state whenever the viewed day changes so
+  // a previous day's optimistic list never masks the newly loaded date (P1-23).
+  useEffect(() => {
+    setOptimistic(null);
+    setPending(null);
+    setDragging(null);
+  }, [date]);
 
   const allServices = optimistic || services;
 
@@ -1523,20 +1607,14 @@ export default function TimeGridDay({
 
   const clearSelection = useCallback(() => setSelection(new Set()), []);
 
-  // Drop ids that are no longer present in the current day's services.
+  // Drop ids that are no longer present in the current day's services (or when bulk actions are disallowed).
   useEffect(() => {
-    setSelection((prev) => {
-      if (prev.size === 0) return prev;
-      const ids = new Set(allServices.map((s) => s.id));
-      const filtered = new Set(Array.from(prev).filter((id) => ids.has(id)));
-      return filtered.size === prev.size ? prev : filtered;
-    });
-  }, [allServices]);
+    setSelection((prev) => pruneSelection(prev, allServices, allowBulkActions));
+  }, [allServices, allowBulkActions]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   // The visit in flight, and the hours that fit it on every route this day.
-  const [dragging, setDragging] = useState(null);
   const { fits: dragFits, best: bestFit } = useBoardOpenTimes({
     service: dragging,
     durationOf: bookedLength,
@@ -1574,12 +1652,11 @@ export default function TimeGridDay({
     return map;
   }, [allServices, techList]);
 
-  // Any-time + unassigned items live in the rail now; AllDayStrip only shows
-  // tech-assigned services that don't have a parseable time window.
+  // Any-time + unassigned items live in the rail now; AllDayStrip shows
+  // tech-assigned services with no parseable time window or starting at/after
+  // the grid's closing hour (20:00+) so late stops are never silently hidden.
   const allDay = useMemo(
-    () => allServices.filter(
-      (s) => !!s.technicianId && parseHHMM(s.windowStart) == null,
-    ),
+    () => allServices.filter(isAllDayAssignedStop),
     [allServices],
   );
 
@@ -1632,6 +1709,7 @@ export default function TimeGridDay({
       : (technicians.find((t) => t.id === toTech)?.name || null);
     setPending({
       svc,
+      fromDate: date,
       toTech,
       fromMin,
       toMin,
@@ -1640,18 +1718,15 @@ export default function TimeGridDay({
         ? { fromName: fromTechName, toName: toTechName }
         : null,
     });
-  }, [allServices, technicians, techList]);
+  }, [allServices, technicians, techList, date]);
 
   const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds, target }) => {
     if (!pending) return;
-    const { svc, toTech, fromMin, toMin } = pending;
+    const { svc, toTech } = pending;
     const fromTech = svc.technicianId || '__unassigned__';
     // A time tapped in the confirm's open-times list replaces the drop, and
     // may move the visit to another day.
-    const [newDate, newWindow, landMin] = target
-      ? [target.date, target.window, parseHHMM(target.window)]
-      : [date, pending.newWindow, toMin];
-    const moves = newDate !== date || fromMin !== landMin;
+    const { newDate, newWindow, moves } = resolveRescheduleAnchor(pending, date, target);
     setBusy(true);
     try {
       const techForApi = toTech === '__unassigned__' ? null : toTech;
@@ -1903,13 +1978,18 @@ export default function TimeGridDay({
     }
   }, [separable, onChange, clearSelection]);
 
+  const { bulkToggle, confirmDate, showBulkBar, createSlotHandler } = dayGridBulkState({
+    allowBulkActions, selection, pending, date, toggleSelection, onCreateSlot, handleCreateSlot,
+  });
+  const weekStrip = onDateChange ? <WeekStrip date={date} onDateChange={onDateChange} /> : null;
+
   if (techList.length === 0 && unassignedInRail.length === 0) {
     return (
       <div
         className="bg-white rounded-md overflow-hidden"
         style={{ border: '1px solid #E4E4E7' }}
       >
-        {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
+        {weekStrip}
         <div className="text-ink-secondary text-center py-16 text-14">
           No technicians scheduled for this day.
         </div>
@@ -1922,9 +2002,9 @@ export default function TimeGridDay({
       className="bg-white rounded-md overflow-hidden"
       style={{ border: '1px solid #E4E4E7' }}
     >
-      {onDateChange && <WeekStrip date={date} onDateChange={onDateChange} />}
+      {weekStrip}
       <AllDayStrip services={allDay} onEdit={onEdit} onProtocol={onProtocol} onTreatmentPlan={onTreatmentPlan} onViewAudit={onViewAudit} owesCompletion={owesCompletion} onViewCustomer={onViewCustomer} />
-      {selection.size > 0 && (
+      {showBulkBar && (
         <BulkActionBar
           count={selection.size}
           defaultDate={date}
@@ -1964,7 +2044,7 @@ export default function TimeGridDay({
               onViewAudit={onViewAudit} owesCompletion={owesCompletion}
               onViewCustomer={onViewCustomer}
               selection={selection}
-              onToggleSelect={toggleSelection}
+              onToggleSelect={bulkToggle}
             />
           )}
           {techList.length === 0 ? (
@@ -1985,10 +2065,10 @@ export default function TimeGridDay({
                     onTreatmentPlan={onTreatmentPlan}
                     onViewAudit={onViewAudit} owesCompletion={owesCompletion}
                     onViewCustomer={onViewCustomer}
-                    onCreateSlot={onCreateSlot ? handleCreateSlot : undefined}
+                    onCreateSlot={createSlotHandler}
                     onResize={handleResize}
                     selection={selection}
-                    onToggleSelect={toggleSelection}
+                    onToggleSelect={bulkToggle}
                     accent={techAccent(idx)}
                     showNowLine={date === todayIso}
                     // An unassigned booking holds its hour in every column:
@@ -2019,9 +2099,9 @@ export default function TimeGridDay({
       <RescheduleConfirmModal
         open={!!pending}
         customerName={pending?.svc?.customerName}
-        fromDate={date}
+        fromDate={confirmDate}
         fromMinutes={pending?.fromMin}
-        toDate={date}
+        toDate={confirmDate}
         toMinutes={pending?.toMin}
         isRecurring={!!pending?.svc?.isRecurring && !pending?.technicianChange}
         technicianChange={pending?.technicianChange}

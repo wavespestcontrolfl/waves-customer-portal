@@ -329,6 +329,7 @@ function availabilityFor(context, { rangeFrom, rangeTo, config, offer = false })
     // bookInsertionOffersLive() is live (the inspection page's contract, see inspection-public.js).
     capacityPlacement: booking.bookInsertionOffersLive(),
     bookArrivalGrace: true,
+    mintSignedOffers: false,
   });
 }
 

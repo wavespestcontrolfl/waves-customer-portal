@@ -8,7 +8,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import LawnReportV2Section from './LawnReportV2Section';
-import { LawnInsightCards, LawnPhotoStrip, PrintContext, VisualDiagnosisCards, WaterIntakeBar } from './LawnReportV2';
+import { PrintContext } from './lawnPrintContext';
+import { LawnInsightCards, LawnPhotoStrip, VisualDiagnosisCards, WaterIntakeBar } from './LawnReportV2';
 
 afterEach(cleanup);
 

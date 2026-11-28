@@ -1656,7 +1656,7 @@ router.get('/shadow-drafts', async (req, res, next) => {
         'message_drafts.id', 'message_drafts.customer_id', 'message_drafts.inbound_message',
         'message_drafts.draft_response', 'message_drafts.intent', 'message_drafts.scheduling_intent',
         'message_drafts.intended_actions', 'message_drafts.draft_ms', 'message_drafts.created_at',
-        'message_drafts.flags',
+        'message_drafts.flags', 'message_drafts.draft_trigger', 'message_drafts.supersedes_draft_id',
         'customers.first_name', 'customers.last_name',
         'shadow_draft_judgments.verdict', 'shadow_draft_judgments.scores',
         'shadow_draft_judgments.human_replied', 'shadow_draft_judgments.human_reply_text',
@@ -1678,6 +1678,8 @@ router.get('/shadow-drafts', async (req, res, next) => {
         intendedActions: r.intended_actions || null,
         draftMs: r.draft_ms,
         createdAt: r.created_at,
+        draftTrigger: r.draft_trigger || 'inbound',
+        supersedesDraftId: r.supersedes_draft_id || null,
         // comms-lint failures recorded on the draft (flags also carries
         // account/context entries; only the lint ones belong in the cohort
         // readout — the reviewer is grading the DRAFT, not the account).
@@ -1708,6 +1710,7 @@ router.get('/shadow-scores', async (req, res, next) => {
   try {
     const totals = await db('message_drafts')
       .where('status', 'shadow')
+      .where('draft_trigger', 'inbound')
       .select('intent')
       .count('* as drafts')
       .groupBy('intent');
@@ -2040,14 +2043,13 @@ router.post('/sealed-eval/runs', requireAdmin, async (req, res, next) => {
           // A resolved lock skip is not a rejection. lease_held means the
           // original holder is still working the run. no_connection means
           // THIS pod ran nothing — but the row is not provably ours to
-          // retire: another pod's stranded-run recovery (runAutoExamSweep)
-          // or a concurrent resume can take the fleet-wide lease and start
-          // processing it right after this pod bailed, and an unguarded
-          // status flip would mark that live run failed and let a second
-          // paid experiment start. The existing recovery path resumes a
-          // stranded 'running' row; surface the miss and leave it there.
+          // retire: a concurrent manual resume can take the fleet-wide lease
+          // and start processing it right after this pod bailed, and an
+          // unguarded status flip would mark that live run failed and let a
+          // second paid experiment start. Surface the miss and leave the
+          // stranded 'running' row for manual resume.
           if (outcome && outcome.skipped === true && outcome.reason === 'no_connection') {
-            logger.warn(`[sealed-eval] background run ${String(runId).slice(0, 8)} could not start on this pod (${outcome.reason}) — resume it or let the auto exam sweep recover it`);
+            logger.warn(`[sealed-eval] background run ${String(runId).slice(0, 8)} could not start on this pod (${outcome.reason}) — resume it manually`);
           }
         })
         .catch((err) => logger.error(`[sealed-eval] background run ${String(runId).slice(0, 8)} failed: ${err.message}`));

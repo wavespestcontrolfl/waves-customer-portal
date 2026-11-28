@@ -84,6 +84,7 @@ import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
 import CreateProjectModal, { wdoFeeSeedFromVisit } from "../../components/tech/CreateProjectModal";
 import { ProjectDetail } from "./ProjectsPage";
 import { getAdminUser } from "../../lib/adminAuth";
+import { acquireVisitStepReloadHold } from "../../components/tech/TechNavigationLock";
 import HorizontalScroll from "../../components/HorizontalScroll";
 import useIsMobile from "../../hooks/useIsMobile";
 import { ActionFeedback, Button, cn } from "../../components/ui";
@@ -418,6 +419,16 @@ function modalCustomerFrom(record) {
 // Board header SPRAY word colors: a rain HOLD reads as an alert, a wind check as a caution.
 const SPRAY_STATUS_TONE = { HOLD: "text-alert-fg", "CHECK WIND": "text-amber-700" };
 
+// Hold automatic out-of-date tab reloads while any visit completion, closeout,
+// checkout, or tender sheet is open on the Schedule page (P1-21).
+function useDispatchVisitStepReloadHold(values) {
+  const open = values.some(Boolean);
+  useEffect(() => {
+    if (!open) return undefined;
+    return acquireVisitStepReloadHold();
+  }, [open]);
+}
+
 export default function DispatchPageV2({
   activeTab: controlledActiveTab,
   setOpenCreateHandler,
@@ -618,6 +629,17 @@ export default function DispatchPageV2({
   };
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
+  useDispatchVisitStepReloadHold([
+    closingVisitId,
+    completingService,
+    treeShrubFastService,
+    lawnFastService,
+    assessmentFastService,
+    lawnReserviceFastService,
+    pestFastService,
+    checkoutService,
+    paymentData,
+  ]);
   // Staged handoffs are PER SERVICE (Map serviceId → handoff): a singleton
   // let an earlier visit's slower response overwrite the handoff already
   // staged for the open panel, whose close then found nothing to drain and
@@ -1443,7 +1465,7 @@ export default function DispatchPageV2({
           The Schedule h1 + "+ Add Appointment" pill that used to share this
           row are now lifted into AdminDispatchPage so they sit above the
           centered top-level tab pill. */}
-      {activeTab !== "board" && viewMode === "day" && getAdminUser()?.role === "admin" && (
+      {activeTab !== "board" && viewMode === "day" && verifiedRole === "admin" && (
         <div className="hidden md:flex justify-end mb-4">
           {" "}
           <Button
@@ -1682,6 +1704,7 @@ export default function DispatchPageV2({
           date={date}
           refreshKey={scheduleRefreshKey}
           technicians={technicians}
+          canAssign={verifiedRole === "admin"}
           owesCompletion={completionResumeMarked}
           onRefresh={() => setScheduleRefreshKey((key) => key + 1)}
           onEdit={(svc) => {
@@ -1695,7 +1718,7 @@ export default function DispatchPageV2({
           // The week list's Protocol button opens the panel (its Plan tab holds the lawn plan).
           onProtocol={(svc) => setProtocolService(svc)}
           // Open-hour rows book; POST /admin/schedule is admin-only.
-          onCreateSlot={getAdminUser()?.role === "admin" ? ({ date: slotDate, windowStart, techId }) => {
+          onCreateSlot={verifiedRole === "admin" ? ({ date: slotDate, windowStart, techId }) => {
             setNewApptDefaults({ date: slotDate, windowStart, techId });
             setShowNewAppt(true);
           } : undefined}
@@ -2022,7 +2045,8 @@ export default function DispatchPageV2({
               }
               onChange={() => fetchSchedule(date)}
               onDateChange={setDate}
-              showOpenHours={getAdminUser()?.role === "admin"}
+              showOpenHours={verifiedRole === "admin"}
+              allowBulkActions={verifiedRole === "admin"}
               bookingHours={safeData.bookingHours || null}
               onCreateSlot={isAdminRole ? ({ date: slotDate, windowStart, techId }) => {
                 setNewApptDefaults({ date: slotDate, windowStart, techId });
@@ -2038,8 +2062,9 @@ export default function DispatchPageV2({
               mode="day"
               date={date}
               bookingHours={safeData.bookingHours || null}
+              canAssign={verifiedRole === "admin"}
               // Open-hour rows book; POST /admin/schedule is admin-only.
-              onCreateSlot={getAdminUser()?.role === "admin" ? ({ date: slotDate, windowStart, techId }) => {
+              onCreateSlot={verifiedRole === "admin" ? ({ date: slotDate, windowStart, techId }) => {
                 setNewApptDefaults({ date: slotDate, windowStart, techId });
                 setShowNewAppt(true);
               } : undefined}
@@ -2069,7 +2094,7 @@ export default function DispatchPageV2({
 
       {/* Modals — V1 components, unchanged */}
       {closingVisitId && <VisitCloseoutSheet
-        key={closingVisitId} visitId={closingVisitId} products={products}
+        key={closingVisitId} visitId={closingVisitId} products={products} operatorId={fastCompleteOperatorId}
         onClose={() => setClosingVisitId(null)}
         onSaved={() => {
           setScheduleRefreshKey((value) => value + 1);
@@ -2332,7 +2357,7 @@ export default function DispatchPageV2({
               ? [projectService.completionProfile.projectType]
               : null
           }
-          allowInvoiceCompletion={getAdminUser()?.role === "admin"}
+          allowInvoiceCompletion={verifiedRole === "admin"}
           onViewDetails={
             isMobile
               ? (createdProject) => {
@@ -2478,7 +2503,7 @@ export default function DispatchPageV2({
                   setScheduleRefreshKey((k) => k + 1);
                 }
               }}
-              canAdminActions={getAdminUser()?.role === "admin"}
+              canAdminActions={verifiedRole === "admin"}
             />
           </div>
         </div>,
@@ -2722,7 +2747,9 @@ export default function DispatchPageV2({
       )}
       {checkoutService && (
         <MobileCheckoutSheet
+          key={checkoutService.id}
           service={checkoutService}
+          isAdmin={verifiedRole === "admin"}
           desktopVisible
           onClose={() => setCheckoutService(null)}
           onChargeSuccess={({

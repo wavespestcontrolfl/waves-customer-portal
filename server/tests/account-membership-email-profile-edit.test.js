@@ -86,3 +86,43 @@ describe('suppressProviderErrorLog', () => {
     expect(res.error).toContain('connection lost');
   });
 });
+
+test('bypassEmailOptOut skips notification_prefs.email_enabled opt-out for takeover security alerts', async () => {
+  jest.resetModules();
+  jest.doMock('../models/db', () => (table) => {
+    const c = new Proxy(function f() {}, {
+      get(_t, prop) {
+        if (prop === 'first') {
+          return jest.fn(async () => (table === 'notification_prefs' ? { email_enabled: false } : mockCustomer));
+        }
+        if (prop === 'insert') return jest.fn(async () => []);
+        if (prop === 'then') return undefined;
+        return jest.fn(() => c);
+      },
+    });
+    return c;
+  });
+  jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+  const localSendTemplate = jest.fn(async () => ({ sent: true, message: { provider_message_id: 'm2', sent_at: 'now' } }));
+  jest.doMock('../services/email-template-library', () => ({ sendTemplate: (...a) => localSendTemplate(...a) }));
+  const FreshEmail = require('../services/account-membership-email');
+
+  const blocked = await FreshEmail.sendAccountUpdated({
+    customerId: 'c1',
+    actorCustomerId: 'c1',
+    alwaysNotify: true,
+    changedItems: [{ key: 'profile', label: 'Account profile' }],
+  });
+  expect(blocked).toMatchObject({ ok: false, skipped: true, reason: 'email_opted_out' });
+  expect(localSendTemplate).not.toHaveBeenCalled();
+
+  const sent = await FreshEmail.sendAccountUpdated({
+    customerId: 'c1',
+    actorCustomerId: 'c1',
+    alwaysNotify: true,
+    bypassEmailOptOut: true,
+    changedItems: [{ key: 'profile', label: 'Account profile' }],
+  });
+  expect(sent.ok).toBe(true);
+  expect(localSendTemplate).toHaveBeenCalledTimes(1);
+});

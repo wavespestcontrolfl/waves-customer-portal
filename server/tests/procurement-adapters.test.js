@@ -12,7 +12,10 @@
  *   - no API key → RefusedError no_api_key before any call
  *   - item not on the account / ≠1 address / ≠1 payment → RefusedError, NO POST
  *   - POST failure / missing number → err.ambiguous (never re-POSTed)
- *   - success → order number + the vendor's read-back total (quote fallback)
+ *   - success → order number + the vendor's charge, read back by order number:
+ *     the USD total of a PAID order in a documented placed state (null
+ *     until then)
+ *   - readCharge(number) = the same read for an order placed earlier
  * SiteOne internals: trusted-host guard, allowlist parsing, money parsing,
  * and the SELECTORS map is the only place selectors live.
  */
@@ -34,12 +37,16 @@ function fakeFetch(routes) {
 }
 
 const happy = () => ({
-  'GET /api/items': { items: [{ id: 4242, name: 'Serviced by Waves 4x5' }] },
+  'GET /api/items': { items: [{ id: 4242, name: 'Serviced by Waves 4x5', isSizeRequired: false, buyingOptions: { quantity: { min: 50, max: 10000, increment: 50 } } }], canLoadMore: false },
   'GET /api/addresses': { addresses: [{ id: 'addr-1' }] },
   'GET /api/payments': { payments: [{ id: 'pay-1' }] },
   'POST /api/orders': { order: { number: 'SM-90001' } },
-  'GET /api/orders': { orders: [{ number: 'SM-90001', total: '318.40' }] },
+  // The new order by its number, as the vendor shows it once the card was charged (readCharge).
+  'GET /api/orders/SM-90001': placedOrder(),
 });
+function placedOrder(extra = {}) {
+  return { number: 'SM-90001', state: 'ready_for_production', paymentState: 'paid', shipmentState: 'pending', placedAt: '2026-11-26T12:00:00.000Z', currency: 'USD', itemTotal: 297.57, total: 318.4, items: [{ id: '4242', quantity: 500, total: 297.57 }], shippingAddress: { name: 'Fixture Office' }, ...extra };
+}
 
 // The vendor's documented order states: the ones of an order that stands as placed, and every
 // other answer (canceled, an unclaimed gift, a value the reference does not list, none at all).
@@ -47,7 +54,8 @@ const PLACED = ['complete', 'ready_for_production', 'in_production', 'ready_to_p
 const NOT_PLACED = [{ state: 'canceled' }, { state: 'gift_unclaimed' }, { state: 'pending' }, { state: 'COMPLETE' }, { state: '' }, { state: null }, { state: undefined }, { state: true }];
 
 // The live shapes (read 2026-11-26): the order list has NO item lines; one order carries them.
-const order = (number, placedAt, total, items, extra = {}) => ({ number, state: 'complete', paymentState: 'paid', shipmentState: 'delivered', placedAt, currency: 'USD', total, items, ...extra });
+// Delivered at the moment it was placed unless a test says otherwise: before any request it is checked against.
+const order = (number, placedAt, total, items, extra = {}) => ({ number, state: 'complete', paymentState: 'paid', shipmentState: 'delivered', placedAt, deliveredAt: placedAt, currency: 'USD', total, items, ...extra });
 const line = (id = '4242', quantity = 500) => ({ id, product: 'rounded-corner-stickers', quantity, total: 314 });
 // Routes for an account history, given newest first: the list (item lines stripped) + one GET per order.
 function history(orders) {
@@ -55,7 +63,9 @@ function history(orders) {
   for (const o of orders) routes[`GET /api/orders/${o.number}`] = o;
   return routes;
 }
-const quote = (orders, { vendorSku = '4242', quantity = 500 } = {}) => sm.bindingQuote({ vendorSku, quantity }, { fetchImpl: fakeFetch(Array.isArray(orders) ? history(orders) : orders).fetchImpl });
+// The request every quote is checked against was raised, and the stock last counted, after every fixture order arrived.
+const SINCE = '2026-11-20T00:00:00Z';
+const quote = (orders, { vendorSku = '4242', quantity = 500, since = SINCE, countedAt = SINCE } = {}) => sm.bindingQuote({ vendorSku, quantity, since, countedAt }, { fetchImpl: fakeFetch(Array.isArray(orders) ? history(orders) : orders).fetchImpl });
 
 beforeEach(() => { process.env.STICKERMULE_API_KEY = 'test-key'; });
 afterAll(() => { delete process.env.STICKERMULE_API_KEY; });
@@ -67,15 +77,16 @@ test('bindingQuote = the latest order of exactly this item at this count, read o
     order('R2', '2026-08-01T00:00:00Z', 322.1, [line()]),
     order('R1', '2026-07-01T00:00:00Z', 318.4, [line()]),
   ]));
-  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl })).toEqual({ cents: 32210, source: 'order R2' });
-  // One list page, then each newer order: the walk stops at the latest identical one (R1 is never read).
-  expect(calls.map((c) => c.path)).toEqual(['/api/orders', '/api/orders/R4', '/api/orders/R3', '/api/orders/R2']);
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: SINCE, countedAt: SINCE }, { fetchImpl })).toEqual({ cents: 32210, source: 'order R2' });
+  // One list page, then every order on it, each once: the price walk stops at the latest identical one (R2),
+  // and the on-its-way check reads the rest (R1).
+  expect(calls.map((c) => c.path)).toEqual(['/api/orders', '/api/orders/R4', '/api/orders/R3', '/api/orders/R2', '/api/orders/R1']);
   expect(String(fetchImpl.mock.calls[0][0])).toMatch(/\/api\/orders\?limit=50$/);
   expect(calls.every((c) => c.method === 'GET')).toBe(true);
-  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 1000 }, { fetchImpl })).toEqual({ cents: 52000, source: 'order R4' });
-  expect(await sm.bindingQuote({ vendorSku: 4242, quantity: 500 }, { fetchImpl })).toEqual({ cents: 32210, source: 'order R2' });
-  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 300 }, { fetchImpl })).toBeNull();
-  expect(await sm.bindingQuote({ vendorSku: '9999', quantity: 500 }, { fetchImpl })).toBeNull();
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 1000, since: SINCE, countedAt: SINCE }, { fetchImpl })).toEqual({ cents: 52000, source: 'order R4' });
+  expect(await sm.bindingQuote({ vendorSku: 4242, quantity: 500, since: SINCE, countedAt: SINCE }, { fetchImpl })).toEqual({ cents: 32210, source: 'order R2' });
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 300, since: SINCE, countedAt: SINCE }, { fetchImpl })).toBeNull();
+  expect(await sm.bindingQuote({ vendorSku: '9999', quantity: 500, since: SINCE, countedAt: SINCE }, { fetchImpl })).toBeNull();
   expect(await quote([])).toBeNull();
 });
 
@@ -84,34 +95,133 @@ test('bindingQuote: the LATEST identical order binds — canceled, unpaid, unrea
   const q = (latest) => quote([order('R2', '2026-09-01T00:00:00Z', 140, [line()], latest), older]);
   expect(await q({})).toEqual({ cents: 14000, source: 'order R2' });
   for (const bad of [{ state: 'canceled', paymentState: 'balance_due' }, { paymentState: 'balance_due' }, { paymentState: 'completed' }, { paymentState: null }, { total: null }, { currency: 'EUR' }, { currency: undefined }, ...NOT_PLACED]) {
-    expect(await q(bad)).toBeNull();
+    // No total binds. An order in a state that may still be coming is named, so its alert says which order.
+    const coming = 'state' in bad && !['canceled', 'gift_unclaimed'].includes(bad.state);
+    expect(await q(bad)).toEqual(coming ? { cents: null, source: 'order R2', outstanding: { number: 'R2', why: 'coming' } } : null);
   }
   // Paid alone is not enough: the order must also be in a state the vendor documents for a placed order.
-  for (const state of PLACED) expect(await q({ state })).toEqual({ cents: 14000, source: 'order R2' });
+  // A placed order not yet complete and delivered still binds its total, and is named as on its way.
+  for (const state of PLACED) expect(await q({ state })).toEqual({ cents: 14000, source: 'order R2', ...(state === 'complete' ? {} : { outstanding: { number: 'R2', why: 'coming' } }) });
+});
+
+test('bindingQuote: an order of this item not yet complete and delivered is named outstanding, so the dispatcher never buys over it', async () => {
+  const older = order('R1', '2026-07-01T00:00:00Z', 100, [line()]);
+  const q = (latest) => quote([order('R2', '2026-09-01T00:00:00Z', 140, [line()], latest), older]);
+  // Arrived = complete AND delivered. Shipped, pending, a value this does not know, or none is still coming.
+  expect(await q({ state: 'complete', shipmentState: 'delivered' })).toEqual({ cents: 14000, source: 'order R2' });
+  for (const shipmentState of ['shipped', 'pending', 'in_transit', 'DELIVERED', null, undefined]) {
+    expect(await q({ state: 'complete', shipmentState })).toEqual({ cents: 14000, source: 'order R2', outstanding: { number: 'R2', why: 'coming' } });
+  }
+  expect(await q({ state: 'in_production', shipmentState: 'pending' })).toEqual({ cents: 14000, source: 'order R2', outstanding: { number: 'R2', why: 'coming' } });
+  // A newer order holding this item at another count, or in a bundle, still on its way: outstanding too.
+  for (const items of [[line('4242', 1000)], [line('4242', 500), line('9', 1)]]) {
+    expect(await quote([order('R3', '2026-10-01T00:00:00Z', 520, items, { state: 'in_production', shipmentState: 'pending' }), order('R2', '2026-09-01T00:00:00Z', 140, [line()]), older])).toEqual({ cents: 14000, source: 'order R2', outstanding: { number: 'R3', why: 'coming' } });
+  }
+  // An OLDER order of this item still in production counts too, past the price match: the whole page is checked.
+  const { fetchImpl, calls } = fakeFetch(history([
+    order('R3', '2026-10-01T00:00:00Z', 140, [line()]),
+    order('R2', '2026-09-01T00:00:00Z', 520, [line('4242', 1000)], { state: 'in_production', shipmentState: 'pending' }),
+    order('R1', '2026-07-01T00:00:00Z', 100, [line()]),
+  ]));
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: SINCE, countedAt: SINCE }, { fetchImpl })).toEqual({ cents: 14000, source: 'order R3', outstanding: { number: 'R2', why: 'coming' } });
+  // Each order is read once, past the match too (the list alone is never trusted); the scan stops at the first one on its way.
+  expect(calls.map((c) => c.path)).toEqual(['/api/orders', '/api/orders/R3', '/api/orders/R2']);
+  // A state this does not know, or none, does not clear the guard: that order may still be coming.
+  for (const state of ['pending', undefined, null, 'COMPLETE']) {
+    expect(await quote([order('R3', '2026-10-01T00:00:00Z', 520, [line('4242', 1000)], { state, shipmentState: 'pending' }), order('R2', '2026-09-01T00:00:00Z', 140, [line()]), older])).toEqual({ cents: 14000, source: 'order R2', outstanding: { number: 'R3', why: 'coming' } });
+  }
+  // An order that may be coming but cannot be read in full could be one of this item: it is named, nothing is bought.
+  const unreadable = history([order('R2', '2026-09-01T00:00:00Z', 140, [line()]), order('R1', '2026-07-01T00:00:00Z', 100, [line()], { state: 'in_production' })]);
+  unreadable['GET /api/orders/R1'] = { number: 'R1', total: 100, currency: 'USD' };
+  expect(await quote(unreadable)).toEqual({ cents: 14000, source: 'order R2', outstanding: { number: 'R1', why: 'unreadable' } });
+  // The list says complete and delivered, the detail says in production: the order may still be coming.
+  const disagree = history([order('R2', '2026-09-01T00:00:00Z', 140, [line()]), older]);
+  disagree['GET /api/orders/R2'] = order('R2', '2026-09-01T00:00:00Z', 140, [line()], { state: 'in_production', shipmentState: 'pending' });
+  expect(await quote(disagree)).toEqual({ cents: 14000, source: 'order R2', outstanding: { number: 'R2', why: 'conflict' } });
+  // The list says canceled, the detail says paid, complete and delivered: neither is trusted, nothing is bought.
+  const canceledVsDelivered = history([order('R2', '2026-09-01T00:00:00Z', 140, [line()], { state: 'canceled' }), older]);
+  canceledVsDelivered['GET /api/orders/R2'] = order('R2', '2026-09-01T00:00:00Z', 140, [line()]);
+  // The list's canceled entry names no charge, so the binding order's two charges disagree: no price either.
+  expect(await quote(canceledVsDelivered)).toEqual({ cents: null, source: null, outstanding: { number: 'R2', why: 'conflict' } });
+  // An OLDER order the list shows delivered whose detail says in production: read, and named.
+  const olderDisagree = history([order('R3', '2026-10-01T00:00:00Z', 140, [line()]), order('R2', '2026-09-01T00:00:00Z', 520, [line('4242', 1000)])]);
+  olderDisagree['GET /api/orders/R2'] = order('R2', '2026-09-01T00:00:00Z', 520, [line('4242', 1000)], { state: 'in_production', shipmentState: 'pending' });
+  expect(await quote(olderDisagree)).toEqual({ cents: 14000, source: 'order R3', outstanding: { number: 'R2', why: 'conflict' } });
+  // No identical order to price, but an order of this item on its way: it is still named (cents null).
+  expect(await quote([order('R3', '2026-10-01T00:00:00Z', 520, [line('4242', 1000)], { state: 'in_production', shipmentState: 'pending' })])).toEqual({ cents: null, source: null, outstanding: { number: 'R3', why: 'coming' } });
+  // An order of this item placed since the request was raised covers it once delivered when not yet
+  // proven in the stock count (bought by hand, not yet received); a later physical count clears it
+  // so staff are never told to double-receive it. A canceled one never covers it.
+  const since = (s, extra, countedAt = '2026-08-01T00:00:00Z') => sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: s, countedAt }, { fetchImpl: fakeFetch(history([order('R2', '2026-09-01T00:00:00Z', 140, [line()], extra), older])).fetchImpl });
+  expect(await since('2026-08-15T00:00:00Z')).toEqual({ cents: 14000, source: 'order R2', outstanding: { number: 'R2', why: 'since' } });
+  expect(await since('2026-08-15T00:00:00Z', {}, SINCE)).toEqual({ cents: 14000, source: 'order R2' }); // physical count after delivery clears it
+  expect(await since('2026-09-02T00:00:00Z', {}, SINCE)).toEqual({ cents: 14000, source: 'order R2' });
+  expect(await since('2026-08-15T00:00:00Z', { state: 'canceled', paymentState: 'balance_due' })).toBeNull();
+  // A newer order of another item on its way, or a canceled newer order of this item, or an unclaimed gift, is not.
+  expect(await quote([order('R3', '2026-10-01T00:00:00Z', 520, [line('4242', 1000)], { state: 'gift_unclaimed', shipmentState: null }), order('R2', '2026-09-01T00:00:00Z', 140, [line()]), older])).toEqual({ cents: 14000, source: 'order R2' });
+  expect(await quote([order('R3', '2026-10-01T00:00:00Z', 50, [line('7', 1)], { state: 'in_production', shipmentState: 'pending' }), order('R2', '2026-09-01T00:00:00Z', 140, [line()]), older])).toEqual({ cents: 14000, source: 'order R2' });
+  expect(await quote([order('R3', '2026-10-01T00:00:00Z', 520, [line('4242', 1000)], { state: 'canceled', paymentState: 'balance_due', shipmentState: null }), order('R2', '2026-09-01T00:00:00Z', 140, [line()]), older])).toEqual({ cents: 14000, source: 'order R2' });
+});
+
+test('bindingQuote: a delivered order of this item covers the request unless the stock count holds it: received by the portal, or before the last count', async () => {
+  // Placed and delivered before the request was raised, but after the last receipt or count: the sweep
+  // raised the request from the old low balance, and the stock may not be in the count.
+  const older = order('R1', '2026-07-01T00:00:00Z', 100, [line()]);
+  const at = (extra, countedAt = '2026-09-03T00:00:00Z') => sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: '2026-09-10T00:00:00Z', countedAt }, { fetchImpl: fakeFetch(history([order('R2', '2026-09-01T00:00:00Z', 140, [line()], extra), older])).fetchImpl });
+  const arrived = { cents: 14000, source: 'order R2', outstanding: { number: 'R2', why: 'arrived' } };
+  expect(await at({ deliveredAt: '2026-09-05T00:00:00Z' })).toEqual(arrived);
+  expect(await at({ deliveredAt: '2026-09-03T00:00:00Z' })).toEqual(arrived); // the same moment counts as after
+  // No delivery time, or one that cannot be read: it cannot be told apart.
+  expect(await at({ deliveredAt: null })).toEqual(arrived);
+  expect(await at({ deliveredAt: 'soon' })).toEqual(arrived);
+  // No receipt or count ever recorded for the product.
+  expect(await at({ deliveredAt: '2026-09-02T00:00:00Z' }, null)).toEqual(arrived);
+  // Arrived before the last receipt or count: the count already held it.
+  expect(await at({ deliveredAt: '2026-09-02T00:00:00Z' })).toEqual({ cents: 14000, source: 'order R2' });
+  // The detail names another delivery time than the list: not trusted.
+  const routes = history([order('R2', '2026-09-01T00:00:00Z', 140, [line()], { deliveredAt: '2026-09-02T00:00:00Z' }), older]);
+  routes['GET /api/orders/R2'] = { ...routes['GET /api/orders/R2'], deliveredAt: '2026-09-04T00:00:00Z' };
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: '2026-09-10T00:00:00Z', countedAt: '2026-09-03T00:00:00Z' }, { fetchImpl: fakeFetch(routes).fetchImpl })).toEqual(arrived);
+  // The portal's own order whose request was received: that receipt counted it, whatever the count date.
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: '2026-09-10T00:00:00Z', countedAt: null, receivedOrders: ['R2', 'R1'] }, { fetchImpl: fakeFetch(history([order('R2', '2026-09-01T00:00:00Z', 140, [line()], { deliveredAt: '2026-09-05T00:00:00Z' }), older])).fetchImpl })).toEqual({ cents: 14000, source: 'order R2' });
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: '2026-09-10T00:00:00Z', countedAt: null, receivedOrders: ['R1', 'R9'] }, { fetchImpl: fakeFetch(history([order('R2', '2026-09-01T00:00:00Z', 140, [line()], { deliveredAt: '2026-09-05T00:00:00Z' }), older])).fetchImpl })).toEqual(arrived);
+  // A canceled order never arrives: it is not named (the latest identical order is canceled, so no price binds).
+  expect(await at({ state: 'canceled', paymentState: 'balance_due', shipmentState: 'canceled', deliveredAt: null })).toBeNull();
+});
+
+test('bindingQuote: the binding order\'s list entry and detail must name the same charge, or no price binds', async () => {
+  const older = order('R1', '2026-07-01T00:00:00Z', 100, [line()]);
+  const differ = (listedExtra) => { const routes = history([order('R2', '2026-09-01T00:00:00Z', 300, [line()]), older]); routes['GET /api/orders'].orders[0] = { ...routes['GET /api/orders'].orders[0], ...listedExtra }; return quote(routes); };
+  expect(await differ({})).toEqual({ cents: 30000, source: 'order R2' });
+  expect(await differ({ total: 700 })).toBeNull();
+  expect(await differ({ currency: 'EUR' })).toBeNull();
+  expect(await differ({ total: undefined })).toBeNull();
 });
 
 test('bindingQuote: an order that cannot be read in full refuses — a newer identical order could hide behind it', async () => {
   const good = order('R1', '2026-07-01T00:00:00Z', 100, [line()]);
   const newer = (detail) => { const routes = history([order('R2', '2026-09-01T00:00:00Z', 50, [line('7', 1)]), good]); routes['GET /api/orders/R2'] = detail; return quote(routes); };
+  // An unreadable newer order refuses the price, and it could be one of this item: it is named, nothing is bought.
+  const unreadR2 = { cents: null, source: null, outstanding: { number: 'R2', why: 'unreadable' } };
   expect(await newer({ number: 'R2', items: [line('7', 1)] })).toEqual({ cents: 10000, source: 'order R1' }); // readable, not identical
-  expect(await newer({ number: 'R2', total: 50, currency: 'USD' })).toBeNull(); // no item lines (the list shape)
-  expect(await newer({})).toBeNull();
-  expect(await newer({ number: 'R9', items: [line('7', 1)] })).toBeNull(); // another order's answer
-  expect(await newer({ number: 'R2', items: [{ quantity: 1 }] })).toBeNull(); // a line with no item id
-  expect(await newer({ number: 'R2', items: [{ id: '7' }] })).toBeNull(); // a line with no count
+  expect(await newer({ number: 'R2', total: 50, currency: 'USD' })).toEqual(unreadR2); // no item lines (the list shape)
+  expect(await newer({})).toEqual(unreadR2);
+  expect(await newer({ number: 'R9', items: [line('7', 1)] })).toEqual(unreadR2); // another order's answer
+  expect(await newer({ number: 'R2', items: [{ quantity: 1 }] })).toEqual(unreadR2); // a line with no item id
+  expect(await newer({ number: 'R2', items: [{ id: '7' }] })).toEqual(unreadR2); // a line with no count
   // Nothing is coerced: a count that is not a whole positive number, an empty item id, an order
   // with no line at all, or ONE bad line beside a good one makes the order unreadable. None of
   // them may pass for "another item" and let the older, cheaper order bind.
-  for (const quantity of [null, 0, -1, 1.5, '1', '', true, NaN]) expect(await newer({ number: 'R2', items: [{ id: '7', quantity }] })).toBeNull();
-  for (const id of [null, '', '  ', {}, true]) expect(await newer({ number: 'R2', items: [{ id, quantity: 1 }] })).toBeNull();
-  expect(await newer({ number: 'R2', items: [] })).toBeNull();
-  expect(await newer({ number: 'R2', items: [line('7', 1), { id: '8', quantity: null }] })).toBeNull();
-  expect(await newer({ number: 'R2', items: [line('7', 1), null] })).toBeNull();
-  expect(await newer({ number: 'R2', lineItems: [line('7', 1)] })).toBeNull(); // lines under another key
+  for (const quantity of [null, 0, -1, 1.5, '1', '', true, NaN]) expect(await newer({ number: 'R2', items: [{ id: '7', quantity }] })).toEqual(unreadR2);
+  for (const id of [null, '', '  ', {}, true]) expect(await newer({ number: 'R2', items: [{ id, quantity: 1 }] })).toEqual(unreadR2);
+  expect(await newer({ number: 'R2', items: [] })).toEqual(unreadR2);
+  expect(await newer({ number: 'R2', items: [line('7', 1), { id: '8', quantity: null }] })).toEqual(unreadR2);
+  expect(await newer({ number: 'R2', items: [line('7', 1), null] })).toEqual(unreadR2);
+  expect(await newer({ number: 'R2', lineItems: [line('7', 1)] })).toEqual(unreadR2); // lines under another key
   // The single-order GET failing is an error, not "no prior order": the dispatcher parks it, nothing is ordered.
   await expect(newer({ status: 404, body: { type: 'NotFoundError', message: 'order R2 was not found' } })).rejects.toThrow(/HTTP 404/);
   // A listed order with no number cannot be read at all.
-  expect(await quote({ 'GET /api/orders': { orders: [{ placedAt: '2026-09-01T00:00:00Z' }, { number: 'R1', placedAt: '2026-07-01T00:00:00Z' }] }, 'GET /api/orders/R1': good })).toBeNull();
+  expect(await quote({ 'GET /api/orders': { orders: [{ placedAt: '2026-09-01T00:00:00Z' }, { number: 'R1', placedAt: '2026-07-01T00:00:00Z' }] }, 'GET /api/orders/R1': good })).toEqual({ cents: null, source: null, outstanding: { number: null, why: 'unreadable' } });
 });
 
 test('bindingQuote: the list must be newest first with a stamp on every order, or the latest cannot be told apart', async () => {
@@ -121,6 +231,10 @@ test('bindingQuote: the list must be newest first with a stamp on every order, o
   expect(await quote([older, newer])).toBeNull(); // oldest first: the first match would be the OLD order
   expect(await quote([newer, { ...older, placedAt: undefined }])).toBeNull();
   expect(await quote([{ ...newer, placedAt: 'not a date' }, older])).toBeNull();
+  // Even when the list is out of order or undated, an open/uncounted order on the page is still surfaced.
+  const coming = order('R3', '2026-09-15T00:00:00Z', 140, [line()], { state: 'in_production', shipmentState: null, deliveredAt: null });
+  expect(await quote([older, coming])).toEqual({ cents: null, source: null, outstanding: { number: 'R3', why: 'coming' } });
+  expect(await quote([{ ...coming, placedAt: undefined }, older])).toEqual({ cents: null, source: null, outstanding: { number: 'R3', why: 'coming' } });
 });
 
 test('bindingQuote: a tie for latest with different totals refuses; the same total binds', async () => {
@@ -137,30 +251,35 @@ test('bindingQuote: a tie for latest that runs to the end of a page that may not
   // The list page as served: canLoadMore true (more orders exist), false (the last page) or not said.
   const page = (orders, canLoadMore) => { const routes = history(orders); routes['GET /api/orders'] = { orders: routes['GET /api/orders'].orders, ...(canLoadMore === undefined ? {} : { canLoadMore }) }; return quote(routes); };
   const tied = [other('N', '2026-10-01T00:00:00Z'), o('A', '2026-09-01T00:00:00Z'), o('B', '2026-09-01T00:00:00Z')];
+  // More orders to load (or not said): an order of the same moment could carry another total past
+  // the page, so both the price and source are withheld alongside the unchecked outstanding marker.
+  const pastPage = { cents: null, source: null, outstanding: { number: null, why: 'unchecked' } };
   expect(await page(tied, false)).toEqual({ cents: 10000, source: 'order A' }); // the last page: the whole tie was read
-  expect(await page(tied, true)).toBeNull(); // more orders exist: one of the same moment could carry another total
-  expect(await page(tied, undefined)).toBeNull(); // not said: not known to be the last page
-  expect(await page(tied, 'false')).toBeNull(); // only the boolean false says "the last page"
+  expect(await page(tied, true)).toEqual(pastPage); // more orders exist: one of the same moment could carry another total
+  expect(await page(tied, undefined)).toEqual(pastPage); // not said: not known to be the last page
+  expect(await page(tied, 'false')).toEqual(pastPage); // only the boolean false says "the last page"
   // The latest identical order is the page's last order, with more to load: the same refusal.
-  expect(await page([o('A', '2026-09-01T00:00:00Z')], true)).toBeNull();
+  expect(await page([o('A', '2026-09-01T00:00:00Z')], true)).toEqual(pastPage);
   expect(await page([o('A', '2026-09-01T00:00:00Z')], false)).toEqual({ cents: 10000, source: 'order A' });
   // The page goes on past the match's moment: the tie ended on this page, whatever follows it.
-  expect(await page([o('A', '2026-09-01T00:00:00Z'), other('Z', '2026-08-01T00:00:00Z')], true)).toEqual({ cents: 10000, source: 'order A' });
-  // No identical order on a page with more to load stays "no usable prior order".
-  expect(await page([other('N', '2026-10-01T00:00:00Z')], true)).toBeNull();
+  // (It still parks: an order of this item past the page may be on its way.)
+  expect(await page([o('A', '2026-09-01T00:00:00Z'), other('Z', '2026-08-01T00:00:00Z')], true)).toEqual({ cents: 10000, source: 'order A', outstanding: { number: null, why: 'unchecked' } });
+  // No identical order on a page with more to load: no price, and the unread page is still named.
+  expect(await page([other('N', '2026-10-01T00:00:00Z')], true)).toEqual({ cents: null, source: null, outstanding: { number: null, why: 'unchecked' } });
+  expect(await page([other('N', '2026-10-01T00:00:00Z')], false)).toBeNull();
 });
 
 test('bindingQuote: the whole lookup has ONE deadline — past it nothing more is read and the lookup throws', async () => {
   // 50 orders, none of this item: the list and 50 order reads when the vendor is quick.
   const orders = Array.from({ length: 50 }, (_, i) => order(`R${50 - i}`, new Date(Date.UTC(2026, 8, 1) - i * 86400000).toISOString(), 900, [line('7', 1)]));
   const quick = fakeFetch(history(orders));
-  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl: quick.fetchImpl })).toBeNull();
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: SINCE, countedAt: SINCE }, { fetchImpl: quick.fetchImpl })).toBeNull();
   expect(quick.calls).toHaveLength(51);
   // A slow vendor: every answer takes 10 s. The lookup has 90 s in all, not 51 timeouts.
   let t = 0;
   const slow = fakeFetch(history(orders));
   const fetchImpl = async (...args) => { const r = await slow.fetchImpl(...args); t += 10000; return r; };
-  await expect(sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl, now: () => t })).rejects.toThrow(/Sticker Mule order history lookup did not finish in 90 s/);
+  await expect(sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: SINCE, countedAt: SINCE }, { fetchImpl, now: () => t })).rejects.toThrow(/Sticker Mule order history lookup did not finish in 90 s/);
   expect(slow.calls).toHaveLength(9); // the reads that started inside the 90 s; the 10th was never sent
 });
 
@@ -175,7 +294,7 @@ test('bindingQuote: a read still running at the deadline is cut off then, not af
     });
     const start = Date.now();
     let endedAfter = null;
-    const lookup = sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl }).finally(() => { endedAfter = Date.now() - start; });
+    const lookup = sm.bindingQuote({ vendorSku: '4242', quantity: 500, since: SINCE, countedAt: SINCE }, { fetchImpl }).finally(() => { endedAfter = Date.now() - start; });
     const refused = expect(lookup).rejects.toThrow(/Sticker Mule order history lookup did not finish in 90 s/);
     await jest.advanceTimersByTimeAsync(200000);
     await refused;
@@ -198,8 +317,15 @@ test('only the documented grand total field is a total: no other field stands in
   const others = [{ total: null, amount: 1 }, { total: undefined, itemTotal: 297.57 }, { total: '', totals: { total: 5 } }, { total: null, price: { total: 5 } }, { total: null, amount: '318.40', totalCents: 31840 }];
   for (const extra of others) {
     expect(await quote([order('A', '2026-09-01T00:00:00Z', 100, [line()], extra)])).toBeNull();
+    expect(await sm.readCharge('SM-90001', { fetchImpl: fakeFetch({ 'GET /api/orders/SM-90001': placedOrder(extra) }).fetchImpl })).toBeNull();
     expect(sm._internals.orderTotalCents({ paymentState: 'paid', ...extra })).toBeNull();
   }
+});
+
+test('place: a refused last claim check sends no POST', async () => {
+  const { fetchImpl } = fakeFetch(happy());
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, beforeSubmit: async () => ({ ok: false, reason: 'claim_lost' }) }, { fetchImpl })).rejects.toMatchObject({ refuse: 'claim_lost' });
+  expect(fetchImpl.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
 });
 
 test('every call goes to www.stickermule.com/api — api.stickermule.com does not resolve (verified 2026-09-06)', async () => {
@@ -218,21 +344,93 @@ test('no API key → refused before any call', async () => {
   expect(fetchImpl).not.toHaveBeenCalled();
 });
 
-test('places a reorder: bearer auth, one item, the single address + payment, vendor total read back', async () => {
+test('places a reorder: bearer auth, one item, the single address + payment; it returns the order number and claims NO charge', async () => {
   const { fetchImpl, calls } = fakeFetch(happy());
   const r = await sm.place({ vendorSku: '4242', quantity: 500, quoteCents: 31400 }, { fetchImpl });
   expect(r.externalOrderNumber).toBe('SM-90001');
-  expect(r.amountCents).toBe(31840);
-  expect(r.evidence).toMatchObject({ itemId: 4242, addressId: 'addr-1', paymentId: 'pay-1', totalSource: 'vendor' });
+  // Never the quote, and never a read of its own: the dispatcher saves the number, then asks readCharge.
+  expect(r.amountCents).toBeNull();
+  expect(r.evidence).toEqual({ itemId: 4242, addressId: 'addr-1', paymentId: 'pay-1', totalSource: 'none' });
   const post = calls.find((c) => c.method === 'POST');
   expect(post.body).toEqual({ items: [{ id: 4242, quantity: 500 }], addressId: 'addr-1', paymentId: 'pay-1' });
   expect(post.auth).toBe('Bearer test-key');
+});
+
+test('the saved item\'s reorder rules are checked before the POST: a size-needing item, no buying options, or a count outside them refuses, nothing sent', async () => {
+  const withItem = (item) => { const routes = happy(); routes['GET /api/items'] = { items: [{ id: 4242, ...item }], canLoadMore: false }; return fakeFetch(routes); };
+  const opts = { quantity: { min: 50, max: 10000, increment: 50 } };
+  const cases = [
+    [{ isSizeRequired: true, buyingOptions: opts }, 500, 'item_needs_size'],
+    [{ buyingOptions: opts }, 500, 'item_needs_size'], // not stated
+    [{ isSizeRequired: false, buyingOptions: null }, 500, 'item_unavailable'],
+    [{ isSizeRequired: false, buyingOptions: { quantity: { min: 50, max: 10000 } } }, 500, 'item_unavailable'],
+    [{ isSizeRequired: false, buyingOptions: opts }, 25, 'bad_quantity'],
+    [{ isSizeRequired: false, buyingOptions: opts }, 20000, 'bad_quantity'],
+    [{ isSizeRequired: false, buyingOptions: opts }, 520, 'bad_quantity'],
+    [{ isSizeRequired: false, buyingOptions: { quantity: { min: 30, max: 10000, increment: 50 } } }, 500, 'bad_quantity'], // off the step from the min
+  ];
+  // The step counts from the min: with min 30 and step 50, 30 and 80 are allowed counts.
+  for (const quantity of [30, 80]) {
+    const { fetchImpl } = withItem({ isSizeRequired: false, buyingOptions: { quantity: { min: 30, max: 10000, increment: 50 } } });
+    expect(await sm.place({ vendorSku: '4242', quantity }, { fetchImpl })).toMatchObject({ externalOrderNumber: 'SM-90001' });
+  }
+  for (const [item, quantity, refuse] of cases) {
+    const { fetchImpl, calls } = withItem(item);
+    await expect(sm.place({ vendorSku: '4242', quantity }, { fetchImpl })).rejects.toMatchObject({ refuse });
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+  }
+  const { fetchImpl } = withItem({ isSizeRequired: false, buyingOptions: opts });
+  expect(await sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl })).toMatchObject({ externalOrderNumber: 'SM-90001' });
 });
 
 test('item not on the account → refused, no POST', async () => {
   const { fetchImpl, calls } = fakeFetch(happy());
   await expect(sm.place({ vendorSku: '9999', quantity: 500 }, { fetchImpl })).rejects.toMatchObject({ refuse: 'item_not_found' });
   expect(calls.some((c) => c.method === 'POST')).toBe(false);
+});
+
+test('the saved item is found on whatever page it sits; "not on the account" needs the vendor\'s last page', async () => {
+  // The saved items as the live API serves them: `limit` a page from `offset`, canLoadMore until the end.
+  const paged = (ids, { canLoadMore = (end) => end < ids.length } = {}) => {
+    const offsets = [];
+    const base = fakeFetch(happy());
+    const fetchImpl = jest.fn(async (url, init) => {
+      const u = new URL(url);
+      if (u.pathname !== '/api/items') return base.fetchImpl(url, init);
+      const offset = Number(u.searchParams.get('offset') || 0);
+      const limit = Number(u.searchParams.get('limit'));
+      offsets.push(offset);
+      const items = ids.slice(offset, offset + limit).map((id) => ({ id, isSizeRequired: false, buyingOptions: { quantity: { min: 50, max: 10000, increment: 50 } } }));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ items, canLoadMore: canLoadMore(offset + limit) }) };
+    });
+    return { fetchImpl, offsets, posted: () => base.calls.some((c) => c.method === 'POST') };
+  };
+  const ids = Array.from({ length: 120 }, (_, i) => `item-${i}`);
+  // On the third page: read page by page, then ordered.
+  const third = paged([...ids, '4242']);
+  expect(await sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl: third.fetchImpl })).toMatchObject({ externalOrderNumber: 'SM-90001', evidence: { itemId: '4242' } });
+  expect(third.offsets).toEqual([0, 50, 100]);
+  // On the first page: one read, no offset.
+  const first = paged(['4242', ...ids]);
+  await sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl: first.fetchImpl });
+  expect(first.offsets).toEqual([0]);
+  expect(String(first.fetchImpl.mock.calls[0][0])).toMatch(/\/api\/items\?limit=50$/);
+  // Not on any page, and the vendor said the list ended: not on the account.
+  const none = paged(ids);
+  await expect(sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl: none.fetchImpl })).rejects.toMatchObject({ refuse: 'item_not_found' });
+  expect(none.offsets).toEqual([0, 50, 100]);
+  expect(none.posted()).toBe(false);
+  // The list never says it ended (always more, or not said): the item cannot be confirmed either way.
+  for (const canLoadMore of [() => true, () => undefined]) {
+    const open = paged(ids, { canLoadMore });
+    await expect(sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl: open.fetchImpl })).rejects.toMatchObject({ refuse: 'item_lookup_incomplete' });
+    expect(open.offsets).toEqual([0, 50, 100, 120]); // stops at the first empty page
+    expect(open.posted()).toBe(false);
+  }
+  // A list with no end at all stops after 20 pages.
+  const endless = paged(Array.from({ length: 5000 }, (_, i) => `item-${i}`), { canLoadMore: () => true });
+  await expect(sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl: endless.fetchImpl })).rejects.toMatchObject({ refuse: 'item_lookup_incomplete' });
+  expect(endless.offsets).toHaveLength(20);
 });
 
 test('two addresses or two payment methods → refused, no POST', async () => {
@@ -242,6 +440,86 @@ test('two addresses or two payment methods → refused, no POST', async () => {
   const f = fakeFetch(noPay);
   await expect(sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse: 'no_payment' });
   expect(f.calls.some((c) => c.method === 'POST')).toBe(false);
+});
+
+test('the last read before the POST: an order placed since the request was raised refuses, nothing sent', async () => {
+  const listAt = (placedAt) => ({ ...happy(), 'GET /api/orders': { orders: [{ number: 'SM-NEW', placedAt, state: 'ready_for_production' }], canLoadMore: false } });
+  // Placed after the request: refused. Placed before it: the POST goes out. No since passed: no read (direct callers).
+  let f = fakeFetch(listAt('2026-11-26T15:00:00Z'));
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new' });
+  expect(f.calls.some((c) => c.method === 'POST')).toBe(false);
+  f = fakeFetch(listAt('2026-11-20T15:00:00Z'));
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).resolves.toMatchObject({ externalOrderNumber: 'SM-90001' });
+  // The read comes after every other check, right before the POST.
+  expect(f.calls.map((c) => `${c.method} ${c.path}`).slice(-2)).toEqual(['GET /api/orders', 'POST /api/orders']);
+  // The last vendor read comes BEFORE the dispatcher's last check, so that check is the final step before the POST.
+  const steps = [];
+  f = fakeFetch(listAt('2026-11-20T15:00:00Z'));
+  const logged = jest.fn(async (url, init) => { steps.push(`${init?.method || 'GET'} ${new URL(String(url)).pathname}`); return f.fetchImpl(url, init); });
+  await sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z', beforeSubmit: async () => { steps.push('beforeSubmit'); return { ok: true }; } }, { fetchImpl: logged });
+  expect(steps.slice(-3)).toEqual(['GET /api/orders', 'beforeSubmit', 'POST /api/orders']);
+  // A list that is not the documented shape, or holds a null or non-object entry, refuses with unreadable evidence.
+  for (const body of [{}, { orders: null }, { orders: 'x' }, { data: [] }, { orders: [null] }, { orders: [{ number: 'OLD', placedAt: '2026-11-20T15:00:00Z' }, 7] }]) {
+    f = fakeFetch({ ...happy(), 'GET /api/orders': body });
+    await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new', evidence: { outstandingOrder: { number: null, why: 'unreadable' } } });
+    expect(f.calls.some((c) => c.method === 'POST')).toBe(false);
+  }
+  // An undated order, or no request start to compare with, refuses too (with structured evidence).
+  f = fakeFetch(listAt(undefined));
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new', evidence: { outstandingOrder: { number: 'SM-NEW', why: 'unreadable' } } });
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: null }, { fetchImpl: fakeFetch(listAt('2026-11-20T15:00:00Z')).fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new', evidence: { outstandingOrder: { number: null, why: 'unreadable' } } });
+  // Each new order is read in full. One of other items only (the robot's own order of another item in the
+  // same run) lets the POST go; one that holds this item, or whose detail cannot be read, refuses.
+  const withDetail = (detail) => ({ ...listAt('2026-11-26T15:00:00Z'), ...(detail ? { 'GET /api/orders/SM-NEW': detail } : {}) });
+  f = fakeFetch(withDetail({ number: 'SM-NEW', items: [line('7', 100)] }));
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).resolves.toMatchObject({ externalOrderNumber: 'SM-90001' });
+  // The refusal keeps the order it names as structured evidence, as the first history check does.
+  f = fakeFetch(withDetail({ number: 'SM-NEW', items: [line('4242', 500)] }));
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new', evidence: { outstandingOrder: { number: 'SM-NEW', why: 'since' } } });
+  f = fakeFetch(withDetail(null));
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ evidence: { outstandingOrder: { number: 'SM-NEW', why: 'unreadable' } } });
+  for (const detail of [{ number: 'SM-NEW', items: [line('7', 100), line('4242', 500)] }, { number: 'SM-NEW', items: [] }, { number: 'OTHER', items: [line('7', 100)] }, null]) {
+    f = fakeFetch(withDetail(detail));
+    await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new' });
+    expect(f.calls.some((c) => c.method === 'POST')).toBe(false);
+  }
+  // A new order of this item canceled in BOTH its list entry and its detail never comes: the POST goes.
+  // Canceled in one only: not trusted, refused.
+  const canceledNew = (listState, detailState) => ({ ...happy(), 'GET /api/orders': { orders: [{ number: 'SM-NEW', placedAt: '2026-11-26T15:00:00Z', state: listState }], canLoadMore: false }, 'GET /api/orders/SM-NEW': { number: 'SM-NEW', state: detailState, items: [line('4242', 1000)] } });
+  f = fakeFetch(canceledNew('canceled', 'canceled'));
+  // A delivered post-request order already proven in the physical stock count (countedDelivery) is skipped too.
+  const deliveredNew = {
+    ...happy(),
+    'GET /api/orders': { orders: [{ number: 'SM-DEL', placedAt: '2026-11-26T15:00:00Z', state: 'complete', shipmentState: 'delivered', paymentState: 'paid', deliveredAt: '2026-11-27T10:00:00Z' }], canLoadMore: false },
+    'GET /api/orders/SM-DEL': { number: 'SM-DEL', state: 'complete', shipmentState: 'delivered', paymentState: 'paid', deliveredAt: '2026-11-27T10:00:00Z', items: [line('4242', 500)] },
+  };
+  const countedFetch = fakeFetch(deliveredNew);
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z', countedAt: '2026-11-27T18:00:00.000Z', receivedOrders: [] }, { fetchImpl: countedFetch.fetchImpl })).resolves.toMatchObject({ externalOrderNumber: 'SM-90001' });
+  // Without a later count (or receipt), the same delivered post-request order still refuses.
+  const uncountedFetch = fakeFetch(deliveredNew);
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z', countedAt: '2026-11-26T00:00:00.000Z', receivedOrders: [] }, { fetchImpl: uncountedFetch.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new', evidence: { outstandingOrder: { number: 'SM-DEL', why: 'since' } } });
+  await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).resolves.toMatchObject({ externalOrderNumber: 'SM-90001' });
+  for (const [l, d] of [['canceled', 'in_production'], ['in_production', 'canceled']]) {
+    f = fakeFetch(canceledNew(l, d));
+    await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new' });
+  }
+  // A list with more to load (canLoadMore not exactly false) cannot rule out a new order: refused
+  // with the same unchecked marker used by bindingQuote so the sweep keeps the account-check warning.
+  for (const more of [true, undefined]) {
+    f = fakeFetch({ ...happy(), 'GET /api/orders': { orders: [], ...(more === undefined ? {} : { canLoadMore: more }) } });
+    await expect(sm.place({ vendorSku: '4242', quantity: 500, since: '2026-11-26T14:00:00.000Z' }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse: 'vendor_order_new', evidence: { outstandingOrder: { number: null, why: 'unchecked' } } });
+    expect(f.calls.some((c) => c.method === 'POST')).toBe(false);
+  }
+});
+
+test('the one address or payment method with no id → refused before the POST', async () => {
+  for (const [route, key, refuse] of [['GET /api/addresses', 'addresses', 'no_address'], ['GET /api/payments', 'payments', 'no_payment']]) {
+    for (const bad of [{}, { id: '' }, { id: '  ' }, { id: null }]) {
+      const f = fakeFetch({ ...happy(), [route]: { [key]: [bad] } });
+      await expect(sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl: f.fetchImpl })).rejects.toMatchObject({ refuse });
+      expect(f.calls.some((c) => c.method === 'POST')).toBe(false);
+    }
+  }
 });
 
 test('a failing POST is ambiguous — surfaced, never repeated', async () => {
@@ -255,12 +533,36 @@ test('a POST that returns no order number is ambiguous', async () => {
   await expect(sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl })).rejects.toMatchObject({ ambiguous: true });
 });
 
-test('a failed read-back keeps the order and falls back to the quote', async () => {
-  const { fetchImpl } = fakeFetch({ ...happy(), 'GET /api/orders': { status: 500 } });
-  const r = await sm.place({ vendorSku: '4242', quantity: 500, quoteCents: 31400 }, { fetchImpl });
-  expect(r.externalOrderNumber).toBe('SM-90001');
-  expect(r.amountCents).toBe(31400);
-  expect(r.evidence.totalSource).toBe('quote');
+test('place() stops at the POST: four calls, the saved items a full page at a time, and no read of the new order', async () => {
+  // A read after the POST would hold the order number in memory only while a vendor call runs.
+  const f = fakeFetch({ ...happy(), 'GET /api/orders/SM-90001': { status: 500 } });
+  const r = await sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl: f.fetchImpl });
+  expect(r).toMatchObject({ externalOrderNumber: 'SM-90001', amountCents: null });
+  const urls = f.fetchImpl.mock.calls.map(([url]) => String(url).replace('https://www.stickermule.com', ''));
+  expect(urls).toEqual(['/api/items?limit=50', '/api/addresses', '/api/payments', '/api/orders']);
+});
+
+test('readCharge = the charge of that order number, read by number: paid and in a known placed state only; a failed read throws', async () => {
+  const charge = (readBack, number = 'SM-90001') => { const f = fakeFetch({ 'GET /api/orders/SM-90001': readBack }); return sm.readCharge(number, { fetchImpl: f.fetchImpl }).then((cents) => ({ cents, calls: f.calls })); };
+  const paid = await charge(placedOrder());
+  expect(paid.cents).toBe(31840);
+  // One GET of that order: it is found however many orders came after it (never the order list).
+  expect(paid.calls.map((c) => `${c.method} ${c.path}`)).toEqual(['GET /api/orders/SM-90001']);
+  for (const state of PLACED) expect((await charge(placedOrder({ state }))).cents).toBe(31840);
+  // Payment still pending (the total is on the order, but nothing was charged yet), every other
+  // payment answer the vendor documents, a state that is not a placed order's (or missing:
+  // incomplete evidence is not a charge), another currency, an unreadable total, another order's answer.
+  for (const notCharged of [{ paymentState: 'balance_due' }, { paymentState: 'failed' }, { paymentState: 'completed' }, { paymentState: 'pending' }, { paymentState: 'processing' }, { paymentState: 'checkout' }, { paymentState: 'credit_owed' }, { paymentState: 'void' }, { paymentState: null }, { paymentState: undefined }, ...NOT_PLACED, { currency: 'EUR' }, { currency: undefined }, { total: null }, { total: '1e3' }, { number: 'SM-OTHER' }]) expect((await charge(placedOrder(notCharged))).cents).toBeNull();
+  expect((await charge({})).cents).toBeNull();
+  // The vendor's answer for an unknown number (404) or an outage is an error the dispatcher logs.
+  await expect(charge({ status: 404, body: { type: 'NotFoundError', message: 'not found' } })).rejects.toThrow(/HTTP 404/);
+  await expect(charge({ status: 503 })).rejects.toThrow(/HTTP 503/);
+  // No number, or no key: nothing is asked.
+  const none = fakeFetch(happy());
+  expect(await sm.readCharge('', { fetchImpl: none.fetchImpl })).toBeNull();
+  delete process.env.STICKERMULE_API_KEY;
+  expect(await sm.readCharge('SM-90001', { fetchImpl: none.fetchImpl })).toBeNull();
+  expect(none.fetchImpl).not.toHaveBeenCalled();
 });
 
 describe('siteone internals', () => {

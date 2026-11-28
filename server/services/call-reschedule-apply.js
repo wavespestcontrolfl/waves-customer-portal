@@ -421,7 +421,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
     // codex #4204 r8 P1). Base table stays unaliased so the column list below
     // is the only qualified part.
     .leftJoin('services', 'services.id', 'scheduled_services.service_id')
-    .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
+    .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id', 'scheduled_services.property_id',
       'scheduled_services.service_id', 'scheduled_services.service_type', 'scheduled_services.scheduled_date',
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes',
       'scheduled_services.service_key_snapshot', 'scheduled_services.status', 'scheduled_services.source_action', 'scheduled_services.visit_id',
@@ -434,10 +434,34 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
       'services.name as catalog_service_name', 'services.service_key as catalog_service_key');
 }
 
+function rescheduleScopeOptions(plan, actor, occurrenceIds, occurrences) {
+  const techScope = require('./technician-visit-scope');
+  if (actor && techScope.isTechnicianRequest(actor)) {
+    return plan.dateMove ? { expectScope: 'single' } : { seriesPolicy: 'single' };
+  }
+  return [
+    { seriesPolicy: 'single' },
+    { expectScope: 'single' },
+    { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences, ...(occurrenceIds.length ? { expectScope: 'series' } : {}) },
+  ][Number(plan.dateMove) + Number(plan.seriesMove)];
+}
+
+function assertTechnicianOwnsLockedVisits(actor, lockedServices, plan) {
+  const techScope = require('./technician-visit-scope');
+  if (!actor || !techScope.isTechnicianRequest(actor)) return;
+  const ownsAll = lockedServices.every((row) => techScope.technicianVisitRowInScope(actor, row) && row.status !== 'completed');
+  if (!ownsAll) {
+    throw Object.assign(new Error('Not assigned to this service'), { status: 403, code: 'service_not_assigned' });
+  }
+  if (lockedServices.length > 1 || (plan?.seriesMove && lockedServices.some((row) => row.is_recurring === true))) {
+    throw Object.assign(new Error('Only an admin can move a recurring series'), { status: 403, code: 'series_move_admin_only' });
+  }
+}
+
 // Human review chooses the source visit and requested time, then shares the
 // automatic path's planner and SmartRebooker choke point. The proposal guard,
 // audit, and move commit in one transaction, including for a series move.
-async function applyReviewedCallReschedule({ conn, call, v2, customer, candidates, visitId, actorId,
+async function applyReviewedCallReschedule({ conn, call, v2, customer, candidates, visitId, actorId, actor,
   operationKey, guard, proposalCardId = null, occurrenceIds = [], occurrences, conflictSnapshot, now = new Date(), rebooker = null } = {}) {
   if (!actorId || !operationKey || typeof guard !== 'function') {
     throw new Error('Reviewed reschedule requires an authenticated, uniquely identified proposal guard');
@@ -469,6 +493,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       || snapshotColumns.some((key) => (lockedService[key] ?? null) !== (visit[key] ?? null))) {
       throw Object.assign(new Error('The visit changed. Refresh the proposal.'), { status: 409 });
     }
+    assertTechnicianOwnsLockedVisits(actor, lockedServices, plan);
     for (const affectedVisitId of affectedVisitIds) {
       if (await openPortalRequest(trx, customer.id, affectedVisitId)) {
         throw Object.assign(new Error('A customer portal reschedule request is still open. Use the schedule editor.'), { status: 409 });
@@ -519,10 +544,8 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
       beforeMove,
       // No date change: a plain single edit. A date change the plan calls a one-off (lawn rounds size rule) is
       // single only because of that rule, so the rebooker judges it again (expectScope). A series move keeps the
-      // reviewed occurrence set, and its scope when the review previewed one.
-      ...[{ seriesPolicy: 'single' }, { expectScope: 'single' }, {
-        expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences, ...(occurrenceIds.length ? { expectScope: 'series' } : {}),
-      }][Number(plan.dateMove) + Number(plan.seriesMove)],
+      // reviewed occurrence set, and its scope when the review previewed one. Technicians stay single-visit only.
+      ...rescheduleScopeOptions(plan, actor, occurrenceIds, occurrences),
       expect: {
         scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,

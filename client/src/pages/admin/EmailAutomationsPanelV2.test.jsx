@@ -174,4 +174,40 @@ describe('Automations panel editor', () => {
     const small = '[class~="text-11"], [class~="text-12"], [class~="text-13"]';
     expect(baseElement.querySelectorAll(small)).toHaveLength(0);
   });
+
+  it('preserves unsaved edits in sibling steps when saving another step', async () => {
+    const twoStepsDetail = {
+      template: { ...TEMPLATE, step_count: 2 },
+      steps: [
+        { ...DETAIL.steps[0], id: 'step-1', subject: 'Step 1 original' },
+        { ...DETAIL.steps[0], id: 'step-2', delay_hours: 24, subject: 'Step 2 original' },
+      ],
+    };
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (url === '/api/admin/automations/templates') {
+        return Promise.resolve(response({ templates: [{ ...TEMPLATE, step_count: 2 }] }));
+      }
+      if (url === DETAIL_URL && !options.method) {
+        return Promise.resolve(response(twoStepsDetail));
+      }
+      if (url === '/api/admin/automations/steps/step-1' && options.method === 'PUT') {
+        return Promise.resolve(response({ ok: true }));
+      }
+      return Promise.resolve(response({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<EmailAutomationsPanelV2 />);
+    await openEditor();
+    const dialog = await screen.findByRole('dialog', { name: 'Welcome sequence' });
+    const step2Subject = await within(dialog).findByDisplayValue('Step 2 original');
+    fireEvent.change(step2Subject, { target: { value: 'Step 2 unsaved draft' } });
+
+    const step1Subject = within(dialog).getByDisplayValue('Step 1 original');
+    fireEvent.change(step1Subject, { target: { value: 'Step 1 edited' } });
+    fireEvent.click(within(dialog).getAllByRole('button', { name: 'Save step' })[0]);
+
+    await waitFor(() => expect(within(dialog).getByText('Saved.')).toBeInTheDocument());
+    expect(within(dialog).getByDisplayValue('Step 2 unsaved draft')).toBeInTheDocument();
+  });
 });

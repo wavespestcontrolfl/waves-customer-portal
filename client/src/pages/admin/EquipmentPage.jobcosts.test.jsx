@@ -64,3 +64,12 @@ it('renders numeric metrics with tabular numerals', async () => {
  expect(screen.getByText('2 jobs')).toHaveClass('u-nums');
  expect(screen.getByText(/^Rev:/)).toHaveClass('u-nums');
 });
+it('uses theme CSS tokens for job-costing card metrics so dark mode stays readable', async () => {
+ handler = async url => (route(url) === 'summary' ? ok({ ...summary, by_service_type: [{ service_type: 'Lawn', total_jobs: 2, total_revenue: 400, total_costs: 100, avg_margin: 75 }] }) : ok({ job_costs: [] }));
+ mount();
+ const [cardMargin] = await screen.findAllByText('75.0%');
+ expect(cardMargin.style.color).toContain('var(--text-primary');
+ expect(screen.getByText('$200.00').style.color).toContain('var(--text-primary');
+ expect(screen.getByText('$50.00').style.color).toContain('var(--text-secondary');
+ expect(screen.getByText('4').style.color).toContain('var(--text-primary');
+});

@@ -39,25 +39,36 @@ jest.mock('../services/procurement/auto-reorder', () => ({
   ringRestockBell: jest.fn(async ({ notify, product, request }) => notify('system', `Restock: ${product.name} is low`, 'order manually', { bell: true, dedupeKey: `auto-reorder:${request.id}` })),
 }));
 
-const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null };
+const mockState = { request: null, vendor: null, product: null, pricing: null, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], unsettledHolds: [], historyPolicy: null, ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null };
 
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
+    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'forShare', 'modify', 'limit']) q[m] = () => q;
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
     q.where = (w) => { q._where = w; return q; };
     q.whereRaw = (sql, bindings) => { (q._raws = q._raws || []).push([sql, bindings]); return q; };
     q.first = async (...cols) => {
+      if (table === 'system_settings') {
+        const val = typeof mockState.historyPolicy === 'function' ? mockState.historyPolicy() : mockState.historyPolicy;
+        return val == null ? null : { value: typeof val === 'string' ? val : JSON.stringify(val) };
+      }
       if (cols[0] === 'vo.status') return mockState.liveAutoOrderAfterBell && mockState.bellRung ? mockState.liveAutoOrderAfterBell : mockState.liveAutoOrder; // findLiveAutoOrder's aliased join (a claim landing after the hand-off bell: liveAutoOrderAfterBell)
-      if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's locked ledger read
+      if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status' && q._where?.restock_request_id) return mockState.requestLedger || null; // settleRequestLedgerBells locked row
+      if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's / authorizeHistoryOrder's locked ledger read
       // deliverBell's locked version read: the row's CURRENT bell is the one being delivered (the park's / the pending row's), unless a test replaced it (bellStampMiss).
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'evidence') { const pending = mockState.pendingBells.find((r) => r.id === q._where?.id); return { id: q._where?.id, evidence: { bell: { v: mockState.bellStampMiss ? 'replaced' : (pending?.evidence?.bell?.v ?? mockState.currentBellV ?? null) } } }; }
-      if (table === 'vendor_orders' && cols.length === 1 && cols[0] === 'id') return mockState.requestLedger || null; // settleRequestLedgerBells' row (null = the request has no ledger row); the lock-only reads ignore the value
+      if (table === 'vendor_orders' && cols.length === 1 && cols[0] === 'id') {
+        if (q._where?.external_order_number) return mockState.savedOrderMatch ? { id: q._where.id } : null;
+        return mockState.requestLedger || null;
+      }
+      if (cols[0] === 'vo.id' && (cols[1] === 'vo.restock_request_id' || q._where === 'vo.id')) return mockState.liveSkuOrder || null; // authorizeHistoryOrder / competingLedgerStillLive
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
+      if (cols[0] === 'placed_at' && table === 'vendor_orders') return mockState.lockedHold || null; // settleHoldLocked / expireHoldLocked
       if (cols[0] === 'amount_cents' && table === 'vendor_orders') { const r = [...mockState.updates].reverse().find((u) => u.table === 'vendor_orders' && u.row.amount_cents != null); return { amount_cents: r ? r.row.amount_cents : null, created_at: mockState.reservedAt || null }; } // settledFinalCents: the reserved amount
+      if (table === 'notifications') return mockState.openBell ? { id: 'n-open' } : null; // bellStillOpen
       if (table === 'product_restock_requests') {
         if (cols[0] === 'status') return { status: mockState.freshRequestStatus, source: mockState.request?.source }; // the mid-flight re-reads (recordPlaced, bellUndispatchable's post-write re-check)
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
@@ -69,6 +80,7 @@ jest.mock('../models/db', () => {
       return null;
     };
     q.sum = () => q;
+    q.pluck = async () => mockState.receivedOrders || [];
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
     q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && row.status && mockState.parkThrowsOnce) { mockState.parkThrowsOnce = false; throw new Error('park lost connection'); } if (table === 'vendor_orders' && typeof row.evidence === 'string') { try { const v = JSON.parse(row.evidence).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } } mockState.updates.push({ table, row, ...(q._raws ? { raws: q._raws } : {}) }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
@@ -81,7 +93,13 @@ jest.mock('../models/db', () => {
       return [saved];
     };
     q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }), merge: () => ({ whereRaw: () => ({ returning }), returning }) }), returning }; };
-    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : (table.startsWith('product_restock_requests') ? (mockState.dispatchable || []) : [])).then(ok, err);
+    q.then = (ok, err) => {
+      const isHoldScan = table.startsWith('vendor_orders') && (q._raws || []).some(([sql]) => /totalSource/.test(String(sql)));
+      const rows = table.startsWith('vendor_orders')
+        ? (q._pendingBells ? mockState.pendingBells : isHoldScan ? mockState.unsettledHolds : mockState.stale)
+        : (table.startsWith('product_restock_requests') ? (mockState.dispatchable || []) : table === 'product_inventory_movements' ? (mockState.countRows || []) : table === 'products_catalog' ? (mockState.otherVendorProducts || []) : []);
+      return Promise.resolve(rows).then(ok, err);
+    };
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
@@ -105,7 +123,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null, currentBellV: null });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], unsettledHolds: [], historyPolicy: null, lockedHold: null, openBell: false, savedOrderMatch: false, liveSkuOrder: null, otherVendorProducts: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null, currentBellV: null });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -162,12 +180,59 @@ test('placed: claim first, then ledger placed + request ordered + audit, no bell
   expect(r.status).toBe('placed');
   expect(r.externalOrderNumber).toBe('SM-1');
   expect(mockState.ledgerRows[0]).toMatchObject({ status: 'placing', adapter: 'stickermule', restock_request_id: 'req-1' });
-  expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500 });
+  expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500, since: null, countedAt: null, receivedOrders: [] });
   expect(a.place).toHaveBeenCalledWith(expect.objectContaining({ vendorSku: '4242', quantity: 500, quoteCents: 31400 }));
   expect(ledgerStatus()).toBe('placed');
   expect(requestStatus()).toBe('ordered');
   expect(auditVendorOrder).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', amount_cents: 31400, external_order_number: 'SM-1' }));
   expect(notify).not.toHaveBeenCalled();
+});
+
+test('bindingQuote returning an outstanding order parks vendor_order_outstanding before cap reservation', async () => {
+  mockState.countRows = [{ id: 'm1', movement_type: 'correction', metadata: { source: 'owner_count', countedAt: '2026-11-17T09:00:00Z' }, created_at: new Date('2026-11-18T12:00:00Z') }];
+  mockState.receivedOrders = ['SM-5'];
+  mockState.request = { ...baseRequest(), created_at: new Date('2026-11-20T15:00:00Z') };
+  const a = {
+    ...mockAdapter(),
+    preSubmitTotal: 'history',
+    bindingQuote: jest.fn(async () => ({ cents: 31400, source: 'order SM-7', outstanding: { number: 'SM-7', why: 'coming' } })),
+  };
+  try {
+    const r = await run(a);
+    expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500, since: '2026-11-20T15:00:00.000Z', countedAt: '2026-11-17T09:00:00.000Z', receivedOrders: ['SM-5'] });
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'vendor_order_outstanding' });
+    expect(a.place).not.toHaveBeenCalled();
+    const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review')?.row;
+    expect(JSON.parse(parked.evidence)).toMatchObject({ outstandingOrder: { number: 'SM-7', why: 'coming' } });
+    expect(parked.error).toMatch(/^vendor_order_outstanding: Sticker Mule order SM-7 holds item 4242/);
+  } finally {
+    Object.assign(mockState, { countRows: null, receivedOrders: null });
+  }
+});
+
+test('failed history lookup persists unreadable outstandingOrder evidence and preserveOutstanding keeps it locked from sweep hand-off', async () => {
+  const a = {
+    ...mockAdapter(),
+    preSubmitTotal: 'history',
+    bindingQuote: jest.fn(async () => { throw new Error('HTTP 504 timeout'); }),
+  };
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'failed', reason: 'adapter_error' });
+  const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'failed')?.row;
+  expect(JSON.parse(parked.evidence)).toMatchObject({ outstandingOrder: { number: null, why: 'unreadable' } });
+
+  const dbFn = require('../models/db');
+  mockState.requestLedger = { id: 'ledger-1', status: 'failed', placed_at: null, evidence: { outstandingOrder: { number: null, why: 'unreadable' } } };
+  mockState.updates = [];
+  try {
+    const out = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true }));
+    expect(out).toEqual({ preserved: 'vendor_order_outstanding' });
+    expect(mockState.updates.filter((u) => u.table === 'notifications' || u.table === 'vendor_orders')).toHaveLength(0);
+    // Normal manual receive/cancel (preserveOutstanding false) still settles the parked bell.
+    const manual = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1'));
+    expect(manual).toEqual({ settled: true });
+    expect(mockState.updates.some((u) => u.table === 'notifications')).toBe(true);
+  } finally { mockState.requestLedger = null; }
 });
 
 test('a conflicting claim skips without calling the adapter', async () => {
@@ -1479,5 +1544,477 @@ describe('open-request alert wiring (runVendorOrderDispatch)', () => {
   test('a failed alert write turns the run red but does not stop the dispatch', async () => {
     syncStaleRequestAlerts.mockRejectedValueOnce(new Error('alert not persisted'));
     await expect(dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV })).rejects.toThrow('open-request alerts failed: alert not persisted');
+  });
+});
+
+describe('DB-backed history-total auto-order policy (Sticker Mule)', () => {
+  const validPolicy = (overrides = {}) => ({
+    enabled: true,
+    approvedItems: ['stickermule:4242'],
+    maxPerOrderCents: 40000,
+    maxMonthlyCents: 80000,
+    revision: 3,
+    updatedAt: '2026-11-28T06:00:00.000Z',
+    updatedBy: '11111111-1111-4111-8111-111111111111',
+    ...overrides,
+  });
+  const historyAdapter = (overrides = {}) => mockAdapter({
+    preSubmitTotal: 'history',
+    place: jest.fn(async ({ beforeSubmit }) => {
+      const verdict = await beforeSubmit();
+      if (!verdict.ok) {
+        const err = new Error(verdict.message);
+        err.refuse = verdict.reason;
+        throw err;
+      }
+      return { externalOrderNumber: 'SM-77', amountCents: null, response: { number: 'SM-77' }, evidence: { itemId: 4242 } };
+    }),
+    readCharge: jest.fn(async () => 31400),
+    ...overrides,
+  });
+
+  test('approved DB policy places silently when readCharge matches history, holding the full DB per-order cap and ignoring Railway cap env vars', async () => {
+    delete process.env.AUTO_ORDER_MAX_PER_ORDER_CENTS;
+    delete process.env.AUTO_ORDER_MAX_MONTHLY_CENTS;
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 80000 });
+    mockState.request = { ...baseRequest(), created_at: new Date('2026-11-27T12:00:00Z') };
+    const a = historyAdapter({ readCharge: jest.fn(async () => 31400) });
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'placed', externalOrderNumber: 'SM-77', amountCents: 31400 });
+    expect(notify).not.toHaveBeenCalled();
+    // Pre-POST reservation held the full DB per-order cap ($400.00), not the $314.00 quote.
+    expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.amount_cents === 40000)).toBe(true);
+    // Order number was saved onto the placing claim before readCharge ran.
+    expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.external_order_number === 'SM-77' && !u.row.status)).toBe(true);
+    expect(a.readCharge).toHaveBeenCalledWith('SM-77');
+    expect(a.place).toHaveBeenCalledWith(expect.objectContaining({
+      vendorSku: '4242',
+      quantity: 500,
+      quoteCents: 40000,
+      since: '2026-11-27T12:00:00.000Z',
+      beforeSubmit: expect.any(Function),
+    }));
+  });
+
+  test('enabled DB policy does not order an unlisted SKU; parks no_vendor_confirmed_total naming Inventory page', async () => {
+    mockState.historyPolicy = validPolicy({ approvedItems: ['stickermule:9999'] });
+    const a = historyAdapter();
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'no_vendor_confirmed_total' });
+    expect(a.place).not.toHaveBeenCalled();
+    expect(lastLedgerPatch().error).toMatch(/Item 4242 is not approved for automatic reorder on the Inventory page/);
+  });
+
+  test('corrupted DB policy fails closed and parks no_vendor_confirmed_total', async () => {
+    mockState.historyPolicy = '{not-json';
+    const a = historyAdapter();
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'no_vendor_confirmed_total' });
+    expect(a.place).not.toHaveBeenCalled();
+    expect(lastLedgerPatch().error).toMatch(/Saved Sticker Mule auto-reorder settings are invalid/);
+  });
+
+  test('monthly cap refusal on an approved history order checks the full DB per-order cap hold', async () => {
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 70000 });
+    mockState.monthly = 35000; // $350 + $314 quote would fit $700, but $350 + $400 hold exceeds $700
+    const a = historyAdapter();
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'over_monthly_cap' });
+    expect(a.place).not.toHaveBeenCalled();
+    expect(lastLedgerPatch().amount_cents).toBe(31400);
+    expect(lastLedgerPatch().error).toMatch(/the amount held for a Sticker Mule order with no price shown first/);
+  });
+
+  test('authorizeHistoryOrder refuses approval_withdrawn when owner turns switch off between bindingQuote and POST', async () => {
+    let reads = 0;
+    mockState.historyPolicy = () => {
+      reads += 1;
+      return reads === 1 ? validPolicy() : validPolicy({ enabled: false, revision: 4 });
+    };
+    const a = historyAdapter();
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'approval_withdrawn' });
+    expect(lastLedgerPatch().amount_cents).toBe(31400); // unsent: shows history quote, not cap hold
+    expect(lastLedgerPatch().placed_at).toBeUndefined();
+    expect(a.readCharge).not.toHaveBeenCalled();
+  });
+
+  test('authorizeHistoryOrder releases unsent claim (approval_changed) when DB spend limits change mid-flight while still above quote', async () => {
+    let reads = 0;
+    mockState.historyPolicy = () => {
+      reads += 1;
+      return reads === 1 ? validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 80000 }) : validPolicy({ maxPerOrderCents: 35000, maxMonthlyCents: 70000, revision: 4 });
+    };
+    const a = historyAdapter();
+    const r = await run(a);
+    expect(r).toEqual({ requestId: 'req-1', skipped: 'approval_changed' });
+    expect(mockState.deletes).toContain('vendor_orders');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('authorizeHistoryOrder refuses approval_withdrawn when DB per-order cap is lowered below history quote mid-flight', async () => {
+    let reads = 0;
+    mockState.historyPolicy = () => {
+      reads += 1;
+      return reads === 1 ? validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 80000 }) : validPolicy({ maxPerOrderCents: 25000, maxMonthlyCents: 80000, revision: 4 });
+    };
+    const a = historyAdapter();
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'approval_withdrawn' });
+    expect(lastLedgerPatch().error).toMatch(/per-order limit was lowered to \$250\.00/);
+  });
+
+  test('authorizeHistoryOrder cancels request and releases claim (need_ended) when stock is no longer low before POST', async () => {
+    mockState.historyPolicy = validPolicy();
+    const a = historyAdapter({
+      place: jest.fn(async ({ beforeSubmit }) => {
+        mockState.product = { ...sticker, inventory_on_hand: '200' };
+        const verdict = await beforeSubmit();
+        const err = new Error(verdict.message);
+        err.refuse = verdict.reason;
+        throw err;
+      }),
+    });
+    const r = await run(a);
+    expect(r).toEqual({ requestId: 'req-1', skipped: 'need_ended' });
+    expect(mockState.deletes).toContain('vendor_orders');
+    expect(requestStatus()).toBe('cancelled');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('unconfirmed charge at placement records history_total_check holding full DB cap with totalSource none', async () => {
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 80000 });
+    const a = historyAdapter({ readCharge: jest.fn(async () => null) });
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'history_total_check', externalOrderNumber: 'SM-77', amountCents: 40000 });
+    const patch = lastLedgerPatch();
+    expect(JSON.parse(patch.evidence)).toMatchObject({ historyCents: 31400, holdCents: 40000, totalSource: 'none' });
+    expect(patch.error).toMatch(/^history_total_check: Sticker Mule order SM-77 was placed, but the vendor has not confirmed a paid total/);
+    expect(requestStatus()).toBe('ordered');
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  test('paid charge drifting >5% and >$2 from history flags history_total_check while keeping order placed', async () => {
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 80000 });
+    const a = historyAdapter({ readCharge: jest.fn(async () => 35000) }); // +$36 (+11.5%)
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'history_total_check', amountCents: 35000 });
+    expect(lastLedgerPatch().error).toMatch(/was placed at \$350\.00; the last identical order was \$314\.00/);
+  });
+
+  test('paid charge above DB per-order cap stamps overHoldAt and records over_cap_after_placement', async () => {
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 80000 });
+    const a = historyAdapter({ readCharge: jest.fn(async () => 45000) });
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement', amountCents: 45000 });
+    const patch = lastLedgerPatch();
+    expect(JSON.parse(patch.evidence)).toMatchObject({ historyCents: 31400, holdCents: 40000, totalSource: 'vendor', overHoldAt: expect.any(String) });
+    expect(patch.error).toMatch(/over_cap_after_placement:.*\$450\.00.*exceeds the per-order cap \$400\.00/);
+  });
+
+  test('settleRequestLedgerBells preserves cap alerts on receipt and rewrites pre-receipt wording to charge-review copy', async () => {
+    const dbFn = require('../models/db');
+    mockState.freshRequestStatus = 'received';
+    mockState.openBell = true;
+    mockState.requestLedger = {
+      id: 'ledger-cap',
+      status: 'needs_review',
+      placed_at: new Date(),
+      vendor_id: 'vend-sm',
+      external_order_number: 'SM-88',
+      adapter: 'stickermule',
+      evidence: {
+        overHoldAt: '2026-11-28T06:05:00.000Z',
+        bellAt: '2026-11-28T06:06:00.000Z',
+        bell: {
+          v: 'v1',
+          title: 'Auto-order needs review: Yard sign sticker (Sticker Mule)',
+          body: 'Sticker Mule charged $450.00 for order SM-88. Do NOT re-order: check the Sticker Mule account (order SM-88) and reconcile by hand — receive the stock, or cancel with the vendor and then use Record vendor cancellation on the Restock tab.',
+        },
+      },
+    };
+    const out = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1'));
+    expect(out).toEqual({ preserved: 'cap_alert' });
+    // Stale pre-receipt notification is closed immediately during receipt while the rewritten alert waits for delivery.
+    const notifUpdates = mockState.updates.filter((u) => u.table === 'notifications');
+    expect(notifUpdates).toHaveLength(1);
+    expect(closedDone(notifUpdates[0])).toBe(true);
+    const rawCall = dbFn.raw.mock.calls.find(([sql]) => String(sql).includes("- 'bellAt'"));
+    expect(rawCall).toBeTruthy();
+    const rewritten = JSON.parse(rawCall[1][0]).bell;
+    expect(rewritten.body).toMatch(/Do NOT re-order: the stock was received, so only the charge is left: check it on the Sticker Mule account \(order SM-88\), then mark this alert done\./);
+  });
+
+  test('recoverStalePlacing converts a stale claim carrying a saved external_order_number into a recoverable history_total_check park', async () => {
+    mockState.stale = [{
+      id: 'ledger-saved',
+      adapter: 'stickermule',
+      amount_cents: 40000,
+      created_at: new Date(Date.now() - 3600e3),
+      updated_at: new Date(Date.now() - 3600e3),
+      external_order_number: 'SM-91',
+      evidence: { historyCents: 31400, holdCents: 40000, totalSource: 'none' },
+      request_id: 'req-saved',
+      product_name: 'Yard sign sticker',
+      vendor_id: 'vend-sm',
+      vendor_name: 'Sticker Mule',
+    }];
+    const r = await dispatch.recoverStalePlacing({ notify });
+    expect(r.recovered).toEqual(['ledger-saved']);
+    const patch = lastLedgerPatch();
+    expect(patch).toMatchObject({ status: 'needs_review', external_order_number: 'SM-91', amount_cents: 40000 });
+    expect(patch.error).toMatch(/^history_total_check: Sticker Mule order SM-91 was placed, but the dispatcher stopped before it read the charge/);
+    expect(JSON.parse(patch.evidence)).toMatchObject({ historyCents: 31400, holdCents: 40000, totalSource: 'none' });
+    expect(requestStatus()).toBe('ordered');
+  });
+
+  test('settleHistoryHolds settles confirmed charges and expires holds past 35 ET days', async () => {
+    const now = new Date('2026-12-28T11:10:00Z');
+    mockState.unsettledHolds = [
+      { id: 'ledger-settle', adapter: 'stickermule', external_order_number: 'SM-101', placed_at: new Date('2026-12-20T11:10:00Z'), restock_request_id: 'req-1', vendor_id: 'vend-sm', product_name: 'Yard sign sticker', vendor_name: 'Sticker Mule' },
+      { id: 'ledger-expire', adapter: 'stickermule', external_order_number: 'SM-102', placed_at: new Date('2026-11-20T11:10:00Z'), restock_request_id: 'req-2', vendor_id: 'vend-sm', product_name: 'Yard sign sticker', vendor_name: 'Sticker Mule' },
+    ];
+    let lockIdx = 0;
+    const lockedRows = [
+      { placed_at: new Date('2026-12-20T11:10:00Z'), amount_cents: 40000, error: 'history_total_check: pending', evidence: { historyCents: 31400, holdCents: 40000, totalSource: 'none' } },
+      { placed_at: new Date('2026-11-20T11:10:00Z'), amount_cents: 40000, error: 'history_total_check: pending', evidence: { historyCents: 31400, holdCents: 40000, totalSource: 'none' } },
+    ];
+    const dbFn = require('../models/db');
+    const orig = dbFn.getMockImplementation();
+    dbFn.mockImplementation((table) => {
+      const q = orig(table);
+      const origFirst = q.first;
+      q.first = async (...cols) => {
+        if (table === 'vendor_orders' && cols[0] === 'placed_at') return lockedRows[lockIdx++];
+        return origFirst.apply(q, cols);
+      };
+      return q;
+    });
+    try {
+      const readCharge = jest.fn(async (num) => (num === 'SM-101' ? 31400 : null));
+      const settled = await dispatch.settleHistoryHolds({ registry: { stickermule: { readCharge } }, now });
+      expect(settled).toEqual(['ledger-settle', 'ledger-expire']);
+      expect(auditVendorOrder).toHaveBeenCalledWith(expect.objectContaining({ vendor_order_id: 'ledger-settle', outcome: 'charge_confirmed', amount_cents: 31400 }));
+      expect(auditVendorOrder).toHaveBeenCalledWith(expect.objectContaining({ vendor_order_id: 'ledger-expire', outcome: 'charge_unconfirmed', amount_cents: 40000 }));
+    } finally { dbFn.mockImplementation(orig); }
+  });
+
+  test('authorizeHistoryOrder refuses vendor_sku_order_live when another product already holds a live order for the same SKU', async () => {
+    mockState.historyPolicy = validPolicy();
+    mockState.liveSkuOrder = { id: 'ledger-other', restock_request_id: 'req-other', status: 'placing', external_order_number: 'SM-LIVE-1', product_name: 'Other Sticker' };
+    const a = historyAdapter({
+      place: jest.fn(async ({ beforeSubmit }) => {
+        const verdict = await beforeSubmit();
+        const err = new Error(verdict.message);
+        err.refuse = verdict.reason;
+        err.evidence = verdict.evidence;
+        throw err;
+      }),
+    });
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+    const patch = lastLedgerPatch();
+    const ev = JSON.parse(patch.evidence);
+    expect(ev).toMatchObject({
+      outstandingOrder: { number: 'SM-LIVE-1', why: 'coming' },
+      competingOrder: { ledgerId: 'ledger-other', requestId: 'req-other' },
+    });
+    expect(ev.bell.body).toContain('req-other');
+    expect(ev.bell.body).toMatch(/Do NOT order by hand/i);
+    // Notification headline and reason must explicitly say wait — never tell staff to buy by hand.
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [, headline, reason] = notify.mock.calls[0];
+    expect(headline).toMatch(/wait on/i);
+    expect(headline).not.toMatch(/order .* by hand|buy/i);
+    expect(reason).toMatch(/wait for it to settle before buying/i);
+    expect(a.readCharge).not.toHaveBeenCalled();
+  });
+
+  test('authorizeHistoryOrder refuses duplicate_sku_mapping when two active auto-reorder products share the SKU with no live order', async () => {
+    mockState.historyPolicy = validPolicy();
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    const a = historyAdapter({
+      place: jest.fn(async ({ beforeSubmit }) => {
+        const verdict = await beforeSubmit();
+        const err = new Error(verdict.message);
+        err.refuse = verdict.reason;
+        err.evidence = verdict.evidence;
+        throw err;
+      }),
+    });
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'duplicate_sku_mapping' });
+    const patch = lastLedgerPatch();
+    const ev = JSON.parse(patch.evidence);
+    expect(ev).toMatchObject({ duplicateSkuProducts: [{ productId: 'prod-other', name: 'Duplicate Sticker' }] });
+    expect(ev.bell.body).toMatch(/Fix the duplicate SKU mapping before buying/i);
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [, headline, reason] = notify.mock.calls[0];
+    expect(headline).toMatch(/fix duplicate/i);
+    expect(headline).not.toMatch(/order .* by hand/i);
+    expect(reason).toMatch(/nothing was sent.*fix the mapping before buying/i);
+    expect(a.readCharge).not.toHaveBeenCalled();
+  });
+
+  test('resolveBindingTotal refuses vendor_sku_order_live before monthly/per-order cap refusal when a competing SKU order is in flight', async () => {
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 50000 });
+    mockState.monthly = 40000; // competing in-flight hold exhausts monthly budget
+    mockState.liveSkuOrder = { id: 'ledger-a', restock_request_id: 'req-a', status: 'placing', external_order_number: null, product_name: 'Product A' };
+    const a = historyAdapter();
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+    expect(a.place).not.toHaveBeenCalled();
+    const ev = JSON.parse(lastLedgerPatch().evidence);
+    expect(ev).toMatchObject({
+      outstandingOrder: { number: null, why: 'coming' },
+      competingOrder: { ledgerId: 'ledger-a', requestId: 'req-a' },
+    });
+    expect(ev.bell.body).toMatch(/Do NOT order by hand/i);
+    expect(notify).toHaveBeenCalledTimes(1);
+    const [, headline, reason] = notify.mock.calls[0];
+    expect(headline).toMatch(/wait on/i);
+    expect(reason).toMatch(/wait for it to settle before buying/i);
+  });
+
+  test('settleRequestLedgerBells preserves duplicate_sku_mapping warning during sweep handoff until the mapping is resolved', async () => {
+    const dbFn = require('../models/db');
+    mockState.requestLedger = {
+      id: 'ledger-dup',
+      status: 'needs_review',
+      placed_at: null,
+      vendor_id: 'vend-sm',
+      adapter: 'stickermule',
+      request_payload: { productId: 'prod-1', vendorSku: '4242' },
+      evidence: {
+        duplicateSkuProducts: [{ productId: 'prod-other', name: 'Duplicate Sticker' }],
+        bell: { v: 'v-dup', title: 'Auto-order needs review: Yard sign sticker (Sticker Mule)', body: 'Multiple active auto-reorder products share Sticker Mule SKU 4242. Fix the duplicate SKU mapping before buying.' },
+      },
+    };
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    const preserved = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true }));
+    expect(preserved).toEqual({ preserved: 'duplicate_sku_mapping' });
+    expect(mockState.updates.filter((u) => u.table === 'notifications')).toHaveLength(0);
+
+    // Once the duplicate mapping is resolved, the sweep handoff retires the warning normally.
+    mockState.otherVendorProducts = [];
+    const settled = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true }));
+    expect(settled).toEqual({ settled: true });
+    expect(mockState.updates.filter((u) => u.table === 'notifications' && closedDone(u))).toHaveLength(1);
+  });
+
+  test('resolveBindingTotal checks SKU conflicts before no_binding_total, adapter_error, and duplicate-mapping cap refusals', async () => {
+    mockState.historyPolicy = validPolicy({ maxPerOrderCents: 40000, maxMonthlyCents: 50000 });
+    mockState.liveSkuOrder = { id: 'ledger-a', restock_request_id: 'req-a', status: 'placing', external_order_number: null, product_name: 'Product A' };
+
+    // 1) No matching price in history while sibling order is in flight -> vendor_sku_order_live, not no_binding_total.
+    const noPrice = await run(historyAdapter({ bindingQuote: jest.fn(async () => null) }));
+    expect(noPrice).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+
+    // 2) History lookup fails while sibling order is in flight -> vendor_sku_order_live, not adapter_error.
+    const lookupFail = await run(historyAdapter({ bindingQuote: jest.fn(async () => { throw new Error('HTTP 502'); }) }));
+    expect(lookupFail).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+
+    // 2b) Vendor reports an outstanding order that belongs to competing Product A -> vendor_sku_order_live, not vendor_order_outstanding.
+    const vendorOut = await run(historyAdapter({ bindingQuote: jest.fn(async () => ({ cents: 31400, outstanding: { number: 'SM-A-1', why: 'coming' } })) }));
+    expect(vendorOut).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+
+    // 2c) Vendor reports an outstanding order AND duplicate SKU mapping exists (no live ledger) -> preserves BOTH blockers.
+    mockState.liveSkuOrder = null;
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    const vendorOutDup = await run(historyAdapter({ bindingQuote: jest.fn(async () => ({ cents: 31400, outstanding: { number: 'SM-VEND-9', why: 'coming' } })) }));
+    expect(vendorOutDup).toMatchObject({ status: 'needs_review', reason: 'duplicate_sku_mapping' });
+    expect(JSON.parse(lastLedgerPatch().evidence)).toMatchObject({
+      outstandingOrder: { number: 'SM-VEND-9', why: 'coming' },
+      duplicateSkuProducts: [{ productId: 'prod-other', name: 'Duplicate Sticker' }],
+    });
+
+    // 3) Duplicate mapping with monthly cap exceeded -> duplicate_sku_mapping, not over_monthly_cap.
+    mockState.liveSkuOrder = null;
+    mockState.monthly = 40000;
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    const dupOverCap = await run(historyAdapter());
+    expect(dupOverCap).toMatchObject({ status: 'needs_review', reason: 'duplicate_sku_mapping' });
+  });
+
+  test('settleRequestLedgerBells releases vendor_sku_order_live warning once competing order and duplicate mapping clear', async () => {
+    const dbFn = require('../models/db');
+    mockState.requestLedger = {
+      id: 'ledger-comp',
+      status: 'needs_review',
+      placed_at: null,
+      vendor_id: 'vend-sm',
+      adapter: 'stickermule',
+      request_payload: { productId: 'prod-1', vendorSku: '4242' },
+      evidence: {
+        outstandingOrder: { number: null, why: 'coming' },
+        competingOrder: { ledgerId: 'ledger-a', requestId: 'req-a' },
+        bell: { v: 'v-comp', title: 'Auto-order needs review: Yard sign sticker (Sticker Mule)', body: 'Do NOT order by hand — wait for that competing restock request to settle.' },
+      },
+    };
+    mockState.liveSkuOrder = { id: 'ledger-a' };
+    expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
+      .toEqual({ preserved: 'vendor_sku_order_live' });
+
+    // Competing order settled, but duplicate mapping still active -> preserved as duplicate_sku_mapping.
+    mockState.liveSkuOrder = null;
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
+      .toEqual({ preserved: 'duplicate_sku_mapping' });
+
+    // Both competing order and duplicate mapping cleared -> warning retired for normal handoff.
+    mockState.otherVendorProducts = [];
+    expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
+      .toEqual({ settled: true });
+  });
+
+  test('unclaimed request handoff stands down in both sweep and dispatcher when another product holds a live order for the same SKU', async () => {
+    const dbFn = require('../models/db');
+    mockState.requestLedger = null;
+    mockState.liveSkuOrder = { id: 'ledger-a', restock_request_id: 'req-a', status: 'placing', external_order_number: null, product_name: 'Product A' };
+
+    // Sweep handoff (settleRequestLedgerBells with preserveOutstanding: true) preserves/withholds manual bell.
+    expect(await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true })))
+      .toEqual({ preserved: 'vendor_sku_order_live' });
+
+    // Dispatcher handoff (vendor gate closed) stands down with autoOrderLive and rings no manual bell.
+    process.env.GATE_AUTO_ORDER_STICKERMULE = 'false';
+    const r = await run(historyAdapter());
+    expect(r).toMatchObject({ skipped: 'vendor_gated', autoOrderLive: true });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('settleRequestLedgerBells rewrites landedAfterReceive cap-alert wording after the second receipt clears landedAfterReceive', async () => {
+    const dbFn = require('../models/db');
+    mockState.freshRequestStatus = 'received';
+    mockState.openBell = true;
+    const lateBodies = [
+      'Sticker Mule order SM-88 ($450.00) landed after the restock request was received by hand — the stock counted was not this order. Receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and then use Record vendor cancellation on the Restock tab; new requests for the product are blocked until then. Also: Sticker Mule order SM-88 was placed at $450.00. Do NOT re-order: check the Sticker Mule account (order SM-88) and reconcile by hand — receive the stock, or cancel with the vendor and then use Record vendor cancellation on the Restock tab.',
+      'Sticker Mule order SM-88 ($450.00) was confirmed after it was parked and the request marked received. The stock counted at that receipt was not this order: receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and then use Record vendor cancellation on the Restock tab; new requests for the product are blocked until then.',
+      'Sticker Mule charged $450.00 for order SM-88, read back after placement: more than the $400.00 held against the caps. Do NOT re-order: the stock counted at the receipt was not this order: receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and then use Record vendor cancellation on the Restock tab.',
+    ];
+    for (const body of lateBodies) {
+      dbFn.raw.mockClear();
+      mockState.requestLedger = {
+        id: 'ledger-late',
+        status: 'needs_review',
+        placed_at: new Date(),
+        vendor_id: 'vend-sm',
+        external_order_number: 'SM-88',
+        adapter: 'stickermule',
+        evidence: {
+          overHoldAt: '2026-11-28T06:05:00.000Z',
+          secondReceiveAt: '2026-11-29T10:00:00.000Z',
+          bellAt: '2026-11-28T06:06:00.000Z',
+          bell: { v: 'v1', title: 'Auto-order needs review: Yard sign sticker (Sticker Mule)', body },
+        },
+      };
+      const out = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1'));
+      expect(out).toEqual({ preserved: 'cap_alert' });
+      const rawCall = dbFn.raw.mock.calls.find(([sql]) => String(sql).includes("- 'bellAt'"));
+      expect(rawCall).toBeTruthy();
+      const rewritten = JSON.parse(rawCall[1][0]).bell;
+      expect(rewritten.body).toMatch(/Do NOT re-order: the stock was received, so only the charge is left: check it on the Sticker Mule account \(order SM-88\), then mark this alert done\./);
+      expect(rewritten.body).not.toMatch(/receive the request once more|Record vendor cancellation/i);
+    }
   });
 });

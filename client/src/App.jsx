@@ -1,5 +1,5 @@
 import React, { Component, useEffect, useRef, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useOutletContext, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
 import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
@@ -12,6 +12,12 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 import { useGlassSurface } from './glass/glass-engine';
 import Icon from './components/Icon';
 import CustomerDialogHost from './components/brand/CustomerDialogHost';
+
+function TodayEstimateRedirect() {
+  const outlet = useOutletContext() || {};
+  const isAdmin = outlet.techRole === 'admin';
+  return <Navigate to={isAdmin ? '/admin/pipeline?tab=new' : '/admin/today'} replace />;
+}
 
 function CustomerFailureScreen({ title, message, onRetry }) {
   useGlassSurface(true);
@@ -760,7 +766,7 @@ export default function App() {
           <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
           <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
-          <Route path="/visit/:token" element={<Suspense fallback={<div />}><WavesShell><VisitSummaryPage /></WavesShell></Suspense>} />
+          <Route path="/visit/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><VisitSummaryPage /></WavesShell></Suspense>} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           {/* Bank-verification texts/emails linked /billing, which the portal
@@ -941,9 +947,9 @@ export default function App() {
               <Route index element={<Suspense fallback={<RouteFallback label="Loading..." />}><TechHomePage /></Suspense>} />
               <Route path="tools" element={<Suspense fallback={<RouteFallback label="Loading tools…" />}><TechHomePage section="tools" /></Suspense>} />
               <Route path="more" element={<Suspense fallback={<RouteFallback label="Loading…" />}><TechHomePage section="more" /></Suspense>} />
-              {/* Field estimates use the canonical server-priced builder. The retired
-                  tech-only calculator duplicated prices client-side. */}
-              <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
+              {/* Field estimates use the canonical server-priced builder for admins;
+                  technicians stay in /admin/today instead of bouncing off admin-only /admin/pipeline. */}
+              <Route path="estimate" element={<TodayEstimateRedirect />} />
               <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
               <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
               <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />

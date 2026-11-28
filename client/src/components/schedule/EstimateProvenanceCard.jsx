@@ -336,16 +336,20 @@ function depositRow(deposit) {
 // Only renders on a RESOLVED cards array — null (unknown) shows nothing so a
 // failed fetch can't masquerade as "no card". Shows the first non-expired
 // method; if every method is expired, says so instead of claiming "None".
-function cardOnFileRow(cardsOnFile) {
+function cardOnFileRow(cardsOnFile, { adminActions = true } = {}) {
   if (!Array.isArray(cardsOnFile)) return null;
-  const card = chargeableCardOnFile(cardsOnFile);
+  // Technicians only take cards — never expose saved ACH bank details (P1-9).
+  const visibleMethods = adminActions
+    ? cardsOnFile
+    : cardsOnFile.filter((pm) => pm?.method_type !== 'ach');
+  const card = chargeableCardOnFile(visibleMethods);
   if (!card) {
-    return { label: 'Card on file', value: 'None', sub: 'no saved payment method', tone: 'muted' };
+    return { label: 'Card on file', value: 'None', sub: 'no saved card', tone: 'muted' };
   }
   const subParts = [];
   if (isCardExpired(card)) subParts.push(`expired ${card.exp_month}/${card.exp_year}`);
   if (card.is_default) subParts.push('default');
-  const others = cardsOnFile.length - 1;
+  const others = visibleMethods.length - 1;
   if (others > 0) subParts.push(`+${others} more on file`);
   return {
     label: card.method_type === 'ach' ? 'Bank on file' : 'Card on file',
@@ -355,7 +359,54 @@ function cardOnFileRow(cardsOnFile) {
   };
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onetimeTotal, deposit, payment, lines, estimateRef, cardsOnFile, style, compareScope = 'group' }) {
+function buildEstimateRows({ adminActions, payment, deposit, cardsOnFile }) {
+  const rows = adminActions ? paymentRows(payment) : [];
+  const dep = adminActions ? depositRow(deposit) : null;
+  if (dep) rows.push(dep);
+  const cardRow = cardOnFileRow(cardsOnFile, { adminActions });
+  if (cardRow) rows.push(cardRow);
+  return rows;
+}
+
+function EstimateServiceLinesList({ show, serviceLines, lineStyle }) {
+  if (!show || !serviceLines.length) return null;
+  return (
+    <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 6 }}>
+      <div style={{ fontSize: 10, fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED }}>
+        Estimate includes
+      </div>
+      {serviceLines.map((line, i) => (
+        <div key={`${line.name}-${i}`} style={lineStyle}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: INK, minWidth: 0 }}>{line.name}</div>
+          {(line.cadence || line.perAppPrice != null || line.oneTimePrice != null) && (
+            <div style={{ fontSize: 12, fontWeight: 500, color: BLUE.ink, whiteSpace: 'nowrap' }}>
+              {line.perAppPrice != null
+                ? `${money(line.perAppPrice)}/application${line.cadence ? ` · ${line.cadence}` : ''}`
+                : line.monthlyPrice != null
+                  ? `${money(line.monthlyPrice)}/mo${line.cadence ? ` · ${line.cadence}` : ''}`
+                  : line.oneTimePrice != null
+                    ? `${money(line.oneTimePrice)} one-time`
+                    : line.cadence}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PriceDriftNote({ show, price, quotedComparable, deltaPct }) {
+  if (!show) return null;
+  return (
+    <div style={{ fontSize: 11, color: MUTED, marginTop: 4, paddingLeft: 2 }}>
+      {quotedComparable > 0
+        ? `Current price ${money(price)} (${deltaPct > 0 ? '+' : ''}${deltaPct}% vs quoted)`
+        : `Current price ${money(price)} (quoted ${money(quotedComparable)})`}
+    </div>
+  );
+}
+
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onetimeTotal, deposit, payment, lines, estimateRef, cardsOnFile, style, compareScope = 'group', adminActions = true }) {
   const quoted = Number(quotedTotal) || 0;
   const refLabel = String(estimateRef || '').trim();
   const price = currentPrice != null ? Number(currentPrice) : null;
@@ -414,16 +465,13 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
       ...(oneTime > 0 ? [`${money(oneTime)} one-time`] : []),
     ].join(' + ')
     : money(quoted);
-  const rows = paymentRows(payment);
-  const dep = depositRow(deposit);
-  if (dep) rows.push(dep);
-  const cardRow = cardOnFileRow(cardsOnFile);
-  if (cardRow) rows.push(cardRow);
+  const rows = buildEstimateRows({ adminActions, payment, deposit, cardsOnFile });
   // Whole-visit third-party billing: surfaced as its own prominent banner so a
   // tech scanning on a phone can't miss it and ask the homeowner for money.
   // Backed by summary.payerBilled (always resolved, gate-independent); fall back
   // to the deposit exemptReason for older payloads.
   const payerBilled = !!(deposit && (deposit.payerBilled || deposit.exemptReason === 'payer_billed'));
+  if (!adminActions && !payerBilled && rows.length === 0) return null;
   // Compare the visit's charge against the quoted VISIT total when one can
   // be established — measuring a per-visit price against the blended
   // monthly+one-time total manufactured phantom deltas (a $121/application
@@ -493,9 +541,11 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
           {/* Wrapping allowed (Codex #3173 r2 P2): a multi-service breakdown
               is wider than a phone-width card — nowrap forced horizontal
               page overflow on the exact surface this targets. */}
-          <span style={{ fontSize: 12, fontWeight: 500, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>
-            Quoted {quotedLabel}
-          </span>
+          {adminActions && (
+            <span style={{ fontSize: 12, fontWeight: 500, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>
+              Quoted {quotedLabel}
+            </span>
+          )}
         </div>
 
         {payerBilled && (
@@ -524,31 +574,7 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
           </div>
         )}
 
-        {serviceLines.length > 0 && (
-          <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 6 }}>
-            {/* Micro-label so the rows read as the estimate's accepted service
-                mix, not this appointment's line items. */}
-            <div style={{ fontSize: 10, fontWeight: 500, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED }}>
-              Estimate includes
-            </div>
-            {serviceLines.map((line, i) => (
-              <div key={`${line.name}-${i}`} style={lineStyle}>
-                <div style={{ fontSize: 13, fontWeight: 500, color: INK, minWidth: 0 }}>{line.name}</div>
-                {(line.cadence || line.perAppPrice != null || line.oneTimePrice != null) && (
-                  <div style={{ fontSize: 12, fontWeight: 500, color: BLUE.ink, whiteSpace: 'nowrap' }}>
-                    {line.perAppPrice != null
-                      ? `${money(line.perAppPrice)}/application${line.cadence ? ` · ${line.cadence}` : ''}`
-                      : line.monthlyPrice != null
-                        ? `${money(line.monthlyPrice)}/mo${line.cadence ? ` · ${line.cadence}` : ''}`
-                        : line.oneTimePrice != null
-                          ? `${money(line.oneTimePrice)} one-time`
-                          : line.cadence}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+        <EstimateServiceLinesList show={adminActions} serviceLines={serviceLines} lineStyle={lineStyle} />
 
         {rows.length > 0 && (
           <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>
@@ -573,15 +599,12 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
         )}
       </div>
 
-      {showVsQuoted && (
-        <div style={{ fontSize: 11, color: MUTED, marginTop: 4, paddingLeft: 2 }}>
-          {/* A percentage against an accepted $0 is meaningless — name the
-              quoted amount instead so the drift is still visible. */}
-          {quotedComparable > 0
-            ? `Current price ${money(price)} (${deltaPct > 0 ? '+' : ''}${deltaPct}% vs quoted)`
-            : `Current price ${money(price)} (quoted ${money(quotedComparable)})`}
-        </div>
-      )}
+      <PriceDriftNote
+        show={adminActions && showVsQuoted}
+        price={price}
+        quotedComparable={quotedComparable}
+        deltaPct={deltaPct}
+      />
     </div>
   );
 }

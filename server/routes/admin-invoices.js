@@ -2053,10 +2053,17 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
     // for delivery to them (Codex #4311 r29 P0). The Bill-To reconciliation
     // is what releases such a row; scheduling is refused until then.
     const scheduleTarget = await db('invoices').where({ id: req.params.id }).first('scheduled_send_error');
-    if (require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(scheduleTarget)) {
+    const invoiceHelpers = require('../services/invoice-helpers');
+    if (invoiceHelpers.invoiceWithdrawnFromCustomer(scheduleTarget)) {
       return res.status(409).json({
         error: 'This invoice is billed to a third-party payer and has been withdrawn from the customer — clear the Bill-To first.',
         code: 'invoice_withdrawn_from_customer',
+      });
+    }
+    if (invoiceHelpers.invoiceHeldForChemicalReview(scheduleTarget)) {
+      return res.status(409).json({
+        error: 'This invoice is held for office billing review of a chemical area add-on — review and send or clear the hold first.',
+        code: 'INVOICE_CHEMICAL_ADDON_HOLD',
       });
     }
 
@@ -2064,7 +2071,7 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
       .where({ id: req.params.id })
       .whereIn('status', ['draft', 'scheduled'])
       .whereNull('payer_statement_id')
-      .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
+      .whereRaw("(scheduled_send_error IS NULL OR (scheduled_send_error NOT LIKE 'payer_billed:%' AND scheduled_send_error NOT LIKE 'chemical_addon_review:%'))")
       // req.ibApprovedSchedule is set only by scheduleSendFromBar (never an HTTP field): the invoice edit time the card
       // showed, as one more predicate on this UPDATE. The page's call is unchanged.
       .modify((q) => {
@@ -2075,8 +2082,8 @@ const invoiceScheduleSendHandler = async (req, res, next) => {
         scheduled_send_at: when,
         scheduled_send_attempts: 0,
         // The accepted-Text/pending-Email marker (a Text leg the visit summary text carries)
-        // survives a reschedule: clearing it would text the pay link a second time.
-        scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED%' OR scheduled_send_error LIKE 'SUMMARY_TEXT_PLANNED%' THEN scheduled_send_error ELSE NULL END"),
+        // and chemical review-hold stamps survive any reschedule.
+        scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED%' OR scheduled_send_error LIKE 'SUMMARY_TEXT_PLANNED%' OR scheduled_send_error LIKE 'chemical_addon_review:%' THEN scheduled_send_error ELSE NULL END"),
         scheduled_request_review: Boolean(requestReview),
         scheduled_review_delay_minutes: requestReview ? reviewDelayMinutes : null,
         updated_at: new Date(),

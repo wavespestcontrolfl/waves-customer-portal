@@ -49,6 +49,7 @@ vi.mock('../hooks/useAuth', () => ({
 // confirm rode without breaking the walk.
 const apiMock = vi.hoisted(() => ({
   token: 'ambient-token',
+  ensureFreshToken: vi.fn(async () => 'valid'),
   fetchRaw: vi.fn((url, opts) => globalThis.fetch(url, opts)),
 }));
 vi.mock('../utils/api', () => ({ api: apiMock, default: apiMock }));
@@ -388,6 +389,51 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
       expect(confirmCalls).toHaveLength(1);
     });
   });
+
+  it('sends capture-intent through api.fetchRaw for signed-in non-token entries and plain fetch when signed out', async () => {
+    authState.isAuthenticated = true;
+    authState.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', phone: '9415550101', email: 'pat@example.com' };
+    const fetchMock = stubFetch();
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    const phoneInput = await screen.findByLabelText('Phone number');
+    fireEvent.change(phoneInput, { target: { value: '9415550101' } });
+    fireEvent.blur(phoneInput);
+
+    await waitFor(() => {
+      const captureRaw = apiMock.fetchRaw.mock.calls.filter(([url]) => String(url).includes('/booking/capture-intent'));
+      expect(captureRaw).toHaveLength(1);
+    });
+    expect(apiMock.ensureFreshToken).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    apiMock.fetchRaw.mockClear();
+    authState.isAuthenticated = false;
+    authState.customer = null;
+    const anonFetch = stubFetch();
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+
+    const anonPhone = await screen.findByLabelText('Phone number');
+    fireEvent.change(anonPhone, { target: { value: '9415550101' } });
+    fireEvent.blur(anonPhone);
+
+    await waitFor(() => {
+      expect(anonFetch.mock.calls.some(([url]) => String(url).includes('/booking/capture-intent'))).toBe(true);
+    });
+    expect(apiMock.fetchRaw.mock.calls.some(([url]) => String(url).includes('/booking/capture-intent'))).toBe(false);
+  });
 });
 
 describe('PublicBookingPage contact phone normalization', () => {
@@ -427,6 +473,63 @@ describe('PublicBookingPage contact phone normalization', () => {
     expect(screen.getByText('Enter a 10-digit phone number.')).toBeInTheDocument();
     expect(phone).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
+  });
+
+  it('rejects foreign E.164 (+44) and invalid-NANP 10-digit numbers without calling customer-lookup or enabling Confirm', async () => {
+    const fetchMock = stubFetch();
+    await walkToContactStep();
+    const phone = screen.getByLabelText('Phone number');
+    for (const invalidPhone of ['+44 2234 5678', '0123456789', '1941555010', '9411550101']) {
+      fireEvent.change(phone, { target: { value: invalidPhone } });
+      fireEvent.blur(phone);
+      expect(screen.getByText('Enter a 10-digit phone number.')).toBeInTheDocument();
+      expect(phone).toHaveAttribute('aria-invalid', 'true');
+      expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
+    }
+    const phoneLookups = fetchMock.mock.calls.filter(([url]) => (
+      String(url).includes('/booking/customer-lookup') && String(url).includes('phone=')
+    ));
+    expect(phoneLookups).toHaveLength(0);
+  });
+
+  it('preserves the entered phone when customer-lookup matches a profile without returning phone', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      const parsed = new URL(String(url), 'https://portal.test');
+      if (parsed.pathname.endsWith('/booking/config')) return jsonResponse({ enabled: true });
+      if (parsed.pathname.endsWith('/booking/customer-lookup') && parsed.searchParams.has('phone')) {
+        return jsonResponse({
+          customer: {
+            id: 'cust-returning',
+            first_name: 'Pat',
+            last_name: 'Lee',
+            email: 'pat@example.com',
+            address_line1: '123 Main St',
+            city: 'Sarasota',
+            state: 'FL',
+            zip: '34236',
+          },
+        });
+      }
+      if (parsed.pathname.endsWith('/booking/confirm')) return jsonResponse({ confirmationCode: 'WPC-5678' });
+      return jsonResponse(availabilityPayload());
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await walkToContactStep();
+    const phone = screen.getByLabelText('Phone number');
+    fireEvent.change(phone, { target: { value: '+1 (941) 555-0101' } });
+    fireEvent.blur(phone);
+
+    await waitFor(() => {
+      expect(screen.getByText('Customer found')).toBeInTheDocument();
+      expect(screen.getByText('Pat Lee')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm booking' }));
+    await waitFor(() => {
+      const confirmCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes('/booking/confirm'));
+      expect(confirmCalls).toHaveLength(1);
+      expect(JSON.parse(confirmCalls[0][1].body).new_customer.phone).toBe('9415550101');
+    });
+    expect(await screen.findByText(/We just texted a confirmation to \+1 \(941\) 555-0101\./)).toBeInTheDocument();
   });
 });
 
@@ -511,5 +614,18 @@ describe('PublicBookingPage ?service= names', () => {
     expect(chip('Mosquito Control')).not.toBeInTheDocument();
     expect(chip('Pest Control')).not.toBeInTheDocument();
     expect(screen.queryByText('Pick your service.')).not.toBeInTheDocument();
+  });
+
+  it('quotes 2-hour arrival windows on step 2 and step 3 even for 60-min and 90-min services', async () => {
+    stubFetch({ config: { enabled: true, multi_service: false } });
+    renderAt('/book?service=termite');
+    await fillAddress();
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    expect(await screen.findByText(/open 2-hour arrival windows/i)).toBeInTheDocument();
+    expect(screen.getByText(/each is a 2-hour arrival window/i)).toBeInTheDocument();
+    expect(screen.queryByText(/1-hour|90-minute/i)).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /^Choose 9:00 AM/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
+    expect(await screen.findByText(/Thursday, July 30 · 9:00 AM – 11:00 AM/)).toBeInTheDocument();
   });
 });

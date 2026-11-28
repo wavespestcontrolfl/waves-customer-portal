@@ -123,7 +123,7 @@ import {
 } from '../../lib/fast-complete-products';
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import {
-  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
+  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, useFastCompleteCloseGuard,
   RecoveredCompletion, RecoveryOnlyView, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
@@ -1277,8 +1277,6 @@ const noProductNoteJoined = (note, rows, newSod) => {
 
 function missingRequirement({ sodWait = '', tetrinoBusy, noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
-  // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
-  const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
   // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. A missing place holds Complete; a place the maps do not take (a take-all
   // card row on an unmapped place) and a yearly limit are warnings on the footer (heldPlaceWarningsOf, limitWarningsOf).
@@ -1300,7 +1298,6 @@ function missingRequirement({ sodWait = '', tetrinoBusy, noProductOk = false, fo
     // The guide is still reading.
     [guideHold, guideHold],
     [areaHold, areaHold],
-    [missingArea, missingArea && `The lawn area is not on file for ${missingArea.name}. Tell the office.`],
     // A spot row needs the amount used, or the area sprayed (which figures it) (spot rules).
     [missingSpot, missingSpot && `Enter the amount used for ${missingSpot.name}.`],
     [missingPlace, missingPlace && `Pick where on the lawn ${missingPlace.name} went.`],
@@ -1309,6 +1306,15 @@ function missingRequirement({ sodWait = '', tetrinoBusy, noProductOk = false, fo
     [typed && !form.condition, 'Pick the lawn condition.'],
   ].find(([missing]) => missing) || [];
   return reason;
+}
+
+// Owner ruling 2026-11-26 ("everything should only be warned, never blocked"):
+// missing broadcast square footage warns clearly in the footer and lets the
+// server record the advisory warning instead of disabling Complete.
+function missingAreaWarningsOf(rows, lawnSqft) {
+  return rows
+    .filter((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0))
+    .map((row) => `The lawn area is not on file for ${row.name}. Tell the office.`);
 }
 
 // The guide's record: one entry per card the guide showed, plus the standing "Chinch bugs found at the edge of
@@ -1535,19 +1541,23 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
   // unknown or refused (it may have saved).
-  const close = useCallback(() => {
-    if (submitting || wrapChecking) return;
+  const performClose = useCallback(() => {
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff.
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, wrapChecking, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  const { requestClose: close, frameProps } = useFastCompleteCloseGuard({
+    blocked: submitting || wrapChecking,
+    skipWhen: [done, ctx.blockedReason, submission.failure, submission.restored],
+    onClose: performClose,
+  });
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for good.
   const locked = submissionHolds(submission) || wrapChecking;
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended}>
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended} {...frameProps}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || wrapChecking || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting || wrapChecking} onBack={close} />
       <SheetBody service={service} request={request} catalog={catalog} catalogError={catalogError} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} collectOnSheet={collectOnSheet} />
     </FastCompleteFrame>
@@ -2070,7 +2080,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // While the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
   const missingReason = missingRequirement({ sodWait, tetrinoBusy: tetrinoScoutBusy, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
-  const footerWarnings = [...limitWarningsOf(rows), ...heldPlaceWarningsOf(rows), ...tetrinoWarnings];
+  const footerWarnings = [...limitWarningsOf(rows), ...heldPlaceWarningsOf(rows), ...tetrinoWarnings, ...missingAreaWarningsOf(rows, lawnSqft)];
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, tetrinoScout: sheetCtx.tetrinoScout && tetrinoRecorded ? tetrinoScout : null, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   usePrepareRecommendations({ base, request, ctx: sheetCtx, missingReason, locked, assessmentId, rows });
   const submit = async () => {

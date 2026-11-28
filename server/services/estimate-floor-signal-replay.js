@@ -594,6 +594,16 @@ function freezeSnapshotRuleStamps(estData) {
   if (Object.keys(frozen).length) estData.sendSnapshot = { ...estData.sendSnapshot, ...frozen };
 }
 
+// Year-1 no-5% annual prepay policy (GATE_NO_YEAR1_PREPAY_DISCOUNT, 2026-11-27):
+// returns { year1PrepayNoPercent: true } only when the stored estimate carries
+// the stamp (so legacy snapshots remain byte-identical when absent).
+function savedYear1PrepayNoPercentSignal(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  return require('./estimate-converter').estimateHasNoYear1PrepayPercent(estData)
+    ? { year1PrepayNoPercent: true }
+    : {};
+}
+
 // ── the shared signal set ───────────────────────────────────────
 
 // Every saved floor signal this estimate carries, as engine INPUT-level keys.
@@ -649,6 +659,7 @@ function savedFloorReplaySignals(estData) {
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') signals.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) signals.pestProgramFloorPerVisit = pest.perVisit;
+  Object.assign(signals, savedYear1PrepayNoPercentSignal(estData));
   return signals;
 }
 
@@ -670,6 +681,7 @@ module.exports = {
   savedSpecialty1126CurrentServices,
   savedOneTimePestRuleLegacy,
   savedOneTimePestCurrentServices,
+  savedYear1PrepayNoPercentSignal,
   storedPestServices,
   freezeSnapshotRuleStamps,
   savedFloorReplaySignals,

@@ -201,6 +201,11 @@ function exemptFromPlanning(rows, planningMinutes) {
   return planningMinutes === false ? rows.map(row => ({ ...row, planning_exempt: true })) : rows;
 }
 
+function isInsertTarget(stored, changes, date, techId, forceInsert) {
+  return !!forceInsert || dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
+    || Boolean(changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5));
+}
+
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
   includeClaimedReservations = false, markLapsedReservations = false,
@@ -225,6 +230,9 @@ async function loadArrivalRouteContext({
   // road purchase, buySaveRoads): read the geocoder's cache only, as the
   // save's own locked read does.
   cacheLocation = false,
+  // True when re-inserting a visit returning from hold onto its own prior slot:
+  // evaluate every route insertion position rather than its stale route_order.
+  forceInsert,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -303,14 +311,13 @@ async function loadArrivalRouteContext({
   (movedTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
-    && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
+    && (row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
     && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at
       && (!includeClaimedReservations || row.customer_id == null))), planningMinutes);
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
   date, now, grouped, activeTarget, activeStop, prospective: !!prospective,
-  insertTarget: dateOnly(stored.scheduled_date) !== date || stored.technician_id !== techId
-    || (changes.window_start && String(changes.window_start).slice(0, 5) !== String(stored.window_start).slice(0, 5)),
+  insertTarget: isInsertTarget(stored, changes, date, techId, forceInsert),
   // Where the visit is saved now (staffPlacement).
   placedAt: prospective ? null : { date: dateOnly(stored.scheduled_date),
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
@@ -669,12 +676,12 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
     const hitsFixed = simulation.arrivals.some((arrival, index) => fixed.some(row => {
       if (row.id === arrival.id) return false;
       const start = minuteOfDay(row.window_start);
-      const end = Math.max(start + workDuration(row), row.endMin ?? 0);
+      const end = Math.max(start + workDuration(row), row.endMin ?? minuteOfDay(row.window_end) ?? 0);
       const occupiedFrom = index === 0 ? startMin : simulation.arrivals[index - 1].departureMin;
       return (capacity && start == null) || (start != null && occupiedFrom < end && arrival.departureMin > start);
     })) || (capacity && fixed.some(row => {
       const start = minuteOfDay(row.window_start);
-      const end = Math.max(start + workDuration(row), row.endMin ?? 0);
+      const end = Math.max(start + workDuration(row), row.endMin ?? minuteOfDay(row.window_end) ?? 0);
       return start == null || (simulation.serviceFinishMin < end && simulation.returnFinishMin > start);
     }));
     if (hitsFixed) continue;
@@ -1556,8 +1563,9 @@ function savepointContextRefusal(context, strictPlace) {
 }
 
 async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, autoDispatchPlace = false, startPoints = false, vanDepartureMin, expectedNeighbours = null }) {
+  const visitHold = require('../visit-hold');
   const row = await sp('scheduled_services').where({ id: serviceId })
-    .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
+    .first('scheduled_date', 'technician_id', 'window_start', 'window_end', ...visitHold.heldColumn());
   const date = row ? dateOnly(row.scheduled_date) : '';
   const strictPlace = autoDispatchPlace === true || Boolean(expectedNeighbours);
   const refuse = (reason) => {
@@ -1565,6 +1573,7 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, au
     return refusePlacement(serviceId, source, reason, date);
   };
   if (!row) return refuse('no_context');
+  if (visitHold.rowIsHeld(row)) return refuse('on_hold');
   if (!row.technician_id) return refuse('unassigned');
   if (!row.window_start || !date) return refuse('untimed');
   if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
@@ -1608,8 +1617,8 @@ async function persistCapacityAllocation(conn, anchor, memberIds) {
   // order. A busy reorder rolls this allocation back for a recoverable retry.
   if (!await require('./tech-day-lock').lockTechDays(conn,
     [{ techId: anchor.technician_id, date: dateOnly(anchor.scheduled_date) }], { wait: false })) throw capacityError();
-  const rows = await conn('scheduled_services').where({ scheduled_date: dateOnly(anchor.scheduled_date),
-    technician_id: anchor.technician_id }).select('id', 'route_order', 'window_start', 'created_at');
+  const rows = await require('../visit-hold').excludeHeld(conn('scheduled_services').where({ scheduled_date: dateOnly(anchor.scheduled_date),
+    technician_id: anchor.technician_id }), 'scheduled_services').select('id', 'route_order', 'window_start', 'created_at');
   const order = currentOrder(rows).filter(row => row.id === anchor.id || !memberIds.includes(row.id))
     .flatMap(row => row.id === anchor.id ? memberIds : [row.id]);
   if (!order.includes(anchor.id)) throw capacityError();

@@ -14,6 +14,11 @@ const SEND_ERRORS = {
   compose: "Failed to send: ",
 };
 
+function replySubject(subject) {
+  const raw = String(subject || "").trim();
+  return /^re:/i.test(raw) ? raw : `Re: ${raw}`;
+}
+
 // The composer and reply boxes are plain textareas, but the server sends the
 // body as text/html. Escape the four HTML-significant characters before
 // turning newlines into <br>, so "price <100 and >50" arrives intact and
@@ -304,9 +309,11 @@ export default function useEmailEditor(userId) {
     try {
       const response = await adminFetch("/api/admin/email/send", {
         method: "POST",
+        headers: { "X-Idempotency-Key": attempt.id },
         body: JSON.stringify({
           ...payload,
           body: encodeEmailBody(payload.body),
+          idempotencyKey: attempt.id,
         }),
       });
       // Router-level authentication/authorization answers before the send
@@ -357,7 +364,7 @@ export default function useEmailEditor(userId) {
         // Reply-To. Same rule the server's AI-draft path already applies
         // (email-actions.js: reply_to || from_address).
         to: email.reply_to || email.from_address,
-        subject: `Re: ${email.subject || ""}`,
+        subject: replySubject(email.subject),
         body: text,
         threadId: email.gmail_thread_id,
         // The server adds the source Message-ID (In-Reply-To / References)
@@ -489,7 +496,7 @@ export default function useEmailEditor(userId) {
     const text = drafts.replies[email?.id] || "";
     if (!email || !text.trim()) return undefined;
     return scheduleEmail("reply", {
-      to: email.reply_to || email.from_address, subject: `Re: ${email.subject || ""}`, body: text,
+      to: email.reply_to || email.from_address, subject: replySubject(email.subject), body: text,
       threadId: email.gmail_thread_id, replyEmailId: email.id,
     }, email.id, sendAt, () => {
       if (draftSession.drafts.replies[email.id] !== text) return false;

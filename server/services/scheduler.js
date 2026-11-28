@@ -2566,6 +2566,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY INVENTORY COST-SPIKE & MARGIN WATCHDOG (gated: cronJobs AND GATE_INVENTORY_MARGIN_WATCHDOG)
+  // Read-only one-way alert for >10% approved vendor cost spikes, <35% modeled
+  // service gross margins, and missing/broken material COGS mappings. Never
+  // mutates retail prices. Daily 6:35am ET (after the 6:00am price scan).
+  // =========================================================================
+  cron.schedule('35 6 * * *', async () => {
+    if (!require('../config/feature-gates').inventoryMarginWatchdogLive?.()) return;
+    logger.info('Running: Daily inventory cost-spike & margin watchdog');
+    try {
+      await runExclusive('inventory-margin-watchdog', async () => {
+        const { runInventoryMarginWatchdog } = require('./inventory-margin-watchdog');
+        const result = await runInventoryMarginWatchdog();
+        logger.info(`[inventory-margin-watchdog] cron run: alerted=${!!result.alerted} spikes=${result.spikes?.length || 0} lowMargins=${result.lowMargins?.length || 0} missingCogs=${result.missingCogs?.length || 0}`);
+      });
+    } catch (err) {
+      logger.error(`Daily inventory margin watchdog failed: ${err.code || err.name || 'ERROR'}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY IRRIGATION RECOMMENDATION EMAIL (gated: cronJobs AND irrigationWeeklyEmail)
   // Monday 7:00am ET — emails lawn-care customers who entered weekly irrigation
   // inches in the portal a "cut back" / "add water" / "you're on track"
@@ -4628,8 +4648,7 @@ function initScheduledJobs() {
   // (inbound + day-of facts_block + human reply) into sms_sealed_eval_items
   // until the pool reaches SEALED_EVAL_TARGET, so the locked exam keeps
   // coverage as intents shift. Idempotent (anti-join + unique source draft);
-  // no-ops once full. Exam RUNS: manual endpoint, plus the gated nightly
-  // auto-run sweep below (smsSealedExamAutoRun).
+  // no-ops once full. Exam RUNS: manual endpoint and the Mac weekly loop.
   // =========================================================================
   cron.schedule('5 3 * * 0', async () => {
     if (!isEnabled('smsSealedEval')) return;
@@ -4640,26 +4659,6 @@ function initScheduledJobs() {
       await runExclusive('sms-sealed-eval-seal', () => sealEvalItems());
     } catch (err) {
       logger.error(`Sealed-eval freezer failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 5:10AM — Sealed-exam auto-run. Ensures the CURRENT drafter
-  // PROMPT_VERSION has a completed exam on every leg (first baselines +
-  // every prompt bump); cheap no-op between bumps. Runs after the nightly
-  // judge (3:55) and Sunday freezer (3:05) so fresh items/judgments are in.
-  // Doubly gated: smsSealedEval (harness live) AND smsSealedExamAutoRun
-  // (spend opt-in, kill = unset GATE_SMS_SEALED_EXAM_AUTORUN).
-  // =========================================================================
-  cron.schedule('10 5 * * *', async () => {
-    if (!isEnabled('smsSealedEval') || !isEnabled('smsSealedExamAutoRun')) return;
-    logger.info('Running: Sealed-exam auto-run sweep');
-    try {
-      const { runExclusive } = require('../utils/cron-lock');
-      const { runAutoExamSweep } = require('./sms-sealed-eval');
-      await runExclusive('sms-sealed-eval-autorun', () => runAutoExamSweep());
-    } catch (err) {
-      logger.error(`Sealed-exam auto-run sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -5231,6 +5230,20 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Automation runner tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN — Phone-only residential new-lead SMS follow-up drip (Day 2 & Day 5).
+  // Ships 100% DARK behind GATE_NEW_LEAD_DRIP_EXTENDED; exits BEFORE acquiring DB lock while off.
+  cron.schedule('*/15 * * * *', async () => {
+    if (require('../config/feature-gates').newLeadDripExtendedLive?.() !== true) return;
+    try {
+      await runExclusive('new-lead-phone-sms-drip', async () => {
+        const { processPhoneOnlyLeadSmsDrip } = require('./new-lead-phone-sms-drip');
+        await processPhoneOnlyLeadSmsDrip();
+      });
+    } catch (err) {
+      logger.error(`[new-lead-phone-sms-drip] tick failed: ${err.code || err.name || 'error'}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -7901,7 +7914,6 @@ function initScheduledJobs() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
       Promise.resolve().then(() => require('./missed-call-bell').retireCalledBackMissedCalls()),
-      Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
       Promise.resolve().then(() => require('./missed-call-text-back').sweepMissedCallTextBacks()),
       // The promise-chaser bell's ONE path: a stateless, idempotent sweep
       // (see that file's docstring — eligibility is now a per-call stamp,
@@ -7925,7 +7937,7 @@ function initScheduledJobs() {
       Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush()),
     ]);
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'repeat-caller', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);
     });
   }, { timezone: 'America/New_York' });
 
@@ -8020,11 +8032,11 @@ function initScheduledJobs() {
         const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
         if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
         // Real Gmail draft ids only — 'pending' claims, reconciliation
-        // sentinels (reconciled_replied / reconciled_existing_draft) and a
-        // draft refused for a blank (refused_blank) are not drafts this agent
-        // created.
+        // sentinels (reconciled_replied / reconciled_existing_draft) and drafts
+        // refused for a blank or safety verifier (refused_blank / refused_verifier)
+        // are not drafts this agent created.
         const drafted = emails.filter(e => e.draft_gmail_id
-          && !['pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank'].includes(e.draft_gmail_id)).length;
+          && !['pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank', 'refused_verifier'].includes(e.draft_gmail_id)).length;
         if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
 
         // Follow-up nudges: inbound conversation mail nobody has answered.
@@ -10204,24 +10216,33 @@ function initScheduledJobs() {
       const missedAppointment = require('./workflows/missed-appointment');
       if (missedAppointment.onSkip) {
         // Find recent services that were scheduled but not completed.
-        // In-progress statuses (en_route / on_site) are intentionally
-        // excluded along with completed/cancelled/skipped/rescheduled —
-        // a tech actively on the job is not a no-show. The range reaches
-        // back to yesterday so evening windows that hadn't elapsed at
-        // yesterday's 6 PM sweep — and genuinely closed as no-shows —
-        // are picked up today instead of never counting.
+        // Today's en_route / on_site visits are excluded (tech actively working);
+        // YESTERDAY's en_route / on_site visits are stuck past visits and MUST
+        // surface in the Action Queue as visit_not_closed_out (P1-16).
         const today = etDateString();
         const yesterday = etDateString(addETDays(new Date(), -1));
-        const candidates = await require('./visit-hold').excludeHeld(db('scheduled_services')
-          .whereBetween('scheduled_date', [yesterday, today])
-          .whereIn('status', ['pending', 'confirmed'])
+        const { isInternalTestCustomerId } = require('./internal-test-customers');
+        // Include yesterday's stuck en_route/on_site visits ONLY when the
+        // notClosedOutQueue decision queue is enabled (P1-16 + Codex P2): when
+        // the queue is off, onSkip() counts every row as a customer no-show.
+        const yesterdayStatuses = require('../config/feature-gates').isEnabled('notClosedOutQueue')
+          ? ['pending', 'confirmed', 'en_route', 'on_site']
+          : ['pending', 'confirmed'];
+        const rawCandidates = await require('./visit-hold').excludeHeld(db('scheduled_services')
+          .where((q) => {
+            q.where((todayQ) => todayQ.where('scheduled_date', today).whereIn('status', ['pending', 'confirmed']))
+              .orWhere((prevQ) => prevQ.where('scheduled_date', yesterday).whereIn('status', yesterdayStatuses));
+          })
+          .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at'))
+          .where((q) => q.whereNull('track_state').orWhereNotIn('track_state', ['complete', 'cancelled']))
           // A street-level address hold the office has not cleared was never dispatched, so it cannot be
           // a customer no-show (no customer_noshow row, no repeated-miss outreach).
           .whereNotExists(function unclearedAddressHold() {
             require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
           }), 'scheduled_services')
           // GATE_VISIT_HOLD (above): a visit the customer asked us to hold was never due, so it cannot be a no-show.
-          .select('id', 'scheduled_date', 'window_start', 'window_end');
+          .select('id', 'customer_id', 'status', 'scheduled_date', 'window_start', 'window_end');
+        const candidates = rawCandidates.filter((row) => !isInternalTestCustomerId(row.customer_id));
 
         // Only flag services whose arrival window has already elapsed at
         // sweep time. Evening jobs (e.g. a 6–8 PM window that completes at
@@ -10806,7 +10827,17 @@ function initScheduledJobs() {
   cron.schedule('*/5 * * * *', async () => {
     try {
       const { runTechLateCheck } = require('./tech-late-detector');
-      await runTechLateCheck();
+      // When no-show-detector is live, runTechLateCheck acquires its own
+      // runExclusive('no-show-detector') lease; otherwise wrap here so legacy
+      // ticks also serialize across deploys and record job_health (P1-18).
+      if (require('./no-show-detector').enabled()) {
+        await runTechLateCheck();
+      } else {
+        await runExclusive('tech-late-detector', async () => {
+          const result = await runTechLateCheck();
+          if (result?.error) throw new Error(result.error);
+        });
+      }
     } catch (err) {
       logger.error(`[tech-late-detector] tick failed: ${err.message}`);
     }
@@ -10824,8 +10855,11 @@ function initScheduledJobs() {
   // unconditional and safe to leave on cronJobs alone.
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const { sweepAbsentTechDays } = require('./tech-out');
-      await sweepAbsentTechDays();
+      await runExclusive('tech-out-absent-day-sweep', async () => {
+        const { sweepAbsentTechDays } = require('./tech-out');
+        const res = await sweepAbsentTechDays();
+        if (res?.failed > 0) throw new Error(`absent-day sweep had ${res.failed} failure(s)`);
+      });
     } catch (err) {
       logger.error(`[tech-out] sweep tick failed: ${err.message}`);
     }
@@ -10842,8 +10876,11 @@ function initScheduledJobs() {
   // (migration 20260427000003).
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const { runUnassignedOverdueCheck } = require('./unassigned-overdue-detector');
-      await runUnassignedOverdueCheck();
+      await runExclusive('unassigned-overdue-detector', async () => {
+        const { runUnassignedOverdueCheck } = require('./unassigned-overdue-detector');
+        const result = await runUnassignedOverdueCheck();
+        if (result?.error) throw new Error(result.error);
+      });
     } catch (err) {
       logger.error(`[unassigned-overdue-detector] tick failed: ${err.message}`);
     }

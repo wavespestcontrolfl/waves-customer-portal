@@ -125,7 +125,7 @@ async function acquireAdminSlotLocks({ trx, dates = [] } = {}) {
 // calendar (Codex #3443 P2). ONE copy here; routes/admin-schedule.js
 // imports it, and probeSlotOverlap defaults to it so a freed slot never
 // draws a false double-booking warning.
-const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show'];
+const ADMIN_OCCUPANCY_EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'];
 
 // One copy of the advisory-overlap warning every staff surface shows —
 // dates only, no customer data.

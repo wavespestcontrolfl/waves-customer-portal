@@ -340,12 +340,11 @@ describe('GET /:serviceId/card-hold?skip=1: the skip block of the cancel window'
     expect(body.skip).toEqual({ eligible: false, code: 'prepaid', message: MESSAGES.prepaid, nextVisitDate: null, lawnRound: null });
   });
 
-  test('a technician who asks gets the fee preview and a refusal, not the plan\'s dates', async () => {
+  test('a technician who asks gets 403 admin-only (cancelling and card-hold preview are office-only)', async () => {
     actor.role = 'technician';
     seed({ technician_id: 'staff-1' });
-    const { status, body } = await call('GET', 'visit-2/card-hold?skip=1');
-    expect(status).toBe(200);
-    expect(body).toEqual({ ...noFee, skip: { eligible: false, code: 'admin_only', message: MESSAGES.admin_only, nextVisitDate: null, lawnRound: null } });
+    const { status } = await call('GET', 'visit-2/card-hold?skip=1');
+    expect(status).toBe(403);
     expect(mockImpact).not.toHaveBeenCalled();
   });
 

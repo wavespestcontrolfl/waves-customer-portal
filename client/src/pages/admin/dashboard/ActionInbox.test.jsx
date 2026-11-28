@@ -185,6 +185,47 @@ describe("ActionInbox", () => {
     expect(screen.queryByText(/All clear/)).not.toBeInTheDocument();
   });
 
+  it("splits standing health alerts behind a toggle when urgent items exist, and expands them on click", () => {
+    render(
+      <ActionInbox
+        alerts={[
+          ALERTS[2],
+          { id: "churn_at_risk", kind: "alert", tier: "standing", severity: "warn", count: 120, label: "120 customers at churn risk", href: "/admin/customers?healthRisk=at_risk" },
+          { id: "autopay_coverage_low", kind: "action", tier: "standing", severity: "warn", count: 40, label: "Autopay covers 40% of recurring plans", href: "/admin/customers" },
+        ]}
+      />,
+    );
+    expect(screen.getByText(/3 leads waiting over 30m/)).toBeInTheDocument();
+    expect(screen.getByText("1 critical · 2 standing")).toBeInTheDocument();
+    expect(screen.queryByText(/120 customers at churn risk/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Standing health/i }));
+    expect(screen.getByText(/120 customers at churn risk/)).toBeInTheDocument();
+    expect(screen.getByText(/Autopay covers 40% of recurring plans/)).toBeInTheDocument();
+  });
+
+  it("shows standing health items open by default when there are no urgent items, and lets the user collapse them", () => {
+    render(
+      <ActionInbox
+        alerts={[
+          { id: "churn_at_risk", kind: "alert", tier: "standing", severity: "warn", count: 10, label: "10 customers at churn risk", href: "/admin/customers?healthRisk=at_risk" },
+        ]}
+      />,
+    );
+    expect(screen.getByText("1 standing")).toBeInTheDocument();
+    expect(screen.getByText(/10 customers at churn risk/)).toBeInTheDocument();
+
+    const toggle = screen.getByRole("button", { name: /Standing health/i });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/10 customers at churn risk/)).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/10 customers at churn risk/)).toBeInTheDocument();
+  });
+
   it("still says the load failed when the first fetch failed, whatever the flags", () => {
     render(<ActionInbox alerts={null} stale failures={[{ id: "ar_overdue_60" }]} />);
     expect(screen.getByText(/Alerts couldn't be loaded/)).toBeInTheDocument();

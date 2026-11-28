@@ -79,7 +79,9 @@ const DETAIL_DAYS = 10;
 function findSameStartVisits(todayET, afterTime) {
   const { TERMINAL_TRACK_STATES } = require('./customer-lifecycle-guard');
   const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
-  return db('scheduled_services as a')
+  const { excludeHeld } = require('./visit-hold');
+  const { heldVisitSubquery } = require('./street-level-hold');
+  const base = db('scheduled_services as a')
     .join('scheduled_services as b', function sameCustomerDayAndStart() {
       this.on('b.customer_id', '=', 'a.customer_id')
         .andOn('b.scheduled_date', '=', 'a.scheduled_date')
@@ -106,9 +108,12 @@ function findSameStartVisits(todayET, afterTime) {
     // cancelled is not live work on either side (customer-lifecycle-guard.js).
     .where(function trackerLive() { this.whereNull('a.track_state').orWhereNotIn('a.track_state', TERMINAL_TRACK_STATES); })
     .where(function partnerTrackerLive() { this.whereNull('b.track_state').orWhereNotIn('b.track_state', TERMINAL_TRACK_STATES); })
+    .whereNotExists(function aAddressHold() { heldVisitSubquery(this, 'a'); })
+    .whereNotExists(function bAddressHold() { heldVisitSubquery(this, 'b'); })
     // A legacy visit group's stop, technician and time are visit-groups.js's.
     .whereNull('a.visit_id')
-    .whereNull('b.visit_id')
+    .whereNull('b.visit_id');
+  return excludeHeld(excludeHeld(base, 'a'), 'b')
     .distinct('a.id', 'a.customer_id', 'a.scheduled_date', 'a.window_start', 'a.service_type', 'a.technician_id', 'c.first_name', 'c.last_name')
     .orderBy([{ column: 'a.customer_id' }, { column: 'a.scheduled_date' }, { column: 'a.window_start' }, { column: 'a.id' }]);
 }
@@ -153,8 +158,10 @@ function daysOf(slots) {
 // rings past the cap (owner 2026-11-19, "A"): by the next run it may be under way.
 function groupByCustomer(rows) {
   const { fullName } = require('./admin-alert-names');
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
   const customers = new Map();
   for (const row of rows || []) {
+    if (isInternalTestCustomerId(row.customer_id)) continue;
     const date = dateOnlyString(row.scheduled_date);
     const start = String(row.window_start || '').slice(0, 5);
     if (!date || !/^\d{2}:\d{2}$/.test(start)) continue;

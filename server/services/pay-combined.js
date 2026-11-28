@@ -117,17 +117,24 @@ const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
 // set authority can mirror the pay page's own preview predicate; `database`
 // lets a caller holding a transaction read through it.
 async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
-  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
+  const gates = require('../config/feature-gates');
+  const autoOn = Boolean(gates.gates?.autoApplyAccountCredit);
+  const promoOn = typeof gates.isEnabled === 'function' ? gates.isEnabled('payPromoCode') : Boolean(gates.gates?.payPromoCode);
+  if (!autoOn && !promoOn) return false;
   if (!invoice?.customer_id || invoice?.payer_id) return false;
-  // Mirrors createInvoicePaymentIntent's availableCredit gate exactly,
-  // including the customer's opt-in (customers.auto_apply_account_credit,
-  // owner ruling 2026-08-28): an opted-out balance reads as zero there, so
-  // it must read as zero here too — otherwise the capture step / combined
-  // preview would show a coverage the setup path will never apply.
-  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return false;
-  const credit = Number(row?.account_credits) || 0;
-  return credit > 0 && credit >= invoiceAmountDue(invoice);
+  let autoCredit = 0;
+  if (autoOn) {
+    // Mirrors createInvoicePaymentIntent's availableCredit gate exactly,
+    // including the customer's opt-in (customers.auto_apply_account_credit,
+    // owner ruling 2026-08-28).
+    const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+    if (row?.auto_apply_account_credit === true) autoCredit = Number(row?.account_credits) || 0;
+  }
+  const promoCredit = promoOn
+    ? await require('./invoice-promo-code').pendingPromoCredit(invoice, database)
+    : 0;
+  const availableCents = Math.round(autoCredit * 100) + Math.round(promoCredit * 100);
+  return availableCents > 0 && availableCents >= amountDueCents(invoice);
 }
 
 // Why combinedEligibleSiblings returned null (the optional onDegrade
@@ -266,9 +273,14 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     if (!candidates.length) return degrade('none');
 
     const stopped = await dunningStoppedInvoiceIds(candidates.map((inv) => inv.id), { database });
+    const pendingPromoIds = await require('./invoice-promo-code').invoiceIdsWithPendingPromo(
+      candidates.map((inv) => inv.id),
+      database,
+    );
+    const excludedIds = new Set([...stopped, ...pendingPromoIds]);
     const eligible = [];
     for (const inv of candidates) {
-      if (stopped.has(String(inv.id))) continue;
+      if (excludedIds.has(String(inv.id))) continue;
       const bound = inv.stripe_payment_intent_id ? String(inv.stripe_payment_intent_id) : null;
       // Unbound, or stamped with OUR OWN combined PI being re-set-up (page
       // reload) — siblings stamped with the anchor's current PI stay
@@ -541,6 +553,7 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     // the same packet. This is the allocation's last fence before money moves.
     if (invoiceWithdrawnFromCustomer(row)) throw staleErr(`invoice ${row.invoice_number} was withdrawn to a third-party payer`);
     if (invoiceHeldForChemicalReview(row)) throw staleErr(`invoice ${row.invoice_number} is held for chemical add-on billing review`);
+    await require('./invoice-promo-code').assertNoPendingPromoCode(row, trx);
     // LIVE payer re-resolution for EVERY row, anchor included (codex r4 P1;
     // anchor exemption removed per codex r5 P1): a payer assigned after
     // invoice creation lives on scheduled_services (or as the customer's
@@ -1233,7 +1246,20 @@ async function revokeOutstandingCombinedSessionsOnGateOff() {
  * cardLastFour, receiptUrl) the caller derived from the PI/charge.
  * Returns { settled, paymentStatus, invoiceIds, anchorPaymentRow }.
  */
-async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreated = null } = {}) {
+function assertAllocatedInvoicesNotHeld(allocation, byId, rejectHeldInvoices, allowChemicalReviewReconcile = false) {
+  if (!rejectHeldInvoices || allowChemicalReviewReconcile) return;
+  for (const entry of allocation) {
+    const inv = byId.get(String(entry.invoiceId));
+    if (!inv || !invoiceHeldForChemicalReview(inv)) continue;
+    const status = String(inv.status || '').toLowerCase();
+    if (['paid', 'prepaid'].includes(status)) continue;
+    const err = new Error('This invoice is held for office billing review of a chemical area add-on');
+    err.code = 'INVOICE_CHEMICAL_ADDON_HOLD';
+    throw err;
+  }
+}
+
+async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreated = null, rejectHeldInvoices = false, allowChemicalReviewReconcile } = {}) {
   const { invoicePaymentStatusForIntent } = require('./stripe-invoice-state');
   const { etDateString } = require('../utils/datetime-et');
   const piId = paymentIntent.id;
@@ -1268,6 +1294,7 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
     const ids = allocation.map((a) => a.invoiceId).sort();
     const rows = await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate();
     const byId = new Map(rows.map((r) => [String(r.id), r]));
+    assertAllocatedInvoicesNotHeld(allocation, byId, rejectHeldInvoices, allowChemicalReviewReconcile);
 
     // 'disputed' is terminal for this PI (mirrors the single-invoice
     // confirm guard): the money already went back via the chargeback. A

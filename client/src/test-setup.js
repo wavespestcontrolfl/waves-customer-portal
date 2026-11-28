@@ -1,4 +1,12 @@
 // Vitest global setup.
+import { beforeAll } from 'vitest';
+
+beforeAll(async () => {
+  const queue = globalThis.__WAVES_TEST_WARMUP__;
+  if (Array.isArray(queue) && queue.length) {
+    await Promise.allSettled(queue);
+  }
+}, 30_000);
 //
 // jsdom does not implement window.matchMedia. The liquid-glass scene
 // (useGlassSurface → applyGlassScene / attachGlassPointerFx) reads it for the

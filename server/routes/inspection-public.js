@@ -199,6 +199,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { recordPageView } = require('../services/customer-page-views');
 const { noStore } = require('../middleware/no-store');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
 const { verifyLeadConsultationToken, smsChannelFor, mintWaitlistTicket, verifyWaitlistTicket } = require('../utils/lead-consultation-token');
@@ -244,6 +245,7 @@ router.use(rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
@@ -252,6 +254,7 @@ const commitLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many attempts. Please try again in a minute.' },
 });
 
@@ -260,6 +263,7 @@ const findSlotsLimiter = rateLimit({
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
 
@@ -1014,6 +1018,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
       zoneFunnelCity: zoneInputs.city,
       zoneFunnelCustomerCity: fallbackCity === undefined ? await listFallbackCity(db, customer, address, coords) : fallbackCity,
     } : {}),
+    mintSignedOffers: false,
   });
 }
 
@@ -3110,6 +3115,8 @@ router._internals = {
   // own catalog, window, availability, slot match, commit and success shape.
   ASSESSMENT_EXPECTED_IDENTITY,
   addressDisplay,
+  customerAddressFields,
+  zoneFunnelInputs,
   maskPhone,
   serviceAreaFailure,
   bookingRange,

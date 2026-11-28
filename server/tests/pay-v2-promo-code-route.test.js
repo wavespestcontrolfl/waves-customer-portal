@@ -92,7 +92,7 @@ test('the code is saved on the transaction that holds the invoice lock, and the 
   mockPromo.enterPromoCodeOnInvoice.mockResolvedValueOnce({ ok: true, applied });
   expect(await post(`/api/pay/${token}/promo-code`, { code: 'save25' }))
     .toEqual({ status: 200, body: { success: true, promoCode: { canEnter: false, applied } } });
-  expect(mockPromo.enterPromoCodeOnInvoice).toHaveBeenLastCalledWith({ invoice: expect.objectContaining({ id: 'inv-1' }), rawCode: 'save25' }, db);
+  expect(mockPromo.enterPromoCodeOnInvoice).toHaveBeenLastCalledWith({ invoice: expect.objectContaining({ id: 'inv-1' }), rawCode: 'save25', trackInsert: true }, db);
   expect(db.transaction).toHaveBeenCalled();
   expect(lastHeaders.get('cache-control')).toContain('no-store');
   expect(lastHeaders.get('x-robots-tag')).toContain('noindex');

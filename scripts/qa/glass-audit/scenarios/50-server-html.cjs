@@ -37,6 +37,7 @@ const landing = [
   ['newsletter-unsubscribed-invalid', 'POST /api/public/newsletter/unsubscribe/:token (form submit, expired link)', 'expired or invalid'],
   ['newsletter-quiz-thanks-nocta', 'POST /api/public/newsletter/quiz/:token/:quizId/:answer (thank-you, booking CTA suppressed)', 'staying on the list'],
   ['newsletter-feedback-thanks-positive', 'POST /api/public/newsletter/feedback/:token/:reaction (positive result)', 'that helps'],
+  ['email-resubscribe', 'GET /api/public/email-resubscribe/:token (confirm form)', 'Turn emails back on'],
 ];
 
 module.exports = [

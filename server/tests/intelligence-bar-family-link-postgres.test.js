@@ -40,7 +40,7 @@ const LOCAL = (() => { try { return ['localhost', '127.0.0.1', '[::1]'].includes
 
   async function profile(last) {
     const id = randomUUID();
-    await db('customers').insert({ id, first_name: 'Fixture', last_name: last, phone: `+1202555${String(1000 + created.length).slice(-4)}`, email: `${id}@example.invalid`, address_line1: '1 Fixture Way', city: 'Bradenton', state: 'FL', zip: '34201', property_type: 'residential', active: true });
+    await db('customers').insert({ id, first_name: 'Fixture', last_name: last, phone: `+1202555${String(1000 + created.length).slice(-4)}`, email: `${id}@example.invalid`, address_line1: `${created.length + 1} Fixture Way`, city: 'Bradenton', state: 'FL', zip: '34201', property_type: 'residential', pipeline_stage: 'active_customer', active: true });
     created.push(id);
     return id;
   }

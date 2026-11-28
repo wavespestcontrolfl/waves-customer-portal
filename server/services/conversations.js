@@ -11,6 +11,15 @@
 
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { storedStatusRule } = require('./sms-delivery-status-order');
+
+function canAdvanceDeliveryStatus(current, incoming) {
+  if (!incoming) return false;
+  if (!current) return true;
+  const rule = storedStatusRule(incoming);
+  if (rule.replaceOnly) return rule.replaceOnly.includes(current);
+  return !rule.keep.includes(current);
+}
 
 function phoneDigits(value) {
   return String(value || '').replace(/\D/g, '');
@@ -483,9 +492,10 @@ async function appendMessage(opts) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${opts.contactPhone}`]);
     }
 
-    const existing = await trx('messages')
-      .where({ channel: opts.channel, twilio_sid: opts.twilioSid })
-      .first();
+    const existingQuery = trx('messages')
+      .where({ channel: opts.channel, twilio_sid: opts.twilioSid });
+    if (typeof existingQuery.forUpdate === 'function') existingQuery.forUpdate();
+    const existing = await existingQuery.first();
     if (!existing) return appendWith(trx);
 
     const patch = { updated_at: new Date() };
@@ -498,7 +508,9 @@ async function appendMessage(opts) {
     if (opts.recordingSid) patch.recording_sid = opts.recordingSid;
     if (opts.durationSeconds) patch.duration_seconds = opts.durationSeconds;
     if (opts.answeredBy) patch.answered_by = opts.answeredBy;
-    if (opts.deliveryStatus) patch.delivery_status = opts.deliveryStatus;
+    if (opts.deliveryStatus && (opts.channel !== 'sms' || canAdvanceDeliveryStatus(existing.delivery_status, opts.deliveryStatus))) {
+      patch.delivery_status = opts.deliveryStatus;
+    }
     if (opts.templateId) patch.template_id = opts.templateId;
     if (opts.coachSessionId) patch.coach_session_id = opts.coachSessionId;
     if (opts.messageType) patch.message_type = opts.messageType;

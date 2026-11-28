@@ -35,6 +35,8 @@
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docButton } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
+import { formatInvoiceDate } from '../lib/invoiceDates';
+import { formatETDate } from '../lib/timezone';
 import DocumentActionBar from '../components/DocumentActionBar';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import { groupInvoiceLinesByProperty, invoiceDiscountRows } from '@waves/invoice-property-groups';
@@ -78,11 +80,12 @@ function depositCreditTotalFromLineItems(lineItems) {
 
 function fmtDate(d) {
   if (!d) return '';
-  const dt = typeof d === 'string'
-    ? new Date(d.length === 10 ? d + 'T12:00:00' : d)
-    : new Date(d);
+  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    return formatInvoiceDate(d);
+  }
+  const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return '';
-  return dt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+  return formatETDate(dt, { month: 'long', day: 'numeric', year: 'numeric' });
 }
 
 const subtlePanel = {
@@ -290,7 +293,9 @@ export default function ReceiptPage() {
   // so the download link must show for both — else a refund hides the PDF button.
   const hasReceiptPdf = paid || invoice.status === 'refunded';
   const processing = invoice.status === 'processing' || payment?.state === 'processing';
-  const paidAt = invoice.paidAt || payment?.paymentDate;
+  const paidDateLabel = invoice.paidAt
+    ? fmtDate(invoice.paidAt)
+    : formatInvoiceDate(payment?.paymentDate);
   const invoiceMethod = String(invoice.paymentMethod || '').toLowerCase();
   const methodDisplay = payment?.cardBrand && payment?.cardLastFour
     ? `${payment.cardBrand.toUpperCase()} ···· ${payment.cardLastFour}`
@@ -300,7 +305,7 @@ export default function ReceiptPage() {
         ? `${invoice.cardBrand.toUpperCase()} ···· ${invoice.cardLastFour}`
         : null));
   const serviceLabel = invoice.title || service.type || 'Service';
-  const serviceDateLabel = service.date ? fmtDate(service.date) : null;
+  const serviceDateLabel = formatInvoiceDate(service.date);
   const locationLine = cityStateZip(customer);
   // Unpaid = the invoice reverted after a failed payment (e.g. an ACH debit
   // bounced post-redirect) — the old neutral state still said "Receipt /
@@ -546,10 +551,10 @@ export default function ReceiptPage() {
             )}
 
             <DetailBlock label="Payment details">
-              {paidAt && (
+              {paidDateLabel && (
                 <div>
                   <span style={{ color: DOC.muted }}>{processing ? 'Submitted: ' : 'Paid: '}</span>
-                  {fmtDate(paidAt)}
+                  {paidDateLabel}
                 </div>
               )}
               {methodDisplay && (

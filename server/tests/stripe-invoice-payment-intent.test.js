@@ -130,6 +130,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     // resetModules, so every case starts from this one).
     jest.doMock('../services/invoice-promo-code', () => ({
       pendingPromoCredit: jest.fn(async () => 0),
+      strictPendingPromoCredit: jest.fn(async () => 0),
+      assertNoPendingPromoCode: jest.fn(async () => {}),
+      invoiceIdsWithPendingPromo: jest.fn(async () => new Set()),
       redeemAndApplyPromoCode: jest.fn(async () => 0),
     }));
   });

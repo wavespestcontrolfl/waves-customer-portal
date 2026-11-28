@@ -42,8 +42,13 @@ const mockDb = jest.fn(table => {
     }),
     whereIn: jest.fn((key, values) => { clauses.push(['whereIn', key, values]); return builder; }),
     whereNull: jest.fn(key => { filters[key] = null; clauses.push(['whereNull', key]); return builder; }),
+    whereNotNull: jest.fn(key => { clauses.push(['whereNotNull', key]); return builder; }),
     orWhereNull: jest.fn(key => { clauses.push(['orWhereNull', key]); return builder; }),
     whereRaw: jest.fn((_sql, bindings) => { invocation = bindings; return builder; }),
+    orderBy: jest.fn(() => builder),
+    offset: jest.fn(() => builder),
+    limit: jest.fn(async () => (table === 'estimates' ? (mockState.estimates || []) : [])),
+    select: jest.fn(async () => (table === 'leads' && mockState.lead?.estimate_id ? [{ id: mockState.lead.id, estimate_id: mockState.lead.estimate_id }] : [])),
     forUpdate: jest.fn(() => builder),
     forNoKeyUpdate: jest.fn(() => builder),
     first: jest.fn(async () => {
@@ -393,5 +398,45 @@ describe('lead texts carry no sign-off', () => {
     expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/NO SIGNATURE: never sign/);
     const sendTool = LEAD_RESPONSE_AGENT_CONFIG.tools.find(t => t.name === 'send_lead_response');
     expect(sendTool.input_schema.properties.message.description).not.toMatch(/signed as/i);
+  });
+
+  test('the agent prompt allows stating exact prices via verbatim priceSentences while routing unquoted new work', () => {
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).not.toMatch(/Never quote exact prices — route to an estimate flow instead/);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/check_existing_estimates/);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/pricing\.priceSentences word for word/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/never a monthly average as an application price/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/share viewUrl only when check_existing_estimates returns a non-null viewUrl/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/queue_for_adam/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/never quote exact prices for unquoted NEW work/i);
+  });
+
+  test('send_lead_response blocks unverified prices, returns queued:true for leadActionTaken when persisted, and reports queueRequired when missing', async () => {
+    const res = await executeLeadTool(
+      'send_lead_response',
+      { message: 'Hello Pat! Your Pest Control plan is $149 per month.' },
+      context,
+    );
+    expect(res).toMatchObject({
+      sent: false,
+      blocked: true,
+      queued: true,
+      queuedForReview: true,
+      code: 'UNVERIFIED_PRICE_IN_MESSAGE',
+    });
+    expect(mockMessage).not.toHaveBeenCalled();
+    expect(mockPipeline).not.toHaveBeenCalled();
+
+    const noSessionRes = await executeLeadTool(
+      'send_lead_response',
+      { message: 'Hello Pat! Your Pest Control plan is $149 per month.' },
+      { leadId: context.leadId, customerId: context.customerId },
+    );
+    expect(noSessionRes).toMatchObject({
+      sent: false,
+      blocked: true,
+      queuedForReview: false,
+      queueRequired: true,
+      code: 'UNVERIFIED_PRICE_IN_MESSAGE',
+    });
   });
 });

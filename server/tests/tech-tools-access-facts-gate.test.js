@@ -201,4 +201,46 @@ describe('get_stop_details access-facts gate', () => {
     expect(r.todays_service).toMatchObject({ id: 's2', service_type: 'Lawn Care' });
     expect(mockDeterministicVisitFacts).toHaveBeenCalledWith(expect.objectContaining({ id: 's2' }));
   });
+
+  test('tech caller + gate off + no live visit today: raw property_preferences are withheld', async () => {
+    mockVisitFactsGateEnabled.mockReturnValue(false);
+    state.scheduled_services = [
+      { id: 's-future', customer_id: 'c1', scheduled_date: etDateString(addETDays(new Date(), 5)), status: 'confirmed', technician_id: 'tech-1' },
+    ];
+    const r = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(r.property).toBeNull();
+  });
+
+  test('tech caller + completed visit today: access codes are withheld regardless of gate', async () => {
+    state.scheduled_services = [
+      { id: 's-done', customer_id: 'c1', scheduled_date: etDateString(new Date()), status: 'completed', technician_id: 'tech-1' },
+    ];
+    mockVisitFactsGateEnabled.mockReturnValue(false);
+    expect((await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' })).property).toBeNull();
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    expect((await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' })).property).toBeNull();
+    expect(mockDeterministicVisitFacts).not.toHaveBeenCalled();
+  });
+
+  test('tech caller + multi-home secondary visit today: primary-home access codes are stripped', async () => {
+    state.customer_properties = [
+      { id: 'home-1', customer_id: 'c1', is_primary: true, active: true },
+      { id: 'home-2', customer_id: 'c1', is_primary: false, active: true },
+    ];
+    state.scheduled_services = [
+      { id: 's-sec', customer_id: 'c1', property_id: 'home-2', scheduled_date: etDateString(new Date()), status: 'confirmed', technician_id: 'tech-1' },
+    ];
+    mockVisitFactsGateEnabled.mockReturnValue(true);
+    const gateOn = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(gateOn.property.codes).toEqual({ neighborhoodGate: null, propertyGate: null, garage: null, lockbox: null });
+    expect(gateOn.property.accessNotes).toBeNull();
+    expect(gateOn.property.pets).toBe('2 dogs');
+
+    mockVisitFactsGateEnabled.mockReturnValue(false);
+    const gateOff = await executeTechTool('get_stop_details', { customer_id: 'c1' }, { techId: 'tech-1' });
+    expect(gateOff.property.property_gate_code).toBeNull();
+    expect(gateOff.property.lockbox_code).toBeNull();
+    expect(gateOff.property.pet_count).toBe(1);
+    delete state.customer_properties;
+  });
 });

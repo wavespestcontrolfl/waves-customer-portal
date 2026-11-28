@@ -206,6 +206,15 @@ const AUTO_BLOCKER_TABLES = [
   // engine reads at invoice/estimate time — silently repointing one onto a
   // live account grants a discount nobody approved. Review queue instead.
   'customer_discounts',
+  // Same-family membership drives the 10% Multi-Home Discount — auto-merge must
+  // never silently grant or drop discount eligibility. Review queue instead.
+  'multi_home_family_members',
+  // Active plan holds carry held_monthly_rate & moved_visits (partial unique on
+  // customer_id + family_key WHERE status='active') — operator review required.
+  'plan_holds',
+  // Issued price-change notices carry emailed tokens & delivery/viewing history
+  // — never delete or overwrite a colliding notice on auto-merge.
+  'price_change_notices',
 ];
 
 // Batched: one grouped count per table for the whole candidate set, not one
@@ -1459,7 +1468,27 @@ async function lockedPairAutoEligibility(trx, winner, loser) {
 // the call was about: a merge never moves a texting grant onto another account, and an undo has nothing to restore. The
 // merged account lists nobody until a call names the person again; the list's copies that move with their visits stand
 // only while the visit's customer lists the number, so they send nothing.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews', 'customer_reminder_contacts']);
+const REPOINT_EXCLUDED_TABLES = new Set([
+  'customer_merge_journal',
+  'customer_duplicate_dismissals',
+  'customer_plan_rates',
+  'field_credit_allocations',
+  'customer_geocode_reviews',
+  'customer_reminder_contacts',
+  // Open 6-digit email-change codes belong solely to the profile that requested
+  // them: open rows on the loser are voided before the sweep so they never
+  // transfer onto the winner or collide on customer_email_change_requests_open_uidx.
+  'customer_email_change_requests',
+  // Deliberately FK-free per-customer evidence / spelling retry tables: keep
+  // historical evidence attached to the original customer_id without colliding.
+  'call_email_spelling_retries',
+  'visit_access_states',
+  'visit_access_verdicts',
+  // Per-customer gate-code filing hash ledger (PK = customer_id): same contract
+  // as customer_geocode_reviews — keep on retired loser; the filing sweep
+  // reconciles winner's current code naturally without colliding or breaking undo.
+  'neighborhood_access_filings',
+]);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert
@@ -1481,7 +1510,10 @@ const REPOINT_ID_CAP = 10000;
 //   those keep the skip-and-report path (sessions are neither financial
 //   nor consent — a stale winner-assigned session merely fails rotation
 //   and forces a re-login).
-const REPOINT_PK_COLUMNS = { customer_refresh_tokens: 'jti' };
+const REPOINT_PK_COLUMNS = {
+  customer_refresh_tokens: 'jti',
+  estimate_roof_points: 'estimate_id',
+};
 
 // One-row-per-customer preference tables: when both sides have a row, the
 // loser's row can't just be dropped — it may hold opted-OUT notification
@@ -2322,6 +2354,421 @@ async function mergeHomeNotes(trx, table, column, winnerId, loserId, { performed
   return 'joined the two notes on the kept customer';
 }
 
+async function repointMultiHomeFamilyMembers(trx, _table, _column, winnerId, loserId, { performedById = null } = {}) {
+  const loserRow = await trx('multi_home_family_members').where({ customer_id: loserId }).forUpdate().first('id', 'family_id');
+  if (!loserRow) return 'moved 0, dropped 0';
+  const winnerRow = await trx('multi_home_family_members').where({ customer_id: winnerId }).forUpdate().first('id', 'family_id');
+  if (!winnerRow) {
+    await trx('multi_home_family_members').where({ id: loserRow.id }).update({ customer_id: winnerId });
+    return 'moved 1, dropped 0';
+  }
+  const { recordAuditEvent } = require('./audit-log');
+  await trx('multi_home_family_members').where({ id: loserRow.id }).del();
+  await recordAuditEvent({
+    actor_type: 'admin',
+    actor_id: performedById || null,
+    action: 'multi_home_family.unlinked',
+    resource_type: 'customer',
+    resource_id: loserId,
+    metadata: { familyId: loserRow.family_id, reason: 'customer_merge_collision', mergedIntoCustomerId: winnerId },
+    trx,
+    critical: true,
+  });
+  let cleanedOrphan = 0;
+  const remaining = await trx('multi_home_family_members').where({ family_id: loserRow.family_id }).forUpdate().select('id', 'customer_id');
+  if (remaining.length === 1) {
+    await trx('multi_home_family_members').where({ id: remaining[0].id }).del();
+    cleanedOrphan = 1;
+    await recordAuditEvent({
+      actor_type: 'admin',
+      actor_id: performedById || null,
+      action: 'multi_home_family.unlinked',
+      resource_type: 'customer',
+      resource_id: remaining[0].customer_id,
+      metadata: { familyId: loserRow.family_id, reason: 'last_member_after_merge', mergedIntoCustomerId: winnerId },
+      trx,
+      critical: true,
+    });
+  }
+  return `dropped 1 duplicate family row, cleaned ${cleanedOrphan} singleton orphan`;
+}
+
+async function repointCustomerMoves(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('customer_moves').where(column, loserId).select('id', 'status', 'pause_state', 'paused_at', 'service_request_id');
+  let moved = 0;
+  let closed = 0;
+  for (const row of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp('customer_moves').where({ id: row.id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      // Non-blocking try-lock avoids lock-order deadlocks while holding both
+      // customer locks; abort so callers can retry cleanly if a move fence is busy.
+      const lockRes = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['customer-move-apply', String(row.id)]);
+      if (lockRes?.rows?.[0]?.locked === false) {
+        throw Object.assign(new Error('Duplicate customer move is currently being updated — retry merging in a moment'), {
+          statusCode: 409,
+          isOperational: true,
+        });
+      }
+      const fresh = await trx('customer_moves')
+        .where({ id: row.id })
+        .forUpdate()
+        .first('id', 'status', 'pause_state', 'paused_at', 'service_request_id') || row;
+      if (fresh.paused_at || (fresh.pause_state && fresh.pause_state !== 'none')) {
+        throw new Error('Both customers have live moves and the duplicate move has already started its pause workflow — reconcile the paused move before merging');
+      }
+      if (fresh.status === 'closed') {
+        await trx('customer_moves').where({ id: row.id }).update({ [column]: winnerId });
+        moved += 1;
+        continue;
+      }
+      await trx('customer_moves').where({ id: row.id }).update({
+        [column]: winnerId,
+        status: 'closed',
+        closed_reason: 'cancelled',
+        closed_at: trx.fn.now(),
+        updated_at: trx.fn.now(),
+      });
+      if (fresh.service_request_id) {
+        await trx('service_requests')
+          .where({ id: fresh.service_request_id })
+          .whereNotIn('status', ['resolved', 'closed', 'cancelled', 'completed'])
+          .update({
+            status: 'resolved',
+            resolved_at: trx.fn.now(),
+            status_version: trx.raw('COALESCE(status_version, 0) + 1'),
+            updated_at: trx.fn.now(),
+          });
+      }
+      closed += 1;
+    }
+  }
+  return `moved ${moved}, closed ${closed} colliding live move(s) (winner already has an open move)`;
+}
+
+async function repointPromoCodesNullCollisions(trx, table, column, winnerId, loserId) {
+  const promoTable = table === 'invoice_promo_codes' ? 'invoice_promo_codes' : 'estimate_promo_codes';
+  const rows = await trx(promoTable).where(column, loserId).select('id');
+  let moved = 0;
+  let unlinked = 0;
+  for (const { id } of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp(promoTable).where({ id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      // Preserve financial promo-redemption audit row without violating the
+      // partial unique redeemed-per-customer index (winner already holds a
+      // redeemed row for this discount_id, so repeat redemption stays blocked).
+      if (promoTable === 'invoice_promo_codes') {
+        await trx('invoice_promo_codes').where({ id }).update({ [column]: null, updated_at: trx.fn.now() });
+      } else {
+        await trx('estimate_promo_codes').where({ id }).update({ [column]: null, updated_at: trx.fn.now() });
+      }
+      unlinked += 1;
+    }
+  }
+  return `moved ${moved}, detached ${unlinked} duplicate redeemed promo row(s) (winner already redeemed)`;
+}
+
+async function repointClickFollowupActions(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('click_followup_actions').where(column, loserId).select('id', 'status', 'draft_id');
+  let moved = 0;
+  let dismissed = 0;
+  for (const row of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp('click_followup_actions').where({ id: row.id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      await trx('click_followup_actions').where({ id: row.id }).update({
+        [column]: winnerId,
+        status: 'dismissed',
+        updated_at: trx.fn.now(),
+      });
+      if (row.draft_id) {
+        await trx('message_drafts')
+          .where({ id: row.draft_id, status: 'pending' })
+          .update({ status: 'rejected' });
+      }
+      dismissed += 1;
+    }
+  }
+  return `moved ${moved}, dismissed ${dismissed} duplicate open click-followup row(s)`;
+}
+
+async function repointReviewSequences(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('review_sequences').where(column, loserId).select('id', 'status');
+  let moved = 0;
+  let stopped = 0;
+  for (const row of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp('review_sequences').where({ id: row.id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      const ReviewService = require('./review-request');
+      const { stopped: seqStopped } = await ReviewService.stopReviewSequence(row.id, 'manual', {
+        trx,
+        repoint: { column, winnerId },
+      });
+      if (!seqStopped) {
+        throw new Error('Review sequence is currently mid-send — retry merging in a moment');
+      }
+      stopped += 1;
+    }
+  }
+  return `moved ${moved}, stopped ${stopped} duplicate active review sequence(s)`;
+}
+
+async function repointAppointmentCardRequests(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('appointment_card_requests').where(column, loserId).select('id', 'kind', 'status');
+  let moved = 0;
+  let expired = 0;
+  let keptOnArchived = 0;
+  for (const row of rows) {
+    // Previously issued standalone Auto Pay links (completed/expired/cancelled)
+    // stay bound to their original customer_id so token lookups never reveal
+    // the surviving customer's firstName (completing/pending still hit the guard).
+    if (row.kind === 'customer' && row.status !== 'pending' && row.status !== 'completing') {
+      keptOnArchived += 1;
+      continue;
+    }
+    try {
+      await trx.transaction(async (sp) => {
+        await sp('appointment_card_requests').where({ id: row.id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      if (row.kind !== 'customer' || row.status !== 'pending') {
+        throw new Error('Both customers have an in-flight standalone Auto Pay setup link — wait for it to finish before merging');
+      }
+      // Expire in place on loserId without repointing onto winnerId, so an
+      // already-sent setup token link can never expose the survivor's first name.
+      const updated = await trx('appointment_card_requests')
+        .where({ id: row.id, [column]: loserId, kind: 'customer', status: 'pending' })
+        .update({
+          status: 'expired',
+          updated_at: trx.fn.now(),
+        });
+      if (updated !== 1) {
+        throw new Error('Standalone Auto Pay setup link changed while merging — wait for it to finish before merging');
+      }
+      expired += 1;
+    }
+  }
+  return `moved ${moved}, expired ${expired} duplicate pending Auto Pay setup link(s), kept ${keptOnArchived} historical link(s) on archived profile`;
+}
+
+async function repointCustomerAccessCodes(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('customer_access_codes')
+    .where(column, loserId)
+    .forUpdate()
+    .select('id', 'source_type', 'source_id', 'kind', 'value_hash', 'instructions', 'life', 'status', 'property_id', 'scheduled_service_id');
+  let moved = 0;
+  let dropped = 0;
+  for (const row of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp('customer_access_codes').where({ id: row.id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      // Match the FULL unique index customer_access_codes_source_uniq (incl.
+      // md5(coalesce(instructions, ''))) and lock the conflicting winner row
+      // before comparing life, status, property, and visit scope.
+      const existing = row.source_id
+        ? await trx('customer_access_codes')
+          .where({
+            [column]: winnerId,
+            source_type: row.source_type,
+            source_id: row.source_id,
+            kind: row.kind,
+            value_hash: row.value_hash,
+          })
+          .whereRaw("md5(coalesce(instructions, '')) = md5(coalesce(?, ''))", [row.instructions || ''])
+          .forUpdate()
+          .first('id', 'life', 'status', 'property_id', 'scheduled_service_id')
+        : null;
+      const sameDecisionAndScope = existing
+        && existing.life === row.life
+        && existing.status === row.status
+        && (existing.property_id ?? null) === (row.property_id ?? null)
+        && (existing.scheduled_service_id ?? null) === (row.scheduled_service_id ?? null);
+      if (!sameDecisionAndScope) {
+        throw new Error('Both customers have conflicting access-code decisions or property/visit scopes — reconcile access codes before merging');
+      }
+      await trx('customer_access_codes').where({ id: row.id }).del();
+      dropped += 1;
+    }
+  }
+  return `moved ${moved}, dropped ${dropped} identical duplicate access-code row(s)`;
+}
+
+async function repointCustomerSignals(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('customer_signals').where(column, loserId).select('id');
+  let moved = 0;
+  let resolved = 0;
+  for (const row of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp('customer_signals').where({ id: row.id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      await trx('customer_signals').where({ id: row.id }).update({
+        [column]: winnerId,
+        resolved: true,
+        resolved_at: trx.fn.now(),
+        resolved_by: 'admin_manual',
+        updated_at: trx.fn.now(),
+      });
+      resolved += 1;
+    }
+  }
+  return `moved ${moved}, resolved ${resolved} duplicate unresolved signal(s) in place`;
+}
+
+async function assertNoActiveEmailSpellingRetry(trx, winnerId, loserId) {
+  let exists = null;
+  try {
+    exists = await trx('information_schema.tables')
+      .where({ table_schema: 'public', table_name: 'call_email_spelling_retries' })
+      .first('table_name');
+  } catch {
+    return;
+  }
+  if (!exists || exists.table_name !== 'call_email_spelling_retries') return;
+  const cutoff = new Date(Date.now() - 72 * 3600 * 1000);
+  const active = await trx('call_email_spelling_retries')
+    .whereIn('customer_id', [winnerId, loserId])
+    .where({ status: 'resending' })
+    .where('created_at', '>', cutoff)
+    .first('id');
+  if (active) {
+    throw new Error('An email spelling retry is currently resending for one of these records — wait for delivery to settle before merging');
+  }
+}
+
+async function voidOpenEmailChangeRequestsBeforeSweep(trx, loserId, winnerId = null) {
+  if (winnerId) await assertNoActiveEmailSpellingRetry(trx, winnerId, loserId);
+  let exists = null;
+  try {
+    exists = await trx('information_schema.tables')
+      .where({ table_schema: 'public', table_name: 'customer_email_change_requests' })
+      .first('table_name');
+  } catch {
+    return;
+  }
+  if (!exists || exists.table_name !== 'customer_email_change_requests') return;
+  await trx('customer_email_change_requests')
+    .where({ customer_id: loserId })
+    .whereNull('consumed_at')
+    .update({ consumed_at: trx.fn.now(), updated_at: trx.fn.now() });
+}
+
+// Acquire move advisory locks and settle standalone Auto Pay setup links BEFORE
+// the generic FK sweep runs: without this, a non-colliding merge transfers an
+// issued standalone Auto Pay token onto the survivor (exposing firstName), or
+// repoints a live move while applyMove is between steps.
+async function runOptionalTableStep(trx, fn) {
+  if (typeof trx.transaction === 'function') {
+    await trx.transaction(async (sp) => fn(sp));
+  } else {
+    await fn(trx);
+  }
+}
+
+async function prepareCustomerMovesAndCardRequestsBeforeSweep(trx, loserId) {
+  try {
+    await runOptionalTableStep(trx, async (conn) => {
+      const liveMoves = await conn('customer_moves')
+        .where({ customer_id: loserId })
+        .whereIn('status', ['open', 'submitted'])
+        .select('id');
+      for (const mv of liveMoves) {
+        const lockRes = await conn.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['customer-move-apply', String(mv.id)]);
+        if (lockRes?.rows?.[0]?.locked === false) {
+          throw Object.assign(new Error('Duplicate customer move is currently being updated — retry merging in a moment'), {
+            statusCode: 409,
+            isOperational: true,
+          });
+        }
+      }
+    });
+  } catch (e) {
+    if (!(e && e.code === '42P01')) throw e;
+  }
+  try {
+    await runOptionalTableStep(trx, async (conn) => {
+      const cardReqs = await conn('appointment_card_requests')
+        .where({ customer_id: loserId, kind: 'customer' })
+        .forUpdate()
+        .select('id', 'status');
+      if (cardReqs.some((r) => r.status === 'completing')) {
+        throw new Error('Archived customer has an in-flight standalone Auto Pay setup link — wait for it to finish before merging');
+      }
+      const pendingIds = cardReqs.filter((r) => r.status === 'pending').map((r) => r.id);
+      if (pendingIds.length) {
+        await conn('appointment_card_requests')
+          .whereIn('id', pendingIds)
+          .update({ status: 'expired', updated_at: trx.fn.now() });
+      }
+    });
+  } catch (e) {
+    if (!(e && e.code === '42P01')) throw e;
+  }
+}
+
+async function reconcileMergedMoveFromProperty(trx, winnerId, repointed = null) {
+  if (repointed && !repointed['customer_moves.customer_id']) return;
+  let liveMove = null;
+  try {
+    await runOptionalTableStep(trx, async (conn) => {
+      liveMove = await conn('customer_moves')
+        .where({ customer_id: winnerId })
+        .whereIn('status', ['open', 'submitted'])
+        .whereNotNull('from_property_id')
+        .first('id', 'from_property_id');
+    });
+  } catch (e) {
+    if (e && e.code === '42P01') return;
+    throw e;
+  }
+  if (!liveMove) return;
+  const fromProp = await trx('customer_properties')
+    .where({ id: liveMove.from_property_id })
+    .first('id', 'active', 'address_key', 'address_line1', 'address_line2', 'city', 'zip');
+  if (!fromProp || fromProp.active === true) return;
+  const activeProps = await trx('customer_properties')
+    .where({ customer_id: winnerId, active: true })
+    .select('id', 'address_key', 'address_line1', 'address_line2', 'city', 'zip');
+  const fanout = require('./customer-address-fanout');
+  const matches = activeProps.filter((p) => (
+    (fromProp.address_key && p.address_key && p.address_key === fromProp.address_key)
+    || (!fromProp.address_key && !fanout.homesDiffer(fromProp, p))
+  ));
+  if (matches.length !== 1) {
+    throw new Error('Cannot match the merged move\'s origin home to a unique active property on the surviving customer — reconcile the move before merging');
+  }
+  await trx('customer_moves')
+    .where({ id: liveMove.id })
+    .update({ from_property_id: matches[0].id, updated_at: trx.fn.now() });
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
   service_contact_notification_prefs: foldContactNotificationPrefs,
@@ -2357,10 +2804,33 @@ const UNIQUE_COLLISION_HANDLERS = {
   collections_flags: repointFlagsReleaseCollisions,
   customer_health_alerts: repointHealthAlertsDismissCollisions,
   // UNIQUE(customer_id): both duplicate profiles linked as "Same family" — the
-  // winner's membership is kept, the loser's copy drops (a family left with
-  // one profile no longer counts for the discount; familyMultiHomeEligible
-  // requires 2+ live members).
-  multi_home_family_members: repointRowwiseDropCollisions,
+  // winner's membership is kept, the loser's copy drops with audit trail and
+  // singleton orphan cleanup so no 1-member ghost family blocks future links.
+  multi_home_family_members: repointMultiHomeFamilyMembers,
+  // Partial unique one open/submitted move per customer: close the loser's
+  // colliding live move instead of aborting the merge with 23505.
+  customer_moves: repointCustomerMoves,
+  // Partial unique redeemed promo code per (discount_id, customer): preserve
+  // audit rows by detaching the duplicate nullable customer link on 23505.
+  estimate_promo_codes: repointPromoCodesNullCollisions,
+  invoice_promo_codes: repointPromoCodesNullCollisions,
+  // Partial unique on push:open beacons per (customer_id, page, subject_id).
+  customer_page_views: repointRowwiseDropCollisions,
+  // Unique source/code entries captured on both duplicate profiles: drop only
+  // when status, property_id, and scheduled_service_id match; refuse conflicts.
+  customer_access_codes: repointCustomerAccessCodes,
+  // Partial unique unresolved signal per (customer_id, signal_type): resolve
+  // duplicate in place on 23505 so retention_outreach.trigger_signal_id stays intact.
+  customer_signals: repointCustomerSignals,
+  // Partial unique one open (pending|drafted) click follow-up per customer:
+  // dismiss the colliding duplicate loser action so history survives.
+  click_followup_actions: repointClickFollowupActions,
+  // Partial unique one active review drip per customer: stop colliding active
+  // loser sequence so review_requests history stays intact without double drips.
+  review_sequences: repointReviewSequences,
+  // Partial unique one pending/completing standalone Auto Pay setup link per
+  // customer: expire duplicate pending link; abort if a completion is in flight.
+  appointment_card_requests: repointAppointmentCardRequests,
   // UNIQUE(customer_id): both duplicate profiles holding an "About this home" note — typed staff text, never dropped:
   // the two are joined into the kept customer's one row (mergeHomeNotes).
   home_notes: mergeHomeNotes,
@@ -3531,6 +4001,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // PostgreSQL can't see. Two advisory locks per merge is cheap;
     // sorted ids for deterministic order.
     await require('./pay-combined').lockCombinedCustomers(trx, [winnerId, loserId].map(String).sort());
+    // Same-family advisory lock BEFORE customer row locks (same order as
+    // multi-home-family.js#linkInTransaction / unlinkInTransaction), serializing
+    // family membership changes against merge repoint/collision cleanup.
+    await require('./multi-home-family').lockFamilyChanges(trx);
     // A collection call mid-flight defers the merge (codex gh-r10): the
     // dial claim also takes these case locks, so this check is
     // authoritative — a 'dialing' case means a live call is using policy
@@ -3973,6 +4447,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // the withdrawal after the sweep reads them, and must not wait on a payer row while holding invoices.
     await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id }, null, { lock: true });
     await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
+    // Open email-change verification codes belong solely to the retired profile —
+    // void them before the sweep (table is in REPOINT_EXCLUDED_TABLES).
+    await voidOpenEmailChangeRequestsBeforeSweep(trx, loser.id, winner.id);
+    // Lock any live moves and expire pending standalone Auto Pay links before the sweep.
+    await prepareCustomerMovesAndCardRequestsBeforeSweep(trx, loser.id);
     // The loser's open pin suggestion (and its bell) is retired, not moved: it names the retired profile.
     await retirePinSuggestionsBeforeSweep(trx, loser.id);
     const fks = await customerFkColumns(trx);
@@ -3988,14 +4467,18 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
           // Bounded prefetch (r35): the journal stores {count} beyond the
           // cap anyway — materializing every id first let a 10k+-row FK
           // table allocate an unbounded list inside the merge transaction.
-          rowIds = (await sp(table).where(column, loserId).select(pkColumn).limit(REPOINT_ID_CAP + 1)).map((r) => r[pkColumn]);
+          let q = sp(table).where(column, loserId);
+          if (table === 'appointment_card_requests') q = q.whereNot('kind', 'customer');
+          rowIds = (await q.select(pkColumn).limit(REPOINT_ID_CAP + 1)).map((r) => r[pkColumn]);
         });
       } catch {
         rowIds = null;
       }
       try {
         await trx.transaction(async (sp) => {
-          const count = await sp(table).where(column, loserId).update({ [column]: winnerId });
+          let uq = sp(table).where(column, loserId);
+          if (table === 'appointment_card_requests') uq = uq.whereNot('kind', 'customer');
+          const count = await uq.update({ [column]: winnerId });
           if (count) {
             repointed[`${table}.${column}`] = count;
             // Record ids only when the update provably covered exactly them
@@ -4021,6 +4504,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         }
       }
     }
+    // If a moved live customer_moves row points at a from_property_id that was
+    // deactivated during customer_properties collision folding, re-anchor it to
+    // the winner's active primary property so Apply move / pausePlan never fail
+    // with from_unknown.
+    await reconcileMergedMoveFromProperty(trx, winnerId, repointed);
     // Customers cannot turn payment receipts off (owner ruling 2026-09-26).
     // When the sweep moved a duplicate's prefs row whole (no collision, so
     // mergeSingletonPrefRow never ran), clear a legacy opt-out it carried.
@@ -5052,7 +5540,9 @@ const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'cus
   'customer_health_alerts',
   // A home note only the archived customer had moves with the plain sweep; staff who then rewrite it for the kept
   // customer stamp updated_at, and the undo must not carry that edited text back to the restored profile.
-  'home_notes']);
+  'home_notes',
+  // Moving rows can accumulate post-merge service requests, estimates, or to_property_id on winner.
+  'customer_moves']);
 
 // The undo's email-clear guard probes every surface that delivers to a
 // denormalized copy of the customer email. This table MIRRORS the canonical
@@ -5358,6 +5848,14 @@ const TABLE_TIMESTAMP_COLUMNS = {
   // timestamps(true, true) — 20260401000069; explicit pair — 20260401000072.
   expenses: ['created_at', 'updated_at'],
   lawn_assessments: ['created_at', 'updated_at'],
+  // 20261102120000: explicit created_at/updated_at.
+  customer_moves: ['created_at', 'updated_at'],
+  // 20261124170000: created_at only (no updated_at).
+  visit_text_recipients: ['created_at'],
+  // 20261105030000: explicit created_at/updated_at.
+  multi_home_discount_applications: ['created_at', 'updated_at'],
+  // 20260930010000: timestamps(true, true).
+  customer_dunning_schedules: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -5429,6 +5927,102 @@ async function recordLinkedProperty({ journalId, propertyId = null }) {
  * never creates or modifies charges. Refusals throw with statusCode 409 and
  * a human-readable reason.
  */
+async function verifyPostMergeDunningSafety(trx, { winnerId, loserId, mergeAt, journaledIdsFor, refuse }) {
+  try {
+    const openSchedules = await trx('customer_dunning_schedules')
+      .whereIn('customer_id', [winnerId, loserId])
+      .whereIn('status', ['active', 'held', 'paused', 'autopay_hold'])
+      .select(['id', ...activityColumnsFor('customer_dunning_schedules')]);
+    const activeDunning = countActivityRows(openSchedules, {
+      journaledIds: journaledIdsFor('customer_dunning_schedules'), mergeAt, sinceOnly: true, table: 'customer_dunning_schedules',
+    });
+    if (activeDunning) {
+      refuse('An overdue reminder schedule was opened or updated after this merge — release it before undoing this merge');
+    }
+  } catch (e) {
+    if (e && e.statusCode === 409) throw e;
+    if (e && e.code !== '42P01') refuse(`Cannot verify customer_dunning_schedules (${e.message}) — refusing to revert`);
+  }
+}
+
+async function hasPostMergeFamilyDiscountApplication(trx, winnerId, mergeAt) {
+  try {
+    const row = await trx('multi_home_discount_applications')
+      .where((q) => q.where('source_customer_id', winnerId).orWhere('target_customer_id', winnerId))
+      .where((q) => q.where('created_at', '>', mergeAt).orWhere('updated_at', '>', mergeAt).orWhere('applied_at', '>', mergeAt))
+      .first('id');
+    return !!row;
+  } catch (e) {
+    if (e && e.code === '42P01') return false;
+    throw e;
+  }
+}
+
+async function verifyPostMergeFamilySafety(trx, { winnerId, loserId, mergeAt, recorded, refuse }) {
+  const movedFamilyIds = recorded?.tables?.['multi_home_family_members.customer_id'];
+  if (!Array.isArray(movedFamilyIds) || !movedFamilyIds.length) return;
+  try {
+    const winnerMember = await trx('multi_home_family_members')
+      .where({ customer_id: winnerId })
+      .first('id', 'family_id', 'linked_at');
+    if (!winnerMember) {
+      refuse('Same-family membership was removed after this merge — reconcile family links by hand before undoing');
+    }
+    const postMergeLink = await trx('multi_home_family_members')
+      .where({ family_id: winnerMember.family_id })
+      .where('linked_at', '>', mergeAt)
+      .first('id');
+    if (postMergeLink) {
+      refuse('Same-family membership changed after this merge — unlink or reconcile family members by hand before undoing');
+    }
+    const postMergeAudit = await trx('audit_log')
+      .whereIn('action', ['multi_home_family_link', 'multi_home_family_unlink', 'multi_home_family.unlinked'])
+      .where('created_at', '>', mergeAt)
+      .where((q) => q.whereIn('resource_id', [winnerId, loserId])
+        .orWhereRaw("metadata->>'familyId' = ?", [String(winnerMember.family_id)]))
+      .first('id');
+    if (postMergeAudit) {
+      refuse('Same-family membership changed (link or unlink) after this merge — reconcile family members by hand before undoing');
+    }
+    if (await hasPostMergeFamilyDiscountApplication(trx, winnerId, mergeAt)) {
+      refuse('A Multi-Home Discount application ran using this family membership after the merge — reconcile discounted series by hand before undoing');
+    }
+  } catch (e) {
+    if (e && e.statusCode === 409) throw e;
+    if (e && e.code !== '42P01') refuse(`Cannot verify multi_home_family_members (${e.message}) — refusing to revert`);
+  }
+}
+
+async function verifyPostMergeMovesSafety(trx, { journaledIdsFor, refuse }) {
+  const movedMoveIds = [...journaledIdsFor('customer_moves')];
+  if (!movedMoveIds.length) return;
+  try {
+    const moveRows = await trx('customer_moves')
+      .whereIn('id', movedMoveIds)
+      .select('id', 'service_request_id', 'estimate_id', 'to_property_id');
+    const jReqs = journaledIdsFor('service_requests');
+    const jEsts = journaledIdsFor('estimates');
+    const jProps = journaledIdsFor('customer_properties');
+    for (const m of moveRows || []) {
+      const unjournaled = (m.service_request_id && !jReqs.has(m.service_request_id))
+        || (m.estimate_id && !jEsts.has(m.estimate_id))
+        || (m.to_property_id && !jProps.has(m.to_property_id));
+      if (unjournaled) {
+        refuse('A moving record moved by this merge has linked requests, estimates, or properties outside the journal — reconcile by hand');
+      }
+    }
+  } catch (e) {
+    if (e && e.statusCode === 409) throw e;
+    if (e && e.code !== '42P01') refuse(`Cannot verify customer_moves children (${e.message}) — refusing to revert`);
+  }
+}
+
+async function verifyPostMergeFamilyAndDunningSafety(trx, ctx) {
+  await verifyPostMergeDunningSafety(trx, ctx);
+  await verifyPostMergeFamilySafety(trx, ctx);
+  await verifyPostMergeMovesSafety(trx, ctx);
+}
+
 async function revertMerge({ journalId, performedBy, performedById }) {
   const refuse = (reason) => {
     const err = new Error(reason);
@@ -5598,7 +6192,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // parked this lane (r19 #4). Creators never lock the journal row, so
     // the journal → comms → customers order cannot cycle. The later
     // email/name-guard acquisitions of this same key are reentrant no-ops.
+    // Same-family advisory lock BEFORE customer-comms lock (matches
+    // multi-home-discount-apply.js worker lock order: family -> comms -> rows)
+    // and post-merge dunning/family/move safety guards (P1-F2, P1-D1, P2-D1).
+    await require('./multi-home-family').lockFamilyChanges(trx);
     await lockCustomerComms(trx, winnerId);
+    await verifyPostMergeFamilyAndDunningSafety(trx, { winnerId, loserId, mergeAt, recorded, journaledIdsFor, refuse });
     // The invoice-issued-closeout gate lock, sorted, BEFORE the customer
     // rows (GitHub r7 P2 #4127) — the same reason as executeMerge: this undo
     // locks the customers first and later the journaled invoices FOR
@@ -6164,6 +6763,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         { table: 'job_costs', column: 'scheduled_service_id', label: 'job cost ledger row(s)' },
         { table: 'expenses', column: 'scheduled_service_id', label: 'job expense/receipt row(s)' },
         { table: 'lawn_assessments', column: 'service_id', label: 'lawn assessment(s)' },
+        { table: 'visit_text_recipients', column: 'scheduled_service_id', label: 'visit text recipient(s)', sinceOnly: true },
       ];
       for (const probe of visitChildProbes) {
         let rows = [];
@@ -6175,7 +6775,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           refuse(`Cannot verify ${probe.table} for this merge's visits (${e.message}) — refusing to revert`);
         }
         const stranded = countActivityRows(rows, {
-          journaledIds: journaledIdsFor(probe.table), mergeAt, table: probe.table,
+          journaledIds: journaledIdsFor(probe.table), mergeAt, sinceOnly: !!probe.sinceOnly, table: probe.table,
         });
         if (stranded) {
           refuse(`${stranded} ${probe.label} for this merge's visits are outside its journal — moving the visits back would leave them attributed to the kept customer; reconcile by hand`);
@@ -6286,6 +6886,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         // never updates the estimate — moving the estimate back would
         // record the public outline under the wrong customer.
         { table: 'service_outline_packets', column: 'estimate_id', label: 'service outline packet(s)' },
+        { table: 'multi_home_discount_applications', column: 'source_estimate_id', label: 'multi-home discount application(s)' },
       ];
       for (const probe of estimateChildProbes) {
         let rows = [];
@@ -7472,7 +8073,15 @@ async function previewMergeEffects(database, winnerId, loserId) {
   // Sequential per-column, concurrent per-table: two FK columns on one table
   // are rare, but summing them concurrently would race on one accumulator.
   await Promise.all([...byTable].map(async ([table, columns]) => {
-    for (const column of columns) await countInto(table, () => database(table).where(column, loserId));
+    for (const column of columns) {
+      await countInto(table, () => {
+        let q = database(table).where(column, loserId);
+        if (table === 'appointment_card_requests' && typeof q.whereNot === 'function') {
+          q = q.whereNot('kind', 'customer');
+        }
+        return q;
+      });
+    }
   }));
   await Promise.all(POLYMORPHIC_CUSTOMER_POINTERS.map(({ table, typeColumn, idColumn }) =>
     countInto(`${table}.${idColumn}`, () => database(table).where({ [typeColumn]: 'customer', [idColumn]: loserId }))));
@@ -7741,6 +8350,139 @@ function predictLoserStateDiscarded(winner, loser) {
 // carry, conversation threads on the same (channel, endpoint). Sorted so
 // the fingerprint is stable; a table that does not exist yet (42P01) is
 // simply not predicted.
+async function predictFamilyCollisionFold(database, winnerId, loserId, details) {
+  let pairRows = [];
+  try {
+    pairRows = await database('multi_home_family_members')
+      .whereIn('customer_id', [winnerId, loserId])
+      .select('customer_id', 'family_id');
+  } catch (e) {
+    if (e && e.code === '42P01') return;
+    throw e;
+  }
+  const list = Array.isArray(pairRows) ? pairRows : [];
+  const winRow = list.find((r) => String(r.customer_id) === String(winnerId));
+  const loseRow = list.find((r) => String(r.customer_id) === String(loserId));
+  if (!winRow || !loseRow) return;
+  let loserFamilyRows = [];
+  try {
+    loserFamilyRows = await database('multi_home_family_members')
+      .where({ family_id: loseRow.family_id })
+      .select('customer_id');
+  } catch (e) {
+    if (!(e && e.code === '42P01')) throw e;
+  }
+  const remainingAfterLoserDrop = (Array.isArray(loserFamilyRows) ? loserFamilyRows : [])
+    .map((r) => String(r.customer_id))
+    .filter((id) => id !== String(loserId))
+    .sort();
+  const dissolvedMembers = remainingAfterLoserDrop.length === 1
+    ? [String(loserId), ...remainingAfterLoserDrop].sort()
+    : [String(loserId)];
+  details.multi_home_family_members = {
+    summary: remainingAfterLoserDrop.length === 1
+      ? 'removing the archived record dissolves a 2-profile Same-Family group, ending Multi-Home eligibility for both listed members'
+      : 'both records are in a Same-Family group: the archived record\'s link is removed while the surviving record\'s link is kept',
+    affectedMembers: dissolvedMembers,
+    sameFamily: String(winRow.family_id) === String(loseRow.family_id),
+  };
+}
+
+async function predictExtraTableCollisionFolds(database, read, winnerId, loserId, details) {
+  const rawMoveRows = await read('customer_moves', ['customer_id', 'status']);
+  const moveRows = (Array.isArray(rawMoveRows) ? rawMoveRows : [])
+    .filter((r) => r.status === 'open' || r.status === 'submitted');
+  const liveMoveOwners = new Set(moveRows.map((r) => String(r.customer_id)));
+  if (liveMoveOwners.has(String(winnerId)) && liveMoveOwners.has(String(loserId))) {
+    details.customer_moves = 'both records have an open move: the surviving record\'s move stays open and the archived record\'s move is closed';
+  }
+  const rawApptCardRows = await read('appointment_card_requests', ['customer_id', 'kind', 'status']);
+  const pendingApptCardOwners = new Set(
+    (Array.isArray(rawApptCardRows) ? rawApptCardRows : [])
+      .filter((r) => r.kind === 'customer' && r.status === 'pending')
+      .map((r) => String(r.customer_id)),
+  );
+  if (pendingApptCardOwners.has(String(loserId))) {
+    details.appointment_card_requests = pendingApptCardOwners.has(String(winnerId))
+      ? 'both records have a pending standalone Auto Pay setup link: the archived record\'s link is expired in place'
+      : 'archived record has a pending standalone Auto Pay setup link: it is expired in place rather than transferred';
+  }
+  const rawFollowupRows = await read('click_followup_actions', ['customer_id', 'status']);
+  const openFollowupOwners = new Set(
+    (Array.isArray(rawFollowupRows) ? rawFollowupRows : [])
+      .filter((r) => r.status === 'pending' || r.status === 'drafted')
+      .map((r) => String(r.customer_id)),
+  );
+  if (openFollowupOwners.has(String(winnerId)) && openFollowupOwners.has(String(loserId))) {
+    details.click_followup_actions = 'both records have an open follow-up action: the archived record\'s duplicate action is dismissed and any pending draft rejected';
+  }
+  const ids = [winnerId, loserId];
+  const promoSpecs = [
+    ['estimate_promo_codes', 'redeemed_customer_id'],
+    ['invoice_promo_codes', 'customer_id'],
+  ];
+  for (const [promoTable, ownerCol] of promoSpecs) {
+    let promoRows = [];
+    try {
+      promoRows = await database(promoTable)
+        .whereIn(ownerCol, ids)
+        .where({ status: 'redeemed' })
+        .whereNotNull('discount_id')
+        .select(ownerCol, 'discount_id');
+    } catch (e) {
+      if (!(e && e.code === '42P01')) throw e;
+    }
+    const promoList = Array.isArray(promoRows) ? promoRows : [];
+    const winDiscounts = new Set(promoList.filter((r) => String(r[ownerCol]) === String(winnerId)).map((r) => String(r.discount_id)));
+    const sharedDiscounts = [...new Set(promoList
+      .filter((r) => String(r[ownerCol]) === String(loserId) && winDiscounts.has(String(r.discount_id)))
+      .map((r) => String(r.discount_id)))].sort();
+    if (sharedDiscounts.length) details[promoTable] = { shared_redeemed_discounts: sharedDiscounts };
+  }
+  const rawReviewRows = await read('review_sequences', ['id', 'customer_id', 'status']);
+  const activeReviewRows = (Array.isArray(rawReviewRows) ? rawReviewRows : [])
+    .filter((r) => r.status === 'active');
+  const winSeqIds = activeReviewRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => String(r.id)).sort();
+  const loseSeqIds = activeReviewRows.filter((r) => String(r.customer_id) === String(loserId)).map((r) => String(r.id)).sort();
+  if (winSeqIds.length && loseSeqIds.length) {
+    details.review_sequences = {
+      summary: 'both records have an active review drip: the archived record\'s sequence is stopped',
+      surviving_sequence_ids: winSeqIds,
+      archived_sequence_ids: loseSeqIds,
+    };
+  }
+}
+
+async function predictPropertyAndThreadFolds(read, winner, loser, details) {
+  const winnerId = winner.id;
+  const loserId = loser.id;
+  const propertyRows = await read('customer_properties', ['customer_id', 'is_primary', 'active']);
+  const winnerHasPrimary = propertyRows.some((row) => String(row.customer_id) === String(winnerId) && row.is_primary === true);
+  const winnerHasActivePrimary = propertyRows.some((row) => String(row.customer_id) === String(winnerId) && row.is_primary === true && row.active === true);
+  const winnerWillEstablishPrimary = !winnerHasPrimary
+    && !isEmptyValue(winner.address_line1)
+    && addressCompat(winner, loser).status !== 'match';
+  const loserHasPrimary = propertyRows.some((row) => String(row.customer_id) === String(loserId) && row.is_primary === true);
+  if (loserHasPrimary && (winnerHasActivePrimary || winnerWillEstablishPrimary)) {
+    details.customer_properties = 'the archived record\'s primary property will be demoted because the surviving account keeps its own primary address';
+  }
+  const tagRows = await read('customer_tags', ['customer_id', 'tag']);
+  const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
+  const sharedTags = [...new Set(tagRows.filter((r) => String(r.customer_id) === String(loserId) && winnerTags.has(r.tag)).map((r) => r.tag))].sort();
+  if (sharedTags.length) details.customer_tags = { shared: sharedTags };
+  const alertRows = (await read('customer_health_alerts', ['customer_id', 'alert_type', 'status']))
+    .filter((r) => HEALTH_ALERT_OPEN_STATUSES.includes(r.status) && HEALTH_ALERT_UNIQUE_RULE_TYPES.includes(r.alert_type));
+  const winnerAlerts = new Set(alertRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.alert_type));
+  const sharedAlerts = [...new Set(alertRows.filter((r) => String(r.customer_id) === String(loserId) && winnerAlerts.has(r.alert_type)).map((r) => r.alert_type))].sort();
+  if (sharedAlerts.length) details.customer_health_alerts = { shared_open_alerts: sharedAlerts };
+  const convRows = await read('conversations', ['customer_id', 'channel', 'our_endpoint_id']);
+  const key = (r) => `${r.channel}\u0000${r.our_endpoint_id}`;
+  const validConv = (r) => r.channel != null && r.our_endpoint_id != null;
+  const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && validConv(r)).map(key));
+  const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && validConv(r) && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
+  if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
+}
+
 async function predictCollisionFolds(database, winner, loser) {
   const winnerId = winner.id;
   const loserId = loser.id;
@@ -7764,36 +8506,9 @@ async function predictCollisionFolds(database, winner, loser) {
     const owners = new Set((Array.isArray(rows) ? rows : []).map((r) => String(r.customer_id)));
     if (owners.has(String(winnerId)) && owners.has(String(loserId))) details[table] = text;
   }
-  // executeMerge initializes an addressed winner's missing primary before the
-  // FK sweep. If the loser owns a primary, that deliberate collision invokes
-  // repointCustomerProperties (which demotes the moved row) and makes automatic
-  // undo unavailable. Predict only this newly deterministic collision; other
-  // active-address collisions retain the existing runtime/journal fallback.
-  const propertyRows = await read('customer_properties', ['customer_id', 'is_primary', 'active']);
-  const winnerRows = propertyRows.filter((row) => String(row.customer_id) === String(winnerId));
-  const winnerHasPrimary = winnerRows.some((row) => row.is_primary === true);
-  const winnerHasActivePrimary = winnerRows.some((row) => row.is_primary === true && row.active === true);
-  const winnerWillEstablishPrimary = !winnerHasPrimary
-    && !isEmptyValue(winner.address_line1)
-    && addressCompat(winner, loser).status !== 'match';
-  const loserHasPrimary = propertyRows.some((row) => String(row.customer_id) === String(loserId) && row.is_primary === true);
-  if (loserHasPrimary && (winnerHasActivePrimary || winnerWillEstablishPrimary)) {
-    details.customer_properties = 'the archived record\'s primary property will be demoted because the surviving account keeps its own primary address';
-  }
-  const tagRows = await read('customer_tags', ['customer_id', 'tag']);
-  const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
-  const sharedTags = [...new Set(tagRows.filter((r) => String(r.customer_id) === String(loserId) && winnerTags.has(r.tag)).map((r) => r.tag))].sort();
-  if (sharedTags.length) details.customer_tags = { shared: sharedTags };
-  const alertRows = (await read('customer_health_alerts', ['customer_id', 'alert_type', 'status']))
-    .filter((r) => HEALTH_ALERT_OPEN_STATUSES.includes(r.status) && HEALTH_ALERT_UNIQUE_RULE_TYPES.includes(r.alert_type));
-  const winnerAlerts = new Set(alertRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.alert_type));
-  const sharedAlerts = [...new Set(alertRows.filter((r) => String(r.customer_id) === String(loserId) && winnerAlerts.has(r.alert_type)).map((r) => r.alert_type))].sort();
-  if (sharedAlerts.length) details.customer_health_alerts = { shared_open_alerts: sharedAlerts };
-  const convRows = await read('conversations', ['customer_id', 'channel', 'our_endpoint_id']);
-  const key = (r) => `${r.channel}\u0000${r.our_endpoint_id}`;
-  const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
-  const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && r.channel != null && r.our_endpoint_id != null && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
-  if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
+  await predictFamilyCollisionFold(database, winnerId, loserId, details);
+  await predictPropertyAndThreadFolds(read, winner, loser, details);
+  await predictExtraTableCollisionFolds(database, read, winnerId, loserId, details);
   return { tables: Object.keys(details).sort(), details };
 }
 
@@ -7990,11 +8705,19 @@ module.exports = {
     repointWeekPlansKeepAvailable,
     foldContactNotificationPrefs,
     pruneDiscardedContactPrefs,
-  repointFlagsReleaseCollisions,
+    repointFlagsReleaseCollisions,
     repointHealthAlertsDismissCollisions,
+    repointMultiHomeFamilyMembers,
+    repointCustomerMoves,
+    repointPromoCodesNullCollisions,
+    voidOpenEmailChangeRequestsBeforeSweep,
+    retirePinSuggestionsBeforeSweep,
+    prepareCustomerMovesAndCardRequestsBeforeSweep,
+    predictCollisionFolds,
+    reconcileMergedMoveFromProperty,
+    verifyPostMergeFamilyAndDunningSafety,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
-    retirePinSuggestionsBeforeSweep,
     stableStringify,
     normalizeDisclosedTimestamps,
     resetFkCache: () => { fkColumnsCache = null; },

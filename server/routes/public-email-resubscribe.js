@@ -88,7 +88,7 @@ router.get('/:token', async (req, res) => {
         `);
   } catch (err) {
     logger.error(`[email-resubscribe] page failed (${Resub.errorWord(err)})`);
-    return res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com if you meant to turn emails back on.');
+    return page(res, 500, 'Something went wrong.', para('Please try again in a few minutes or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> if you meant to turn emails back on.'));
   }
 });
 
@@ -108,7 +108,10 @@ router.post('/:token', async (req, res) => {
     return page(res, 200, PAGE.successHeading, para(PAGE.successBody(`<span class="email">${escapeHtml(request.email)}</span>`)));
   } catch (err) {
     logger.error(`[email-resubscribe] release failed (${Resub.errorWord(err)})`);
-    return res.status(500).json({ success: false, error: 'release failed' });
+    if (!isFormSubmission(req)) {
+      return res.status(500).json({ success: false, error: 'release failed' });
+    }
+    return page(res, 500, 'Something went wrong.', para('Please try again in a few minutes or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> if you meant to turn emails back on.'));
   }
 });
 

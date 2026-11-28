@@ -1670,6 +1670,9 @@ module.exports = {
   buildOfferForFamily,
   buildPortalPurchaseBasis,
   buildStartOffer,
+  // The two approved pushed cross-sell pillars (owner ruling 2026-11-21:
+  // pest_control and lawn_care only — never push Tree & Shrub or Termite).
+  OFFER_LADDER,
   // The families a customer may choose to add: the My Plan "Add a service"
   // list walks it, and a one-tap purchase accepts no family outside it.
   PURCHASE_FAMILIES,

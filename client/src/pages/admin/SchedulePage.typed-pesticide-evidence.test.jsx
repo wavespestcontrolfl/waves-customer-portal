@@ -8,6 +8,7 @@ vi.mock('../../lib/adminApi', () => ({ adminFetch: vi.fn(() => Promise.resolve({
 
 import {
   TypedFindingsSection,
+  completionPesticideComplianceWarnings,
   treeShrubTypedPesticideScopeClient,
 } from './SchedulePage.jsx';
 
@@ -85,5 +86,29 @@ describe('typed Tree & Shrub pesticide evidence fields', () => {
     expect(screen.getByRole('option', { name: 'No insect treatment recorded' })).toBeInTheDocument();
     expect(screen.queryByText(/Flowering \/ pollinator status/)).not.toBeInTheDocument();
     expect(screen.queryByText('Current live insect target')).not.toBeInTheDocument();
+  });
+
+  it('completionPesticideComplianceWarnings surfaces missing primary and companion fields as non-blocking warnings', () => {
+    const scope = treeShrubTypedPesticideScopeClient([{ name: 'Mainspring GNL Insecticide', category: '' }]);
+    const warnings = completionPesticideComplianceWarnings({
+      isTypedFindings: true,
+      isIncompleteVisit: false,
+      typedFindingsSchema: SCHEMA,
+      findingsValues: {},
+      companionSchemas: [{ ...SCHEMA, label: 'Tree & Shrub Companion' }],
+      companionState: { tree_shrub: { values: {} } },
+      scope,
+    });
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toMatch(/Missing pesticide compliance details:.*Flowering \/ pollinator status/);
+    expect(warnings[1]).toMatch(/Tree & Shrub Companion: missing pesticide compliance details:/);
+
+    expect(completionPesticideComplianceWarnings({
+      isTypedFindings: true,
+      isIncompleteVisit: true,
+      typedFindingsSchema: SCHEMA,
+      findingsValues: {},
+      scope,
+    })).toEqual([]);
   });
 });

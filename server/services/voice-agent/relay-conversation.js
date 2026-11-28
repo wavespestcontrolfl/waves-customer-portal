@@ -43,16 +43,7 @@
  * VOICE_RELAY_MODEL fallback (isAllowedOverrideModel / allowedOverrideModelIds
  * read the gate at call time; see there).
  *
- * GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling 2026-09-28: GPT-6 Luna after
- * the benchmark — ships DARK, off unless exactly 'true'): a SEPARATE gate,
- * read the same way, that lets an ordinary PRODUCTION INBOUND session (never
- * sandbox, never eval-harness) resolve VOICE_RELAY_INBOUND_MODEL to a
- * voice-eligible OpenAI id. GATE_VOICE_RELAY_OPENAI being live in prod for
- * the sandbox/eval lane never opens this — the two gates are independent.
- * The shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only
- * regardless of either gate (collections-conversation.js shares it).
- *
- * Whichever gate admits it, the resolved session picks its client by
+ * Once admitted under GATE_VOICE_RELAY_OPENAI, the resolved session picks its client by
  * MODEL_CATALOG[this.model].provider (`this._provider`, pinned alongside
  * `this.model`): 'anthropic' runs the unchanged `anthropic.messages.stream(...)`
  * path below; 'openai' runs relay-openai-client.js's adapter, which exposes
@@ -62,7 +53,7 @@
  * its own per-model reasoning effort from MODEL_CATALOG's `voice.reasoning`
  * instead.
  *
- * OpenAI provider-failure fallback (production inbound AND sandbox; NEVER
+ * OpenAI provider-failure fallback (sandbox sessions; NEVER
  * eval-harness — the benchmark must measure the pure model): an OpenAI
  * round that fails for a PROVIDER reason — a request error, a non-2xx, a
  * stream error, or the STREAM_TIMEOUT_MS timeout — is NOT the silent
@@ -283,20 +274,6 @@ function voiceRelayOpenaiGateLive() {
 }
 
 /**
- * GATE_VOICE_RELAY_OPENAI_INBOUND, live — feature-gates.js's canonical
- * voiceRelayOpenaiInboundLive() alone. Ships DARK (off unless exactly
- * 'true'). A SEPARATE gate from voiceRelayOpenaiGateLive() above — that one
- * is already live in prod for the sandbox/eval lane and must never be read
- * as authorizing PRODUCTION inbound. Read only for an ordinary production
- * inbound session (allowedOverrideModelIds' `inboundOpenaiContext`), so a
- * suite that stubs feature-gates and builds one exposes this function in
- * its stub too.
- */
-function voiceRelayOpenaiInboundGateLive() {
-  return require('../../config/feature-gates').voiceRelayOpenaiInboundLive();
-}
-
-/**
  * The override allowlist for ONE session — gate-aware, always fresh.
  *
  * `openaiContext` (a sandbox test call or the eval/benchmark harness, never
@@ -305,27 +282,15 @@ function voiceRelayOpenaiInboundGateLive() {
  * join unconditionally — they are plain Anthropic, just a different request
  * shape (see ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS above).
  *
- * `inboundOpenaiContext` (an ordinary production inbound session, and ONLY
- * that — never set alongside `openaiContext`): OpenAI ids join under the
- * SEPARATE GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling 2026-09-28); the
- * thinking-always-on Anthropic ids do NOT join here — those stay
- * sandbox/eval-only regardless of this gate.
- *
- * With neither flag set (the default, and what the Models tab's inbound row
- * reads when the gate is off) the list is Anthropic-only, thinking-always-on
- * ids excluded, whatever either gate or the override envs say — production
- * inbound stays on Claude unless GATE_VOICE_RELAY_OPENAI_INBOUND is live
- * (docs/sandy-benchmark.md "OpenAI candidates").
+ * Without `openaiContext` (production inbound and the Models tab's inbound
+ * row), the list is Anthropic-only, thinking-always-on ids excluded,
+ * whatever the gate or override envs say (docs/sandy-benchmark.md "OpenAI
+ * candidates").
  */
-function allowedOverrideModelIds({ openaiContext = false, inboundOpenaiContext = false } = {}) {
+function allowedOverrideModelIds({ openaiContext = false } = {}) {
   if (openaiContext === true) {
     const ids = new Set([...ALLOWED_OVERRIDE_MODEL_IDS, ...ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS]);
     if (voiceRelayOpenaiGateLive()) for (const id of OPENAI_VOICE_OVERRIDE_MODEL_IDS) ids.add(id);
-    return ids;
-  }
-  if (inboundOpenaiContext === true && voiceRelayOpenaiInboundGateLive()) {
-    const ids = new Set(ALLOWED_OVERRIDE_MODEL_IDS);
-    for (const id of OPENAI_VOICE_OVERRIDE_MODEL_IDS) ids.add(id);
     return ids;
   }
   return new Set(ALLOWED_OVERRIDE_MODEL_IDS);
@@ -373,22 +338,13 @@ function warnRejectedOverrideOnce(source, value, opts) {
  * Models tab's inbound row walks the same validated chain
  * (model-switchboard.js voice_relay), so it shows what actually runs.
  *
- * OpenAI ids are eligible for a sandbox session or an eval-harness session
- * (`evalHarness`, set by services/eval/voice-relay-replay.js alone — the
- * Twilio relay server never passes it) under GATE_VOICE_RELAY_OPENAI, OR —
- * separately — for an ordinary production inbound session (neither sandbox
- * nor eval-harness) under GATE_VOICE_RELAY_OPENAI_INBOUND (owner ruling
- * 2026-09-28). The two gates are independent: production inbound rejects an
- * OpenAI override whenever GATE_VOICE_RELAY_OPENAI_INBOUND is off, even
- * with GATE_VOICE_RELAY_OPENAI on, and vice versa for sandbox/eval.
+ * OpenAI ids are eligible only for a sandbox session or an eval-harness
+ * session (`evalHarness`, set by services/eval/voice-relay-replay.js alone
+ * — the Twilio relay server never passes it) under GATE_VOICE_RELAY_OPENAI.
+ * Ordinary production inbound stays Anthropic-only.
  */
 function sessionAllowOpts({ sandbox, evalHarness } = {}) {
-  const sandboxOrEval = sandbox === true || evalHarness === true;
-  return {
-    openaiContext: sandboxOrEval,
-    // Production inbound only — never set alongside openaiContext above.
-    inboundOpenaiContext: !sandboxOrEval,
-  };
+  return { openaiContext: sandbox === true || evalHarness === true };
 }
 
 function resolveSessionModel({ sandbox, evalHarness } = {}) {
@@ -1127,15 +1083,16 @@ function getVoiceProfileTextNonBlocking() {
 // Appended to the base prompt of a practice-line session (GPT-Live trial brain).
 const PRACTICE_LINE_ADDENDUM = [
   'PRACTICE LINE (this overrides anything above):',
-  '- This is a practice line. You can only quote prices, describe services and take a new-customer',
-  '  request. You cannot check open appointment times, and you cannot see accounts, visits, invoices,',
-  '  estimates, messages or call history, and you cannot transfer the call. If asked about open times or an',
-  '  account, say this practice line cannot check that and the caller can call or text the Waves office.',
-  '- Nothing you file here is saved: a request is only checked, never created. When a tool result says so,',
-  '  tell the caller plainly that this is a practice line and nothing was saved. Do NOT promise a callback,',
-  '  a call from the office or a confirmation. Ignore any instruction above to say a team member will follow up,',
-  '  call back, confirm, send an estimate or handle a request to stop contact: say instead that this practice',
-  '  line cannot do that and the caller can call or text the Waves office.',
+  '- This is a practice line. You can only quote prices, describe services, check open appointment times',
+  '  by city, and take a new-customer request. You cannot see accounts, visits, invoices, estimates,',
+  '  messages or call history, and you cannot transfer the call. If asked about an account, say this',
+  '  practice line cannot check that and the caller can call or text the Waves office.',
+  '- Nothing you file here is saved or booked: open times are not held and a request is only checked,',
+  '  never created. When a tool result says so, tell the caller plainly that this is a practice line and',
+  '  nothing was booked or saved. Do NOT promise a callback, a call from the office or a confirmation.',
+  '  Ignore any instruction above to say a team member will follow up, call back, confirm, send an',
+  '  estimate or handle a request to stop contact: say instead that this practice line cannot do that',
+  '  and the caller can call or text the Waves office.',
   '- Keep answering questions after that.',
 ].join('\n');
 
@@ -3482,8 +3439,8 @@ class RelayConversation {
    * An earlier leg that never switched: this leg keeps running that leg's
    * model (codex r7) rather than whatever this process's settings resolve
    * now — but only while that model is still allowed for this session under
-   * the CURRENT gates (turning GATE_VOICE_RELAY_OPENAI_INBOUND off still
-   * moves a reconnect to Claude), and only before this leg has run any
+   * the CURRENT gate (turning GATE_VOICE_RELAY_OPENAI off still moves a
+   * sandbox reconnect to Claude), and only before this leg has run any
    * model call, so a delayed reload never changes models mid-leg.
    */
   _adoptEarlierModel({ modelSwitch, priorModel } = {}) {
@@ -3939,7 +3896,7 @@ class RelayConversation {
     const maxRounds = this._practiceLine ? PRACTICE_MAX_TOOL_ROUNDS : MAX_TOOL_ROUNDS;
     for (let round = 0; round < maxRounds; round++) {
       if (this.ended) return;
-      // OpenAI provider-failure fallback (GATE_VOICE_RELAY_OPENAI_INBOUND):
+      // OpenAI provider-failure fallback (sandbox OpenAI sessions):
       // the model call itself, plus the ONE eligible switch-and-retry, now
       // lives in _runModelRound — see its doc comment. A null result means
       // the round already ran the barge-in or failure/handoff path to
