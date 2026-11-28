@@ -49,7 +49,7 @@ const ENGAGEMENT_OUTBOUND_TYPES = [...HUMAN_REPLY_TYPES, 'lead_outreach', 'ai_au
 
 const LEAD_SELECT_COLS = Object.freeze([
   'id', 'first_name', 'phone', 'email', 'customer_id', 'estimate_id',
-  'converted_at', 'is_commercial', 'status', 'deleted_at', 'created_at',
+  'converted_at', 'is_commercial', 'is_residential', 'status', 'deleted_at', 'created_at',
   'twilio_call_sid', 'twilio_message_sid', 'lead_type', 'extracted_data',
 ]);
 
@@ -73,7 +73,7 @@ function isWithinSendHoursET(now = new Date()) {
 }
 
 function isEligibleUnquotedLeadRow(lead) {
-  if (!lead || lead.deleted_at || lead.is_commercial === true) return false;
+  if (!lead || lead.deleted_at || lead.is_commercial === true || lead.is_residential === false) return false;
   if (lead.converted_at || lead.estimate_id) return false;
   if (!UNQUOTED_OPEN_STATUSES.includes(lead.status)) return false;
   return Boolean(String(lead.phone || '').trim()) && !String(lead.email || '').trim();
@@ -119,6 +119,7 @@ function pickDueStep(lead, sentClaims, now = new Date()) {
     return ageHours >= 48 && ageHours <= 96 ? 1 : null;
   }
   if (step1.status && step1.status !== 'sent') return null;
+  if (step1.destination_phone && !phonesShareIdentity(step1.destination_phone, lead.phone)) return null;
   const step1At = new Date(step1.sent_at || step1.created_at).getTime();
   if (!Number.isFinite(step1At)) return null;
   const sinceStep1Hours = (now.getTime() - step1At) / HOUR_MS;
@@ -179,9 +180,12 @@ async function resolveLeadPromotionalConsent(conn, lead, matchDigitsInput = null
   const webPromoOptIn = CONSENTED_WEB_LEAD_TYPES.has(lead.lead_type) && extracted.marketing_sms_opt_in === true;
   const submittedPhone = extracted.sms_consent_phone || extracted.submitted_phone || extracted.phone || null;
   if (webPromoOptIn && submittedPhone && phonesShareIdentity(submittedPhone, leadE164)) {
+    const linkedMatchingCustomer = rows.find((r) => (
+      lead.customer_id && String(r.id) === String(lead.customer_id) && phonesShareIdentity(r.phone, leadE164)
+    ));
     return {
       consentBasis: { status: 'opted_in', source: 'web_form_sms_opt_in', phoneBound: true },
-      consentingCustomerId: null,
+      consentingCustomerId: linkedMatchingCustomer?.id || null,
       matchedCustomerIds,
     };
   }
@@ -323,6 +327,10 @@ async function settleDripClaim(dbh, { claimId, leadId, step, activityType, outco
     await dbh('new_lead_phone_drip_sends').where({ id: claimId, status: 'claimed' }).del();
     return;
   }
+  if (outcome === 'stopped') {
+    await dbh('new_lead_phone_drip_sends').where({ id: claimId }).update({ status: 'stopped' });
+    return;
+  }
   await dbh('new_lead_phone_drip_sends').where({ id: claimId }).update({ status: 'uncertain' });
 }
 
@@ -371,7 +379,7 @@ function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock }) {
 async function processOnePhoneLead(dbh, lead, { now, clock, sender }) {
   const claims = await dbh('new_lead_phone_drip_sends')
     .where({ lead_id: lead.id })
-    .select('step', 'status', 'sent_at', 'claimed_at');
+    .select('step', 'status', 'sent_at', 'claimed_at', 'destination_phone');
 
   const step = pickDueStep(lead, claims, now);
   if (!step) return 'skip';
@@ -380,7 +388,7 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender }) {
   if (stop) return 'stopped';
 
   const destinationPhone = canonicalE164(lead.phone);
-  const effectiveCustomerId = lead.customer_id || consentingCustomerId || undefined;
+  const effectiveCustomerId = consentingCustomerId || undefined;
   const activityType = step === 1 ? STEP_1_ACTIVITY : STEP_2_ACTIVITY;
   const deliveryKey = `${DRIP_ENTRY_POINT}:${lead.id}:step_${step}`;
   const claimId = await claimLeadDripStep(dbh, { leadId: lead.id, step, destinationPhone, deliveryKey });
@@ -409,13 +417,14 @@ async function processOnePhoneLead(dbh, lead, { now, clock, sender }) {
     throw err;
   }
 
-  if (result?.deliveryOutcome === 'accepted' || result?.sent === true) {
+  if (result?.deliveryOutcome === 'accepted') {
     await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: 'sent', providerMessageId: result?.providerMessageId });
     return 'sent';
   }
   if (result?.deliveryOutcome === 'not_sent') {
-    await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: 'release' });
-    return result?.retryable === true ? 'deferred' : 'stopped';
+    const retryable = result?.retryable === true;
+    await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: retryable ? 'release' : 'stopped' });
+    return retryable ? 'deferred' : 'stopped';
   }
   await settleDripClaim(dbh, { claimId, leadId: lead.id, step, activityType, outcome: 'uncertain' });
   return 'deferred';
@@ -428,6 +437,7 @@ async function fetchPhoneDripLeadPage(dbh, { cutoffOldest, cutoffNewest, cursor,
     .whereNull('estimate_id')
     .whereIn('status', UNQUOTED_OPEN_STATUSES)
     .whereRaw('COALESCE(is_commercial, false) = false')
+    .whereRaw('COALESCE(is_residential, true) = true')
     .whereRaw("NULLIF(TRIM(COALESCE(phone, '')), '') IS NOT NULL")
     .whereRaw("NULLIF(TRIM(COALESCE(email, '')), '') IS NULL")
     .where('created_at', '>=', cutoffOldest)

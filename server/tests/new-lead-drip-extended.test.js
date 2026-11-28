@@ -300,10 +300,12 @@ describe('phone-only residential SMS drip pure helpers & central marketing conse
     const hoursAgo = (h) => new Date(now.getTime() - h * 3600 * 1000).toISOString();
 
     expect(pickDueStep({ ...base, created_at: hoursAgo(60) }, [], now)).toBe(1);
+    expect(pickDueStep({ ...base, is_residential: false, created_at: hoursAgo(60) }, [], now)).toBeNull();
     expect(pickDueStep({ ...base, status: 'estimate_sent', created_at: hoursAgo(60) }, [], now)).toBeNull();
     expect(pickDueStep({ ...base, status: 'estimate_viewed', created_at: hoursAgo(60) }, [], now)).toBeNull();
     expect(pickDueStep({ ...base, created_at: hoursAgo(60), email: 'a@example.com' }, [], now)).toBeNull();
-    expect(pickDueStep({ ...base, created_at: hoursAgo(130) }, [{ step: 1, status: 'sent', sent_at: hoursAgo(70) }], now)).toBe(2);
+    expect(pickDueStep({ ...base, created_at: hoursAgo(130) }, [{ step: 1, status: 'sent', sent_at: hoursAgo(70), destination_phone: '+19415550111' }], now)).toBe(2);
+    expect(pickDueStep({ ...base, created_at: hoursAgo(130) }, [{ step: 1, status: 'sent', sent_at: hoursAgo(70), destination_phone: '+19415559999' }], now)).toBeNull();
     expect(pickDueStep({ ...base, created_at: hoursAgo(130) }, [{ step: 1, status: 'uncertain', claimed_at: hoursAgo(70) }], now)).toBeNull();
   });
 });
@@ -477,6 +479,47 @@ describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwardin
     }));
     expect(claimUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', provider_message_id: 'SM123' }));
     expect(actInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ lead_id: 'lead-10', activity_type: STEP_1_ACTIVITY }));
+  });
+
+  test('persists terminal status=stopped on permanent provider refusal (e.g. landline) instead of retrying', async () => {
+    const claimInsert = chain({ returning: [{ id: 'claim-term' }] });
+    const claimUpdate = chain();
+    const dbh = makeDb({
+      leads: [chain({ result: [OPTED_IN_LEAD] })],
+      new_lead_phone_drip_sends: [chain({ result: [] }), claimInsert, claimUpdate],
+      customers: [chain({ result: [] })],
+      estimates: [chain({ result: [] })],
+      sms_log: [chain({ first: null })],
+      messaging_suppression: [chain({ first: null })],
+    });
+    const sendMessage = jest.fn(async () => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: false }));
+
+    const res = await processPhoneOnlyLeadSmsDrip({
+      now: NOW_DAYTIME, clock: () => NOW_DAYTIME, dbh, gates: { newLeadDripExtendedLive: () => true }, sendMessage,
+    });
+    expect(res).toEqual({ skipped: null, checked: 1, sent: 0, stopped: 1, deferred: 0 });
+    expect(claimUpdate.update).toHaveBeenCalledWith({ status: 'stopped' });
+    expect(claimUpdate.del).not.toHaveBeenCalled();
+  });
+
+  test('treats sent:true with uncertain deliveryOutcome as uncertain (never marks sent)', async () => {
+    const claimInsert = chain({ returning: [{ id: 'claim-unc' }] });
+    const claimUpdate = chain();
+    const dbh = makeDb({
+      leads: [chain({ result: [OPTED_IN_LEAD] })],
+      new_lead_phone_drip_sends: [chain({ result: [] }), claimInsert, claimUpdate],
+      customers: [chain({ result: [] })],
+      estimates: [chain({ result: [] })],
+      sms_log: [chain({ first: null })],
+      messaging_suppression: [chain({ first: null })],
+    });
+    const sendMessage = jest.fn(async () => ({ sent: true, blocked: false, deliveryOutcome: 'uncertain' }));
+
+    const res = await processPhoneOnlyLeadSmsDrip({
+      now: NOW_DAYTIME, clock: () => NOW_DAYTIME, dbh, gates: { newLeadDripExtendedLive: () => true }, sendMessage,
+    });
+    expect(res).toEqual({ skipped: null, checked: 1, sent: 0, stopped: 0, deferred: 1 });
+    expect(claimUpdate.update).toHaveBeenCalledWith({ status: 'uncertain' });
   });
 
   test('providerPreSendCheck rechecks live clock at handoff and blocks after 8 PM ET', async () => {
