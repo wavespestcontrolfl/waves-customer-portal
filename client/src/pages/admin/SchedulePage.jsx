@@ -12677,8 +12677,17 @@ export function PestRecapCard({ serviceId }) {
       });
     fetchStatus();
     id = setInterval(fetchStatus, 4000);
-    return () => { alive = false; stopPolling(); if (blobRef.current) { URL.revokeObjectURL(blobRef.current); blobRef.current = null; } };
+    return () => { alive = false; stopPolling(); };
   }, [serviceId, pollGen]);
+
+  useEffect(() => () => {
+    if (blobRef.current) {
+      URL.revokeObjectURL(blobRef.current);
+      blobRef.current = null;
+    }
+    setVideoUrl(null);
+    setVideoError(false);
+  }, [serviceId]);
 
   useEffect(() => {
     if (!(state.status === "ready" || state.status === "approved") || videoUrl) return undefined;
