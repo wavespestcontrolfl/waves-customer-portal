@@ -517,14 +517,32 @@ function scoreInTipPeriod(score, { fromDate, toDate }) {
   return Boolean(date) && date >= fromDate && date < toDate;
 }
 
+// A period's scores carry their call's start time (metadata.callSid is the call's twilio_call_sid), and
+// scoreInTipPeriod places each by it. A call is scored after it starts, so every call that started in the period
+// has call_date >= fromDate; a later call_date (scored after the period ended) stays in this read. A voice sandbox
+// or tech-line row never gives a start (whereNotSandboxCall's rule, row-level in this raw join), so such a score
+// keeps its call_date.
+function loadScoresWithCallStart(fromDate) {
+  return db('csr_call_scores as s')
+    .joinRaw(`LEFT JOIN LATERAL (SELECT MIN(${callStartedAtSql('cl')}) AS started_at FROM call_log cl`
+      + " WHERE cl.twilio_call_sid = s.metadata->>'callSid'"
+      + " AND COALESCE(cl.source, '') <> ? AND COALESCE(cl.source, '') <> ?) call_start ON TRUE",
+    [VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE])
+    .where('s.call_date', '>=', fromDate)
+    .select('s.*', 'call_start.started_at as call_started_at');
+}
+
 function resolveOverviewWindow(days, { periodStart = null, periodEnd = null } = {}) {
   const since = periodStart || etDateString(addETDays(new Date(), -days));
   const followUpSince = parseETDateTime(`${since}T00:00:00`);
-  const followUpBefore = periodEnd
-    ? parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${periodEnd}T12:00`), 1))}T00:00:00`)
+  const periodEndExclusive = periodEnd
+    ? etDateString(addETDays(parseETDateTime(`${periodEnd}T12:00`), 1))
+    : null;
+  const followUpBefore = periodEndExclusive
+    ? parseETDateTime(`${periodEndExclusive}T00:00:00`)
     : null;
   const period = periodStart && periodEnd ? `${periodStart}..${periodEnd}` : `${days}d`;
-  return { since, periodEnd, followUpSince, followUpBefore, period };
+  return { since, periodEnd, periodEndExclusive, followUpSince, followUpBefore, period };
 }
 class CSRCoach {
 
@@ -847,9 +865,10 @@ Return JSON:
   async getTeamOverview(days = 30, range = {}) {
     const win = resolveOverviewWindow(days, range);
 
-    let scoreQuery = db('csr_call_scores').where('call_date', '>=', win.since);
-    if (win.periodEnd) scoreQuery = scoreQuery.where('call_date', '<=', win.periodEnd);
-    const scores = await scoreQuery;
+    const scores = win.periodEnd
+      ? (await loadScoresWithCallStart(win.since))
+        .filter((score) => scoreInTipPeriod(score, { fromDate: win.since, toDate: win.periodEndExclusive }))
+      : await db('csr_call_scores').where('call_date', '>=', win.since);
 
     // By CSR
     const byCSR = {};
@@ -931,19 +950,8 @@ Return JSON:
   // seven completed days its call-outcomes line reads (weekly-call-outcomes.js completedWeekDates), so the tip covers
   // one period. Without it, scores dated after the day a week ago (the CSR page's on-demand tip).
   async generateWeeklyTeamRecommendation({ between = null } = {}) {
-    // A period's scores carry their call's start time (metadata.callSid is the call's twilio_call_sid), and
-    // scoreInTipPeriod places each by it. A call is scored after it starts, so every call that started in the period
-    // has call_date >= fromDate; a later call_date (scored after the period ended) stays in this read. A voice sandbox
-    // or tech-line row never gives a start (whereNotSandboxCall's rule, row-level in this raw join), so such a score
-    // keeps its call_date.
     const allScores = between
-      ? (await db('csr_call_scores as s')
-        .joinRaw(`LEFT JOIN LATERAL (SELECT MIN(${callStartedAtSql('cl')}) AS started_at FROM call_log cl`
-          + " WHERE cl.twilio_call_sid = s.metadata->>'callSid'"
-          + " AND COALESCE(cl.source, '') <> ? AND COALESCE(cl.source, '') <> ?) call_start ON TRUE",
-        [VOICE_RELAY_SANDBOX_SOURCE, TECH_VOICE_SOURCE])
-        .where('s.call_date', '>=', between.fromDate)
-        .select('s.*', 'call_start.started_at as call_started_at'))
+      ? (await loadScoresWithCallStart(between.fromDate))
         .filter((score) => scoreInTipPeriod(score, between))
       : await db('csr_call_scores').where('call_date', '>', etDateString(addETDays(new Date(), -7)));
 

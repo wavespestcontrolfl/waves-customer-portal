@@ -32,7 +32,7 @@ const adminCommsRouter = require('../routes/admin-communications');
 function makeChain(result = []) {
   const calls = [];
   const q = { _calls: calls };
-  for (const m of ['where', 'whereNot', 'orWhereNull', 'leftJoin', 'select', 'groupBy', 'orderBy', 'limit', 'update', 'count']) {
+  for (const m of ['where', 'whereNot', 'orWhereNull', 'leftJoin', 'joinRaw', 'select', 'groupBy', 'orderBy', 'limit', 'update', 'count']) {
     q[m] = jest.fn((...args) => {
       calls.push([m, ...args]);
       return q;
@@ -93,15 +93,20 @@ describe('PUT /api/admin/csr/follow-up-tasks/:id', () => {
 });
 
 describe('CSRCoach.getLeaderboard half-month period boundaries', () => {
-  test('queries exact half-month boundaries (16th..end) on the 18th instead of rolling 15 days', async () => {
+  test('queries exact half-month boundaries (16th..end) using linked call start and excludes late-15th calls scored on the 16th', async () => {
     const scoreChain = makeChain([
-      { csr_name: 'Alex', call_outcome: 'booked', is_first_call_from_lead: true, total_score: 10 },
+      // Started Nov 15 at 11:30 PM EST, scored Nov 16 after midnight -> belongs to Nov 1-15, NOT Nov 16-30.
+      { csr_name: 'Late15th', call_date: '2026-11-16', call_started_at: new Date('2026-11-16T04:30:00Z'), call_outcome: 'booked', is_first_call_from_lead: true, total_score: 16 },
+      // Started Nov 16 at 10:00 AM EST -> belongs to Nov 16-30.
+      { csr_name: 'Alex', call_date: '2026-11-16', call_started_at: new Date('2026-11-16T15:00:00Z'), call_outcome: 'booked', is_first_call_from_lead: true, total_score: 10 },
+      // Unlinked score falls back to call_date -> belongs to Nov 16-30.
+      { csr_name: 'Unlinked', call_date: '2026-11-17', call_started_at: null, call_outcome: 'not_booked', is_first_call_from_lead: true, total_score: 8 },
     ]);
     const followUpChain = makeChain([
       { assigned_to: 'Alex', status: 'completed', job_booked_from_followup: false },
     ]);
     db.mockImplementation((table) => {
-      if (table === 'csr_call_scores') return scoreChain;
+      if (table === 'csr_call_scores as s') return scoreChain;
       if (table === 'ai_follow_up_tasks') return followUpChain;
       return makeChain([]);
     });
@@ -109,17 +114,24 @@ describe('CSRCoach.getLeaderboard half-month period boundaries', () => {
     const board = await CSRCoach.getLeaderboard(new Date('2026-11-18T17:00:00Z'));
     expect(board.periodStart).toBe('2026-11-16');
     expect(board.periodEnd).toBe('2026-11-30');
-    expect(scoreChain.where).toHaveBeenCalledWith('call_date', '>=', '2026-11-16');
-    expect(scoreChain.where).toHaveBeenCalledWith('call_date', '<=', '2026-11-30');
+    expect(scoreChain.joinRaw).toHaveBeenCalledTimes(1);
+    expect(scoreChain.where).toHaveBeenCalledWith('s.call_date', '>=', '2026-11-16');
+    expect(scoreChain.where).not.toHaveBeenCalledWith('call_date', '<=', expect.anything());
+    expect(board.csrs.map((c) => c.name).sort()).toEqual(['Alex', 'Unlinked']);
     expect(followUpChain.where).toHaveBeenCalledWith('created_at', '>=', new Date('2026-11-16T05:00:00.000Z'));
     expect(followUpChain.where).toHaveBeenCalledWith('created_at', '<', new Date('2026-12-01T05:00:00.000Z'));
   });
 
-  test('queries exact first-half boundaries (1st..15th) on the 2nd instead of rolling into prior month', async () => {
-    const scoreChain = makeChain([]);
+  test('counts a late-15th call scored after midnight in the 1st..15th period and excludes calls started on the 16th', async () => {
+    const scoreChain = makeChain([
+      // Started Dec 15 at 11:45 PM EST, scored Dec 16 -> counts in Dec 1-15.
+      { csr_name: 'Late15th', call_date: '2026-12-16', call_started_at: new Date('2026-12-16T04:45:00Z'), call_outcome: 'booked', is_first_call_from_lead: true, total_score: 14 },
+      // Started Dec 16 at 12:10 AM EST -> belongs to Dec 16-31, excluded from Dec 1-15.
+      { csr_name: 'Early16th', call_date: '2026-12-16', call_started_at: new Date('2026-12-16T05:10:00Z'), call_outcome: 'booked', is_first_call_from_lead: true, total_score: 16 },
+    ]);
     const followUpChain = makeChain([]);
     db.mockImplementation((table) => {
-      if (table === 'csr_call_scores') return scoreChain;
+      if (table === 'csr_call_scores as s') return scoreChain;
       if (table === 'ai_follow_up_tasks') return followUpChain;
       return makeChain([]);
     });
@@ -127,8 +139,8 @@ describe('CSRCoach.getLeaderboard half-month period boundaries', () => {
     const board = await CSRCoach.getLeaderboard(new Date('2026-12-02T17:00:00Z'));
     expect(board.periodStart).toBe('2026-12-01');
     expect(board.periodEnd).toBe('2026-12-15');
-    expect(scoreChain.where).toHaveBeenCalledWith('call_date', '>=', '2026-12-01');
-    expect(scoreChain.where).toHaveBeenCalledWith('call_date', '<=', '2026-12-15');
+    expect(scoreChain.where).toHaveBeenCalledWith('s.call_date', '>=', '2026-12-01');
+    expect(board.csrs.map((c) => c.name)).toEqual(['Late15th']);
   });
 });
 

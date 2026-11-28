@@ -718,7 +718,7 @@ function buildSmsPropertyDraft(proposals) {
       address_line1: pr.address_line1 || "",
       address_line2: pr.address_line2 || "",
       city: pr.city || "",
-      state: String(pr.state || "FL").toUpperCase(),
+      state: String(pr.state || "").trim().toUpperCase(),
       zip: pr.zip || "",
       occupancy_type: OCCUPANCY_OPTIONS.includes(pr.occupancy_type) ? pr.occupancy_type : "unknown",
     })),

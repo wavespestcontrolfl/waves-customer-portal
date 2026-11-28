@@ -1653,4 +1653,53 @@ describe('SMS property_role_confirm cards and load race guard', () => {
     await waitFor(() => expect(screen.getByText('Resolved Row')).toBeInTheDocument());
     expect(screen.queryByText('Stale Open')).not.toBeInTheDocument();
   });
+
+  it('leaves a missing SMS proposal state blank so staff must enter a state before applying', async () => {
+    const missingStateCard = {
+      ...ordinary,
+      id: 'sms-prop-nostate',
+      call_log_id: null,
+      sms_log_id: 'sms-log-2',
+      first_name: 'Jordan',
+      last_name: 'NoState',
+      reason_code: 'property_role_confirm',
+      updated_at: '2026-11-27T13:00:00.000Z',
+      payload: {
+        customer_id: 'cust-2',
+        sms_text: 'Also add 789 Pine Rd, Sarasota 34236',
+        sender_requires_review: false,
+        additional_property_proposals: [
+          {
+            quote: '789 Pine Rd, Sarasota 34236',
+            address_line1: '789 Pine Rd',
+            address_line2: '',
+            city: 'Sarasota',
+            state: null,
+            zip: '34236',
+            occupancy_type: 'primary',
+          },
+        ],
+      },
+    };
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) {
+        return { items: [missingStateCard], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      }
+      return { resolved: true, created: 1 };
+    });
+
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Jordan NoState');
+
+    const stateInput = screen.getByLabelText('Address 1 state');
+    expect(stateInput).toHaveValue('');
+
+    const applyBtn = screen.getByRole('button', { name: /Apply properties/i });
+    fireEvent.click(screen.getByLabelText('Confirm common responsibility for sms-prop-nostate'));
+    expect(applyBtn).toBeDisabled();
+
+    fireEvent.change(stateInput, { target: { value: 'fl' } });
+    expect(stateInput).toHaveValue('FL');
+    expect(applyBtn).toBeEnabled();
+  });
 });
