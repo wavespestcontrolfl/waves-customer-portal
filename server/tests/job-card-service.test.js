@@ -3542,6 +3542,8 @@ describe('rodent trap work: steps only, with the safety rules', () => {
             { product: 'Duplicate Item', where: 'Ambiguous', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
             { product: 'Tekko Pro IGR', where: 'Roach label rate', perGallon: { amount: 2, unit: 'fl oz' }, sprayers: ['bg_1_gal'], epa: '53883-335' },
             { product: 'Blank Epa Product', where: 'Needs exact EPA', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['bg_1_gal'], epa: '99999-999' },
+            { product: 'Antapex Mass', where: 'Compatible mass units', perGallon: { amount: 10, unit: 'g' }, sprayers: ['bg_1_gal'] },
+            { product: 'Mismatched Unit Product', where: 'Mass vs volume', perGallon: { amount: 10, unit: 'g' }, sprayers: ['bg_1_gal'] },
           ],
           lineMeta: {
             'Apply growth regulator at 2 fl oz/gal': {
@@ -3562,6 +3564,8 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       { id: 'cat-dup-1', name: 'Duplicate Item', label_verified_at: '2026-08-01T00:00:00Z' },
       { id: 'cat-dup-2', name: 'Duplicate Item', label_verified_at: '2026-08-01T00:00:00Z' },
       { id: 'cat-blank-epa', name: 'Blank Epa Product', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '1', default_unit: 'fl_oz/gal' },
+      { id: 'cat-antapex-mass', name: 'Antapex Mass', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '0.35-1.05', default_unit: 'oz/gal' },
+      { id: 'cat-mismatch-unit', name: 'Mismatched Unit Product', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '0.5-1.0', default_unit: 'fl_oz/gal' },
     ];
     const out = await jobCard.resolveVisitProducts({
       facts: { isLawn: false, serviceType: 'Mosquito Treatment - IGR', scheduledDate: '2026-09-04' },
@@ -3576,9 +3580,12 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       expect.objectContaining({ product: 'Duplicate Item', productId: null }),
       expect.objectContaining({ product: 'Tekko Pro IGR', productId: 'cat-tekko' }),
       expect.objectContaining({ product: 'Blank Epa Product', productId: null }),
+      expect.objectContaining({ product: 'Antapex Mass', productId: 'cat-antapex-mass' }),
+      expect.objectContaining({ product: 'Mismatched Unit Product', productId: 'cat-mismatch-unit', labelWarning: 'Protocol and catalog rates use different units — verify against container label.' }),
     ]);
     expect(out.procedure.mixRates[1].labelWarning).toBeUndefined();
     expect(out.procedure.mixRates[4].labelWarning).toBeUndefined();
+    expect(out.procedure.mixRates[6].labelWarning).toBeUndefined();
 
     // Assigned sprayer carrier-volume and area-cap warnings ride on each procedure's own rows:
     // shared products across primary + add-ons do not borrow each other's lineCarrier, 1,500 sq ft volumes normalize
@@ -3905,6 +3912,33 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
     );
     expect(dipelOk.fieldGuide.mixRates[0].calibrationWarnings).toBeUndefined();
+
+    // Reciprocal coverage limits (Bora-Care: "up to 400 sq ft per gal" => at least 2.5 gal per 1,000 sq ft)
+    // warn below 2.5 gal/1,000 sq ft and pass at or above 2.5 gal/1,000 sq ft.
+    const boraCareRow = () => ({
+      product: 'Bora-Care',
+      sprayers: ['bg_1_gal', 'flowzone_4_gal'],
+      perGallon: { amount: 64, unit: 'fl oz' },
+      sprayVolume: '1 part Bora-Care to 1 part water; up to 400 sq ft per gal',
+    });
+    const boraLow = { mixRates: [boraCareRow()] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: boraLow, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(boraLow.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('below the label minimum of 2.5 gal per 1,000 sq ft'),
+    ]);
+    const boraOk = { mixRates: [boraCareRow()] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: boraOk, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 2.5 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(boraOk.mixRates[0].calibrationWarnings).toBeUndefined();
   });
 
   test('buildJobCard and mixForProduct both ignore another technician calibration on a system-only assignment and carry field-guide label warnings into product details', async () => {

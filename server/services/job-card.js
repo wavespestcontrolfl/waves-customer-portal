@@ -1495,19 +1495,51 @@ function matchMixRateProduct(row, catalog) {
   return resolveCatalogProductForName(name, pool) || fieldGuideLineProduct(name, pool) || null;
 }
 
+const MASS_IN_G = { g: 1, gram: 1, grams: 1, oz: 28.349523125, ounce: 28.349523125, ounces: 28.349523125, dry_oz: 28.349523125, lb: 453.59237, lbs: 453.59237, pound: 453.59237, pounds: 453.59237 };
+const VOLUME_IN_FL_OZ = { fl_oz: 1, floz: 1, fluid_oz: 1, fluid_ounce: 1, fluid_ounces: 1, ml: 1 / 29.5735295625, milliliter: 1 / 29.5735295625, milliliters: 1 / 29.5735295625, tsp: 1 / 6, teaspoon: 1 / 6, teaspoons: 1 / 6, tbsp: 0.5, tablespoon: 0.5, tablespoons: 0.5, pt: 16, pint: 16, pints: 16, qt: 32, quart: 32, quarts: 32, gal: 128, gallon: 128, gallons: 128 };
+const normRateUnit = (u) => String(u || '').trim().toLowerCase().replace(/[\s.]+/g, '_');
+
+function convertRateUnit(amount, fromUnit, toUnit) {
+  const from = normRateUnit(fromUnit);
+  const to = normRateUnit(toUnit);
+  if (!from || !to) return null;
+  if (from === to) return amount;
+  if (MASS_IN_G[from] && MASS_IN_G[to]) return (amount * MASS_IN_G[from]) / MASS_IN_G[to];
+  if (VOLUME_IN_FL_OZ[from] && VOLUME_IN_FL_OZ[to]) return (amount * VOLUME_IN_FL_OZ[from]) / VOLUME_IN_FL_OZ[to];
+  return null;
+}
+
+function hasDeclaredLabelUse(lines, productId, { lo, hi, unit }) {
+  const pid = String(productId);
+  return Array.isArray(lines) && lines.some((l) => (
+    String(l.product?.id) === pid
+    && l.labelUseRate
+    && l.declaredRate?.lo === lo
+    && l.declaredRate?.hi === hi
+    && normRateUnit(l.declaredRate?.unit) === unit
+  ));
+}
+
+function compareDilutionToCatalog({ lo, hi, unit }, catalogLabel) {
+  const convLo = convertRateUnit(lo, unit, catalogLabel.unit);
+  const convHi = convertRateUnit(hi, unit, catalogLabel.unit);
+  if (convLo == null || convHi == null) return 'Protocol and catalog rates use different units — verify against container label.';
+  if (convHi > catalogLabel.hi + 1e-6) return 'Protocol dilution exceeds verified catalog label rate — confirm label before mixing.';
+  if (convLo < catalogLabel.lo - 1e-6) return 'Protocol dilution is below verified catalog label rate — confirm label before mixing.';
+  return null;
+}
+
 function mixRowLabelWarning(row, matched, lines) {
-  const hasAmount = Boolean(row?.perGallon || row?.dose);
-  if (!matched || !hasAmount) return null;
+  if (!matched || !(row?.perGallon || row?.dose)) return null;
   if (!matched.label_verified_at) return 'Label rate not yet verified';
-  if (!row?.perGallon?.amount || !row?.perGallon?.unit) return null;
+  if (!row.perGallon?.amount || !row.perGallon?.unit) return null;
   const catalogLabel = perGallonRate(matched);
   if (!catalogLabel) return 'Protocol rate only — verify against container label.';
   const lo = Number(row.perGallon.amount);
   const hi = Number(row.perGallon.amountMax > lo ? row.perGallon.amountMax : lo);
-  const unit = String(row.perGallon.unit).trim().toLowerCase().replace(/\s+/g, '_');
-  const labelUse = Boolean(lines?.some((l) => l.product?.id === matched.id && l.labelUseRate && l.declaredRate?.lo === lo && l.declaredRate?.hi === hi && l.declaredRate?.unit === unit));
-  const protoLine = { rate: { lo, hi, unit }, declared: true, ...(labelUse ? { labelUse: true } : {}) };
-  return protocolBand(catalogLabel, protoLine) ? null : 'Protocol dilution exceeds verified catalog label rate — confirm label before mixing.';
+  const unit = normRateUnit(row.perGallon.unit);
+  if (hasDeclaredLabelUse(lines, matched.id, { lo, hi, unit })) return null;
+  return compareDilutionToCatalog({ lo, hi, unit }, catalogLabel);
 }
 
 function enrichMixRates(rows, catalog, lines) {
@@ -2539,6 +2571,7 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
 // procedure mix row (including Tree & Shrub fieldGuide.mixRates) when an appointment names an assigned sprayer rig.
 const SQFT_PER_ACRE = 43560;
 const SPRAY_VOL_SPEC_RE = /(?:(\b(?:at\s+least|at\s+most|no\s+more\s+than|up\s+to|min(?:imum)?|max(?:imum)?|about|approx(?:\.|imately)?|around)(?:\s+of)?\s+|~\s*)|(?<![\d.]))(\d+(?:\.\d+)?)\s*(?:(?:finished|mixed|diluted)\s+)?gal(?:lon)?s?\s+(?:of\s+(?:mix|water|finished\s+spray|spray)\s+)?(?:per|for)\s+(?:(\d+(?:,\d+)?)\s*sq\.?\s*ft|(acre)\b)/ig;
+const COVERAGE_SQFT_PER_GAL_RE = /(?:(\b(?:at\s+least|at\s+most|no\s+more\s+than|up\s+to|min(?:imum)?|max(?:imum)?|about|approx(?:\.|imately)?|around)(?:\s+of)?\s+|~\s*)|(?<![\d.]))(\d+(?:,\d+)?(?:\.\d+)?)\s*sq\.?\s*ft\.?\s+per\s+(?:(\d+(?:\.\d+)?)\s*)?(?:(?:finished|mixed|diluted)\s+)?gal(?:lon)?s?\b/ig;
 const MAX_VOL_QUAL_RE = /^(?:at\s+most|no\s+more\s+than|up\s+to|max(?:imum)?)(?:\s+of)?$/i;
 const MIN_VOL_QUAL_RE = /^(?:at\s+least|min(?:imum)?)(?:\s+of)?$/i;
 const APPROX_VOL_QUAL_RE = /^(?:about|approx(?:\.|imately)?|around|~)$/i;
@@ -2561,6 +2594,15 @@ function mixTankForRequest(rigs, { pickedRig, equipmentSystemId, technicianId, s
   return procedureCalibrationTank(rigs, rigAssignment(svc), svc.technician_id || technicianId || null, fallback);
 }
 
+function recordSprayVolumeSpec(out, per1000, qual, { reciprocal = false } = {}) {
+  const isMax = MAX_VOL_QUAL_RE.test(qual);
+  const isMin = MIN_VOL_QUAL_RE.test(qual);
+  if ((isMax && !reciprocal) || (isMin && reciprocal)) out.max = out.max == null ? per1000 : Math.min(out.max, per1000);
+  else if ((isMin && !reciprocal) || (isMax && reciprocal)) out.min = out.min == null ? per1000 : Math.max(out.min, per1000);
+  else if (APPROX_VOL_QUAL_RE.test(qual)) out.approx = out.approx ?? per1000;
+  else if (out.exact == null) out.exact = per1000;
+}
+
 function parseSprayVolumeSpecs(text) {
   const out = { exact: null, min: null, max: null, approx: null };
   const str = String(text || '');
@@ -2569,13 +2611,13 @@ function parseSprayVolumeSpecs(text) {
   while ((m = SPRAY_VOL_SPEC_RE.exec(str)) !== null) {
     const gal = Number(m[2]);
     const sqft = m[4] ? SQFT_PER_ACRE : Number(String(m[3]).replace(/,/g, ''));
-    if (!(gal > 0 && sqft > 0)) continue;
-    const per1000 = roundDbPrecision((gal * 1000) / sqft);
-    const qual = String(m[1] || '').trim();
-    if (MAX_VOL_QUAL_RE.test(qual)) out.max = out.max == null ? per1000 : Math.min(out.max, per1000);
-    else if (MIN_VOL_QUAL_RE.test(qual)) out.min = out.min == null ? per1000 : Math.max(out.min, per1000);
-    else if (APPROX_VOL_QUAL_RE.test(qual)) out.approx = out.approx ?? per1000;
-    else if (out.exact == null) out.exact = per1000;
+    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, roundDbPrecision((gal * 1000) / sqft), String(m[1] || '').trim());
+  }
+  COVERAGE_SQFT_PER_GAL_RE.lastIndex = 0;
+  while ((m = COVERAGE_SQFT_PER_GAL_RE.exec(str)) !== null) {
+    const sqft = Number(String(m[2]).replace(/,/g, ''));
+    const gal = m[3] ? Number(m[3]) : 1;
+    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, roundDbPrecision((gal * 1000) / sqft), String(m[1] || '').trim(), { reciprocal: true });
   }
   return out;
 }
