@@ -742,7 +742,6 @@ function serializeCheckoutInvoiceForFeed(req, s, checkoutInvoice, checkoutInvoic
 }
 
 function techSafeEstimateSourcePayload(payload) {
-  const prepayCoversVisit = payload.payment?.annualPrepay?.coversThisVisit === true;
   return {
     linked: true,
     estimateId: payload.estimateId,
@@ -761,8 +760,20 @@ function techSafeEstimateSourcePayload(payload) {
       frequency: line.frequency || null,
       visitsPerYear: line.visitsPerYear ?? null,
     })),
-    deposit: payload.deposit?.payerBilled ? { payerBilled: true } : null,
-    payment: prepayCoversVisit ? { annualPrepayCovered: true } : null,
+    deposit: payload.deposit
+      ? { payerBilled: Boolean(payload.deposit.payerBilled), required: Boolean(payload.deposit.required) }
+      : null,
+    payment: payload.payment
+      ? {
+          billingTerm: payload.payment.billingTerm || null,
+          ...(payload.payment.annualPrepay ? {
+            annualPrepay: {
+              coversThisVisit: payload.payment.annualPrepay.coversThisVisit,
+              refunded: Boolean(payload.payment.annualPrepay.refunded),
+            },
+          } : {}),
+        }
+      : null,
   };
 }
 
