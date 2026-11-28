@@ -116,6 +116,8 @@ function hasUnresolvedPlaceholder(value) {
   return false;
 }
 
+const MAILTO_BOX_RE = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$/;
+
 function isValidUnsubscribeTarget(trimmed) {
   if (/\s/.test(trimmed) || hasUnresolvedPlaceholder(trimmed)) return false;
   try {
@@ -123,7 +125,10 @@ function isValidUnsubscribeTarget(trimmed) {
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
       return /^https?:\/\//i.test(trimmed) && Boolean(parsed.hostname);
     }
-    if (parsed.protocol === 'mailto:') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(parsed.pathname);
+    if (parsed.protocol === 'mailto:') {
+      const mailbox = decodeURIComponent(parsed.pathname);
+      return MAILTO_BOX_RE.test(mailbox);
+    }
     return false;
   } catch {
     return false;

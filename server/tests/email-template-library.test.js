@@ -2864,6 +2864,8 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
         'https://portal.wavespestcontrol.com/unsubscribe/{{missing}}',
         'https://portal.wavespestcontrol.com/unsubscribe/%7B%7Bmissing%7D%7D',
         'https:unsubscribe',
+        'mailto:unsubscribe@example%20.com',
+        'mailto:unsubscribe@%ZZ.com',
       ]) {
         setDbQueues({
           email_templates: [chain({ first: marketingTemplate() })],
