@@ -255,7 +255,9 @@ function unDiscountedPrimarySeed(service, primary) {
 
 export function wdoFeeSeedFromVisit(service) {
   if (!service) return '';
-  const addonTotal = sumAddonSeedPrices(service.serviceAddons);
+  const addons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
+  if (addons.some((a) => a?.hasBillablePrice === true && addonSeedPrice(a) <= 0)) return '';
+  const addonTotal = sumAddonSeedPrices(addons);
   const primary = Number(service.primaryLinePrice ?? service.primary_line_price);
   const rawEst = service.estimatedPrice ?? service.estimated_price;
   if (addonTotal <= 0) {
