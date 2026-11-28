@@ -375,11 +375,7 @@ function renderQuizHtml({ token, quizId = DEFAULT_QUIZ_ID } = {}) {
 
   const buttons = quiz.answers.map((a) => {
     const url = quizAnswerUrl(token, quizId, a.key);
-    return `<td style="padding:6px;">
-<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="width:100%;"><tr><td align="center" style="border-radius:10px;background:${C.navy};mso-padding-alt:12px 10px;">
-<a href="${esc(url)}" class="dm-onnavy" style="display:block;background:${C.navy};color:#ffffff;text-decoration:none;border-radius:10px;padding:12px 10px;font-weight:700;font-size:16px;text-align:center;font-family:Inter,Arial,sans-serif;">${esc(a.label)}</a>
-</td></tr></table>
-</td>`;
+    return `<td style="border-radius:10px;background:${C.navy};mso-padding-alt:12px 10px;"><a href="${esc(url)}" class="dm-onnavy" style="display:block;color:#fff;text-decoration:none;padding:12px 10px;font-weight:700;font-size:16px;text-align:center;font-family:Inter,Arial,sans-serif;">${esc(a.label)}</a></td>`;
   });
   // Two-per-row grid so up to 4 answers read as a tidy grid on mobile + desktop.
   const rows = [];
@@ -388,8 +384,8 @@ function renderQuizHtml({ token, quizId = DEFAULT_QUIZ_ID } = {}) {
   }
 
   return `<div class="dm-box" style="margin:24px 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;">
-<p style="margin:0 0 14px 0;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;text-align:center;">${esc(quiz.question)}</p>
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:separate;">
+<p style="margin:0 0 14px;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;text-align:center;">${esc(quiz.question)}</p>
+<table role="presentation" cellpadding="0" cellspacing="12" style="width:100%;border-collapse:separate">
 ${rows.join('\n')}
 </table>
 <p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};text-align:center;font-family:Inter,Arial,sans-serif;">${esc(quiz.emailCta || "Tap one — we'll follow up on your next visit.")}</p>
