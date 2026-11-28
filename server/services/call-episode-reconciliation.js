@@ -4,58 +4,41 @@
  * 48-Hour Multi-Call + SMS Episode Reconciliation (PR B2, $0.00 spend, no new gate).
  *
  * Connects related calls and texts within a 48-hour customer episode using 100%
- * deterministic DB logic (zero extra LLM prompt tokens):
+ * deterministic DB logic (zero extra LLM prompt tokens) and strictly delegates
+ * triage card resolution to the repo's ONE authoritative mechanisms:
  * 1. Sanitized 48h SMS + household sibling context readers (URL/bearer-link, PAN,
  *    access-code, and prompt-delimiter scrubbed).
- * 2. Auto-resolves stale Call 1 open address and `customer_email_missing` triage cards
- *    under `lockTriageCall` + `syncCallReviewStatus`, and retires stale Call 1 call-intake
- *    new-lead bells tied to the booked lead once Call 2 verifies the address or books a
- *    confirmed non-re-service visit within 48h (including voicemail-first leads).
- *    - Strictly preserves confirmed-but-unbooked address cards (`triage-auto-resolve.js`
- *      owns full service/time proof), `missing_unit_number`, `email_unverified`,
- *      `email_invalid`, `missing_first_name`, `missing_last_name`, human-claimed
- *      `in_progress` cards, multi-property accounts (fail-closed on count error),
- *      `address_unit_conflict` / address-conflict holds, street/unit/locality
- *      mismatched cards, city-only snapshots, website quote alerts, missed-callback
- *      alerts, and unrelated leads.
- * 3. Suppresses false "Quote asked by text" owed-quote bells when an inbound photo SMS
- *    affirmatively delivers photos requested by `Agent:` on a recent inbound 48h call
- *    (excluding outbound calls whose speaker labels may swap, requiring affirmative
- *    photo-delivery phrasing for non-empty captions, and preserving questions, bids,
- *    ballparks, and explicit new/additional service requests).
- * 4. Preserves first-touch `lead_source` (Google Ads / GBP / organic / referral) across
- *    repeat or outbound callback calls so Call 2 never overwrites Call 1's channel with
- *    generic `phone_call` / `direct` / `phone_tracking`, preferring an explicit recorded
- *    referral/channel on the call's linked lead over the raw dialed tracking number.
+ * 2. Post-finalization, generation-fenced episode reconciliation:
+ *    - Delegates Call 1 open address/name card resolution directly to
+ *      `triage-auto-resolve.reconcileSiblingCallsNow` (inheriting all confirmed-unbooked,
+ *      single-property, unit, locality, lockTriageCall, and gate protections).
+ *    - Delegates Call 1 `customer_email_missing` settlement directly to
+ *      `customer-email-fanout.resolveOpenEmailReviewCards` (never touching
+ *      `email_unverified` / `email_invalid`).
+ *    - Retires ONLY identifiable call-intake new-lead alerts tied to the booked `leadId`
+ *      on confirmed/fulfilled non-re-service visits (including voicemail-first leads).
+ * 3. Suppresses false "Quote asked by text" owed-quote bells ONLY when an inbound photo
+ *    SMS is a delivery-only photo submission answering an inbound 48h call where `Agent:`
+ *    explicitly requested photos (never suppressing questions, bids, ballparks, or mixed
+ *    service/scheduling captions).
+ * 4. Preserves first-touch `lead_source` across repeat or outbound callback calls within
+ *    48h (comparing earlier tracking lines + linked lead attribution while keeping an
+ *    explicit spoken referral override on the current call).
  */
 
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
-const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const { scrubPans } = require('../utils/pan-scrub');
 const { redactAccessCodes } = require('./context-aggregator');
-const { streetKey, unitKey: canonicalUnitKey, streetEmbeddedUnitKey } = require('./customer-properties');
-const { parseRawAddress } = require('../utils/address-normalizer');
+const { streetKey } = require('./customer-properties');
 const { attributionForSourceType } = require('./ads/call-attribution');
 
 const EPISODE_WINDOW_HOURS = 48;
 const MAX_EPISODE_SMS = 5;
 const MAX_SMS_SNIPPET_CHARS = 140;
 const PHOTO_LOOKUP_TIMEOUT_MS = 800;
-
-// Mirrors ADDRESS_MOOT_CODES in triage-auto-resolve.js.
-// Deliberately EXCLUDES `missing_unit_number` (multi-unit landlord hazard) and
-// `email_unverified` / `email_invalid` (Codex #3119 r10 P2 & lead-first-touch-resume).
-const EPISODE_ADDRESS_CARD_CODES = Object.freeze([
-  'missing_service_address',
-  'address_unverified',
-  'address_unverifiable',
-  'low_confidence_address',
-  'address_not_validated',
-]);
-const EPISODE_ADDRESS_CARD_SET = Object.freeze(new Set(EPISODE_ADDRESS_CARD_CODES));
 
 const ADDRESS_CONFLICT_HOLD_REASONS = Object.freeze(new Set([
   'street_level_address_review',
@@ -73,26 +56,28 @@ const CALL_NEW_LEAD_ALERT_TITLES = Object.freeze([
   'New voicemail lead',
 ]);
 
+// Confirmed or fulfilled booking states only (excludes pending, rescheduled, cancelled, skipped, no_show).
+const CONFIRMED_OR_FULFILLED_STATUSES = Object.freeze(new Set([
+  'confirmed',
+  'en_route',
+  'on_site',
+  'completed',
+]));
+
 const GENERIC_LEAD_SOURCES = Object.freeze(new Set([
   '', 'phone_call', 'direct', 'phone', 'phone_tracking', 'inbound_call', 'outbound_call', 'unknown',
 ]));
 
 const URL_OR_SHORTLINK_RE = /\b(?:https?:\/\/\S+|www\.\S+|(?:[a-z0-9-]+\.)+(?:com|net|org|io|co|to|ly|me|app|link|us|info|biz)\/\S*)/gi;
 const DELIMITER_GUARD_RE = /<<<\s*PRIOR_CALL_DATA|PRIOR_CALL_DATA\s*>>>|<<<|>>>/gi;
-const QUOTE_OR_SERVICE_ASK_RE = /\?|\b(?:how\s+much|quote|price|pricing|cost|estimate|rate|charge|charges|ballpark|bid|range|approx\w*|rough\s+(?:idea|number|figure)|(?:i|we)\s+(?:need|want|would\s+like)\b|looking\s+for\b|another\s+property|please\s+(?:treat|spray|send\s+me\s+(?:a|an|the)\s+(?:quote|estimate|bid|price)|quote|price|check)|can\s+you\s+(?:treat|help|come|give|tell|do|handle|check|quote)|do\s+you\s+(?:treat|do|offer|service|handle)|would\s+(?:it|that|this)\s+(?:be|cost))\b/i;
-const PHOTO_SUBMISSION_RE = /\b(?:(?:here(?:'s|’s| is| are)?|attached|sending|sent|sharing)\b[^.!?\n]{0,45}\b(?:pic(?:ture)?s?|photos?|images?|snapshots?)|(?:pic(?:ture)?s?|photos?)\s+(?:of|from|as\s+requested|you\s+asked|for\s+you))\b/i;
+const NON_DELIVERY_ASK_RE = /\?|\b(?:how\s+much|quote|price|pricing|cost|estimate|rate|charge|charges|ballpark|bid|range|approx\w*|rough\s+(?:idea|number|figure)|schedule|book|appoint\w*|also|too\b|(?:i|we)\s+(?:need|want|would\s+like)\b|looking\s+for\b|another\s+property|please\s+(?:treat|spray|send|quote|price|check|schedule|book|come|call|add)|can\s+you\b|do\s+you\b|would\s+(?:it|that|this)\b)\b/i;
+// Delivery-only caption: the ENTIRE message (single sentence, optional polite opener/closer)
+// states that a photo/picture is attached or being sent.
+const DELIVERY_ONLY_PHOTO_CAPTION_RE = /^(?:(?:hi|hello|hey|thanks|thank\s+you|ok(?:ay)?|sure)\s*[,!.—-]?\s*)*(?:(?:here(?:'s|’s| is| are)?|attached(?:\s+is|\s+are)?|sending|sent|sharing)\s+(?:is\s+|are\s+)?(?:the\s+|a\s+|my\s+|some\s+)?(?:pic(?:ture)?s?|photos?|images?|snapshots?)|(?:the\s+|a\s+|my\s+)?(?:pic(?:ture)?s?|photos?|images?)\s+(?:of|from|as\s+requested|you\s+asked|for\s+you))(?:[^.!?;\n]{0,80})[.!]?$/i;
 const STAFF_PHOTO_REQUEST_RE = /\b(?:text|send|shoot|email|message|snap)\b[^.!?\n]{0,50}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
+const RESERVICE_LABEL_RE = /\b(?:re[- ]?service|callback\s+treatment|covered\s+re[- ]?service)\b/i;
 
 const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-const zip5 = (v) => { const m = String(v || '').match(/\d{5}/); return m ? m[0] : ''; };
-const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
-
-// Extract unit from line2 or from the street segment BEFORE any comma-led city/state
-// ("100 Main St Apt 2, Sarasota FL" -> "2").
-function unitKey(line1, line2) {
-  const streetOnly = String(line1 || '').split(',')[0].trim();
-  return canonicalUnitKey(line2) || streetEmbeddedUnitKey(streetOnly) || '';
-}
 
 function anchorDate(value) {
   const d = value ? new Date(value) : new Date();
@@ -106,20 +91,13 @@ function windowStartFrom(anchor, hours = EPISODE_WINDOW_HOURS) {
 function parseMaybeJson(raw) {
   if (raw == null) return null;
   if (typeof raw === 'object') return raw;
-  try { return JSON.parse(raw); } catch { return undefined; }
+  try { return JSON.parse(raw); } catch { return null; }
 }
 
 function normalizedStreetKey(line1) {
   const street = String(line1 || '').split(',')[0].trim();
   if (!/^\d/.test(street)) return null;
   return streetKey(street) || null;
-}
-
-// Mirrors triage-auto-resolve.js localityOfRaw: parses city + ZIP via parseRawAddress
-// so a 5-digit house number ("12345 Palm Ave, Bradenton FL 34205") is never read as a ZIP.
-function localityOfRaw(text) {
-  const parsed = parseRawAddress(text);
-  return { city: parsed.city || null, zip: zip5(parsed.zip) };
 }
 
 function sanitizeEpisodeSmsBody(body) {
@@ -179,8 +157,6 @@ async function loadRecentEpisodeSms(conn, contactPhone, anchorCreatedAt = null) 
 
 // Find strictly earlier non-spam sibling calls within 48h for the same customer_id
 // (plus optional exact household normalized_street + last_name lookup).
-// Note: call_log has no lead_id column; lead links live in call_log.metadata->>'lead_id'
-// and leads.twilio_call_sid.
 async function findRecentEpisodeSiblingCalls(conn, {
   customerId = null,
   currentCallId = null,
@@ -193,10 +169,7 @@ async function findRecentEpisodeSiblingCalls(conn, {
   const anchor = anchorDate(anchorCreatedAt);
   const since = windowStartFrom(anchor);
   const byId = new Map();
-  const cols = [
-    'id', 'twilio_call_sid', 'customer_id', 'metadata', 'created_at',
-    'direction', 'to_phone', 'ai_extraction', 'ai_extraction_enriched',
-  ];
+  const cols = ['id', 'twilio_call_sid', 'customer_id', 'metadata', 'created_at', 'direction', 'to_phone'];
 
   if (customerId) {
     const q = whereNotSandboxCall(conn('call_log'))
@@ -239,128 +212,32 @@ async function findRecentEpisodeSiblingCalls(conn, {
   return [...byId.values()];
 }
 
-function buildReconcilableCardCodes({ customer, singleProperty, addressVerified, validatedPlace, hasAddressConflictHold }) {
-  const codes = [];
-  if (addressVerified && !hasAddressConflictHold && singleProperty && validatedPlace?.streetKey
-      && String(customer?.address_line1 || '').trim() && String(customer?.zip || '').trim()) {
-    codes.push(...EPISODE_ADDRESS_CARD_CODES);
-  }
-  if (cleanValidEmailOrNull(customer?.email)) codes.push('customer_email_missing');
-  return codes;
-}
-
-// Mirrors triage-auto-resolve.js callConfirmedUnbooked / cardConfirmedUnbooked:
-// when Call 1 confirmed an appointment that address validation blocked, its address
-// card can be the only remaining scheduling task. Preserve it (fail closed on
-// unparseable payloads/extractions) so triage-auto-resolve's full bookingCoversRequest
-// evidence check owns retirement.
-function isConfirmedAppointmentAddressCard(row, siblingCall) {
-  if (!EPISODE_ADDRESS_CARD_SET.has(row?.reason_code)) return false;
-  const payload = parseMaybeJson(row?.payload);
-  if (payload === undefined) return true;
-  const cardStatus = payload?.scheduling_window?.status ?? payload?.scheduling_status;
-  if (cardStatus === 'confirmed') return true;
-  const v2 = parseMaybeJson(siblingCall?.ai_extraction_enriched);
-  const v1 = parseMaybeJson(siblingCall?.ai_extraction);
-  if (v2 === undefined || v1 === undefined) return true;
-  if (v2?.scheduling?.status === 'confirmed' || v1?.appointment_confirmed === true) return true;
+function isVisitReServiceRow(visit) {
+  if (!visit) return true;
+  if (visit.is_callback === true) return true;
+  if (RESERVICE_LABEL_RE.test(String(visit.service_type || ''))) return true;
   return false;
-}
-
-function readingMatchesValidatedPlace(reading, place) {
-  if (!place?.streetKey) return false;
-  const key = normalizedStreetKey(reading.text);
-  if (!key || key !== place.streetKey) return false;
-  const heardUnit = unitKey(reading.text, reading.line2);
-  if (heardUnit && heardUnit !== place.unit) return false;
-  const heardZip = zip5(reading.zip);
-  if (heardZip && place.zip && heardZip !== place.zip) return false;
-  const heardCity = cityKey(reading.city);
-  if (heardCity && place.city && heardCity !== place.city) return false;
-  return true;
-}
-
-function collectCardAddressReadings(payload) {
-  const readings = [];
-  if (payload.address_as_heard) {
-    readings.push({ text: payload.address_as_heard, ...localityOfRaw(payload.address_as_heard) });
-  }
-  const snap = payload.heard_address;
-  if (snap && typeof snap === 'object') {
-    if (snap.street_line_1) {
-      readings.push({ text: snap.street_line_1, line2: snap.street_line_2, city: snap.city, zip: snap.postal_code });
-    }
-    if (snap.raw_text) {
-      readings.push({ text: snap.raw_text, ...localityOfRaw(snap.raw_text) });
-    }
-    // Fail closed on a city/ZIP/unit-only snapshot with no street.
-    const hasFragment = [snap.street_line_2, snap.city, snap.postal_code].some((v) => String(v || '').trim());
-    if (!snap.street_line_1 && !snap.raw_text && hasFragment) return null;
-  }
-  return readings.filter((r) => String(r.text || '').trim());
-}
-
-// Match an open address review card against Call 2's validated street, unit, city, and ZIP.
-// Fails closed on confirmed-unbooked cards, unit/locality mismatches, or city/ZIP-only snapshots.
-function addressCardMatchesVerifiedPlace(row, validatedPlace, siblingCall = null) {
-  if (!EPISODE_ADDRESS_CARD_SET.has(row?.reason_code)) return true;
-  if (isConfirmedAppointmentAddressCard(row, siblingCall)) return false;
-  if (!validatedPlace?.streetKey) return false;
-  const payload = parseMaybeJson(row?.payload);
-  if (payload === undefined) return false;
-  if (!payload || typeof payload !== 'object') return true;
-  const readings = collectCardAddressReadings(payload);
-  if (readings === null) return false;
-  if (!readings.length) return true;
-  return readings.every((r) => readingMatchesValidatedPlace(r, validatedPlace));
-}
-
-async function resolveOpenSiblingCards(conn, siblings, customerId, codes, currentCallId, validatedPlace) {
-  if (!siblings.length || !codes.length) return 0;
-  let totalResolved = 0;
-  const now = new Date();
-  const note = `Auto-resolved: follow-up call ${currentCallId} verified missing fields within 48h episode.`;
-
-  for (const sibling of siblings) {
-    const priorCallId = sibling.id;
-    const resolvedForCall = await conn.transaction(async (trx) => {
-      await lockTriageCall(trx, priorCallId);
-      const openRows = await trx('triage_items')
-        .where({ call_log_id: priorCallId, status: 'open' })
-        .where((qb) => qb.whereNull('related_customer_id').orWhere('related_customer_id', customerId))
-        .whereIn('reason_code', codes)
-        .select('id', 'reason_code', 'payload');
-      const eligibleIds = openRows
-        .filter((r) => addressCardMatchesVerifiedPlace(r, validatedPlace, sibling))
-        .map((r) => r.id);
-      if (!eligibleIds.length) return 0;
-      const count = await trx('triage_items')
-        .whereIn('id', eligibleIds)
-        .where({ status: 'open' })
-        .update({
-          status: 'resolved',
-          resolution_rule: 'episode_call_reconciled',
-          resolution_source: 'auto',
-          resolution_note: note,
-          resolved_at: now,
-          updated_at: now,
-        });
-      if (count > 0) await syncCallReviewStatus(trx, priorCallId, 'resolved');
-      return count;
-    });
-    totalResolved += Number(resolvedForCall || 0);
-  }
-  return totalResolved;
 }
 
 async function isConfirmedNonReServiceBooking(conn, bookedServiceId, customerId) {
   if (!bookedServiceId || !customerId) return false;
   const visit = await conn('scheduled_services')
     .where({ id: bookedServiceId, customer_id: customerId })
-    .first('id', 'status', 'is_callback');
-  if (!visit) return false;
-  if (visit.is_callback === true) return false;
-  return !['pending', 'cancelled', 'skipped', 'no_show'].includes(String(visit.status || ''));
+    .first('id', 'status', 'is_callback', 'service_type', 'service_id');
+  if (!visit || isVisitReServiceRow(visit)) return false;
+  if (!CONFIRMED_OR_FULFILLED_STATUSES.has(String(visit.status || ''))) return false;
+  if (visit.service_id) {
+    const cat = await conn('service_catalog')
+      .where({ id: visit.service_id })
+      .first('service_key', 'name')
+      .catch(() => null);
+    if (cat && (String(cat.service_key || '').includes('reservice')
+      || String(cat.service_key || '').includes('re_service')
+      || RESERVICE_LABEL_RE.test(String(cat.name || '')))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function callSidMatchesBookedLead(sibling, leadIdStr, leadCallSid) {
@@ -409,12 +286,6 @@ async function retireBookedLeadBells(conn, { leadId, siblings, anchor, since }) 
   return Number(count || 0);
 }
 
-function isVerifiedAddressValidation(av) {
-  return Boolean(
-    av && ['validated_accept', 'corrected'].includes(String(av.status || '')) && av.inServiceArea === true,
-  );
-}
-
 function hasAddressConflictHold(opts) {
   const reasons = Array.isArray(opts.bridgeNeedsConfirmation) ? opts.bridgeNeedsConfirmation : [];
   if (opts.streetLevelPending === true || opts.appointmentResult?.streetLevelPending === true
@@ -429,134 +300,81 @@ function isCallTerminalNoise(opts) {
     || opts.isVoicemail === true || opts.extracted?.is_voicemail === true;
 }
 
-function buildValidatedPlace(av, fallbackStreet) {
-  const norm = av?.normalized || {};
-  const line1 = norm.street_line_1 || fallbackStreet || '';
-  const sk = normalizedStreetKey(line1);
-  if (!sk) return null;
-  return {
-    streetKey: sk,
-    unit: unitKey(line1, norm.street_line_2),
-    city: cityKey(norm.city),
-    zip: zip5(norm.postal_code),
-  };
+async function callGenerationStillCurrent(conn, callId, procGeneration) {
+  if (procGeneration == null) return true;
+  const row = await conn('call_log').where({ id: callId }).first('processing_generation', 'processing_token');
+  if (!row || row.processing_token != null) return false;
+  return Number(row.processing_generation) === Number(procGeneration);
 }
 
-function deriveReconciliationSignals(opts = {}) {
-  const addressConflictHold = hasAddressConflictHold(opts);
-  const av = opts.addressValidation;
-  return {
-    callId: opts.callId || opts.call?.id || null,
-    callCreatedAt: opts.callCreatedAt || opts.call?.created_at || null,
-    customerId: opts.customerId || null,
-    leadId: opts.leadId || null,
-    bookedServiceId: opts.bookedServiceId || opts.appointmentResult?.scheduledServiceId || null,
-    isTerminalNoise: isCallTerminalNoise(opts),
-    addressConflictHold,
-    addressVerified: opts.addressVerified === true || (isVerifiedAddressValidation(av) && !addressConflictHold),
-    validatedPlace: buildValidatedPlace(av, opts.validatedStreet),
-  };
-}
+async function settleSiblingTriageCards(conn, { customerId, priorCallIds, anchor, opts }) {
+  if (!priorCallIds.length) return 0;
+  const triageReconciler = opts.triageReconciler || require('./triage-auto-resolve').reconcileSiblingCallsNow;
+  const sweepRes = await triageReconciler({ callIds: priorCallIds, now: anchor });
+  let resolved = Number(sweepRes?.applied || 0);
 
-async function isSingleActivePropertyCustomer(conn, customerId) {
-  try {
-    const row = await conn('customer_properties')
-      .where({ customer_id: customerId, active: true })
-      .count('* as n')
-      .first();
-    const count = parseInt(row?.n, 10);
-    return Number.isFinite(count) && count <= 1;
-  } catch (err) {
-    logger.warn(`[call-episode] active property count failed (preserving address cards): ${err.code || err.name || 'db_error'}`);
-    return false;
+  const customer = await conn('customers').where({ id: customerId }).first('id', 'email', 'active');
+  if (customer && customer.active !== false && cleanValidEmailOrNull(customer.email)) {
+    const emailResolver = opts.emailResolver || require('./customer-email-fanout').resolveOpenEmailReviewCards;
+    const emailResolved = await emailResolver({
+      customerId,
+      email: customer.email,
+      source: '48h episode follow-up call',
+      reasonCodes: ['customer_email_missing'],
+      restrictToCallLogIds: priorCallIds,
+    }, conn);
+    resolved += Number(emailResolved || 0);
   }
+  return resolved;
 }
 
-// Reject any conflict between stored customer street/unit/city/ZIP and Call 2's
-// validated address before combining them.
-function customerPlaceMatchesValidated(customer, validatedPlace) {
-  if (!customer || !validatedPlace?.streetKey) return null;
-  if (normalizedStreetKey(customer.address_line1) !== validatedPlace.streetKey) return null;
-  const custUnit = unitKey(customer.address_line1, customer.address_line2);
-  if (validatedPlace.unit && custUnit && validatedPlace.unit !== custUnit) return null;
-  const custCity = cityKey(customer.city);
-  if (validatedPlace.city && custCity && validatedPlace.city !== custCity) return null;
-  const custZip = zip5(customer.zip);
-  if (validatedPlace.zip && custZip && validatedPlace.zip !== custZip) return null;
-  return {
-    streetKey: validatedPlace.streetKey,
-    unit: validatedPlace.unit || custUnit,
-    city: validatedPlace.city || custCity,
-    zip: validatedPlace.zip || custZip,
-  };
+async function maybeRetireBookedLeadBells(conn, { customerId, siblings, anchor, since, opts }) {
+  const bookedServiceId = opts.bookedServiceId || opts.appointmentResult?.scheduledServiceId || null;
+  const leadId = opts.leadId || null;
+  if (!bookedServiceId || !leadId) return 0;
+  if (!(await isConfirmedNonReServiceBooking(conn, bookedServiceId, customerId))) return 0;
+  return retireBookedLeadBells(conn, { leadId, siblings, anchor, since });
 }
 
-// Reconcile Call 1 open triage cards + stale call-intake new-lead bells tied to the
-// booked lead when Call 2 verifies missing fields or books a confirmed non-re-service
-// visit within 48h. Evaluates booked-lead bell retirement even when Call 1 was a
-// customerless voicemail. Best-effort & non-throwing by contract.
+// Post-finalization, generation-fenced episode reconciliation:
+// - Delegates Call 1 open address/name card resolution to triage-auto-resolve.reconcileSiblingCallsNow
+// - Delegates Call 1 customer_email_missing settlement to customer-email-fanout.resolveOpenEmailReviewCards
+// - Retires stale Call 1 call-intake new-lead alerts on confirmed non-re-service bookings
+// Best-effort & non-throwing by contract.
 async function reconcilePriorEpisodeOnCallCompletion(conn, opts = {}) {
   const empty = { cardsResolved: 0, bellsRetired: 0 };
-  const sig = deriveReconciliationSignals(opts);
-  if (!conn || !sig.callId || !sig.customerId || sig.isTerminalNoise) return empty;
+  const callId = opts.callId || opts.call?.id || null;
+  const customerId = opts.customerId || null;
+  if (!conn || !callId || !customerId || isCallTerminalNoise(opts)) return empty;
   try {
-    const anchor = anchorDate(sig.callCreatedAt);
+    if (!(await callGenerationStillCurrent(conn, callId, opts.procGeneration))) return empty;
+    if (hasAddressConflictHold(opts)) return empty;
+
+    const anchor = anchorDate(opts.callCreatedAt || opts.call?.created_at);
     const since = windowStartFrom(anchor);
     const siblings = await findRecentEpisodeSiblingCalls(conn, {
-      customerId: sig.customerId,
-      currentCallId: sig.callId,
+      customerId,
+      currentCallId: callId,
       anchorCreatedAt: anchor,
     });
-
-    let cardsResolved = 0;
-    if (siblings.length) {
-      const customer = await conn('customers')
-        .where({ id: sig.customerId })
-        .first('id', 'email', 'address_line1', 'address_line2', 'city', 'zip', 'active');
-      if (customer && customer.active !== false) {
-        const singleProperty = await isSingleActivePropertyCustomer(conn, sig.customerId);
-        const verifiedPlace = customerPlaceMatchesValidated(customer, sig.validatedPlace);
-        const codes = buildReconcilableCardCodes({
-          customer,
-          singleProperty,
-          addressVerified: sig.addressVerified,
-          validatedPlace: verifiedPlace,
-          hasAddressConflictHold: sig.addressConflictHold,
-        });
-        cardsResolved = await resolveOpenSiblingCards(
-          conn,
-          siblings,
-          sig.customerId,
-          codes,
-          sig.callId,
-          verifiedPlace,
-        );
-      }
-    }
-
-    let bellsRetired = 0;
-    if (sig.bookedServiceId && sig.leadId && !sig.addressConflictHold) {
-      const confirmedNonCallback = await isConfirmedNonReServiceBooking(conn, sig.bookedServiceId, sig.customerId);
-      if (confirmedNonCallback) {
-        bellsRetired = await retireBookedLeadBells(conn, { leadId: sig.leadId, siblings, anchor, since });
-      }
-    }
+    const priorCallIds = siblings.map((s) => s.id);
+    const cardsResolved = await settleSiblingTriageCards(conn, { customerId, priorCallIds, anchor, opts });
+    const bellsRetired = await maybeRetireBookedLeadBells(conn, { customerId, siblings, anchor, since, opts });
     return { cardsResolved, bellsRetired };
   } catch (err) {
-    logger.warn(`[call-episode] reconciliation failed for call ${sig.callId}: ${err.code || err.name || 'db_error'}`);
+    logger.warn(`[call-episode] reconciliation failed for call ${callId}: ${err.code || err.name || 'db_error'}`);
     return empty;
   }
 }
 
-// Pure predicate: is this inbound SMS affirmatively delivering a requested photo
-// WITHOUT asking a question, requesting a quote/bid/ballpark, or requesting a new service?
-// Non-empty captions MUST carry affirmative photo-delivery wording (never suppressed by
-// caption length alone).
+// Pure predicate: is this inbound SMS a delivery-only photo submission (bare media
+// OR a single photo-delivery caption with zero questions, bids, ballparks, or
+// additional service/scheduling requests)?
 function isPhotoSubmissionSms({ triggerBody = '', hasMedia = false } = {}) {
   const body = String(triggerBody || '').trim();
   if (!body) return Boolean(hasMedia);
-  if (QUOTE_OR_SERVICE_ASK_RE.test(body)) return false;
-  return PHOTO_SUBMISSION_RE.test(body);
+  if (NON_DELIVERY_ASK_RE.test(body)) return false;
+  return DELIVERY_ONLY_PHOTO_CAPTION_RE.test(body);
 }
 
 // Pure predicate: did diarized Waves staff (`Agent:` lines ONLY) explicitly ask for
@@ -587,9 +405,9 @@ async function smsRowHasMedia(conn, triggerSmsLogId, timeoutMs) {
   }
 }
 
-// Suppress false "Quote asked by text" when a customer texts photos requested by
-// staff on a recent INBOUND call (<=48h; excludes outbound calls where speaker labels
-// may swap) and does not ask a question or request pricing/service in the text.
+// Suppress false "Quote asked by text" ONLY when a customer texts a delivery-only
+// photo follow-up answering a recent INBOUND call (<=48h; excludes outbound calls
+// whose speaker labels may swap) where Agent: explicitly asked for photos.
 // Fail-open & bounded so Twilio webhook latency is preserved and real quotes never drop.
 async function isPhotoFollowUpToRecentCall(conn, {
   phone,
@@ -658,8 +476,6 @@ async function priorCallFirstTouchCandidate(conn, { digits, currentCallId, since
   const priorCalls = await q.select('twilio_call_sid', 'to_phone', 'created_at');
   for (const prior of priorCalls) {
     const callAt = new Date(prior.created_at).getTime();
-    // Prefer a specific recorded lead attribution for this exact call (e.g. a spoken
-    // referral) over the raw dialed tracking number; generic phone_tracking falls through.
     const linkedLead = prior.twilio_call_sid ? leadByCallSid.get(String(prior.twilio_call_sid)) : null;
     if (linkedLead) return { ...linkedLead, at: callAt };
     const cfg = twilioNumbers.findByNumber(prior.to_phone);
@@ -694,14 +510,10 @@ async function priorLeadFirstTouchCandidates(conn, { digits, since, anchor }) {
   return { earliest: list[0] || null, byCallSid };
 }
 
-function shouldKeepCurrentLeadSource({ hasExplicitReferral, referredByName, isOutbound, fallback }) {
-  if (hasExplicitReferral || Boolean(referredByName)) return true;
-  return !isOutbound && !isGenericCallLeadSource(fallback.source);
-}
-
 // Preserve first-touch acquisition lead_source across repeat or outbound callback calls
-// within 48h so Call 2 never overwrites Call 1's Google Ads / GBP / organic / referral source
-// with generic `phone_call` / `direct`. Fail-open to currentLeadSource on any error.
+// within 48h — even when Call 2 dials a different tracking line (e.g. Google Ads voicemail
+// followed by an inbound GBP call). Explicit spoken referral on Call 2 still wins.
+// Fail-open to currentLeadSource on any error.
 async function resolveFirstTouchCallLeadSource(conn, {
   contactPhone,
   currentCallId = null,
@@ -709,11 +521,10 @@ async function resolveFirstTouchCallLeadSource(conn, {
   currentLeadSource = null,
   hasExplicitReferral = false,
   referredByName = '',
-  isOutbound = false,
   twilioNumbers = null,
 } = {}) {
   const fallback = currentLeadSource || { source: 'phone_call' };
-  if (shouldKeepCurrentLeadSource({ hasExplicitReferral, referredByName, isOutbound, fallback })) return fallback;
+  if (hasExplicitReferral || Boolean(referredByName)) return fallback;
 
   const digits = last10(contactPhone);
   if (digits.length < 10 || typeof conn !== 'function') return fallback;
@@ -737,7 +548,6 @@ async function resolveFirstTouchCallLeadSource(conn, {
 
 module.exports = {
   EPISODE_WINDOW_HOURS,
-  EPISODE_ADDRESS_CARD_CODES,
   isGenericCallLeadSource,
   shouldPreserveExistingLeadSource,
   loadRecentEpisodeSms,
@@ -749,12 +559,9 @@ module.exports = {
   resolveFirstTouchCallLeadSource,
   _test: {
     normalizedStreetKey,
-    localityOfRaw,
-    unitKey,
     sanitizeEpisodeSmsBody,
-    buildReconcilableCardCodes,
-    addressCardMatchesVerifiedPlace,
-    customerPlaceMatchesValidated,
-    deriveReconciliationSignals,
+    isVisitReServiceRow,
+    isConfirmedNonReServiceBooking,
+    callGenerationStillCurrent,
   },
 };

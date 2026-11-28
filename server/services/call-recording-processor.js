@@ -24979,18 +24979,6 @@ const CallRecordingProcessor = {
     // (codex #3677 P1). This is the last gate before the terminal write,
     // which is itself token-fenced.
     if (!(await stillOwnsClaim())) return abandonToPeer('the synopsis and scoring writes');
-    // 48h episode reconciliation: close stale Call 1 open address/name/email-missing
-    // triage cards and retire stale Call 1 new-lead bells once Call 2 verifies fields
-    // or books a confirmed visit for the same customer. Non-blocking by contract.
-    await reconcilePriorEpisodeOnCallCompletion(db, {
-      call,
-      customerId,
-      leadId,
-      extracted,
-      appointmentResult,
-      bridgeNeedsConfirmation,
-      addressValidation: effectiveAddressValidation,
-    });
     // Step 7b: Generate lead synopsis (Sales Strategist analysis)
     let synopsis = null;
     if (transcription && !extracted.is_spam && !extracted.is_voicemail) {
@@ -25980,6 +25968,19 @@ const CallRecordingProcessor = {
 
       // Suggest a last name to the office (GATE_CALL_LAST_NAME_LOOKUP): fire-and-forget, never awaited.
       if (customerId) require('./call-last-name-lookup').enqueueCallLastNameLookup({ callLogId: call.id, customerId });
+
+      // 48h episode reconciliation (after token-fenced finalization, generation-fenced):
+      // delegates stale Call 1 card settlement to triage-auto-resolve & customer-email-fanout
+      // and retires stale Call 1 call-intake new-lead alerts on confirmed non-re-service bookings.
+      await reconcilePriorEpisodeOnCallCompletion(db, {
+        call,
+        customerId,
+        leadId,
+        extracted,
+        appointmentResult,
+        bridgeNeedsConfirmation,
+        procGeneration,
+      });
 
       // The window this booking call committed needs no capture step either:
       // the visit row carries source_call_log_id, written in the booking
