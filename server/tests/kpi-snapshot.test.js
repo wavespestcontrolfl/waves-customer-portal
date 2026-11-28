@@ -87,7 +87,8 @@ describe('recordKpiSnapshot', () => {
     expect(byMetric.csat_avg).toBe(8.7); // parsed from the "8.7" toFixed string
     expect(byMetric.retention_pct).toBe(96.4);
     expect(byMetric.collection_rate).toBe(88.5);
-    expect(byMetric.autopay_pct).toBe(73.1);
+    expect(byMetric.recurring_autopay_pct).toBe(73.1);
+    expect(byMetric.autopay_pct).toBeUndefined();
     expect(byMetric.net_customers).toBe(5);
     expect(byMetric.net_mrr).toBe(412.5);
   });
@@ -110,10 +111,12 @@ describe('snapshotMissing / recordKpiSnapshotIfMissing', () => {
   // kpi_snapshots already holds for the asked date; an error makes the count read throw.
   function makeCatchUpDb({ existing = 0, countError = null, capture }) {
     capture.counts = [];
+    capture.whereIns = [];
     capture.rows = [];
     return () => {
       const builder = {
         where(cond) { capture.counts.push(cond); return builder; },
+        whereIn(col, vals) { capture.whereIns.push({ col, vals }); return builder; },
         count() { return builder; },
         first() { return countError ? Promise.reject(new Error(countError)) : Promise.resolve({ n: String(existing) }); },
         insert(row) { builder._row = row; return builder; },
@@ -129,10 +132,11 @@ describe('snapshotMissing / recordKpiSnapshotIfMissing', () => {
     computeCoreKpis.mockResolvedValue(fixedKpis());
   });
 
-  test('no rows for the day: missing', async () => {
+  test('no rows for the day: missing (and scopes count strictly to current SNAPSHOT_METRICS keys)', async () => {
     const capture = {};
     await expect(snapshotMissing('2026-06-24', makeCatchUpDb({ existing: 0, capture }))).resolves.toBe(true);
     expect(capture.counts).toEqual([{ snapshot_date: '2026-06-24' }]);
+    expect(capture.whereIns).toEqual([{ col: 'metric', vals: SNAPSHOT_METRICS.map(([m]) => m) }]);
   });
 
   test('a half-written day (a restart mid-loop) is still missing', async () => {

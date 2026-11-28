@@ -354,7 +354,19 @@ describe('refuses any record that is not empty, naming what it found and pointin
   // this check itself, read from the engine's own REPOINT_EXCLUDED_TABLES.
   const { REPOINT_EXCLUDED_TABLES } = jest.requireActual('../services/customer-dedupe');
   test('the real exclusion list covers plan rates, credits, location reviews, merge journal, dismissals and the every-visit text list', () => {
-    expect([...REPOINT_EXCLUDED_TABLES].sort()).toEqual(['customer_duplicate_dismissals', 'customer_geocode_reviews', 'customer_merge_journal', 'customer_plan_rates', 'customer_reminder_contacts', 'field_credit_allocations']);
+    expect([...REPOINT_EXCLUDED_TABLES].sort()).toEqual([
+      'call_email_spelling_retries',
+      'customer_duplicate_dismissals',
+      'customer_email_change_requests',
+      'customer_geocode_reviews',
+      'customer_merge_journal',
+      'customer_plan_rates',
+      'customer_reminder_contacts',
+      'field_credit_allocations',
+      'neighborhood_access_filings',
+      'visit_access_states',
+      'visit_access_verdicts',
+    ]);
   });
   test.each([...REPOINT_EXCLUDED_TABLES])('a row in merge-excluded table %s refuses', async (table) => {
     db.__state.counts[table] = 1;

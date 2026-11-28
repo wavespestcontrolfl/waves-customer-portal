@@ -990,11 +990,33 @@ function leaseFree(q) {
   q.whereNull('dispatch_lease_at').orWhere('dispatch_lease_at', '<', new Date(Date.now() - LEASE_TTL_MS));
 }
 
-async function claimRecipientOptins({ customer, contacts = [], priorPhones = [], propertyAddress = '', trx = null, visitId = null }) {
+function prepareUnconsentedClaimScope(contacts, priorKeys, customer, unconsentedOverridePhones) {
+  const unconsentedKeys = require('./customer-contact').unconsentedSlotPhoneKeys(customer);
+  const allowed = Array.isArray(unconsentedOverridePhones)
+    ? new Set(unconsentedOverridePhones.map(recipientPhoneKey).filter(Boolean))
+    : null;
+  unconsentedKeys.forEach((k) => {
+    if (!allowed || allowed.has(k)) priorKeys.delete(k);
+  });
+  if (!allowed) return contacts;
+  return contacts.filter((c) => {
+    const k = recipientPhoneKey(c?.phone);
+    return !k || !unconsentedKeys.has(k) || allowed.has(k);
+  });
+}
+
+async function claimRecipientOptins({ customer, contacts = [], priorPhones = [], unconsentedOverridePhones, propertyAddress = '', trx = null, visitId = null }) {
   if (!isDoubleOptinEnabled()) return [];
   const dbc = trx || db;
   const accountKey = recipientPhoneKey(customer?.phone);
   const priorKeys = new Set(priorPhones.map(recipientPhoneKey).filter(Boolean));
+  // Phones still listed in unconsented_slot_phone_keys (filed by call pipeline
+  // without consent) must NOT be grandfathered as prior phones when the holder
+  // explicitly submits & attests them — they need the YES opt-in ask so their
+  // reply can lift the unconsented hold (P1-E2). Legacy slot-1-only saves pass
+  // unconsentedOverridePhones: [slot1Phone] so untouched unconsented slots 2/3
+  // are skipped completely before any retry reclaim or new insert.
+  const claimableContacts = prepareUnconsentedClaimScope(contacts, priorKeys, customer, unconsentedOverridePhones);
 
   // Dark-vs-broken distinction (fail closed on broken): a missing or
   // deactivated template row is the INTENTIONAL dark state — skip quietly.
@@ -1010,7 +1032,7 @@ async function claimRecipientOptins({ customer, contacts = [], priorPhones = [],
   const templateDark = !templateRow || templateRow.is_active === false;
 
   const claims = [];
-  for (const contact of contacts) {
+  for (const contact of claimableContacts) {
     const key = recipientPhoneKey(contact.phone);
     if (!key || key === accountKey) continue;
     try {

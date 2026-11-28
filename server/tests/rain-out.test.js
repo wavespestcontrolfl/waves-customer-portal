@@ -5153,7 +5153,7 @@ describe('rain-out service', () => {
       expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
         dateFrom: '2026-08-20',
         dateTo: '2026-08-20',
-        excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+        excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
       }));
     });
 

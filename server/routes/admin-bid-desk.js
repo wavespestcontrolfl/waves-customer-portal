@@ -10,6 +10,17 @@ const { daysLeft } = require('../services/bid-desk/rules');
 const { loadBidPacketReadiness } = require('../services/bid-desk/packet-readiness');
 const { parseETDateTime, validCalendarDate, etParts, etWallClockOccurrences } = require('../utils/datetime-et');
 const { closeDoneAlerts } = require('../services/bid-desk/close-alerts');
+const { errorTag } = require('../services/bid-kit-log');
+
+// Scrub raw DB error messages (which can quote buyer names/emails or notes) before handing to errorHandler.
+function scrubBidDeskError(err) {
+  const out = new Error(`Bid Desk request failed (${errorTag(err)})`);
+  out.name = (err && err.name) || 'Error';
+  if (err && err.code) out.code = err.code;
+  if (err && err.status) out.status = err.status;
+  out.stack = `${out.name}: ${out.message}`;
+  return out;
+}
 
 // Bid Desk. Staff-only list, detail and decisions for bid invites found in the email table.
 // Nothing here sends a message to anyone; a due date only becomes "confirmed" when the operator types or confirms it.
@@ -444,6 +455,9 @@ router.delete('/:id/checklist/:itemId', async (req, res, next) => {
     return next(err);
   }
 });
+
+// Scrub unhandled DB errors across every Bid Desk handler before errorHandler logs them.
+router.use((err, _req, _res, next) => next(scrubBidDeskError(err)));
 
 module.exports = router;
 // The save step, for the bell's bid buttons (services/bid-desk/alert-buttons.js).

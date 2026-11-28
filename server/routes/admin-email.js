@@ -263,9 +263,12 @@ router.get('/message/:id', async (req, res) => {
   }
 });
 
+const EMAIL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // GET /message/:id/attachment/:attachmentId — download attachment
 router.get('/message/:id/attachment/:attachmentId', async (req, res) => {
   try {
+    if (!EMAIL_UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'Email not found' });
     const email = await db('emails').where('id', req.params.id).first();
     if (!email) return res.status(404).json({ error: 'Email not found' });
 
@@ -275,20 +278,22 @@ router.get('/message/:id/attachment/:attachmentId', async (req, res) => {
     if (!att) return res.status(404).json({ error: 'Attachment not found' });
 
     const data = await gmailClient.getAttachment(email.gmail_id, req.params.attachmentId);
-    const rawName = String(att.filename || 'attachment').replace(/[\r\n]/g, ' ').trim() || 'attachment';
+    const rawName = String(att.filename || 'attachment').replace(/[\x00-\x1f\x7f\r\n]/g, ' ').trim() || 'attachment';
     // ASCII fallback + RFC 5987 UTF-8 filename* so non-ASCII names (e.g. macOS
     // screenshots with U+202F) never throw ERR_INVALID_CHAR in res.setHeader.
-    const asciiFallback = rawName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+    const asciiFallback = rawName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\/]/g, '_');
     const encodedName = encodeURIComponent(rawName).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
     // Log internal ids only — staff name/email and the filename are PII and
     // stay out of application logs (the id resolves the record when needed).
     logger.info(`[email] Attachment downloaded: actor=${req.technicianId || 'unknown'} email=${email.id} attachment=${req.params.attachmentId}`);
+    res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Disposition', `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedName}`);
     res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
     res.send(data);
   } catch (err) {
-    logger.error(`[email] Attachment error: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    const tag = String(err?.code || err?.name || 'Error').slice(0, 40);
+    logger.error(`[email] Attachment download failed (${tag})`);
+    res.status(500).json({ error: 'Could not download attachment.' });
   }
 });
 
