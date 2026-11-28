@@ -267,12 +267,17 @@ export function nextStepFor(call) {
   if (!call) return null;
   const extraction = parseAiExtraction(call);
   const meta = parseJsonObject(call?.metadata);
+  const hasScheduledFulfillment = Boolean(
+    call.scheduled_service_id ||
+    meta?.scheduled_service_id ||
+    meta?.auto_booking?.scheduled_service_id
+  );
   if (
     call.processing_status === "spam" ||
     call.invalid_reason === "spam" ||
     NEXT_STEP_CLOSED_DISPOSITIONS.has(call.disposition) ||
     extraction?.is_spam === true ||
-    extraction?.appointment_confirmed === true ||
+    hasScheduledFulfillment ||
     meta?.early_summary_fulfilled === true
   ) {
     return null;

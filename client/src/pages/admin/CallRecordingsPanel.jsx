@@ -258,11 +258,16 @@ export default function CallRecordingsPanel() {
     setTimeout(() => setToast(null), 3500);
   };
 
+  const actionableCount = stats
+    ? Number(stats.pending || 0) +
+      Number(stats.retrying ?? stats.failed ?? 0) +
+      Number(stats.stalled_claims ?? stats.stalledClaims ?? 0)
+    : null;
+
   const processAll = async () => {
     if (processing) return;
-    const pendingCount = stats?.pending;
-    if (pendingCount != null && Number(pendingCount) === 0) return;
-    const label = pendingCount != null ? `${pendingCount} pending` : "all pending";
+    if (actionableCount != null && actionableCount === 0) return;
+    const label = actionableCount != null ? `${actionableCount} pending/retryable` : "all pending";
     if (!window.confirm(`Process ${label} call recording(s)? This runs paid AI transcription and extraction.`)) {
       return;
     }
@@ -353,10 +358,10 @@ export default function CallRecordingsPanel() {
         </div>{" "}
         <button
           onClick={processAll}
-          disabled={processing || (stats && Number(stats.pending) === 0)}
+          disabled={processing || (actionableCount != null && actionableCount === 0)}
           style={{
             ...sBtn(D.teal, D.white),
-            opacity: processing || (stats && Number(stats.pending) === 0) ? 0.5 : 1,
+            opacity: processing || (actionableCount != null && actionableCount === 0) ? 0.5 : 1,
           }}
         >
           {processing ? "Processing..." : "Process All Pending"}

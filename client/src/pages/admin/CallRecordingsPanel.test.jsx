@@ -41,6 +41,26 @@ describe("CallRecordingsPanel (C2-29)", () => {
     expect(posts).toEqual([]);
   });
 
+  it("keeps Process All Pending enabled when pending is 0 but retryable or stalled calls remain", async () => {
+    const posts = [];
+    vi.stubGlobal("fetch", vi.fn(async (url, opts) => {
+      if (opts?.method === "POST") posts.push(String(url));
+      if (String(url).includes("/stats")) {
+        return { ok: true, json: async () => ({ pending: 0, retrying: 2, stalled_claims: 1 }) };
+      }
+      return { ok: true, json: async () => ({ recordings: [] }) };
+    }));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<CallRecordingsPanel />);
+    const btn = await screen.findByRole("button", { name: "Process All Pending" });
+    expect(btn).not.toBeDisabled();
+    fireEvent.click(btn);
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(posts).toEqual(["/api/admin/call-recordings/process-all"]);
+    });
+  });
+
   it("fences cross-call synopsis overwrite when switching selected recording mid-request", async () => {
     let resolveSynopsisA;
     const recA = {

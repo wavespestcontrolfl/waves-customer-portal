@@ -71,18 +71,30 @@ describe("nextStepFor", () => {
     expect(nextStepFor(null)).toBeNull();
   });
 
-  it("hides early-summary next_step and promises on spam or fulfilled calls (C2-29)", () => {
+  it("hides early-summary next_step and promises on spam or fulfilled calls, but keeps them when appointment_confirmed lacks booking fulfillment (C2-29)", () => {
     expect(nextStepFor(withNext({ processing_status: "spam" }))).toBeNull();
     expect(nextStepFor(withNext({ disposition: "spam_discarded" }))).toBeNull();
     expect(nextStepFor(withNext({ disposition: "booked" }))).toBeNull();
     expect(nextStepFor(withNext({ ai_extraction: JSON.stringify({ is_spam: true }) }))).toBeNull();
-    expect(nextStepFor(withNext({ ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBeNull();
+    expect(nextStepFor(withNext({ scheduled_service_id: "svc-123" }))).toBeNull();
+    expect(nextStepFor(withNext({
+      metadata: {
+        ...withNext().metadata,
+        auto_booking: { scheduled_service_id: "svc-456" },
+      },
+    }))).toBeNull();
     expect(nextStepFor(withNext({
       metadata: {
         ...withNext().metadata,
         early_summary_fulfilled: true,
       },
     }))).toBeNull();
+    // Conversational appointment_confirmed without actual scheduled fulfillment still needs office follow-up
+    expect(nextStepFor(withNext({ ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toEqual({
+      nextStep: NEXT,
+      promises: [PROMISE],
+      staffName: "Virginia",
+    });
   });
 });
 
