@@ -112,7 +112,7 @@ function projectTypeLabel(project = {}) {
   return getProjectType(project.project_type)?.label || clean(project.project_type) || 'Waves service';
 }
 
-function projectTitle(project = {}) {
+function projectTitle(project = {}, { scheduledService = null, feeValues = null } = {}) {
   const title = clean(project.title);
   if (!title) return projectTypeLabel(project);
   // same type-gated cue+value scrub as the public /data headline — a
@@ -121,7 +121,10 @@ function projectTitle(project = {}) {
   // (codex #2817)
   let safe = redactInspectionFeeCuesForType(title, project.project_type);
   if (projectTypeHasInternalFindingKeys(project.project_type)) {
-    safe = redactSpecificAmounts(safe, projectRecordedFeeValues(project));
+    const values = Array.isArray(feeValues)
+      ? feeValues
+      : projectRecordedFeeValues(project, { scheduledService });
+    safe = redactSpecificAmounts(safe, values);
   }
   return safe;
 }
@@ -198,6 +201,8 @@ function buildProjectPayload({
   reportUrl = '',
   portalInviteUrl = '',
   recipient: explicitRecipient = null,
+  scheduledService = null,
+  feeValues = null,
 } = {}) {
   const recipient = explicitRecipient || resolveProjectEmailRecipient(customer);
   const firstName = firstToken(recipient.name) || firstToken(customer.first_name) || 'there';
@@ -214,7 +219,7 @@ function buildProjectPayload({
     report_url: reportUrl,
     report_type: typeLabel,
     project_type: typeLabel,
-    project_title: projectTitle(project),
+    project_title: projectTitle(project, { scheduledService, feeValues }),
     inspection_date: serviceDate,
     project_date: serviceDate,
     service_date: serviceDate,
@@ -264,12 +269,19 @@ async function sendProjectTemplate({
     return { ok: false, skipped: true, reason: 'missing_email' };
   }
   const customerId = customer?.id || project?.customer_id || null;
+  let resolvedPayload = payload;
+  if (payload && project?.project_type === 'wdo_inspection' && (project.scheduled_service_id || project.service_record_id)) {
+    const scheduledService = await require('./wdo-inspection-fee').loadLinkedWdoVisit(project, db);
+    if (scheduledService) {
+      resolvedPayload = { ...payload, project_title: projectTitle(project, { scheduledService }) };
+    }
+  }
 
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
       to: recipient.email,
-      payload,
+      payload: resolvedPayload,
       recipientType: 'customer',
       recipientId: customerId,
       triggerEventId: triggerEventId || `${templateKey}:${project?.id || customer?.id || 'manual'}`,
