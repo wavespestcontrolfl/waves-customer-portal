@@ -117,9 +117,9 @@ function hasUnresolvedPlaceholder(value) {
 }
 
 const PUBLIC_HOSTNAME_RE = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+)$/i;
+const INTERNAL_HOST_SUFFIX_RE = /\.(?:internal|local|localdomain|lan|home\.arpa|corp|intranet)$/i;
 
-function isLoopbackHost(hostname) {
-  const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+function isLoopbackHost(host) {
   return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(host);
 }
 
@@ -128,7 +128,9 @@ function isValidUnsubscribeTarget(trimmed, { allowLocal = false } = {}) {
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    if (isLoopbackHost(parsed.hostname)) return allowLocal;
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    if (isLoopbackHost(host)) return allowLocal;
+    if (INTERNAL_HOST_SUFFIX_RE.test(host)) return false;
     return PUBLIC_HOSTNAME_RE.test(parsed.hostname);
   } catch {
     return false;

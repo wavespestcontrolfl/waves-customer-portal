@@ -2870,6 +2870,8 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
         'http://localhost:5173/unsubscribe/demo',
         'http://[::1]:5173/unsubscribe/demo',
         'http://10.0.0.1/unsubscribe/demo',
+        'https://portal.railway.internal/unsubscribe/demo',
+        'https://service.local/unsubscribe/demo',
       ]) {
         setDbQueues({
           email_templates: [chain({ first: marketingTemplate() })],
@@ -2892,12 +2894,14 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
     }
 
     // With a configured ASM group, live marketing sends fall back to the ASM
-    // token instead of leaking a loopback unsubscribe URL.
-    for (const loopbackUrl of [
+    // token instead of leaking loopback or internal-only unsubscribe URLs.
+    for (const nonPublicUrl of [
       'http://127.0.0.1:5173/unsubscribe/demo',
       'http://localhost:5173/unsubscribe/demo',
+      'https://portal.railway.internal/unsubscribe/demo',
+      'https://service.local/unsubscribe/demo',
     ]) {
-      const queuedMessage = { id: 'msg-loopback', status: 'queued', subject_snapshot: 'Monthly update' };
+      const queuedMessage = { id: 'msg-nonpublic', status: 'queued', subject_snapshot: 'Monthly update' };
       const queueInsert = chain({ returning: [queuedMessage] });
       setDbQueues({
         email_templates: [chain({ first: marketingTemplate() })],
@@ -2905,19 +2909,19 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
         email_suppressions: [chain({ result: [] })],
         email_messages: [queueInsert, chain({ returning: [{ ...queuedMessage, status: 'sent' }] })],
       });
-      sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-loopback' });
+      sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-nonpublic' });
       await EmailTemplates.sendTemplate({
         templateKey: 'newsletter.monthly',
         to: 'sam@example.com',
         payload: { first_name: 'Sam' },
         recipientType: 'subscriber',
-        unsubscribeUrl: loopbackUrl,
+        unsubscribeUrl: nonPublicUrl,
       });
       const sentCall = sendgrid.sendOne.mock.calls.at(-1)[0];
       expect(sentCall.html).toContain('<%asm_group_unsubscribe_raw_url%>');
-      expect(sentCall.html).not.toContain(loopbackUrl);
+      expect(sentCall.html).not.toContain(nonPublicUrl);
       expect(sentCall.text).toContain('Unsubscribe: <%asm_group_unsubscribe_raw_url%>');
-      expect(sentCall.text).not.toContain(loopbackUrl);
+      expect(sentCall.text).not.toContain(nonPublicUrl);
     }
   });
 
