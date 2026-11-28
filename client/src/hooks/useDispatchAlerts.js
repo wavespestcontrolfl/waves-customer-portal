@@ -334,12 +334,14 @@ export function useDispatchAlerts() {
       broadcastCountRef.current += 1;
       changedAtRef.current.set(payload.id, broadcastCountRef.current);
       const wasPresent = alertsRef.current.some((a) => a.id === payload.id);
-      alertsRef.current = mergeAlertBroadcast(alertsRef.current, payload, resolvedIdsRef.current);
+      const nextAlerts = mergeAlertBroadcast(alertsRef.current, payload, resolvedIdsRef.current);
+      const nextLen = nextAlerts.length;
+      alertsRef.current = nextAlerts;
       setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
       if (!wasPresent) {
         addedSinceRef.current.set(payload.id, broadcastCountRef.current);
-        totalRef.current = Math.max(alertsRef.current.length, totalRef.current + 1);
-        setTotal((t) => Math.max(alertsRef.current.length, t + 1));
+        totalRef.current = Math.max(nextLen, totalRef.current + 1);
+        setTotal((t) => Math.max(nextLen, t + 1));
       }
       relayTechOutAlertChange(payload);
       // The socket broadcast carries only the bare dispatch_alerts row (no

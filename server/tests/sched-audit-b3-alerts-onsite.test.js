@@ -118,6 +118,21 @@ describe('P0-8 & P2: dispatch-alerts decision-only protection and savepoint-safe
       rejectOuter(new Error('outer rollback'));
       await new Promise((r) => setImmediate(r));
       expect(emit).not.toHaveBeenCalled();
+
+      // Inner savepoint rolls back while outer transaction catches & commits -> still zero emits!
+      emit.mockClear();
+      let resolveOuterOk;
+      const outerOkPromise = new Promise((res) => { resolveOuterOk = res; });
+      let rejectInner;
+      const innerFailPromise = new Promise((_res, rej) => { rejectInner = rej; });
+      fakeTrx.executionPromise = innerFailPromise;
+      fakeTrx.parentTransaction = { executionPromise: outerOkPromise };
+      await createAlert({ type: 'tech_late', severity: 'warn', techId: 't1', jobId: 'j2', trx: fakeTrx });
+      await resolveAllOpenAlerts({ resolvedBy: 'admin-1', trx: fakeTrx });
+      rejectInner(new Error('savepoint rollback'));
+      resolveOuterOk();
+      await new Promise((r) => setImmediate(r));
+      expect(emit).not.toHaveBeenCalled();
     });
   });
 });

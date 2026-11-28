@@ -43,6 +43,15 @@ const ROOM = 'dispatch:admins';
 
 const VALID_SEVERITIES = ['info', 'warn', 'critical'];
 
+function enclosingCommitPromise(trx) {
+  const rootCommit = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+  if (!rootCommit) return null;
+  if (trx && trx.parentTransaction && trx.executionPromise) {
+    return Promise.all([trx.executionPromise, rootCommit]);
+  }
+  return rootCommit;
+}
+
 /**
  * Create a dispatch alert and broadcast it to dispatch:admins.
  *
@@ -97,7 +106,7 @@ async function createAlert({ type, severity, techId, jobId, payload, trx } = {})
 
   if (trx) {
     const row = await doWrite(trx);
-    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+    const commitPromise = enclosingCommitPromise(trx);
     if (commitPromise) {
       commitPromise.then(() => emitAlert(row)).catch(() => {
         // Outer rollback. Caller sees the rejection; we suppress
@@ -172,7 +181,7 @@ async function createAlertOnce({
     if (result.created && result.row) {
       // Outermost commit, not a savepoint release (same rule resolveAlert follows,
       // codex #3590 r14): a caller may run this insert in a savepoint.
-      const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+      const commitPromise = enclosingCommitPromise(trx);
       if (commitPromise) {
         commitPromise.then(() => emitAlert(result.row)).catch(() => {
           // Outer rollback. Suppress the emit so no phantom alert reaches dispatch.
@@ -289,7 +298,7 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
     const row = await doWrite(trx);
     if (!row) return null;
     // Outermost commit, not a savepoint release (codex #3590 r14).
-    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+    const commitPromise = enclosingCommitPromise(trx);
     if (commitPromise) {
       commitPromise.then(() => emitResolved(row)).catch(() => {
         // Outer rollback. Suppress emit so cards don't disappear from
@@ -374,7 +383,7 @@ async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
   let rows;
   if (trx) {
     rows = await doWrite(trx);
-    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+    const commitPromise = enclosingCommitPromise(trx);
     if (commitPromise) {
       commitPromise.then(() => rows.forEach(emitResolved)).catch(() => {
         // Outer rollback. Suppress emits for rows that did not commit.

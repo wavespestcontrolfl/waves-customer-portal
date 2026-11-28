@@ -7101,10 +7101,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         COALESCE(s.service_address_state, c.state) AS state,
         COALESCE(s.service_address_zip, c.zip) AS zip
       FROM scheduled_services s
-      INNER JOIN customers c ON c.id = s.customer_id
+      LEFT JOIN customers c ON c.id = s.customer_id
       WHERE s.scheduled_date = ?
+        AND (s.customer_id IS NOT NULL OR s.reservation_expires_at IS NULL)
         AND s.status NOT IN ('cancelled', 'rescheduled')${visitHold.heldSqlGuard('s')}
-      ORDER BY s.window_start NULLS LAST, c.last_name
+      ORDER BY s.window_start NULLS LAST, c.last_name NULLS LAST
       `,
       [today]
     );
@@ -7475,7 +7476,13 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
 
     if (unresolved) q.whereNull('a.resolved_at');
 
-    const rows = await q;
+    let countQ = db('dispatch_alerts as a');
+    if (unresolved) countQ = countQ.whereNull('a.resolved_at');
+    const [rows, countRow] = await Promise.all([
+      q,
+      countQ.count('* as count').first(),
+    ]);
+    const total = parseInt(countRow?.count || rows.length, 10);
 
     const alerts = rows.map((r) => {
       // Address normalization, same shape as /board and /jobs/:id.
@@ -7511,7 +7518,7 @@ router.get('/alerts', requireAdmin, async (req, res, next) => {
       };
     });
 
-    res.json({ alerts });
+    res.json({ alerts, total });
   } catch (err) {
     logger.error(`[dispatch/alerts] hydration failed: ${err.message}`);
     next(err);

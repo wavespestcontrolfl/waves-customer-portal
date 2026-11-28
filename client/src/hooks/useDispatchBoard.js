@@ -223,7 +223,6 @@ export function useDispatchBoard() {
       });
       return;
     }
-    let needsAuthoritativeCounts = false;
     setBoardState((prevState) => {
       const prev = prevState.jobs;
       const idx = prev.findIndex((j) => j.id === payload.job_id);
@@ -231,10 +230,9 @@ export function useDispatchBoard() {
         const created = boardJobFromPayload(payload);
         if (!created) return prevState;
         // Address-only visits without customer_id may already sit in today_agg
-        // while omitted from /board's jobs baseline before LEFT JOIN customers;
-        // resync counts instead of blind +1 when unlinked to the baseline.
+        // when omitted from an older baseline; trigger authoritative resync
+        // outside the updater below rather than blind +1 here.
         if (!payload.customer_id) {
-          needsAuthoritativeCounts = true;
           return { ...prevState, jobs: [...prev, created] };
         }
         return {
@@ -266,7 +264,7 @@ export function useDispatchBoard() {
         jobs: next,
       };
     });
-    if (needsAuthoritativeCounts) requestResyncRef.current?.();
+    if (!payload.customer_id) requestResyncRef.current?.();
   }, []);
 
   // ---- on-demand tech refresh (see header comment) ----

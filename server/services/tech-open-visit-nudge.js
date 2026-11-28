@@ -152,6 +152,7 @@ async function findCarryoverVisits(now, technicianId = null) {
       .where('s.is_callback', true)
       .orWhereIn('services.service_key', RESERVICE_KEYS)
       .orWhereIn('s.status', ['en_route', 'on_site']))
+    .where((q) => q.whereNull('s.track_state').orWhereNotIn('s.track_state', ['complete', 'cancelled']))
     .where(notSlotHold)
     .whereNotExists(function unclearedAddressHold() { heldVisitSubquery(this, 's'); }), 's')
     .orderBy('s.scheduled_date', 'asc')
