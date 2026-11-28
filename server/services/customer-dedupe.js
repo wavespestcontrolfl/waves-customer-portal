@@ -2534,7 +2534,15 @@ async function repointAppointmentCardRequests(trx, _table, column, winnerId, los
   const rows = await trx('appointment_card_requests').where(column, loserId).select('id', 'kind', 'status');
   let moved = 0;
   let expired = 0;
+  let keptOnArchived = 0;
   for (const row of rows) {
+    // Previously issued standalone Auto Pay links (completed/expired/cancelled)
+    // stay bound to their original customer_id so token lookups never reveal
+    // the surviving customer's firstName (completing/pending still hit the guard).
+    if (row.kind === 'customer' && row.status !== 'pending' && row.status !== 'completing') {
+      keptOnArchived += 1;
+      continue;
+    }
     try {
       await trx.transaction(async (sp) => {
         await sp('appointment_card_requests').where({ id: row.id }).update({ [column]: winnerId });
@@ -2559,7 +2567,7 @@ async function repointAppointmentCardRequests(trx, _table, column, winnerId, los
       expired += 1;
     }
   }
-  return `moved ${moved}, expired ${expired} duplicate pending Auto Pay setup link(s)`;
+  return `moved ${moved}, expired ${expired} duplicate pending Auto Pay setup link(s), kept ${keptOnArchived} historical link(s) on archived profile`;
 }
 
 async function repointCustomerAccessCodes(trx, _table, column, winnerId, loserId) {
@@ -8307,6 +8315,57 @@ async function predictFamilyCollisionFold(database, winnerId, loserId, details) 
   };
 }
 
+async function predictExtraTableCollisionFolds(database, read, winnerId, loserId, details) {
+  const rawMoveRows = await read('customer_moves', ['customer_id', 'status']);
+  const moveRows = (Array.isArray(rawMoveRows) ? rawMoveRows : [])
+    .filter((r) => r.status === 'open' || r.status === 'submitted');
+  const liveMoveOwners = new Set(moveRows.map((r) => String(r.customer_id)));
+  if (liveMoveOwners.has(String(winnerId)) && liveMoveOwners.has(String(loserId))) {
+    details.customer_moves = 'both records have an open move: the surviving record\'s move stays open and the archived record\'s move is closed';
+  }
+  const rawApptCardRows = await read('appointment_card_requests', ['customer_id', 'kind', 'status']);
+  const pendingApptCardOwners = new Set(
+    (Array.isArray(rawApptCardRows) ? rawApptCardRows : [])
+      .filter((r) => r.kind === 'customer' && r.status === 'pending')
+      .map((r) => String(r.customer_id)),
+  );
+  if (pendingApptCardOwners.has(String(winnerId)) && pendingApptCardOwners.has(String(loserId))) {
+    details.appointment_card_requests = 'both records have a pending standalone Auto Pay setup link: the archived record\'s link is expired in place';
+  }
+  const rawFollowupRows = await read('click_followup_actions', ['customer_id', 'status']);
+  const openFollowupOwners = new Set(
+    (Array.isArray(rawFollowupRows) ? rawFollowupRows : [])
+      .filter((r) => r.status === 'pending' || r.status === 'drafted')
+      .map((r) => String(r.customer_id)),
+  );
+  if (openFollowupOwners.has(String(winnerId)) && openFollowupOwners.has(String(loserId))) {
+    details.click_followup_actions = 'both records have an open follow-up action: the archived record\'s duplicate action is dismissed and any pending draft rejected';
+  }
+  const ids = [winnerId, loserId];
+  const promoSpecs = [
+    ['estimate_promo_codes', 'redeemed_customer_id'],
+    ['invoice_promo_codes', 'customer_id'],
+  ];
+  for (const [promoTable, ownerCol] of promoSpecs) {
+    let promoRows = [];
+    try {
+      promoRows = await database(promoTable)
+        .whereIn(ownerCol, ids)
+        .where({ status: 'redeemed' })
+        .whereNotNull('discount_id')
+        .select(ownerCol, 'discount_id');
+    } catch (e) {
+      if (!(e && e.code === '42P01')) throw e;
+    }
+    const promoList = Array.isArray(promoRows) ? promoRows : [];
+    const winDiscounts = new Set(promoList.filter((r) => String(r[ownerCol]) === String(winnerId)).map((r) => String(r.discount_id)));
+    const sharedDiscounts = [...new Set(promoList
+      .filter((r) => String(r[ownerCol]) === String(loserId) && winDiscounts.has(String(r.discount_id)))
+      .map((r) => String(r.discount_id)))].sort();
+    if (sharedDiscounts.length) details[promoTable] = { shared_redeemed_discounts: sharedDiscounts };
+  }
+}
+
 async function predictCollisionFolds(database, winner, loser) {
   const winnerId = winner.id;
   const loserId = loser.id;
@@ -8361,48 +8420,7 @@ async function predictCollisionFolds(database, winner, loser) {
   const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
   const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && r.channel != null && r.our_endpoint_id != null && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
   if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
-  const rawMoveRows = await read('customer_moves', ['customer_id', 'status']);
-  const moveRows = (Array.isArray(rawMoveRows) ? rawMoveRows : [])
-    .filter((r) => r.status === 'open' || r.status === 'submitted');
-  const liveMoveOwners = new Set(moveRows.map((r) => String(r.customer_id)));
-  if (liveMoveOwners.has(String(winnerId)) && liveMoveOwners.has(String(loserId))) {
-    details.customer_moves = 'both records have an open move: the surviving record\'s move stays open and the archived record\'s move is closed';
-  }
-  const rawApptCardRows = await read('appointment_card_requests', ['customer_id', 'kind', 'status']);
-  const pendingApptCardOwners = new Set(
-    (Array.isArray(rawApptCardRows) ? rawApptCardRows : [])
-      .filter((r) => r.kind === 'customer' && r.status === 'pending')
-      .map((r) => String(r.customer_id)),
-  );
-  if (pendingApptCardOwners.has(String(winnerId)) && pendingApptCardOwners.has(String(loserId))) {
-    details.appointment_card_requests = 'both records have a pending standalone Auto Pay setup link: the archived record\'s link is expired in place';
-  }
-  const rawFollowupRows = await read('click_followup_actions', ['customer_id', 'status']);
-  const openFollowupOwners = new Set(
-    (Array.isArray(rawFollowupRows) ? rawFollowupRows : [])
-      .filter((r) => r.status === 'pending' || r.status === 'drafted')
-      .map((r) => String(r.customer_id)),
-  );
-  if (openFollowupOwners.has(String(winnerId)) && openFollowupOwners.has(String(loserId))) {
-    details.click_followup_actions = 'both records have an open follow-up action: the archived record\'s duplicate action is dismissed and any pending draft rejected';
-  }
-  for (const promoTable of ['estimate_promo_codes', 'invoice_promo_codes']) {
-    let promoRows = [];
-    try {
-      promoRows = await database(promoTable)
-        .whereIn('redeemed_by_customer_id', ids)
-        .whereNotNull('discount_id')
-        .select('redeemed_by_customer_id', 'discount_id');
-    } catch (e) {
-      if (!(e && e.code === '42P01')) throw e;
-    }
-    const promoList = Array.isArray(promoRows) ? promoRows : [];
-    const winDiscounts = new Set(promoList.filter((r) => String(r.redeemed_by_customer_id) === String(winnerId)).map((r) => String(r.discount_id)));
-    const sharedDiscounts = [...new Set(promoList
-      .filter((r) => String(r.redeemed_by_customer_id) === String(loserId) && winDiscounts.has(String(r.discount_id)))
-      .map((r) => String(r.discount_id)))].sort();
-    if (sharedDiscounts.length) details[promoTable] = { shared_redeemed_discounts: sharedDiscounts };
-  }
+  await predictExtraTableCollisionFolds(database, read, winnerId, loserId, details);
   return { tables: Object.keys(details).sort(), details };
 }
 

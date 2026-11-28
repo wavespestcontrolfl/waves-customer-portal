@@ -100,6 +100,14 @@ function collisionFoldsNote(folds) {
   const parts = Object.entries(folds).map(([table, detail]) => {
     if (table === 'customer_tags') return `tags shared by both records (${detail.shared.join(', ')}) are dropped from the archived side`;
     if (table === 'conversations') return `${detail.shared_threads.length} conversation thread(s) both records hold on the same channel (${detail.shared_threads.join(', ')}) merge into the survivor's thread`;
+    if (table === 'multi_home_family_members' && detail && typeof detail === 'object') {
+      const members = Array.isArray(detail.affectedMembers) && detail.affectedMembers.length ? ` (${detail.affectedMembers.join(', ')})` : '';
+      return `${detail.summary || 'Same-Family link changes on merge'}${members}`;
+    }
+    if ((table === 'estimate_promo_codes' || table === 'invoice_promo_codes') && detail && typeof detail === 'object') {
+      const n = Array.isArray(detail.shared_redeemed_discounts) ? detail.shared_redeemed_discounts.length : 0;
+      return `${table}: ${n} duplicate redeemed promo row(s) detached from the archived record`;
+    }
     return `${table}: ${detail}`;
   });
   return ` Folds the undo cannot split apart: ${parts.join('; ')}.`;
