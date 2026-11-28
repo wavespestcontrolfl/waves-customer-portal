@@ -159,6 +159,7 @@ describe('record-payment retires an open pay-page PaymentIntent first (codex #36
     });
     const trx = jest.fn((table) => {
       if (table === 'invoices') return trxInvoices;
+      if (table === 'customers') return makeRecorder({ first: jest.fn(async () => ({ id: 'cust-1', payer_id: null })) });
       throw new Error(`unexpected trx table ${table}`);
     });
     trx.fn = { now: jest.fn(() => 'NOW()') };
