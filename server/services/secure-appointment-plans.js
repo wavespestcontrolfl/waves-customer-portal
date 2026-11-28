@@ -128,7 +128,7 @@ function resolveEstimateSeriesCoverage(annualBase, { estimateData, recurringServ
 }
 
 function computeSeriesPrepayPricing({
-  perVisit, visitsPerYear, planClass, unwaivedSetupFee = 0,
+  perVisit, visitsPerYear, planClass, unwaivedSetupFee = 0, noYear1PrepayPercent = false,
   estimateData = null, recurringServices = null, serviceKey = null, serviceType = null,
 }) {
   const annualBase = cents(Number(perVisit) * Number(visitsPerYear));
@@ -141,7 +141,7 @@ function computeSeriesPrepayPricing({
       estimateData, recurringServices, serviceKey, serviceType,
     }));
   } else {
-    const discountRate = planClass === 'discount' ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
+    const discountRate = (planClass === 'discount' && !noYear1PrepayPercent) ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
     coverageTotal = cents(annualBase * (1 - discountRate));
     discount = cents(annualBase - coverageTotal);
     ratePctLabel = discountRate > 0 ? `${Math.round(discountRate * 1000) / 10}%` : '';

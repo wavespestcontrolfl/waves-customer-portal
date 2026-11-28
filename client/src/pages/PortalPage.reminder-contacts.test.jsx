@@ -71,13 +71,18 @@ describe('Also gets visit texts (named on a call)', () => {
     expect(screen.queryByText('Also gets visit texts')).not.toBeInTheDocument();
   });
 
-  it('hides the section when the load fails', async () => {
+  it('shows an error alert with Retry when the load fails, and recovers on retry', async () => {
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [profileEntry()] });
-    api.getReminderContacts.mockRejectedValue(new Error('boom'));
+    api.getReminderContacts
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce({ reminderContacts: [person()] });
     render(<ScheduleTab customer={customer} properties={[]} onSelectProperty={() => {}} />);
     await screen.findByText('On-location contacts');
-    await waitFor(() => expect(api.getReminderContacts).toHaveBeenCalled());
-    expect(screen.queryByText('Also gets visit texts')).not.toBeInTheDocument();
+    const section = await screen.findByTestId('reminder-contacts');
+    expect(within(section).getByRole('alert')).toBeInTheDocument();
+    fireEvent.click(within(section).getByRole('button', { name: 'Retry' }));
+    expect(await within(section).findByText('Bob Example')).toBeInTheDocument();
+    expect(within(section).queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('never loads the list in a contact session', async () => {

@@ -208,25 +208,30 @@ describe('buildRelayTwiML — Jennifer persona parity (voice + greeting)', () =>
     expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('voice="custom-voice-id"');
   });
 
-  test('default greeting is the bare owner-ruled opener — name + day-part, no notice', () => {
+  test('default greeting is the punchy owner-ruled opener — full company name + agent name, no time-of-day or notice', () => {
     const greeting = defaultWelcomeGreeting();
     expect(greeting).toContain('Jennifer');
     expect(greeting.toLowerCase()).not.toMatch(/recorded|automated|assistant/);
-    expect(greeting).toMatch(/^Waves, this is Jennifer\. How can I help you this (morning|afternoon|evening)\?$/);
-    expect(greeting).toMatch(/How can I help you this (morning|afternoon|evening)\?$/);
+    expect(greeting).toBe('Waves Pest Control, this is Jennifer. How can I help?');
     expect(greeting).not.toContain('{dayPart}');
-    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Jennifer');
+    expect(greeting).not.toMatch(/this morning|this afternoon|this evening/);
+    expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Waves Pest Control, this is Jennifer. How can I help?');
   });
 
-  test('the greeting day-part follows the ET clock at render time (owner ruling 2026-08-28)', () => {
+  test('greetingDayPart follows the ET clock and drops "this morning" between midnight and 5 AM ET (owner ruling 2026-11-28)', () => {
     const { greetingDayPart } = require('../services/voice-agent/relay-protocol');
+    expect(greetingDayPart(new Date('2026-08-28T04:00:00Z'))).toBe('today');          // 00:00 ET (midnight)
+    expect(greetingDayPart(new Date('2026-08-28T04:50:00Z'))).toBe('today');          // 00:50 ET
+    expect(greetingDayPart(new Date('2026-08-28T08:59:00Z'))).toBe('today');          // 04:59 ET
+    expect(greetingDayPart(new Date('2026-08-28T09:00:00Z'))).toBe('this morning');   // 05:00 ET
     expect(greetingDayPart(new Date('2026-08-28T12:30:00Z'))).toBe('this morning');   // 08:30 ET
     expect(greetingDayPart(new Date('2026-08-28T15:59:00Z'))).toBe('this morning');   // 11:59 ET
     expect(greetingDayPart(new Date('2026-08-28T16:00:00Z'))).toBe('this afternoon'); // 12:00 ET
     expect(greetingDayPart(new Date('2026-08-28T20:59:00Z'))).toBe('this afternoon'); // 16:59 ET
     expect(greetingDayPart(new Date('2026-08-28T21:00:00Z'))).toBe('this evening');   // 17:00 ET
     expect(greetingDayPart(new Date('2026-08-29T03:30:00Z'))).toBe('this evening');   // 23:30 ET
-    expect(defaultWelcomeGreeting(new Date('2026-08-28T21:00:00Z'))).toContain('How can I help you this evening?');
+    // Default opener never says "this morning" at midnight either.
+    expect(defaultWelcomeGreeting(new Date('2026-08-28T04:50:00Z'))).toBe('Waves Pest Control, this is Jennifer. How can I help?');
   });
 
   test('VOICE_AGENT_NAME renames her; VOICE_RELAY_GREETING overrides the whole line', () => {
@@ -252,7 +257,7 @@ describe('buildRelayTwiML — Jennifer persona parity (voice + greeting)', () =>
     ]) {
       process.env.VOICE_RELAY_GREETING = bad;
       const spoken = defaultWelcomeGreeting();
-      expect(spoken).toMatch(/^Waves, this is Jennifer\. How can I help you this (morning|afternoon|evening)\?$/);
+      expect(spoken).toBe('Waves Pest Control, this is Jennifer. How can I help?');
       expect(spoken).not.toMatch(/human|real person|live agent/);
     }
     // …while any honest override is used exactly as written.

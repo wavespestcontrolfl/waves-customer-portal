@@ -34,7 +34,8 @@ describe('RatePage thank-you + one Google button', () => {
 
     const link = await screen.findByRole('link', { name: 'Open Google' });
     expect(link).toHaveAttribute('href', TRACKED);
-    expect(screen.getByText('Thank you!')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Thank you!' })).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'Waves' })).not.toBeInTheDocument();
     expect(screen.getByText(LINE)).toBeInTheDocument();
     for (const n of ['1', '5', '10']) expect(screen.queryByRole('button', { name: n })).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/tell us what happened/i)).not.toBeInTheDocument();
@@ -71,5 +72,19 @@ describe('RatePage thank-you + one Google button', () => {
     renderPage();
     await screen.findByRole('link', { name: 'Open Google' });
     expect(screen.queryByText(/try again in a minute/i)).not.toBeInTheDocument();
+  });
+
+  it('uses an in-file spinner keyframe while loading and PublicStateCard on 404', async () => {
+    let resolveFetch;
+    globalThis.fetch = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve; }));
+    const { container } = renderPage();
+    const spinner = container.querySelector('[data-rate-spinner]');
+    expect(spinner).not.toBeNull();
+    expect(spinner.style.animation).toContain('wavesRateSpin');
+    expect(container.querySelector('style')?.textContent).toContain('@keyframes wavesRateSpin');
+
+    resolveFetch({ ok: false, status: 404, json: async () => ({}) });
+    expect(await screen.findByRole('heading', { level: 1, name: /isn’t available|isn't available/i })).toBeInTheDocument();
+    expect(screen.getByText(/expired or already been used/i)).toBeInTheDocument();
   });
 });

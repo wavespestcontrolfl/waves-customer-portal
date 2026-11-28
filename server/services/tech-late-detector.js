@@ -194,6 +194,7 @@ async function runInner() {
       WITH candidates AS (
         SELECT
           s.id AS job_id,
+          s.customer_id,
           s.technician_id AS tech_id,
           s.window_start,
           s.window_end,
@@ -214,7 +215,9 @@ async function runInner() {
         FROM scheduled_services s
         WHERE s.scheduled_date >= ((NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '1 day')
           AND s.scheduled_date <= ((NOW() AT TIME ZONE 'America/New_York')::date)
-          AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show')
+          AND s.status NOT IN ('on_site', 'completed', 'cancelled', 'skipped', 'no_show', 'rescheduled')
+          AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
+          AND (s.customer_id IS NOT NULL OR s.reservation_expires_at IS NULL)
           AND s.technician_id IS NOT NULL
           AND s.window_start IS NOT NULL
           -- An uncleared street-level address hold was never dispatched: no late alert for it.
@@ -223,6 +226,7 @@ async function runInner() {
       )
       SELECT
         c.job_id,
+        c.customer_id,
         c.tech_id,
         c.window_start,
         c.window_end,
@@ -269,9 +273,11 @@ async function runInner() {
     return { created: 0, error: err.message };
   }
 
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
   let created = 0;
   let suppressed = 0;
   for (const row of rows) {
+    if (isInternalTestCustomerId(row.customer_id)) continue;
     const delayMin = Math.floor(Number(row.delay_minutes) || 0);
     const severity = delayMin >= TECH_LATE_CRITICAL_MINUTES ? 'critical' : 'warn';
     try {

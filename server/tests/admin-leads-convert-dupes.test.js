@@ -857,7 +857,7 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       // Probe still runs, tech-blind with the shared admin exclusion set
       // (freed terminal rows never draw a false overlap note).
       const probe = calls.find((c) => c.table === 'scheduled_services' && c.op === 'chain' && isOccupancyProbe(c));
-      expect(probe.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled', 'completed', 'skipped', 'no_show']]);
+      expect(probe.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled']]);
       expect(probe.ops.some((o) => o.op === 'where' && o.args[0]?.technician_id !== undefined)).toBe(false);
     });
   });

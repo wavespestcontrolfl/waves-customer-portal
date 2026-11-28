@@ -2,6 +2,7 @@ import { Gavel } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { UiSurface } from "../../components/ui";
+import { confirmLeaveIfGuarded } from "../../lib/navigation-guard";
 import BidDeskPage from "./BidDeskPage";
 import BidKitPage from "./BidKitPage";
 import BuilderProspectsPage from "./BuilderProspectsPage";
@@ -22,12 +23,15 @@ export default function BidsPage() {
   const [params, setParams] = useSearchParams();
   const active = TABS.find((tab) => tab.param && tab.param === params.get("tab")) || TABS[0];
 
-  const select = (key) => setParams((prev) => {
-    const next = new URLSearchParams(prev);
-    const tab = TABS.find((entry) => entry.key === key);
-    if (tab.param) next.set("tab", tab.param); else next.delete("tab");
-    return next;
-  }, { replace: true });
+  const select = (key) => {
+    if (key === active.key || !confirmLeaveIfGuarded()) return;
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      const tab = TABS.find((entry) => entry.key === key);
+      if (tab.param) next.set("tab", tab.param); else next.delete("tab");
+      return next;
+    }, { replace: true });
+  };
 
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">

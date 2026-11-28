@@ -238,10 +238,11 @@ let invoiceColsCache = null;
 // the process, so syncTermForInvoicePayment (and every other reader gated
 // on this) silently no-oped: a paid invoice left its term payment_pending
 // with no error anywhere.
-async function annualPrepayTableExists() {
+async function annualPrepayTableExists(conn = db) {
   if (tableExistsCache != null) return tableExistsCache;
   try {
-    tableExistsCache = await db.schema.hasTable('annual_prepay_terms');
+    const schema = conn && conn.schema && typeof conn.schema.hasTable === 'function' ? conn.schema : db.schema;
+    tableExistsCache = await schema.hasTable('annual_prepay_terms');
   } catch (err) {
     logger.warn(`[annual-prepay] table detection failed: ${err.message}`);
     return false;
@@ -6192,7 +6193,7 @@ function renewalGateTermIds(term) {
 }
 
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
-  if (!(await annualPrepayTableExists())) return [];
+  if (!(await annualPrepayTableExists(conn))) return [];
   const invoice = typeof invoiceOrId === 'object'
     ? invoiceOrId
     : await conn('invoices').where({ id: invoiceOrId }).first('id', 'status', 'paid_at');
@@ -6564,7 +6565,14 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
 }
 
 async function syncTermForRefundedPayment(payment, conn = db) {
-  if (!(await annualPrepayTableExists()) || !payment) return [];
+  if (!(await annualPrepayTableExists(conn)) || !payment) return [];
+  // Defensive guard (B-01): never unwind coverage for a payment row that is
+  // not actually refunded (e.g. a parked partial or bounced refund that left
+  // the row 'paid').
+  if (String(payment.status || '').toLowerCase() !== 'refunded') {
+    logger.warn(`[annual-prepay] syncTermForRefundedPayment skipped for payment ${payment.id || payment.stripe_charge_id || 'unknown'} — status is "${payment.status || 'missing'}", not refunded`);
+    return [];
+  }
   const invoiceId = await findInvoiceIdForRefundedPayment(payment, conn);
   if (!invoiceId) return [];
 
@@ -6598,8 +6606,12 @@ async function syncTermForRefundedPayment(payment, conn = db) {
   // same invoice and can deadlock a replacement payment or a dispute.
   const invoiceRow = await conn('invoices')
     .where({ id: invoiceId })
-    .first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
-  if (invoiceRow && !require('./invoice-helpers').refundedPaymentOwnsInvoice(invoiceRow, {
+    .first('id', 'status', 'stripe_payment_intent_id', 'stripe_charge_id');
+  if (!invoiceRow || String(invoiceRow.status || '').toLowerCase() !== 'refunded') {
+    logger.warn(`[annual-prepay] refund of payment ${payment.id || payment.stripe_charge_id} skipped term clawback — invoice ${invoiceId} status is "${invoiceRow?.status || 'missing'}", not refunded`);
+    return [];
+  }
+  if (!require('./invoice-helpers').refundedPaymentOwnsInvoice(invoiceRow, {
     paymentIntentId: payment.stripe_payment_intent_id,
     chargeId: payment.stripe_charge_id,
   })) {

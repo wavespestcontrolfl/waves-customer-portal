@@ -3795,7 +3795,79 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}, { discountRate = 0
 // module invoices when the annual changes — multiplying a new annual by a
 // previously-computed flat "effective rate" goes stale immediately, because
 // the effective rate is itself a function of the annual.
+function formatAnnualPrepayInvoiceCopy({
+  isTermiteAnnualPlanAccept = false,
+  commercialOnlyRecurring = false,
+  prepayPlanPrefix = 'WaveGuard Bronze',
+  prepayDiscountApplied = false,
+  prepayDiscountPctLabel = '5%',
+  prepayWaivesSetupFee = false,
+  estimateId = '',
+  setupFeeAmount = 0,
+} = {}) {
+  const discountNote = `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`;
+  if (isTermiteAnnualPlanAccept) {
+    return {
+      prepayLineDescription: prepayDiscountApplied
+        ? `${prepayPlanPrefix} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
+        : `${prepayPlanPrefix} — 12 months prepaid`,
+      prepayNotes: prepayDiscountApplied
+        ? discountNote
+        : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" for the ${prepayPlanPrefix}.`,
+    };
+  }
+  if (prepayDiscountApplied) {
+    return {
+      prepayLineDescription: commercialOnlyRecurring
+        ? `${prepayPlanPrefix} — 12 months prepaid`
+        : `${prepayPlanPrefix} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`,
+      prepayNotes: discountNote,
+    };
+  }
+  if (!commercialOnlyRecurring && prepayWaivesSetupFee) {
+    return {
+      prepayLineDescription: 'WaveGuard Membership — 12 months prepaid (setup fee waived)',
+      prepayNotes: `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${Number(setupFeeAmount).toFixed(2)} setup fee waived per WaveGuard membership policy.`,
+    };
+  }
+  return {
+    prepayLineDescription: `${prepayPlanPrefix} — 12 months prepaid`,
+    prepayNotes: `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — 12 months prepaid.`,
+  };
+}
+
+function estimateHasNoYear1PrepayPercent(estimateData = {}) {
+  if (!estimateData || typeof estimateData !== 'object') return false;
+  const carriers = [
+    estimateData.result && estimateData.result.pricingMetadata,
+    estimateData.engineResult && estimateData.engineResult.pricingMetadata,
+    estimateData.pricingMetadata,
+    estimateData.sendSnapshot,
+    estimateData.sendSnapshot && estimateData.sendSnapshot.pricingBundle,
+  ];
+  return carriers.some((carrier) => Boolean(carrier && carrier.year1PrepayNoPercent === true));
+}
+
 function annualPrepayDiscountComponents({ recurringServices = [], estimateData = {} } = {}) {
+  // Owner ruling 2026-11-05 + 2026-11-27 (GATE_NO_YEAR1_PREPAY_DISCOUNT):
+  // New estimates stamped year1PrepayNoPercent = true carry 0% annual prepay
+  // discount in Year 1 across monthly/quarterly/6-week mixes (unwaived solo
+  // pest/mosquito keep the $99 setup waiver; setup-waived offers like
+  // One-Time→Plan and multi-service bundles get 0% in Year 1; 5% starts on
+  // Year 2+ renewals). Mandatory-prepay Subterranean Termite Protection annual
+  // plans have no monthly alternative (TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY),
+  // never stack WaveGuard bundle discounts, and freeze parent.prepay_amount as
+  // the legally disclosed Year 2+ renewal fee (termite-annual-renewal-charge),
+  // so they stay on their annual-plan pricing contract. Pre-gate quotes without
+  // the stamp keep their exact historical 5% replay math.
+  const isMandatoryTermiteAnnualPlan = selectedTermiteAnnualPlanRows(estimateData).length > 0
+    || (Array.isArray(recurringServices) && recurringServices.some(
+      (svc) => String(svc?.service || '').toLowerCase() === 'termite_bait'
+        && String(svc?.plan || '').toLowerCase() === 'annual_protection',
+    ));
+  if (estimateHasNoYear1PrepayPercent(estimateData) && !isMandatoryTermiteAnnualPlan) {
+    return { discountRate: 0, protectedFloor: 0 };
+  }
   // Solo pest/mosquito mixes normally earn NO prepay % — their incentive is
   // the fee-waived-with-prepay. Owner ruling 2026-07-23: when the operator
   // has already waived the setup fee outright, the mix converts to the
@@ -8421,25 +8493,22 @@ const EstimateConverter = {
             : commercialOnlyRecurring
               ? 'Commercial'
               : `WaveGuard ${tier && tier !== 'none' ? tier : 'Bronze'}`;
-          // Never the WaveGuard "setup fee waived" wording for the termite
-          // annual plan — it carries no WaveGuard setup fee to waive (its
-          // OWN Station Setup line is charged, never waived); the
-          // commercial/WaveGuard branches below are UNCHANGED from before
-          // this lane (every other program stays byte-identical).
-          const prepayLineDescription = isTermiteAnnualPlanAccept
-            ? (prepayDiscountApplied
-              ? `${prepayPlanPrefix} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
-              : `${prepayPlanPrefix} — 12 months prepaid`)
-            : commercialOnlyRecurring
-              ? `${prepayPlanPrefix} — 12 months prepaid`
-              : prepayDiscountApplied
-                ? `${prepayPlanPrefix} — 12 months prepaid (${prepayDiscountPctLabel} prepay discount)`
-                : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
-          const prepayNotes = prepayDiscountApplied
-            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
-            : isTermiteAnnualPlanAccept
-              ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" for the ${prepayPlanPrefix}.`
-              : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $${setupFeeAmount.toFixed(2)} setup fee waived per WaveGuard membership policy.`;
+          // Never claim "setup fee waived" unless prepayment actually waives a
+          // WaveGuard setup fee that would have been billed on standard terms.
+          const prepayWaivesSetupFee = !isTermiteAnnualPlanAccept
+            && !commercialOnlyRecurring
+            && shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurringServicesForConversion, estimateData })
+            && setupFeeAmount > 0;
+          const { prepayLineDescription, prepayNotes } = formatAnnualPrepayInvoiceCopy({
+            isTermiteAnnualPlanAccept,
+            commercialOnlyRecurring,
+            prepayPlanPrefix,
+            prepayDiscountApplied,
+            prepayDiscountPctLabel,
+            prepayWaivesSetupFee,
+            estimateId,
+            setupFeeAmount,
+          });
           // Commercial prepay tax: pass an explicit BLENDED rate (see
           // resolveCommercialPrepayTaxRate) so only the taxable pest share of a
           // mixed commercial plan is taxed. Non-commercial prepay passes no rate
@@ -9581,6 +9650,8 @@ module.exports.resolveLawnProgramMinimumMonthlyIgnoringBreach = resolveLawnProgr
 module.exports.estimateLawnProgramMinimumSignal = estimateLawnProgramMinimumSignal;
 module.exports.estimateManualDiscountFloorBreachAcknowledged = estimateManualDiscountFloorBreachAcknowledged;
 module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
+module.exports.estimateHasNoYear1PrepayPercent = estimateHasNoYear1PrepayPercent;
+module.exports.formatAnnualPrepayInvoiceCopy = formatAnnualPrepayInvoiceCopy;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
 module.exports.resolveCommercialPrepayBaseRate = resolveCommercialPrepayBaseRate;

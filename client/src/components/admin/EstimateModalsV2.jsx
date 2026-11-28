@@ -36,6 +36,7 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
     `Hi ${firstName}, just checking in on the estimate I sent for ${addrShort}. Any questions?`,
   );
   const [sending, setSending] = useState(false);
+  const inFlightRef = useRef(false);
   // The server's ready text (service name + estimate link) replaces the default words only while the person has
   // not typed. A failed or null draft changes nothing: the default words stay and no error shows.
   const typedRef = useRef(false);
@@ -54,21 +55,29 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
   }, [estimate.id]);
 
   const handleSend = async () => {
+    if (inFlightRef.current || !message.trim()) return;
+    inFlightRef.current = true;
     setSending(true);
     try {
       await adminFetch(`/admin/estimates/${estimate.id}/follow-up`, {
         method: "POST",
         body: JSON.stringify({ message }),
       });
-      onSent();
+      onSent(estimate.id);
     } catch (err) {
       alert("Follow-up failed: " + err.message);
+    } finally {
+      inFlightRef.current = false;
+      setSending(false);
     }
-    setSending(false);
+  };
+
+  const handleClose = () => {
+    if (!inFlightRef.current) onClose();
   };
 
   return (
-    <Dialog open onClose={onClose} size="md">
+    <Dialog open onClose={handleClose} size="md">
       {" "}
       <DialogHeader>
         {" "}
@@ -126,11 +135,13 @@ export function DeclineModalV2({ estimate, onClose, onSaved, reasonOnly = false 
   const [competitorPrice, setCompetitorPrice] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const inFlightRef = useRef(false);
   // "Other" needs its note — the server 400s a blank one.
   const incomplete = !reason || (reason === "declined_other" && !note.trim());
 
   const handleSave = async () => {
-    if (incomplete) return;
+    if (inFlightRef.current || incomplete) return;
+    inFlightRef.current = true;
     setSaving(true);
     try {
       await adminFetch(`/admin/estimates/${estimate.id}`, {
@@ -142,12 +153,18 @@ export function DeclineModalV2({ estimate, onClose, onSaved, reasonOnly = false 
       onSaved();
     } catch (err) {
       alert("Failed: " + err.message);
+    } finally {
+      inFlightRef.current = false;
+      setSaving(false);
     }
-    setSaving(false);
+  };
+
+  const handleClose = () => {
+    if (!inFlightRef.current) onClose();
   };
 
   return (
-    <Dialog open onClose={onClose} size="sm">
+    <Dialog open onClose={handleClose} size="sm">
       {" "}
       <DialogHeader>
         {" "}
@@ -257,6 +274,7 @@ export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
   const [customDays, setCustomDays] = useState("");
   const [silent, setSilent] = useState(false);
   const [sending, setSending] = useState(false);
+  const inFlightRef = useRef(false);
 
   const effectiveDays =
     days === "custom" ? Number.parseInt(customDays, 10) || 0 : days;
@@ -264,7 +282,8 @@ export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
   const hasPhone = !!estimate.customerPhone;
 
   const handleExtend = async () => {
-    if (!valid) return;
+    if (inFlightRef.current || !valid) return;
+    inFlightRef.current = true;
     setSending(true);
     try {
       const result = await adminFetch(
@@ -277,12 +296,18 @@ export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
       onExtended?.(result);
     } catch (err) {
       alert("Extend failed: " + err.message);
+    } finally {
+      inFlightRef.current = false;
+      setSending(false);
     }
-    setSending(false);
+  };
+
+  const handleClose = () => {
+    if (!inFlightRef.current) onClose();
   };
 
   return (
-    <Dialog open onClose={onClose} size="md">
+    <Dialog open onClose={handleClose} size="md">
       {" "}
       <DialogHeader>
         {" "}

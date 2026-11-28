@@ -27,6 +27,9 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (req, res, next) => (
     ['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'Access denied' })
   ),
+  requireAdmin: (req, res, next) => (
+    req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })
+  ),
 }));
 
 const express = require('express');
@@ -104,13 +107,29 @@ describe('admin requests routes', () => {
     });
   });
 
-  test('loads request photos on demand for authenticated staff', async () => {
+  test('rejects technicians on list, photos, and patch before querying the database', async () => {
+    await withServer(async (baseUrl) => {
+      const listRes = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer tech' } });
+      expect(listRes.status).toBe(403);
+      const photosRes = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer tech' } });
+      expect(photosRes.status).toBe(403);
+      const patchRes = await fetch(`${baseUrl}/admin/requests/${requestId}`, {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'resolved' }),
+      });
+      expect(patchRes.status).toBe(403);
+      expect(db).not.toHaveBeenCalled();
+    });
+  });
+
+  test('loads request photos on demand for authenticated admins', async () => {
     const photos = ['data:image/jpeg;base64,YQ==', 'data:image/png;base64,Yg==', 'data:image/webp;base64,Yw==', 'data:image/jpeg;base64,ZA=='];
     setDb({ service_requests: [makeChain({ first: { id: requestId, photos: [...photos, 'data:text/html;base64,PHNjcmlwdD4='] } })] });
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, {
-        headers: { Authorization: 'Bearer tech' },
+        headers: { Authorization: 'Bearer admin' },
       });
       expect(res.status).toBe(200);
       expect(res.headers.get('cache-control')).toBe('private, no-store');
@@ -125,7 +144,7 @@ describe('admin requests routes', () => {
     setDb({ service_requests: [chain] });
     convertHeicToJpeg.mockResolvedValue(Buffer.from('jpeg'));
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer tech' } });
+      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer admin' } });
       expect(await res.json()).toEqual({ photos: ['data:image/jpeg;base64,anBlZw==', 'data:image/jpeg;base64,anBlZw=='], unavailableCount: 0 });
     });
     expect(convertHeicToJpeg.mock.calls.map(([bytes]) => bytes.toString())).toEqual(['a', 'b']);
@@ -138,7 +157,7 @@ describe('admin requests routes', () => {
     setDb({ service_requests: [makeChain({ first: { id: requestId, photos: [`data:image/heic;base64,${original.toString('base64')}`] } })] });
     convertHeicToJpeg.mockImplementationOnce(jest.requireActual('../services/heic-to-jpeg').convertHeicToJpeg);
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer tech' } });
+      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer admin' } });
       const body = await res.json();
       expect(body.unavailableCount).toBe(0);
       expect(body.photos[0]).toMatch(/^data:image\/jpeg;base64,/);
@@ -155,13 +174,13 @@ describe('admin requests routes', () => {
     ] } })] });
     convertHeicToJpeg.mockRejectedValue(new Error('decode failed'));
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer tech' } });
+      const res = await fetch(`${baseUrl}/admin/requests/${requestId}/photos`, { headers: { Authorization: 'Bearer admin' } });
       expect(await res.json()).toEqual({ photos: [jpeg], unavailableCount: 2 });
     });
     expect(convertHeicToJpeg).toHaveBeenCalledTimes(1);
   });
 
-  test('lists service requests for a technician', async () => {
+  test('lists service requests for an admin', async () => {
     const listQuery = makeChain({ rows: [{ id: 'req-1', status: 'new', subject: 'Ants in kitchen' }] });
     setDb({
       service_requests: [
@@ -171,7 +190,7 @@ describe('admin requests routes', () => {
     });
 
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer tech' } });
+      const res = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer admin' } });
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body.requests).toEqual([{ id: 'req-1', status: 'new', subject: 'Ants in kitchen' }]);
@@ -194,7 +213,7 @@ describe('admin requests routes', () => {
     });
 
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer tech' } });
+      const res = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer admin' } });
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body.requests).toEqual([

@@ -48,7 +48,7 @@ async function findFoldTarget(conn, { customerId, lane, date, propertyId = null 
   const day = dateOnlyString(date);
   if (!customerId || !day || !lane) return null;
   const scope = await foldCoverageScope(conn, customerId, propertyId);
-  const rows = await conn('scheduled_services as s')
+  const rows = await require('./visit-hold').excludeHeld(conn('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
     .where('s.is_recurring', true)
@@ -58,7 +58,7 @@ async function findFoldTarget(conn, { customerId, lane, date, propertyId = null 
     // A visit already on a shared stop moves with its stop, not alone: only an ungrouped plan visit folds.
     .whereNull('s.visit_id')
     .whereRaw('s.scheduled_date >= ?::date AND s.scheduled_date <= (?::date + ?::int)', [day, day, FOLD_DAYS])
-    .modify((qb) => applyCoverageScope(qb, 's', scope))
+    .modify((qb) => applyCoverageScope(qb, 's', scope)), 's')
     .orderBy('s.scheduled_date', 'asc')
     .orderByRaw('s.window_start ASC NULLS LAST')
     .limit(25)
@@ -347,8 +347,8 @@ async function holdReplay({ conn = db, target, customerRequest, date }) {
   let held = false;
   try {
     return await conn.transaction(async (trx) => {
-      const row = await trx('scheduled_services')
-        .where({ id: target.id, ...foldExpect(target), window_start: target.window_start })
+      const row = await require('./visit-hold').excludeHeld(trx('scheduled_services')
+        .where({ id: target.id, ...foldExpect(target), window_start: target.window_start }), 'scheduled_services')
         .forUpdate()
         .first('id');
       if (!row) return false;

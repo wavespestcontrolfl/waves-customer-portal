@@ -344,8 +344,69 @@ async function completionStatusForService({ serviceId, idempotencyKey }, knex = 
  * follow-up queries, which a failed statement would otherwise poison
  * (25P02). On the root connection (autocommit) it is a plain insert.
  */
+const SERVICE_COMPLETION_PENDING_CONFLICT = {
+  action: 'conflict',
+  status: 409,
+  payload: {
+    error: 'Completion already pending for this service.',
+    code: 'service_completion_pending',
+  },
+};
+
+async function insertPendingAttemptOrConflict(knex, values) {
+  try {
+    const [row] = await insertPendingAttempt(knex, values);
+    return { action: 'proceed', attempt: row };
+  } catch (retryErr) {
+    if (!isUniqueViolation(retryErr)) throw retryErr;
+    return SERVICE_COMPLETION_PENDING_CONFLICT;
+  }
+}
+
+async function retryFailedAttemptOrConflict(knex, existingId, requestHash) {
+  const doUpdate = (k) => k('service_completion_attempts')
+    .where({ id: existingId, status: 'failed' })
+    .update({
+      status: 'pending',
+      request_hash: requestHash,
+      response: null,
+      error: null,
+      updated_at: new Date(),
+    })
+    .returning('*');
+  let row;
+  try {
+    // Isolate in a SAVEPOINT when inside a caller transaction (mirrors
+    // insertPendingAttempt) so a PostgreSQL 23505 on the partial pending unique
+    // index never aborts the surrounding transaction (25P02).
+    const rows = (knex && knex.isTransaction && typeof knex.transaction === 'function')
+      ? await knex.transaction((sp) => doUpdate(sp))
+      : await doUpdate(knex);
+    [row] = rows;
+  } catch (retryErr) {
+    if (!isUniqueViolation(retryErr)) throw retryErr;
+    return SERVICE_COMPLETION_PENDING_CONFLICT;
+  }
+  if (!row) {
+    return {
+      action: 'conflict',
+      status: 409,
+      payload: {
+        error: 'Completion already pending.',
+        code: 'completion_pending',
+      },
+    };
+  }
+  return { action: 'proceed', attempt: row };
+}
+
 async function insertPendingAttempt(knex, values) {
-  const doInsert = (k) => k('service_completion_attempts').insert(values).returning('*');
+  // Explicitly stamp a JS Date (millisecond precision) instead of relying on
+  // PostgreSQL CURRENT_TIMESTAMP (microsecond precision). Otherwise the Date
+  // returned by pg truncates sub-millisecond digits and markCompletionAttemptFailed's
+  // updated_at CAS predicate would match zero rows on fresh claims.
+  const rowValues = { updated_at: new Date(), ...values };
+  const doInsert = (k) => k('service_completion_attempts').insert(rowValues).returning('*');
   if (knex && knex.isTransaction && typeof knex.transaction === 'function') {
     return knex.transaction((sp) => doInsert(sp));
   }
@@ -526,14 +587,15 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
             `[completion-attempts] reclaimed stale pending attempt ${reclaimed.id} for service ${serviceId} (key ${reclaimed.idempotency_key})`
           );
           // Pending row is now failed — partial unique index is clear.
-          // Retry the original insert under this caller's key.
-          const [row] = await insertPendingAttempt(knex, {
+          // Retry the original insert under this caller's key. Another
+          // concurrent caller may have claimed the slot between the reclaim
+          // update and this insert — turn that 23505 into a clean 409.
+          return insertPendingAttemptOrConflict(knex, {
             service_id: serviceId,
             idempotency_key: idempotencyKey,
             status: 'pending',
             request_hash: requestHash,
           });
-          return { action: 'proceed', attempt: row };
         }
         // Lost the reclaim race to another retry — fall through.
       }
@@ -654,31 +716,7 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
       // (Snapshot-bearing failed rows are caught by the global
       // priorSnapshotAttempt check before INSERT is attempted, so
       // existing.snapshot_written_at is guaranteed NULL here.)
-      const [row] = await knex('service_completion_attempts')
-        .where({ id: existing.id, status: 'failed' })
-        .update({
-          status: 'pending',
-          request_hash: requestHash,
-          response: null,
-          error: null,
-          updated_at: new Date(),
-        })
-        .returning('*');
-      // The conditional UPDATE matches at most one row across concurrent
-      // retries. The loser of that race gets nothing back — another
-      // retry already flipped the row to pending, so this caller must
-      // not proceed and double-execute the side effects.
-      if (!row) {
-        return {
-          action: 'conflict',
-          status: 409,
-          payload: {
-            error: 'Completion already pending.',
-            code: 'completion_pending',
-          },
-        };
-      }
-      return { action: 'proceed', attempt: row };
+      return retryFailedAttemptOrConflict(knex, existing.id, requestHash);
     }
 
     return {
@@ -695,7 +733,13 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
 async function markCompletionAttemptFailed(attempt, err, knex = db) {
   if (!attempt?.id) return;
   try {
-    await knex('service_completion_attempts').where({ id: attempt.id }).update({
+    // Only fail an attempt that is still pre-commit `pending` AND still on
+    // this caller's own claim generation (`updated_at`). A stalled request
+    // whose row was reclaimed by a same-key retry (bumping updated_at) or
+    // progressed to side_effects_running / succeeded must never overwrite it.
+    const query = knex('service_completion_attempts').where({ id: attempt.id, status: 'pending' });
+    if (attempt.updated_at != null) query.andWhere('updated_at', attempt.updated_at);
+    await query.update({
       status: 'failed',
       error: err?.message || String(err || 'Unknown completion error'),
       updated_at: new Date(),
@@ -863,12 +907,13 @@ async function storeResolvedSnapshot(
       snapshot_written_at: new Date(),
       updated_at: new Date(),
     })
-    .returning('id');
+    .returning(['id', 'updated_at']);
   if (!updated || updated.length === 0) {
     const err = new Error('storeResolvedSnapshot found no eligible pre-record attempt row (already resolved, resumed, or progressed past pending)');
     err.code = 'snapshot_write_not_eligible';
     throw err;
   }
+  if (updated[0]?.updated_at) attempt.updated_at = updated[0].updated_at;
   return { snapshotHash: computedHash };
 }
 

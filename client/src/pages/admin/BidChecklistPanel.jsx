@@ -36,7 +36,16 @@ const Section = ({ title, children }) => (
   </section>
 );
 
-function Details({ bid, busy, save }) {
+function isDetailsDirty(form, bid) {
+  if (!("type" in form)) return false;
+  return orNull(form.type) !== (bid.solicitation_type || null)
+    || scoredToApi(form.scored) !== scoredToApi(scoredOf(bid.scored))
+    || !!form.mandatory !== !!bid.job_walk_mandatory
+    || form.questions !== etDatetimeLocalValue(bid.questions_due_at)
+    || form.walk !== etDatetimeLocalValue(bid.job_walk_at);
+}
+
+function Details({ bid, busy, save, onDirtyChange }) {
   const [form, setForm] = useState({});
   const [unchanged, setUnchanged] = useState(false);
   useEffect(() => {
@@ -45,6 +54,11 @@ function Details({ bid, busy, save }) {
       walk: etDatetimeLocalValue(bid.job_walk_at), mandatory: !!bid.job_walk_mandatory,
     });
   }, [bid.solicitation_type, bid.scored, bid.questions_due_at, bid.job_walk_at, bid.job_walk_mandatory]);
+  const dirty = isDetailsDirty(form, bid);
+  useEffect(() => {
+    onDirtyChange?.("details", dirty);
+    return () => onDirtyChange?.("details", false);
+  }, [dirty, onDirtyChange]);
   const set = (key) => (event) => {
     setUnchanged(false);
     setForm((f) => ({ ...f, [key]: event.target.type === "checkbox" ? event.target.checked : event.target.value }));
@@ -227,7 +241,7 @@ function KitPill({ templateKey, kit }) {
   );
 }
 
-function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive, onMove, onEdit }) {
+function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive, onMove, onEdit, onDirtyChange }) {
   const [notes, setNotes] = useState(item.notes || "");
   const [editing, setEditing] = useState(false);
   const draft = useRef(notes);
@@ -235,6 +249,11 @@ function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive
   const lastSent = useRef(item.notes || "");
   const saving = useRef(false);
   const again = useRef(false);
+  const rowDirty = editing || notes !== (item.notes || "");
+  useEffect(() => {
+    onDirtyChange?.(`row:${item.id}`, rowDirty);
+    return () => onDirtyChange?.(`row:${item.id}`, false);
+  }, [item.id, rowDirty, onDirtyChange]);
   // A refresh replaces the note only while the field holds no unsaved typing (its text is still the note the server
   // last had), focused or not: an untouched field must not keep an older note that its next blur would send back.
   // Typing not saved yet stays, since a refresh can bring back a note older than the draft (the reply to a save the
@@ -289,9 +308,14 @@ function ChecklistRow({ item, kit, first, last, busy, onTick, onNotes, onArchive
   );
 }
 
-function AddRow({ busy, onAdd }) {
+function AddRow({ busy, onAdd, onDirtyChange }) {
   const [label, setLabel] = useState("");
   const [source, setSource] = useState("");
+  const dirty = Boolean(label.trim() || source.trim());
+  useEffect(() => {
+    onDirtyChange?.("addRow", dirty);
+    return () => onDirtyChange?.("addRow", false);
+  }, [dirty, onDirtyChange]);
   return (
     <form className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end" onSubmit={async (event) => {
       event.preventDefault();
@@ -308,7 +332,7 @@ function AddRow({ busy, onAdd }) {
   );
 }
 
-function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, kit }) {
+function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, kit, onDirtyChange }) {
   const act = (path, method, body, query = "") => adminFetch(`/admin/bid-desk/${bidId}/checklist${path}${query}`, { method, ...(body === undefined ? {} : { body }) });
   const start = (query) => run(() => act("/start", "POST", bid.solicitation_type ? { type: bid.solicitation_type } : {}, query));
   // "Add missing lines" is offered whenever the bid has template lines it does not carry (an unset type means the base
@@ -333,7 +357,7 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, ki
           </div>
           <ul className="grid gap-2">
             {items.map((item, index) => (
-              <ChecklistRow key={item.id} item={item} kit={kit} first={index === 0} last={index === items.length - 1} busy={busy}
+              <ChecklistRow key={item.id} item={item} kit={kit} first={index === 0} last={index === items.length - 1} busy={busy} onDirtyChange={onDirtyChange}
                 onTick={(row, checked) => run(() => act(`/${row.id}`, "PATCH", { checked }))}
                 onNotes={(row, notes) => run(() => act(`/${row.id}`, "PATCH", { notes }), { background: true })}
                 onArchive={(row) => run(() => act(`/${row.id}`, "DELETE"))}
@@ -348,7 +372,7 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, ki
           </ul>
         </>
       )}
-      <AddRow busy={busy} onAdd={(row) => run(() => act("", "POST", row))} />
+      <AddRow busy={busy} onDirtyChange={onDirtyChange} onAdd={(row) => run(() => act("", "POST", row))} />
       {invite && items.length > 0 && progress.checked < progress.required && (
         <div className="mt-2 text-ui-caption text-warn-fg">{progress.required - progress.checked} required lines are not checked yet. You can still mark the bid submitted.</div>
       )}
@@ -356,13 +380,18 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, ki
   );
 }
 
-function Submission({ bid, busy, save, invite }) {
+function Submission({ bid, busy, save, invite, onDirtyChange }) {
   const [at, setAt] = useState("");
   const [confirmation, setConfirmation] = useState("");
   useEffect(() => {
     setAt(etDatetimeLocalValue(bid.submitted_at));
     setConfirmation(bid.submission_confirmation || "");
   }, [bid.submitted_at, bid.submission_confirmation]);
+  const dirty = at !== etDatetimeLocalValue(bid.submitted_at) || confirmation !== (bid.submission_confirmation || "");
+  useEffect(() => {
+    onDirtyChange?.("submission", dirty);
+    return () => onDirtyChange?.("submission", false);
+  }, [dirty, onDirtyChange]);
   return (
     <>
       {invite && <div className="mb-2 text-ui-body text-ink-secondary">Record when the bid was handed in and the confirmation number. Neither is required.</div>}
@@ -385,12 +414,19 @@ function Submission({ bid, busy, save, invite }) {
  * @param save      (body, doneMessage) => Promise<boolean>: a PATCH of the bid, by the page
  * @param invite    true while the Decision field says Submitted: the submission record is invited, never required
  */
-export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite, onProgress }) {
+export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite, onProgress, onDirtyChange }) {
   const [state, setState] = useState(extras);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState({ text: "", error: false });
   const [refreshError, setRefreshError] = useState("");
   const first = useRef(true);
+  const dirtyKeysRef = useRef(new Set());
+  const reportDirty = useCallback((key, isDirty) => {
+    const keys = dirtyKeysRef.current;
+    if (isDirty) keys.add(key); else keys.delete(key);
+    onDirtyChange?.(keys.size > 0);
+  }, [onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   // The Bid kit list, read once per panel. It loads beside the checklist and the pills appear when it
   // arrives. A refused or failed read, or an unusable reply: no pills and no message, the checklist is as before.
@@ -468,15 +504,15 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
   const disabled = busy || parentBusy;
   return (
     <div data-testid="bid-checklist-panel">
-      <Section title="Bid details"><Details bid={bid} busy={disabled} save={save} /></Section>
+      <Section title="Bid details"><Details bid={bid} busy={disabled} save={save} onDirtyChange={reportDirty} /></Section>
       <Section title="Estimate and proposal"><EstimateLink bid={bid} estimate={state.estimate} busy={disabled} save={save} /></Section>
       <Section title="Documents"><Documents documents={state.documents} /></Section>
       <Section title="Checklist">
-        <Checklist bidId={bidId} bid={bid} items={state.checklist} progress={state.progress} missing={state.missing ?? 0} busy={disabled} run={run} invite={invite} kit={kit} />
+        <Checklist bidId={bidId} bid={bid} items={state.checklist} progress={state.progress} missing={state.missing ?? 0} busy={disabled} run={run} invite={invite} kit={kit} onDirtyChange={reportDirty} />
         {message.text && <ActionFeedback error={message.error} className="mt-2">{message.text}</ActionFeedback>}
         {refreshError && <ActionFeedback error className="mt-2">{refreshError}</ActionFeedback>}
       </Section>
-      <Section title="Submission record"><Submission bid={bid} busy={disabled} save={save} invite={invite} /></Section>
+      <Section title="Submission record"><Submission bid={bid} busy={disabled} save={save} invite={invite} onDirtyChange={reportDirty} /></Section>
     </div>
   );
 }

@@ -62,6 +62,7 @@ export default function QuestionsEscapeHatch({ estimateSlug, context = 'estimate
         href={textHref}
         aria-label="Text Waves at (941) 297-5749"
         className={glass ? 'gc-section-cta' : undefined}
+        data-glass-pill={glass ? '' : undefined}
         style={glass ? { ...BTN_BASE, background: undefined } : { ...BTN_BASE, background: W.warmBg, color: W.blueDeeper, border: `1px solid ${W.warmBorder}` }}
       >
         <ChatIcon />

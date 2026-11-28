@@ -476,6 +476,22 @@ function termiticideMetadataFields(li = {}) {
   return fields;
 }
 
+function boraCarePushFields(li = {}) {
+  return {
+    ...(li.atticSqFt !== undefined ? { atticSqFt: Number(li.atticSqFt) > 0 ? Number(li.atticSqFt) : null } : {}),
+    ...(li.surfaceSqFt !== undefined ? { surfaceSqFt: Number(li.surfaceSqFt) > 0 ? Number(li.surfaceSqFt) : null } : {}),
+    ...(li.pricingKnobs && typeof li.pricingKnobs === 'object' ? { pricingKnobs: li.pricingKnobs } : {}),
+  };
+}
+
+function boraCareRowFields(s = {}) {
+  return {
+    ...(s.atticSqFt !== undefined ? { atticSqFt: s.atticSqFt } : {}),
+    ...(s.surfaceSqFt !== undefined ? { surfaceSqFt: s.surfaceSqFt } : {}),
+    ...(s.pricingKnobs && typeof s.pricingKnobs === 'object' ? { pricingKnobs: s.pricingKnobs } : {}),
+  };
+}
+
 function termiticideDetail(li = {}, fallback = '') {
   if (li.service === 'trenching') {
     const lfDetail = li.dirtLF !== undefined && li.concreteLF !== undefined
@@ -1277,11 +1293,10 @@ function mapV1ToLegacyShape(v1Result) {
         ...(li.includedFollowUps !== undefined ? { includedFollowUps: li.includedFollowUps } : {}),
         ...(li.includedCallbacks !== undefined ? { includedCallbacks: li.includedCallbacks } : {}),
         ...(typeof li.unlimitedCallbacks === 'boolean' ? { unlimitedCallbacks: li.unlimitedCallbacks } : {}),
-        // Trap-only billing mode + Bora-Care purchased areas (codex #3823 r8 P1s).
+        // Trap-only billing mode + Bora-Care purchased areas & quote-time knobs (codex #3823 r8 P1s).
         ...(li.retainerBilling || li.trapOnlyRetainerBilling
           ? { retainerBilling: li.retainerBilling || li.trapOnlyRetainerBilling } : {}),
-        ...(li.atticSqFt !== undefined ? { atticSqFt: Number(li.atticSqFt) > 0 ? Number(li.atticSqFt) : null } : {}),
-        ...(li.surfaceSqFt !== undefined ? { surfaceSqFt: Number(li.surfaceSqFt) > 0 ? Number(li.surfaceSqFt) : null } : {}),
+        ...boraCarePushFields(li),
         // Dead Rodent Removal & Odor Treatment: the access tier and the engine's on-site minutes
         // travel with the sold row so the booking sizes its slot by the tier (45 or 90 minutes),
         // not only by the catalog default.
@@ -1569,8 +1584,7 @@ function mapV1ToLegacyShape(v1Result) {
           ...(s.includedCallbacks !== undefined ? { includedCallbacks: s.includedCallbacks } : {}),
           ...(typeof s.unlimitedCallbacks === 'boolean' ? { unlimitedCallbacks: s.unlimitedCallbacks } : {}),
           ...(s.retainerBilling ? { retainerBilling: s.retainerBilling } : {}),
-          ...(s.atticSqFt !== undefined ? { atticSqFt: s.atticSqFt } : {}),
-          ...(s.surfaceSqFt !== undefined ? { surfaceSqFt: s.surfaceSqFt } : {}),
+          ...boraCareRowFields(s),
           source: s.source,
           pricingModel: s.pricingModel,
           legacyPricingModel: s.legacyPricingModel,

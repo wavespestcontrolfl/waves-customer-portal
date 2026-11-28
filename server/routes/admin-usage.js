@@ -59,8 +59,11 @@ const RELOAD_BLOCKERS = new Set([
   'first-page', 'reload-missed', 'admin-index', 'waves-admin', 'field-page', 'current',
   'never-heard', 'offline', 'no-signal', 'storage', 'reloaded', 'stalled', 'saving', 'request',
   // Holds (registerReloadHold, holdReloadWhileSending).
-  'ask-draft', 'bank-import', 'bank-link', 'card-payment', 'dictation', 'email-draft',
-  'estimate-send', 'misting-layout', 'photo-assessment', 'push-setup', 'recap-upload',
+  'ask-draft', 'bank-import', 'bank-link', 'card-on-file-charge', 'card-payment',
+  'cash-tender', 'check-tender', 'checkout-invoice-mint', 'dictation', 'email-draft',
+  'estimate-send', 'in-person-card-handoff', 'invoice-send', 'mark-prepaid',
+  'misting-layout', 'photo-assessment', 'prepay-switch', 'prepay-switch-abort',
+  'prepay-switch-collecting', 'prepay-switch-confirm', 'push-setup', 'recap-upload',
   'schedule-notice', 'tap-to-pay', 'text-attachment', 'text-draft', 'time-clock',
   'visit-step', 'visual-note', 'zone-map',
 ]);

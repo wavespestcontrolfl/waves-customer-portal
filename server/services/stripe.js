@@ -74,7 +74,13 @@ const {
   invoicePaymentStatusForIntent,
   nextInvoiceStatusAfterFailedPayment,
 } = require('./stripe-invoice-state');
-const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
+const {
+  assertInvoiceCollectible,
+  assertInvoiceNotWithdrawnFromCustomer,
+  isInvoiceCollectibleStatus,
+  invoiceAmountDue,
+  refundedPaymentOwnsInvoice,
+} = require('./invoice-helpers');
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -103,6 +109,154 @@ function assertLockedCustomerNotDeleted(lockedCustomer) {
   if (lockedCustomer?.deleted_at) {
     throw Object.assign(new Error('This customer account was deleted — Auto Pay is not armed. Review before charging.'), { code: 'CUSTOMER_DELETED' });
   }
+}
+
+// Recheck on a FOR UPDATE locked payments row that a full refund committed by
+// StripeService._refundPayment has not since been reverted by a racing
+// refund.failed webhook (Codex P0): requires status === 'refunded', refundId
+// not fenced in metadata.failed_refund_ids, and refundId still stamped on the
+// row. Shared by both the credit-restore and annual-prepay clawback locks.
+function parsePaymentMetaSafe(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) || {}; } catch { return {}; }
+  }
+  return typeof raw === 'object' ? raw : {};
+}
+
+const PENDING_REFUND_META_KEYS = [
+  'pending_refund_key',
+  'pending_refund_request',
+  'pending_refund_base',
+  'pending_refund_gross',
+  'pending_refund_reason',
+  'pending_refund_at',
+];
+
+function stripPendingRefundMeta(meta) {
+  const out = { ...meta };
+  for (const k of PENDING_REFUND_META_KEYS) delete out[k];
+  return out;
+}
+
+function isRefundStampedOnRow(row, meta, refundId) {
+  if (!refundId || !row) return false;
+  if (row.stripe_refund_id === refundId) return true;
+  const stampedIds = Array.isArray(meta?.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+  return stampedIds.includes(refundId);
+}
+
+function reconcileLockedRefundTotals(lockedRow, lockedMeta, opts) {
+  const {
+    refund, isFullRefund, totalRefundedCents, surchargeCents,
+    alreadyRefundedSurchargeCents, requestCents, bounceFence, bouncedIds,
+  } = opts;
+  const refundAmtCents = Number(refund?.amount) || 0;
+  const paidCents = lockedRow ? Math.round(Number(lockedRow.amount) * 100) || 0 : 0;
+  const priorBounces = bouncedIds ? bouncedIds.length : 0;
+  const hasSiblingBounce = Boolean(lockedRow) && bounceFence.size > priorBounces;
+  const alreadyStamped = isRefundStampedOnRow(lockedRow, lockedMeta, refund?.id);
+  let effTotal = totalRefundedCents;
+  let effPriorSurcharge = alreadyRefundedSurchargeCents;
+  if (hasSiblingBounce) {
+    const livePriorCents = Math.round(Number(lockedRow.refund_amount) * 100) || 0;
+    effTotal = alreadyStamped ? livePriorCents : Math.min(paidCents, livePriorCents + refundAmtCents);
+    effPriorSurcharge = Number(lockedRow.refunded_surcharge_cents) || 0;
+  }
+  const effFull = paidCents > 0 ? effTotal >= paidCents : isFullRefund;
+  if (!(surchargeCents > 0)) return { effTotal, effFull, nextSurcharge: null };
+  let nextSurcharge;
+  if (effFull) {
+    nextSurcharge = surchargeCents;
+  } else if (hasSiblingBounce && alreadyStamped) {
+    // Locked surcharge tracker already includes this stamped refund's share;
+    // preserve it rather than double-counting it after a sibling bounce.
+    nextSurcharge = Math.min(surchargeCents, effPriorSurcharge);
+  } else {
+    const surchargeDelta = requestCents === null
+      ? Math.max(0, surchargeCents - alreadyRefundedSurchargeCents)
+      : Math.max(0, refundAmtCents - requestCents);
+    nextSurcharge = Math.min(surchargeCents, effPriorSurcharge + surchargeDelta);
+  }
+  return { effTotal, effFull, nextSurcharge };
+}
+
+function mergeRefundMetadata(lockedMeta, baseClearedMeta, bounceFence, refundId) {
+  const merged = stripPendingRefundMeta({ ...baseClearedMeta, ...lockedMeta });
+  if (bounceFence.size) merged.failed_refund_ids = [...bounceFence];
+  const mergedStamps = new Set([
+    ...(Array.isArray(lockedMeta.stamped_refund_ids) ? lockedMeta.stamped_refund_ids : []),
+    ...(Array.isArray(baseClearedMeta.stamped_refund_ids) ? baseClearedMeta.stamped_refund_ids : []),
+    ...(refundId ? [refundId] : []),
+  ]);
+  if (mergedStamps.size) merged.stamped_refund_ids = [...mergedStamps];
+  return merged;
+}
+
+async function isRefundFencedTableInTrx(trx, refundId) {
+  if (!refundId || !trx.schema || typeof trx.schema.hasTable !== 'function') return false;
+  if (!(await trx.schema.hasTable('stripe_failed_refunds'))) return false;
+  const fencedRow = await trx('stripe_failed_refunds')
+    .where({ stripe_refund_id: refundId })
+    .first('stripe_refund_id');
+  return Boolean(fencedRow);
+}
+
+async function stampRefundInTransaction(trx, opts) {
+  const {
+    paymentId, refund, surchargeCents, baseClearedMeta, bouncedIds,
+  } = opts;
+  const lockedRow = await trx('payments').where({ id: paymentId }).forUpdate().first();
+  const lockedMeta = parsePaymentMetaSafe(lockedRow?.metadata);
+  const bounceFence = new Set([
+    ...(Array.isArray(bouncedIds) ? bouncedIds : []),
+    ...(Array.isArray(lockedMeta.failed_refund_ids) ? lockedMeta.failed_refund_ids : []),
+  ]);
+  const refundId = refund?.id || null;
+  if (refundId && (bounceFence.has(refundId) || await isRefundFencedTableInTrx(trx, refundId))) {
+    // Persist table-only bounce IDs into failed_refund_ids before clearing
+    // pending_refund_* so the next identical retry derives a fresh key.
+    bounceFence.add(refundId);
+    const abortMeta = stripPendingRefundMeta(lockedMeta);
+    abortMeta.failed_refund_ids = [...bounceFence];
+    await trx('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(abortMeta) });
+    return { abortedByBounce: true, isFullRefund: false, totalRefundedCents: opts.totalRefundedCents };
+  }
+  const { effTotal, effFull, nextSurcharge } = reconcileLockedRefundTotals(lockedRow, lockedMeta, { ...opts, bounceFence });
+  const mergedMeta = mergeRefundMetadata(lockedMeta, baseClearedMeta, bounceFence, refundId);
+  const patch = {
+    status: effFull ? 'refunded' : 'paid',
+    refund_amount: effTotal / 100,
+    refund_status: refund.status,
+    stripe_refund_id: refundId,
+    metadata: JSON.stringify(mergedMeta),
+    updated_at: new Date(),
+  };
+  if (surchargeCents > 0 && nextSurcharge !== null) {
+    patch.refunded_surcharge_cents = nextSurcharge;
+  }
+  await trx('payments').where({ id: paymentId }).update(patch);
+  return { abortedByBounce: false, isFullRefund: effFull, totalRefundedCents: effTotal };
+}
+
+async function isThisRefundBouncedInTrx(trx, row, refundId) {
+  if (!refundId) return false;
+  const meta = parsePaymentMetaSafe(row?.metadata);
+  const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+  if (failedIds.includes(refundId)) return true;
+  return isRefundFencedTableInTrx(trx, refundId);
+}
+
+function isPaymentStillRefundedFor(row, refundId) {
+  if (!row || String(row.status || '').toLowerCase() !== 'refunded') return false;
+  let meta = {};
+  try {
+    meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+  } catch { meta = {}; }
+  const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+  if (refundId && failedIds.includes(refundId)) return false;
+  if (!refundId) return true;
+  return isRefundStampedOnRow(row, meta, refundId);
 }
 
 function isIncompatibleAttachedMethodError(err) {
@@ -3834,86 +3988,13 @@ const StripeService = {
     } catch (chargeErr) {
       logger.warn(`[stripe] refund cumulative lookup failed for payment ${paymentId} (falling back to local accumulation): ${chargeErr.message}`);
     }
-    const isFullRefund = totalRefundedCents >= paidCents;
+    let isFullRefund = totalRefundedCents >= paidCents;
 
-    // LIVE metadata read — the charge.refunded / refund.failed webhooks may
-    // have written stamps or bounce fences while this attempt was in flight,
-    // and clearedMeta is a pre-call snapshot that would otherwise erase them.
-    let liveMeta = null;
-    try {
-      const liveRow = await db('payments').where({ id: paymentId }).first('metadata');
-      try {
-        liveMeta = liveRow?.metadata ? (typeof liveRow.metadata === 'string' ? JSON.parse(liveRow.metadata) : liveRow.metadata) : {};
-      } catch { liveMeta = {}; }
-    } catch (liveErr) {
-      logger.warn(`[stripe] live metadata read failed for payment ${paymentId}: ${liveErr.message}`);
-      liveMeta = null; // unknown — fall back to the loaded snapshot below
-    }
-
-    // A refund whose FAILURE was already recorded must never be stamped as
-    // returned money: when the original attempt's ledger write failed, the
-    // pending marker survives its own refund's bounce, and the retry's
-    // idempotent key replay hands back the ORIGINAL bounced refund object
-    // as if newly created. Stamping it would record money Stripe kept — and
-    // handleRefundFailed would never rewind it (the bounce is already
-    // fenced, so the event replay is a no-op). Abort: clear the pending
-    // marker (the next attempt derives a fresh bounce-suffixed key) and
-    // tell the operator the truth.
-    const bounceFence = new Set([
-      ...bouncedIds,
-      ...(liveMeta && Array.isArray(liveMeta.failed_refund_ids) ? liveMeta.failed_refund_ids : []),
-    ]);
-    if (refund?.id && bounceFence.has(refund.id)) {
-      const abortMeta = { ...(liveMeta || clearedMeta) };
-      for (const k of ['pending_refund_key', 'pending_refund_request', 'pending_refund_base', 'pending_refund_gross', 'pending_refund_reason', 'pending_refund_at']) {
-        delete abortMeta[k];
-      }
-      await db('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(abortMeta) }).catch(() => {});
-      logger.error(`[stripe] refund ${refund.id} for payment ${paymentId} already bounced at the bank — attempt aborted, nothing stamped`);
-      throw new Error('This refund attempt already bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
-    }
-    // Preserve concurrently-recorded bounce fences of OTHER refunds — the
-    // wholesale metadata write below must not erase them.
-    if (bounceFence.size) clearedMeta.failed_refund_ids = [...bounceFence];
-
-    // Record this refund as STAMPED (metadata.stamped_refund_ids) so a later
-    // bounce stays attributable after newer stamps overwrite stripe_refund_id.
-    const mergedStamps = new Set([
-      ...(liveMeta && Array.isArray(liveMeta.stamped_refund_ids) ? liveMeta.stamped_refund_ids : []),
-      ...(Array.isArray(clearedMeta.stamped_refund_ids) ? clearedMeta.stamped_refund_ids : []),
-      ...(refund?.id ? [refund.id] : []),
-    ]);
-    if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
-
-    // The ledger write itself — called inside the gated transaction below.
-    const stampRefundOnPayment = async (trx) => {
-      await trx('payments')
-        .where({ id: paymentId })
-        .update({
-          status: isFullRefund ? 'refunded' : 'paid',
-          refund_amount: totalRefundedCents / 100,
-          refund_status: refund.status,
-          stripe_refund_id: refund.id,
-          // Cumulative surcharge-returned tracker — the NEXT partial prorates
-          // from this. The share actually sent this attempt = Stripe's refund
-          // amount minus the entered base (0 on legacy/no-surcharge attempts);
-          // a full refund returns the whole surcharge by definition.
-          ...(surchargeCents > 0
-            ? {
-                refunded_surcharge_cents: isFullRefund
-                  ? surchargeCents
-                  : Math.min(
-                      surchargeCents,
-                      alreadyRefundedSurchargeCents + Math.max(0, (Number(refund.amount) || 0) - (requestCents || 0)),
-                    ),
-              }
-            : {}),
-          metadata: JSON.stringify(clearedMeta),
-          // The ledger's refund time (Codex #4971 r6 P1: the termite
-          // renewal's late-paid alert dates a parent's revocation by it).
-          updated_at: new Date(),
-        });
-    };
+    // Stamp inside a locked transaction (re-reading the live payment row
+    // FOR UPDATE, checking failed_refund_ids + stripe_failed_refunds under
+    // lock, reconciling cumulative totals against any concurrent partial bounce,
+    // and merging current metadata).
+    let stampOutcome = { abortedByBounce: false, isFullRefund, totalRefundedCents };
     try {
       // Chokepoint B (Codex #4971 r4 P1): the stamp runs in its own
       // transaction whose FIRST lock is the renewal parent-decision gate —
@@ -3922,7 +4003,17 @@ const StripeService = {
       // out that charge's submission. No-op without a termite term.
       await db.transaction(async (trx) => {
         await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
-        await stampRefundOnPayment(trx);
+        stampOutcome = await stampRefundInTransaction(trx, {
+          paymentId,
+          refund,
+          isFullRefund,
+          totalRefundedCents,
+          surchargeCents,
+          alreadyRefundedSurchargeCents,
+          requestCents,
+          baseClearedMeta: clearedMeta,
+          bouncedIds,
+        });
       });
     } catch (dbErr) {
       // Refund issued, ledger write failed. The pending attempt marker is
@@ -3933,42 +4024,94 @@ const StripeService = {
       logger.error(`[stripe] CRITICAL: refund ${refund.id} ($${refundAmountDollars}) issued for payment ${paymentId} but the payments-row update failed: ${dbErr.message}`);
       throw new Error(`Refund ${refund.id} WAS issued at Stripe but recording it failed. Re-running the same refund is safe — it will not refund twice, only sync the records.`);
     }
+    if (stampOutcome.abortedByBounce) {
+      logger.error(`[stripe] refund ${refund.id} for payment ${paymentId} already bounced at the bank — attempt aborted under lock, nothing stamped`);
+      throw new Error('This refund attempt already bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
+    }
+    isFullRefund = stampOutcome.isFullRefund;
+    totalRefundedCents = stampOutcome.totalRefundedCents;
 
     // Side effects past this point never mask the successful refund as
     // "Refund processing failed" — each degrades on its own.
+    // Track full-refund revert (e.g. an earlier partial bounced, leaving this
+    // payment partially refunded) SEPARATELY from this specific refund bouncing:
+    // only throw a bounce failure when THIS refund's own ID bounced, never
+    // prompting staff to repeat a refund that actually succeeded.
+    let fullRefundReverted = false;
+    let thisRefundBounced = false;
     if (isFullRefund) {
       // Return any applied account credit to the customer's balance — a full
       // refund gives back the cash, so the credit they used must return too
       // (else it stays consumed). Idempotent vs the charge.refunded webhook.
+      // Lock and recheck both the payment row + refund id AND invoice ownership
+      // FOR UPDATE before mutating the invoice or unwinding coverage: a racing
+      // refund.failed can revert the payment back to 'paid', or a replacement
+      // payment can settle the invoice while this refund waits.
+      let refundedInvoice = null;
       try {
-        const inv = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first('id');
-        if (inv) {
+        refundedInvoice = await db('invoices')
+          .where({ stripe_payment_intent_id: payment.stripe_payment_intent_id })
+          .first('id', 'customer_id', 'notes', 'scheduled_service_id', 'service_record_id');
+        if (refundedInvoice) {
           const { returnAppliedCreditOnRefund } = require('./customer-credit');
           // Gate first (Codex #4971 r4 P1): returning credit is money the
           // renewal charge could consume — same entry rule as the stamp.
           await db.transaction(async (trx) => {
             await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
-            return returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx);
+            const lockedPayment = await trx('payments').where({ id: paymentId }).forUpdate().first();
+            if (!isPaymentStillRefundedFor(lockedPayment, refund.id)) {
+              fullRefundReverted = true;
+              if (await isThisRefundBouncedInTrx(trx, lockedPayment, refund.id)) thisRefundBounced = true;
+              logger.warn(`[stripe] refund ${refund.id} for payment ${paymentId} no longer full-refunded before credit restore (status=${lockedPayment?.status || 'missing'}, thisBounced=${thisRefundBounced}) — skipping credit restore`);
+              return;
+            }
+            const lockedInvoice = await trx('invoices')
+              .where({ id: refundedInvoice.id })
+              .forUpdate()
+              .first('id', 'stripe_payment_intent_id', 'stripe_charge_id');
+            if (!refundedPaymentOwnsInvoice(lockedInvoice, {
+              paymentIntentId: lockedPayment.stripe_payment_intent_id,
+              chargeId: lockedPayment.stripe_charge_id,
+            })) {
+              logger.warn(`[stripe] refund ${refund.id} for payment ${paymentId} no longer owns invoice ${refundedInvoice.id} — skipping credit restore`);
+              return;
+            }
+            return returnAppliedCreditOnRefund({ invoiceId: refundedInvoice.id, createdBy: 'system:refund' }, trx);
           });
         }
       } catch (creditErr) {
         logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
       }
-      // Annual-prepay claw-back, AFTER the credit restore on purpose (B03):
-      // that restore terminalizes the invoice this PI owns to 'refunded'
-      // under its row lock, and a refunded invoice is refused by every
-      // replacement-settlement path — so the ownership read
-      // syncTermForRefundedPayment makes next cannot be flipped by a
-      // replacement payment before the term is cancelled. (The restore finds
-      // the invoice by this payment's PI, i.e. only an invoice it still
-      // owns.) A restore that throws is logged above and never skips this:
-      // the sync runs regardless, as it always has, just on a read that is
-      // then not pinned by the terminal status.
+      // Annual-prepay claw-back, AFTER the credit restore on purpose (B03) and
+      // serialized with handleRefundFailed on the payment row lock: re-locks
+      // and verifies the live payment still reflects this refund before
+      // calling syncTermForRefundedPayment(lockedPayment, trx) — never passing
+      // a fabricated status that could bypass the guard after a bounce.
       try {
-        await require('./annual-prepay-renewals').syncTermForRefundedPayment(payment);
+        await db.transaction(async (trx) => {
+          if (fullRefundReverted) return;
+          await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
+          const lockedPayment = await trx('payments').where({ id: paymentId }).forUpdate().first();
+          if (!isPaymentStillRefundedFor(lockedPayment, refund.id)) {
+            fullRefundReverted = true;
+            if (await isThisRefundBouncedInTrx(trx, lockedPayment, refund.id)) thisRefundBounced = true;
+            logger.warn(`[annual-prepay] refund ${refund.id} for payment ${paymentId} no longer full-refunded before prepay sync (status=${lockedPayment?.status || 'missing'}, thisBounced=${thisRefundBounced}) — skipping coverage clawback`);
+            return;
+          }
+          await require('./annual-prepay-renewals').syncTermForRefundedPayment(lockedPayment, trx);
+        });
       } catch (syncErr) {
         logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
       }
+      // Best-effort setup-fee alert reconcile after refund + prepay claw-back (B-43).
+      // reconcileSetupFeeAlertForInvoice no-ops on null and catches its own errors.
+      await Promise.resolve()
+        .then(() => (!fullRefundReverted
+          ? require('./setup-fee-alert-reconcile').reconcileSetupFeeAlertForInvoice(refundedInvoice)
+          : undefined))
+        .catch((reconcileErr) => {
+          logger.error(`[setup-fee-reconcile] refund reconcile failed for payment ${paymentId}: ${reconcileErr.message}`);
+        });
     }
 
     let updated = null;
@@ -3976,6 +4119,14 @@ const StripeService = {
       updated = await db('payments').where({ id: paymentId }).first();
     } catch (readErr) {
       logger.warn(`[stripe] refund post-update read failed for payment ${paymentId}: ${readErr.message}`);
+    }
+    const updatedFailedIds = parsePaymentMetaSafe(updated?.metadata).failed_refund_ids;
+    if (Array.isArray(updatedFailedIds) && updatedFailedIds.includes(refund.id)) {
+      thisRefundBounced = true;
+    }
+    if (thisRefundBounced) {
+      logger.warn(`[stripe] Refund ${refund.id} for payment ${paymentId} bounced before completion — suppressing refund-issued email and surfacing bounce failure`);
+      throw new Error('This refund attempt bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
     }
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: updated?.customer_id || payment.customer_id,

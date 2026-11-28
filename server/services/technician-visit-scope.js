@@ -17,6 +17,7 @@
 const { addETDays, etDateString } = require('../utils/datetime-et');
 
 const isTechnicianRequest = (req) => req.techRole === 'technician';
+const adminOnlyFields = (req, fields) => (isTechnicianRequest(req) ? {} : fields);
 
 const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
 const TECH_ACCESS_WINDOW_DAYS = 7;
@@ -196,4 +197,4 @@ async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
   return !(await require('./payment-method-consents').autopayOptedOut(invoice.customer_id, { dbh: database }));
 }
 
-module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly };
+module.exports = { isTechnicianRequest, adminOnlyFields, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly };

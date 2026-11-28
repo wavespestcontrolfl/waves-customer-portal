@@ -250,11 +250,13 @@ function PortalReply({ item, answerByText, onSent, onCancel }) {
   const [shownByText, setShownByText] = useState(Boolean(answerByText));
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const inFlight = useRef(false);
   const requestRef = useRef(null);
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
+    if (!text || sending || inFlight.current) return;
+    inFlight.current = true;
     if (requestRef.current?.text !== text) requestRef.current = { id: uuid(), text };
     setSending(true);
     setError("");
@@ -268,6 +270,7 @@ function PortalReply({ item, answerByText, onSent, onCancel }) {
       if (err?.code === "notice_way_changed") setShownByText((shown) => !shown);
       // The service's refusals carry a code and words for staff (gone, inactive customer, empty, a changed way).
       setError(isRateLimitError(err) ? RATE_LIMITED : err?.code && err.message ? err.message : "Could not send. Try again.");
+      inFlight.current = false;
       setSending(false);
     }
   };
@@ -424,8 +427,8 @@ function OlderLine({ older, cutoff, onClosed, children }) {
 }
 
 // onCount(n): tells the page how many items are open in the last 14 days, so
-// the tab label stays in step as rows are handled.
-export default function PortalInboxTabV2({ onCount }) {
+// the tab label stays in step as rows are handled. onMutate: refreshes cross-tab badges after mutations.
+export default function PortalInboxTabV2({ onCount, onMutate }) {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState("");
@@ -481,24 +484,31 @@ export default function PortalInboxTabV2({ onCount }) {
     return next;
   });
 
-  // A handled or answered row leaves the list once. A recent row lowers the
-  // total; an older row lowers its older count.
-  const dropRow = (item) => {
+  // A handled or answered row leaves the list once. When a portal reply answers a chat or request,
+  // it also closes any sibling open portal message row for that customer server-side; drop those too.
+  const dropRow = (item, { dropCustomerMessages = false } = {}) => {
     const key = rowKey(item);
+    const customerId = dropCustomerMessages ? item.customer?.id : null;
+    const matches = (row) => rowKey(row) === key || (customerId && row.kind === "message" && row.customer?.id === customerId);
     handledSinceLoad.current += 1;
     setData((prev) => {
-      if (prev.items.some((row) => rowKey(row) === key)) {
-        return { ...prev, items: prev.items.filter((row) => rowKey(row) !== key), total: Math.max(0, prev.total - 1) };
+      if (!prev) return prev;
+      const nextItems = prev.items.filter((row) => !matches(row));
+      const droppedRecent = prev.items.length - nextItems.length;
+      const droppedOlder = prev.olderItems.filter(matches);
+      if (!droppedRecent && !droppedOlder.length) return prev;
+      const nextOlder = { ...prev.older };
+      for (const row of droppedOlder) {
+        const field = OLDER_FIELD[row.kind];
+        nextOlder[field] = Math.max(0, (nextOlder[field] || 0) - 1);
       }
-      if (prev.olderItems.some((row) => rowKey(row) === key)) {
-        const field = OLDER_FIELD[item.kind];
-        return {
-          ...prev,
-          olderItems: prev.olderItems.filter((row) => rowKey(row) !== key),
-          older: { ...prev.older, [field]: Math.max(0, (prev.older[field] || 0) - 1) },
-        };
-      }
-      return prev;
+      return {
+        ...prev,
+        items: nextItems,
+        total: Math.max(0, prev.total - droppedRecent),
+        olderItems: droppedOlder.length ? prev.olderItems.filter((row) => !matches(row)) : prev.olderItems,
+        older: nextOlder,
+      };
     });
   };
 
@@ -522,6 +532,7 @@ export default function PortalInboxTabV2({ onCount }) {
         return;
       }
       dropRow(item);
+      onMutate?.();
     } catch (err) {
       // A booking bell's Done answers 409 when the bell changed after this list loaded.
       const changed = item.kind === "booking" && err?.status === 409;
@@ -540,10 +551,11 @@ export default function PortalInboxTabV2({ onCount }) {
     if (href) navigate(href);
   };
   const openCustomer = (item) => navigate(`/admin/customers?customerId=${encodeURIComponent(item.customer.id)}`);
-  // An answer saved in the portal closes the item it answers.
+  // An answer saved in the portal closes the item it answers and any sibling open portal message for that customer.
   const sent = (item, res) => {
-    dropRow(item);
+    dropRow(item, { dropCustomerMessages: item.kind !== "message" });
     setSentNote(noticeLine(customerName(item.customer), res?.notice));
+    onMutate?.();
   };
 
   return (
@@ -560,8 +572,9 @@ export default function PortalInboxTabV2({ onCount }) {
         <p className="text-14 text-zinc-900" role="status" data-testid="portal-sent-note">{sentNote}</p>
       )}
       {loadError && (
-        <div role="alert" className="flex items-center gap-2 text-14 text-alert-fg bg-alert-bg border-hairline border-alert-fg/30 rounded-md px-3 py-2">
-          <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {loadError}
+        <div role="alert" className="flex items-center justify-between gap-2 text-14 text-alert-fg bg-alert-bg border-hairline border-alert-fg/30 rounded-md px-3 py-2">
+          <span className="flex items-center gap-2"><AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {loadError}</span>
+          <Button type="button" density="comfortable" variant="secondary" onClick={load}>Retry</Button>
         </div>
       )}
       <Card>
@@ -592,7 +605,7 @@ export default function PortalInboxTabV2({ onCount }) {
             </div>
           ) : null}
           {data && (
-            <OlderLine older={data.older} cutoff={data.cutoff} onClosed={() => setData((prev) => ({ ...prev, olderItems: [], older: { chats: 0, requests: 0, bookings: 0, ...(prev.older.messages !== undefined ? { messages: 0 } : {}) } }))}>
+            <OlderLine older={data.older} cutoff={data.cutoff} onClosed={() => { setData((prev) => ({ ...prev, olderItems: [], older: { chats: 0, requests: 0, bookings: 0, ...(prev.older.messages !== undefined ? { messages: 0 } : {}) } })); onMutate?.(); }}>
               {data.olderItems.length > 0 && (
                 <div className="mt-4">
                   {olderTotal(data.older) > data.olderItems.length && (

@@ -98,7 +98,7 @@ async function nextPlanVisitDate(conn, row, date, { requireServiceAndProperty = 
   // no date; the office preview keeps its established series-only lookup.
   if (requireServiceAndProperty && (!row.service_id || !row.property_id)) return null;
   const rootId = row.recurring_parent_id || row.id;
-  const query = conn('scheduled_services')
+  const query = require('./visit-hold').excludeHeld(conn('scheduled_services'), 'scheduled_services')
     .where(function seriesRows() { this.where('recurring_parent_id', rootId).orWhere('id', rootId); })
     .whereIn('status', SKIPPABLE_FROM_STATUSES)
     .where('scheduled_date', '>', date)

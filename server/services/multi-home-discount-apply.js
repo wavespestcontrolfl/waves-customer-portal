@@ -661,7 +661,8 @@ async function sameProfileOtherHome(trx, { source, target, estimate }) {
 async function sameLiveFamily(trx, { source, target }) {
   const rows = await trx(FAMILY_TABLE).whereIn('customer_id', [source.customerId, target.customerId]).select('customer_id', 'family_id');
   if (rows.length !== 2 || String(rows[0].family_id) !== String(rows[1].family_id)) return false;
-  return familyMultiHomeEligible(trx, source.customerId);
+  return (await familyMultiHomeEligible(trx, source.customerId))
+    && (await familyMultiHomeEligible(trx, target.customerId));
 }
 
 // The source estimate still has a live plan visit (the same plan-row test and allow-list describeSource uses).
@@ -865,7 +866,7 @@ async function settleTarget(dbh, source, target, result, now, out) {
 
 async function targetsForSource(dbh, source, today) {
   const family = await familyMembers(dbh, source.customerId);
-  const familyIds = family.members.filter((m) => !m.isSelf && m.active).map((m) => m.id);
+  const familyIds = family.members.filter((m) => !m.isSelf && m.qualifies).map((m) => m.id);
   const customerIds = [source.customerId, ...familyIds];
   const series = await loadCandidateSeries(dbh, customerIds, today);
   const schedule = require('../routes/admin-schedule');

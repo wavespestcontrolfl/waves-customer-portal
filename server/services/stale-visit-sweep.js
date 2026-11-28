@@ -51,10 +51,17 @@ async function findStaleVisits(now = new Date()) {
   // floor on purpose: same-day misses belong to the 6PM checker; by this
   // sweep's definition every match is at least a day past.
   const today = etDateString(now);
-  return require('./visit-hold').excludeHeld(db('scheduled_services')
+  const { heldVisitSubquery } = require('./street-level-hold');
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
+  const rows = await require('./visit-hold').excludeHeld(db('scheduled_services')
     .whereIn('status', OPEN_STATUSES), 'scheduled_services')
     .where('scheduled_date', '<', today)
+    .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at'))
+    .whereNotExists(function unclearedAddressHold() {
+      heldVisitSubquery(this, 'scheduled_services');
+    })
     .select('id', 'status', 'scheduled_date', 'customer_id');
+  return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
 }
 
 // Plain DATE columns come back from pg as Date objects — normalize to the

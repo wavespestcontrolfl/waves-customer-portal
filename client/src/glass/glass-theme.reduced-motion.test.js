@@ -39,4 +39,13 @@ describe('glass theme under Reduce Motion', () => {
     expect(css).toMatch(/html\[data-glass-theme\] \{[^}]*scroll-behavior: smooth;/);
     expect(pageWide).toMatch(/html\[data-glass-theme\],\s*html\[data-glass-theme\] \* \{\s*scroll-behavior: auto !important;/);
   });
+
+  it('includes summary in focus-visible and solid fallbacks for report tiles and scrims', () => {
+    expect(css).toMatch(/html\[data-glass-theme\] :is\([^\n]*\bsummary\b[^\n]*\):focus-visible/);
+    expect(css).toMatch(/@supports not \(\(backdrop-filter: blur\(1px\)\)[\s\S]*?html\[data-glass-theme\] \.sr-cell/);
+    expect(css).toMatch(/@media \(prefers-reduced-transparency: reduce\)[\s\S]*?html\[data-glass-theme\] \.sr-cell/);
+    expect(css).toMatch(/@media \(prefers-reduced-transparency: reduce\)[\s\S]*?html\[data-glass-theme\] \[data-glass-scrim\]/);
+    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*?html\[data-glass-theme\] \.sr-cell/);
+    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*?html\[data-glass-theme\] \[data-glass-scrim\]/);
+  });
 });

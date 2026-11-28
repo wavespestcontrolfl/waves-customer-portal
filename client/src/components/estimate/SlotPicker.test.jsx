@@ -6,11 +6,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SlotPicker from './SlotPicker';
 import { setGlassDefault } from '../../lib/estimate-glass-copy';
 
-// A bare trigger for the date search: it hands the picker's onSearch a query.
+// A bare trigger for the date search: it hands the picker's onSearch a query
+// and stamps each mount with a monotonic id so remounts (key resets) are observable.
+let searchMountSeq = 0;
 vi.mock('../booking/WavesAIScheduleSearch', async () => {
-  const { createElement } = await import('react');
+  const { createElement, useRef } = await import('react');
   return {
-    default: ({ onSearch }) => createElement('button', { type: 'button', onClick: () => onSearch('next week').catch(() => {}) }, 'run-date-search'),
+    default: ({ onSearch }) => {
+      const mountIdRef = useRef(null);
+      if (mountIdRef.current === null) mountIdRef.current = ++searchMountSeq;
+      return createElement('button', {
+        type: 'button',
+        'data-search-mount': String(mountIdRef.current),
+        onClick: () => onSearch('next week').catch(() => {}),
+      }, 'run-date-search');
+    },
   };
 });
 
@@ -889,5 +899,160 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: '2099-10-20' } });
       await waitFor(() => expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument());
     });
+  });
+});
+
+describe('SlotPicker Phase 1 — full calendarSlots, AI search race/reset, and load retry', () => {
+  it('opens every day in calendarSlots on the grid while keeping the top-3 best times curated', async () => {
+    const curated = [
+      slot('c-1', '2099-06-01', { windowStart: '09:00' }),
+      slot('c-2', '2099-06-02', { windowStart: '10:00' }),
+      slot('c-3', '2099-06-03', { windowStart: '11:00' }),
+    ];
+    const extraCalendarOnly = slot('cal-only-day10', '2099-06-10', { windowStart: '13:00', routeOptimal: false });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({
+      primary: curated,
+      expander: [],
+      calendarSlots: [...curated, extraCalendarOnly],
+      metadata: { dateFrom: '2099-06-01', dateTo: '2099-06-14', windowDays: 14 },
+    })));
+    const onSelect = vi.fn();
+    render(
+      <SlotPicker token="tok" selectedSlotId={null} onSelect={onSelect} refreshSignal={0} />,
+    );
+    await screen.findByText('Monday, June 1');
+    expect(screen.getAllByRole('button', { name: /Pick/ })).toHaveLength(3);
+    const day10 = screen.getByRole('option', { name: /Wednesday, June 10, 1 opening/ });
+    expect(day10).toBeEnabled();
+    fireEvent.click(day10);
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Wednesday, June 10/ }));
+    expect(onSelect).toHaveBeenLastCalledWith('cal-only-day10');
+  });
+
+  it('ignores a slow AI search that resolves after Clear search or picking a date, and remounts the search widget on Clear', async () => {
+    const slowSearch = deferred();
+    const initialYmd = ymdFromToday(3);
+    const pickedYmd = ymdFromToday(10);
+    const staleYmd = ymdFromToday(7);
+    const dayLabel = (ymd) => new Date(`${ymd}T12:00:00`)
+      .toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    const fetchMock = vi.fn((url, init) => {
+      if (init?.method === 'POST') return slowSearch.promise;
+      if (String(url).includes(`date=${pickedYmd}`)) {
+        return Promise.resolve(jsonResponse({
+          primary: [slot('picked-day', pickedYmd, { windowStart: '14:00' })],
+          expander: [],
+        }));
+      }
+      return Promise.resolve(jsonResponse({
+        primary: [slot('initial-1', initialYmd, { windowStart: '09:00' })],
+        expander: [],
+      }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const onSelect = vi.fn();
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={onSelect} refreshSignal={0} />);
+    await screen.findByText(dayLabel(initialYmd));
+
+    // Fire slow AI search, then supersede it by picking a specific date before it resolves.
+    const searchBtnBefore = screen.getByRole('button', { name: 'run-date-search' });
+    const mountBefore = searchBtnBefore.getAttribute('data-search-mount');
+    fireEvent.click(searchBtnBefore);
+    fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: pickedYmd } });
+    await screen.findByText(dayLabel(pickedYmd));
+    // Even while the first AI search is still in flight (searchData === null),
+    // picking a date immediately remounts the search widget so it cannot stay disabled.
+    const mountAfterPick = screen.getByRole('button', { name: 'run-date-search' }).getAttribute('data-search-mount');
+    expect(Number(mountAfterPick)).toBeGreaterThan(Number(mountBefore));
+
+    // Now the stale AI search returns: it must NOT overwrite the picked day.
+    await act(async () => {
+      slowSearch.resolve(jsonResponse({
+        summary: 'Old search result',
+        primary: [slot('stale-ai', staleYmd, { windowStart: '08:00' })],
+        expander: [],
+      }));
+    });
+    expect(screen.getByText(dayLabel(pickedYmd))).toBeInTheDocument();
+    expect(screen.queryByText(dayLabel(staleYmd))).not.toBeInTheDocument();
+
+    // Clicking "Clear search" remounts WavesAIScheduleSearch (fresh key) so input/summary reset.
+    fireEvent.click(screen.getByRole('button', { name: /Clear search/i }));
+    await screen.findByText(dayLabel(initialYmd));
+    const mountAfter = screen.getByRole('button', { name: 'run-date-search' }).getAttribute('data-search-mount');
+    expect(Number(mountAfter)).toBeGreaterThan(Number(mountBefore));
+  });
+
+  it('shows a working Try again button when the initial availability fetch fails', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 500 })
+      .mockResolvedValueOnce(jsonResponse({ primary: [slot('recovered', '2099-06-02', { windowStart: '10:00' })], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
+    expect(await screen.findByText(/Couldn't load times right now/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Tuesday, June 2')).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears pickedLoading immediately when an AI search supersedes a pending date pick and then fails', async () => {
+    const pendingDate = deferred();
+    const initialYmd = ymdFromToday(3);
+    const pickedYmd = ymdFromToday(10);
+    const dayLabel = (ymd) => new Date(`${ymd}T12:00:00`)
+      .toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    const fetchMock = vi.fn((url, init) => {
+      if (init?.method === 'POST') return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'search failed' }) });
+      if (String(url).includes(`date=${pickedYmd}`)) return pendingDate.promise;
+      return Promise.resolve(jsonResponse({ primary: [slot('initial-1', initialYmd, { windowStart: '09:00' })], expander: [] }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
+    await screen.findByText(dayLabel(initialYmd));
+
+    // Start a slow date pick so the picker enters "Loading times…".
+    fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: pickedYmd } });
+    expect(await screen.findByText(/Loading times/)).toBeInTheDocument();
+
+    // Supersede it with an AI search that fails: "Loading times…" and the superseded date must clear right away.
+    fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
+    await waitFor(() => expect(screen.queryByText(/Loading times/)).not.toBeInTheDocument());
+    expect(screen.getByLabelText(/pick one that works for you/i)).toHaveValue('');
+    expect(screen.getByText(dayLabel(initialYmd))).toBeInTheDocument();
+  });
+
+  it('ignores a stale 409 refusal from a superseded date pick after a newer AI search starts', async () => {
+    const staleDate = deferred();
+    const initialYmd = ymdFromToday(3);
+    const pickedYmd = ymdFromToday(10);
+    const searchYmd = ymdFromToday(5);
+    const dayLabel = (ymd) => new Date(`${ymd}T12:00:00`)
+      .toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    const onRefusal = vi.fn(() => true);
+    const fetchMock = vi.fn((url, init) => {
+      if (init?.method === 'POST') {
+        return Promise.resolve(jsonResponse({
+          summary: 'Found 1 time',
+          primary: [slot('ai-slot', searchYmd, { windowStart: '11:00' })],
+          expander: [],
+        }));
+      }
+      if (String(url).includes(`date=${pickedYmd}`)) return staleDate.promise;
+      return Promise.resolve(jsonResponse({ primary: [slot('initial-1', initialYmd, { windowStart: '09:00' })], expander: [] }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onRefusal={onRefusal} />);
+    await screen.findByText(dayLabel(initialYmd));
+
+    fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: pickedYmd } });
+    fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
+    await screen.findByText(dayLabel(searchYmd));
+
+    // Late 409 from the superseded date request must NOT trigger onRefusal.
+    await act(async () => {
+      staleDate.resolve({ ok: false, status: 409, json: async () => ({ code: 'PLAN_START_STATE_CHANGED', error: 'changed' }) });
+    });
+    expect(onRefusal).not.toHaveBeenCalled();
+    expect(screen.getByText(dayLabel(searchYmd))).toBeInTheDocument();
   });
 });

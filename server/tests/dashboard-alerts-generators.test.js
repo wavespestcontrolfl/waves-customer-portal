@@ -9,7 +9,13 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   info: jest.fn(),
 }));
-jest.mock('../services/mrr-breakdown', () => ({ listAtRiskMrrAccounts: jest.fn() }));
+jest.mock('../services/mrr-breakdown', () => {
+  const actual = jest.requireActual('../services/mrr-breakdown');
+  return {
+    listAtRiskMrrAccounts: jest.fn(),
+    whereRecurringPlanCustomer: actual.whereRecurringPlanCustomer,
+  };
+});
 jest.mock('../services/closeout-alerts', () => {
   const actual = jest.requireActual('../services/closeout-alerts');
   return { ...actual, loadCloseoutStatuses: jest.fn(async () => new Map()) };
@@ -271,6 +277,7 @@ describe('Action Inbox generators', () => {
     expect(alerts.find((a) => a.id === 'estimate_drafts_unsent')).toEqual({
       id: 'estimate_drafts_unsent',
       kind: 'action',
+      tier: 'urgent',
       severity: 'warn',
       count: 2,
       members: ['draft-a', 'draft-b'],
@@ -384,37 +391,61 @@ describe('Action Inbox generators', () => {
     expect(alerts.find((a) => a.id === 'at_risk_mrr')).toBeUndefined();
   });
 
-  test('autopay_coverage_low: fires below the 50% target with the manual-pay count', async () => {
-    primeDb({
-      customers: { c: '100' },
-      'customers as c': { c: '23' },
+  const recurringAutopayResult = ({ base, covered }) => (calls) => {
+    const isCovered = calls.some((c) => c.method === 'whereRaw' && String(c.args[0]).includes('autopay_enabled'));
+    return { c: String(isCovered ? covered : base) };
+  };
+
+  test('autopay_coverage_low: fires below the 50% target on recurring plans as a standing alert', async () => {
+    const capture = primeDb({
+      'customers as c': recurringAutopayResult({ base: 100, covered: 23 }),
     });
     const { alerts } = await computeDashboardAlertsUncached();
     const item = alerts.find((a) => a.id === 'autopay_coverage_low');
-    expect(item).toMatchObject({ kind: 'action', severity: 'warn', count: 77 });
-    expect(item.label).toContain('Autopay covers 23%');
+    expect(item).toMatchObject({ kind: 'action', tier: 'standing', severity: 'warn', count: 77 });
+    expect(item.label).toContain('Autopay covers 23% of recurring plans — 77 without chargeable autopay');
+    expect(item.label).not.toContain('billed manually');
+    // Recurring-plan scope matches computeRecurringPlans (monthly_rate > 0 + WaveGuard tier, no stage mismatch).
+    const recurringCalls = capture.filter((c) => c.table === 'customers as c');
+    expect(recurringCalls.some((c) => c.method === 'where' && c.args[0] === 'c.monthly_rate' && c.args[1] === '>' && c.args[2] === 0)).toBe(true);
+    expect(recurringCalls.some((c) => c.method === 'whereRaw' && String(c.args[0]).includes('waveguard_tier'))).toBe(true);
+    expect(recurringCalls.some((c) => c.method === 'whereIn' && c.args[0] === 'c.pipeline_stage')).toBe(false);
   });
 
   test('autopay_coverage_low: thresholds on the raw ratio — 49.9% must fire, not round up to 50 and skip', async () => {
     primeDb({
-      customers: { c: '1000' },
-      'customers as c': { c: '499' },
+      'customers as c': recurringAutopayResult({ base: 1000, covered: 499 }),
     });
     const { alerts } = await computeDashboardAlertsUncached();
     const item = alerts.find((a) => a.id === 'autopay_coverage_low');
-    expect(item).toMatchObject({ kind: 'action', count: 501 });
+    expect(item).toMatchObject({ kind: 'action', tier: 'standing', count: 501 });
     // Label shows the tile's one-decimal form, never a rounded-up 50.
-    expect(item.label).toContain('Autopay covers 49.9%');
+    expect(item.label).toContain('Autopay covers 49.9% of recurring plans');
   });
 
   test('autopay_coverage_low: silent at/above target and on an empty base', async () => {
-    primeDb({ customers: { c: '100' }, 'customers as c': { c: '60' } });
+    primeDb({ 'customers as c': recurringAutopayResult({ base: 100, covered: 60 }) });
     let { alerts } = await computeDashboardAlertsUncached();
     expect(alerts.find((a) => a.id === 'autopay_coverage_low')).toBeUndefined();
 
-    primeDb({ customers: { c: '0' }, 'customers as c': { c: '0' } });
+    primeDb({ 'customers as c': recurringAutopayResult({ base: 0, covered: 0 }) });
     ({ alerts } = await computeDashboardAlertsUncached());
     expect(alerts.find((a) => a.id === 'autopay_coverage_low')).toBeUndefined();
+  });
+
+  test('tier splits standing health alerts from urgent operational fires', async () => {
+    db.raw.mockImplementation((sql) => ({
+      sql,
+      rows: sql.includes('FROM customer_health_scores') ? [{ c: '4' }] : [],
+    }));
+    primeDb({
+      payments: { count: '1' },
+      'customers as c': recurringAutopayResult({ base: 10, covered: 2 }),
+    });
+    const { alerts } = await computeDashboardAlertsUncached();
+    expect(alerts.find((a) => a.id === 'payments_failed_today')?.tier).toBe('urgent');
+    expect(alerts.find((a) => a.id === 'churn_at_risk')?.tier).toBe('standing');
+    expect(alerts.find((a) => a.id === 'autopay_coverage_low')?.tier).toBe('standing');
   });
 
   test('closeout_gaps_today: warn action over today\'s completed visits with open closeout issues; unknown/not_required never count', async () => {

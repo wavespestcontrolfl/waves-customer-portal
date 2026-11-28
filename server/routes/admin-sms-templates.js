@@ -261,8 +261,8 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /issues — recent SMS template render issues from audit_log.
-router.get('/issues', async (req, res, next) => {
+// GET /issues — recent SMS template render issues from audit_log (admin-only: cross-customer audit rows).
+router.get('/issues', requireAdmin, async (req, res, next) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 100);
     if (!(await db.schema.hasTable('audit_log'))) return res.json({ issues: [] });

@@ -8581,7 +8581,9 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
     if (!area) return;
     const primary = (body && body.primary) || [];
     const expander = (body && body.expander) || [];
-    const all = primary.concat(expander);
+    const all = (body && Array.isArray(body.calendarSlots) && body.calendarSlots.length)
+      ? body.calendarSlots
+      : primary.concat(expander);
     if (!all.length) {
       area.innerHTML = '<div class="booking-state">No open times then. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll fit you in.</div>';
       return;
@@ -20810,7 +20812,7 @@ function savedFloorReplayOverrides(estData) {
   // estimate tool prices today's bottle. An estimate that kept only its engine inputs has no stored row, so no pin: it prices
   // today's bottle, as the termite station, misting and tree and shrub pins above do without their stored rows. On 2026-11-19 no
   // open sent or viewed estimate held a slab or trench service (migration 20261119020000).
-  Object.assign(overrides, { preSlabTermiticidePricingKnobs: undefined, trenchingTermiticidePricingKnobs: undefined },
+  Object.assign(overrides, { preSlabTermiticidePricingKnobs: undefined, trenchingTermiticidePricingKnobs: undefined, boraCarePricingKnobs: undefined },
     require('../services/estimate-tree-shrub-knob-replay').termiticideReplayOverrides(estData));
   // Whole-home exclusion quote-time minimum and renewal price (GATE_EXCLUSION_WHOLE_HOME): set even when EMPTY
   // (undefined), like the pins below, so a value stored inside the browser-controlled inputs is neutralized.

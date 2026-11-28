@@ -1845,7 +1845,7 @@ describe('revertMerge', () => {
     // Codex #5503 r2: both customers' dunning keys (customer-dunning/merge.js,
     // sorted) come first of all, as in executeMerge — every dunning path takes
     // that key first in a fresh transaction, so the order cannot invert.
-    expect(state.rawCalls.length).toBeGreaterThanOrEqual(5);
+    expect(state.rawCalls.length).toBeGreaterThanOrEqual(6);
     const sortedParties = [WINNER, LOSER].map(String).sort();
     state.rawCalls.slice(0, 2).forEach(([sql, bindings], i) => {
       expect(String(sql)).toContain('pg_advisory_xact_lock(hashtext(?))');
@@ -1855,7 +1855,9 @@ describe('revertMerge', () => {
       expect(String(sql)).toContain('pg_advisory_xact_lock');
       expect(bindings).toEqual(['collections_case', sortedParties[i]]);
     });
-    const [sql, bindings] = state.rawCalls[4];
+    expect(String(state.rawCalls[4][0])).toContain('pg_advisory_xact_lock');
+    expect(state.rawCalls[4][1]).toEqual(['multi_home_family_members:changes']);
+    const [sql, bindings] = state.rawCalls[5];
     expect(String(sql)).toContain('pg_advisory_xact_lock');
     expect(bindings).toEqual([`customer-comms:${WINNER}`]);
   });

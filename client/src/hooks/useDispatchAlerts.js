@@ -126,11 +126,16 @@ export function bumpOrderTieBreak(a, b) {
 
 export function useDispatchAlerts() {
   const [alerts, setAlerts] = useState([]);
+  const [total, setTotal] = useState(0);
   // Mirror for socket handlers (type / tech_id of a card being resolved —
   // the resolved broadcast carries only the id) and the ids seen resolving.
   const alertsRef = useRef(alerts);
   alertsRef.current = alerts;
   const resolvedIdsRef = useRef(new Set());
+  const resolvedCountRef = useRef(0);
+  const addedSinceRef = useRef(new Map());
+  const totalRef = useRef(0);
+  const requestResyncRef = useRef(null);
   // Reconcile bookkeeping. broadcastCountRef counts handled dispatch:alert
   // broadcasts; changedAtRef maps id -> the count at that card's latest one.
   // A read notes the count before its fetch: a card whose entry is higher was
@@ -147,9 +152,13 @@ export function useDispatchAlerts() {
   // card change to the drawer, then drops the cards.
   const markResolved = useCallback((ids) => {
     const gone = new Set(ids);
-    if (!gone.size) return;
+    if (!gone.size) return 0;
+    let newlyResolved = 0;
     for (const id of gone) {
-      resolvedIdsRef.current.add(id);
+      if (!resolvedIdsRef.current.has(id)) {
+        newlyResolved += 1;
+        resolvedIdsRef.current.add(id);
+      }
       changedAtRef.current.delete(id);
       const known = alertsRef.current.find((a) => a.id === id);
       // A card this board never saw (resolved before hydration landed) could
@@ -158,7 +167,15 @@ export function useDispatchAlerts() {
       if (known) relayTechOutAlertChange(known);
       else relayTechOutAlertChange({ type: TECH_OUT_ALERT_TYPE, tech_id: null });
     }
+    const nextAlerts = alertsRef.current.filter((a) => !gone.has(a.id));
+    alertsRef.current = nextAlerts;
+    resolvedCountRef.current += newlyResolved;
+    const nextTotal = Math.max(nextAlerts.length, totalRef.current - newlyResolved);
+    totalRef.current = nextTotal;
     setAlerts((prev) => prev.filter((a) => !gone.has(a.id)));
+    if (newlyResolved > 0) setTotal((t) => Math.max(nextAlerts.length, t - newlyResolved));
+    if (newlyResolved > 0 && nextTotal > nextAlerts.length) requestResyncRef.current?.();
+    return newlyResolved;
   }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -169,6 +186,7 @@ export function useDispatchAlerts() {
   const hydrate = useCallback(async (isCancelled = () => false) => {
     const seq = ++readSeqRef.current;
     const countAtStart = broadcastCountRef.current;
+    const resolvedAtStart = resolvedCountRef.current;
     const res = await fetch(
       `${API_BASE}/admin/dispatch/alerts?unresolved=true`,
       { headers: adminAuthHeaders() }
@@ -180,8 +198,22 @@ export function useDispatchAlerts() {
     if (seq < appliedSeqRef.current) return;
     appliedSeqRef.current = seq;
     const fetched = Array.isArray(data.alerts) ? data.alerts : [];
+    const fetchedIds = new Set(fetched.map((a) => a.id));
+    const serverTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : fetched.length;
+    const resolvedDuringRead = resolvedCountRef.current - resolvedAtStart;
+    const addedNotInResponse = [...addedSinceRef.current.entries()]
+      .filter(([id, addedAt]) => addedAt > countAtStart && !fetchedIds.has(id) && !resolvedIdsRef.current.has(id))
+      .length;
     const changedSinceRead = (id) => (changedAtRef.current.get(id) || 0) > countAtStart;
+    const merged = mergeHydration(alertsRef.current, fetched, resolvedIdsRef.current, changedSinceRead);
+    alertsRef.current = merged;
+    const nextTotal = Math.max(merged.length, serverTotal + addedNotInResponse - resolvedDuringRead);
+    totalRef.current = nextTotal;
     setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current, changedSinceRead));
+    setTotal(nextTotal);
+    if (serverTotal > fetched.length && (resolvedDuringRead > 0 || broadcastCountRef.current > countAtStart)) {
+      requestResyncRef.current?.();
+    }
     setError(null);
     setLoading(false);
   }, []);
@@ -262,6 +294,7 @@ export function useDispatchAlerts() {
       if (mountedRef.current) runResync();
     }, RESYNC_DEBOUNCE_MS);
   }, [runResync]);
+  requestResyncRef.current = requestResync;
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -300,11 +333,27 @@ export function useDispatchAlerts() {
       if (payload.resolved_at || resolvedIdsRef.current.has(payload.id)) return;
       broadcastCountRef.current += 1;
       changedAtRef.current.set(payload.id, broadcastCountRef.current);
+      const wasPresent = alertsRef.current.some((a) => a.id === payload.id);
+      const nextAlerts = mergeAlertBroadcast(alertsRef.current, payload, resolvedIdsRef.current);
+      const nextLen = nextAlerts.length;
+      alertsRef.current = nextAlerts;
       setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
+      if (!wasPresent) {
+        addedSinceRef.current.set(payload.id, broadcastCountRef.current);
+        totalRef.current = Math.max(nextLen, totalRef.current + 1);
+        setTotal((t) => Math.max(nextLen, t + 1));
+      }
       relayTechOutAlertChange(payload);
-      // The broadcast is the bare row. A "Visit not closed out" card is told apart
-      // by its customer, which only the queue read joins in: re-read for it.
-      if (payload.type === 'visit_not_closed_out' && !payload.customer_first_name) hydrate().catch(() => {});
+      // The socket broadcast carries only the bare dispatch_alerts row (no
+      // joined tech_name / customer / address). Hydrate immediately for
+      // visit_not_closed_out, and schedule a debounced resync for any other
+      // alert missing joined context so newly arriving cards display names &
+      // addresses instead of raw IDs (P2).
+      if (payload.type === 'visit_not_closed_out' && !payload.customer_first_name) {
+        hydrate().catch(() => {});
+      } else if ((payload.tech_id && !payload.tech_name) || (payload.job_id && !payload.customer_first_name && !payload.address)) {
+        requestResync();
+      }
     }
 
     function handleResolved(payload) {
@@ -347,8 +396,9 @@ export function useDispatchAlerts() {
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     markResolved([id]);
+    if (total > alertsRef.current.length) requestResync();
     return res.json();
-  }, [markResolved]);
+  }, [markResolved, requestResync, total]);
 
   const clearAlerts = useCallback(async () => {
     const res = await fetch(
@@ -358,8 +408,9 @@ export function useDispatchAlerts() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     markResolved(Array.isArray(data.alert_ids) ? data.alert_ids : []);
+    requestResync();
     return data;
-  }, [markResolved]);
+  }, [markResolved, requestResync]);
 
   // The dispatcher's call on a "Visit not closed out" card: 'confirm_miss'
   // ("This was a miss"), 'dismiss' ("Not a miss") or 'done' (a confirmed miss
@@ -392,6 +443,7 @@ export function useDispatchAlerts() {
 
   return {
     alerts,
+    total,
     loading,
     error,
     retryAlerts,

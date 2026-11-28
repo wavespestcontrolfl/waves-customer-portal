@@ -465,7 +465,7 @@ router.get('/jobs', async (req, res) => {
 });
 
 // POST /api/dispatch/jobs/:id/score
-router.post('/jobs/:id/score', async (req, res) => {
+router.post('/jobs/:id/score', requireAdmin, async (req, res) => {
   try {
     const jobs = await canonicalJobs({ date: req.body?.date });
     const target = jobs.find((row) => row.id === req.params.id);
@@ -477,7 +477,7 @@ router.post('/jobs/:id/score', async (req, res) => {
 });
 
 // POST /api/dispatch/match/simulate
-router.post('/match/simulate', async (req, res) => {
+router.post('/match/simulate', requireAdmin, async (req, res) => {
   try {
     const { serviceType, zip, jobCategory: category } = req.body || {};
     const techs = await activeTechs();
@@ -488,7 +488,7 @@ router.post('/match/simulate', async (req, res) => {
 });
 
 // GET /api/dispatch/techs
-router.get('/techs', async (req, res) => {
+router.get('/techs', requireAdmin, async (req, res) => {
   try {
     res.json(await activeTechs());
   } catch (err) {
@@ -497,7 +497,7 @@ router.get('/techs', async (req, res) => {
 });
 
 // POST /api/dispatch/csr/slots
-router.post('/csr/slots', async (req, res) => {
+router.post('/csr/slots', requireAdmin, async (req, res) => {
   try {
     const { scenario = 'urgent' } = req.body || {};
     const config = SCENARIOS[scenario] || SCENARIOS.urgent;
@@ -519,7 +519,7 @@ router.get('/insights', requireAdmin, async (req, res) => {
 });
 
 // POST /api/dispatch/sync
-router.post('/sync', async (req, res) => {
+router.post('/sync', requireAdmin, async (req, res) => {
   res.json({
     ok: true,
     synced: 0,
