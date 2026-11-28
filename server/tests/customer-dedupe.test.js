@@ -1477,13 +1477,19 @@ describe('executeMerge', () => {
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
     const { trx } = buildTrx({ winner, loser, fkRows: [{ table_name: 'invoices', column_name: 'customer_id' }] });
     db.transaction.mockImplementation(async (fn) => fn(trx));
-    // The first savepoint is the loser's pin-suggestion retire (stubbed to succeed); every later one is the FK sweep's.
     const pins = jest.spyOn(require('../services/customer-pin-suggestions'), 'retireOnMerge').mockResolvedValue(0);
-    let savepoints = 0;
     trx.transaction = jest.fn(async (fn) => {
-      savepoints += 1;
-      if (savepoints === 1) return fn(trx);
-      const e = new Error('boom'); e.code = '23505'; throw e;
+      const wrappedSp = (table, ...rest) => {
+        const q = trx(table, ...rest);
+        if (table === 'invoices' && q && typeof q.update === 'function') {
+          q.update = async () => {
+            const e = new Error('boom'); e.code = '23505'; throw e;
+          };
+        }
+        return q;
+      };
+      Object.assign(wrappedSp, trx);
+      return fn(wrappedSp);
     });
     try {
       await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
