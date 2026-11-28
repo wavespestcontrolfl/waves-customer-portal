@@ -301,20 +301,42 @@ function stripNegatedAndHistorical(text, termPattern) {
   return text.replace(negRe, ' ').replace(histLeadRe, ' ').replace(histTailRe, ' ');
 }
 
+const RODENT_EXCLUSION_CUE_RE = /\b(?:exclu(?:sion|de)|seal(?:ing|ed)?|entry\s*(?:holes?|points?)|plug(?:ging)?|wire\s*mesh|sanitation|inspect(?:ion)?)\b/i;
+const RODENT_TRAP_CUE_RE = /\b(?:trap(?:s|ping|ped)?|bait\s*stations?|monitor(?:ing)?)\b/i;
+const FREQUENCY_ONLY_PEST_RE = /\b(?:one[- ]?time|single\s+treatment|just\s+once)\b/i;
+
+function rodentKeysForText(cleaned) {
+  if (RODENT_EXCLUSION_CUE_RE.test(cleaned)) {
+    return { keys: ['rodent_exclusion', 'rodent_inspection', 'rodent_control', 'rodent_trapping'], line: 'exclusion' };
+  }
+  if (RODENT_TRAP_CUE_RE.test(cleaned)) {
+    return { keys: ['rodent_trapping', 'rodent_bait_station_program', 'rodent_control'], line: 'rodent' };
+  }
+  return { keys: ['rodent_inspection', 'rodent_control', 'rodent_exclusion', 'rodent_trapping'], line: 'exclusion' };
+}
+
+const GENERAL_PEST_CUE = Object.freeze({
+  term: 'one[- ]?time\\s+(?:pest(?:\\s+control)?|bug|spray)|ghost\\s*ants?|sugar\\s*ants?|ants?|spiders?|palmetto\\s+bugs?|silverfish|earwigs?|general\\s+pest|pest\\s+control',
+  keys: ['one_time_pest', 'pest_control', 'quarterly_pest'],
+  nameRe: /\b(?:one[- ]time\s+pest|pest\s+control)\b/i,
+  funnelKey: 'pest_control',
+  serviceLine: 'general',
+});
+
 const CATALOG_CUES = Object.freeze([
   { term: 'wdo|wood[\\s-]+destroying|real[\\s-]+estate\\s+inspection|closing\\s+inspection|termite\\s+letter', keys: ['wdo_inspection', 'lawn_inspection'], nameRe: /\b(?:wdo|assessment)\b/i, funnelKey: 'termite', serviceLine: 'termite' },
   { term: 'german\\s+(?:cock)?roach(?:es)?|cockroach(?:es)?|roach(?:es)?', stripPalmetto: true, keys: ['cockroach_control', 'one_time_pest'], nameRe: /\b(?:cockroach|one[- ]time\s+pest)\b/i, funnelKey: 'pest_control', serviceLine: 'general' },
   { term: 'wasp(?:s|\\s*nest)?|hornets?|yellow\\s*jackets?|bee\\s*nest|beehives?|stinging\\s+insects?', keys: ['bee_wasp_nest_removal', 'stinging_insect'], nameRe: /\b(?:wasp|bee|hornet|nest)\b/i, funnelKey: 'pest_control', serviceLine: 'general' },
   { term: 'bed\\s*bugs?', keys: ['bed_bug_treatment', 'bed_bug'], nameRe: /\bbed\s*bug/i, funnelKey: 'pest_control', serviceLine: 'general' },
   { term: 'fleas?|ticks?', keys: ['flea_treatment', 'flea_tick'], nameRe: /\bflea/i, funnelKey: 'pest_control', serviceLine: 'general' },
-  { term: 'rats?|mice|mouse|rodents?|trapping|attic\\s+(?:droppings?|noise|rats?|mice)', keys: ['rodent_trapping', 'rodent_control', 'rodent_exclusion'], nameRe: /\brodent/i, funnelKey: 'rodent', serviceLine: 'exclusion' },
+  { term: 'rats?|mice|mouse|rodents?|trapping|attic\\s+(?:droppings?|noise|rats?|mice)', keys: ['rodent_exclusion', 'rodent_inspection', 'rodent_control', 'rodent_trapping'], nameRe: /\brodent/i, funnelKey: 'rodent', serviceLine: 'exclusion', resolveRodent: true },
   { term: 'bora[\\s-]?care', keys: ['bora_care'], nameRe: /\bbora[\s-]?care\b/i, funnelKey: 'bora_care', serviceLine: 'termite' },
   { term: 'termites?|sentricon|swarmers?|mud\\s*tubes?|frass', keys: ['termite_bait', 'sentricon', 'lawn_inspection'], nameRe: /\b(?:termite|sentricon|assessment)\b/i, funnelKey: 'termite', serviceLine: 'termite' },
   { term: 'mosquito(?:es)?|no[- ]?see[- ]?ums?|misting', keys: ['mosquito_control', 'mosquito'], nameRe: /\bmosquito/i, funnelKey: 'mosquito', serviceLine: 'mosquito' },
   { term: 'fire\\s*ants?|ant\\s*mounds?', keys: ['fire_ant_treatment', 'fire_ant'], nameRe: /\bfire\s*ant/i, funnelKey: 'pest_control', serviceLine: 'general' },
   { term: 'lawn|turf|weeds?|fertiliz\\w*|chinch\\s*bugs?|mole\\s*crickets?|st\\.?\\s*augustine|zoysia|sod|fungus', keys: ['lawn_care', 'lawn_fertilization', 'lawn_pest_knockdown'], nameRe: /\blawn\b/i, funnelKey: 'lawn_care', serviceLine: 'lawn' },
   { term: 'trees?|shrubs?|palms?|ornamentals?|whitefl(?:y|ies)|spiraling', keys: ['tree_shrub', 'palm_injection'], nameRe: /\b(?:tree|shrub|palm)\b/i, funnelKey: 'tree_shrub', serviceLine: 'lawn' },
-  { term: 'one[- ]?time|single\\s+treatment|just\\s+once|ghost\\s*ants?|sugar\\s*ants?|ants?|spiders?|palmetto\\s+bugs?|silverfish|earwigs?|general\\s+pest|pest\\s+control', keys: ['one_time_pest', 'pest_control', 'quarterly_pest'], nameRe: /\b(?:one[- ]time\s+pest|pest\s+control)\b/i, funnelKey: 'pest_control', serviceLine: 'general' },
+  GENERAL_PEST_CUE,
 ]);
 
 async function loadCachedCatalog(conn, now) {
@@ -364,10 +386,21 @@ function matchCatalogCues(text) {
   const raw = String(text || '').trim();
   if (!raw) return [];
   const noPalmetto = raw.replace(PALMETTO_RE, ' ');
-  return CATALOG_CUES.filter((cue) => {
+  const matched = [];
+  for (const cue of CATALOG_CUES) {
     const cleaned = stripNegatedAndHistorical(cue.stripPalmetto ? noPalmetto : raw, cue.term);
-    return new RegExp(`\\b(?:${cue.term})\\b`, 'i').test(cleaned);
-  });
+    if (!new RegExp(`\\b(?:${cue.term})\\b`, 'i').test(cleaned)) continue;
+    if (cue.resolveRodent) {
+      const resolved = rodentKeysForText(cleaned);
+      matched.push({ ...cue, keys: resolved.keys, serviceLine: resolved.line, forcedLine: resolved.line });
+    } else {
+      matched.push(cue);
+    }
+  }
+  if (!matched.length && FREQUENCY_ONLY_PEST_RE.test(stripNegatedAndHistorical(raw, 'one[- ]?time|single\\s+treatment|just\\s+once'))) {
+    matched.push(GENERAL_PEST_CUE);
+  }
+  return matched;
 }
 
 function matchCatalogMatches(text, catalogRows) {
@@ -379,7 +412,7 @@ function matchCatalogMatches(text, catalogRows) {
   const cueLines = [];
   for (const cue of cues) {
     const matched = safeCatalog.length ? matchingRowsForCue(safeCatalog, cue) : [];
-    const line = (matched[0] && lineForCatalogRow(matched[0])) || cue.serviceLine || null;
+    const line = cue.forcedLine || (matched[0] && lineForCatalogRow(matched[0])) || cue.serviceLine || null;
     if (line && !cueLines.includes(line)) cueLines.push(line);
     for (const row of matched) {
       if (rows.length >= MAX_CATALOG_MATCHES) break;

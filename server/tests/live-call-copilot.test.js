@@ -599,5 +599,47 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
       { city: 'Bradenton', zip: '34202', address_line1: '100 Oak Dr' },
       'This is for my place in Bradenton Beach.',
     )).toBe(true);
+
+    // Rodent sealing/exclusion routes to `exclusion` (not `rodent` trapping), while explicit trapping routes to `rodent`
+    const rodentCatalog = [
+      { id: 'r1', service_key: 'rodent_trapping', name: 'Rodent Trapping Service', category: 'rodent', base_price: 300, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 60 },
+      { id: 'r2', service_key: 'rodent_exclusion', name: 'Rodent Exclusion Service', category: 'rodent', base_price: null, pricing_type: 'variable', billing_type: 'one_time', default_duration_minutes: 60 },
+      { id: 'm1', service_key: 'mosquito_control', name: 'Mosquito Control Service', category: 'mosquito', base_price: 89, pricing_type: 'variable', billing_type: 'recurring', default_duration_minutes: 60 },
+      { id: 'p1', service_key: 'one_time_pest', name: 'One-Time Pest Control Service', category: 'pest_control', base_price: 200, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 60 },
+    ];
+    mockLoadBookable.mockResolvedValueOnce(rodentCatalog);
+    resetCaches();
+    buildBookingAvailability.mockResolvedValueOnce({ slots: [{ date: '2026-12-06', window_start: '09:00', window_end: '10:00' }] });
+    await buildLiveCallCopilot({
+      call: { id: 'call-rodent-excl', customer_id: 'cust-termite' },
+      customer: { id: 'cust-termite', name: 'Alex Termite' },
+      meta: {},
+      lines: [{ speaker: 'caller', text: 'I have rats in my attic and need the entry holes sealed.' }],
+      assist: null,
+    }, { ...deps, isEnabled: () => true });
+    expect(buildBookingAvailability).toHaveBeenNthCalledWith(5, expect.objectContaining({
+      serviceKey: 'rodent',
+      serviceLines: ['exclusion'],
+      serviceIdentity: { catalogServiceKey: 'rodent_exclusion', serviceType: 'Rodent Exclusion Service' },
+    }));
+
+    // Frequency modifier ("a one-time mosquito treatment") must NOT add general pest as a second service
+    mockLoadBookable.mockResolvedValueOnce(rodentCatalog);
+    resetCaches();
+    buildBookingAvailability.mockResolvedValueOnce({ slots: [{ date: '2026-12-07', window_start: '09:00', window_end: '10:00' }] });
+    const oneTimeMosquito = await buildLiveCallCopilot({
+      call: { id: 'call-ot-mosq', customer_id: 'cust-termite' },
+      customer: { id: 'cust-termite', name: 'Alex Termite' },
+      meta: {},
+      lines: [{ speaker: 'caller', text: 'I need a one-time mosquito treatment for the backyard.' }],
+      assist: null,
+    }, { ...deps, isEnabled: (gate) => gate === 'selfBooking' });
+    expect(oneTimeMosquito.catalog_prices.map((p) => p.name)).toEqual(['Mosquito Control Service']);
+    expect(oneTimeMosquito.route_slots).toEqual(['2026-12-07 09:00-10:00']);
+    expect(buildBookingAvailability).toHaveBeenNthCalledWith(6, expect.objectContaining({
+      duration: 60,
+      serviceKey: 'mosquito',
+      serviceLines: ['mosquito'],
+    }));
   });
 });
