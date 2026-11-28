@@ -26,6 +26,7 @@ const { buildWinbackDraftRow } = require('../services/newsletter-sunset');
 const { assembleWavesNewsletter } = require('../services/newsletter-draft');
 const { renderIssue } = require('../services/pest-insider/render');
 const { POST_URLS } = require('../services/pest-insider/posts');
+const { htmlToPlainText } = require('../utils/html-to-plain-text');
 const legacyEmail = require('../services/email');
 
 describe('Customer emails audit PR 1 regressions', () => {
@@ -130,12 +131,13 @@ describe('Customer emails audit PR 1 regressions', () => {
 
     const legacy = renderAutomationStepContent({
       template: { key: 'welcome_drip', name: 'Welcome' },
-      htmlBody: '<p>Legacy white body</p>{{consultation_booking_block}}',
+      htmlBody: '<p>Legacy white body</p>{{consultation_booking}}',
       textBody: 'Legacy white body',
       customer: { first_name: 'Taylor' },
       asmGroupId: null,
       consultationHtml: '<a class="dm-gold" href="https://portal.wavespestcontrol.com/book">Book</a>',
     });
+    expect(legacy.html).toContain('class="dm-gold"');
     expect(legacy.html).toContain('class="dm-lightcard"');
     expect(legacy.html).not.toContain('class="dm-card"');
   });
@@ -270,6 +272,8 @@ describe('Customer emails audit PR 1 regressions', () => {
       expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({
         text: 'Service Update\n\nWe finished your visit. Contact <billing@example.com> (mailto:billing@example.com).\n\nView Report: https://portal.wavespestcontrol.com/report/1',
       }));
+      expect(htmlToPlainText('Intro<p>Next block</p><table><tr><td>10</td><td>20</td></tr><tr><td>30</td><td>40</td></tr></table>'))
+        .toBe('Intro\nNext block\n10 20\n30 40');
     } finally {
       if (prevPw === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
       else process.env.GOOGLE_SMTP_PASSWORD = prevPw;

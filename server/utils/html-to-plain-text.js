@@ -5,6 +5,7 @@ const BLOCK_TAGS = new Set([
   'p', 'div', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'blockquote', 'section', 'article', 'header', 'footer',
 ]);
+const CELL_TAGS = new Set(['td', 'th']);
 const QUOTE_CLASS_RE = /\b(?:gmail_quote|yahoo_quoted)\b/i;
 const SIGNATURE_CLASS_RE = /\bgmail_signature\b/i;
 
@@ -29,6 +30,13 @@ function normalizeLines(raw) {
     .trim();
 }
 
+function endsWith(out, re) {
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    if (out[i]) return re.test(out[i]);
+  }
+  return true;
+}
+
 function renderAnchor(node) {
   const labelParts = [];
   for (const child of node.childNodes || []) collectText(child, labelParts);
@@ -45,6 +53,13 @@ function renderChildren(node) {
   return normalizeLines(inner.join(''));
 }
 
+function renderCell(node, out) {
+  const cell = renderChildren(node);
+  if (!cell) return;
+  if (!endsWith(out, /[\s\n]$/)) out.push(' ');
+  out.push(cell);
+}
+
 function collectText(node, out) {
   if (!node) return;
   if (node.nodeName === '#text') {
@@ -53,19 +68,12 @@ function collectText(node, out) {
   }
   const tag = String(node.tagName || '').toLowerCase();
   if (SKIP_TAGS.has(tag)) return;
-  if (tag === 'br') {
-    out.push('\n');
-    return;
-  }
-  if (tag === 'a') {
-    out.push(renderAnchor(node));
-    return;
-  }
+  if (tag === 'br') { out.push('\n'); return; }
+  if (tag === 'a') { out.push(renderAnchor(node)); return; }
+  if (CELL_TAGS.has(tag)) { renderCell(node, out); return; }
   if (isQuoteContainer(node, tag)) {
     const quoted = renderChildren(node);
-    if (quoted) {
-      out.push(`\n${quoted.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')}\n`);
-    }
+    if (quoted) out.push(`\n${quoted.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')}\n`);
     return;
   }
   if (isSignatureContainer(node)) {
@@ -73,8 +81,9 @@ function collectText(node, out) {
     if (sig) out.push(`\n--\n${sig}\n`);
     return;
   }
+  if (BLOCK_TAGS.has(tag) && !endsWith(out, /\n$/)) out.push('\n');
   for (const child of node.childNodes || []) collectText(child, out);
-  if (BLOCK_TAGS.has(tag)) out.push('\n');
+  if (BLOCK_TAGS.has(tag) && !endsWith(out, /\n$/)) out.push('\n');
 }
 
 function htmlToPlainText(html) {
