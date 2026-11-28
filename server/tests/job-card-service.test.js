@@ -3825,8 +3825,18 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
     );
     expect(aboveMax.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
-      'Truck Rig #1 sprays 5 gal per 1,000 sq ft, above the label maximum of 4.5 gal per 1,000 sq ft. Use less water per 1,000 sq ft',
+      'Truck Rig #1 sprays 5 gal per 1,000 sq ft, above the label maximum of 4.5 gal per 1,000 sq ft at 8 fl oz per 100 gal. Use a lower rate or less water per 1,000 sq ft',
     ]);
+
+    // A lower fixed Floramite concentration (4 fl oz per 100 gal) does not trigger the 8 fl oz per 100 gal water cap at 5 gal/1,000 sq ft.
+    const lowConcFloramite = { fieldGuide: { mixRates: [{ ...floramiteRow(), perGallon: { amount: 0.04, unit: 'fl oz' } }] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: lowConcFloramite, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 5 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(lowConcFloramite.fieldGuide.mixRates[0].calibrationWarnings).toBeUndefined();
 
     const belowMin = { fieldGuide: { mixRates: [minRow()] } };
     jobCard._test.attachMixCalibrationWarnings(
@@ -4614,6 +4624,31 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const diffBoundsCalc = await jobCard.mixForProduct('ace', 100, { serviceId: 'svc35', dbh: diffBoundsDb, deps: { buildPlan: jest.fn(), protocols: diffBoundsProtocols }, now: new Date('2028-03-10T15:00:00Z') });
     expect(diffBoundsCalc.serviceAmounts).toHaveLength(2);
     expect(diffBoundsCalc.warnings.join(' ')).toContain('Tree & Shrub Care: Truck Rig #1 sprays 5 gal per 1,000 sq ft, above the label maximum of 2 gal per 1,000 sq ft.');
+
+    // Two booked services sharing the same per-gallon rate and carrier limits still split when one has a tank-table override for the requested fill.
+    const diffOverrideProtocols = {
+      termite: {
+        name: 'Termite Liquid Trench & Rod',
+        visits: [{ visit: 3, month: 'Any', primary: 'Taurus SC trench', mixRates: [{ product: 'Taurus SC', where: 'Trench', perGallon: { amount: 0.8, unit: 'fl oz' }, sprayVolume: '4 gal per 10 linear ft. 100 gal tank: 78 fl oz (label table)', epa: '53883-279' }] }],
+      },
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{ visit: 1, month: 'Any', primary: 'Taurus SC perimeter', mixRates: [{ product: 'Taurus SC', where: 'Perimeter', perGallon: { amount: 0.8, unit: 'fl oz' }, epa: '53883-279' }] }],
+      },
+    };
+    const diffOverrideDb = dbFor({
+      scheduled_services: [{ id: 'svc36', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control', service_key: 'pest_general_quarterly' }],
+    });
+    const diffOverride100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc36', dbh: diffOverrideDb, deps: { buildPlan: jest.fn(), protocols: diffOverrideProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(diffOverride100.serviceAmounts).toEqual([
+      expect.objectContaining({ service: 'Termite Liquid Trench & Rod', amount: 78, basis: 'tank_table', ratePerGallon: null }),
+      expect.objectContaining({ service: 'Quarterly Pest Control', amount: 80, ratePerGallon: { lo: 0.8, hi: 0.8, unit: 'fl_oz' } }),
+    ]);
 
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],

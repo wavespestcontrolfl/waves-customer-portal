@@ -2607,6 +2607,7 @@ function tankTableOverrideNote(dose) {
 const SQFT_PER_ACRE = 43560;
 const SPRAY_VOL_SPEC_RE = /(?:(\b(?:at\s+least|at\s+most|no\s+more\s+than|up\s+to|min(?:imum)?|max(?:imum)?|about|approx(?:\.|imately)?|around)(?:\s+of)?\s+|~\s*)|(?<![\d.]))(\d+(?:\.\d+)?)\s*(?:(?:finished|mixed|diluted)\s+)?gal(?:lon)?s?\s+(?:of\s+(?:mix|water|finished\s+spray|spray)\s+)?(?:per|for)\s+(?:(\d+(?:,\d+)?)\s*sq\.?\s*ft|(acre)\b)/ig;
 const COVERAGE_SQFT_PER_GAL_RE = /(?:(\b(?:at\s+least|at\s+most|no\s+more\s+than|up\s+to|min(?:imum)?|max(?:imum)?|about|approx(?:\.|imately)?|around)(?:\s+of)?\s+|~\s*)|(?<![\d.]))(\d+(?:,\d+)?(?:\.\d+)?)\s*sq\.?\s*ft\.?\s+per\s+(?:(\d+(?:\.\d+)?)\s*)?(?:(?:finished|mixed|diluted)\s+)?gal(?:lon)?s?\b/ig;
+const CONC_QUAL_BEFORE_RE = /\bat\s+(\d+(?:\.\d+)?)\s*(fl\s*oz|oz|g|ml|lb|lbs)\s+per\s+(\d+(?:,\d+)?)\s*gal(?:lon)?s?\s*,\s*$/i;
 const MAX_VOL_QUAL_RE = /^(?:at\s+most|no\s+more\s+than|up\s+to|max(?:imum)?)(?:\s+of)?$/i;
 const MIN_VOL_QUAL_RE = /^(?:at\s+least|min(?:imum)?)(?:\s+of)?$/i;
 const APPROX_VOL_QUAL_RE = /^(?:about|approx(?:\.|imately)?|around|~)$/i;
@@ -2663,36 +2664,50 @@ async function resolveMixTank(dbh, rigs, { pickedRig, equipmentSystemId, technic
   return tankFromCalibrations(viewerRows(rigRows(rigs, { equipmentSystemId }), effectiveTechId), fallback);
 }
 
-function recordSprayVolumeSpec(out, per1000, qual, { reciprocal = false } = {}) {
+function concQualifierBefore(str, index) {
+  const m = CONC_QUAL_BEFORE_RE.exec(str.slice(0, index));
+  if (!m) return null;
+  const amount = Number(m[1]);
+  const perGal = Number(String(m[3]).replace(/,/g, ''));
+  if (!(amount > 0) || !(perGal > 0)) return null;
+  const unitText = m[2].replace(/\s+/g, ' ').toLowerCase();
+  return { perGal: amount / perGal, unit: normRateUnit(unitText), label: `${amount} ${unitText} per ${perGal} gal` };
+}
+
+function recordSprayVolumeSpec(out, per1000, qual, { reciprocal = false, concQual = null } = {}) {
   const isMax = MAX_VOL_QUAL_RE.test(qual);
   const isMin = MIN_VOL_QUAL_RE.test(qual);
-  if ((isMax && !reciprocal) || (isMin && reciprocal)) out.max = out.max == null ? per1000 : Math.min(out.max, per1000);
-  else if ((isMin && !reciprocal) || (isMax && reciprocal)) out.min = out.min == null ? per1000 : Math.max(out.min, per1000);
+  if ((isMax && !reciprocal) || (isMin && reciprocal)) {
+    if (out.max == null || per1000 < out.max) {
+      out.max = per1000;
+      out.maxAtRate = concQual;
+    }
+  } else if ((isMin && !reciprocal) || (isMax && reciprocal)) out.min = out.min == null ? per1000 : Math.max(out.min, per1000);
   else if (APPROX_VOL_QUAL_RE.test(qual)) out.approx = out.approx ?? per1000;
   else if (out.exact == null) out.exact = per1000;
 }
 
 function parseSprayVolumeSpecs(text) {
-  const out = { exact: null, min: null, max: null, approx: null };
+  const out = { exact: null, min: null, max: null, maxAtRate: null, approx: null };
   const str = String(text || '');
   SPRAY_VOL_SPEC_RE.lastIndex = 0;
   let m;
   while ((m = SPRAY_VOL_SPEC_RE.exec(str)) !== null) {
     const gal = Number(m[2]);
     const sqft = m[4] ? SQFT_PER_ACRE : Number(String(m[3]).replace(/,/g, ''));
-    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, (gal * 1000) / sqft, String(m[1] || '').trim());
+    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, (gal * 1000) / sqft, String(m[1] || '').trim(), { concQual: concQualifierBefore(str, m.index) });
   }
   COVERAGE_SQFT_PER_GAL_RE.lastIndex = 0;
   while ((m = COVERAGE_SQFT_PER_GAL_RE.exec(str)) !== null) {
     const sqft = Number(String(m[2]).replace(/,/g, ''));
     const gal = m[3] ? Number(m[3]) : 1;
-    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, (gal * 1000) / sqft, String(m[1] || '').trim(), { reciprocal: true });
+    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, (gal * 1000) / sqft, String(m[1] || '').trim(), { reciprocal: true, concQual: concQualifierBefore(str, m.index) });
   }
   return out;
 }
 
 function sprayVolumeBoundsForRows(mixRows, line) {
-  const specs = { exact: line?.labelCarrierGalPer1000 ? Number(line.labelCarrierGalPer1000) : null, min: null, max: null };
+  const specs = { exact: line?.labelCarrierGalPer1000 ? Number(line.labelCarrierGalPer1000) : null, min: null, max: null, maxAtRate: null };
   const texts = [
     ...(mixRows || []).map((row) => row?.sprayVolume),
     line?.raw,
@@ -2702,7 +2717,10 @@ function sprayVolumeBoundsForRows(mixRows, line) {
     const parsed = parseSprayVolumeSpecs(text);
     if (specs.exact == null && parsed.exact != null) specs.exact = parsed.exact;
     if (parsed.min != null) specs.min = specs.min == null ? parsed.min : Math.max(specs.min, parsed.min);
-    if (parsed.max != null) specs.max = specs.max == null ? parsed.max : Math.min(specs.max, parsed.max);
+    if (parsed.max != null && (specs.max == null || parsed.max < specs.max)) {
+      specs.max = parsed.max;
+      specs.maxAtRate = parsed.maxAtRate || null;
+    }
   }
   return specs;
 }
@@ -2715,10 +2733,21 @@ function areaCapForRows(mixRows, line) {
   return areaCapOf(line?.raw);
 }
 
-function rigVolumeBoundWarnings({ min, max, rigCarrier, rigName, rigGalPer1000 }) {
+function maxCarrierExceeded({ max, maxAtRate, band, rigCarrier }) {
+  if (!max) return false;
+  if (maxAtRate && band) {
+    const convHi = convertRateUnit(band.hi, band.unit, maxAtRate.unit);
+    if (convHi != null) return convHi * roundDbPrecision(rigCarrier) > maxAtRate.perGal * max + 1e-6;
+  }
+  return roundDbPrecision(rigCarrier) > roundDbPrecision(max) + 1e-9;
+}
+
+function rigVolumeBoundWarnings({ min, max, maxAtRate = null, band = null, rigCarrier, rigName, rigGalPer1000 }) {
   const warnings = [];
-  if (max && roundDbPrecision(rigCarrier) > roundDbPrecision(max) + 1e-9) {
-    warnings.push(`${rigName} sprays ${fmtGal(rigGalPer1000)} gal per 1,000 sq ft, above the label maximum of ${fmtGal(max)} gal per 1,000 sq ft. Use less water per 1,000 sq ft`);
+  if (maxCarrierExceeded({ max, maxAtRate, band, rigCarrier })) {
+    warnings.push(maxAtRate
+      ? `${rigName} sprays ${fmtGal(rigGalPer1000)} gal per 1,000 sq ft, above the label maximum of ${fmtGal(max)} gal per 1,000 sq ft at ${maxAtRate.label}. Use a lower rate or less water per 1,000 sq ft`
+      : `${rigName} sprays ${fmtGal(rigGalPer1000)} gal per 1,000 sq ft, above the label maximum of ${fmtGal(max)} gal per 1,000 sq ft. Use less water per 1,000 sq ft`);
   }
   if (min && roundDbPrecision(rigCarrier) < roundDbPrecision(min) - 1e-9) {
     warnings.push(`${rigName} sprays ${fmtGal(rigGalPer1000)} gal per 1,000 sq ft, below the label minimum of ${fmtGal(min)} gal per 1,000 sq ft. Use more water per 1,000 sq ft`);
@@ -2752,7 +2781,7 @@ function rigLineVolumeWarnings({ lineCarrier, line, band, rigCtx }) {
   return [
     rigVolumeWarning({ lineCarrier, ...rigCtx }),
     capWarn,
-    ...(rigCtx.rigCarrier ? rigVolumeBoundWarnings({ min: line?.minCarrier, max: capWarn ? null : line?.maxCarrier, ...rigCtx }) : []),
+    ...(rigCtx.rigCarrier ? rigVolumeBoundWarnings({ min: line?.minCarrier, max: capWarn ? null : line?.maxCarrier, maxAtRate: capWarn ? null : line?.maxAtRate, band, ...rigCtx }) : []),
   ].filter(Boolean);
 }
 
@@ -2767,7 +2796,7 @@ function singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, ri
   const uncalWarn = uncalibratedRigBoundWarning({ lineCarrier, line: protocolLine, rigCtx });
   const capWarn = uncalWarn ? null : areaCapWarning({ band: perGallon, line: protocolLine, ...rigCtx });
   const boundWarnings = !uncalWarn && rigCtx.rigCarrier
-    ? rigVolumeBoundWarnings({ min: protocolLine?.minCarrier, max: capWarn ? null : protocolLine?.maxCarrier, ...rigCtx })
+    ? rigVolumeBoundWarnings({ min: protocolLine?.minCarrier, max: capWarn ? null : protocolLine?.maxCarrier, maxAtRate: capWarn ? null : protocolLine?.maxAtRate, band: perGallon, ...rigCtx })
     : [];
   const labelWarnings = !protocolLine?.conflictLines && Array.isArray(protocolLine?.rowLabelWarnings) ? protocolLine.rowLabelWarnings : [];
   const useNotes = Array.isArray(protocolLine?.doseUseNotes) ? protocolLine.doseUseNotes : [];
@@ -2844,12 +2873,12 @@ function rigAppliesToMixRow(row, rigKey) {
 }
 
 function mixRowCarrierAndBand(row, line) {
-  const { exact: lineCarrier, min: minCarrier, max: maxCarrier } = sprayVolumeBoundsForRows([row], line);
+  const { exact: lineCarrier, min: minCarrier, max: maxCarrier, maxAtRate } = sprayVolumeBoundsForRows([row], line);
   const lo = Number(row.perGallon?.amount || 0);
   const hi = Math.max(lo, Number(row.perGallon?.amountMax || 0));
   const band = lo > 0 && row.perGallon?.unit ? { lo, hi, unit: String(row.perGallon.unit) } : null;
   const capLine = areaCapForRows([row], line);
-  return { lineCarrier, minCarrier, maxCarrier, band, capLine };
+  return { lineCarrier, minCarrier, maxCarrier, maxAtRate, band, capLine };
 }
 
 function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey }) {
@@ -2858,13 +2887,13 @@ function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey }) {
   }
   if (!rigAppliesToMixRow(row, rigKey)) return [];
   const line = row.productId ? lines.find((l) => String(l.product?.id) === String(row.productId)) : null;
-  const { lineCarrier, minCarrier, maxCarrier, band, capLine } = mixRowCarrierAndBand(row, line);
+  const { lineCarrier, minCarrier, maxCarrier, maxAtRate, band, capLine } = mixRowCarrierAndBand(row, line);
   if (!rigCtx.rigCarrier) {
     return lineCarrier || minCarrier || maxCarrier || capLine.areaCap
       ? [`${tank.reason || 'No sprayer calibration on file'} — verify ${rigCtx.rigName} output against this row's spray volume or area limit.`]
       : [];
   }
-  return rigLineVolumeWarnings({ lineCarrier, line: { ...capLine, minCarrier, maxCarrier }, band, rigCtx });
+  return rigLineVolumeWarnings({ lineCarrier, line: { ...capLine, minCarrier, maxCarrier, maxAtRate }, band, rigCtx });
 }
 
 function attachMixCalibrationWarnings(entries, tank, rig, systems = []) {
@@ -3289,7 +3318,8 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const boundLine = h.useSpecific ? null : h.hit;
     const specs = sprayVolumeBoundsForRows(h.mixRows, boundLine);
     const { areaCap = null } = areaCapForRows(h.mixRows, boundLine);
-    return { min: specs.min, max: specs.max, areaCap };
+    const tankOverrides = (h.mixRows || []).flatMap((row) => tankTableOverrides(row?.sprayVolume));
+    return { min: specs.min, max: specs.max, maxAtRate: specs.maxAtRate || null, areaCap, tankOverrides };
   };
   // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
   // narrowed by the label band, as before.
@@ -3311,7 +3341,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
       // The line's own per-area limit for one spray (Acelepryn: no more than 0.37 fl oz per 1,000 sq ft), checked against the rig's volume.
       ...areaCapForRows(rows, boundLine),
       ...(specs.min ? { minCarrier: specs.min } : {}),
-      ...(specs.max ? { maxCarrier: specs.max } : {}),
+      ...(specs.max ? { maxCarrier: specs.max, ...(specs.maxAtRate ? { maxAtRate: specs.maxAtRate } : {}) } : {}),
       ...(tankOverrides.length ? { tankOverrides } : {}),
       ...(rowLabelWarnings.length ? { rowLabelWarnings } : {}),
       ...(exactSprayVolume ? { exactSprayVolume } : {}),
