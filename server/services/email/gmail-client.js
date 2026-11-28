@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { google } = require('googleapis');
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -286,21 +287,53 @@ async function runBeforeSend(gmail, options) {
   await options.beforeSend();
 }
 
+function stripHtmlToPlainText(html) {
+  return String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 // The base64url MIME message: our From, the recipient, an encoded subject,
-// HTML body, and In-Reply-To / References when it answers a message.
+// multipart/alternative (plain-text + HTML), and In-Reply-To / References when it answers a message.
 function buildRawMessage(to, subject, body, inReplyTo) {
   const safeTo = sanitizeHeaderValue(to);
   if (!safeTo) throw new Error('Recipient (to) is required');
   const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
+  const boundary = `waves-alt-${crypto.randomBytes(8).toString('hex')}`;
+  const plainBody = stripHtmlToPlainText(body);
   const headers = [
     `From: ${fromHeader()}`,
     `To: ${safeTo}`,
     `Subject: ${encodeHeaderUtf8(subject)}`,
     'MIME-Version: 1.0',
-    'Content-Type: text/html; charset=utf-8',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
     ...(safeInReplyTo ? [`In-Reply-To: ${safeInReplyTo}`, `References: ${safeInReplyTo}`] : []),
   ];
-  return Buffer.from(headers.join('\r\n') + '\r\n\r\n' + body).toString('base64url');
+  const parts = [
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    plainBody,
+    `--${boundary}`,
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    String(body || ''),
+    `--${boundary}--`,
+  ];
+  return Buffer.from(headers.join('\r\n') + '\r\n\r\n' + parts.join('\r\n')).toString('base64url');
 }
 
 // Marks a messages.send failure that may hide an accepted email

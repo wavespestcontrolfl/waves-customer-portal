@@ -400,8 +400,8 @@ function renderBlocks(blocks, payload) {
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="dm-rule" style="margin:18px 0;border-top:1px solid ${B.rule};border-bottom:1px solid ${B.rule};">
             ${rows.map((row) => `
               <tr>
-                <td class="dm-muted" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.mutedText};">${row.labelHtml}</td>
-                <td align="right" class="dm-ink" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.valueHtml}</td>
+                <td valign="top" class="dm-muted" style="padding:8px 12px 8px 0;vertical-align:top;font-family:${B.font};font-size:14px;color:${B.mutedText};">${row.labelHtml}</td>
+                <td valign="top" align="right" class="dm-ink" style="padding:8px 0;vertical-align:top;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.valueHtml}</td>
               </tr>
             `).join('')}
           </table>
@@ -413,7 +413,7 @@ function renderBlocks(blocks, payload) {
       if (href) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
         if (block.variant === 'link') {
-          htmlParts.push(`<p style="margin:0 0 10px;font-family:${B.font};font-size:13px;line-height:1.58;"><a class="dm-link" href="${escapeHtml(safeUrl(href))}" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(label)}</a></p>`);
+          htmlParts.push(`<p style="margin:0 0 10px;font-family:${B.font};font-size:14px;line-height:1.58;"><a class="dm-link" href="${escapeHtml(safeUrl(href))}" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(label)}</a></p>`);
         } else {
           const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
           renderedCtaCount += 1;
@@ -427,8 +427,9 @@ function renderBlocks(blocks, payload) {
       // portal-hosted asset URL with no variable is fine too. Width is in CSS
       // px (capped to 100% on narrow screens); radius rounds screenshots
       // (badges pass radius 0). A missing/blank src renders nothing.
-      const src = renderInline(block.src, payload, { html: false }).trim();
-      if (src) {
+      const rawSrc = renderInline(block.src, payload, { html: false }).trim();
+      const src = safeUrl(rawSrc);
+      if (src && /^(https?:\/\/|\/)/i.test(src)) {
         const width = Number(block.width) > 0 ? Math.round(Number(block.width)) : 240;
         const align = block.align === 'left' ? 'left' : block.align === 'right' ? 'right' : 'center';
         const radius = Number(block.radius) > 0 ? Math.round(Number(block.radius)) : 0;
@@ -486,7 +487,7 @@ function renderBlocks(blocks, payload) {
       const content = renderInline(block.content, payload);
       if (content) {
         const small = block.type === 'small_note';
-        htmlParts.push(`<p class="${small ? 'dm-muted' : 'dm-text'}" style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:${B.font};font-size:${small ? '13' : '15'}px;line-height:1.58;color:${small ? B.mutedText : B.text};">${content}</p>`);
+        htmlParts.push(`<p class="${small ? 'dm-muted' : 'dm-text'}" style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:${B.font};font-size:${small ? '14' : '15'}px;line-height:1.58;color:${small ? B.mutedText : B.text};">${content}</p>`);
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     }
@@ -800,7 +801,7 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   }
   if (bodyAppend?.html) {
     const B = blockPalette();
-    bodyHtml = [bodyHtml, `<p class="dm-muted" style="margin:18px 0 0 0;font-family:${B.font};font-size:13px;line-height:1.58;color:${B.mutedText};">${bodyAppend.html}</p>`].filter(Boolean).join('\n');
+    bodyHtml = [bodyHtml, `<p class="dm-muted" style="margin:18px 0 0 0;font-family:${B.font};font-size:14px;line-height:1.58;color:${B.mutedText};">${bodyAppend.html}</p>`].filter(Boolean).join('\n');
   }
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   // Billing-family templates carry the Stripe trust line (owner scope
@@ -828,8 +829,13 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // one stream ("referral emails", "these follow-ups") would understate it.
   // Only an admin preview/test passes a link for a service-stream template.
   const unsubScope = isMarketingSend(template, null) ? 'Waves marketing emails' : 'these emails';
-  const unsubFooterHtml = unsubscribeUrl
-    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
+  const unsubHref = unsubscribeUrl
+    ? (unsubscribeUrl === ASM_UNSUBSCRIBE_URL || /^\{\{[a-zA-Z0-9_]+\}\}$/.test(unsubscribeUrl)
+      ? unsubscribeUrl
+      : escapeHtml(safeUrl(unsubscribeUrl)))
+    : null;
+  const unsubFooterHtml = unsubHref
+    ? `<a href="${unsubHref}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
     : null;
   const footerNote = mode === 'marketing'
     ? null
@@ -848,7 +854,7 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // referral.friend_invite) must not close the hidden preheader div.
   const preheader = previewText ? escapeHtml(previewText) : undefined;
   const html = mode === 'marketing'
-    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader, darkAwareBody })
+    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl: unsubHref, preheader, darkAwareBody })
     : wrapServiceEmail({ body: bodyHtml, preheader, footerNote, darkAwareBody });
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText, bodyAppend?.text].filter(Boolean).join('\n\n')

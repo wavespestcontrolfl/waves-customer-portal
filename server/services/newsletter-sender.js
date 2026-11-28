@@ -32,7 +32,7 @@ const logger = require('./logger');
 const crypto = require('crypto');
 const { wrapNewsletter, ensureLegalTextFooter, bodyIsDarkAware } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
-const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL, decodeEscapedEntities } = require('./newsletter-draft');
+const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL, decodeEscapedEntities, escapeHtml } = require('./newsletter-draft');
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
@@ -1267,7 +1267,7 @@ async function sendCampaign(sendId, opts = {}) {
   const htmlWithFooter = wrapNewsletter({
     body: bodyHtml,
     unsubscribeUrl: '{{unsubscribe_url}}',
-    preheader: send.preview_text || undefined,
+    preheader: send.preview_text ? escapeHtml(send.preview_text) : undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
     // Web-version permalink — the Astro archive page for this issue.

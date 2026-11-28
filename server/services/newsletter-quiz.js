@@ -376,7 +376,9 @@ function renderQuizHtml({ token, quizId = DEFAULT_QUIZ_ID } = {}) {
   const buttons = quiz.answers.map((a) => {
     const url = quizAnswerUrl(token, quizId, a.key);
     return `<td style="padding:6px;">
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="width:100%;"><tr><td align="center" style="border-radius:10px;background:${C.navy};mso-padding-alt:12px 10px;">
 <a href="${esc(url)}" class="dm-onnavy" style="display:block;background:${C.navy};color:#ffffff;text-decoration:none;border-radius:10px;padding:12px 10px;font-weight:700;font-size:16px;text-align:center;font-family:Inter,Arial,sans-serif;">${esc(a.label)}</a>
+</td></tr></table>
 </td>`;
   });
   // Two-per-row grid so up to 4 answers read as a tidy grid on mobile + desktop.

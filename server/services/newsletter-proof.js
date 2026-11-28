@@ -32,6 +32,7 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const NewsletterSender = require('./newsletter-sender');
 const { wrapNewsletter, bodyIsDarkAware } = require('./email-template');
+const { escapeHtml } = require('./newsletter-draft');
 const { validateNewsletterDraft, lockedPricesForSend } = require('./newsletter-validator');
 const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 const { isFlagshipTargetForWeek } = require('./event-freshness');
@@ -537,7 +538,7 @@ async function renderSendPreview(send, toEmail) {
   let html = wrapNewsletter({
     body: ensured.html,
     unsubscribeUrl: demoUrl,
-    preheader: send.preview_text || undefined,
+    preheader: send.preview_text ? escapeHtml(send.preview_text) : undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
     // Same web-version permalink the live campaign gets — but only once

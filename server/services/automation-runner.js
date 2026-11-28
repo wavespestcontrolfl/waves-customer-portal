@@ -18,7 +18,7 @@ const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
+const { wrapServiceEmail, ensureLegalTextFooter, blockPalette, bodyIsDarkAware } = require('./email-template');
 const { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS, NEW_LEAD_EXTENDED_STEP_IDS } = require('./new-lead-drip-stops');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -516,7 +516,7 @@ async function repointPaymentFailedEnrollment({ enrollment, sendId, current, ema
 // Defaulted to '' so every existing caller (testSequence, and any step
 // whose body never carries the placeholder) renders byte-identical to
 // before these params existed.
-function renderAutomationStepContent({ template, htmlBody, textBody, customer, asmGroupId, consultationHtml = '', consultationText = '' }) {
+function renderAutomationStepContent({ template, htmlBody, textBody, previewText = '', customer, asmGroupId, consultationHtml = '', consultationText = '' }) {
   const rawHtml = substitute(htmlBody || '', customer, { html: true }).replace(CONSULTATION_HTML_RE, withSeparator(consultationHtml));
   const rawText = substitute(textBody || '', customer).replace(CONSULTATION_TEXT_RE, withSeparator(consultationText));
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
@@ -529,8 +529,9 @@ function renderAutomationStepContent({ template, htmlBody, textBody, customer, a
   const unsubFooter = isNewsletterAutomation(template) && unsubscribeUrl
     ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from these emails.`
     : null;
+  const preheader = previewText ? escapeHtml(substitute(previewText, customer)) : undefined;
   const html = rawHtml
-    ? wrapServiceEmail({ body: rawHtml, footerNote: unsubFooter })
+    ? wrapServiceEmail({ body: rawHtml, preheader, footerNote: unsubFooter, darkAwareBody: bodyIsDarkAware(rawHtml) })
     : '';
   const text = isNewsletterAutomation(template)
     ? ensureLegalTextFooter(rawText, { unsubscribeUrl })
@@ -1293,6 +1294,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     template,
     htmlBody: nudgeBody(step.html_body, nudge.decision, true),
     textBody: nudgeBody(step.text_body, nudge.decision, false),
+    previewText: step.preview_text || '',
     customer: personal,
     asmGroupId,
     consultationHtml: consultationBlock.html,
@@ -1479,6 +1481,7 @@ async function testSequence({ templateKey, toEmail }) {
         template,
         htmlBody: nudgeBody(step.html_body, nudgeDecision, true),
         textBody: nudgeBody(step.text_body, nudgeDecision, false),
+        previewText: step.preview_text || '',
         customer: fake,
         asmGroupId,
       });

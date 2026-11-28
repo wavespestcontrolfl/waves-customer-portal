@@ -38,6 +38,16 @@ function acceptedInvoiceEmailEvidence(result) {
   return result.deduped ? { deduped: true, sentAt: storedEmailAcceptedAt(result.message) } : {};
 }
 
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 let cachedTransporter = null;
 function getTransporter() {
   if (cachedTransporter) return cachedTransporter;
@@ -465,22 +475,21 @@ async function sendInvoiceEmailCore(invoiceId, options = {}) {
     ? ` ${extraAttachmentCount} additional attachment${extraAttachmentCount === 1 ? ' is' : 's are'} available from the online invoice.`
     : '';
   const intro = `Hi ${first}, thank you for letting us take care of ${svcPhrase}. Your invoice for ${currency(amountDue)} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.${attachmentNote}`;
+  const introHtml = `Hi ${escapeHtml(first)}, thank you for letting us take care of ${escapeHtml(svcPhrase)}. Your invoice for ${escapeHtml(currency(amountDue))} is ready — the full breakdown is attached as a PDF, and you can pay online in a few taps.${attachmentNote}`;
   // Customer-facing service summary (the AI-written / operator-edited note that
   // already shows on the invoice PDF). Render it as its own paragraph so the
   // summary reaches the customer in the email body, not just the attachment.
   const summaryNote = clean(customerVisibleInvoiceNotes(invoice.notes)).slice(0, 1200);
-  const summaryEscaped = summaryNote
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const summaryEscaped = escapeHtml(summaryNote);
   const summaryHtml = summaryNote
-    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${summaryEscaped}</div>`
+    ? `<div class="dm-box" style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${summaryEscaped}</div>`
     : '';
   // Operator-written personal thank-you note (invoice.email_message), rendered
   // after the service summary and above the line-item table. Plain paragraph
   // (no info-card chrome) so it reads as a personal note, distinct from the
   // boxed service summary above it.
   const thankYouNote = clean(invoice.email_message).slice(0, 800);
-  const thankYouEscaped = thankYouNote
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const thankYouEscaped = escapeHtml(thankYouNote);
   const thankYouHtml = thankYouNote
     ? `<div class="dm-page-text" style="margin-top:16px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${thankYouEscaped}</div>`
     : '';
@@ -506,26 +515,25 @@ async function sendInvoiceEmailCore(invoiceId, options = {}) {
   } else if (previousBalance?.total > 0) {
     previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(previousBalance.total)} from ${previousBalance.count === 1 ? 'an earlier invoice' : `${previousBalance.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the text or email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
   }
-  const previousBalanceEscaped = previousBalanceNote
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const previousBalanceEscaped = escapeHtml(previousBalanceNote);
   const previousBalanceHtml = previousBalanceNote
-    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};">${previousBalanceEscaped}</div>`
+    ? `<div class="dm-box" style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};">${previousBalanceEscaped}</div>`
     : '';
-  const introWithSummary = `${intro}${summaryHtml}${thankYouHtml}${previousBalanceHtml}`;
+  const introWithSummary = `${introHtml}${summaryHtml}${thankYouHtml}${previousBalanceHtml}`;
   const lines = [
-    ['Invoice', invoice.invoice_number],
-    ['Service', invoice.service_type || '—'],
-    invoice.service_date ? ['Service date', formatDateOnly(invoice.service_date)] : null,
-    invoice.due_date ? ['Due', formatDateOnly(invoice.due_date)] : null,
-    ['Amount due', currency(amountDue), true],
+    ['Invoice', escapeHtml(invoice.invoice_number)],
+    ['Service', escapeHtml(invoice.service_type || '—')],
+    invoice.service_date ? ['Service date', escapeHtml(formatDateOnly(invoice.service_date))] : null,
+    invoice.due_date ? ['Due', escapeHtml(formatDateOnly(invoice.due_date))] : null,
+    ['Amount due', escapeHtml(currency(amountDue)), true],
   ].filter(Boolean);
   const html = wrapEmail({
-    preheader: `Invoice ${invoice.invoice_number} — ${currency(amountDue)} due.`,
+    preheader: `Invoice ${escapeHtml(invoice.invoice_number)} — ${escapeHtml(currency(amountDue))} due.`,
     heading,
     intro: introWithSummary,
     lines,
-    ctaHref: payUrl,
-    ctaLabel: `Pay ${currency(amountDue)}`,
+    ctaHref: escapeHtml(payUrl),
+    ctaLabel: `Pay ${escapeHtml(currency(amountDue))}`,
     footerNote: (extraAttachmentCount > 0
       ? `Your PDF invoice is attached. Additional invoice attachments are available from the payment link. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`
       : `Your PDF invoice is attached. Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY} with any questions.`)
@@ -1116,33 +1124,33 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 
   const first = recipient.name || customer.first_name || 'there';
   const heading = 'Payment received — thank you';
-  const memoEscaped = memo
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const memoEscaped = escapeHtml(memo);
   const memoHtml = memo
-    ? `<div style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${memoEscaped}</div>`
+    ? `<div class="dm-box" style="margin-top:16px;padding:14px 16px;background:#F8FCFE;border:1px solid #CFE7F5;border-radius:12px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${memoEscaped}</div>`
     : '';
   const intro = `Hi ${first}, we received your payment of ${currency(amountDue)} for invoice ${invoice.invoice_number}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
-  const introWithMemo = memoHtml ? `${intro}${memoHtml}` : intro;
+  const introHtml = `Hi ${escapeHtml(first)}, we received your payment of ${escapeHtml(currency(amountDue))} for invoice ${escapeHtml(invoice.invoice_number)}. Keep this email as your record — a printable receipt is attached, and the online copy lives at the link below for whenever you need it.`;
+  const introWithMemo = memoHtml ? `${introHtml}${memoHtml}` : introHtml;
   const cardText = (payment?.card_brand && payment?.card_last_four)
     ? `${payment.card_brand.toUpperCase()} ···· ${payment.card_last_four}`
     : (invoice.card_brand && invoice.card_last_four)
       ? `${invoice.card_brand.toUpperCase()} ···· ${invoice.card_last_four}`
       : null;
   const lines = [
-    ['Invoice', invoice.invoice_number],
-    invoice.service_type ? ['Service', invoice.service_type] : null,
-    ['Paid', formatDate(invoice.paid_at)],
-    cardText ? ['Method', cardText] : null,
-    ['Amount paid', currency(amountDue), true],
+    ['Invoice', escapeHtml(invoice.invoice_number)],
+    invoice.service_type ? ['Service', escapeHtml(invoice.service_type)] : null,
+    ['Paid', escapeHtml(formatDate(invoice.paid_at))],
+    cardText ? ['Method', escapeHtml(cardText)] : null,
+    ['Amount paid', escapeHtml(currency(amountDue)), true],
   ].filter(Boolean);
   const html = wrapEmail({
-    preheader: `Receipt for ${invoice.invoice_number} — ${currency(amountDue)} paid.`,
+    preheader: `Receipt for ${escapeHtml(invoice.invoice_number)} — ${escapeHtml(currency(amountDue))} paid.`,
     heading,
     intro: introWithMemo,
     lines,
-    ctaHref: receiptUrl,
+    ctaHref: escapeHtml(receiptUrl),
     ctaLabel: 'View receipt online',
-    footerNote: 'Your PDF receipt is attached for bookkeeping. Keep this email for your records.',
+    footerNote: `Your PDF receipt is attached for bookkeeping. Keep this email for your records.${stripeFooterLine()}`,
   });
   const text = plainText([
     `Hi ${first},`,

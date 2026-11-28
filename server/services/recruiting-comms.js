@@ -32,6 +32,7 @@ const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-s
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { redactOfferLinks, redactOfferLinksTogether, offerLinkTokens } = require('../utils/offer-link-redaction');
 const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+const { wrapServiceEmail, ctaButton, colors } = require('./email-template');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const FROM_EMAIL = 'contact@wavespestcontrol.com';
@@ -259,23 +260,23 @@ function escapeHtml(value) {
 
 function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff }) {
   const parts = [
-    '<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#1a1a1a;">',
-    `<h2 style="font-size:18px;margin:0 0 16px;">${escapeHtml(heading)}</h2>`,
+    `<h2 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:20px;line-height:1.25;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};">${escapeHtml(heading)}</h2>`,
   ];
   for (const p of paragraphs) {
-    parts.push(`<p style="font-size:14px;line-height:1.5;margin:0 0 12px;">${escapeHtml(p)}</p>`);
+    parts.push(`<p style="font-family:${colors.FONT};font-size:15px;line-height:1.58;margin:0 0 14px 0;color:${colors.BODY};">${escapeHtml(p)}</p>`);
   }
   if (buttonUrl) {
-    parts.push(
-      `<p style="margin:20px 0;"><a href="${escapeHtml(buttonUrl)}" style="background:#0b5c3f;color:#ffffff;` +
-      `padding:12px 20px;border-radius:6px;text-decoration:none;font-size:14px;display:inline-block;">` +
-      `${escapeHtml(buttonLabel || buttonUrl)}</a></p>`,
-    );
-    parts.push(`<p style="font-size:12px;color:#666;word-break:break-all;">${escapeHtml(buttonUrl)}</p>`);
+    const safeHref = escapeHtml(buttonUrl);
+    parts.push(`<div style="margin:24px 0 14px 0;text-align:center;">${ctaButton(safeHref, escapeHtml(buttonLabel || buttonUrl))}</div>`);
+    parts.push(`<p class="dm-muted" style="font-family:${colors.FONT};font-size:14px;line-height:1.5;color:${colors.MUTED};word-break:break-all;margin:0 0 14px 0;">${safeHref}</p>`);
   }
-  if (signoff) parts.push(`<p style="font-size:14px;line-height:1.5;margin:16px 0 0;">${escapeHtml(signoff)}</p>`);
-  parts.push('</div>');
-  return parts.join('\n');
+  if (signoff) {
+    parts.push(`<p style="font-family:${colors.FONT};font-size:15px;line-height:1.58;margin:16px 0 0 0;color:${colors.BODY};">${escapeHtml(signoff)}</p>`);
+  }
+  return wrapServiceEmail({
+    preheader: paragraphs[0] ? escapeHtml(paragraphs[0]) : escapeHtml(heading),
+    body: parts.join('\n'),
+  });
 }
 
 // The job-offer email (GATE_JOB_OFFERS) and its one reminder (GATE_JOB_OFFER_REMINDER). Owner-approved words, spec

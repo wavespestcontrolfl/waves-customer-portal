@@ -104,3 +104,19 @@ test('beforeSend runs after the token refresh and before the message request', a
   expect(seenAtHook[0]).toMatch(/token/);
   expect(String(requests.at(-1).url)).toMatch(/messages\/send/);
 });
+
+test('sendMessage emits multipart/alternative MIME with plain-text fallback and HTML part', async () => {
+  acceptedData = { id: 'synthetic-message', threadId: 'synthetic-thread' };
+  const htmlBody = '<style>.a{color:red}</style><p>Hi Taylor &amp; Sam,</p><p>Your visit is confirmed.</p>';
+  await gmail.sendMessage('fixture@example.test', 'Visit confirmed', htmlBody);
+  const payload = requests[0].data ?? requests[0].body;
+  const sentBody = typeof payload === 'string' ? JSON.parse(payload) : payload;
+  const raw = Buffer.from(sentBody.raw, 'base64url').toString('utf8');
+  expect(raw).toContain('Content-Type: multipart/alternative; boundary="waves-alt-');
+  expect(raw).toContain('Content-Type: text/plain; charset=utf-8');
+  expect(raw).toContain('Content-Type: text/html; charset=utf-8');
+  const [plainPart, htmlPart] = raw.split('Content-Type: text/html; charset=utf-8');
+  expect(plainPart).toContain('Hi Taylor & Sam,\nYour visit is confirmed.');
+  expect(plainPart).not.toContain('.a{color:red}');
+  expect(htmlPart).toContain(htmlBody);
+});

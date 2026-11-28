@@ -209,10 +209,8 @@ function ctaButton(href, label) {
   return `
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;${block ? 'width:100%;' : ''}">
       <tr>
-        <td ${block ? 'align="center" ' : ''}style="border-radius:${T.ctaRadius};background:${T.ctaBg};${T.ctaBgImage ? `background-image:${T.ctaBgImage};` : ''}border:1px solid ${T.ctaBorder};${T.ctaShadow ? `box-shadow:${T.ctaShadow};` : ''}">
-          <a href="${href}" class="dm-gold" style="display:${block ? 'block' : 'inline-block'};padding:${T.ctaPad};font-family:${T.font};font-size:${T.ctaSize};font-weight:${T.ctaWeight};color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;${block ? 'text-align:center;' : ''}">
-            ${label}
-          </a>
+        <td ${block ? 'align="center" ' : ''}style="border-radius:${T.ctaRadius};background:${T.ctaBg};${T.ctaBgImage ? `background-image:${T.ctaBgImage};` : ''}border:1px solid ${T.ctaBorder};${T.ctaShadow ? `box-shadow:${T.ctaShadow};` : ''}mso-padding-alt:${T.ctaPad};">
+          <a href="${href}" class="dm-gold" style="display:${block ? 'block' : 'inline-block'};padding:${T.ctaPad};font-family:${T.font};font-size:${T.ctaSize};font-weight:${T.ctaWeight};color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;${block ? 'text-align:center;' : ''}">${label}</a>
         </td>
       </tr>
     </table>
@@ -271,8 +269,8 @@ function appFooterHtml(T) {
             Track visits, reports &amp; payments in the Waves app
           </div>
           <div style="text-align:center;margin:0 0 16px 0;">
-            <a href="${APP_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;"><img src="${APPLE_BADGE_IMG}" alt="Download on the App Store" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
-            <a href="${PLAY_STORE_URL}" style="display:inline-block;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="38" style="height:38px;width:auto;border:0;vertical-align:middle;" /></a>
+            <a href="${APP_STORE_URL}" style="display:inline-block;padding:3px 0;text-decoration:none;border:0;"><img src="${APPLE_BADGE_IMG}" alt="Download on the App Store" height="40" style="height:40px;width:auto;border:0;vertical-align:middle;" /></a>
+            <a href="${PLAY_STORE_URL}" style="display:inline-block;padding:3px 0;text-decoration:none;border:0;margin-left:10px;"><img src="${GOOGLE_BADGE_IMG}" alt="Get it on Google Play" height="38" style="height:38px;width:auto;border:0;vertical-align:middle;" /></a>
           </div>`;
 }
 
@@ -311,7 +309,7 @@ function ctaChip(href, label) {
  * actually takes) and the legacy SMTP fallback (invoice-email.js).
  */
 function stripeFooterLine() {
-  return `<div style="margin-top:12px;font-size:14px;">Powered by <a href="https://stripe.com" style="color:#635BFF;font-weight:700;text-decoration:none;">stripe</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href="https://stripe.com/invoicing" style="color:${activeTheme().muted};text-decoration:underline;">Learn more about Stripe Invoicing</a></div>`;
+  return `<div style="margin-top:12px;font-size:14px;">Powered by <a class="dm-link" href="https://stripe.com" style="color:#635BFF;font-weight:700;text-decoration:none;">stripe</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href="https://stripe.com/invoicing" style="color:${activeTheme().muted};text-decoration:underline;">Learn more about Stripe Invoicing</a></div>`;
 }
 
 function glassPillHeader(T) {
@@ -368,7 +366,7 @@ function followUsLine() {
 }
 
 function socialRowHtml() {
-  return `<div style="margin:14px 0 0 0;text-align:center;">${SOCIALS.map(([slug, url, name]) => `<a href="${url}" style="display:inline-block;margin:0 3px;padding:4px;text-decoration:none;border:0;"><img src="https://portal.wavespestcontrol.com/app-email/social/${slug}.png" alt="${name}" width="20" height="20" style="width:20px;height:20px;border:0;vertical-align:middle;opacity:0.9;" /></a>`).join('')}</div>`;
+  return `<div style="margin:14px 0 0 0;text-align:center;">${SOCIALS.map(([slug, url, name]) => `<a href="${url}" style="display:inline-block;margin:0 2px;padding:12px;text-decoration:none;border:0;"><img src="https://portal.wavespestcontrol.com/app-email/social/${slug}.png" alt="${name}" width="20" height="20" style="width:20px;height:20px;border:0;vertical-align:middle;opacity:0.9;" /></a>`).join('')}</div>`;
 }
 
 function glassFinePrint(T, extra = '') {
@@ -390,10 +388,9 @@ function glassFinePrint(T, extra = '') {
 // The complete universal Waves footer. Wrappers call this helper instead of
 // independently composing app links, company details, social links, and logo.
 function universalWavesFooterHtml(T, { appPromo = true } = {}) {
-  // appPromo:false → the newsletter lane. The customer-app pitch has no
-  // relevance to a general local-newsletter subscriber (owner-accepted
-  // critique 2026-07-29); it stays in the transactional/service wrappers,
-  // where every recipient is a customer.
+  // Keeps the universal Waves footer (app promo badges, company details,
+  // social icons, logo) across wrappers by default; callers can still pass
+  // appPromo:false to omit the app badges when needed.
   return glassFinePrint(T, appPromo ? appFooterHtml(T) : '');
 }
 
@@ -477,7 +474,7 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
 </style>
 </head>
 <body class="dm-body" style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
-  ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${T.pageBg};">${preheader}${PREHEADER_PAD}</div>` : ''}
+  ${preheader ? `<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;color:${T.pageBg};">${preheader}${PREHEADER_PAD}</div>` : ''}
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="dm-page" style="${pageBgStyle(T)}">
     <tr><td align="center" style="padding:26px 18px 44px 18px;">
       <!--[if mso]><table role="presentation" width="${msoWidth}" align="center" cellspacing="0" cellpadding="0" border="0"><tr><td><![endif]-->
@@ -493,8 +490,8 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
   const T = GLASS_THEME;
   const linesHtml = (lines || []).map(([label, value, emphasis]) => `
     <tr>
-      <td style="padding:7px 0;font-family:${T.font};font-size:14px;color:${T.muted};">${label}</td>
-      <td align="right" style="padding:7px 0;font-family:${T.font};font-size:14px;color:${T.ink};font-weight:${emphasis ? '700' : '500'};">${value}</td>
+      <td valign="top" style="padding:7px 12px 7px 0;vertical-align:top;font-family:${T.font};font-size:14px;color:${T.muted};">${label}</td>
+      <td valign="top" align="right" style="padding:7px 0;vertical-align:top;font-family:${T.font};font-size:14px;color:${T.ink};font-weight:${emphasis ? '700' : '500'};">${value}</td>
     </tr>
   `).join('');
 

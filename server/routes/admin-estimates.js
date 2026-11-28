@@ -1038,22 +1038,35 @@ const proposalFallbackIntro = (firstName) => `Hi ${firstName}, thank you for cal
 
 // updated (GATE_ESTIMATE_UPDATED_WORDING): the same email for a corrected estimate, saying it is the updated one.
 // A proposal never takes it (it keeps its own copy).
+function escEmailHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode, updated = false }) {
   const isUpdated = updated === true && !proposalMode;
   const ready = isUpdated ? 'Your updated Waves estimate is ready' : 'Your Waves estimate is ready';
   const heading = proposalMode ? 'Your Waves proposal is ready' : ready;
+  const firstHtml = escEmailHtml(firstName);
+  const viewUrlHtml = escEmailHtml(viewUrl);
+  const priceLineHtml = escEmailHtml(priceLine);
   const intro = proposalMode
-    ? `${proposalFallbackIntro(firstName)} ${PROPOSAL_NEXT_STEP_SUMMARY}`
+    ? `${proposalFallbackIntro(firstHtml)} ${PROPOSAL_NEXT_STEP_SUMMARY}`
     : (isUpdated
-      ? `Hi ${firstName}, your updated service estimate is ready for review. It replaces the one we sent before. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`
-      : `Hi ${firstName}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`);
+      ? `Hi ${firstHtml}, your updated service estimate is ready for review. It replaces the one we sent before. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`
+      : `Hi ${firstHtml}, your customized service estimate is ready for review. Tap below to view the full breakdown, add-ons, and pick a time that works for you.`);
   const html = wrapEmail({
     preheader: proposalMode
       ? 'Your proposal is attached. Here is how to get started.'
-      : (priceLine && priceLine.startsWith('$') ? `${ready} — ${priceLine}.` : `${ready} to review.`),
+      : (priceLine && priceLine.startsWith('$') ? `${ready} — ${priceLineHtml}.` : `${ready} to review.`),
     heading,
     intro,
-    ctaHref: viewUrl,
+    ctaHref: viewUrlHtml,
     ctaLabel: proposalMode ? 'View your proposal' : 'View Your Estimate',
     ...(proposalMode ? { footerNote: PROPOSAL_FALLBACK_NOTE } : {}),
   });
@@ -1379,7 +1392,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
     to: estimate.customer_email,
-    subject: isUpdated ? smtpSubject : 'Your Waves Pest Control Estimate is Ready',
+    subject: smtpSubject,
     html,
     text,
     ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
