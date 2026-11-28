@@ -87,13 +87,14 @@ function PalmTypes({ palmTypes, labelClass }) {
   </section>;
 }
 
-export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules = [] }) {
+export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules = [], products = null }) {
   const [open, setOpen] = useState(null);
   const [tank, setTank] = useState('flowzone');
   const instance = useId();
   const tech = mode === 'tech';
   const labelClass = tech ? 'text-14 font-medium text-ink-secondary' : heading;
   const hasMix = Object.values(guide.products).some(p => p.mix);
+  const showDesktopMixGrid = !tech && !(Array.isArray(guide.mixRates) && guide.mixRates.length > 0);
   return <div className="bg-white text-ink-primary text-14 leading-relaxed [&_*]:box-border [&_p]:m-0 [&_h2]:mt-0 [&_h3]:mt-0 [&_h4]:m-0 [&_dl]:mb-0 [&_dd]:ml-0 [&_ul]:my-0" data-testid="tree-shrub-field-guide">
     <header className="border-b border-hairline border-t-0 border-x-0 border-solid border-zinc-200 pb-4 mb-5">
       <h2 className="text-20 font-medium">Tree &amp; Shrub</h2>
@@ -108,10 +109,10 @@ export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules
     {guide.decision && <p className="mb-5 text-ink-secondary">{guide.decision}</p>}
     {/* The month's label-rate amounts for each of the card's tanks (the same TANKS as the product grid: rig 110 gal); granular and
         per-plant doses as written. */}
-    <ProtocolMixTable mixRates={guide.mixRates} sprayers={TANKS.map(t => ({ key: t.id, label: guide.equipment[t.id]?.name || t.id, gallons: t.gallons }))} />
+    <ProtocolMixTable mixRates={guide.mixRates} sprayers={TANKS.map(t => ({ key: t.id, label: guide.equipment[t.id]?.name || t.id, gallons: t.gallons }))} products={products} />
     {[['routine', 'Routine when due'], ['conditional', 'If you find']].map(([section, title]) => guide[section].length > 0 && <section key={section} className="mb-6">
       <h3 className={`${labelClass} mb-2`}>{title}</h3>
-      {!tech && <div className="hidden md:grid grid-cols-[minmax(180px,2fr)_repeat(3,minmax(100px,1fr))] gap-3 py-2 border-b border-hairline border-t-0 border-x-0 border-solid border-zinc-200 text-14 text-ink-tertiary">
+      {showDesktopMixGrid && <div className="hidden md:grid grid-cols-[minmax(180px,2fr)_repeat(3,minmax(100px,1fr))] gap-3 py-2 border-b border-hairline border-t-0 border-x-0 border-solid border-zinc-200 text-14 text-ink-tertiary">
         <span>Product</span><span>B&amp;G 1 gal</span><span>FlowZone 4 gal</span><span>Rig 110 gal</span>
       </div>}
       {guide[section].map((row, i) => {
@@ -121,10 +122,10 @@ export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules
         const expanded = key === open;
         return <div key={key} className="border-b border-hairline border-t-0 border-x-0 border-solid border-zinc-200">
           <button type="button" aria-expanded={expanded} aria-controls={panelId} onClick={() => setOpen(expanded ? null : key)}
-            className={`appearance-none border-0 bg-transparent px-0 w-full min-h-11 text-left py-3 u-focus-ring ${tech ? '' : 'md:grid md:grid-cols-[minmax(180px,2fr)_repeat(3,minmax(100px,1fr))] md:gap-3 md:items-center'}`}>
+            className={`appearance-none border-0 bg-transparent px-0 w-full min-h-11 text-left py-3 u-focus-ring ${showDesktopMixGrid ? 'md:grid md:grid-cols-[minmax(180px,2fr)_repeat(3,minmax(100px,1fr))] md:gap-3 md:items-center' : ''}`}>
             <span className="block"><span className="font-medium">{product.name}</span><span aria-hidden="true" className="ml-2">{expanded ? '−' : '+'}</span><span className="block text-ink-secondary">{row.where}</span>{product.mixWarning && <span role="alert" className="block text-alert-fg">Warning: {product.mixWarning}</span>}</span>
             <span className={`block text-ink-secondary ${tech ? '' : 'md:hidden'}`}>{amountFor(product, TANKS.find(t => t.id === tank).gallons)}</span>
-            {!tech && (product.mix ? TANKS.map(t => <span className="hidden md:block tabular-nums" key={t.id}>{amountFor(product, t.gallons)}</span>) : <span className="hidden md:block md:col-span-3 text-ink-secondary">{product.summary}</span>)}
+            {showDesktopMixGrid && (product.mix ? TANKS.map(t => <span className="hidden md:block tabular-nums" key={t.id}>{amountFor(product, t.gallons)}</span>) : <span className="hidden md:block md:col-span-3 text-ink-secondary">{product.summary}</span>)}
           </button>
           {expanded && <div id={panelId}><ProductDetails key={key} product={product} equipment={guide.equipment} mode={mode} tank={tank} onTankChange={setTank} /></div>}
         </div>;

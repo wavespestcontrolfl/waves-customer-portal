@@ -8460,7 +8460,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                               }}
                             >
                               {lawnMix.equipment?.systemName ||
-                                "No calibrated rig"}{" "}
+                                "No sprayer selected"}{" "}
                               ·{" "}
                               {fmtProtocolNumber(
                                 lawnMix.equipment?.carrierGalPer1000,

@@ -94,6 +94,7 @@ const PROGRAM_KEYS = [
   'flea',
   'bed_bug',
   'termite',
+  'mosquito_misting',
 ];
 
 function programSummary(key, program) {
@@ -749,7 +750,12 @@ async function getProtocolProducts() {
   }));
 }
 
-async function getActiveCalibration(equipmentSystemId) {
+function calibrationAllowedForScope(row, { scopeByTechnician = false, technicianId = null } = {}) {
+  if (!scopeByTechnician) return true;
+  return !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId));
+}
+
+async function getActiveCalibration(equipmentSystemId, { calibrationId = null, scopeByTechnician = false, technicianId = null } = {}) {
   const query = db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -764,8 +770,42 @@ async function getActiveCalibration(equipmentSystemId) {
     .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 when es.system_type = 'tank' then 1 else 2 end")
     .orderBy('es.name', 'asc');
 
+  if (calibrationId) query.where('ec.id', calibrationId);
   if (equipmentSystemId) query.where('ec.equipment_system_id', equipmentSystemId);
+  if (scopeByTechnician && !calibrationId) {
+    const rows = await query.catch(() => []);
+    const list = Array.isArray(rows) ? rows : [];
+    return list.find((row) => calibrationAllowedForScope(row, { scopeByTechnician, technicianId })) || null;
+  }
   return query.first().catch(() => null);
+}
+
+function sheetTechnicianScope(req, scheduled, pickedRigId) {
+  const isTech = isTechnicianRequest(req);
+  const visitTechId = scheduled?.technician_id || null;
+  const scopeByTechnician = isTech || Boolean(scheduled && (!pickedRigId || visitTechId));
+  const viewerTechId = isTech ? (req.technicianId || null) : null;
+  const technicianId = !pickedRigId && scheduled ? visitTechId : (viewerTechId || visitTechId);
+  return { scopeByTechnician, technicianId };
+}
+
+async function loadSheetCalibration(req, scheduled) {
+  const pickedRigId = req.query.equipmentSystemId || null;
+  const assignedSystemId = await assignedRigId(scheduled);
+  const rigId = pickedRigId || assignedSystemId;
+  const storedPin = scheduled?.assigned_calibration_id || null;
+  const keepPin = Boolean(storedPin && (!pickedRigId || !assignedSystemId || String(pickedRigId) === String(assignedSystemId)));
+  const calibrationId = keepPin ? storedPin : null;
+  const techScope = sheetTechnicianScope(req, scheduled, pickedRigId);
+  const calibration = await getActiveCalibration(rigId, { calibrationId, ...techScope });
+  const unresolvedPinRigId = calibrationId && !calibration ? (rigId || '__unknown__') : null;
+  const unresolvedRigId = !calibration && (rigId || calibrationId) ? (rigId || '__unknown__') : null;
+  const calibrationScope = {
+    ...techScope,
+    ...(unresolvedPinRigId ? { unresolvedPinRigId } : {}),
+    ...(unresolvedRigId ? { unresolvedRigId } : {}),
+  };
+  return { rigId, calibration, calibrationScope };
 }
 
 // The sprayer line of each other big tank the sheet names an amount for (tankOptions: no sprayer picked, the tanks differ).
@@ -781,13 +821,14 @@ function otherTankLines(calibration, bigTanks, items) {
 async function assignedRigId(scheduled) {
   if (scheduled?.assigned_equipment_system_id) return scheduled.assigned_equipment_system_id;
   if (!scheduled?.assigned_calibration_id) return null;
-  const row = await db('equipment_calibrations').where({ id: scheduled.assigned_calibration_id }).first('equipment_system_id');
+  const row = await db('equipment_calibrations').where({ id: scheduled.assigned_calibration_id }).first('equipment_system_id').catch(() => null);
   return row?.equipment_system_id || null;
 }
 
 // Every active 110 gal tank's active calibration, tank #1 first (as getActiveCalibration orders them).
-async function getActiveBigTanks() {
-  return db('equipment_calibrations as ec')
+async function getActiveBigTanks(scope = {}) {
+  if (scope.unresolvedPinRigId) return [];
+  const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where({ 'ec.active': true, 'es.active': true, 'es.system_type': 'tank' })
     .where('es.tank_capacity_gal', BIG_TANK_CAPACITY_GAL)
@@ -795,6 +836,7 @@ async function getActiveBigTanks() {
     .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 else 1 end")
     // No catch: a failed read fails the sheet, never one tank's number shown as if it were the only tank.
     .orderBy('es.name', 'asc');
+  return Array.isArray(rows) ? rows.filter((row) => calibrationAllowedForScope(row, scope)) : [];
 }
 const BIG_TANK_CAPACITY_GAL = 110;
 
@@ -804,8 +846,19 @@ const BIG_TANK_CAPACITY_GAL = 110;
 const isFlowZone4Gal = (row) => row.system_type === 'backpack' && Number(row.tank_capacity_gal) === 4 && /flow\s*zone/i.test(row.system_name || '');
 const newestTestFirst = (a, b) => (b.calibration_status === 'field_verified') - (a.calibration_status === 'field_verified')
   || new Date(b.calibrated_at || 0) - new Date(a.calibrated_at || 0);
-async function getBackpackCalibration(selected) {
+async function isFlowZoneSystem(equipmentSystemId) {
+  if (!equipmentSystemId || equipmentSystemId === '__unknown__') return true;
+  const sys = await db('equipment_systems')
+    .where({ id: equipmentSystemId })
+    .first('system_type', 'tank_capacity_gal', 'name as system_name')
+    .catch(() => null);
+  return !sys || isFlowZone4Gal(sys);
+}
+
+async function getBackpackCalibration(selected, scope = {}) {
   if (selected && isFlowZone4Gal(selected)) return selected;
+  const blockedRigId = scope.unresolvedRigId || scope.unresolvedPinRigId || null;
+  if (blockedRigId && await isFlowZoneSystem(blockedRigId)) return null;
   const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -815,7 +868,9 @@ async function getBackpackCalibration(selected) {
     .where('es.name', 'ilike', '%flow%zone%')
     .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
     .catch(() => []);
-  return (rows || []).filter(isFlowZone4Gal).sort(newestTestFirst)[0] || null;
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => isFlowZone4Gal(row) && calibrationAllowedForScope(row, scope))
+    .sort(newestTestFirst)[0] || null;
 }
 
 // GET /api/admin/protocols/photos/relevant — context-aware photo references
@@ -1273,12 +1328,11 @@ router.get('/lawn-mix', async (req, res, next) => {
     const lineMeta = visit.lineMeta || {};
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
-    // The picked sprayer, else the visit's own assigned rig; neither: every active 110 gal tank, so the sheet names each tank's
-    // amount when their numbers differ.
-    const rigId = req.query.equipmentSystemId || await assignedRigId(scheduled);
-    const calibration = await getActiveCalibration(rigId);
-    const backpack = await getBackpackCalibration(calibration);
-    const bigTanks = rigId ? [] : await getActiveBigTanks();
+    // The picked sprayer, else the visit's own assigned rig (scoped by assigned calibration and technician, matching the plan engine);
+    // neither: every active 110 gal tank, so the sheet names each tank's amount when their numbers differ.
+    const { rigId, calibration, calibrationScope } = await loadSheetCalibration(req, scheduled);
+    const backpack = await getBackpackCalibration(calibration, calibrationScope);
+    const bigTanks = rigId || calibrationScope.unresolvedPinRigId ? [] : await getActiveBigTanks(calibrationScope);
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
@@ -2246,6 +2300,7 @@ router.get('/programs', async (req, res, next) => {
       flea: programSummary('flea', protocols.flea),
       bed_bug: programSummary('bed_bug', protocols.bed_bug),
       termite: programSummary('termite', protocols.termite),
+      mosquito_misting: programSummary('mosquito_misting', protocols.mosquito_misting),
     }));
   } catch (err) { next(err); }
 });
@@ -2280,6 +2335,9 @@ router._internals = {
   loadWindowSopPayload,
   renderWindowSopMarkdown,
   resolveMixWith,
+  loadSheetCalibration,
+  getBackpackCalibration,
+  getActiveBigTanks,
 };
 
 module.exports = router;
