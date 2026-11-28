@@ -2706,9 +2706,8 @@ function notifyTechOfSkippedVisit({ req, svc, transition, fromStatus }) {
   });
 }
 
-function techForbiddenStatusAction(req, svc, toStatus) {
+function techForbiddenStatusAction(req, _svc, toStatus) {
   if (req.techRole === 'admin') return false;
-  if (svc?.status === toStatus && ['cancelled', 'skipped', 'no_show'].includes(toStatus)) return false;
   return toStatus === 'no_show' || toStatus === 'skipped' || toStatus === 'cancelled';
 }
 

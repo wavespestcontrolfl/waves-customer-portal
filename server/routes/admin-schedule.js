@@ -29515,7 +29515,7 @@ router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
       db('scheduled_services')
         .where({ scheduled_date: date })
         .whereNotIn('status', ['cancelled', 'rescheduled'])
-        .where((q) => q.whereNotNull('customer_id').orWhere('reservation_expires_at', '>', db.fn.now())),
+        .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', db.fn.now())),
       'scheduled_services'
     ).select('window_start', 'window_end', 'estimated_duration_minutes');
 
