@@ -571,7 +571,7 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
       }
       return d;
     });
-    setOptimistic({ ...data, days: nextDays });
+    setOptimistic(nextDays);
     setPending({
       mode: 'reschedule',
       svc,

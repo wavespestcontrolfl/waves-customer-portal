@@ -137,6 +137,8 @@ router.put('/', async (req, res, next) => {
         return;
       }
 
+      await stampMarketingSmsConsentPhone(trx, req.customerId, updates, existing);
+
       updates.updated_at = new Date();
       if (existing) {
         await trx('notification_prefs').where({ customer_id: req.customerId }).update(updates);
@@ -191,6 +193,25 @@ function dropRoundTrippedMarketingFlags(updates, existing) {
   }
 }
 
-router._private = { dropRoundTrippedMarketingFlags };
+async function stampMarketingSmsConsentPhone(trx, customerId, updates, existing) {
+  if (updates.marketing_offers === undefined && updates.marketing_channel === undefined) return;
+  let cols = {};
+  try { cols = await trx('notification_prefs').columnInfo(); } catch { cols = {}; }
+  if (!cols?.marketing_sms_consent_phone) return;
+  const wasChannel = existing?.marketing_channel || 'email';
+  const wasEnabled = existing?.marketing_offers === true && (wasChannel === 'sms' || wasChannel === 'both');
+  const nextOffers = updates.marketing_offers !== undefined ? updates.marketing_offers : existing?.marketing_offers;
+  const nextChannel = updates.marketing_channel !== undefined ? updates.marketing_channel : wasChannel;
+  const nowEnabled = nextOffers === true && (nextChannel === 'sms' || nextChannel === 'both');
+  if (!nowEnabled) {
+    updates.marketing_sms_consent_phone = null;
+  } else if (!wasEnabled) {
+    const cust = await trx('customers').where({ id: customerId }).first('phone');
+    const { canonicalE164 } = require('../services/new-lead-phone-sms-drip');
+    updates.marketing_sms_consent_phone = canonicalE164(cust?.phone) || null;
+  }
+}
+
+router._private = { dropRoundTrippedMarketingFlags, stampMarketingSmsConsentPhone };
 
 module.exports = router;

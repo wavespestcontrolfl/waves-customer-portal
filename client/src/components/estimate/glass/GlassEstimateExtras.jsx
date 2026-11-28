@@ -7,6 +7,7 @@
  * scoped to html[data-glass-theme].
  */
 import { useEffect, useState } from 'react';
+import { Clock } from 'lucide-react';
 import { approveSlotWhen } from '../../../lib/estimate-glass-slots';
 import './glass-components.css';
 
@@ -49,6 +50,7 @@ export function GlassFrequencyPills({ frequencies, selected, onChange, disabled 
               key={frequency.key}
               type="button"
               className="gc-freq-btn"
+              data-glass-pill=""
               aria-label={`${frequency.label} frequency`}
               aria-pressed={active}
               disabled={disabled}
@@ -189,7 +191,7 @@ export function GlassStickyBookBar({ show = false, slotMeta, onApprove }) {
   if (!show) return null;
   return (
     <div className="gc-mbb">
-      <button type="button" className="gc-mbb-btn" style={{ flex: 1, width: '100%' }} onClick={onApprove}>
+      <button type="button" className="gc-mbb-btn" data-glass-pill="" style={{ flex: 1, width: '100%' }} onClick={onApprove}>
         {slotMeta ? `Approve ${approveSlotWhen(slotMeta)} →` : 'Approve my plan →'}
       </button>
     </div>
@@ -228,7 +230,7 @@ export function GlassScarcityBadge({ info }) {
   if (!info) return null;
   return (
     <div className="gc-scarcity">
-      <span aria-hidden="true">⏳</span>
+      <Clock size={14} aria-hidden="true" />
       {info.label}
     </div>
   );
@@ -241,7 +243,7 @@ export function GlassScarcityBadge({ info }) {
 export function GlassSectionCta({ label, onClick, style }) {
   return (
     <div style={{ display: 'flex', margin: '16px 0 4px', ...style }}>
-      <button type="button" className="gc-section-cta" onClick={onClick}>
+      <button type="button" className="gc-section-cta" data-glass-pill="" onClick={onClick}>
         {label}
       </button>
     </div>

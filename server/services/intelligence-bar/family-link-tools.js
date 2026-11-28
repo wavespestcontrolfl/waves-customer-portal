@@ -116,20 +116,45 @@ async function loadProfile(database, rawId, label) {
   const id = String(rawId || '').trim().toLowerCase();
   if (!UUID_RE.test(id)) return refusal(`A valid ${label} id is required`, 'invalid_target');
   const row = await database('customers').where({ id }).first('id', 'first_name', 'last_name', 'company_name',
-    'address_line1', 'address_line2', 'city', 'state', 'zip', 'active', 'deleted_at');
+    'email', 'phone',
+    'address_line1', 'address_line2', 'city', 'state', 'zip', 'active', 'pipeline_stage', 'deleted_at');
   if (!row || row.deleted_at) return refusal(`The ${label} profile was not found. Nothing was changed.`, 'customer_not_found');
-  const family = await require('../multi-home-family').familyMembers(database, id);
+  const Family = require('../multi-home-family');
+  const family = await Family.familyMembers(database, id);
   // Every membership row of the family, a soft-deleted profile's included (familyMembers hides those): the confirm locks
   // all of them, so a restored profile can never join the family between the card and the write unseen.
   const memberIds = family.familyId
     ? (await database('multi_home_family_members').where({ family_id: family.familyId }).select('customer_id')).map((r) => String(r.customer_id)).sort()
     : [];
+  const memberAddresses = [];
+  for (const mid of memberIds) {
+    if (mid === id) continue;
+    const memberRow = await database('customers').where({ id: mid }).first('id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'deleted_at');
+    if (memberRow && !memberRow.deleted_at) memberAddresses.push(memberRow);
+  }
+  const { isInternalTestContact } = require('../internal-test-customers');
+  const isInternalTest = isInternalTestContact({
+    customerId: row.id,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    email: row.email,
+    phone: row.phone,
+  });
   return {
     profile: {
       id,
       name: displayName(row),
       address: displayAddress(row),
+      rawAddress: {
+        address_line1: row.address_line1 || null,
+        address_line2: row.address_line2 || null,
+        city: row.city || null,
+        zip: row.zip || null,
+      },
+      memberAddresses,
       active: row.active === true,
+      pipeline_stage: row.pipeline_stage || null,
+      is_internal_test: isInternalTest,
       family_id: family.familyId,
       member_ids: memberIds,
       members: family.members.map(({ id: memberId, name, address, active }) => ({ id: memberId, name, address, active })),
@@ -137,7 +162,42 @@ async function loadProfile(database, rawId, label) {
   };
 }
 
-const pinOf = (p) => ({ id: p.id, name: p.name, address: p.address, active: p.active, family_id: p.family_id, member_ids: p.member_ids, members: p.members.map((m) => [m.id, m.name, m.address, m.active]) });
+const pinOf = (p) => ({
+  id: p.id,
+  name: p.name,
+  address: p.address,
+  active: p.active,
+  pipeline_stage: p.pipeline_stage,
+  family_id: p.family_id,
+  member_ids: p.member_ids,
+  members: p.members.map((m) => [m.id, m.name, m.address, m.active]),
+});
+
+function profileLinkabilityRefusal(p, liveStages) {
+  const { addressMatchKey } = require('../customer-address-fanout');
+  if (!p.active) return refusal(`${p.name}'s profile is not active. Only active profiles can be linked. Nothing was changed.`, 'profile_inactive');
+  if (p.is_internal_test) return refusal(`${p.name}'s profile is an internal test account and cannot be linked. Nothing was changed.`, 'internal_test_account');
+  if (!liveStages.includes(String(p.pipeline_stage || ''))) {
+    return refusal(`${p.name}'s profile is not an active customer. Only active customers can be linked as Same family. Nothing was changed.`, 'profile_ineligible');
+  }
+  if (!addressMatchKey(p.rawAddress?.address_line1)) {
+    return refusal(`${p.name}'s profile has no street address yet. Add a service address before linking as Same family. Nothing was changed.`, 'missing_address');
+  }
+  return null;
+}
+
+function sharedFamilyAddressRefusal(mine, other, Family) {
+  if (Family.sameHomeAddress(mine.rawAddress, other.rawAddress)) {
+    return refusal(`${mine.name} and ${other.name} share the same service address. Link distinct homes as Same family, or merge duplicate profiles instead. Nothing was changed.`, 'same_address');
+  }
+  const joiner = other.family_id && !mine.family_id ? mine : other;
+  const host = joiner === mine ? other : mine;
+  const conflict = (host.memberAddresses || []).some((m) => String(m.id) !== joiner.id && Family.sameHomeAddress(joiner.rawAddress, m));
+  if (conflict) {
+    return refusal(`A profile at ${joiner.name}'s service address is already in ${host.name}'s family. Link distinct homes as Same family, or merge duplicate profiles instead. Nothing was changed.`, 'same_address');
+  }
+  return null;
+}
 
 async function buildLinkPlan(input, { database = db } = {}) {
   const a = await loadProfile(database, input.customer_id, 'account');
@@ -147,9 +207,11 @@ async function buildLinkPlan(input, { database = db } = {}) {
   const mine = a.profile;
   const other = b.profile;
   if (mine.id === other.id) return refusal('That is the same profile twice. Pass the family member\'s own profile as other_customer_id.', 'same_profile');
-  for (const p of [mine, other]) {
-    if (!p.active) return refusal(`${p.name}'s profile is not active. Only active profiles can be linked. Nothing was changed.`, 'profile_inactive');
-  }
+  const Family = require('../multi-home-family');
+  const ineligible = profileLinkabilityRefusal(mine, Family.LIVE_FAMILY_STAGES)
+    || profileLinkabilityRefusal(other, Family.LIVE_FAMILY_STAGES)
+    || sharedFamilyAddressRefusal(mine, other, Family);
+  if (ineligible) return ineligible;
   if (mine.family_id && other.family_id && mine.family_id === other.family_id) {
     return refusal(`${mine.name} and ${other.name} are already linked as the same family. Nothing was changed.`, 'already_linked');
   }
@@ -251,6 +313,7 @@ async function commit(toolName, input, actionContext) {
   const Family = require('../multi-home-family');
   const actorId = actionContext?.technicianId || null;
   let members;
+  let formerMemberIds = [];
   try {
     await db.transaction(async (trx) => {
       // The page's own family-change lock first (held to the end of this transaction), then the card re-read under it,
@@ -262,6 +325,9 @@ async function commit(toolName, input, actionContext) {
       await trx('customers').whereIn('id', [...shown].sort()).orderBy('id').forUpdate().select('id');
       const locked = await buildPlan(toolName, input, { database: trx });
       if (locked.error || JSON.stringify(locked._version) !== JSON.stringify(plan._version)) throw changedError();
+      if (toolName === 'unlink_customer_family') {
+        formerMemberIds = [...(plan._version.account?.member_ids || [])];
+      }
       const result = toolName === 'link_customer_family'
         ? await Family.linkFamily(trx, { customerId: plan.customer_id, otherCustomerId: plan.other_customer_id, actorId })
         : await Family.unlinkFamily(trx, { customerId: plan.customer_id, actorId });
@@ -277,6 +343,12 @@ async function commit(toolName, input, actionContext) {
     return { customer_id: plan.customer_id, outcome_unknown: true, code: 'execution_interrupted',
       error: 'The family link change was interrupted — it may or may not have happened. Check the Same family section on the customer page before trying again.' };
   }
+  await Family.alertFamilyDropBelowTwo(db, {
+    formerMemberIds,
+    departedCustomerId: plan.customer_id,
+    reason: 'unlinked',
+    includeDeparted: true,
+  });
   logger.info(`[intelligence-bar:family-link] ${toolName} done for ${plan.customer_id}`);
   if (toolName === 'link_customer_family') {
     return { customer_id: plan.customer_id, other_customer_id: plan.other_customer_id, success: true, sent_to_customer: false,

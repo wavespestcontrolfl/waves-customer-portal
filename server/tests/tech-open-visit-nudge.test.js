@@ -26,6 +26,7 @@ function chain(overrides = {}) {
     whereIn: jest.fn(() => c),
     whereNotNull: jest.fn(() => c),
     whereNull: jest.fn(() => c),
+    whereNotExists: jest.fn(() => c),
     whereBetween: jest.fn(() => c),
     orderBy: jest.fn(() => c),
     select: jest.fn().mockResolvedValue([]),
@@ -784,13 +785,17 @@ describe('re-service carry-over', () => {
     const probes = q.where.mock.calls.map((c) => c[0]).filter((a) => typeof a === 'function').map((fn) => {
       const p = {
         where: jest.fn(() => p), orWhereIn: jest.fn(() => p), whereNotNull: jest.fn(() => p), orWhereNull: jest.fn(() => p),
+        whereNull: jest.fn(() => p), orWhereNotIn: jest.fn(() => p),
       };
       fn(p);
       return p;
     });
-    const reservice = probes.find((p) => p.orWhereIn.mock.calls.length);
+    const reservice = probes.find((p) => p.orWhereIn.mock.calls.some(([col]) => col === 'services.service_key'));
     expect(reservice.where).toHaveBeenCalledWith('s.is_callback', true);
     expect(reservice.orWhereIn).toHaveBeenCalledWith('services.service_key', ['pest_re_service', 'lawn_re_service']);
+    const trackerGuard = probes.find((p) => p.whereNull.mock.calls.length);
+    expect(trackerGuard.whereNull).toHaveBeenCalledWith('s.track_state');
+    expect(trackerGuard.orWhereNotIn).toHaveBeenCalledWith('s.track_state', ['complete', 'cancelled']);
     const hold = probes.find((p) => p.orWhereNull.mock.calls.length);
     expect(hold.orWhereNull).toHaveBeenCalledWith('s.reservation_expires_at');
   });

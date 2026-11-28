@@ -10,6 +10,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/estimate-slot-availability', () => ({
   invalidateEstimate: jest.fn(),
+  invalidateAllEstimates: jest.fn(),
   async resolveCatalogSlotProfile(estimate, options) { return this.resolveEstimateSlotProfile(estimate, options); },
   resolveEstimateSlotProfile: jest.fn(() => ({
     durationMinutes: 90,
@@ -1156,6 +1157,47 @@ describe('slot reservation helpers', () => {
         await expect(commit(trx)).rejects.toMatchObject({ code: 'COMBINED_VISIT_UNAVAILABLE', status: 409 });
         expect(updateBuilder.update).not.toHaveBeenCalled();
       } finally { capabilities.mockRestore(); jest.useRealTimers(); }
+    });
+
+    test('a winter hold committed under seasonal9 mosquito is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-11-01T15:00:00Z'));
+      const origSeasonalProfile = estimateSlotAvailability.seasonalSelectionProfile;
+      const origInSeason = estimateSlotAvailability.inMosquitoSeason;
+      estimateSlotAvailability.seasonalSelectionProfile = jest.fn(() => true);
+      estimateSlotAvailability.inMosquitoSeason = jest.fn(() => false);
+      try {
+        const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-11-20' }) };
+        const reservationBuilder = {
+          where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+          first: jest.fn().mockResolvedValue({
+            id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-11-20',
+            window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
+            reservation_expires_at: '2027-11-20T13:15:00.000Z',
+          }),
+        };
+        const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+        const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+        const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true });
+        const trx = jest.fn((table) => {
+          if (table === 'scheduled_services') return scheduledBuilders.shift();
+          if (table === 'technicians') return techBuilder;
+          if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
+          throw new Error(`unexpected table ${table}`);
+        });
+        trx.raw = jest.fn((sql) => ({ raw: sql }));
+        trx.isTransaction = true;
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+          estimatedPrice: 99, estimate: { id: 'estimate-456', service_interest: 'Mosquito Control' },
+          selectedFrequency: 'seasonal9', trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: expect.stringMatching(/February through October/) });
+        expect(estimateSlotAvailability.inMosquitoSeason).toHaveBeenCalledWith('2027-11-20');
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally {
+        estimateSlotAvailability.seasonalSelectionProfile = origSeasonalProfile;
+        estimateSlotAvailability.inMosquitoSeason = origInSeason;
+        jest.useRealTimers();
+      }
     });
   });
 
@@ -2621,8 +2663,9 @@ describe('reserveSlot signed-offer gate (booking-audit round 2)', () => {
       expect(travel).not.toHaveBeenCalled();
       // Pre-transaction rejections must still drop the wrapper cache so the
       // public 409 recovery payload re-signs fresh slots instead of re-serving
-      // the stale list (codex #4346 P2).
+      // the stale list (codex #4346 P2), without flushing unrelated estimates.
       expect(estimateSlotAvailability.invalidateEstimate).toHaveBeenCalledWith('estimate-456');
+      expect(estimateSlotAvailability.invalidateAllEstimates).not.toHaveBeenCalled();
     } finally {
       travel.mockRestore();
       delete estimateSlotAvailability.resolveEstimateCoords;
@@ -3004,5 +3047,79 @@ describe('commitReservation enforces a configured close in capacity mode (Codex 
       await expect(commit(trx)).rejects.not.toMatchObject({ message: 'slot runs past the end of the working day' });
       expect(updateBuilder.update).not.toHaveBeenCalled();
     } finally { jest.useRealTimers(); }
+  });
+});
+
+describe('global estimate cache invalidation on hold lifecycle writes', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('releaseReservation and releaseEstimateHolds flush all estimate caches when rows are deleted', async () => {
+    const delBuilder = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      del: jest.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0).mockResolvedValueOnce(2),
+    };
+    db.mockReturnValue(delBuilder);
+    const r1 = await slotReservation.releaseReservation({ scheduledServiceId: 'hold-1', estimateId: 'est-1' });
+    expect(r1).toEqual({ released: true });
+    expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(1);
+
+    // No-op delete does not unnecessarily flush.
+    const r2 = await slotReservation.releaseReservation({ scheduledServiceId: 'hold-missing', estimateId: 'est-1' });
+    expect(r2).toEqual({ released: false });
+    expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(1);
+
+    const r3 = await slotReservation.releaseEstimateHolds({ estimateId: 'est-2' });
+    expect(r3).toEqual({ released: 2 });
+    expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(2);
+  });
+
+  test('transactional releaseEstimateHolds defers cache flush until the outer transaction commits', async () => {
+    let resolveCommit;
+    const executionPromise = new Promise((resolve) => { resolveCommit = resolve; });
+    const trx = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      del: jest.fn().mockResolvedValue(1),
+    }));
+    trx.isTransaction = true;
+    trx.executionPromise = executionPromise;
+
+    const r = await slotReservation.releaseEstimateHolds({ estimateId: 'est-tx', database: trx });
+    expect(r).toEqual({ released: 1 });
+    expect(estimateSlotAvailability.invalidateAllEstimates).not.toHaveBeenCalled();
+
+    resolveCommit();
+    await executionPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(1);
+  });
+
+  test('nested savepoint rollback does not flush caches even when the outer transaction commits', async () => {
+    let resolveOuter;
+    let rejectSavepoint;
+    const outerPromise = new Promise((resolve) => { resolveOuter = resolve; });
+    const savepointPromise = new Promise((_resolve, reject) => { rejectSavepoint = reject; });
+    const outerTrx = { isTransaction: true, executionPromise: outerPromise };
+    const savepointTrx = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      del: jest.fn().mockResolvedValue(1),
+    }));
+    savepointTrx.isTransaction = true;
+    savepointTrx.executionPromise = savepointPromise;
+    savepointTrx.parentTransaction = outerTrx;
+
+    await slotReservation.releaseEstimateHolds({ estimateId: 'est-sp', database: savepointTrx });
+    rejectSavepoint(new Error('savepoint rolled back'));
+    resolveOuter();
+    await outerPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(estimateSlotAvailability.invalidateAllEstimates).not.toHaveBeenCalled();
   });
 });

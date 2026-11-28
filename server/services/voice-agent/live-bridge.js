@@ -2,12 +2,13 @@
  * GPT-Live trial bridge (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19, spend cap $5).
  *
  * One Twilio Media Streams socket on one side, one OpenAI GPT-Live session
- * (wss://api.openai.com/v1/live/sessions) on the other. The caller's mu-law
- * 8 kHz audio passes through unchanged in both directions, so the owner can
- * compare this one speech-to-speech model with Sandy's STT -> Claude -> TTS
- * chain by ear. relay-server.js hands the socket here only after the same
+ * (wss://api.openai.com/v1/live/sessions) on the other. Caller mu-law 8 kHz
+ * audio passes through unchanged to OpenAI; model outbound mu-law audio passes
+ * through a zero-dependency lookup-table gain + soft-clip limiter targeting
+ * -16 dBFS voiced RMS so replies play at crisp telephony volume without clipping.
+ * relay-server.js hands the socket here only after the same
  * door as /ws/voice-agent: per-call token, sandbox-sourced call_log row with
- * the gpt_live stamp the cell route wrote, gate on, token burned.
+ * the gpt_live stamp the route wrote, gate on, token burned.
  *
  * The server records reply delay (no call words) for each call on
  * call_log.metadata.gpt_live. GPT-Live sends no speech-started event, so
@@ -97,11 +98,80 @@ function mulawToLinear(byte) {
   return u & 0x80 ? 0x84 - x : x - 0x84;
 }
 
+// Inverse ITU-T G.711 linear (16-bit signed) to mu-law byte.
+const MULAW_BIAS = 0x84;
+const MULAW_CLIP = 32635;
+function linearToMulaw(sample) {
+  let sign = 0;
+  let mag = Math.round(sample);
+  if (mag < 0) {
+    sign = 0x80;
+    mag = -mag;
+  }
+  if (mag > MULAW_CLIP) mag = MULAW_CLIP;
+  mag += MULAW_BIAS;
+  let exp = 7;
+  for (let mask = 0x4000; exp > 0 && (mag & mask) === 0; exp -= 1, mask >>= 1);
+  const mant = (mag >> (exp + 3)) & 0x0f;
+  return (~(sign | (exp << 4) | mant)) & 0xff;
+}
+
 // Whether each mu-law byte is voice (digital silence is 0xFF and 0x7F).
 const VOICED_BYTE = Uint8Array.from({ length: 256 }, (_, b) => (Math.abs(mulawToLinear(b)) >= VOICED_SAMPLE_MIN ? 1 : 0));
 const REPLY_SILENCE_MIN_SAMPLES = REPLY_SILENCE_MIN_MS * MULAW_BYTES_PER_MS;
 // The squared linear value of each mu-law byte, for a frame's RMS.
 const MULAW_SQUARE = Float64Array.from({ length: 256 }, (_, b) => mulawToLinear(b) ** 2);
+
+// Real-time outbound voice volume optimizer (owner 2026-11-28, $0, <0.1 ms/chunk):
+// Precomputed mu-law -> mu-law gain tables from 0.0 dB to +10.0 dB in 0.5 dB
+// steps. Pure silence and quiet noise floor (<100 linear, -50.3 dBFS) pass
+// untouched; gain ramps smoothly between 100 and VOICED_SAMPLE_MIN (300) to
+// avoid crossover artifacts; voiced peaks above -4.3 dBFS soft-clip via tanh
+// asymptotic to 27004 (-1.68 dBFS, exact G.711 mu-law bin strictly below
+// -1.5 dBFS) so replies never hard-clip.
+const OUTBOUND_TARGET_RMS = 5193; // -16.0 dBFS on 16-bit full scale (32768 * 10^(-16/20))
+const OUTBOUND_MAX_GAIN_DB = 10;
+const OUTBOUND_GAIN_STEP_DB = 0.5;
+const OUTBOUND_NOISE_FLOOR = OPENING_SOUND_RMS_MIN; // 100 linear (-50.3 dBFS): never boost silence/hiss
+const OUTBOUND_LIMITER_KNEE = 20000; // -4.3 dBFS soft-clip knee
+const OUTBOUND_LIMITER_CEILING = 27004; // -1.68 dBFS exact mu-law ceiling (< -1.5 dBFS after quantization)
+const OUTBOUND_GAIN_ATTACK = 0.7; // fast ducking when speech gets louder
+const OUTBOUND_GAIN_RELEASE = 0.3; // smooth boost when speech gets quieter
+
+function buildOutboundGainLut(gainDb) {
+  const lut = new Uint8Array(256);
+  if (gainDb <= 0) {
+    for (let b = 0; b < 256; b += 1) lut[b] = b;
+    return lut;
+  }
+  const linearGain = 10 ** (gainDb / 20);
+  const headroom = OUTBOUND_LIMITER_CEILING - OUTBOUND_LIMITER_KNEE;
+  for (let b = 0; b < 256; b += 1) {
+    const sample = mulawToLinear(b);
+    const absIn = Math.abs(sample);
+    if (absIn < OUTBOUND_NOISE_FLOOR) {
+      lut[b] = b;
+      continue;
+    }
+    const ramp = absIn >= VOICED_SAMPLE_MIN
+      ? 1
+      : (absIn - OUTBOUND_NOISE_FLOOR) / (VOICED_SAMPLE_MIN - OUTBOUND_NOISE_FLOOR);
+    const effGain = 1 + (linearGain - 1) * ramp;
+    let absOut = absIn * effGain;
+    if (absOut > OUTBOUND_LIMITER_KNEE) {
+      absOut = OUTBOUND_LIMITER_KNEE + headroom * Math.tanh((absOut - OUTBOUND_LIMITER_KNEE) / headroom);
+    }
+    lut[b] = linearToMulaw(sample < 0 ? -absOut : absOut);
+  }
+  return lut;
+}
+
+const OUTBOUND_GAIN_LUTS = Object.freeze(
+  Array.from(
+    { length: Math.round(OUTBOUND_MAX_GAIN_DB / OUTBOUND_GAIN_STEP_DB) + 1 },
+    (_, step) => buildOutboundGainLut(step * OUTBOUND_GAIN_STEP_DB),
+  ),
+);
 
 const INSTRUCTIONS_MAX_CHARS = 60000; // about 16k tokens; OpenAI's limit is 16,384
 
@@ -135,12 +205,12 @@ const TRIAL_LIMITS = [
 // Tools mode replaces TRIAL_LIMITS (which says nothing can be looked up).
 const TOOLS_LIMITS = [
   'TRIAL LIMITS (this overrides everything above):',
-  'This is a practice line. Delegate only these: prices, services offered, and a new-customer request. For',
-  'those, say only what the delegation result says; never guess or invent a price or service. A request is',
-  'practice and changes nothing, and the result says so. You cannot check open appointment times, accounts,',
-  'visits, invoices, estimates, messages or call history: if asked, say this practice line cannot check that,',
-  'and they can call or text the Waves office. You cannot send a text or transfer the call, and nobody will',
-  'call back from this line.',
+  'This is a practice line. Delegate only these: prices, services offered, open appointment times by city,',
+  'and a new-customer request. For those, say only what the delegation result says; never guess or invent',
+  'a price, service or time. Open times are practice-only and nothing is booked or held; a request changes',
+  'nothing. You cannot check accounts, visits, invoices, estimates, messages or call history: if asked,',
+  'say this practice line cannot check that, and they can call or text the Waves office. You cannot send a',
+  'text or transfer the call, and nobody will call back from this line.',
 ].join('\n');
 
 // ── Session setup pieces (pure, exported for tests) ────────────────────────
@@ -362,6 +432,7 @@ class LiveBridge {
     this.ambiguousReplies = []; // reply starts inside a barge-in's tail-drop window
     this.openingAudio = []; // caller frames before session.started (memory only)
     this.ambiguousUntil = null; // reply starts before this follow a barge-in too closely to time
+    this.outboundGainDb = null; // smoothed outbound boost (dB) toward OUTBOUND_TARGET_RMS
   }
 
   // ── plumbing ─────────────────────────────────────────────────────────────
@@ -658,8 +729,45 @@ class LiveBridge {
     const playsAt = Math.max(t, this.playbackEndsAt);
     if (last >= 0) this.voiceEndsAt = playsAt + (last + 1 - from) / MULAW_BYTES_PER_MS;
     this.playbackEndsAt = playsAt + (audio.length - from) / MULAW_BYTES_PER_MS;
-    const payload = from ? audio.subarray(from).toString('base64') : msg.delta;
+    const slice = from ? audio.subarray(from) : audio;
+    const payload = this.optimizeOutboundAudio(slice, from ? null : msg.delta);
     this.toTwilio({ event: 'media', streamSid: this.streamSid, media: { payload } });
+  }
+
+  // Adaptive LUT gain targeting -16 dBFS voiced RMS with soft-clip protection.
+  // Silence-only chunks and already-loud chunks (>= -16 dBFS) pass through
+  // byte-identically with zero extra allocation.
+  optimizeOutboundAudio(slice, rawDelta) {
+    let voicedSqSum = 0;
+    let voicedCount = 0;
+    for (let i = 0; i < slice.length; i += 1) {
+      const b = slice[i];
+      if (VOICED_BYTE[b]) {
+        voicedSqSum += MULAW_SQUARE[b];
+        voicedCount += 1;
+      }
+    }
+    if (voicedCount === 0) return rawDelta !== null ? rawDelta : slice.toString('base64');
+    const rms = Math.sqrt(voicedSqSum / voicedCount);
+    // Already at or above -16 dBFS: immediately reset gain to 0 dB and pass
+    // through byte-identically (no residual boost after a quiet chunk).
+    if (rms >= OUTBOUND_TARGET_RMS) {
+      this.outboundGainDb = 0;
+      return rawDelta !== null ? rawDelta : slice.toString('base64');
+    }
+    const desiredDb = Math.min(OUTBOUND_MAX_GAIN_DB, 20 * Math.log10(OUTBOUND_TARGET_RMS / rms));
+    if (this.outboundGainDb === null) {
+      this.outboundGainDb = desiredDb;
+    } else {
+      const alpha = desiredDb < this.outboundGainDb ? OUTBOUND_GAIN_ATTACK : OUTBOUND_GAIN_RELEASE;
+      this.outboundGainDb += alpha * (desiredDb - this.outboundGainDb);
+    }
+    const step = Math.max(0, Math.min(OUTBOUND_GAIN_LUTS.length - 1, Math.round(this.outboundGainDb / OUTBOUND_GAIN_STEP_DB)));
+    if (step === 0) return rawDelta !== null ? rawDelta : slice.toString('base64');
+    const lut = OUTBOUND_GAIN_LUTS[step];
+    const out = Buffer.allocUnsafe(slice.length);
+    for (let i = 0; i < slice.length; i += 1) out[i] = lut[slice[i]];
+    return out.toString('base64');
   }
 
   // A reply's delay runs from the caller's last speech to the reply's first
@@ -1260,4 +1368,9 @@ module.exports = {
   INSTRUCTIONS_MAX_CHARS,
   PER_CALL_RESERVE_USD,
   callCostUsd,
+  mulawToLinear,
+  linearToMulaw,
+  OUTBOUND_GAIN_LUTS,
+  OUTBOUND_TARGET_RMS,
+  OUTBOUND_LIMITER_CEILING,
 };

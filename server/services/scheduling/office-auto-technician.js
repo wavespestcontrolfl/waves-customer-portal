@@ -23,28 +23,57 @@
  */
 const defaultDb = require('../../models/db');
 const logger = require('../logger');
-const { applyAssignable, absentTechDays } = require('../technician-eligibility');
+const eligibility = require('../technician-eligibility');
+const { applyAssignable, absentTechDays } = eligibility;
+const featureGates = require('../../config/feature-gates');
 const { serviceLineFor, lineMapLive, pickLineTechnician } = require('./line-technician');
-const { stateOf } = require('../technician-capabilities');
+const { stateOf, inactiveCapabilitiesForServices } = require('../technician-capabilities');
+const { rowBlockMinutes } = require('./window-rules');
 const { dateOnlyString } = require('../../utils/datetime-et');
+
+const shiftHoursLive = () => typeof featureGates.techShiftHoursLive === 'function' && featureGates.techShiftHoursLive();
 
 const unassigned = (reason) => ({ technicianId: null, result: 'unassigned', reason });
 const assigned = (technicianId, reason) => ({ technicianId, result: 'assigned', reason });
 
+async function filterTechsByShift(conn, techs, { day, windowStart, windowEnd, durationMinutes }) {
+  if (!techs.length || !windowStart || !shiftHoursLive() || typeof eligibility.shiftExcluding !== 'function') return techs;
+  const hours = rowBlockMinutes({
+    window_start: windowStart,
+    window_end: windowEnd,
+    estimated_duration_minutes: durationMinutes,
+  });
+  if (!hours) return techs;
+  const kept = [];
+  for (const tech of techs) {
+    if (!(await eligibility.shiftExcluding(conn, tech.id, day, hours))) kept.push(tech);
+  }
+  return kept;
+}
+
 /** The technicians who may take this visit on this day: [{ id, name }]. */
-async function assignableTechnicians(conn, { day, serviceId, serviceKey, serviceType }) {
+async function assignableTechnicians(conn, { day, serviceId, serviceKey, serviceType, serviceAddons = [], windowStart = null, windowEnd = null, durationMinutes = 60 }) {
   let techs = await applyAssignable(conn('technicians')).select('technicians.id', 'technicians.name');
   if (!techs.length) return [];
   const absent = await absentTechDays(conn, { dateFrom: day, dateTo: day, technicianIds: techs.map((t) => t.id) });
   techs = techs.filter((t) => !absent.has(`${t.id}:${day}`));
   if (!techs.length) return [];
+  techs = await filterTechsByShift(conn, techs, { day, windowStart, windowEnd, durationMinutes });
+  if (!techs.length) return [];
   const { line } = await serviceLineFor(conn, { serviceId, serviceKey, serviceType });
-  if (!line) return techs;
-  const rows = await conn('technician_capabilities')
-    .whereIn('technician_id', techs.map((t) => t.id)).where({ service_category: line })
-    .select('technician_id', 'service_category', 'capability_level', 'active');
-  const off = new Set(rows.filter((row) => stateOf(row) === 'off').map((row) => row.technician_id));
-  return techs.filter((t) => !off.has(t.id));
+  if (line) {
+    const rows = await conn('technician_capabilities')
+      .whereIn('technician_id', techs.map((t) => t.id)).where({ service_category: line })
+      .select('technician_id', 'service_category', 'capability_level', 'active');
+    const off = new Set(rows.filter((row) => stateOf(row) === 'off').map((row) => row.technician_id));
+    techs = techs.filter((t) => !off.has(t.id));
+  }
+  if (techs.length && Array.isArray(serviceAddons) && serviceAddons.length) {
+    const addonOff = await inactiveCapabilitiesForServices(conn, techs.map((t) => t.id), serviceAddons);
+    const addonOffIds = new Set(addonOff.map((row) => row.technician_id));
+    techs = techs.filter((t) => !addonOffIds.has(t.id));
+  }
+  return techs;
 }
 
 /**
@@ -54,12 +83,12 @@ async function assignableTechnicians(conn, { day, serviceId, serviceKey, service
  */
 async function resolveOfficeAutoTechnician({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = 60,
-  serviceId, serviceKey, serviceType, customerId, lat, lng, zip = null,
+  serviceId, serviceKey, serviceType, serviceAddons, customerId, lat, lng, zip = null,
 } = {}) {
   try {
     const day = dateOnlyString(date);
     if (!day) return unassigned('lookup_failed');
-    const techs = await assignableTechnicians(conn, { day, serviceId, serviceKey, serviceType });
+    const techs = await assignableTechnicians(conn, { day, serviceId, serviceKey, serviceType, serviceAddons, windowStart, windowEnd, durationMinutes });
     if (!techs.length) return unassigned('none_assignable');
 
     // Service-line map LIVE: the line's home technician, else its gap technician, among
@@ -79,7 +108,7 @@ async function resolveOfficeAutoTechnician({
     // The catalog identity rides along: the pick reads the line (and capability) catalog
     // first, as step 1 did; by name alone a lawn catalog row such as "Top Dress" reads general.
     const pick = await picker.pickTechnicianForVisit({
-      conn, date: day, windowStart, windowEnd, durationMinutes, lat, lng, zip, serviceType, serviceId, serviceKey, customerId,
+      conn, date: day, windowStart, windowEnd, durationMinutes, lat, lng, zip, serviceType, serviceId, serviceKey, serviceAddons, customerId,
     });
     if (!pick.active) return unassigned('several_assignable');
     const pickedId = pick.technician?.id || null;

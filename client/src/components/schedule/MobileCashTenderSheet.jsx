@@ -6,7 +6,8 @@
 // invoice instead of writing only a scheduled-service prepaid marker.
 
 import { ArrowLeft, Delete } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -26,6 +27,7 @@ export default function MobileCashTenderSheet({
   const [entered, setEntered] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const savingRef = useRef(false);
   // Set when the server recorded the payment but sent no receipt ({ receipt: { manual: true } }: a part-paid invoice, whose
   // receipt would name the whole bill). The sheet then says so and closes on Done. It does not ask for a resend: the Invoices
   // page receipt names the whole bill too.
@@ -36,11 +38,15 @@ export default function MobileCashTenderSheet({
 
   function pressDigit(s) {
     setEntered((prev) => {
-      // Append digit(s) — treat each tap as "shift left one decimal, add digit"
-      const next = prev * 10 + Number(s[0]);
-      if (s.length > 1) return next * 10 + Number(s[1]);
-      // Clamp at 9 digits of cents ($9,999,999.99)
-      return next > 99_999_999_9 ? prev : next;
+      // Append digit(s) — shift left one decimal per digit and clamp at 9
+      // digits of cents ($9,999,999.99) for both single digits and '00'.
+      let next = prev;
+      for (const ch of String(s)) {
+        const candidate = next * 10 + Number(ch);
+        if (candidate > 999_999_999) return prev;
+        next = candidate;
+      }
+      return next;
     });
   }
 
@@ -49,7 +55,7 @@ export default function MobileCashTenderSheet({
   }
 
   async function handleTender() {
-    if (saving) return;
+    if (savingRef.current || saving) return;
     const submitAmount = entered > 0 ? entered / 100 : Number(amount || 0);
     if (!Number.isFinite(submitAmount) || submitAmount <= 0) {
       setError('Enter an amount');
@@ -63,37 +69,44 @@ export default function MobileCashTenderSheet({
       setError('Cash payment must match the invoice total');
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     setError(null);
-    try {
-      const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/record-payment`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-        },
-        // checkoutTender + totalSeen: with GATE_CHECKOUT_TENDER_RECEIPT on, the server queues the receipt and records
-        // exactly the amount this sheet showed (a balance that moved since is refused). Gate off, sendReceipt: false
-        // stands, as before.
-        body: JSON.stringify({ method: 'cash', note: null, sendReceipt: false, checkoutTender: true, totalSeen: Number(amount || 0) }),
-      });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        throw new Error(d.error || 'Failed to record payment');
-      }
-      const data = await r.json();
-      const payload = { amount: submitAmount, method: 'cash', invoice: data.invoice };
-      if (data.receipt?.manual) {
-        setRecorded(payload);
+    await holdReloadWhileSending('cash-tender', async () => {
+      try {
+        const r = await fetch(`${API_BASE}/admin/invoices/${invoiceId}/record-payment`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+          },
+          // checkoutTender + totalSeen: with GATE_CHECKOUT_TENDER_RECEIPT on, the server queues the receipt and records
+          // exactly the amount this sheet showed (a balance that moved since is refused). Gate off, sendReceipt: false
+          // stands, as before.
+          body: JSON.stringify({ method: 'cash', note: null, sendReceipt: false, checkoutTender: true, totalSeen: Number(amount || 0) }),
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          throw new Error(d.error || 'Failed to record payment');
+        }
+        const data = await r.json();
+        const payload = { amount: submitAmount, method: 'cash', invoice: data.invoice };
+        if (data.receipt?.manual) {
+          setRecorded(payload);
+          savingRef.current = false;
+          setSaving(false);
+          return;
+        }
+        savingRef.current = false;
         setSaving(false);
-        return;
+        onRecorded?.(payload);
+        onClose?.();
+      } catch (e) {
+        setError(e.message || 'Failed to record payment');
+        savingRef.current = false;
+        setSaving(false);
       }
-      onRecorded?.(payload);
-      onClose?.();
-    } catch (e) {
-      setError(e.message || 'Failed to record payment');
-      setSaving(false);
-    }
+    });
   }
 
   const displayValue = entered > 0 ? fmt(entered) : '';

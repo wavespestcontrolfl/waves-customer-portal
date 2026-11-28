@@ -35,7 +35,7 @@ const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection, renderSmsBankFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
 const portalCancelFact = require('./sms-portal-cancel-fact');
-const { namedDayMatcher } = require('./sms-open-times-intent');
+const { namedDayMatcherForThread } = require('./sms-open-times-intent');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
 const promptPatch = require('./sms-prompt-patch');
 const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
@@ -6353,9 +6353,13 @@ function openTimesWithheldReason({ timesAsked, missedVisitListed, missedRebook, 
 
 // What draftShadowReply stores from the OPEN TIMES outcome: the intended_actions key open_times_withheld ({} when times were shown
 // or never asked for). Empty for a frozen replay and with the real-answers gate off.
-function openTimesStampFor({ frozen, ...withheldInputs }) {
-  const withheld = frozen || !gateEnvValue('GATE_SMS_REAL_ANSWERS') ? null : openTimesWithheldReason(withheldInputs);
-  return withheld ? { open_times_withheld: withheld } : {};
+function openTimesStampFor({ frozen, threadCarryReason = null, ...withheldInputs }) {
+  if (frozen || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return {};
+  const withheld = openTimesWithheldReason(withheldInputs);
+  return {
+    ...(withheld ? { open_times_withheld: withheld } : {}),
+    ...(threadCarryReason ? { open_times_from_thread: threadCarryReason } : {}),
+  };
 }
 
 // B1: the free re-service booking page's own openings for a covered pest report that decides the reply. { block, days, offer } with
@@ -6470,10 +6474,23 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // A text linked to an estimate prices the estimate's service, so the missed visit's own times cannot be told apart from it: that draft
   // keeps today's hand-off (OPEN TIMES withheld for the whole reply).
   const missedRebook = missedVisitListed && smsPromptB1Live() && !estimateId;
-  const timesAsked = Boolean(schedulingIntent)
+  const openTimesIntent = require('./sms-open-times-intent');
+  const directTimesAsked = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
     || pestReportSignal(inboundMessage, context);
+  const threadFollowUp = openTimesIntent.resolveThreadSchedulingContext({
+    frozen: Boolean(presetFactsBlock),
+    liveOpenTimes,
+    directTimesAsked,
+    realAnswersOn: gateEnvValue('GATE_SMS_REAL_ANSWERS'),
+    continuityOn: require('../config/feature-gates').smsThreadContinuityLive(),
+    inboundMessage,
+    inboundPhone,
+    context,
+    asOf,
+  });
+  const timesAsked = threadFollowUp.timesAsked;
   const needsOpenTimes = missedRebook || (!missedVisitListed && timesAsked);
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
   // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
@@ -6499,9 +6516,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const identity = willFetchOpenTimes && !estimateId
-    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(inboundMessage, context, { openEstimate }))
+  const identityText = openTimesIntent.buildThreadIdentityInput(threadFollowUp, inboundMessage);
+  const rawIdentity = willFetchOpenTimes && !estimateId
+    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(identityText, context, { openEstimate }))
     : { serviceType: liveServiceType(context), certain: true };
+  const identity = openTimesIntent.disambiguateThreadIdentity(threadFollowUp, rawIdentity, context, openEstimate);
   const serviceType = identity.serviceType;
   const pricingEstimateId = estimateId || identity.estimateId || null;
   // An estimate pins the service itself; otherwise an uncertain identity
@@ -6529,7 +6548,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
-      schedulerOffer, namedDay: namedDayMatcher(inboundMessage),
+      schedulerOffer, namedDay: namedDayMatcherForThread(inboundMessage, threadFollowUp),
     });
   const openTimesFetch = { block: openTimesBlock, withheld: openTimesWithheldFetch };
   // B1: a covered pest report offers the free re-service booking page's own openings (a section of its own, never OPEN TIMES)
@@ -6541,6 +6560,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const openTimesStamp = openTimesStampFor({
     frozen: Boolean(presetFactsBlock), timesAsked, missedVisitListed, missedRebook, reserviceLaneDecides,
     reserviceOpeningsShown: Boolean(reserviceOpenings.block), willFetchOpenTimes, identityCertain, identityReason: identity.reason, fetched: openTimesFetch,
+    threadCarryReason: threadFollowUp.carryReason,
   });
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
   const reserviceBooked = reserviceState ? reserviceState.booked : {};
@@ -6912,15 +6932,46 @@ function parseShadowResponse(text) {
 //           so a draft written minutes after the text reads what a draft written at the text did.
 //   liveEta false forces the LIVE ETA lookup (a GPS + Distance Matrix call) off. Only false has an
 //           effect; true or unset leaves the GATE_SMS_REAL_ANSWERS rule below in charge.
-async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false, source = null, hasMedia = false, asOf = null, liveEta }) {
+function isPostVisitRevision(draftTrigger, supersedesDraftId) {
+  return draftTrigger === 'post_visit_closeout' || Boolean(supersedesDraftId);
+}
+
+function revisionColumnPatch(isRevision, draftTrigger, supersedesDraftId) {
+  return isRevision ? { draft_trigger: draftTrigger || 'post_visit_closeout', supersedes_draft_id: supersedesDraftId || null } : {};
+}
+
+function unansweredReplyStampForDraft(isRevision, args) {
+  return isRevision ? {} : require('./sms-unanswered-reply').draftStamp(args);
+}
+
+function loadUnansweredFactsForDraft(isRevision, customer, opts) {
+  return isRevision ? Promise.resolve(null) : require('./sms-unanswered-reply').draftFactsFingerprint(customer, opts);
+}
+
+function allowAutoSendForDraft({ skipAutoSend, isRevision, deliveryMode, autoSendMode, lintPass }) {
+  return !skipAutoSend && !isRevision && deliveryMode === autoSendMode && lintPass;
+}
+
+function isGratitudeDraftCandidate({ isRevision, source, hasMedia, schedulingIntent, customer, smsLogId, inboundMessage }) {
+  return !isRevision && GRATITUDE_CLASSIFY_SOURCES.has(source) && !hasMedia && !schedulingIntent
+    && Boolean(customer?.id) && Boolean(smsLogId) && isGratitudeOnly(inboundMessage);
+}
+
+async function draftShadowReply({
+  inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false,
+  source = null, hasMedia = false, asOf = null, liveEta,
+  draftTrigger, supersedesDraftId, skipAutoSend, serviceRecordId = null,
+}) {
   const startedAt = Date.now();
+  const isRevision = isPostVisitRevision(draftTrigger, supersedesDraftId);
   try {
     const classifiedIntent = intent;
     // A late Mac draft (source 'mac_late') takes the same gratitude classification and prompt as a live
     // one, so its cohort matches; its stamp below keeps source 'mac_late', which the gratitude send sweep
     // refuses (sms-gratitude-context.js: provenance must be 'live_webhook'), so it can never be sent.
-    let gratitudeCandidate = GRATITUDE_CLASSIFY_SOURCES.has(source) && !hasMedia && !schedulingIntent
-      && customer?.id && smsLogId && isGratitudeOnly(inboundMessage);
+    let gratitudeCandidate = isGratitudeDraftCandidate({
+      isRevision, source, hasMedia, schedulingIntent, customer, smsLogId, inboundMessage,
+    });
     if (gratitudeCandidate) {
       intent = { intent: GRATITUDE_INTENT, confidence: 1, approvedReply: buildGratitudeReply(customer.first_name) };
     }
@@ -6946,16 +6997,17 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // (texting AI gap 5) a text that names ONE service ("the lawn treatment") gets the prep guide of that service's upcoming visit
     const prepGuideFamily = labelFactsLib.namedServiceFamily(inboundMessage);
     const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true, smsPrepGuideFamily: prepGuideFamily } : {};
+    const focusRecordOpt = serviceRecordId ? { focusServiceRecordId: serviceRecordId } : {};
     const loadContext = (withLiveEta) => (customer
-      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
-      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...focusRecordOpt, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...focusRecordOpt, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
     // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
     // a fingerprint of this customer's facts that a delayed send re-derives
     // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE
     // the drafting context loads, so the reply is never written from data
     // older than its fingerprint: a change landing in between makes the
     // send-time comparison fail, which keeps the text with staff.
-    const unansweredFacts = await require('./sms-unanswered-reply').draftFactsFingerprint(customer, { prepGuideFamily });
+    const unansweredFacts = await loadUnansweredFactsForDraft(isRevision, customer, { prepGuideFamily });
     let context = await loadContext(includeLiveEta);
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a promise we owe, an ask they are waiting on) is not a
@@ -7004,6 +7056,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);
       return null;
     }
+    // Carried scheduling follow-ups inherit the same scheduling delivery safeguards
+    // and stored scheduling_intent flag as direct scheduling texts.
+    schedulingIntent = require('./sms-open-times-intent').effectiveSchedulingIntent(schedulingIntent, openTimesStamp);
 
     const intentName = intent?.intent || 'GENERAL';
     // factsForDraft is the EXACT block generateGroundedDraft drafted and
@@ -7024,7 +7079,14 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // to a person, never auto-send, gate on or off (claimAutoSend refuses it again at the claim). A reply that states a photo reading the facts
     // did not give stays a shadow row (photoReply.held, gate on).
     const photoReply = photoFact.replyPhotoVerdict({ reply: parsed.reply, context, photoCheck, inboundHasPhoto: hasMedia });
-    const requireReview = [openLoopThanks, factsListOpenLoop(factsForDraft), labelFactsLib.factsBlockCarriesProductNotes(factsForDraft), Boolean(hasMedia)].some(Boolean);
+    const requireReview = [
+      openLoopThanks,
+      factsListOpenLoop(factsForDraft),
+      labelFactsLib.factsBlockCarriesProductNotes(factsForDraft),
+      Boolean(hasMedia),
+      isRevision,
+      Boolean(skipAutoSend),
+    ].some(Boolean);
     // Only an ANSWER may leave the silent shadow lane (owner 2026-11-25). An ACK is the fixed acknowledgement and an ABSTAIN has no text:
     // routing sees an empty reply for both (deliverableReply), which is never eligible, so they stay shadow rows for the judge whatever the
     // suggest and auto-send gates say, and no card and no send can come from them.
@@ -7135,15 +7197,21 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           } : {}),
           // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; {} while it is off):
           // what a later sweep needs to know about this draft and cannot re-derive.
-          ...require('./sms-unanswered-reply').draftStamp({
+          // Post-visit revision rows never enter the unanswered-text auto-send lane.
+          ...unansweredReplyStampForDraft(isRevision, {
             autoSendSafe: parsed.auto_send_safe, requireReview, lintPass: lint.pass, verifierEnabled: VERIFY_ENABLED,
             factsFingerprint: unansweredFacts,
           }),
         }),
+        ...revisionColumnPatch(isRevision, draftTrigger, supersedesDraftId),
         scheduling_intent: Boolean(schedulingIntent),
         draft_ms: Date.now() - startedAt,
       })
       .returning('id');
+
+    // Post-visit closeout revisions stay in shadow status only: never supersede or
+    // alter the original draft's status/card and never auto-send.
+    if (isRevision) return row?.id || null;
 
     // Gratitude is never sent or published from the webhook/drafter. The
     // existing scheduled sweep rechecks the immutable source, entire recent
@@ -7204,7 +7272,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
     if (row?.id && converged && !replyHasPlaceholder && !replyHasUngroundedAmount && !photoReply.held) {
-      if (deliveryMode === suggestMode.AUTO_SEND_MODE && lint.pass) {
+      if (allowAutoSendForDraft({ skipAutoSend, isRevision, deliveryMode, autoSendMode: suggestMode.AUTO_SEND_MODE, lintPass: lint.pass })) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,
           customer,

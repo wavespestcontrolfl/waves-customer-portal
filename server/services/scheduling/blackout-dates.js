@@ -84,9 +84,31 @@ const readOptional = (conn, fn) => (conn && conn.isTransaction && typeof conn.tr
   ? conn.transaction((sp) => fn(sp))
   : fn(conn));
 
+function isValidWeekdayEntry(entry) {
+  if (typeof entry === 'number') return Number.isInteger(entry) && entry >= 0 && entry <= 6;
+  if (typeof entry === 'string') return /^[0-6]$/.test(entry.trim());
+  return false;
+}
+
+function assertWeeklyDaysOffWellFormed(value) {
+  if (value == null || value === '') return;
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw Object.assign(new Error('schedule_weekly_days_off is not valid JSON'), { code: 'MALFORMED_SETTING' });
+    }
+  }
+  if (!Array.isArray(parsed) || parsed.some((entry) => !isValidWeekdayEntry(entry))) {
+    throw Object.assign(new Error('schedule_weekly_days_off must be a JSON array of weekday integers 0-6'), { code: 'MALFORMED_SETTING' });
+  }
+}
+
 async function getWeeklyDaysOff(conn = db, { strict = false } = {}) {
   try {
     const row = await readOptional(conn, (dbh) => dbh('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value'));
+    if (strict) assertWeeklyDaysOffWellFormed(row && row.value);
     return parseWeeklyDaysOff(row && row.value);
   } catch (err) {
     if (strict) throw err;
@@ -178,11 +200,13 @@ async function getBlackoutDates(fromStr, toStr, conn = db, { strict = false } = 
 // unlike the fail-open helpers above this THROWS on a lookup failure, so a
 // failed read rolls the savepoint back instead of leaving the caller's
 // transaction aborted; callers treat the rejection as their fail-open.
-async function getBlackoutLayers(fromStr, toStr, conn = db) {
+async function getBlackoutLayers(fromStr, toStr, conn = db, { strict = false } = {}) {
   return conn.transaction(async (sp) => {
     const weeklyRow = await sp('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value');
+    if (strict) assertWeeklyDaysOffWellFormed(weeklyRow && weeklyRow.value);
     const weeklyDaysOff = parseWeeklyDaysOff(weeklyRow && weeklyRow.value);
     const holidayRow = await sp('system_settings').where('key', HOLIDAY_CLOSURES_KEY).first('value');
+    if (strict) assertHolidayClosuresWellFormed(holidayRow && holidayRow.value);
     const closedHolidays = parseHolidayClosures(holidayRow && holidayRow.value);
     const rows = await sp('schedule_blackout_dates')
       .whereBetween('date', [fromStr, toStr])

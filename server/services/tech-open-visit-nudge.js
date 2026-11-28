@@ -109,7 +109,9 @@ async function findOpenVisitsToday(now, technicianId = null) {
   const today = etDateString(now);
   const { hour, minute } = etParts(now);
   const nowHHMM = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-  let query = db('scheduled_services as s')
+  const { heldVisitSubquery } = require('./street-level-hold');
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
+  let query = require('./visit-hold').excludeHeld(db('scheduled_services as s')
     .join('technicians as t', 's.technician_id', 't.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.scheduled_date', today)
@@ -117,9 +119,11 @@ async function findOpenVisitsToday(now, technicianId = null) {
     .whereNotNull('s.technician_id')
     .where((q) => q.whereNull('s.window_start').orWhere('s.window_start', '<=', nowHHMM))
     .where(notSlotHold)
+    .whereNotExists(function unclearedAddressHold() { heldVisitSubquery(this, 's'); }), 's')
     .orderBy('s.window_start', 'asc');
   if (technicianId) query = query.where('s.technician_id', technicianId);
-  return query.select(...VISIT_COLUMNS);
+  const rows = await query.select(...VISIT_COLUMNS, 's.customer_id');
+  return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
 }
 
 // "today minus 30 days" from the ET date string itself, so a DST change never
@@ -130,12 +134,13 @@ function carryoverFloor(today) {
   return d.toISOString().slice(0, 10);
 }
 
-// Re-services still open from an earlier day (last 30 ET days): a callback
-// visit, or one whose catalog service is a pest/lawn re-service. Same joins
-// and slot-hold filter as today's query; oldest first.
+// Re-services AND stuck en_route/on_site visits still open from an earlier day
+// (last 30 ET days) so unclosed stops never disappear after day 0 (P1-16).
 async function findCarryoverVisits(now, technicianId = null) {
   const today = etDateString(now);
-  let query = db('scheduled_services as s')
+  const { heldVisitSubquery } = require('./street-level-hold');
+  const { isInternalTestCustomerId } = require('./internal-test-customers');
+  let query = require('./visit-hold').excludeHeld(db('scheduled_services as s')
     .join('technicians as t', 's.technician_id', 't.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .leftJoin('services', 's.service_id', 'services.id')
@@ -143,12 +148,32 @@ async function findCarryoverVisits(now, technicianId = null) {
     .where('s.scheduled_date', '>=', carryoverFloor(today))
     .whereIn('s.status', OPEN_STATUSES)
     .whereNotNull('s.technician_id')
-    .where((q) => q.where('s.is_callback', true).orWhereIn('services.service_key', RESERVICE_KEYS))
+    .where((q) => q
+      .where('s.is_callback', true)
+      .orWhereIn('services.service_key', RESERVICE_KEYS)
+      .orWhereIn('s.status', ['en_route', 'on_site']))
+    .where((q) => q.whereNull('s.track_state').orWhereNotIn('s.track_state', ['complete', 'cancelled']))
     .where(notSlotHold)
+    .whereNotExists(function unclearedAddressHold() { heldVisitSubquery(this, 's'); }), 's')
     .orderBy('s.scheduled_date', 'asc')
     .orderBy('s.window_start', 'asc');
   if (technicianId) query = query.where('s.technician_id', technicianId);
-  return query.select(...VISIT_COLUMNS, db.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_day"));
+  const rows = await query.select(
+    ...VISIT_COLUMNS,
+    's.customer_id',
+    's.is_callback',
+    'services.service_key',
+    db.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_day"),
+  );
+  return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
+}
+
+function isReserviceRow(row) {
+  if (row.is_callback === true || RESERVICE_KEYS.includes(row.service_key)) return true;
+  // Real Postgres rows always populate is_callback (boolean) or service_key;
+  // never expand paid SMS eligibility from free-text service_type labels.
+  if (row.is_callback !== undefined || row.service_key !== undefined) return false;
+  return /\bre-?service\b/i.test(String(row.service_type || ''));
 }
 
 // Flat rows -> one entry per technician, in first-seen (= earliest window)
@@ -176,11 +201,13 @@ function groupByTechnician(rows) {
     }
     const group = byId.get(id);
     const stopKey = String(row.stop_id || row.visit_id);
+    const isReservice = isReserviceRow(row);
     const existing = group.stops.get(stopKey);
     if (existing) {
       existing.ids.push(row.visit_id);
       if (row.service_type && !existing.serviceTypes.includes(row.service_type)) existing.serviceTypes.push(row.service_type);
       if (!NOT_STARTED.has(row.status)) existing.status = row.status;
+      if (isReservice) existing.isReservice = true;
       continue;
     }
     const stop = {
@@ -192,6 +219,7 @@ function groupByTechnician(rows) {
       serviceTypes: row.service_type ? [row.service_type] : [],
       customerFirst: row.cust_first_name,
       customerLast: row.cust_last_name,
+      isReservice,
     };
     group.stops.set(stopKey, stop);
     group.visits.push(stop);
@@ -272,12 +300,19 @@ function carryoverLines(stops) {
   return lines;
 }
 
+function allReserviceCarryovers(carryovers) {
+  return Array.isArray(carryovers) && carryovers.length > 0 && carryovers.every((c) => c.isReservice !== false);
+}
+
 // Body under the header: today's lines, then (when both exist) the
 // carry-over sub-header and its lines.
 function bodyLines(visits, carryovers) {
   if (!carryovers.length) return visitLines(visits);
   if (!visits.length) return carryoverLines(carryovers);
-  return [...visitLines(visits), 'Re-services still open from earlier days:', ...carryoverLines(carryovers)];
+  const label = allReserviceCarryovers(carryovers)
+    ? 'Re-services still open from earlier days:'
+    : 'Visits still open from earlier days:';
+  return [...visitLines(visits), label, ...carryoverLines(carryovers)];
 }
 
 // "3 visits from today are still open" / "2 re-services from earlier days are still open": the sentence the text and
@@ -285,7 +320,8 @@ function bodyLines(visits, carryovers) {
 function headlineText(visits, carryovers = []) {
   if (visits.length) return `${visits.length} visit${visits.length === 1 ? '' : 's'} from today are still open`;
   const n = carryovers.length;
-  return `${n} re-service${n === 1 ? '' : 's'} from earlier days ${n === 1 ? 'is' : 'are'} still open`;
+  const noun = allReserviceCarryovers(carryovers) ? 're-service' : 'visit';
+  return `${n} ${noun}${n === 1 ? '' : 's'} from earlier days ${n === 1 ? 'is' : 'are'} still open`;
 }
 
 function buildMessage(visits, carryovers = []) {
@@ -426,9 +462,10 @@ async function smsNudge(tech, cell, message, etDate) {
 async function cardNudge(tech, visits, etDate, carryovers = null) {
   const carry = carryovers || [];
   const count = visits.length;
+  const carryNoun = allReserviceCarryovers(carry) ? 're-service' : 'visit';
   const headline = count
     ? `${count} visit${count === 1 ? '' : 's'} from today still open`
-    : `${carry.length} re-service${carry.length === 1 ? '' : 's'} from earlier days still open`;
+    : `${carry.length} ${carryNoun}${carry.length === 1 ? '' : 's'} from earlier days still open`;
   try {
     const updated = await db('tech_notifications')
       .where({ dedupe_key: dedupeKeyFor(tech.id, etDate), type: NOTIFICATION_TYPE })
@@ -499,7 +536,15 @@ async function deliverNudge(techId, etDate, now) {
   if (!cell) return cardNudge(live.tech, live.visits, etDate, live.carryovers);
   // The banner first; the text only when no device took it. Never both.
   if (await bannerNudge(live.tech, live.visits, live.carryovers || [], etDate)) return true;
-  return smsNudge(live.tech, cell, buildMessage(live.visits, live.carryovers), etDate);
+  // Paid SMS fallback stays strictly scoped to today's open visits + re-service
+  // carryovers ($0 new SMS spend); ordinary stuck carryover visits are surfaced
+  // via the free push banner and Action Queue only.
+  const smsCarryovers = (live.carryovers || []).filter((v) => v.isReservice !== false);
+  if (!live.visits.length && !smsCarryovers.length) {
+    await releaseClaim(techId, etDate);
+    return false;
+  }
+  return smsNudge(live.tech, cell, buildMessage(live.visits, smsCarryovers), etDate);
 }
 
 // One entry per technician: today's stops first, then technicians who only

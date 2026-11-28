@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import api from '../../utils/api';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE as SHELL } from '../../theme-customer';
@@ -58,38 +58,65 @@ function profileEditAvailable(customer) {
 const CODE_SHAPE = /^\d{6}$/;
 
 // Step 2 of an email change: type the code mailed to the new address. Wrong, expired and too-many-tries answers come
-// from the server with their own words; "Send a new code" asks again for the same address (limited server-side).
-function EmailCodeStep({ email, busy, error, onConfirm, onResend, onCancel }) {
+// from the server with their own words; "Send a new code" asks again for the same address (with a 30s client cooldown
+// after a resend to prevent accidental double-requests).
+function EmailCodeStep({ email, busy, error, notice, onConfirm, onResend, onCancel }) {
   const [code, setCode] = useState('');
+  const [resendCooldown, setResendCooldown] = useState(0);
+  useEffect(() => {
+    if (resendCooldown <= 0) return undefined;
+    const t = setTimeout(() => setResendCooldown((c) => Math.max(0, c - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [resendCooldown]);
   const submit = (e) => {
     e.preventDefault();
     if (CODE_SHAPE.test(code.trim())) onConfirm(code.trim());
   };
+  const handleResend = async () => {
+    if (busy || resendCooldown > 0) return;
+    setCode('');
+    await onResend();
+    setResendCooldown(30);
+  };
   return (
     <form data-testid="profile-code-form" noValidate onSubmit={submit} style={{ display: 'grid', gap: 10, marginTop: 10 }}>
       <div style={{ fontSize: 16, color: SHELL.text }}>We sent a code to {email}. Type it here to confirm the new email. It expires in 15 minutes.</div>
+      {notice && <div role="status" style={{ fontSize: 14, color: SHELL.muted }}>{notice}</div>}
       <label style={labelStyle}>6-digit code
         <input aria-label="Code" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} style={inputStyle} />
       </label>
       {error && <div role="alert" style={{ fontSize: 14, color: '#B42318' }}>{error}</div>}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         <button type="submit" disabled={busy || !CODE_SHAPE.test(code)} data-testid="profile-code-confirm" style={{ ...saveStyle, opacity: busy || !CODE_SHAPE.test(code) ? 0.65 : 1 }}>{busy ? 'Checking' : 'Confirm'}</button>
-        <button type="button" disabled={busy} data-testid="profile-code-resend" onClick={() => { setCode(''); onResend(); }} style={cancelStyle}>Send a new code</button>
+        <button type="button" disabled={busy || resendCooldown > 0} data-testid="profile-code-resend" onClick={handleResend} style={cancelStyle}>
+          {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Send a new code'}
+        </button>
         <button type="button" disabled={busy} onClick={onCancel} style={cancelStyle}>Cancel</button>
       </div>
     </form>
   );
 }
 
-export default function ProfileEditCard({ customer, refreshCustomer }) {
+export default function ProfileEditCard({
+  customer,
+  refreshCustomer,
+  pendingEmail: controlledPendingEmail,
+  onPendingEmailChange,
+  notice: controlledNotice,
+  onNoticeChange,
+}) {
   const [open, setOpen] = useState(false);
   const [opened, setOpened] = useState({ firstName: '', lastName: '', email: '' });
   const [form, setForm] = useState({ firstName: '', lastName: '', email: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [localNotice, setLocalNotice] = useState('');
   // The address a code was mailed to, while step 2 of an email change is open.
-  const [pendingEmail, setPendingEmail] = useState('');
+  const [localPendingEmail, setLocalPendingEmail] = useState('');
+  const pendingEmail = controlledPendingEmail !== undefined ? controlledPendingEmail : localPendingEmail;
+  const setPendingEmail = onPendingEmailChange || setLocalPendingEmail;
+  const notice = controlledNotice !== undefined ? controlledNotice : localNotice;
+  const setNotice = onNoticeChange || setLocalNotice;
 
   if (!profileEditAvailable(customer)) return null;
 
@@ -165,7 +192,11 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
       setPendingEmail('');
       setOpen(false);
     } catch (err) {
-      setError(err?.message || 'We could not check that code. Please try again.');
+      const base = err?.message || 'We could not check that code. Please try again.';
+      const left = Number.isInteger(err?.attemptsLeft)
+        ? ` (${err.attemptsLeft} ${err.attemptsLeft === 1 ? 'try' : 'tries'} left)`
+        : '';
+      setError(`${base}${left}`);
     } finally {
       setBusy(false);
     }
@@ -173,12 +204,13 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
 
   const closeCodeStep = () => { setPendingEmail(''); setError(''); setOpen(false); };
 
-  if (open && pendingEmail) {
+  if (pendingEmail) {
     return (
       <EmailCodeStep
         email={pendingEmail}
         busy={busy}
         error={error}
+        notice={notice}
         onConfirm={confirmCode}
         onResend={() => save({ email: pendingEmail })}
         onCancel={closeCodeStep}

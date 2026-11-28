@@ -33,6 +33,13 @@ async function sendAppointmentSms({ to, body, customerId, messageType, appointme
   return result;
 }
 
+const { rowIsHeld, heldColumn } = require('./visit-hold');
+
+const DEAD_SLOT_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+function isLiveUnheldService(svc) {
+  return !!svc && !rowIsHeld(svc) && !DEAD_SLOT_STATUSES.has(svc.status);
+}
+
 class RescheduleSMS {
   // sendRescheduleRequest removed 2026-07-06 — it had no callers and its
   // reschedule_options_* templates never fired in prod; the rain-out engine
@@ -150,7 +157,7 @@ class RescheduleSMS {
     if (selectedOption) {
       const svc = await db('scheduled_services')
         .where({ id: pending.scheduled_service_id })
-        .first('scheduled_date', 'window_start', 'window_end', 'status');
+        .first('scheduled_date', 'window_start', 'window_end', 'status', ...heldColumn());
       // pg/Knex can return scheduled_date as a JS Date OR a 'YYYY-MM-DD' string —
       // normalize both (mirrors track-transitions.isFutureScheduledDate) so a Date
       // doesn't stringify to 'Sat Jul 04' and silently miss the match.
@@ -178,11 +185,10 @@ class RescheduleSMS {
       // the move's CAS/fence and the reply takes the office-follow-up path
       // instead of overwriting the newer end (codex r13 P2).
       observedSchedule = svc ? { scheduled_date: toYmd(svc.scheduled_date), window_start: svc.window_start ?? null, window_end: svc.window_end ?? null } : null;
-      alreadyOnSlot = !!svc
+      alreadyOnSlot = isLiveUnheldService(svc)
         && toYmd(svc.scheduled_date) === toYmd(selectedOption.date)
         && normTime(svc.window_start) === normTime(selectedOption.window?.start)
         && normTime(svc.window_end) === normTime(selectedOption.window?.end)
-        && !['completed', 'cancelled', 'skipped'].includes(svc.status)
         && withinQuotedWindow;
     }
 

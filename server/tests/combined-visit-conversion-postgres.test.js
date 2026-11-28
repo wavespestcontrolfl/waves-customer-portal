@@ -11,7 +11,7 @@ jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange
 jest.mock('../services/notification-service', () => ({ notifyAdmin: async () => {} }));
 jest.mock('../services/inspection-credit', () => ({ markBookingForInspectionCredit: async () => {} }));
 jest.mock('../services/scheduling/blackout-dates', () => ({
-  isBlackoutDate: async () => false, getBlackoutLayers: async () => ({ dates: new Set() }),
+  isBlackoutDate: async () => false, getBlackoutDates: async () => new Set(), getBlackoutLayers: async () => ({ dates: new Set() }),
   // Real advisory lock: capacity certification serializes closure reads
   // against admin closure writes on the same PostgreSQL connection.
   lockClosureState: jest.requireActual('../services/scheduling/blackout-dates').lockClosureState,

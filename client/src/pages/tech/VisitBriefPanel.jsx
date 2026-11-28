@@ -1257,6 +1257,42 @@ function SetTextsSection({ line, service, visitIds, request, onBusyChange }) {
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
 const CALL_LOCK_MS = 45000;
 
+function firstAddonPromptMember(memberBits) {
+  const match = memberBits.find((m) => m.facts?.addon_prompt) || null;
+  return match ? { prompt: match.facts.addon_prompt, service: match.service } : null;
+}
+
+function AddonPromptBanner({ detail, memberBits, fallbackService, onLead }) {
+  if (detail?.status !== 'ready') return null;
+  const match = firstAddonPromptMember(memberBits);
+  if (!match) return null;
+  const { prompt, service } = match;
+  return (
+    <div
+      data-testid="visit-brief-addon-prompt"
+      style={{
+        marginTop: 12, padding: 12, borderRadius: 6,
+        border: `1px solid ${DARK.border}`, background: DARK.bg,
+      }}
+    >
+      <div style={{ fontSize: 14, fontWeight: 600, color: DARK.text }}>
+        Add-on opportunity · {prompt.headline}
+      </div>
+      <p style={{ ...factMutedStyle, margin: '4px 0 8px' }}>{prompt.detail}</p>
+      {onLead && (
+        <button
+          type="button"
+          className="tf-button"
+          onClick={() => onLead(service || fallbackService, prompt.fieldLeadServiceType)}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+        >
+          <Flag aria-hidden="true" size={14} /> Flag {prompt.targetLabel} Lead
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, onEstimate = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
   const service = stop.primary;
   const estimateService = stop.services.find((member) => !DEAD_ASSIGNMENT_STATUSES.has(member.status));
@@ -1503,6 +1539,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           </button>
         </div>
       )}
+
+      <AddonPromptBanner detail={detail} memberBits={memberBits} fallbackService={service} onLead={onLead} />
 
       <SectionLabel>Actions</SectionLabel>
       {stop.services.map((s) => (

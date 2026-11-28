@@ -41,14 +41,14 @@ describe('the live lawn report footer', () => {
 
   it('without the key: the WaveGuard sentence and the booking link print, as before', async () => {
     renderReport(payload());
-    const footer = (await screen.findByText(PEST_SENTENCE)).closest('footer');
+    const footer = (await screen.findByText(PEST_SENTENCE)).closest('.sr-footer');
     expect(footer).not.toBeNull();
     expect(screen.getByRole('link', { name: 'Book a free re-service in your portal' })).toBeInTheDocument();
   });
 
   it('with lawnCopyFixes: neither the sentence nor the link prints, and the rest of the footer stays', async () => {
     const { container } = renderReport(payload({ lawnCopyFixes: true }));
-    const footer = (await screen.findByText(/This report is provided for your records/)).closest('footer');
+    const footer = (await screen.findByText(/This report is provided for your records/)).closest('.sr-footer');
     expect(footer.textContent).not.toMatch(PEST_SENTENCE);
     expect(container.textContent).not.toMatch(PEST_SENTENCE);
     expect(screen.queryByRole('link', { name: 'Book a free re-service in your portal' })).toBeNull();
