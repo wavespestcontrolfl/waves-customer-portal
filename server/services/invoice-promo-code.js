@@ -368,10 +368,16 @@ async function redeemAndApplyPromoCode(trx, invoice) {
     return await trx.transaction(async (savepoint) => {
       const row = await savepoint('invoice_promo_codes').where({ invoice_id: invoice.id, status: 'entered' }).first();
       if (!row) return 0;
-      // Lock the customer row (billing lock order: invoices FOR UPDATE held by
-      // caller -> customers FOR UPDATE) so a concurrent customer-default payer
-      // assignment cannot race past invoicePayerOwnership when the invoice has
-      // no linked scheduled visit row.
+      // Match estimate-promo-code.js lock order (discounts FOR UPDATE ->
+      // customers FOR UPDATE) so concurrent invoice + estimate promo
+      // redemptions for the same customer never deadlock on inverted locks.
+      if (row.discount_id) {
+        const discLockQuery = savepoint('discounts').where({ id: row.discount_id });
+        if (typeof discLockQuery.forUpdate === 'function') await discLockQuery.forUpdate().first('id');
+      }
+      // Lock the customer row (under discounts FOR UPDATE) so a concurrent
+      // customer-default payer assignment cannot race past
+      // invoicePayerOwnership when the invoice has no linked scheduled visit row.
       const custLockQuery = savepoint('customers').where({ id: invoice.customer_id });
       if (typeof custLockQuery.forUpdate === 'function') await custLockQuery.forUpdate().first('id');
       // Verify live third-party payer ownership inside the lock before

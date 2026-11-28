@@ -132,6 +132,19 @@ jest.mock('../config/feature-gates', () => ({
       t.timestamp('resolved_at', { useTz: true });
       t.timestamps(true, true);
     });
+    await schema.createTable('stripe_orphan_charges', (t) => {
+      id(t);
+      t.uuid('invoice_id');
+      t.string('stripe_payment_intent_id');
+      t.boolean('resolved').defaultTo(false);
+    });
+    await schema.createTable('payments', (t) => {
+      id(t);
+      t.string('status');
+      t.string('stripe_payment_intent_id');
+      t.jsonb('metadata');
+      t.uuid('superseded_by_payment_id');
+    });
     await schema.createTable('payment_plans', (t) => {
       id(t);
       t.uuid('invoice_id');
