@@ -10,9 +10,9 @@ export const AdminNavigationContext = createContext(null);
 // are dropped once; pins carry over.
 const PREFERENCE_VERSION = 2;
 const destinationIds = new Set(ADMIN_WORKSPACE_DESTINATIONS.map(({ id }) => id));
-// Auth screens live under /admin/* outside AdminLayoutV2; never leave dark mode
-// on them after logout or an expired-session redirect.
-const isAdminAuthPath = (path) => /^\/admin\/(login|forgot-password|reset-password|change-password)(\/|$)/.test(String(path || ''));
+// Standalone /admin/* routes outside AdminLayoutV2 (auth, two-step, report preview);
+// never carry dark mode onto them on logout, redirect, or navigation.
+const isStandaloneAdminPath = (path) => /^\/admin\/(login|change-password|two-step|forgot-password|reset-password|report-preview)(\/|$)/.test(String(path || ''));
 // In-memory per-account fallback when device storage is full or blocked so
 // toggling dark mode survives pathname-keyed AdminNavigationProvider remounts.
 const unsavedDarkModeByAccount = new Map();
@@ -173,14 +173,14 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     if (typeof document === 'undefined') return undefined;
     const root = document.documentElement;
     if (!enabled) {
-      if (isAdminAuthPath(window.location.pathname)) delete root.dataset.adminTheme;
+      if (isStandaloneAdminPath(window.location.pathname)) delete root.dataset.adminTheme;
       return undefined;
     }
     if (darkMode) root.dataset.adminTheme = 'dark';
     else delete root.dataset.adminTheme;
     return () => {
       const path = window.location.pathname;
-      if (!isAdminPath(path) || isAdminAuthPath(path)) {
+      if (!isAdminPath(path) || isStandaloneAdminPath(path)) {
         delete root.dataset.adminTheme;
       }
     };

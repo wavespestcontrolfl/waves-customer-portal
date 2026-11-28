@@ -53,8 +53,8 @@
     /* Text — high-contrast daylight-calibrated neutrals on dark ground */
     --text-primary: #f4f5f6;
     --text-secondary: #b4bac4;
-    --text-tertiary: #8b93a0;
-    --text-quaternary: #68707d;
+    --text-tertiary: #9aa2af;
+    --text-quaternary: #949ca8;
 
     /* Keyboard hint chip */
     --kbd-bg: #22262c;

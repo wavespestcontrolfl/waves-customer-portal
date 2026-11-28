@@ -79,10 +79,10 @@
     color: #b4bac4;
   }
   html.admin-app[data-admin-theme="dark"] :is(.text-zinc-500, .text-ink-tertiary, .text-slate-500, .text-gray-500, .text-stone-500) {
-    color: #8b93a0;
+    color: #9aa2af;
   }
   html.admin-app[data-admin-theme="dark"] :is(.text-zinc-400, .text-ink-disabled, .text-slate-400, .text-gray-400, .text-stone-400) {
-    color: #68707d;
+    color: #949ca8;
   }
   html.admin-app[data-admin-theme="dark"] .hover\:text-zinc-900:hover {
     color: #ffffff;
@@ -223,7 +223,7 @@
   html.admin-app[data-admin-theme="dark"] :is(.bg-alert-bg, .bg-red-50, .bg-red-100, .bg-waves-red-light, .bg-\[\#FEECEB\], .bg-\[\#FEF3F2\]) {
     background-color: rgba(200, 49, 47, 0.2);
   }
-  html.admin-app[data-admin-theme="dark"] :is(.text-alert-fg, .text-red-700, .text-red-800) {
+  html.admin-app[data-admin-theme="dark"] :is(.text-alert-fg, .text-red-700, .text-red-800, .text-red-900) {
     color: #f87171;
   }
   html.admin-app[data-admin-theme="dark"] .bg-alert-fg.text-white {
@@ -233,7 +233,7 @@
   html.admin-app[data-admin-theme="dark"] :is(.bg-warn-bg, .bg-amber-50, .bg-amber-100, .bg-yellow-50, .bg-waves-gold-light) {
     background-color: rgba(217, 119, 6, 0.2);
   }
-  html.admin-app[data-admin-theme="dark"] :is(.text-warn-fg, .text-amber-800, .text-amber-700, .text-yellow-800) {
+  html.admin-app[data-admin-theme="dark"] :is(.text-warn-fg, .text-amber-600, .text-amber-700, .text-amber-800, .text-amber-900, .text-yellow-800) {
     color: #fcd34d;
   }
   html.admin-app[data-admin-theme="dark"] :is(.bg-waves-success-bg, .bg-green-50, .bg-green-100, .bg-emerald-50, .bg-emerald-100, .bg-\[\#EAF5E4\]) {
@@ -242,13 +242,13 @@
   html.admin-app[data-admin-theme="dark"] :is(.border-waves-success-border, .border-green-200, .border-emerald-200) {
     border-color: rgba(16, 185, 129, 0.35);
   }
-  html.admin-app[data-admin-theme="dark"] :is(.text-waves-success, .text-green-700, .text-green-800, .text-emerald-700, .text-emerald-800) {
+  html.admin-app[data-admin-theme="dark"] :is(.text-waves-success, .text-green-700, .text-green-800, .text-emerald-600, .text-emerald-700, .text-emerald-800) {
     color: #6ee7b7;
   }
   html.admin-app[data-admin-theme="dark"] :is(.bg-waves-blue-light, .bg-waves-blue-50, .bg-blue-50, .bg-blue-100, .bg-sky-50) {
     background-color: rgba(10, 126, 194, 0.2);
   }
-  html.admin-app[data-admin-theme="dark"] :is(.text-waves-blue, .text-waves-blue-dark, .text-blue-700, .text-blue-800) {
+  html.admin-app[data-admin-theme="dark"] :is(.text-waves-blue, .text-waves-blue-dark, .text-blue-600, .text-blue-700, .text-blue-800, .text-sky-700) {
     color: #60a5fa;
   }
 

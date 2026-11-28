@@ -108,13 +108,15 @@ describe('Admin dark mode preference', () => {
       cleanup();
       expect(document.documentElement.dataset.adminTheme).toBeUndefined();
 
-      // Logging out / redirecting to /admin/login clears data-admin-theme too
-      window.history.pushState({}, '', '/admin/dashboard');
-      mount({ id: 'acct-1', role: 'admin' }, { enabled: true });
-      expect(document.documentElement.dataset.adminTheme).toBe('dark');
-      window.history.pushState({}, '', '/admin/login');
-      cleanup();
-      expect(document.documentElement.dataset.adminTheme).toBeUndefined();
+      // Logging out or opening standalone /admin/login or /admin/two-step clears data-admin-theme
+      for (const standalonePath of ['/admin/login', '/admin/two-step']) {
+        window.history.pushState({}, '', '/admin/dashboard');
+        mount({ id: 'acct-1', role: 'admin' }, { enabled: true });
+        expect(document.documentElement.dataset.adminTheme).toBe('dark');
+        window.history.pushState({}, '', standalonePath);
+        cleanup();
+        expect(document.documentElement.dataset.adminTheme).toBeUndefined();
+      }
     } finally {
       window.history.pushState({}, '', '/');
     }
