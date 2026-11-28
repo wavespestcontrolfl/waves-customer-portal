@@ -803,12 +803,19 @@ function guardEvidenceText({ extracted = {}, v2Extraction = null, transcription 
 }
 
 const QUESTION_OR_CHECK_RE = /\?$|\b(?:does|do|did|will|would|is|are|can)\s+(?:the\s+)?(?:lender|bank|buyer|seller|realtor|agent|title|underwriter)\b/i;
+const WDO_POLITE_BOOKING_REQUEST_RE = /\b(?:can|could|would|will)\s+(?:you|we)\s+(?:please\s+)?(?:go\s+ahead\s+and\s+)?(?:book|schedule|add|order|include|set\s+up)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|certificate|service))?|termite\s+(?:letter|clearance(?:\s+letter)?|report|form)|wood[- ]destroying[- ]organism(?:\s+(?:inspection|report|form|letter))?)\b/i;
 
 function scanWdoClauses(text, initialRefused = false) {
   let refused = initialRefused;
   const clauses = String(text || '').split(/(?<=\?)|[.!\n,;]+/).map((s) => s.trim()).filter(Boolean);
   for (const clause of clauses) {
-    if (QUESTION_OR_CHECK_RE.test(clause)) continue;
+    if (QUESTION_OR_CHECK_RE.test(clause)) {
+      if (refused && !WDO_CLAUSE_REFUSAL_RE.test(clause) && !WDO_LENDER_CHECK_RE.test(clause)
+        && WDO_POLITE_BOOKING_REQUEST_RE.test(clause)) {
+        refused = false;
+      }
+      continue;
+    }
     if (WDO_CLAUSE_REFUSAL_RE.test(clause)) refused = true;
     else if (refused && WDO_CLAUSE_AFFIRM_RE.test(clause)) refused = false;
   }

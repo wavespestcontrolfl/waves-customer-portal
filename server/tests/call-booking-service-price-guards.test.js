@@ -308,6 +308,15 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       'Caller: Yes, Tuesday works.',
     ].join('\n');
     expect(hasExplicitWdoRefusal({ transcription: sameTurnChangedQuestion })).toBe(true);
+
+    // Direct WDO booking request phrased as a polite question clears an earlier refusal
+    const politeBookingQuestion = [
+      "Caller: I don't need a WDO inspection.",
+      'Caller: Actually, can you book the WDO inspection after all?',
+      "Agent: You're booked for the WDO inspection Tuesday at $250.",
+      'Caller: Great, thank you.',
+    ].join('\n');
+    expect(hasExplicitWdoRefusal({ transcription: politeBookingQuestion })).toBe(false);
   });
 
   test('preserves caller-only boundary on unidentified raw diarization ("Speaker 1:"/"Speaker 2:")', () => {
