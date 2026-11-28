@@ -240,58 +240,92 @@ function wdoFeeIsExplicitZero(value) {
   return match != null && Number(match[1]) === 0;
 }
 
-// Sign-step send body. A held send names the invoice amount the tech confirmed, the same
-// keys the Reports page drawer sends (ProjectsPage holdBody).
-function signStepHoldBody(holdReport, billingFingerprint) {
-  return holdReport
-    ? { hold_report_until_paid: true, ...(billingFingerprint ? { expected_billing_fingerprint: billingFingerprint } : {}) }
-    : {};
-}
-
-// The preview the tech confirms. A held send bills an invoice that already exists, so a brand-new
-// WDO gets its draft prepared first (no hold armed, nothing sent) and the preview is read again —
-// the same steps as the Reports page drawer's fetchSendWithInvoicePreview.
-async function signStepInvoicePreview({ call, holdReport, documentLabel }) {
-  const fallback = `Could not prepare the ${documentLabel} invoice`;
-  const dryRun = { dry_run: true, ...signStepHoldBody(holdReport) };
-  const preview = await call(dryRun, fallback);
-  if (!(holdReport && preview?.invoice && !preview.invoice.id) || preview?.email_routing?.recipient_refused) return preview;
-  await call({ prepare_invoice: true, ...signStepHoldBody(holdReport) }, fallback);
-  return call(dryRun, fallback);
-}
-
-// The sign step's send leg: preview, confirm, send. Returns the delivery, or null when the tech
-// cancels the confirm. Throws when the invoice cannot be emailed for a hold or was not delivered.
-async function deliverSignStepInvoice({ call, holdReport, documentLabel }) {
-  const preview = await signStepInvoicePreview({ call, holdReport, documentLabel });
-  if (holdReport && preview?.email_routing?.recipient_refused) {
+// The sign step's held send — the same legs as the Reports page drawer (ProjectsPage
+// fetchSendWithInvoicePreview + holdBody): a brand-new WDO has no invoice row yet, so its draft is
+// prepared first (no hold armed, nothing sent) and the preview is read again; the send names the
+// invoice the tech confirmed. Returns the response, or null when the tech cancels the confirm.
+async function deliverHeldInvoice(call) {
+  const fallback = 'Could not prepare the WDO report invoice';
+  const dryRun = { dry_run: true, hold_report_until_paid: true };
+  let preview = await call(dryRun, fallback);
+  if (preview?.email_routing?.recipient_refused) {
     throw new Error('This invoice cannot be emailed: there is no billing email address that accepts email. Add one, or send the report with the invoice.');
   }
-  if (!confirm(signStepSendConfirmText({ preview, holdReport, documentLabel }))) return null;
+  if (preview?.invoice && !preview.invoice.id) {
+    await call({ prepare_invoice: true, hold_report_until_paid: true }, fallback);
+    preview = await call(dryRun, fallback);
+  }
+  if (!confirm(heldSendConfirmText(preview))) return null;
+  const fingerprint = preview?.invoice?.billing_fingerprint;
   const sent = await call({
     ...(preview?.invoice?.id ? { invoice_id: preview.invoice.id } : {}),
-    ...signStepHoldBody(holdReport, preview?.invoice?.billing_fingerprint),
-  }, `Could not send the ${documentLabel} invoice`);
-  if (!sent.sent) {
-    throw new Error(holdReport
-      ? 'The invoice was not delivered. Please retry.'
-      : `The invoice and ${documentLabel} were not delivered. Please retry.`);
-  }
+    hold_report_until_paid: true,
+    ...(fingerprint ? { expected_billing_fingerprint: fingerprint } : {}),
+  }, 'Could not send the WDO report invoice');
+  if (!sent.sent) throw new Error('The invoice was not delivered. Please retry.');
   return sent;
 }
 
-function signStepSendConfirmText({ preview, holdReport, documentLabel }) {
+function heldSendConfirmText(preview) {
   const amount = Number(preview?.invoice?.total || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-  if (!holdReport) {
-    return `Send the ${amount} invoice now and finish this service?\n\nThe customer receives the invoice, payment link, and ${documentLabel} now.`;
-  }
   const release = preview?.report_hold_release || {};
   const reportTo = [release.recipient, ...(release.copies || [])].filter(Boolean).join(', ');
-  return `Send the ${amount} invoice now, hold the ${documentLabel} until it is paid, and finish this service?\n\n`
+  return `Send the ${amount} invoice now, hold the WDO report until it is paid, and finish this service?\n\n`
     + 'The customer gets the invoice and pay link now. The report is emailed by itself once the invoice is paid. '
     + 'A bank payment takes a few days to clear, and the report waits until it does.'
     + (preview?.email_routing?.recipient ? `\n\nInvoice email to: ${preview.email_routing.recipient}` : '')
     + `\nAfter payment the report goes to: ${reportTo || 'no one yet (no email on file)'}`;
+}
+
+// Why a held send must stop before closeout, or null. An unknown email outcome parks a first invoice
+// unsent (server settleUnverifiedHeldInvoice) and rings the office bell, so closeout would refuse it;
+// the copy matches the Reports page drawer (ProjectsPage sendWithInvoiceNotice).
+function heldSendStopReason(sent) {
+  if (sent.report_held !== true) {
+    return 'The invoice was sent, but the WDO report hold was not confirmed. Open the report on the Reports page to check it before finishing. Tap Save for later.';
+  }
+  if (sent.channels?.email?.uncertain) {
+    return 'The invoice email outcome is unknown. Check that the customer got it on the Reports page before resending. The report stays held until the invoice is paid. Tap Save for later.';
+  }
+  return null;
+}
+
+// The sign step offers the hold only when the server does (report_payment_hold_available), the report is
+// signed, and nothing was charged, delivered, or stopped on this sign step yet.
+function heldInvoiceOffered(signStep) {
+  return signStep.projectDetail?.report_payment_hold_available === true
+    && signStep.signature?.signed === true
+    && !signStep.invoiceDelivery
+    && !signStep.heldSendStopped
+    && !signStep.cardCompletion?.charged
+    && !signStep.cardCompletion?.blocked;
+}
+
+function HeldInvoiceButton({ signStep, busy, sending, onClick, palette, fontWeight }) {
+  if (!heldInvoiceOffered(signStep)) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      title="Send the invoice and pay link now; the report is sent by itself once the invoice is paid"
+      style={{
+        minHeight: 52,
+        width: '100%',
+        padding: '0 18px',
+        borderRadius: 10,
+        fontSize: 14,
+        fontWeight,
+        background: 'transparent',
+        color: palette.text,
+        border: `1px solid ${palette.border}`,
+        cursor: busy ? 'default' : 'pointer',
+        opacity: busy ? 0.6 : 1,
+      }}
+    >
+      {busy && sending ? 'Sending invoice…' : 'Invoice now, report after payment'}
+    </button>
+  );
 }
 
 // Populate the WDO contact/address fields from the selected customer. With
@@ -1631,9 +1665,9 @@ export default function CreateProjectModal({
           billingReason: detailPayload?.closeoutPreview?.billing?.reason || null,
           invoiceStatus: detailPayload?.closeoutPreview?.billing?.invoiceStatus || null,
           noCharge: projectType === WDO_PROJECT_TYPE && wdoFeeIsExplicitZero(findings.inspection_fee),
-          // "Invoice now, report after payment" (GATE_WDO_REPORT_HOLD): offered only when the server says so,
-          // the same key the Reports page drawer reads.
-          holdAvailable: projectType === WDO_PROJECT_TYPE && detail?.report_payment_hold_available === true,
+          // "Invoice now, report after payment" (GATE_WDO_REPORT_HOLD) reads the detail's
+          // report_payment_hold_available, the key the Reports page drawer reads (WDO only, server side).
+          projectDetail: detail,
         });
         return;
       }
@@ -1666,38 +1700,53 @@ export default function CreateProjectModal({
     return payload;
   }
 
-  // holdReport: "Invoice now, report after payment" — the invoice and pay link go now, and the
-  // server emails the report by itself once the invoice is paid (GATE_WDO_REPORT_HOLD).
-  async function sendInvoiceAndFinish({ holdReport = false } = {}) {
+  // heldDelivery: a held send the hold button already delivered — this only closes the service.
+  async function sendInvoiceAndFinish(heldDelivery) {
     const requiresSignature = signStep?.requiresSignature !== false;
     if (!allowInvoiceCompletion
       || !signStep?.project?.id
-      || (holdReport && !signStep.holdAvailable && !signStep.invoiceDelivery)
       || (requiresSignature && !signStep.signature?.signed && !signStep.invoiceDelivery)) return;
     const isCertificate = signStep.project.project_type === PRE_TREATMENT_CERTIFICATE_TYPE;
     const documentLabel = isCertificate ? 'pre-treatment certificate' : 'WDO report';
     setCompletionBusy(true);
-    setCompletionAction(holdReport ? 'hold' : 'invoice');
+    setCompletionAction('invoice');
     setError(null);
-    let invoiceDelivery = signStep.invoiceDelivery || null;
+    let invoiceDelivery = heldDelivery || signStep.invoiceDelivery;
     try {
       if (!invoiceDelivery) {
-        const call = async (body, fallback) => readProjectAction(
-          await adminFetch(`/admin/projects/${signStep.project.id}/send-with-invoice`, { method: 'POST', body }),
-          fallback,
+        const previewResponse = await adminFetch(
+          `/admin/projects/${signStep.project.id}/send-with-invoice`,
+          {
+            method: 'POST',
+            body: { dry_run: true },
+          },
         );
-        const sent = await deliverSignStepInvoice({ call, holdReport, documentLabel });
-        if (!sent) return;
+        const preview = await readProjectAction(previewResponse, `Could not prepare the ${documentLabel} invoice`);
+        const amount = Number(preview?.invoice?.total || 0).toLocaleString('en-US', {
+          style: 'currency',
+          currency: 'USD',
+        });
+        const deliveryExplanation = `The customer receives the invoice, payment link, and ${documentLabel} now.`;
+        if (!confirm(`Send the ${amount} invoice now and finish this service?\n\n${deliveryExplanation}`)) return;
+
+        const sendResponse = await adminFetch(
+          `/admin/projects/${signStep.project.id}/send-with-invoice`,
+          {
+            method: 'POST',
+            body: {
+              ...(preview?.invoice?.id ? { invoice_id: preview.invoice.id } : {}),
+            },
+          },
+        );
+        const sent = await readProjectAction(sendResponse, `Could not send the ${documentLabel} invoice`);
+        if (!sent.sent) {
+          throw new Error(`The invoice and ${documentLabel} were not delivered. Please retry.`);
+        }
         invoiceDelivery = sent;
         // Persist this boundary in local UI state before attempting close. If
         // closeout fails, Retry finishes the service without emailing a second
         // invoice.
         setSignStep(prev => (prev ? { ...prev, invoiceDelivery: sent } : prev));
-        if (holdReport && sent.report_held !== true) {
-          // The invoice went out but the server did not confirm the hold: stop before closeout so the
-          // tech sees it, and the office sends the report from the Reports page.
-          throw new Error(`The invoice was sent, but the ${documentLabel} hold was not confirmed. Open the report on the Reports page to check it before finishing.`);
-        }
       }
 
       const closeResponse = await adminFetch(`/admin/projects/${signStep.project.id}/close`, {
@@ -1707,7 +1756,7 @@ export default function CreateProjectModal({
       const closed = await readProjectAction(
         closeResponse,
         invoiceDelivery
-          ? `The invoice was sent and the ${documentLabel} was delivered, but the service could not be closed. Tap Finish service to retry.`
+          ? `The invoice was sent, but the service could not be closed. Tap Finish service to retry.`
           : `Could not finish the ${isCertificate ? 'pre-treatment' : 'WDO'} service`,
       );
       finishSignStep({
@@ -1721,6 +1770,38 @@ export default function CreateProjectModal({
       setCompletionBusy(false);
       setCompletionAction(null);
     }
+  }
+
+  // "Invoice now, report after payment" (GATE_WDO_REPORT_HOLD): the invoice and pay link go now and the
+  // server emails the report by itself once the invoice is paid. A send the server did not confirm as a
+  // clean hold stops here, before closeout, and leaves no send button that could repeat the invoice.
+  async function sendHeldInvoiceAndFinish() {
+    if (!allowInvoiceCompletion || !signStep?.project?.id || !heldInvoiceOffered(signStep)) return;
+    setCompletionBusy(true);
+    setCompletionAction('hold');
+    setError(null);
+    let sent = null;
+    try {
+      const call = async (body, fallback) => readProjectAction(
+        await adminFetch(`/admin/projects/${signStep.project.id}/send-with-invoice`, { method: 'POST', body }),
+        fallback,
+      );
+      sent = await deliverHeldInvoice(call);
+    } catch (e) {
+      setError(e.message || 'Could not send the WDO invoice');
+    } finally {
+      setCompletionBusy(false);
+      setCompletionAction(null);
+    }
+    if (!sent) return;
+    const stopReason = heldSendStopReason(sent);
+    if (stopReason) {
+      setSignStep(prev => (prev ? { ...prev, heldSendStopped: true } : prev));
+      setError(stopReason);
+      return;
+    }
+    setSignStep(prev => (prev ? { ...prev, invoiceDelivery: sent } : prev));
+    await sendInvoiceAndFinish(sent);
   }
 
   async function sendReportAndFinish() {
@@ -2142,6 +2223,7 @@ export default function CreateProjectModal({
               && !reportOnlyCompletion
               && (savedCard || signStep.cardCompletion)
               && !signStep.invoiceDelivery
+              && !signStep.heldSendStopped
               && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.cardCompletion) && (
               <button
                 type="button"
@@ -2176,6 +2258,7 @@ export default function CreateProjectModal({
               && !reportOnlyCompletion
               && !signStep.cardCompletion?.charged
               && !signStep.cardCompletion?.blocked
+              && !signStep.heldSendStopped
               && (signStep.requiresSignature === false || signStep.signature?.signed || signStep.invoiceDelivery) && (
               <button
                 type="button"
@@ -2202,34 +2285,15 @@ export default function CreateProjectModal({
                     : `Send invoice & ${signStep.requiresSignature === false ? 'certificate' : 'report'}`}
               </button>
             )}
-            {allowInvoiceCompletion
-              && !reportOnlyCompletion
-              && signStep.holdAvailable
-              && !signStep.invoiceDelivery
-              && !signStep.cardCompletion?.charged
-              && !signStep.cardCompletion?.blocked
-              && signStep.signature?.signed && (
-              <button
-                type="button"
-                onClick={() => sendInvoiceAndFinish({ holdReport: true })}
-                disabled={signBusy || completionBusy}
-                title="Send the invoice and pay link now; the report is sent by itself once the invoice is paid"
-                style={{
-                  minHeight: 52,
-                  width: '100%',
-                  padding: '0 18px',
-                  borderRadius: 10,
-                  fontSize: 14,
-                  fontWeight: wStrong,
-                  background: 'transparent',
-                  color: P.text,
-                  border: `1px solid ${P.border}`,
-                  cursor: signBusy || completionBusy ? 'default' : 'pointer',
-                  opacity: signBusy || completionBusy ? 0.6 : 1,
-                }}
-              >
-                {completionBusy && completionAction === 'hold' ? 'Sending invoice…' : 'Invoice now, report after payment'}
-              </button>
+            {allowInvoiceCompletion && !reportOnlyCompletion && (
+              <HeldInvoiceButton
+                signStep={signStep}
+                busy={signBusy || completionBusy}
+                sending={completionAction === 'hold'}
+                onClick={sendHeldInvoiceAndFinish}
+                palette={P}
+                fontWeight={wStrong}
+              />
             )}
             <button
               type="button"

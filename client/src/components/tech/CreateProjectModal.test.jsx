@@ -638,7 +638,7 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
 
   // GATE_WDO_REPORT_HOLD (owner 2026-11-28): the sign step offers the same "Invoice now, report
   // after payment" choice as the Reports page drawer, only when the server offers the hold.
-  function stubHoldSend({ reportHeld = true } = {}) {
+  function stubHoldSend({ reportHeld = true, emailUncertain = false } = {}) {
     const baseFetch = fetch;
     let prepared = false;
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
@@ -655,7 +655,12 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
             report_hold_release: { recipient: 'jess@example.com', copies: [] },
           });
         }
-        return jsonResponse({ sent: true, report_held: reportHeld, invoice: { id: 'inv-1', invoice_number: 'INV-2001' } });
+        return jsonResponse({
+          sent: true,
+          report_held: reportHeld,
+          channels: { email: emailUncertain ? { ok: false, uncertain: true } : { ok: true } },
+          invoice: { id: 'inv-1', invoice_number: 'INV-2001' },
+        });
       }
       return baseFetch(url, opts);
     }));
@@ -702,6 +707,24 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     await screen.findByText(/hold was not confirmed/);
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/admin/projects/p-1/close'))).toBe(false);
     expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  it('stops before closeout on an unknown invoice email outcome and offers no second send', async () => {
+    detailPayload.report_payment_hold_available = true;
+    stubHoldSend({ emailUncertain: true });
+    const onCreated = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose: vi.fn() });
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Invoice now, report after payment' }));
+
+    await screen.findByText(/invoice email outcome is unknown/);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/admin/projects/p-1/close'))).toBe(false);
+    expect(onCreated).not.toHaveBeenCalled();
+    // No button left that would email the invoice again, send the held report early, or retry a refused closeout.
+    expect(screen.queryByRole('button', { name: 'Invoice now, report after payment' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send invoice & report' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Finish service' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save for later' })).toBeTruthy();
   });
 
   it('accepts immediate report delivery when account credit fully covers the invoice', async () => {
