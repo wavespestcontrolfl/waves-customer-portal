@@ -1065,6 +1065,6 @@ describe('proposal lifecycle routes', () => {
     });
     expect(apply.status).toBe(200);
     expect(proposals.applyProposal).toHaveBeenCalledWith(db, CALL_ID,
-      { actorId: 'tech-1', visitId: COMMIT_ID, previewHash: 'a'.repeat(64) });
+      { actorId: 'tech-1', actor: { techRole: 'admin', technicianId: 'tech-1' }, visitId: COMMIT_ID, previewHash: 'a'.repeat(64) });
   }));
 });
