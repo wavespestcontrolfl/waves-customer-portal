@@ -32,17 +32,16 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(at).toBeGreaterThan(quoteSignalsAt);
   });
 
-  test('the estimator-engine eligibility gate requires callAgreedPrice == null', () => {
-    const gateAt = source.indexOf('if (estimatorEngineOn() && !extracted.is_spam');
-    expect(gateAt).toBeGreaterThan(-1);
+  test('the estimator-engine eligibility gate checks agreedPriceSuppressesDraft via shouldSuppressDraftForAgreedPrice', () => {
+    const helperAt = source.indexOf('const agreedPriceSuppressesDraft = shouldSuppressDraftForAgreedPrice({');
+    expect(helperAt).toBeGreaterThan(-1);
+    const gateAt = source.indexOf('if (estimatorEngineOn() && !extracted.is_spam', helperAt);
+    expect(gateAt).toBeGreaterThan(helperAt);
     const gateClause = source.slice(gateAt, gateAt + 300);
     expect(gateClause).toContain('(callQuotePromised || callQuoteRequested)');
-    expect(gateClause).toContain('callAgreedPrice == null');
-    // The agreed-price exclusion applies to BOTH quote-promised and
-    // quote-requested calls — it must not be scoped inside the
-    // parenthesized OR (which would only cover one signal).
+    expect(gateClause).toContain('!agreedPriceSuppressesDraft');
     const orAt = gateClause.indexOf('(callQuotePromised || callQuoteRequested)');
-    const exclusionAt = gateClause.indexOf('callAgreedPrice == null');
+    const exclusionAt = gateClause.indexOf('!agreedPriceSuppressesDraft');
     expect(exclusionAt).toBeGreaterThan(orAt + '(callQuotePromised || callQuoteRequested)'.length);
   });
 
@@ -53,23 +52,12 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     expect(elseEndAt).toBeGreaterThan(elseAt);
     const elseBody = source.slice(elseAt, elseEndAt);
     expect(elseBody).toContain("skipped:'price_agreed_on_call'");
-    expect(elseBody).toContain('if (callAgreedPrice != null)');
+    expect(elseBody).toContain('if (agreedPriceSuppressesDraft)');
   });
 
-  // codex #4815 r1 P1: reconcileDraftLinksForCall alone only re-links a
-  // draft's lead — it does nothing when the lead is unchanged, so a
-  // force-reprocess that newly finds an agreed price left a stale
-  // (possibly differently-priced) draft sendable with nothing refusing a
-  // detached composer's late insert. The fix reuses the SAME forced-
-  // invalidation helper the identity-conflict quarantine and the
-  // spam/voicemail terminal verdict already use, in two passes: one before
-  // finalization (this pass still holds its own claim) and one after (a
-  // belt-and-braces sweep for anything that raced in between) — the exact
-  // two-pass shape the spam/voicemail terminal branch uses higher up in
-  // this same file.
   function priceAgreedSyncBlock() {
     const elseAt = source.indexOf('} else {\n      // Reconcile-only pass');
-    const ifAgreedAt = source.indexOf('if (callAgreedPrice != null) {', elseAt);
+    const ifAgreedAt = source.indexOf('if (agreedPriceSuppressesDraft) {', elseAt);
     expect(ifAgreedAt).toBeGreaterThan(elseAt);
     const endAt = source.indexOf('agreedPriceDraftSweepPending = true;', ifAgreedAt);
     expect(endAt).toBeGreaterThan(ifAgreedAt);
@@ -283,7 +271,7 @@ describe('processRecording estimator-engine gate — agreed-price exclusion', ()
     // Two mirrored copies both dropped the billing unit; the shared module
     // is the only definition now.
     const engineSource = fs.readFileSync(require.resolve('../services/estimator-engine/index.js'), 'utf8');
-    expect(source).toContain("const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');");
+    expect(source).toContain("const { resolveCallAgreedPrice, formatAgreedPriceLabel, shouldSuppressDraftForAgreedPrice } = require('../utils/call-agreed-price');");
     expect(engineSource).toContain("const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../../utils/call-agreed-price');");
     expect(source).not.toMatch(/function resolveCallAgreedPrice\(/);
     expect(source).not.toMatch(/function formatAgreedPriceLabel\(/);

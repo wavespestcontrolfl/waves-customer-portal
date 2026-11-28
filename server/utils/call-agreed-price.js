@@ -205,10 +205,43 @@ function formatAgreedPriceLabel(agreedPrice) {
   return [agreedPrice, ...extra].map(formatAgreedTerm).join(' + ');
 }
 
+// Did this call confirm/book an appointment? Under owner ruling 2026-09-24
+// (the $300 flea booking), an agreed price on a booked call ALWAYS suppresses
+// estimator drafting so no conflicting estimate draft competes with the booking.
+function hasConfirmedBookingOnCall(extracted = null, v2Extraction = null) {
+  if (extracted?.appointment_confirmed === true) return true;
+  const sched = v2Extraction?.scheduling;
+  if (!sched || typeof sched !== 'object') return false;
+  return sched.status === 'confirmed' || sched.agent_committed_booking === true;
+}
+
+/**
+ * Should an agreed verbal price suppress estimator-engine drafting for this call?
+ * - Owner ruling 2026-09-24 ("the spoken word beats the estimator"): ALWAYS
+ *   suppresses when a visit IS booked/confirmed on the call OR when no written
+ *   quote was promised (`quotePromised !== true`).
+ * - Owner 2026-11-28 quote-closure fix: when NO visit was booked on the call
+ *   AND staff explicitly promised to send a written quote (`quotePromised === true`),
+ *   allow the draft to compose for staff review (yellow lane with verbal-price
+ *   notice) instead of stranding the lead with zero booking and zero draft.
+ */
+function shouldSuppressDraftForAgreedPrice({
+  agreedPrice = null,
+  quotePromised = false,
+  extracted = null,
+  v2Extraction = null,
+} = {}) {
+  if (!agreedPrice) return false;
+  if (hasConfirmedBookingOnCall(extracted, v2Extraction)) return true;
+  return quotePromised !== true;
+}
+
 module.exports = {
   resolveCallAgreedPrice,
   resolveStatedOneTimeCallPrice,
   resolveAgreedOneTimeJobPrice,
   agreedOneTimeJobPriceStatedBy,
   formatAgreedPriceLabel,
+  hasConfirmedBookingOnCall,
+  shouldSuppressDraftForAgreedPrice,
 };
