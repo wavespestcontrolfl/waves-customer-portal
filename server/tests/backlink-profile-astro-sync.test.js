@@ -76,9 +76,11 @@ describe('sameAsRejectReason', () => {
     expect(sameAsRejectReason(url)).toBe('excluded');
   });
 
-  test('query strings or non-waves paths on allowlisted hosts are not profiles', () => {
+  test('query strings or non-profile paths on allowlisted hosts are not profiles', () => {
     expect(sameAsRejectReason('https://citysquares.com/b/waves-pest-control-venice-26858800?ref=x')).toBe('not_profile');
     expect(sameAsRejectReason('https://nextdoor.com/pages/other-pest-control-sarasota-fl/')).toBe('not_profile');
+    expect(sameAsRejectReason('https://nextdoor.com/p/waves-pest-control-sarasota-fl/')).toBe('not_profile');
+    expect(sameAsRejectReason('https://citysquares.com/articles/waves-pest-control-sarasota')).toBe('not_profile');
   });
 
   test('non-https or unparseable URL is invalid', () => {
@@ -99,9 +101,12 @@ describe('getVerifiedProfilesByOffice', () => {
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-bradenton-fl/', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-lakewood-ranch-99999', location: null },
-      // Stored default 'bradenton' conflicting with a Sarasota URL -> dropped
+      // Stored default 'bradenton' with unmapped Lakewood Ranch HQ URL or conflicting Sarasota URL -> dropped
+      { live_url: 'https://citysquares.com/b/waves-pest-control-lakewood-ranch-99999', location: 'bradenton' },
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-99999', location: 'bradenton' },
-      // Explicit location on allowlisted host with non-conflicting URL
+      // Non-profile Nextdoor post mentioning waves and sarasota -> rejected
+      { live_url: 'https://nextdoor.com/p/waves-pest-control-sarasota-fl/', location: null },
+      // Explicit non-default location on allowlisted host with non-conflicting URL
       { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: 'venice' },
     ]);
 

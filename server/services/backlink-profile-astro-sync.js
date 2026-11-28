@@ -121,6 +121,12 @@ function officeSlugForRow(location, rawUrl) {
     if (!stored) return null;
     if (explicit && explicit !== stored) return null;
     if (pathMatches.length === 1 && pathMatches[0] !== stored) return null;
+    // The signup runner writes `bradenton` as its default fallback, so an
+    // unmapped URL (e.g. a Lakewood Ranch HQ listing) with stored `bradenton`
+    // must still have explicit office evidence in the URL or reviewed map.
+    if (stored === 'bradenton-fl' && explicit !== 'bradenton-fl' && pathMatches[0] !== 'bradenton-fl') {
+      return null;
+    }
     return stored;
   }
   // Unscoped rows (location null/'default') must unambiguously name ONE office
@@ -128,17 +134,15 @@ function officeSlugForRow(location, rawUrl) {
   return inferOfficeSlugFromUrl(rawUrl);
 }
 
-// Strict allowlist of verified, publicly crawlable per-office directory hosts.
-// Switching from a denylist to an allowlist keeps SaaS/tool launch directories
-// (betterlaunch.co, proofstories.io, showmysites.com, toolfio.com, toolhub.me),
-// PBN blog-network links, corporate/HQ profiles (trustpilot.com, facebook.com,
-// bbb.org, swflinc.com, pinterest.com), and unverified aggregators out of
+// Strict allowlist of verified, publicly crawlable per-office directory hosts
+// and their business-profile path shapes. Keeps SaaS launch directories, PBN
+// blogs, Englewood duplicates, corporate handles, and community posts out of
 // per-office LocalBusiness sameAs.
-const SAMEAS_ALLOWED_OFFICE_HOSTS = new Set([
-  'citysquares.com',
-  'n49.com',
-  'nextdoor.com',
-  'reviews.birdeye.com',
+const SAMEAS_ALLOWED_OFFICE_HOSTS = new Map([
+  ['citysquares.com', /^\/b\/[^/]*waves/],
+  ['n49.com', /^\/biz\/\d+\/[^/]*waves/],
+  ['nextdoor.com', /^\/pages\/[^/]*waves/],
+  ['reviews.birdeye.com', /^\/[^/]*waves[^/]*$/],
 ]);
 
 // Specific excluded pages on allowlisted (or legacy) hosts — e.g. wrong phone,
@@ -154,14 +158,18 @@ const SAMEAS_EXCLUDED_PAGES = new Set([
   'reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312', // wrong phone (941) 381-7612
 ]);
 
-function isAllowedOfficeHost(host) {
-  return [...SAMEAS_ALLOWED_OFFICE_HOSTS].some((h) => host === h || host.endsWith(`.${h}`));
+function allowedHostRule(host) {
+  for (const [h, pathRe] of SAMEAS_ALLOWED_OFFICE_HOSTS.entries()) {
+    if (host === h || host.endsWith(`.${h}`)) return pathRe;
+  }
+  return null;
 }
 
 /**
  * Why a verified URL stays out of sameAs, or null when it may ship. A sameAs entry
- * must be ONE live Waves per-office listing on an allowlisted directory host, with
- * no query string and no exclusion override.
+ * must be ONE live Waves per-office listing on an allowlisted directory host
+ * matching that directory's business-profile URL pattern, with no query string
+ * and no exclusion override.
  */
 function sameAsRejectReason(rawUrl) {
   let u;
@@ -169,8 +177,9 @@ function sameAsRejectReason(rawUrl) {
   if (u.protocol !== 'https:') return 'invalid';
   const host = u.hostname.toLowerCase().replace(/^www\./, '');
   const path = u.pathname.toLowerCase().replace(/\/+$/, '');
-  if (!isAllowedOfficeHost(host) || SAMEAS_EXCLUDED_PAGES.has(host + path)) return 'excluded';
-  if (u.search || !path.includes('waves')) return 'not_profile';
+  const hostPathRe = allowedHostRule(host);
+  if (!hostPathRe || SAMEAS_EXCLUDED_PAGES.has(host + path)) return 'excluded';
+  if (u.search || !hostPathRe.test(path)) return 'not_profile';
   return null;
 }
 
