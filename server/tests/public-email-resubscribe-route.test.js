@@ -263,10 +263,20 @@ describe('POST /:token', () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
-  test('a service error is a 500 with error code only in the log', async () => {
+  test('a service error is a 500 with error code only in the log, returning JSON to JSON clients and branded HTML to form submits', async () => {
     jest.spyOn(Resub, 'completeResubscribe').mockRejectedValue(Object.assign(new Error('select pat@example.com failed'), { code: '57014' }));
     const res = await post(TOKEN, { form: false });
     expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ success: false, error: 'release failed' });
+
+    const htmlRes = await post(TOKEN, { form: true });
+    expect(htmlRes.status).toBe(500);
+    expect(htmlRes.headers.get('content-type')).toContain('text/html');
+    const html = await htmlRes.text();
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain('Something went wrong.');
+    expect(html).not.toContain('pat@example.com');
+
     expect(JSON.stringify(logger.error.mock.calls)).toContain('57014');
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain('pat@example.com');
   });

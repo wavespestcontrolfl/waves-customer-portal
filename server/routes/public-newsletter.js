@@ -530,7 +530,7 @@ router.post('/subscribe', subscribeLimiter, async (req, res) => {
 function renderConfirmPage(heading, bodyHtml) {
   return `
       <!doctype html>
-      <html>
+      <html lang="en">
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -555,7 +555,20 @@ function renderConfirmPage(heading, bodyHtml) {
           .btn:hover { filter: brightness(0.97); }
           :is(a, button, input, textarea):focus-visible { outline: 2px solid #04395E; outline-offset: 3px; }
           form { margin: 0; padding: 0; }
-          .footer { margin-top: 32px; font-size: 14px; color: #4F5B70; text-align: center; }
+          .footer { max-width: 520px; margin: 32px auto 0; font-size: 14px; color: #4F5B70; text-align: center; }
+          @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+            .box { background: rgba(255,255,255,0.94); border-color: #7C8DA0; }
+          }
+          @media (prefers-reduced-transparency: reduce) {
+            .box { background: rgba(255,255,255,0.94); border-color: #7C8DA0; backdrop-filter: none; -webkit-backdrop-filter: none; }
+          }
+          @media (forced-colors: active) {
+            .box, .btn { background: Canvas; color: CanvasText; border: 1px solid CanvasText; backdrop-filter: none; -webkit-backdrop-filter: none; box-shadow: none; }
+          }
+          @media print {
+            body { background: #FFFFFF; padding: 16px; }
+            .box { background: #FFFFFF; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; border-color: #D7D2C4; break-inside: avoid; }
+          }
         </style>
       </head>
       <body>
@@ -564,8 +577,8 @@ function renderConfirmPage(heading, bodyHtml) {
           <div class="box">
             ${bodyHtml}
           </div>
-          <div class="footer">${glassUniversalFooterHtml()}</div>
         </main>
+        <footer class="footer" role="contentinfo">${glassUniversalFooterHtml()}</footer>
         <script>
           (() => {
             const card = document.querySelector('.box');
@@ -646,7 +659,7 @@ router.get('/confirm/:token', async (req, res) => {
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
     logger.error(`[newsletter] confirm GET failed: ${err.message}`);
-    res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com if you meant to confirm a subscription.');
+    res.status(500).type('html').send(renderConfirmPage('Something went wrong.', '<p style="margin-bottom:0">Please try again in a few minutes or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> if you meant to confirm a subscription.</p>'));
   }
 });
 
