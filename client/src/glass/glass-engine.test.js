@@ -104,6 +104,29 @@ describe('attachGlassPointerFx', () => {
     detach();
     cleanup();
   });
+
+  it('ref-counts shared pointer FX and clears orb transforms when the last animated owner leaves a still page', () => {
+    const first = renderHook(() => useGlassSurface(true));
+    const still = renderHook(() => useGlassSurface(true, { motion: false }));
+    const second = renderHook(() => useGlassSurface(true));
+
+    const firstOrb = document.querySelector('.glass-orb');
+    firstOrb.style.transform = 'translateX(20px)';
+    document.documentElement.style.setProperty('--mx', '42%');
+    document.documentElement.style.setProperty('--my', '64%');
+
+    first.unmount();
+    expect(document.documentElement.style.getPropertyValue('--mx')).toBe('42%');
+    expect(firstOrb.style.transform).toBe('translateX(20px)');
+
+    second.unmount();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.documentElement.style.getPropertyValue('--mx')).toBe('');
+    expect(firstOrb.style.transform).toBe('');
+
+    still.unmount();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
+  });
 });
 
 describe('fireGlassConfetti', () => {

@@ -138,15 +138,24 @@ export function applyGlassScene({ motion = true } = {}) {
  * :hover element renders its ::before, so a single global pair positions
  * the shine correctly.
  */
-export function attachGlassPointerFx(html, orbs, reduced) {
-  if (!orbs) return () => {};
+const pointerFxByOrbs = new WeakMap();
+
+function createPointerFxEntry(html, orbs) {
   const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
-  let motionReduced = reduced;
+  const owners = new Set();
+  const orbEls = orbs.querySelectorAll('.glass-orb');
   let raf = 0;
   let lastEvt = null;
   let px = 0;
   let py = 0;
-  const orbEls = orbs.querySelectorAll('.glass-orb');
+  let motionReduced = false;
+
+  const resetVisuals = () => {
+    orbEls.forEach((orb) => orb.style.removeProperty('transform'));
+    html.style.removeProperty('--mx');
+    html.style.removeProperty('--my');
+  };
+
   const parallax = () => {
     if (motionReduced) return;
     const sy = window.scrollY;
@@ -156,6 +165,7 @@ export function attachGlassPointerFx(html, orbs, reduced) {
       c.style.transform = `translate(${px * -46 * ((i + 1) / orbEls.length) + drift}px, ${sy * f + py * -34 * ((i + 1) / orbEls.length)}px)`;
     });
   };
+
   const onMove = (e) => {
     lastEvt = e;
     if (raf) return;
@@ -172,36 +182,65 @@ export function attachGlassPointerFx(html, orbs, reduced) {
       parallax();
     });
   };
-  const onScroll = () => requestAnimationFrame(parallax);
+  const onScroll = () => {
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; parallax(); });
+  };
+
   // Under reduced motion the pointer listener is never registered. Gating only
   // `parallax()` left `--mx`/`--my` tracking the cursor, so the specular
   // highlight went on sliding across every card — motion the user asked not to
   // see, from the one path that was not checking the flag.
   const syncPreference = () => {
+    motionReduced = preference.matches || (owners.size > 0 && [...owners].every((o) => o.reduced));
     document.removeEventListener('pointermove', onMove);
     window.removeEventListener('scroll', onScroll);
-    if (!motionReduced) {
+    if (!motionReduced && owners.size > 0) {
       document.addEventListener('pointermove', onMove, { passive: true });
       window.addEventListener('scroll', onScroll, { passive: true });
-    } else {
+      return;
+    }
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    resetVisuals();
+  };
+
+  preference.addEventListener('change', syncPreference);
+  return {
+    owners,
+    syncPreference,
+    destroy() {
+      document.removeEventListener('pointermove', onMove);
+      window.removeEventListener('scroll', onScroll);
+      preference.removeEventListener('change', syncPreference);
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
-      orbEls.forEach((orb) => orb.style.removeProperty('transform'));
-      html.style.removeProperty('--mx');
-      html.style.removeProperty('--my');
-    }
+      resetVisuals();
+    },
   };
-  const onPreference = () => { motionReduced = preference.matches; syncPreference(); };
-  syncPreference();
-  preference.addEventListener('change', onPreference);
+}
 
+export function attachGlassPointerFx(html, orbs, reduced) {
+  if (!orbs) return () => {};
+  let entry = pointerFxByOrbs.get(orbs);
+  if (!entry) {
+    entry = createPointerFxEntry(html, orbs);
+    pointerFxByOrbs.set(orbs, entry);
+  }
+  const owner = { reduced };
+  entry.owners.add(owner);
+  entry.syncPreference();
+
+  let detached = false;
   return () => {
-    document.removeEventListener('pointermove', onMove);
-    window.removeEventListener('scroll', onScroll);
-    preference.removeEventListener('change', onPreference);
-    if (raf) cancelAnimationFrame(raf);
-    html.style.removeProperty('--mx');
-    html.style.removeProperty('--my');
+    if (detached) return;
+    detached = true;
+    entry.owners.delete(owner);
+    if (entry.owners.size > 0) {
+      entry.syncPreference();
+      return;
+    }
+    if (pointerFxByOrbs.get(orbs) === entry) pointerFxByOrbs.delete(orbs);
+    entry.destroy();
   };
 }
 
