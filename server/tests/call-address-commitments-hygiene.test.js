@@ -259,20 +259,17 @@ describe('PR A2: complaint alert guard, active-customer spam guard, and outage m
     expect(JSON.stringify(payload)).not.toContain('Customer Jane');
 
     const rawSqlCalls = [];
-    const mockDbWithCount = (n) => jest.fn(() => ({
-      whereRaw: jest.fn((sql, bindings) => {
-        rawSqlCalls.push({ sql, bindings });
-        return {
-          whereRaw: jest.fn((sql2, bindings2) => {
-            rawSqlCalls.push({ sql: sql2, bindings: bindings2 });
-            return {
-              count: jest.fn().mockReturnThis(),
-              first: jest.fn().mockResolvedValue({ n: String(n) }),
-            };
-          }),
-        };
-      }),
-    }));
+    const mockDbWithCount = (n) => jest.fn(() => {
+      const chain = {
+        whereRaw: jest.fn((sql, bindings) => {
+          rawSqlCalls.push({ sql, bindings });
+          return chain;
+        }),
+        count: jest.fn(() => chain),
+        first: jest.fn().mockResolvedValue({ n: String(n) }),
+      };
+      return chain;
+    });
 
     await maybeAlertExtractionOutage({ db: mockDbWithCount(2), err: rawSecretErr, now: new Date('2026-11-28T08:00:00Z') });
     expect(notifyAdmin).not.toHaveBeenCalled();

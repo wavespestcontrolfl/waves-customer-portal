@@ -8,6 +8,7 @@
  */
 
 const logger = require('./logger');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 const COMPETITOR_ENTITY = '(?:terminix|orkin|truly\\s*nolen|massey|aptive|home\\s*team|eco\\s*shield|bulwark|previous\\s+(?:pest\\s+)?company|other\\s+(?:pest\\s+)?company|former\\s+(?:pest\\s+)?company|old\\s+(?:pest\\s+)?company)';
 const COMPETITOR_ENTITY_RE = new RegExp(`\\b${COMPETITOR_ENTITY}\\b`, 'i');
@@ -103,7 +104,7 @@ async function maybeAlertExtractionOutage({ db: conn, err, now = new Date() } = 
   if (typeof conn !== 'function') return null;
   try {
     const sinceIso = new Date(now.getTime() - OUTAGE_WINDOW_MS).toISOString();
-    const countQuery = conn('call_log')
+    const countQuery = whereNotSandboxCall(conn('call_log'))
       .whereRaw("(metadata->'last_extraction_error'->>'at') IS NOT NULL")
       .whereRaw("(metadata->'last_extraction_error'->>'at')::timestamptz >= ?", [sinceIso]);
     if (typeof countQuery?.count !== 'function') return null;
