@@ -39,11 +39,15 @@ describe('Decision 3: Same-Family eligibility, internal test exclusion, and same
       last_name: 'Sample',
       email: 'robin@example.com',
       phone: '+19415551111',
+      address_line1: '100 Main St',
+      zip: '34231',
       active: true,
       deleted_at: null,
       pipeline_stage: 'active_customer',
     };
     expect(Family.isEligibleFamilyCustomer(base)).toBe(true);
+    expect(Family.isEligibleFamilyCustomer({ ...base, address_line1: '' })).toBe(false);
+    expect(Family.isEligibleFamilyCustomer({ ...base, address_line1: null })).toBe(false);
     expect(Family.isEligibleFamilyCustomer({ ...base, pipeline_stage: 'won' })).toBe(true);
     expect(Family.isEligibleFamilyCustomer({ ...base, pipeline_stage: 'at_risk' })).toBe(true);
     for (const stage of ['new_lead', 'contacted', 'estimate_sent', 'lost', 'churned', null, '']) {

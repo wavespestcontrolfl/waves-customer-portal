@@ -26,9 +26,15 @@ function familyError(message, statusCode) {
   return Object.assign(new Error(message), { statusCode, status: statusCode, isOperational: true, code: 'multi_home_family' });
 }
 
+function hasUsableServiceStreet(row) {
+  const { addressMatchKey } = require('./customer-address-fanout');
+  return Boolean(addressMatchKey(row?.address_line1));
+}
+
 function isEligibleFamilyCustomer(row) {
   if (!row || row.deleted_at || row.active !== true) return false;
   if (!LIVE_FAMILY_STAGES.includes(String(row.pipeline_stage || ''))) return false;
+  if (!hasUsableServiceStreet(row)) return false;
   const { isInternalTestContact } = require('./internal-test-customers');
   return !isInternalTestContact({
     customerId: row.id,
@@ -157,6 +163,9 @@ async function loadLinkable(trx, customerId, label) {
   if (row.active !== true) throw familyError(`The ${label} profile is not active. Only active profiles can be linked.`, 409);
   if (!LIVE_FAMILY_STAGES.includes(String(row.pipeline_stage || ''))) {
     throw familyError(`The ${label} profile is not an active customer. Only active customers can be linked as Same family.`, 409);
+  }
+  if (!hasUsableServiceStreet(row)) {
+    throw familyError(`The ${label} profile has no street address yet. Add a service address before linking as Same family.`, 409);
   }
   const { isInternalTestContact } = require('./internal-test-customers');
   if (isInternalTestContact({
@@ -320,7 +329,7 @@ async function countUpcomingMultiHomeDiscountedVisits(conn, customerId) {
   const row = await conn('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '>=', today)
-    .whereNotIn('status', DEAD_VISIT_STATUSES)
+    .whereIn('status', ['pending', 'confirmed'])
     .where((q) => {
       q.where('discount_id', preset.id)
         .orWhere('line_discount_id', preset.id)
@@ -405,13 +414,20 @@ async function unlinkFamily(conn, { customerId, actorId = null } = {}) {
   const mine = normalizeId(customerId);
   const res = await conn.transaction((trx) => unlinkInTransaction(trx, { customerId: mine, actorId }));
   if (!conn.isTransaction && res?.removed && res.formerMemberIds?.length) {
-    await alertFamilyDropBelowTwo(conn, { formerMemberIds: res.formerMemberIds, departedCustomerId: mine, reason: 'unlinked' });
+    // Manual unlinks leave the departing member active at one home too, so alert
+    // them alongside survivors if they still carry Multi-Home pricing without flag.
+    await alertFamilyDropBelowTwo(conn, {
+      formerMemberIds: [...res.formerMemberIds, mine],
+      departedCustomerId: mine,
+      reason: 'unlinked',
+    });
   }
   return familyMembers(conn, mine);
 }
 
 module.exports = {
   LIVE_FAMILY_STAGES,
+  hasUsableServiceStreet,
   isEligibleFamilyCustomer,
   sameHomeAddress,
   familyMembers,

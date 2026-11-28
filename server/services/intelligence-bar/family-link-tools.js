@@ -174,10 +174,14 @@ const pinOf = (p) => ({
 });
 
 function profileLinkabilityRefusal(p, liveStages) {
+  const { addressMatchKey } = require('../customer-address-fanout');
   if (!p.active) return refusal(`${p.name}'s profile is not active. Only active profiles can be linked. Nothing was changed.`, 'profile_inactive');
   if (p.is_internal_test) return refusal(`${p.name}'s profile is an internal test account and cannot be linked. Nothing was changed.`, 'internal_test_account');
   if (!liveStages.includes(String(p.pipeline_stage || ''))) {
     return refusal(`${p.name}'s profile is not an active customer. Only active customers can be linked as Same family. Nothing was changed.`, 'profile_ineligible');
+  }
+  if (!addressMatchKey(p.rawAddress?.address_line1)) {
+    return refusal(`${p.name}'s profile has no street address yet. Add a service address before linking as Same family. Nothing was changed.`, 'missing_address');
   }
   return null;
 }
@@ -322,7 +326,7 @@ async function commit(toolName, input, actionContext) {
       const locked = await buildPlan(toolName, input, { database: trx });
       if (locked.error || JSON.stringify(locked._version) !== JSON.stringify(plan._version)) throw changedError();
       if (toolName === 'unlink_customer_family') {
-        formerMemberIds = (plan._version.account?.member_ids || []).filter((id) => id !== plan.customer_id);
+        formerMemberIds = [...(plan._version.account?.member_ids || [])];
       }
       const result = toolName === 'link_customer_family'
         ? await Family.linkFamily(trx, { customerId: plan.customer_id, otherCustomerId: plan.other_customer_id, actorId })
