@@ -632,7 +632,8 @@ async function invoiceMatchesPropertyScope(conn, row, scope, cache) {
     if (visitVerdict !== null) return visitVerdict;
   }
   const { AUTO_MINT_RE, namedIn } = require('./payment-refund-facts');
-  const mintedEstimateId = namedIn(row.notes, AUTO_MINT_RE)[0] || null;
+  const { acceptedEstimateIdFromNotes } = require('./setup-fee-alert-reconcile');
+  const mintedEstimateId = namedIn(row.notes, AUTO_MINT_RE)[0] || acceptedEstimateIdFromNotes(row.notes) || null;
   if (mintedEstimateId) {
     const est = await loadEstimateScopeRow(conn, mintedEstimateId);
     if (est) {
