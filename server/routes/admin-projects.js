@@ -3074,6 +3074,7 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
     // The photo set the signature was captured against: a filing is only ever re-used for the same signature
     // revision (signed_at) and the same photo set, not just the same findings.
     photo_set_hash: signature?.photoSetHash || null,
+    fee_values: signature?.feeValues || null,
     content_hash: wdoContentHash(project, signature?.feeValues || null),
     // The archived binary was rendered through the customer-safe scrub
     // (buildWdoReportPDFBuffer applies customerSafeFindings) — the public

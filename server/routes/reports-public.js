@@ -85,6 +85,14 @@ async function serviceReportSuppressedOrHeld(record) {
   });
 }
 
+async function resolvePublicProjectFeeValues(project, typeCarriesFee) {
+  if (!typeCarriesFee) return [];
+  const lastFiling = project?.project_type === 'wdo_inspection' ? servedWdoFiling(project) : null;
+  const resolved = await resolveProjectRecordedFeeValues(project);
+  if (!Array.isArray(lastFiling?.fee_values) || !lastFiling.fee_values.length) return resolved;
+  return [...new Set([...lastFiling.fee_values, ...resolved])];
+}
+
 // Seasonal pest forecast for the V2 report dashboards (pest + mosquito).
 // Non-blocking lookup (350ms cold cap + stale-while-revalidate on same-day
 // cached entries) so an external weather call never slows a report open.
@@ -904,7 +912,7 @@ router.get('/project/:token/data', async (req, res, next) => {
     // VALUE pass — a paraphrase without the literal cue ("the $250 charge")
     // is caught on every one of these surfaces (codex #2817).
     const typeCarriesFee = projectTypeHasInternalFindingKeys(project.project_type);
-    const feeValues = typeCarriesFee ? await resolveProjectRecordedFeeValues(project) : [];
+    const feeValues = await resolvePublicProjectFeeValues(project, typeCarriesFee);
     const freeTextKeys = projectTypeFreeTextKeys(project.project_type);
     const scrubText = (text) => {
       if (!typeCarriesFee || !text) return text;
