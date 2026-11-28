@@ -506,5 +506,16 @@ describe('threadSchedulingFollowUp', () => {
       { id: 'est-explicit-1' },
     );
     expect(explicitEstimate).toMatchObject({ serviceType: 'Lawn Fertilization', certain: true, reason: 'open_estimate', estimateId: 'est-explicit-1' });
+
+    // Codex P2: retrospective staff question about a past visit does NOT carry scheduling context
+    const retrospectiveQuestion = threadSchedulingFollowUp({
+      inboundMessage: 'After lunch',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'outbound', body: 'What time did the technician arrive for your last visit?', date: minsAgo(10), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+      ],
+    });
+    expect(retrospectiveQuestion).toEqual({ carried: false, reason: 'staff_closed_thread', anchorText: '' });
   });
 });
