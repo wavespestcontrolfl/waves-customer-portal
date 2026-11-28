@@ -172,13 +172,20 @@
   }
 
   /* Selected chips & primary buttons in technician Fast Complete / visit sheets */
-  html.admin-app[data-admin-theme="dark"] :is(.ui-action.tech-visit-primary, .ui-action.tech-visit-complete, .ui-action.tech-visit-action[aria-pressed="true"], .ui-action.tech-visit-action[aria-pressed="true"]:hover:where(:not(:disabled))) {
+  html.admin-app[data-admin-theme="dark"] :is(
+    .ui-action.tech-visit-primary,
+    .ui-action.tech-visit-complete,
+    .ui-action.tech-visit-action.tech-visit-product--added,
+    .ui-action.tech-visit-action.tech-product-unit[aria-pressed="true"],
+    .ui-action.tech-visit-action[aria-pressed="true"],
+    .ui-action.tech-visit-action[aria-pressed="true"]:hover:where(:not(:disabled))
+  ) {
     background-color: #f4f5f6;
     border-color: #f4f5f6;
     color: #111315;
   }
-  html.admin-app[data-admin-theme="dark"] [style*="color: rgb(9, 9, 11)"] {
-    color: #f4f5f6 !important;
+  html.admin-app[data-admin-theme="dark"] .ui-action.tech-visit-tip[aria-pressed="true"] .tech-visit-tip-copy {
+    color: #3f3f46;
   }
 
   /* Workspace navigation & action menus (ui-workspace.css) */
