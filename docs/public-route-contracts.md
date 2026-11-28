@@ -48,7 +48,13 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 ## Routes
 
-Undecodable token segments (`/api/estimates`, `/api/pay` except `/api/pay/statement`, and `/api/public/secure-card`): a path segment that does not percent-decode (`/%E0%A4%A`) answers the mount's generic unknown-token 404 (`{ error: 'Estimate not found' }`, `{ error: 'Invoice not found' }` with the `noStore` headers, `{ error: 'Not found' }` with the secure-card privacy headers) from `rejectUndecodablePath` (`server/middleware/reject-undecodable-path.js`, mounted in `server/index.js` before the global `/api/` limiter). It is not counted by any limiter and never reaches the error handler, so the raw segment is not logged. Headers on that answer: `Cache-Control: no-store` and `Referrer-Policy: no-referrer` (a header an earlier guard already stamped stays: the secure-card privacy set, the `noStore` set on pay, the map proxy set), and never a route's own headers, so a dark route (`darkEstimateRoutePreGuard`, `darkRoutePreGuard`, the secure-card select-plan guard) and a live one answer an undecodable path identically. A path that decodes but holds a malformed token keeps today's `router.param` 404 on each mount, unchanged: header-free on the estimate routes (except where an earlier guard such as the map proxy stamps its set first), with the `noStore` set on pay and the privacy set on secure-card. Live behavior change: such a request used to answer 500 from Express's param-decode error, with the raw segment logged. Every other request is untouched.
+Undecodable token segments (`/api/estimates`, `/api/pay` except `/api/pay/statement`, `/api/public/secure-card`, `/api/public/estimates`, `/api/public/reschedule`, and `/api/public/reservice`): a path segment that does not percent-decode (`/%E0%A4%A`) answers the mount's generic unknown-token 404 (`{ error: 'Estimate not found' }`, `{ error: 'Invoice not found' }` with the `noStore` headers, `{ error: 'Not found' }` on secure-card and the three public picker mounts) from `rejectUndecodablePath` (`server/middleware/reject-undecodable-path.js`, mounted in `server/index.js` before the global `/api/` limiter). It is not counted by any limiter and never reaches the error handler, so the raw segment is not logged. Headers on that answer: `Cache-Control: no-store` and `Referrer-Policy: no-referrer` (a header an earlier guard already stamped stays: the secure-card privacy set, the `noStore` set on pay/reschedule/estimates/reservice, the map proxy set), and never a route's own headers, so a dark route (`darkEstimateRoutePreGuard`, `darkRoutePreGuard`, the secure-card select-plan guard, `reservice` dark guard) and a live one answer an undecodable path identically. A path that decodes but holds a malformed token keeps today's `router.param` / route-level 404 on each mount, unchanged: header-free on `/api/estimates` (except where an earlier guard such as the map proxy stamps its set first), with the `noStore` set on pay/reschedule/estimates/reservice and the privacy set on secure-card. Live behavior change: such a request used to answer 500 from Express's param-decode error, with the raw segment logged. Every other request is untouched.
+
+Public picker privacy, redaction, rate-limit keys, and slot-route hardening (Phase 2C-2, P1-19):
+- Pre-limiter `noStore` (`Cache-Control: no-store`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`) is mounted in `server/index.js` on `/api/public/reschedule` and `/api/public/estimates` ahead of the global `/api/` limiter (alongside `/api/public/reservice`, `/api/public/inspection`, and `/api/public/estimate-assessment`); `estimate-slots-public.js` also stamps `X-Robots-Tag: noindex, nofollow` alongside its existing `Cache-Control: no-cache, no-store, must-revalidate`, `Pragma: no-cache`, and `Referrer-Policy: no-referrer` headers on every response branch.
+- `redact-request-url.js` treats `reschedule` and `reservice` alongside `inspection` in `CONSULTATION_TOKEN_PARENTS`, redacting bearer tokens after `/reschedule/`, `/api/public/reschedule/`, `/reservice/`, and `/api/public/reservice/` in HTTP access logs.
+- All five unauthenticated public picker routers (`estimate-slots-public.js`, `reschedule-public.js`, `reservice-public.js`, `inspection-public.js`, `estimate-assessment-public.js`) key every `express-rate-limit` instance with `unauthenticatedAuthLimitKey` (/64 IPv6 normalization; bearer JWT does not bypass IP bucketing).
+- `DELETE /api/public/estimates/:token/reserve/:scheduledServiceId` shares `reserveLimiter`, rejects non-UUID `scheduledServiceId` values via `HOLD_ID_RE` with generic `404 { error: 'Not found' }` before hitting Postgres, selects `SLOT_ESTIMATE_COLUMNS`, and runs `rejectCallSideBlockedEstimate` + `isEstimateCustomerViewable` (404 on archived/draft/expired/call-blocked quotes). `POST /api/public/estimates/:token/find-slots` likewise checks `rejectCallSideBlockedEstimate` and `isEstimateCustomerViewable` before `verifyEstimateAskToken`, closing the unauthenticated `403` vs `404` existence oracle while still requiring a valid `askToken` before terminal `409` or payload branches.
 
 Customer page-view log (no payload, gate, or header change): the data GET of
 `/api/public/appointment/:token`, `/api/public/reschedule/:token`,
@@ -885,7 +891,16 @@ stamp — so every money seam on this surface reads the invoice ROW, not its
 status. `/setup`, `/quote`, `/finalize`, `/confirm` and `/update-amount`
 refuse such an invoice through the shared collectibility gate, and `/consent`,
 `/capture-setup` and `/setup-complete` refuse it with
-`409 { error, code: 'invoice_withdrawn_from_customer' }`. What that refusal
+`409 { error, code: 'invoice_withdrawn_from_customer' }`, while
+`/consent`, `/capture-setup`, and `/setup-complete` also refuse
+chemical-review-held invoices with
+`409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`, `/consent`
+refuses unreadable/malformed combined-payment allocation metadata on the
+PI with `409 { error, code: 'COMBINED_ALLOCATION_UNREADABLE' }`, and
+`/consent` and `/setup-complete` refuse lock contention when another
+transaction holds the customer row with
+`409 { error, code: 'INVOICE_BUSY_RETRY' }` (retryable; no consent is
+recorded and no Auto Pay enrollment happens). What that refusal
 guarantees, precisely: no consent is recorded and no Auto Pay enrollment
 happens for a withdrawn invoice — the authorization row and the ownership
 judgement commit in ONE transaction, and the enrollment re-judges ownership
@@ -901,16 +916,40 @@ reconciliation and collects normally again). CHEMICAL AREA ADD-ON REVIEW HOLD
 (2026-11-26): an unpaid invoice whose visit completed a chemical area add-on
 without a recorded product application carries a `chemical_addon_review:<serviceId>`
 billing hold stamp while awaiting office review (keeping a collectible status
-and a NULL `payer_id`). `/setup`, `/quote`, `/update-amount`, `/finalize` and
-`/confirm` refuse such an invoice through the shared collectibility gate /
-hold check (code `INVOICE_CHEMICAL_ADDON_HOLD`); combined-balance
-selection (`open-balance.js` / `pay-combined.js`) excludes held siblings and
-refuses any held row under the locked allocation verifier (`verifyAllocationLocked`
-→ `409 staleBalance`); and `GET /api/pay/:token` / `payPageZelleVisibility`
-withholds `manualPayOptions` (Zelle) on held invoices via `zelleDeniedByInvoiceState`
-(including its final DB re-read). Nothing else in the payload changes, no
-customer or service details leak, and once the office reviews and explicitly
-releases/sends or reschedules the invoice it collects normally again. TERMITE RENEWAL ELIGIBILITY
+and a NULL `payer_id`). On `GET /api/pay/:token`, `GET /api/pay/:token/invoice.pdf`,
+`/plan-choice`, `/consent`, `/capture-setup`, `/setup-complete`, `/setup`,
+`/quote`, `/update-amount`, `/finalize`, and `/confirm`, a held invoice in a
+collectible non-processing status is refused (`409` on `GET`, `invoice.pdf`,
+`/plan-choice`, `/consent`, `/capture-setup`, `/setup-complete`, locked
+`/update-amount`, and `/confirm`; `400` on `/setup`, `/quote`, `/finalize`
+pre-check; all carrying `{ error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`). Already
+`paid`, `prepaid`, or `processing` invoices stay readable on `GET /api/pay/:token`
+and `GET /api/pay/:token/invoice.pdf` even if stamped, so receipt redirects and
+pending-ACH status remain accessible.
+Precedence and race outcomes: when the invoice is already in `status = 'processing'`
+(an ACH debit already submitted to Stripe before the hold landed), `/setup`
+returns `409 { error, inProgress: true }` (without `INVOICE_CHEMICAL_ADDON_HOLD`)
+so the page reflects the in-flight bank transfer; `/confirm` preserves
+`409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }` both on the route pre-check
+and if the hold commits mid-request before `confirmInvoicePayment`'s locked
+settlement — including combined full-balance settlements (`settleCombinedPaymentIntent`
+checks every allocated invoice under lock when `rejectHeldInvoices: true`, while
+internal webhook settlement of an already-succeeded/processing PI passes
+`allowChemicalReviewReconcile: true` / `rejectHeldInvoices: false` so cleared funds
+are never stranded); and both Stripe webhook enrollment paths (`payment_intent.succeeded`
+save-card mirror — locking the anchor plus every combined-allocation invoice on the
+PI in ascending-id order — and `setup_intent.succeeded` `covered_capture`) take the same
+locked `invoices → customers` chemical-hold check so a hold committed between
+mint and webhook delivery never records consent or enrolls Auto Pay.
+Combined-balance selection (`open-balance.js` / `pay-combined.js`) and the
+authenticated portal balance (both `unpaidInvoices` and `standaloneFailedTotal`)
+/ Pay Now list (`billing-v2.js` / `open-balance.js`) exclude held invoices and
+refuse any held row under the locked allocation verifier
+(`verifyAllocationLocked` → `409 staleBalance`); and `payPageZelleVisibility`
+withholds `manualPayOptions` (Zelle) on held invoices via
+`zelleDeniedByInvoiceState` (including its final DB re-read). No customer or
+service details leak, and once the office reviews and explicitly releases/sends
+the invoice it collects normally again. TERMITE RENEWAL ELIGIBILITY
 (2026-09-28, dark behind GATE_TERMITE_ANNUAL_PLAN — only an invoice that is a
 termite annual-plan RENEWAL successor's prepay invoice, found through its own
 `annual_prepay_term_id` link, is ever judged; every other invoice is
@@ -4926,23 +4965,30 @@ short code-shaped utterance by the same speaker within 30 s of a masked card
 number; a mask stamps `live_transcription.pan_detected`. While the
 star-key hold holds the caller (`conference_path.hold.phase = 'held'`, or
 `applied = 'held'` until Twilio confirms the return or the voicemail), a
-final utterance is answered 200 and not stored. With
+final utterance is answered 200 and not stored. Once Twilio confirms hold
+voicemail (`phase = 'voicemail'` and `applied = 'voicemail'`), `outbound_track`
+prompts (Waves' voicemail TTS, `speaker = 'staff'`) are answered 200 and
+discarded while `inbound_track` caller speech is stored so card-pause detection
+continues to run on the resumed recording. With
 `GATE_CALL_RECORDING_CARD_PAUSE` also on (dark, owner 2026-11-16 "ok build
 all"), a stored utterance that asks for or names card details, or one the
 scrub masked, pauses the caller's call recording by REST (`Twilio.CURRENT`,
-`Status=paused`, `PauseBehavior=silence`), off the response path; the
-recording resumes 90 s later, and a new trigger moves the end out. State is
-`live_transcription.card_pause`. A pause that was running when that gate
-went off still resumes. No new spend. The other events
+`Status=paused`, `PauseBehavior=silence`, falling back to the classic `<Dial>`
+child `dial_call_sid` on 20404 after re-fencing the sender lease), off the
+response path; the recording resumes 90 s later, and a new trigger moves the
+end out. State is `live_transcription.card_pause`. A pause that was running
+when that gate went off still resumes. No new spend. The other events
 stamp `live_at`, `stopped_at` or `event_error*`. Every outcome answers 200,
 a failed write included. The post-call card-number quarantine deletes the
-call's live utterances (and the early summary below).
+call's live utterances and strips `early_summary`, `spoken_notes`, and `assist`.
 With `GATE_CALL_EARLY_SUMMARY` also on (dark, owner 2026-11-16 "ok build all,
-use haiku"), `transcription-stopped` also schedules, after its 200 answer and
+use haiku"), `transcription-stopped` (and `/call-status` on terminal status
+when `stopped_at` is already stamped) schedules, after its 200 answer and
 a 3 s wait for the last utterances, one paid Claude Haiku 5.5 call over the
 call's live utterances: at most once per call (a compare-and-swap on
-`live_transcription.early_summary_claimed_at`), and none for a call with
-fewer than 3 utterances or one the recording pipeline already processed. Its
+`live_transcription.early_summary_claimed_at`), requiring `stopped_at` and
+terminal call status or `ended_at`, and skipping spam, `tech_line`, quarantined,
+fewer than 3 utterances, or already-processed rows. Its
 2-3 sentence reply, card numbers masked, is saved only on
 `live_transcription.early_summary` for the Calls tab: never on
 `call_summary`, and never sent to a customer. The same reply also carries
@@ -7684,17 +7730,17 @@ web report's screened form lists, never the merged note lists or
 `ai_report`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
-terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
-(2026-09-12): a combined-visit invoice whose Bill-To moved to a payer after
-the handoff was minted keeps a collectible status and a NULL `payer_id` —
-the move is recorded only in its withdrawal stamp — so this route treats a
-withdrawn invoice exactly like a terminal status change and refuses with the
-existing `invoice_changed` outcome after the burn, rather than handing the
-technician a card-present session for debt now owed by AP. `/handoff` refuses
-to mint one for the same reason, and `/payment-intent` refuses with
-`409 { code: 'invoice_withdrawn_from_customer' }` — including a re-read under
-the invoice row lock at the final bind, so a Bill-To change committing during
-the mint is caught). RESPONSE (2026-10-31, Waves Admin pay screens): beside
+terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL &
+CHEMICAL AREA ADD-ON REVIEW HOLD (2026-09-12, updated 2026-11-27): after the
+burn, this route refuses uncollectible statuses (`paid`, `prepaid`, `processing`,
+`void`, `refunded`, `canceled`, `cancelled`) with `409 { code: 'invoice_status_changed' }`,
+third-party payer / statement-accrued / `payer_billed:*` withdrawn invoices with
+`409 { code: 'invoice_withdrawn_from_customer' }`, and `chemical_addon_review:*`
+held invoices with `409 { code: 'INVOICE_CHEMICAL_ADDON_HOLD' }` (each audited
+under outcome `invoice_changed`). `/handoff` refuses to mint a handoff for the
+same terminal/payer/chemical-hold states (re-checked under the invoice row lock
+before credit apply), and `/payment-intent` and `/apply-surcharge` refuse with
+those same `409` codes both pre-create and under the invoice row lock). RESPONSE (2026-10-31, Waves Admin pay screens): beside
 `invoice_id`, `customer_name`, `amount_cents`, `currency`, `authToken` and the
 surcharge fields, a successful burn returns what the customer pays for:
 `invoice_number`, `items` (`{ description, amount_cents }`, the invoice's
@@ -9493,8 +9539,8 @@ a call with no final callback keeps its 3), a call with no row (refused
 before admission) gets a fallback row with the same internal source, and
 the call gets no recording recovery and no failure bell. Every call reader
 drops the source through `relay-protocol.whereNotSandboxCall` /
-`isInternalCallSource` (no inbox thread, lead, KPI, missed-call or
-repeat-caller bell, text-back, booking-link text, or "call since the text"
+`isInternalCallSource` (no inbox thread, lead, KPI, missed-call bell,
+text-back, booking-link text, or "call since the text"
 for an unanswered reply). Gate off ⇒ every request rejected and nothing
 written. Any change to the number, caller or budget checks is security- and
 cost-critical).

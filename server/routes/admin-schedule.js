@@ -442,7 +442,98 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const { isTechnicianRequest, adminOnlyFields, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
+const {
+  isTechnicianRequest,
+  adminOnlyFields,
+  technicianCurrentVisitFilter,
+  technicianLiveVisitFilter,
+  technicianMayReadVisitAccessCodes,
+  visitHasDirectPremiseStamp,
+  visitMatchesPrimaryHomeForTechAccess,
+  loadActiveHomesByCustomerIds,
+  loadTechHomesByCustomerIds,
+  loadTechPrimaryAccessIds,
+  recheckTechFeedAccessRows,
+  redactFreeTextAccessCodes,
+  collectStoredAccessCodes,
+  sameHomeForTechVisitPrefs,
+  stripAccessCodePrefs,
+  stripAccessCodesFromBriefBlock,
+} = require('../services/technician-visit-scope');
+
+function redactTechFeedText(allowWindow, text, knownCodes = null) {
+  return allowWindow ? text : redactFreeTextAccessCodes(text, knownCodes);
+}
+
+function redactTechHistoryText(req, text, knownCodes = null) {
+  return isTechnicianRequest(req) ? redactFreeTextAccessCodes(text, knownCodes) : text;
+}
+
+function pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds) {
+  if (!droppedIds.size) return;
+  for (let i = enriched.length - 1; i >= 0; i -= 1) {
+    if (droppedIds.has(enriched[i].id)) enriched.splice(i, 1);
+  }
+  for (let i = unassigned.length - 1; i >= 0; i -= 1) {
+    if (droppedIds.has(unassigned[i].id)) unassigned.splice(i, 1);
+  }
+  for (const [key, tech] of Object.entries(byTech)) {
+    tech.services = tech.services.filter((s) => !droppedIds.has(s.id));
+    if (!tech.services.length) {
+      delete byTech[key];
+      continue;
+    }
+    tech.totalServices = tech.services.length;
+    tech.completedServices = tech.services.filter((s) => s.status === 'completed').length;
+    tech.estimatedServiceMinutes = tech.services.reduce((sum, s) => sum + (s.estimatedDuration || 30), 0);
+    tech.estimatedDriveMinutes = tech.services.length * 8;
+    const zones = {};
+    const materials = {};
+    tech.services.forEach((s) => {
+      zones[s.zone] = (zones[s.zone] || 0) + 1;
+      (s.materialsNeeded || []).forEach((m) => { materials[m.product || m] = true; });
+    });
+    tech.zones = zones;
+    tech.loadList = Object.keys(materials);
+  }
+}
+
+const BILLING_FEED_ALERT_TYPES = new Set(['no_card_on_file', 'unbilled_visit']);
+
+async function applyTechScheduleFeedRecheck(conn, req, candidates, { enriched, byTech, unassigned, date = null }) {
+  const droppedIds = await recheckTechFeedAccessRows(conn, req, candidates, (c, { lostWindow, lostPrimary }) => {
+    const knownCodes = collectStoredAccessCodes(c.prefs, c.visit);
+    const preservedBilling = Array.isArray(c.row.propertyAlerts)
+      ? c.row.propertyAlerts.filter((a) => a && BILLING_FEED_ALERT_TYPES.has(a.type))
+      : [];
+    const safeNotes = lostWindow ? redactFreeTextAccessCodes(c.cleanedNotes, knownCodes) : c.cleanedNotes;
+    const keepNeighborhood = !lostWindow && (visitHasDirectPremiseStamp(c.visit) || !c.visit.source_estimate_id || !lostPrimary);
+    c.row.propertyAlerts = [
+      ...compilePropertyAlerts({
+        prefs: stripAccessCodePrefs(c.prefs, knownCodes),
+        notes: safeNotes,
+        genuinelyNew: c.genuinelyNew,
+        servicePreferences: c.visit.service_preferences,
+        normalizedServiceType: c.normalizedType,
+        neighborhoodGate: keepNeighborhood ? c.neighborhoodGate : null,
+        neighborhoodActions: keepNeighborhood && c.neighborhoodActions,
+      }),
+      ...preservedBilling,
+    ];
+    if (!keepNeighborhood) delete c.row.neighborhoodGateActions;
+    if (lostWindow) {
+      c.row.lastServiceNotes = redactFreeTextAccessCodes(c.row.lastServiceNotes, knownCodes);
+      c.row.lastLineServiceNotes = redactFreeTextAccessCodes(c.row.lastLineServiceNotes, knownCodes);
+    }
+  });
+  if (droppedIds.size) {
+    pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds);
+    require('../services/visit-groups').visitSummariesForRows(enriched);
+    const legsToday = date === etDateString();
+    Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs')
+      .attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
+  }
+}
 
 function normalizeAddonEntry(a) {
   return {
@@ -760,10 +851,10 @@ function techSafeEstimateSourcePayload(payload) {
       frequency: line.frequency || null,
       visitsPerYear: line.visitsPerYear ?? null,
     })),
-    deposit: payload.deposit
+    deposit: payload.deposit && (payload.deposit.payerBilled || payload.deposit.required)
       ? { payerBilled: Boolean(payload.deposit.payerBilled), required: Boolean(payload.deposit.required) }
       : null,
-    payment: payload.payment
+    payment: payload.payment && (payload.payment.billingTerm || payload.payment.annualPrepay)
       ? {
           billingTerm: payload.payment.billingTerm || null,
           ...(payload.payment.annualPrepay ? {
@@ -7099,7 +7190,7 @@ router.get('/', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         // The primary address on file, for the rain step's stopForecastZone
         // (stampedAddressDiverges): kept on the row only, never in the response.
-        'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
+        'customers.address_line1 as customer_address_line1', 'customers.address_line2 as customer_address_line2', 'customers.city as customer_city', 'customers.zip as customer_zip',
         // Visit coordinates for map-centered tools (treatment-zone mapper):
         // stamped visit coords win; the customer mirror only backfills a
         // NON-divergent stamp — a divergent stamp with no coords must degrade
@@ -7276,6 +7367,12 @@ router.get('/', async (req, res, next) => {
     } catch { deferredPrepayCustomerIds = null; }
     // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
     const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
+    // For technicians, raw property access codes and away-mode dates follow
+    // access-code-capture.js#listForVisit: only active (non-completed/terminal)
+    // visits in [yesterday..tomorrow] ET at the matching home receive them.
+    const activeHomesByCustomer = await loadTechHomesByCustomerIds(db, req, services.map((s) => s.customer_id));
+    const techPrimaryAllowedIds = await loadTechPrimaryAccessIds(db, req, services, activeHomesByCustomer);
+    const techRecheckCandidates = [];
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -7325,14 +7422,25 @@ router.get('/', async (req, res, next) => {
       // Compiled by the shared helper (services/nextstop-alerts.js) so the
       // pre-visit brief's deterministic access block and this day feed can
       // never drift — the block moved verbatim, behavior 1:1.
+      // Primary-home property_preferences codes require BOTH visit-window
+      // eligibility AND a primary-home match; neighborhoodGateByVisit is
+      // already scoped to the visit's own property_id so secondary homes keep
+      // their own neighborhood gate entry while inside the visit window.
+      const knownCodes = isTechnicianRequest(req) ? collectStoredAccessCodes(prefs, s) : null;
+      const allowTechVisitWindow = technicianMayReadVisitAccessCodes(req, s);
+      const allowTechPrimaryPrefs = !isTechnicianRequest(req) || (allowTechVisitWindow && techPrimaryAllowedIds.has(s.id));
+      const allowTechNeighborhood = !isTechnicianRequest(req)
+        || (allowTechVisitWindow && (visitHasDirectPremiseStamp(s) || !s.source_estimate_id || allowTechPrimaryPrefs));
+      const rowNeighborhoodGate = allowTechNeighborhood ? (neighborhoodGateByVisit.get(s.id) || null) : null;
+      const rowNeighborhoodActions = allowTechNeighborhood && gateActionVisits.has(s.id);
       const alerts = compilePropertyAlerts({
-        prefs,
-        notes: cleanedNotes,
+        prefs: allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs, knownCodes),
+        notes: redactTechFeedText(allowTechVisitWindow, cleanedNotes, knownCodes),
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
-        neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
-        neighborhoodActions: gateActionVisits.has(s.id),
+        neighborhoodGate: rowNeighborhoodGate,
+        neighborhoodActions: rowNeighborhoodActions,
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -7485,7 +7593,7 @@ router.get('/', async (req, res, next) => {
             });
           })
         : [];
-      return {
+      const row = {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
         ...(prepPhotosLive ? { customerSentPhotos: customerSentPhotosByServiceId.get(s.id) === true } : {}),
@@ -7611,7 +7719,7 @@ router.get('/', async (req, res, next) => {
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
-        ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(rowNeighborhoodActions ? { neighborhoodGateActions: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
@@ -7620,12 +7728,12 @@ router.get('/', async (req, res, next) => {
         // scheduler-audit filter is for scheduled_services.notes (where ops
         // sessions write audit trails), and would false-positive on genuine
         // tech prose like "No SMS sent because the phone is disconnected".
-        lastServiceNotes: previewText(lastService?.technician_notes),
+        lastServiceNotes: previewText(redactTechHistoryText(req, lastService?.technician_notes, knownCodes)),
         // Line-scoped last visit for the service dashboards (Protocol panel):
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: safeDate(lastLineService?.service_date),
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
-        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
+        lastLineServiceNotes: previewText(redactTechHistoryText(req, lastLineService?.technician_notes, knownCodes)),
         checkOutTime: s.check_out_time,
         // With checkInTime/checkOutTime: the drive line finds where the tech is now.
         enRouteAt: s.en_route_at || null,
@@ -7651,6 +7759,14 @@ router.get('/', async (req, res, next) => {
         visitId: s.visit_id || null,
         trackState: s.track_state || null,
       };
+      if (isTechnicianRequest(req)) {
+        techRecheckCandidates.push({
+          visit: s, row, prefs, cleanedNotes, genuinelyNew, normalizedType,
+          neighborhoodGate: rowNeighborhoodGate, neighborhoodActions: rowNeighborhoodActions,
+          hadWindow: allowTechVisitWindow, hadPrimary: allowTechPrimaryPrefs,
+        });
+      }
+      return row;
     }));
     require('../services/visit-groups').visitSummariesForRows(enriched);
     const visitIds = [...new Set(enriched.map((service) => service.visitId).filter(Boolean))];
@@ -7790,6 +7906,10 @@ router.get('/', async (req, res, next) => {
 
     await attachOfficeToldFields(req, enriched);
     stripTechOwnerOnlyMoney(req, enriched);
+    // Final authorization + access-code recheck runs AFTER all enrichment,
+    // closeout, roster, weather, and office-told awaits so reassigned visits
+    // are removed and completed/changed stops never serialize raw credentials.
+    await applyTechScheduleFeedRecheck(db, req, techRecheckCandidates, { enriched, byTech, unassigned, date });
 
     res.json({
       date, services: enriched,
@@ -25157,6 +25277,20 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.*');
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    // Technicians read raw property access codes and absence/Away Watch dates
+    // only on non-ended visits in [yesterday..tomorrow] ET at the matching home.
+    const checkTechBriefCodeEligibility = async (visitRow) => {
+      if (!isTechnicianRequest(req)) return true;
+      if (!technicianMayReadVisitAccessCodes(req, visitRow)) return false;
+      const homesMap = await loadActiveHomesByCustomerIds(db, [visitRow.customer_id]);
+      const homes = homesMap ? (homesMap.get(visitRow.customer_id) || []) : null;
+      let customerPrimary = null;
+      if (Array.isArray(homes) && homes.length === 0) {
+        customerPrimary = await db('customers').where({ id: visitRow.customer_id }).first('address_line1', 'address_line2', 'city', 'zip').catch(() => null);
+      }
+      return visitMatchesPrimaryHomeForTechAccess(db, visitRow, homes, customerPrimary);
+    };
+    const allowTechBriefAccessCodes = await checkTechBriefCodeEligibility(svc);
     const PrevisitBrief = require('../services/previsit-brief');
     // Every `{brief: null}` answer optionally carries a deterministic
     // `facts` block (access codes + last same-line visit's products) for
@@ -25217,7 +25351,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
             .update({ tech_seen_at: db.fn.now() })
             .catch((err) => logger.warn(`[admin-schedule] visit-prep tech_seen_at stamp failed for ${svc.id}: ${err.message}`));
         }
-        return { ...payload, facts };
+        const safeFacts = (!allowTechBriefAccessCodes && facts?.access)
+          ? { ...facts, access: stripAccessCodesFromBriefBlock(facts.access) }
+          : facts;
+        return { ...payload, facts: safeFacts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
         return payload;
@@ -25231,6 +25368,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const withAwayWatch = async (payload) => {
       const AwayWatch = require('../services/away-watch');
       if (!AwayWatch.awayWatchLive()) return payload;
+      // Absence/return dates follow the same visit-window + home eligibility
+      // rule as access codes so far-future or completed stops never expose
+      // when a customer's home stands empty.
+      if (isTechnicianRequest(req) && !allowTechBriefAccessCodes) return payload;
       let awayWatch = null;
       try {
         awayWatch = await AwayWatch.awayWatchCardLines(db, svc.id);
@@ -25264,22 +25405,60 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       // every brief gate off, and withholds the whole answer when the visit was lost during the read or the check cannot run.
       if (out && !out.editable) return payload;
       homeNoteLooked = true;
-      return out ? { ...payload, homeNote: { note: out.note, customerId: out.customerId } } : payload;
+      if (!out) return payload;
+      const safeNote = (isTechnicianRequest(req) && !allowTechBriefAccessCodes && typeof out.note?.body === 'string')
+        ? { ...out.note, body: redactFreeTextAccessCodes(out.note.body) }
+        : out.note;
+      return { ...payload, homeNote: { note: safeNote, customerId: out.customerId } };
     };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
     // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
     // customer the brief was built for (a merge changes the visit's customer while the technician stays assigned).
     // No longer so, or the check itself failing: the whole answer is withheld. All three gates off and no home note looked up: no extra read.
+    const stripCodesFromBriefPayload = (payload) => {
+      const next = { ...payload };
+      delete next.awayWatch;
+      const briefCodes = [
+        ...Object.values(next.facts?.access?.codes || {}),
+        ...Object.values(next.brief?.access?.codes || {}),
+      ].flatMap((v) => {
+        const t = String(v || '').trim();
+        const s = t.replace(/^[#*]+|[#*]+$/g, '');
+        return [t, s].filter((x) => x.length >= 3);
+      });
+      if (next.facts?.access) next.facts = { ...next.facts, access: stripAccessCodesFromBriefBlock(next.facts.access, briefCodes) };
+      if (next.brief?.access) next.brief = { ...next.brief, access: stripAccessCodesFromBriefBlock(next.brief.access, briefCodes) };
+      if (typeof next.homeNote?.note?.body === 'string') {
+        next.homeNote = {
+          ...next.homeNote,
+          note: { ...next.homeNote.note, body: redactFreeTextAccessCodes(next.homeNote.note.body, briefCodes) },
+        };
+      }
+      return next;
+    };
     const finalRecheck = async (payload) => {
-      if (!(homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
+      const techHoldingCodes = isTechnicianRequest(req) && allowTechBriefAccessCodes;
+      if (!(techHoldingCodes || homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
       try {
-        const stillOwned = await db('scheduled_services')
+        const recheckQ = db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
-          .modify((q) => (customerAskedBound ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
-          .modify((q) => technicianCurrentVisitFilter(req, q))
-          .first('scheduled_services.id');
-        return stillOwned ? payload : { brief: null };
+          .modify((q) => ((customerAskedBound || techHoldingCodes) ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
+          .modify((q) => technicianCurrentVisitFilter(req, q));
+        const stillOwned = techHoldingCodes
+          ? await recheckQ.first(
+            'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+            'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
+            'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+            'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+            'scheduled_services.source_estimate_id',
+          )
+          : await recheckQ.first('scheduled_services.id');
+        if (!stillOwned) return { brief: null };
+        if (techHoldingCodes && !(await checkTechBriefCodeEligibility(stillOwned))) {
+          return stripCodesFromBriefPayload(payload);
+        }
+        return payload;
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief final recheck failed for ${svc.id}: ${err.message}`);
         return { brief: null };
@@ -25308,7 +25487,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return answer({ brief: null, stale: staleReason });
       }
     }
-    const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
+    const safeBrief = (!allowTechBriefAccessCodes && parsedBrief?.access)
+      ? { ...parsedBrief, access: stripAccessCodesFromBriefBlock(parsedBrief.access) }
+      : parsedBrief;
+    const served = { brief: safeBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
     // Facts ride along with EVERY served brief (gated): the WDO and
     // legacy shapes carry no access/last_visit at all, and even a served
     // visit brief's access block is a snapshot from the :19/:49 sweep —
@@ -25325,7 +25507,13 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
 // holds the visit row locked in its own transaction, so a reassignment landing during the save refuses it. A stale save
 // (the note changed since the editor read it) is 409 with the current note. Staff only: no customer, report or token
 // route reads this table.
-const HOME_NOTE_VISIT_COLUMNS = ['scheduled_services.id', 'scheduled_services.customer_id'];
+const HOME_NOTE_VISIT_COLUMNS = [
+  'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+  'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
+  'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+  'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+  'scheduled_services.source_estimate_id',
+];
 const homeNoteVisitRefusal = (req, res) => (isTechnicianRequest(req)
   ? res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' })
   : res.status(404).json({ error: 'Scheduled service not found' }));
@@ -25344,8 +25532,22 @@ router.get('/:id/home-note', async (req, res, next) => {
     const stillOwned = await db('scheduled_services')
       .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
       .modify((q) => technicianCurrentVisitFilter(req, q))
-      .first('scheduled_services.id');
+      .first(HOME_NOTE_VISIT_COLUMNS);
     if (!stillOwned) return homeNoteVisitRefusal(req, res);
+    if (isTechnicianRequest(req)) {
+      const mayReadCodes = technicianMayReadVisitAccessCodes(req, stillOwned)
+        && await sameHomeForTechVisitPrefs(db, req.technicianId, stillOwned.customer_id, stillOwned);
+      if (!mayReadCodes) {
+        out.editable = false;
+        if (typeof out?.note?.body === 'string') {
+          const prefs = stillOwned.customer_id
+            ? await db('property_preferences').where({ customer_id: stillOwned.customer_id }).first().catch(() => null)
+            : null;
+          const knownCodes = collectStoredAccessCodes(prefs, stillOwned);
+          out.note = { ...out.note, body: redactFreeTextAccessCodes(out.note.body, knownCodes) };
+        }
+      }
+    }
     HomeNote.sendHomeNote(res, out);
   } catch (err) { next(err); }
 });
@@ -25368,9 +25570,24 @@ router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, a
           : Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });
       }
       if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forShare().first('id');
-      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id'], { allowCompleted: true });
+      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, [
+        'id', 'customer_id', 'technician_id', 'status', 'scheduled_date', 'property_id',
+        'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+        'source_estimate_id',
+      ], { allowCompleted: true });
       if (String(peek.customer_id || '') !== String(svc.customer_id || '')) {
         return { status: 409, error: 'This visit now belongs to another customer. Reload it.', code: 'customer_changed' };
+      }
+      if (isTechnicianRequest(req)) {
+        const mayReadCodes = technicianMayReadVisitAccessCodes(req, svc)
+          && await sameHomeForTechVisitPrefs(trx, req.technicianId, svc.customer_id, svc);
+        if (!mayReadCodes) {
+          return {
+            status: 403,
+            error: 'Home notes are read-only outside the active visit window at the matching service address.',
+            code: 'home_note_read_only',
+          };
+        }
       }
       return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
     });
@@ -25746,6 +25963,17 @@ const {
 // or carrying the PaymentIntent that page opens — is the normal state, not a
 // refusal. That lane voids nothing at the choice; every money guard below
 // (collected, part-paid, credited, deposit, payer, foreign lines) still holds.
+function supersedeInvoiceHoldReason(inv) {
+  const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview } = require('../services/invoice-helpers');
+  if (inv.payer_id || inv.payer_statement_id || invoiceWithdrawnFromCustomer(inv)) {
+    return 'isn’t available — this visit’s invoice bills to a third-party payer';
+  }
+  if (invoiceHeldForChemicalReview(inv)) {
+    return 'isn’t available — this visit’s invoice is held for office chemical add-on billing review';
+  }
+  return null;
+}
+
 async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db, delivered = false }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0) {
     return { ok: true, supersedes: [] };
@@ -25791,8 +26019,8 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
           });
       })
       .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid', 'paid_at',
-        'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
-        'notes');
+        'payer_id', 'payer_statement_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
+        'scheduled_send_error', 'notes');
   } catch (err) {
     logger.warn(`[schedule:prepay-switch] attached-invoice lookup failed for ${visitIds.join(',')}: ${err.message} — refusing`);
     return { ok: false, blockReason: 'couldn’t confirm what this visit is already invoiced for — refresh and try again' };
@@ -25859,8 +26087,9 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     if (lines.some((li) => String(li?.category || '') === 'deposit_credit')) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit carries an estimate deposit credit. Mint the prepay from Customer 360 so the deposit is applied to it` };
     }
-    if (inv.payer_id) {
-      return { ok: false, blockReason: 'isn’t available — this visit’s invoice bills to a third-party payer' };
+    const holdBlockReason = supersedeInvoiceHoldReason(inv);
+    if (holdBlockReason) {
+      return { ok: false, blockReason: holdBlockReason };
     }
     supersedes.push({
       id: inv.id,
@@ -26837,6 +27066,7 @@ async function runPrepaySwitch({
       await trx('invoices')
         .where(function supersedeNets() {
           this.whereIn('scheduled_service_id', target.visitIds);
+          if (payPageInvoiceId) this.orWhere({ id: payPageInvoiceId });
           if (target.estimateId) {
             this.orWhere(function customerProvenance() {
               this.where({ customer_id: target.customerId })

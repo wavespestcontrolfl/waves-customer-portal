@@ -413,6 +413,14 @@ describe('the alert after an office call', () => {
     expect(saved().text).toBe(JSON_REPLY.summary);
     expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('next-step alert failed'));
   });
+
+  test('C2-21 & C2-31: warm transfer taken by owner suppresses the CSR next-step alert', async () => {
+    setCall({ acceptance: staffAnswer });
+    db.__state.call.metadata.conference_path = { hold: { transfer: { n: 1, status: 'accepted' } } };
+    reply(JSON.stringify(JSON_REPLY));
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: true, reason: null });
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
 });
 
 describe('the promises saved', () => {

@@ -152,8 +152,11 @@ async function stageProposal(conn, { callId, procGeneration = null, now = new Da
   });
 }
 
-async function visitsForCard(conn, customerId, now) {
-  const rows = await loadCandidates(conn, customerId, now, { includePast: true });
+async function visitsForCard(conn, customerId, now, { technicianId = null } = {}) {
+  const rawRows = await loadCandidates(conn, customerId, now, { includePast: true });
+  const rows = technicianId
+    ? rawRows.filter((r) => String(r.technician_id || '') === String(technicianId))
+    : rawRows;
   const serviceIds = [...new Set(rows.map((r) => r.service_id).filter(Boolean))];
   const propertyIds = [...new Set(rows.map((r) => r.property_id).filter(Boolean))];
   const [services, properties] = await Promise.all([
@@ -166,7 +169,7 @@ async function visitsForCard(conn, customerId, now) {
     property: properties.find((p) => p.id === r.property_id && p.customer_id === r.customer_id) || null, current_window: customerWindow(r.scheduled_date, r.window_start) }));
 }
 
-async function listProposals(conn, { limit = 100, offset = 0, now = new Date(), customerScope = null } = {}) {
+async function listProposals(conn, { limit = 100, offset = 0, now = new Date(), customerScope = null, technicianId = null } = {}) {
   let query = conn('triage_items as t').join('call_log as cl', 'cl.id', 't.call_log_id')
     .join('customers as c', 'c.id', 'cl.customer_id').whereNull('c.deleted_at').whereIn('t.status', openStates)
     .whereRaw("t.payload->'reschedule_proposal' IS NOT NULL");
@@ -177,7 +180,7 @@ async function listProposals(conn, { limit = 100, offset = 0, now = new Date(), 
       'c.first_name', 'c.last_name', 'c.phone', ...ADDRESS_COLUMNS.map((field) => `c.${field}`));
   const visitsByCustomer = new Map();
   if (rows.length) {
-    const visits = await visitsForCard(conn, [...new Set(rows.map((row) => row.customer_id))], now);
+    const visits = await visitsForCard(conn, [...new Set(rows.map((row) => row.customer_id))], now, { technicianId });
     for (const visit of visits) {
       if (!visitsByCustomer.has(visit.customer_id)) visitsByCustomer.set(visit.customer_id, []);
       visitsByCustomer.get(visit.customer_id).push(visit);
@@ -214,17 +217,11 @@ function assertTechnicianOwnsProposalVisits(actor, selected, series, plan) {
   }
 }
 
-async function previewProposal(conn, id, { visitId, actor, now = new Date(), rebooker = null } = {}) {
-  const card = await conn('triage_items').where({ id }).whereIn('status', openStates).first();
-  if (!card?.payload?.reschedule_proposal) throw fail('Proposal is no longer open', 404);
-  const call = await conn('call_log').where({ id: card.call_log_id }).first();
-  if (!call?.customer_id || call.processing_token || call.v2_extraction_status !== 'valid'
-    || Number(call.processing_generation) !== Number(card.payload.reschedule_proposal.call_generation)) {
-    throw fail('The call changed. Refresh the proposal.');
+async function loadAndValidateProposalVisit(conn, call, customer, card, visitId, now, technicianId) {
+  const candidates = await visitsForCard(conn, customer.id, now, { technicianId });
+  if (visitId && !candidates.some((visit) => visit.id === visitId)) {
+    throw fail('Proposal visit not assigned to you', technicianId ? 403 : 404);
   }
-  const customer = await conn('customers').where({ id: call.customer_id }).first(CUSTOMER_COLUMNS);
-  if (!customer || customer.deleted_at) throw fail('The customer is no longer active. Review this request in the schedule.');
-  const candidates = await visitsForCard(conn, customer.id, now);
   const selection = visitId || (candidates.length === 1 ? candidates[0].id : null);
   if (!selection) throw fail('Select the appointment discussed on the call', 400);
   const reviewedVisit = candidates.find((visit) => visit.id === selection);
@@ -235,6 +232,67 @@ async function previewProposal(conn, id, { visitId, actor, now = new Date(), reb
   if (!proposalEvidence(v2, call.transcription) || v2.scheduling.proposed_start_at !== card.payload.reschedule_proposal.proposed_start_at) {
     throw fail('The request evidence changed. Review the call.');
   }
+  return { candidates, selection, v2 };
+}
+
+function buildProposalPreviewSnapshot({ call, customer, selected, card, v2, series, overlap, conflictSnapshot }) {
+  return {
+    source: digest([call.transcription, v2]),
+    customer,
+    property: selected.property,
+    card_id: card.id,
+    updated_at: new Date(card.updated_at).toISOString(),
+    generation: call.processing_generation,
+    visit_id: selected.id,
+    from: {
+      date: selected.scheduled_date, start: selected.window_start, end: selected.window_end,
+      duration: selected.estimated_duration_minutes, status: selected.status, property_id: selected.property_id,
+      service_id: selected.service_id, service_type: selected.service_type, service_name: selected.service_name,
+      visit_id: selected.visit_id, is_recurring: selected.is_recurring, source_action: selected.source_action,
+      customer_confirmed: selected.customer_confirmed, self_booking_id: selected.self_booking_id,
+      service_address_line1: selected.service_address_line1, service_address_line2: selected.service_address_line2,
+      service_address_city: selected.service_address_city, service_address_state: selected.service_address_state,
+      service_address_zip: selected.service_address_zip,
+    },
+    target: v2.scheduling.proposed_start_at,
+    series,
+    overlap,
+    conflictSnapshot,
+  };
+}
+
+async function assertTechnicianOwnsProposalMoves(trx, technicianId, customerId, moves) {
+  const affectedIds = [...new Set(moves.map((m) => m.id).filter(Boolean))];
+  if (!technicianId || !affectedIds.length) return;
+  const affectedRows = await trx('scheduled_services').whereIn('id', affectedIds).orderBy('id').forUpdate().select('id', 'technician_id', 'customer_id');
+  if (affectedRows.length !== affectedIds.length
+    || affectedRows.some((r) => String(r.technician_id || '') !== String(technicianId) || String(r.customer_id || '') !== String(customerId))) {
+    throw fail('One or more affected visits are no longer assigned to you.', 403);
+  }
+}
+
+function isProposalStateStale({ liveCard, card, liveCall, customer, liveCustomer, selected, liveProperty, call, v2 }) {
+  return !liveCard || !openStates.includes(liveCard.status)
+    || new Date(liveCard.updated_at).getTime() !== new Date(card.updated_at).getTime()
+    || !liveCall || liveCall.processing_token || liveCall.v2_extraction_status !== 'valid'
+    || liveCall.customer_id !== customer.id || !liveCustomer || liveCustomer.deleted_at
+    || (selected.property && !liveProperty)
+    || digest(liveCustomer) !== digest(customer) || digest(liveProperty) !== digest(selected.property)
+    || digest([liveCall.transcription, liveCall.ai_extraction_enriched]) !== digest([call.transcription, v2])
+    || Number(liveCall.processing_generation) !== Number(call.processing_generation);
+}
+
+async function previewProposal(conn, id, { visitId, actor = null, now = new Date(), rebooker = null, technicianId = null } = {}) {
+  const card = await conn('triage_items').where({ id }).whereIn('status', openStates).first();
+  if (!card?.payload?.reschedule_proposal) throw fail('Proposal is no longer open', 404);
+  const call = await conn('call_log').where({ id: card.call_log_id }).first();
+  if (!call?.customer_id || call.processing_token || call.v2_extraction_status !== 'valid'
+    || Number(call.processing_generation) !== Number(card.payload.reschedule_proposal.call_generation)) {
+    throw fail('The call changed. Refresh the proposal.');
+  }
+  const customer = await conn('customers').where({ id: call.customer_id }).first(CUSTOMER_COLUMNS);
+  if (!customer || customer.deleted_at) throw fail('The customer is no longer active. Review this request in the schedule.');
+  const { candidates, selection, v2 } = await loadAndValidateProposalVisit(conn, call, customer, card, visitId, now, technicianId);
   const plan = planRescheduleFromCall({ v2, call, customer, candidates, now, humanOverride: { visitId: selection } });
   if (plan.action === 'skip') throw fail(`This request needs the schedule editor: ${plan.reason.replace(/_/g, ' ')}`);
   const selected = candidates.find((visit) => visit.id === selection);
@@ -256,29 +314,14 @@ async function previewProposal(conn, id, { visitId, actor, now = new Date(), reb
   if (await hasLinkedFollowUps(conn, moves)) {
     throw fail('This visit has a linked follow-up. Use Pick another time to review both appointments together.');
   }
-  const snapshot = {
-    source: digest([call.transcription, v2]), customer, property: selected.property,
-    card_id: card.id, updated_at: new Date(card.updated_at).toISOString(), generation: call.processing_generation,
-    visit_id: selection,
-    from: {
-      date: selected.scheduled_date, start: selected.window_start, end: selected.window_end,
-      duration: selected.estimated_duration_minutes, status: selected.status, property_id: selected.property_id,
-      service_id: selected.service_id, service_type: selected.service_type, service_name: selected.service_name,
-      visit_id: selected.visit_id, is_recurring: selected.is_recurring, source_action: selected.source_action,
-      customer_confirmed: selected.customer_confirmed, self_booking_id: selected.self_booking_id,
-      service_address_line1: selected.service_address_line1, service_address_line2: selected.service_address_line2,
-      service_address_city: selected.service_address_city, service_address_state: selected.service_address_state,
-      service_address_zip: selected.service_address_zip,
-    },
-    target: v2.scheduling.proposed_start_at, series, overlap, conflictSnapshot,
-  };
+  const snapshot = buildProposalPreviewSnapshot({ call, customer, selected, card, v2, series, overlap, conflictSnapshot });
   return { preview_hash: digest(snapshot), card, call, customer, candidates, v2, plan, selected, series,
     overlap, conflictSnapshot, displayAddress: proposalAddress(selected, customer) };
 }
 
-async function applyProposal(conn, id, { actorId, actor, visitId, previewHash, now = new Date(), rebooker = null } = {}) {
+async function applyProposal(conn, id, { actorId, actor = null, visitId, previewHash, now = new Date(), rebooker = null, technicianId = null } = {}) {
   if (!previewHash) throw fail('Preview the requested move first', 400);
-  const preview = await previewProposal(conn, id, { visitId, actor, now, rebooker });
+  const preview = await previewProposal(conn, id, { visitId, actor, now, rebooker, technicianId });
   if (preview.preview_hash !== previewHash) throw fail('The appointment or recurring plan changed. Refresh the preview.');
   const { call, card, customer, candidates, v2, series, selected } = preview;
   return applyReviewedCallReschedule({
@@ -287,7 +330,9 @@ async function applyProposal(conn, id, { actorId, actor, visitId, previewHash, n
     occurrenceIds: series.occurrenceIds || [], occurrences: series.occurrences,
     conflictSnapshot: preview.conflictSnapshot,
     guard: async (trx) => {
-      if (await hasLinkedFollowUps(trx, reviewedMoves(selected, preview.plan, series))) {
+      const moves = reviewedMoves(selected, preview.plan, series);
+      await assertTechnicianOwnsProposalMoves(trx, technicianId, customer.id, moves);
+      if (await hasLinkedFollowUps(trx, moves)) {
         throw fail('A linked follow-up appeared. Review both appointments from the schedule.');
       }
       await lockTriageCall(trx, call.id);
@@ -298,14 +343,7 @@ async function applyProposal(conn, id, { actorId, actor, visitId, previewHash, n
       const liveProperty = selected.property ? await trx('customer_properties')
         .where({ id: selected.property.id, customer_id: customer.id, active: true }).forShare().first(PROPERTY_COLUMNS) : null;
       if (!staff) throw fail('Active staff account required', 403);
-      if (!liveCard || !openStates.includes(liveCard.status)
-        || new Date(liveCard.updated_at).getTime() !== new Date(card.updated_at).getTime()
-        || !liveCall || liveCall.processing_token || liveCall.v2_extraction_status !== 'valid'
-        || liveCall.customer_id !== customer.id || !liveCustomer || liveCustomer.deleted_at
-        || (selected.property && !liveProperty)
-        || digest(liveCustomer) !== digest(customer) || digest(liveProperty) !== digest(selected.property)
-        || digest([liveCall.transcription, liveCall.ai_extraction_enriched]) !== digest([call.transcription, v2])
-        || Number(liveCall.processing_generation) !== Number(call.processing_generation)) {
+      if (isProposalStateStale({ liveCard, card, liveCall, customer, liveCustomer, selected, liveProperty, call, v2 })) {
         throw fail('The proposal changed. Refresh before applying.');
       }
       await trx('triage_items').where({ id }).update({

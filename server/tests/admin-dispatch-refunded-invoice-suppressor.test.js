@@ -195,7 +195,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // Unconditional (not gated on the suppressors finding nothing) — an
     // older live row must not mask a newer refunded one.
     expect(src.slice(idx - 200, idx)).toMatch(/if \(!packetEffects && \(!recapReviewOnly\)\) \{\s*let refundedOnVisit = null;\s*let newestLiveOnVisit = null;\s*try \{\s*$/);
-    expect(src.slice(idx, idx + 2000)).toContain('reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit)');
+    expect(src.slice(idx, idx + 2500)).toContain('reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit, {');
     expect(src.slice(idx, idx + 600)).toContain('newestLiveOnVisit = await completionNewestLiveInvoiceLookup(db, {');
     // Fail CLOSED: outside the non-blocking suppressor try (that catch sits
     // BEFORE this lookup), and its own failure releases the attempt + 503.
@@ -371,7 +371,8 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(block).toContain('RESOLVED — no action needed');
     expect(block).toContain("adminBodyColumns('billing', alertBody)");
     expect(block).toContain('const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;');
-    expect(block).toContain("the invoice was reinstated to '");
+    expect(block).toContain('const alertBody = buildTerminalManualBillingBody({');
+    expect(src).toContain("the invoice was reinstated to '");
     // Skip = success (nothing durable owed), not the fail-closed 503 leg.
     expect(block.slice(recheckAt, notifyAt)).toContain('return true;');
   });
@@ -380,8 +381,11 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const at = src.indexOf('const liveBesideNow = terminalRestored || freshLiveOnVisit || siblingLiveNow || null;');
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at, at + 9000);
-    expect(block).toContain('collect THAT invoice; do NOT create another');
-    expect(block).toContain('bill this visit manually');
+    const bodyHelperStart = src.indexOf('function buildTerminalManualBillingBody(');
+    const bodyHelper = src.slice(bodyHelperStart, bodyHelperStart + 4000);
+    expect(bodyHelper).toContain('collect THAT invoice; do NOT create another');
+    expect(bodyHelper).toContain('bill this visit manually');
+    expect(bodyHelper).toContain('already PROCESSING — verify it settles; do NOT collect again');
     expect(block).toContain('liveBesideInvoiceId: liveBesideNow.id');
     // The live-beside row's status is RE-READ under lock and the action is
     // tailored by it (codex r9): settled → no alert at all (a "collect"
@@ -389,7 +393,6 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     // verify, don't collect; only a collectible row gets "collect THAT".
     expect(block).toContain("['paid', 'prepaid'].includes(liveBesideNow.status)");
     expect(block).toContain("rewritten as resolved' : 'skipped'");
-    expect(block).toContain('already PROCESSING — verify it settles; do NOT collect again');
     // Wired from the reconciliation, before the alert block reads it.
     expect(src).toContain('completionLiveBesideInvoice = reconciled.liveBeside;');
     expect(src.indexOf('completionLiveBesideInvoice = reconciled.liveBeside;')).toBeLessThan(at);
@@ -441,7 +444,10 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const at = src.indexOf('if (!packetEffects && (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(at).toBeGreaterThan(-1);
     const guard = src.slice(at, at + 500);
-    expect(guard).toContain('&& shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, terminalInvoiceOnVisit: false }))) {');
+    expect(guard).toContain('&& shouldAutoInvoiceCompletion(completionGateWithoutHoldSuppressors))) {');
+    expect(src).toContain('unrecordedChemicalAddOnHold: false,');
+    expect(src).toContain('terminalInvoiceOnVisit: false,');
+    expect(src).toContain('unmintedSetupFeeHold: false,');
     // The re-ask reads the SAME hoisted input the route's decision read —
     // not a second hand-built derivation that could drift.
     expect(src).toContain('const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);');

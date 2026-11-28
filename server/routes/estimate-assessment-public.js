@@ -36,7 +36,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
 const { hadCompletedAssessmentLook } = require('../services/assessment-booking');
-const { rateLimitKey } = require('../middleware/rate-limit-key');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 
 const router = express.Router();
 router.use(noStore);
@@ -46,7 +46,7 @@ const limiter = (max, error) => rateLimit({
   max,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: rateLimitKey,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error },
 });
 const readLimiter = limiter(30, 'Too many requests. Please try again in a minute.');

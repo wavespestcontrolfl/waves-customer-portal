@@ -25,7 +25,7 @@ export function buildKitIndex(body) {
   return { today, byKey };
 }
 
-const link = (id) => (id ? `/admin/bid-kit?item=${encodeURIComponent(id)}` : "/admin/bid-kit");
+const link = (id) => (id ? `/admin/bids?tab=kit&item=${encodeURIComponent(id)}` : "/admin/bids?tab=kit");
 
 // One kit item as the line sees it: its worst row (soonest expiry among equals), or missing when it has no row.
 function itemState(key, index) {

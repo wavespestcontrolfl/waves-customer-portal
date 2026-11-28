@@ -88,7 +88,7 @@ import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import MistingRecordsPanel from "./MistingRecordsPanel";
-import useUnreadConversations from "../../hooks/useUnreadConversations";
+import useUnreadConversations, { notifyUnreadChanged } from "../../hooks/useUnreadConversations";
 import { etParts, formatETDateOnly } from "../../lib/timezone";
 import { useCollectionHold } from "../../hooks/useCollectionHold";
 import { CollectionHoldStatus, HOLD_UNKNOWN_MESSAGE } from "./CollectionHoldNotice";
@@ -10162,7 +10162,7 @@ function CustomerConversation({
                 reactionBadges={likeView.badges}
               />
               {message.id === likeView.likeMessageId ? (
-                <OfficeLikeButton messageId={message.id} customerName={c?.first_name} onLiked={() => setCommsLoaded(false)} />
+                <OfficeLikeButton messageId={message.id} customerName={c?.first_name} onLiked={() => { setCommsLoaded(false); notifyUnreadChanged(); }} />
               ) : null}
             </Fragment>
           );

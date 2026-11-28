@@ -7,7 +7,11 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('twilio', () => jest.fn(() => ({ calls: { create: jest.fn() } })));
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  fn.raw = jest.fn((sql) => sql);
+  return fn;
+});
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test' } }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), homeLineLive: () => false }));
@@ -27,6 +31,7 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-media', () => ({
   mediaFromOutboundAttachments: jest.fn(() => []),
+  resolveVerifiedOutboundAttachments: jest.fn(async () => ({ media: [], mediaUrls: [] })),
   signMediaForClient: jest.fn(async (media) => media),
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(() => Promise.resolve()) }));
@@ -188,6 +193,60 @@ describe('POST /sms composer recruiting boundary', () => {
     expect(mockOpenAppId).toHaveBeenCalled(); // the context did not name the application for THIS phone
     expect(mockSendOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ applicationId: 'app-1' }));
     mockSendOwnerReply.mockClear(); mockOpenAppId.mockClear();
+  });
+
+  test('a recruiting reply whose application phone changed returns 409 instead of falling through to customer SMS even with a validated customerId', async () => {
+    mockIsRecruitingPhone.mockResolvedValue(false);
+    mockSendOwnerReply.mockClear(); mockOpenAppId.mockClear();
+    db.mockImplementation((table) => {
+      if (table === 'customers') return query({ result: [{ id: 'cust-A', phone: '+19415550142' }] });
+      if (table === 'messages') {
+        return query({
+          result: [{
+            message_type: 'job_applicant_reply',
+            metadata: { job_application_id: 'app-9' },
+            contact_phone: '+19415550142',
+            customer_phone: '+19415550142',
+            application_phone: '+19415559999',
+            our_endpoint_id: '+19415550199',
+          }],
+        });
+      }
+      return table === 'messaging_audit_log' ? auditQuery : query({ result: [] });
+    });
+    const res = await fetch(`${base}/api/admin/communications/sms`, {
+      method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+19415550142', body: 'See you Tuesday', customerId: 'cust-A', replyToMessageId: 'msg-job-1' }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'RECRUITING_PHONE_MISMATCH' });
+    expect(mockSendOwnerReply).not.toHaveBeenCalled();
+  });
+
+  test('schedule-sms also returns 409 when a recruiting reply row has a changed application phone and a validated customerId', async () => {
+    mockIsRecruitingPhone.mockResolvedValue(false);
+    db.mockImplementation((table) => {
+      if (table === 'customers') return query({ result: [{ id: 'cust-A', phone: '+19415550142' }] });
+      if (table === 'messages') {
+        return query({
+          result: [{
+            message_type: 'job_applicant_reply',
+            metadata: { job_application_id: 'app-9' },
+            contact_phone: null,
+            customer_phone: '+19415550142',
+            application_phone: '+19415559999',
+            our_endpoint_id: '+19415550199',
+          }],
+        });
+      }
+      return table === 'messaging_audit_log' ? auditQuery : query({ result: [] });
+    });
+    const res = await fetch(`${base}/api/admin/communications/schedule-sms`, {
+      method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '+19415550142', body: 'See you Tuesday', scheduledFor: '2099-01-05T15:00:00.000Z', customerId: 'cust-A', replyToMessageId: 'msg-job-1' }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'RECRUITING_PHONE_MISMATCH' });
   });
 
   test('technician texting an applicant phone is refused (403)', async () => {

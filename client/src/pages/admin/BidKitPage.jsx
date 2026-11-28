@@ -25,6 +25,9 @@ const LIMIT_LABEL = {
 const DETAIL_LABEL = {
   entity: "Entity", contactRole: "Contact role", phone: "Phone", email: "Email", contractPeriod: "Contract period", scope: "Scope of work", annualValue: "Annual value", publicOrPrivate: "Public or private",
 };
+const DETAIL_MAX_LENGTH = {
+  entity: 200, contactRole: 120, phone: 40, email: 200, contractPeriod: 120, scope: 1000, annualValue: 40,
+};
 const INSURANCE_KEYS = ["insurance_certificate", "pollution_coverage"];
 const ACCEPT = ".pdf,.png,.jpg,.jpeg,.docx,application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const CONFLICT_MESSAGE = "Someone else changed this item. Here is the latest version; make your change again.";
@@ -335,7 +338,7 @@ function ReferenceFields({ form, setNested }) {
               <option value="">Not set</option>
               {PUBLIC_OR_PRIVATE.map((entry) => <option key={entry} value={entry}>{entry === "public" ? "Public" : "Private"}</option>)}
             </Select>
-          ) : <Input value={form.details[key]} onChange={(event) => setNested("details", key, event.target.value)} />}
+          ) : <Input maxLength={DETAIL_MAX_LENGTH[key]} value={form.details[key]} onChange={(event) => setNested("details", key, event.target.value)} />}
         </Field>
       ))}
     </fieldset>
@@ -646,11 +649,22 @@ export default function BidKitPage({ embedded = false }) {
   useUnsavedLeaveGuard(editorDirty, "Leave Bid Kit with unsaved changes?");
 
   const checklist = useMemo(() => (data ? buildEntries(data.catalog, data.items) : []), [data]);
+  const scrolledFocusRef = useRef("");
   useEffect(() => {
-    if (!focusId || !data) return;
+    if (!focusId) {
+      scrolledFocusRef.current = "";
+      return;
+    }
+    setView("checklist");
+  }, [focusId]);
+  useEffect(() => {
+    if (!focusId || !data || view !== "checklist" || scrolledFocusRef.current === focusId) return;
     const node = document.getElementById(`bid-kit-${focusId}`);
-    if (node && node.scrollIntoView) node.scrollIntoView({ block: "center" });
-  }, [focusId, data]);
+    if (node) {
+      scrolledFocusRef.current = focusId;
+      if (node.scrollIntoView) node.scrollIntoView({ block: "center" });
+    }
+  }, [focusId, data, view]);
 
   const confirmDiscardEditor = useCallback(
     () => !editorDirty || window.confirm("Discard unsaved Bid Kit changes?"),

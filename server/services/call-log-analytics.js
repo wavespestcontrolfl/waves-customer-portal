@@ -106,10 +106,14 @@ function recordedSourceEvidence(row) {
     detail: `Maps listing · ${(location || 'Google Business Profile').replace(/^GBP\s*[—-]\s*/i, '')}`,
     basis: 'When the call arrived, the dialed number was assigned to this Google Maps listing.',
   };
-  if (['domain_tracking', 'pest_domain', 'lawn_domain'].includes(type)) return {
-    kind: 'website', label: 'Website', detail: domain ? `Website · ${domain}` : (location || 'Website call line'),
-    basis: 'When the call arrived, the dialed number was assigned only to this website placement.',
-  };
+  if (['domain_tracking', 'pest_domain', 'lawn_domain'].includes(type)) {
+    const number = toE164(row?.to_phone);
+    if (sharedLineNumbers(TWILIO_NUMBERS).includes(number)) return null;
+    return {
+      kind: 'website', label: 'Website', detail: domain ? `Website · ${domain}` : (location || 'Website call line'),
+      basis: 'When the call arrived, the dialed number was assigned only to this website placement.',
+    };
+  }
   if (type === 'van_tracking') return {
     kind: 'offline', label: 'Offline', detail: location || 'Vehicle tracking line',
     basis: 'When the call arrived, the dialed number was assigned to this offline placement.',
@@ -261,7 +265,8 @@ function sourceSortExpression(conn, callAlias = 'cl') {
     WHEN ${callAlias}.metadata->>'numberType' = 'gbp_tracking' THEN 'Google Business Profile'
     WHEN ${callAlias}.metadata->>'numberType' = 'van_tracking' THEN 'Offline'
     WHEN ${callAlias}.metadata->>'numberType' IN ('location', 'tech_line', 'unassigned', 'internal_alert', 'customer_chat') THEN 'Source unknown'
-    WHEN ${callAlias}.metadata->>'numberType' IN ('domain_tracking', 'pest_domain', 'lawn_domain') THEN 'Website'
+    WHEN ${callAlias}.metadata->>'numberType' IN ('domain_tracking', 'pest_domain', 'lawn_domain')
+      AND ${callAlias}.to_phone NOT IN (${marks(shared)}) THEN 'Website'
     WHEN ${callAlias}.to_phone IN (${marks(google)}) OR call_source.source_type = 'google_ads' THEN 'Google Ads'
     WHEN call_source.source_type = 'google_lsa' AND call_source.is_active IS TRUE THEN 'Google LSA'
     WHEN ${callAlias}.to_phone IN (${marks(meta)}) OR call_source.source_type = 'facebook' THEN 'Meta Ads'
@@ -273,7 +278,7 @@ function sourceSortExpression(conn, callAlias = 'cl') {
       OR (call_source.source_type = 'main_site' AND call_source.domain IS NOT NULL)
       THEN 'Website'
     ELSE 'Source unknown'
-  END`, [...google, ...meta, ...gbp, ...offline, ...shared, ...websites]);
+  END`, [...shared, ...google, ...meta, ...gbp, ...offline, ...shared, ...websites]);
 }
 
 function applyCallListOrder(query, conn, { sort, order } = {}) {

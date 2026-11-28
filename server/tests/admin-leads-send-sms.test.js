@@ -38,6 +38,12 @@ jest.mock('../services/call-booking-link-text', () => ({
 jest.mock('../config/twilio-numbers', () => ({
   findByNumber: jest.fn((n) => (n === '+19415559999' ? { number: n } : null)),
 }));
+jest.mock('@aws-sdk/s3-request-presigner', () => ({
+  getSignedUrl: jest.fn(async (_s3, cmd) => `https://s3.example.com/signed/${encodeURIComponent(cmd.input.Key)}`),
+}));
+const config = require('../config');
+config.s3 = { ...(config.s3 || {}), bucket: 'test-bucket', region: 'us-east-1' };
+const { createAttachmentToken } = require('../services/sms-media');
 
 const express = require('express');
 const db = require('../models/db');
@@ -354,29 +360,41 @@ test('does not move an already progressed lead back to contacted', async () => {
 // the operator-picked fromNumber must reach sendCustomerMessage the same
 // way they reach the generic /admin/communications/sms route, not vanish.
 describe('attachments and fromNumber reach the sender (same shape as /admin/communications/sms)', () => {
-  test('mediaUrls + mediaAttachments + fromNumber all land in the sendCustomerMessage metadata', async () => {
+  test('verified mediaAttachments + fromNumber land in sendCustomerMessage metadata with server-signed URLs', async () => {
+    const key = 'sms-attachments/123-a.jpg';
+    const token = createAttachmentToken({ key, size: 1024, mimeType: 'image/jpeg' });
     const response = await send({
       message: 'Synthetic outreach with a photo',
       to: '+19415550103',
       fromNumber: '+19415559999',
-      mediaUrls: ['https://cdn.example.com/a.jpg'],
-      mediaAttachments: [{ url: 'https://cdn.example.com/a.jpg', fileName: 'a.jpg', mimeType: 'image/jpeg', size: 1024 }],
+      mediaAttachments: [{ key, url: 'https://ignored.example.com/a.jpg', fileName: 'a.jpg', mimeType: 'image/jpeg', size: 1024, attachmentToken: token }],
     });
     expect(response.status).toBe(200);
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       leadId: 'lead-qa',
       metadata: expect.objectContaining({
         fromNumber: '+19415559999',
-        mediaUrls: ['https://cdn.example.com/a.jpg'],
+        mediaUrls: [`https://s3.example.com/signed/${encodeURIComponent(key)}`],
         allowMediaUrls: true,
         media: expect.arrayContaining([expect.objectContaining({
-          url: 'https://cdn.example.com/a.jpg',
+          key,
+          url: null,
           fileName: 'a.jpg',
           contentType: 'image/jpeg',
           size: 1024,
         })]),
       }),
     }));
+  });
+
+  test('raw mediaUrls without verified mediaAttachments are refused (C2-02)', async () => {
+    const response = await send({
+      message: 'Synthetic outreach',
+      to: '+19415550103',
+      mediaUrls: ['https://attacker.example/evil.png'],
+    });
+    expect(response.status).toBe(400);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('a website-only line the lead never called or texted is refused before any send is attempted', async () => {
@@ -397,12 +415,14 @@ describe('attachments and fromNumber reach the sender (same shape as /admin/comm
   });
 
   test('attachments over the 5MB Twilio MMS cap are refused before any send is attempted', async () => {
+    const key1 = 'sms-attachments/big1.jpg';
+    const key2 = 'sms-attachments/big2.jpg';
     const response = await send({
       message: 'Synthetic outreach',
       to: '+19415550103',
       mediaAttachments: [
-        { url: 'https://cdn.example.com/big1.jpg', size: 3 * 1024 * 1024 },
-        { url: 'https://cdn.example.com/big2.jpg', size: 3 * 1024 * 1024 },
+        { key: key1, size: 3 * 1024 * 1024, mimeType: 'image/jpeg', attachmentToken: createAttachmentToken({ key: key1, size: 3 * 1024 * 1024, mimeType: 'image/jpeg' }) },
+        { key: key2, size: 3 * 1024 * 1024, mimeType: 'image/jpeg', attachmentToken: createAttachmentToken({ key: key2, size: 3 * 1024 * 1024, mimeType: 'image/jpeg' }) },
       ],
     });
     expect(response.status).toBe(413);

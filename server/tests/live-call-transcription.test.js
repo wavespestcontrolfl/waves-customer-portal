@@ -39,13 +39,18 @@ jest.mock('../models/db', () => {
         quarantined: state.quarantined.has(sid) || state.panDetected.has(sid),
         card_pause_open: state.pauseOpen === true,
         hold_held: state.hold?.phase === 'held' || state.hold?.applied === 'held',
+        hold_voicemail: state.hold?.phase === 'voicemail' && state.hold?.applied === 'voicemail',
       };
     });
     q.update = jest.fn(async (patch) => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
       if (!state.rowExists) return 0;
-      // The purge's early-summary drop (WHERE early_summary IS NOT NULL): no row here carries one.
-      if (String(patch.metadata?.sql || '').includes("- 'early_summary'")) { state.summaryDrops = (state.summaryDrops || 0) + 1; return 0; }
+      // The purge's derived-text drop (early_summary, spoken_notes, assist).
+      if (String(patch.metadata?.sql || '').includes("- 'early_summary'")) {
+        state.summaryDrops = (state.summaryDrops || 0) + 1;
+        state.summaryDropSql = String(patch.metadata?.sql || '');
+        return 0;
+      }
       if (q.raws.some((r) => r.includes('IS NULL'))) {
         if (state.claimed.has(sid)) return 0;
         state.claimed.add(sid);
@@ -265,6 +270,26 @@ describe('recordLiveTranscriptionEvent', () => {
     expect(db.__state.utterances.map((u) => [u.speaker, u.text])).toEqual([['staff', 'Thanks for waiting, I am back']]);
   });
 
+  test('C2-32: confirmed hold voicemail drops outbound TTS (speaker:staff) while letting caller speech reach card-pause', async () => {
+    mockCardPause.mockClear();
+    db.__state.hold = { phase: 'voicemail', applied: 'voicemail' };
+    await expect(live.recordLiveTranscriptionEvent(content(5, 'outbound_track', 'Please leave a message and we will call you right back.', 4)))
+      .resolves.toEqual({ stored: false, reason: 'hold_voicemail_tts' });
+    expect(db.__state.utterances).toHaveLength(0);
+    await expect(live.recordLiveTranscriptionEvent(content(6, 'inbound_track', 'Here is my credit card number for the bill', 5)))
+      .resolves.toMatchObject({ stored: true });
+    expect(mockCardPause).toHaveBeenCalledWith(expect.objectContaining({ callSid: CALL, text: 'Here is my credit card number for the bill' }));
+  });
+
+  test('C2-20: purgeLiveUtterances strips early_summary, spoken_notes, and assist using jsonb_exists_any (Knex-safe)', async () => {
+    await live.purgeLiveUtterances(CALL);
+    expect(db.__state.summaryDropSql).toContain("- 'early_summary' - 'spoken_notes' - 'assist'");
+    await live.purgeQuarantinedLiveText();
+    const retrySql = db.__state.rawCalls.join('\n');
+    expect(retrySql).toContain("jsonb_exists_any(c.metadata -> 'live_transcription', ARRAY['early_summary', 'spoken_notes', 'assist'])");
+    expect(retrySql).not.toContain('?|');
+  });
+
   test('a return or a voicemail decided but not yet confirmed by Twilio stores nothing: the caller still hears the script', async () => {
     db.__state.hold = { phase: 'returned', applied: 'held' };
     await expect(live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Chinch bugs usually walk, not fly, between lawns.', 1)))
@@ -273,7 +298,7 @@ describe('recordLiveTranscriptionEvent', () => {
     await expect(live.recordLiveTranscriptionEvent(content(3, 'outbound_track', 'Roof rats are expert climbers.', 2)))
       .resolves.toEqual({ stored: false, reason: 'on_hold' });
     expect(db.__state.utterances).toHaveLength(0);
-    // Twilio confirmed the voicemail: the prompt and the message are the call's own text again.
+    // Twilio confirmed the voicemail: caller speech is stored again, while outbound TTS stays suppressed.
     db.__state.hold = { phase: 'voicemail', applied: 'voicemail' };
     await expect(live.recordLiveTranscriptionEvent(content(4, 'inbound_track', 'Hi, please call me back about the ants', 3))).resolves.toMatchObject({ stored: true });
     expect(db.__state.utterances.map((u) => [u.speaker, u.text])).toEqual([['caller', 'Hi, please call me back about the ants']]);

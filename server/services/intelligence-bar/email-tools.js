@@ -13,7 +13,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 // First TEXT block of a Message — a thinking block leads the content on
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
 const { anthropicText } = require('../llm/call');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const { sendManualCustomerSms } = require('../messaging/send-manual-customer-sms');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
@@ -175,9 +175,9 @@ const EMAIL_SHARED_TOOLS = EMAIL_TOOLS.filter(t => EMAIL_SHARED_TOOL_NAMES.has(t
 
 async function getInboxSummary({ days = 1 }) {
   try {
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-    since.setHours(0, 0, 0, 0);
+    const lookbackDays = Math.max(1, Math.floor(Number(days) || 1));
+    const startDay = lookbackDays === 1 ? new Date() : addETDays(new Date(), -(lookbackDays - 1));
+    const since = parseETDateTime(`${etDateString(startDay)}T00:00:00`);
 
     const emails = await db('emails').where('received_at', '>=', since);
 
@@ -199,7 +199,7 @@ async function getInboxSummary({ days = 1 }) {
         });
       }
 
-      if (e.classification === 'complaint' || (e.extracted_data && typeof e.extracted_data === 'object' && e.extracted_data.urgency === 'high')) {
+      if (e.classification === 'complaint' || (e.extracted_data && typeof e.extracted_data === 'object' && (e.extracted_data.is_urgent === true || e.extracted_data.urgency === 'high'))) {
         urgent.push({ from: e.from_name || e.from_address, subject: e.subject, category: e.classification });
       }
     });
@@ -208,7 +208,7 @@ async function getInboxSummary({ days = 1 }) {
     const needsAttention = emails.filter(e => !e.is_read && !e.is_archived && !['spam', 'marketing_newsletter'].includes(e.classification)).length;
 
     return {
-      period: days === 1 ? 'today' : `last ${days} days`,
+      period: lookbackDays === 1 ? 'today' : `last ${lookbackDays} days`,
       total_received: emails.length,
       unread,
       needs_attention: needsAttention,
@@ -374,11 +374,14 @@ async function draftEmailReply(emailId, threadId, fromName, instructions, custom
     const targetFailure = await emailReadTargetFailure([email, ...thread], customerIds);
     if (targetFailure) return targetFailure;
 
-    // Load customer context if matched
+    // Load customer context only when the address uniquely matches this live
+    // customer record AND senderOwnsCustomerFacts proves aligned auth (C2-03).
     let customerContext = '';
     if (email.customer_id) {
-      const customer = await db('customers').where('id', email.customer_id).first();
-      if (customer) {
+      const { senderOwnsCustomerFacts, findUniqueLiveCustomerByEmail } = require('../email/email-actions');
+      const uniqueCustomer = await findUniqueLiveCustomerByEmail(email.from_address);
+      const customer = uniqueCustomer && uniqueCustomer.id === email.customer_id ? uniqueCustomer : null;
+      if (customer && senderOwnsCustomerFacts(email, customer)) {
         const lastService = await db('service_records')
           .where({ customer_id: customer.id, status: 'completed' })
           .orderBy('service_date', 'desc').first();
@@ -564,6 +567,7 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
     if (linkRefusal) return linkRefusal;
 
     const gmailClient = require('../../services/email/gmail-client');
+    const { encodeEmailBody } = require('../email/send-message');
     // ADMIN-BUG-R22 (same class): relayed mail (contact forms, lead
     // marketplaces, ticketing) has a no-reply From with the real recipient
     // in Reply-To — mirrors the rule the draft path above and the admin
@@ -571,9 +575,10 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
     const effectiveRecipient = email.reply_to || email.from_address;
     const result = await gmailClient.sendMessage(
       effectiveRecipient,
-      email.subject?.startsWith('Re:') ? email.subject : `Re: ${email.subject || '(no subject)'}`,
-      body.replace(/\n/g, '<br>'),
-      email.gmail_thread_id
+      /^re:/i.test(email.subject || '') ? email.subject : `Re: ${email.subject || '(no subject)'}`,
+      encodeEmailBody(body),
+      email.gmail_thread_id,
+      email.message_id || undefined
     );
     if (!result?.id) return { outcome_unknown: true, warning: 'Gmail returned no message identifier. Check the sent thread before retrying.' };
 

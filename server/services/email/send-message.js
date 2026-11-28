@@ -15,7 +15,31 @@
  */
 const logger = require('../logger');
 
-async function sendEmailMessage({ to, subject, body, threadId, inReplyTo } = {}) {
+// In-process idempotency fence for native sends (H01): a retry carrying the
+// same attempt idempotencyKey while a send is in-flight or after Gmail
+// accepted (200) / returned an ambiguous outcome (202) returns the original
+// outcome without calling Gmail a second time. Definite pre-send failures
+// (502, status: 'failed') clear their entry so the operator can safely retry.
+const SEND_IDEMPOTENCY_TTL_MS = 15 * 60 * 1000;
+const SEND_IDEMPOTENCY_MAX_ENTRIES = 500;
+const sendIdempotencyCache = new Map();
+
+function pruneIdempotencyCache(now = Date.now()) {
+  for (const [key, entry] of sendIdempotencyCache.entries()) {
+    if (entry.state === 'settled' && now - entry.createdAt > SEND_IDEMPOTENCY_TTL_MS) {
+      sendIdempotencyCache.delete(key);
+    }
+  }
+  if (sendIdempotencyCache.size <= SEND_IDEMPOTENCY_MAX_ENTRIES) return;
+  for (const [key, entry] of sendIdempotencyCache.entries()) {
+    if (sendIdempotencyCache.size <= SEND_IDEMPOTENCY_MAX_ENTRIES) break;
+    // Never evict an active in-flight send — doing so would let a concurrent
+    // retry bypass the fence and double-send via Gmail.
+    if (entry.state === 'settled') sendIdempotencyCache.delete(key);
+  }
+}
+
+async function performGmailSend({ to, subject, body, threadId, inReplyTo }) {
   try {
     const gmailClient = require('./gmail-client');
     const result = await gmailClient.sendMessage(to, subject || '(no subject)', body, threadId, inReplyTo);
@@ -33,6 +57,37 @@ async function sendEmailMessage({ to, subject, body, threadId, inReplyTo } = {})
   }
 }
 
+async function sendEmailMessage({ to, subject, body, threadId, inReplyTo, idempotencyKey } = {}) {
+  const key = typeof idempotencyKey === 'string' && idempotencyKey.trim() ? idempotencyKey.trim() : null;
+  if (!key) return performGmailSend({ to, subject, body, threadId, inReplyTo });
+
+  const now = Date.now();
+  pruneIdempotencyCache(now);
+
+  const existing = sendIdempotencyCache.get(key);
+  if (existing) {
+    if (existing.state === 'in_flight') return existing.promise;
+    if (now - existing.createdAt <= SEND_IDEMPOTENCY_TTL_MS) return existing.result;
+    sendIdempotencyCache.delete(key);
+  }
+
+  const promise = performGmailSend({ to, subject, body, threadId, inReplyTo }).then((outcome) => {
+    if (outcome.json?.status === 'failed') {
+      // Definite refusal: Gmail never accepted it, so release the key for retry.
+      sendIdempotencyCache.delete(key);
+    } else {
+      sendIdempotencyCache.set(key, { state: 'settled', result: outcome, createdAt: Date.now() });
+    }
+    return outcome;
+  });
+  sendIdempotencyCache.set(key, { state: 'in_flight', promise, createdAt: now });
+  return promise;
+}
+
+function __resetIdempotencyCache() {
+  sendIdempotencyCache.clear();
+}
+
 // The Email page's composer sends plain text as HTML (client/src/pages/admin/email/useEmailEditor.js encodeEmailBody):
 // the four HTML-significant characters escaped, then newlines as <br>, so what an operator reads is what arrives.
 // The bar's compose_email sends its carded plain text through the same encoding.
@@ -45,4 +100,4 @@ function encodeEmailBody(text) {
     .replace(/\n/g, '<br>');
 }
 
-module.exports = { sendEmailMessage, encodeEmailBody };
+module.exports = { sendEmailMessage, encodeEmailBody, __resetIdempotencyCache };

@@ -403,7 +403,9 @@ it("opens a bid from the link in its bell, shows its emails and saves a typed da
 
 it("confirms a date as read and saves a decision with a note", async () => {
   const detail = { bid: bid(), emails: [] };
-  const patch = vi.fn(() => reply({ ok: true, bid: bid({ due_confirmed: true, status: "no_bid" }) }));
+  const patch = vi.fn()
+    .mockImplementationOnce(() => reply({ ok: true, bid: bid({ due_confirmed: true }) }))
+    .mockImplementationOnce(() => reply({ ok: true, bid: bid({ due_confirmed: true, status: "no_bid", decision_note: "Out of area" }) }));
   route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }), "GET /admin/bid-desk/b1": () => reply(detail), "PATCH /admin/bid-desk/b1": patch });
   renderPage("/?bid=b1");
   fireEvent.click(await screen.findByRole("button", { name: "Confirm date as read" }));
@@ -413,7 +415,7 @@ it("confirms a date as read and saves a decision with a note", async () => {
   fireEvent.change(screen.getByLabelText("Note"), { target: { value: "Out of area" } });
   fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-  expect(patch.mock.calls[1][0].body).toEqual({ status: "no_bid", decision_note: "Out of area" });
+  expect(patch.mock.calls[1][0].body).toEqual({ status: "no_bid", decision_note: "Out of area", expected_updated_at: detail.bid.updated_at });
 });
 
 it("saving a decision keeps a due date the operator typed but has not saved", async () => {
@@ -498,6 +500,94 @@ it("a notice link off sam.gov is not shown", async () => {
   renderPage("/?bid=s2");
   expect(await screen.findByText("Read from SAM.gov:")).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Open the notice on SAM.gov" })).toBeNull();
+});
+
+it("keeps a closed SAM.gov notice banner visible even after needs_date_confirmation is cleared", async () => {
+  const closedBid = bid({
+    id: "s4", source: "sam_gov", source_active: false, needs_date_confirmation: false,
+    due_source_line: "SAM.gov response deadline: 2026-11-05T14:00:00-05:00",
+  });
+  route({ "GET /admin/bid-desk/": () => reply({ bids: [closedBid] }), "GET /admin/bid-desk/s4": () => reply({ bid: closedBid, emails: [] }) });
+  renderPage("/?bid=s4");
+  expect(await screen.findByText(/SAM\.gov no longer lists this notice as active\. Check the notice on SAM\.gov and decide the bid\./)).toBeInTheDocument();
+});
+
+it("reloads the bid after a 409 conflict on Save decision, refreshes untouched fields, and sends only edited fields", async () => {
+  let reads = 0;
+  const latest = bid({ status: "no_bid", updated_at: "2026-10-02T14:00:00.000Z" });
+  const patch = vi.fn()
+    .mockImplementationOnce(() => reply({ error: "This bid changed since you opened it. Reload and check it again." }, { ok: false, status: 409 }))
+    .mockImplementationOnce(() => reply({ ok: true, bid: { ...latest, decision_note: "Checked scope" } }));
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: reads++ === 0 ? bid() : latest, emails: [] }),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage("/?bid=b1");
+  fireEvent.change(await screen.findByLabelText("Note"), { target: { value: "Checked scope" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  expect(await screen.findByText(/Not saved: This bid changed since you opened it/)).toBeInTheDocument();
+  await waitFor(() => expect(reads).toBe(2));
+  // Another operator changed Decision to No bid while this operator edited Note: Decision refreshes, Note stays.
+  expect(screen.getByLabelText("Decision")).toHaveValue("no_bid");
+  expect(screen.getByLabelText("Note")).toHaveValue("Checked scope");
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
+  expect(patch.mock.calls[1][0].body).toEqual({ decision_note: "Checked scope", expected_updated_at: "2026-10-02T14:00:00.000Z" });
+});
+
+it("shows both server and draft values when a 409 conflict changes the same decision field", async () => {
+  let reads = 0;
+  const latest = bid({ status: "bid", updated_at: "2026-10-02T15:00:00.000Z" });
+  const patch = vi.fn(() => reply({ error: "This bid changed since you opened it. Reload and check it again." }, { ok: false, status: 409 }));
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: reads++ === 0 ? bid() : latest, emails: [] }),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage("/?bid=b1");
+  fireEvent.change(await screen.findByLabelText("Decision"), { target: { value: "no_bid" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  expect(await screen.findByText(/Decision is now "Bid" on the server \(your draft: "No bid"\)/)).toBeInTheDocument();
+  expect(screen.getByLabelText("Decision")).toHaveValue("no_bid");
+});
+
+it("keeps a typed due date after a 409 save conflict and shows the stored server deadline", async () => {
+  let reads = 0;
+  const latest = bid({ due_at: "2026-10-25T16:00:00.000Z", updated_at: "2026-10-02T16:00:00.000Z" });
+  const patch = vi.fn()
+    .mockImplementationOnce(() => reply({ error: "The due date changed since you opened this bid. Reload and check it again." }, { ok: false, status: 409 }))
+    .mockImplementationOnce(() => reply({ ok: true, bid: { ...latest, due_at: "2026-10-30T13:00:00.000Z", due_confirmed: true } }));
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: reads++ === 0 ? bid() : latest, emails: [] }),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage("/?bid=b1");
+  fireEvent.change(await screen.findByLabelText("Due date (Eastern time)"), { target: { value: "2026-10-30T09:00" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save as confirmed" }));
+  expect(await screen.findByText(/Stored due date is now.*your typed date is kept below/i)).toBeInTheDocument();
+  expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-10-30T09:00");
+
+  fireEvent.click(screen.getByRole("button", { name: "Save as confirmed" }));
+  await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
+  expect(patch.mock.calls[1][0].body).toEqual({ due_at: "2026-10-30T09:00", expected_updated_at: "2026-10-02T16:00:00.000Z" });
+});
+
+it("keeps a typed due date when Confirm date as read conflicts with a 409 reload", async () => {
+  let reads = 0;
+  const latest = bid({ due_at: "2026-10-25T16:00:00.000Z", updated_at: "2026-10-02T17:00:00.000Z" });
+  const patch = vi.fn(() => reply({ error: "The due date changed since you opened this bid. Reload and check it again." }, { ok: false, status: 409 }));
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: reads++ === 0 ? bid() : latest, emails: [] }),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage("/?bid=b1");
+  fireEvent.change(await screen.findByLabelText("Due date (Eastern time)"), { target: { value: "2026-10-31T11:30" } });
+  fireEvent.click(screen.getByRole("button", { name: "Confirm date as read" }));
+  expect(await screen.findByText(/Stored due date is now.*your typed date is kept below/i)).toBeInTheDocument();
+  expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-10-31T11:30");
 });
 
 it("prompts before switching to another bid row when the open detail has unsaved edits", async () => {

@@ -32,7 +32,7 @@ describe("pillForLine", () => {
     const row = doc("business_license_copy", { expires_on: "2027-06-30" });
     const pill = pillForLine("itb.business_license", index([row]));
     expect(pill.text).toBe("Kit: on file, signed off");
-    expect(pill.to).toBe(`/admin/bid-kit?item=${row.id}`);
+    expect(pill.to).toBe(`/admin/bids?tab=kit&item=${row.id}`);
     expect(pill.tone).toBe("strong");
   });
 
@@ -55,9 +55,9 @@ describe("pillForLine", () => {
   });
 
   it("a paper with no kit row, or a row with no file, is missing and links to the kit page", () => {
-    expect(pillForLine("itb.product_list", index([]))).toMatchObject({ text: "Kit: missing", to: "/admin/bid-kit" });
+    expect(pillForLine("itb.product_list", index([]))).toMatchObject({ text: "Kit: missing", to: "/admin/bids?tab=kit" });
     const noFile = doc("product_list", { file: null });
-    expect(pillForLine("itb.product_list", index([noFile]))).toMatchObject({ text: "Kit: missing", to: `/admin/bid-kit?item=${noFile.id}` });
+    expect(pillForLine("itb.product_list", index([noFile]))).toMatchObject({ text: "Kit: missing", to: `/admin/bids?tab=kit&item=${noFile.id}` });
   });
 
   it("a document that expires but has no expiry date asks for the date", () => {
@@ -91,7 +91,7 @@ describe("pillForLine", () => {
     const pill = pillForLine("itb.operator_statement", index([row]));
     expect(pill.text).toBe("Kit: template on file");
     expect(pill.text).not.toMatch(/signed off|done/i);
-    expect(pill.to).toBe(`/admin/bid-kit?item=${row.id}`);
+    expect(pill.to).toBe(`/admin/bids?tab=kit&item=${row.id}`);
     expect(pillForLine("itb.operator_statement", index([doc("cpco_fulltime_statement", { attested_at: null })])).text).toBe("Kit: template on file");
     expect(pillForLine("itb.operator_statement", index([])).text).toBe("Kit: missing");
   });
@@ -99,7 +99,7 @@ describe("pillForLine", () => {
   it("references show how many ready references of three", () => {
     const two = index([ref(), ref(), ref({ permission_on: null }), ref({ archived_at: "2026-10-02T00:00:00Z" })]);
     for (const line of ["quote.references", "itb.references_form", "rfp.reference_surveys", "stop.reference_rules", "federal.past_performance"]) {
-      expect(pillForLine(line, two)).toMatchObject({ text: "Kit: 2 of 3 references", tone: "warn", to: "/admin/bid-kit" });
+      expect(pillForLine(line, two)).toMatchObject({ text: "Kit: 2 of 3 references", tone: "warn", to: "/admin/bids?tab=kit" });
     }
     expect(pillForLine("quote.references", index([ref(), ref(), ref(), ref()])).text).toBe("Kit: 4 of 3 references");
     expect(pillForLine("quote.references", index([ref(), ref(), ref()])).tone).toBe("strong");

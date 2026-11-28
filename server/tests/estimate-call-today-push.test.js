@@ -167,12 +167,12 @@ describe('the count is the page list', () => {
     await countCallToday(NOW.getTime());
     expect(estimateCalls).toContainEqual(['limit', 2000]);
     expect(estimateCalls).toContainEqual(['whereNull', 'estimates.archived_at']);
-    // The sent-list scope: a row with sent_at, or a delivery attempt status. A viewed row never sent is outside it.
+    // The sent-list scope: a row with sent_at, or a delivery-attempt / terminal status. A viewed row never sent is outside it.
     const scope = estimateCalls.find(([name, arg]) => name === 'where' && typeof arg === 'function');
     const inner = [];
     const rec = { whereNotNull: (...a) => { inner.push(['whereNotNull', ...a]); return rec; }, orWhereIn: (...a) => { inner.push(['orWhereIn', ...a]); return rec; } };
     scope[1].call(rec);
-    expect(inner).toEqual([['whereNotNull', 'estimates.sent_at'], ['orWhereIn', 'estimates.status', ['scheduled', 'sending', 'send_failed']]]);
+    expect(inner).toEqual([['whereNotNull', 'estimates.sent_at'], ['orWhereIn', 'estimates.status', ['scheduled', 'sending', 'send_failed', 'accepted', 'declined']]]);
   });
 
   test('an estimate older than the newest 2000 the page loads is not counted', async () => {
