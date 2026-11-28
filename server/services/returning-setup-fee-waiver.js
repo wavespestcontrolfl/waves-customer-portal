@@ -676,39 +676,28 @@ function parseEstimateDataObject(raw) {
   } catch { return null; }
 }
 
+function addFeeToTotals(holder, fee) {
+  const year1 = Number(holder?.totals?.year1);
+  if (Number.isFinite(year1)) holder.totals.year1 = Math.round((year1 + fee) * 100) / 100;
+}
+
 function restoreFallbackSetupFeeOnData(data, row) {
   const converter = require('./estimate-converter');
   const lines = converter.recurringServicesFromEstimateData(data);
   if (!feeLineOfPlan(lines)) return {};
   const fee = Number(converter.WAVEGUARD_SETUP_FEE) || 99;
-  const oneTime = data.result && typeof data.result === 'object' ? data.result.oneTime : null;
-  if (oneTime && typeof oneTime === 'object') {
-    if (Number(oneTime.membershipFee) > 0) return {};
-    oneTime.membershipFee = fee;
-    oneTime.total = Math.round(((Number(oneTime.total) || 0) + fee) * 100) / 100;
-    if (data.result.totals && typeof data.result.totals === 'object' && Number.isFinite(Number(data.result.totals.year1))) {
-      data.result.totals.year1 = Math.round((Number(data.result.totals.year1) + fee) * 100) / 100;
-    }
-    return { onetime_total: oneTime.total };
-  }
-  const priorOneTime = Number(row?.onetime_total || 0);
-  const nextTotal = Math.round((priorOneTime + fee) * 100) / 100;
-  if (data.result && typeof data.result === 'object') {
-    data.result.oneTime = { membershipFee: fee, total: nextTotal };
-    if (data.result.totals && typeof data.result.totals === 'object' && Number.isFinite(Number(data.result.totals.year1))) {
-      data.result.totals.year1 = Math.round((Number(data.result.totals.year1) + fee) * 100) / 100;
-    }
-    return { onetime_total: nextTotal };
-  }
   // Legacy estimates store recurring services at the top level with no
   // `data.result`: keep oneTime/totals at the top level rather than creating
   // an empty `data.result` that would hide `data.recurring` on display.
-  data.oneTime = (data.oneTime && typeof data.oneTime === 'object')
-    ? { ...data.oneTime, membershipFee: fee, total: nextTotal }
+  const holder = data.result && typeof data.result === 'object' ? data.result : data;
+  const oneTime = holder.oneTime && typeof holder.oneTime === 'object' ? holder.oneTime : null;
+  if (oneTime && Number(oneTime.membershipFee) > 0) return {};
+  const priorTotal = oneTime ? Number(oneTime.total) || 0 : Number(row?.onetime_total || 0);
+  const nextTotal = Math.round((priorTotal + fee) * 100) / 100;
+  holder.oneTime = oneTime
+    ? Object.assign(oneTime, { membershipFee: fee, total: nextTotal })
     : { membershipFee: fee, total: nextTotal };
-  if (data.totals && typeof data.totals === 'object' && Number.isFinite(Number(data.totals.year1))) {
-    data.totals.year1 = Math.round((Number(data.totals.year1) + fee) * 100) / 100;
-  }
+  addFeeToTotals(holder, fee);
   return { onetime_total: nextTotal };
 }
 
