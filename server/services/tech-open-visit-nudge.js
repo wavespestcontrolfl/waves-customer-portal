@@ -168,9 +168,11 @@ async function findCarryoverVisits(now, technicianId = null) {
 }
 
 function isReserviceRow(row) {
-  return row.is_callback === true
-    || RESERVICE_KEYS.includes(row.service_key)
-    || /\bre-?service\b/i.test(String(row.service_type || ''));
+  if (row.is_callback === true || RESERVICE_KEYS.includes(row.service_key)) return true;
+  // Real Postgres rows always populate is_callback (boolean) or service_key;
+  // never expand paid SMS eligibility from free-text service_type labels.
+  if (row.is_callback !== undefined || row.service_key !== undefined) return false;
+  return /\bre-?service\b/i.test(String(row.service_type || ''));
 }
 
 // Flat rows -> one entry per technician, in first-seen (= earliest window)

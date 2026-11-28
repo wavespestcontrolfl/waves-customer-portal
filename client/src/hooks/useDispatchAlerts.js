@@ -164,6 +164,7 @@ export function useDispatchAlerts() {
       else relayTechOutAlertChange({ type: TECH_OUT_ALERT_TYPE, tech_id: null });
     }
     const nextAlerts = alertsRef.current.filter((a) => !gone.has(a.id));
+    alertsRef.current = nextAlerts;
     setAlerts((prev) => prev.filter((a) => !gone.has(a.id)));
     if (newlyResolved > 0) setTotal((t) => Math.max(nextAlerts.length, t - newlyResolved));
     return newlyResolved;
@@ -191,6 +192,7 @@ export function useDispatchAlerts() {
     const serverTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : fetched.length;
     const changedSinceRead = (id) => (changedAtRef.current.get(id) || 0) > countAtStart;
     const merged = mergeHydration(alertsRef.current, fetched, resolvedIdsRef.current, changedSinceRead);
+    alertsRef.current = merged;
     setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current, changedSinceRead));
     setTotal(Math.max(serverTotal, merged.length));
     setError(null);
