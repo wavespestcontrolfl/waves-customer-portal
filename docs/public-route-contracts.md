@@ -8017,7 +8017,7 @@ route or on site, else 0). It never returns `summary`, the report, invoice, prep
 or review tokens, photos, the offer and referral cards, `customer`,
 `cancellation`, `visitChange`, stops count or route progress, and the cards and
 summary reads do not run. The recipient path is strictly read-only (no
-geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token), the row may also be a copy of the customer's every-visit list (`customer_reminder_contacts`, owner 2026-11-24 PM + 2026-11-26 "simpler": a person a call named, without a "just this visit" limit, is copied onto each live visit of that customer as an ordinary recipient row by `materializeForVisit` right before a send, so a later visit's en-route text can mint that person's own map-only token for THAT visit; a copy also needs the visit's CURRENT customer to list the number, checked in the resolver's permission read and again in the same final joined query on all three routes, so a copy a merge moved to an account that does not list the person answers 404 like an unknown token); a person the account holder or staff STOPPED (owner 2026-11-27; `customer_reminder_contacts.texts_stopped_at`, rule in `server/services/reminder-stop-sql.js`: a stop on the visit customer's own list, or a stop on the list of a record merged into it by a merge not undone that was saved after the customer's own last Restart, `texts_restarted_at`) answers 404 the same way for every row of the number on that customer, checked in the resolver and again in the same final joined query and
+geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token), the row may also be a copy of the customer's every-visit list (`customer_reminder_contacts`, owner 2026-11-24 PM + 2026-11-26 "simpler": a person a call named, without a "just this visit" limit, is copied onto each live visit of that customer as an ordinary recipient row by `materializeForVisit` right before a send, so a later visit's en-route text can mint that person's own map-only token for THAT visit; a copy also needs the visit's CURRENT customer to list the number, checked in the resolver's permission read and again in the same final joined query on all three routes, so a copy a merge moved to an account that does not list the person answers 404 like an unknown token); a person the account holder or staff STOPPED (owner 2026-11-27; `customer_reminder_contacts.texts_stopped_at`, rule in `server/services/reminder-stop-sql.js`: a stop on the visit customer's own list, or a stop on the list of a record merged into it by a merge not undone that was saved or merged (`merged_at`) after the customer's own last Restart, `texts_restarted_at`) answers 404 the same way for every row of the number on that customer, checked in the resolver and again in the same final joined query and
 the plain permission reads pass (`recipientPermission`: gate, person on the
 visit, no decline, no callback-number hold on the visit or the person's number,
 no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read; the visit is read again after the permission reads and must still be eligible). The live vehicle shows only while the visit is en route, `tech_status.current_job_id` exactly this visit's own id, decided in the same SELECT that returns the fix (no visit-group lookup: a grouped visit whose focus moved to a sibling shows no truck) and the cached fix was reported and received strictly after the visit's `en_route_at`; otherwise `vehicle` is null. The `tech_status` read is STRICT (`resolveFreshTechPosition` with `strict: true`, used only for this scope): a FAILED read answers 404 exactly like an unknown token (code-only log), while a successful read with no usable fix answers 200 with `vehicle: null`. The technician photo is presigned STRICT for this scope (`resolveTechPhotoUrl(..., { strict: true })`): a signing failure throws a code-only error and answers 404 like an unknown token, never a fallback photo (every other caller keeps its fallback; the helper logs the error code only, never the S3 key or the raw message). The GET makes no visit-change read: an eligible row is en route, on site or just completed, which carries no visit change. Its stops-ahead POST answers nulls and its view POST
@@ -9300,11 +9300,43 @@ a generic `/call-status` fallback row that won the race (`source` NULL) is
 adopted — sandbox source, customer link cleared — and any row with a foreign
 non-null source is refused (403 hangup). `/call-status` itself writes the
 sandbox-sourced row, with no customer link or touchpoint, when it sees the
-sandbox number first. The handler then renders a 6-second two-digit DTMF
-`<Gather>` (a relay-profile cell code, `relay-profiles.SANDBOX_CELLS`;
-'99' = the raw env attributes; no digits ⇒ the production profile) followed
-by the same `<Connect><ConversationRelay>` + per-call minted token that
-`/voice` renders — the WS secret never leaves the server. Payload: standard
+sandbox number first. Every sandbox disclosure `<Play>` uses the remastered
+telephony WAV (`client/public/audio/waves-greeting-notice.wav`, -16 LUFS 8 kHz
+mono PCM, served from the current deploy host via `express.static`, overridable
+by an `https://` `VOICE_SANDBOX_GREETING_URL`). When `GATE_VOICE_GPT_LIVE_TEST`
+is OFF, `/relay-sandbox` ALWAYS renders the documented 6-second two-digit DTMF
+`<Gather>` (ignoring any `?cell=` query parameter, `71`/`72` included) followed
+by the same `<Connect><ConversationRelay>` + per-call minted token that `/voice`
+renders — the WS secret never leaves the server. When `GATE_VOICE_GPT_LIVE_TEST`
+is ON (explicit owner approval 2026-11-28), plain `POST /relay-sandbox` bypasses
+the `<Gather>` wait and answers directly into GPT-Live Marin (`cell: '71'`,
+`voice: 'marin'`) after one complete disclosure clip (`<Play>` → optional
+`<Start><Recording>` → `<Connect action="…/relay-sandbox/live-complete"><Stream .../></Connect>`).
+Callable test entry points are preserved for runners and bake-offs (explicit
+query selectors take precedence over `VOICE_SANDBOX_MENU_DEFAULT`, and `cell`
+and `mode` query values on `/api/webhooks/twilio/relay-sandbox` are redacted
+from access logs by `redact-request-url.js`):
+`?mode=menu` or `VOICE_SANDBOX_MENU_DEFAULT=true` (when no explicit `?cell=` is
+passed) restores the 2-digit `<Gather>` keypad menu (so normal DTMF dialing
+reaches `71`, `72`, `01`–`10`, and `99` via `/relay-sandbox/cell` with zero
+webhook-URL change when toggled), `?cell=72` (or `71`) connects directly to
+that GPT-Live voice (same signature check and budget reservation), and
+`?cell=<known sandbox code>` (`resolveSandboxCell`, e.g. `09`, `10`, or explicit
+`99` — which keeps the ConversationRelay production-profile fallback if
+`VOICE_RELAY_SANDBOX_ATTRS` is unset/invalid rather than reserving GPT-Live;
+unknown query values are ignored and never logged) plays the full disclosure
+once and connects directly to that ConversationRelay profile. Signature failure
+responses depend on the mount's `TWILIO_SIGNATURE_VALIDATION` mode: in `enforce`
+mode (production default), the mounted `validateTwilioSignature` middleware
+rejects missing or invalid `X-Twilio-Signature` with an empty `403` and missing
+`TWILIO_AUTH_TOKEN` with a `500` empty `<Response></Response>` XML BEFORE the
+route handler runs; only requests that pass through to the route handler (such
+as `log` or `disabled` middleware mode) hit the route's own
+`gptLiveRequestSigned` check BEFORE any `call_log`, ledger, or Twilio REST write
+and receive the `200` spoken refusal + `<Hangup/>`; a foreign-sourced `call_log`
+row is still refused 403 before any budget claim, a detached relay stamps
+`relay_failed` and hangs up without reserving budget, and a full/unparseable
+budget responds with a spoken notice and `<Hangup/>` (no recording, no `<Stream>`). Payload: standard
 Twilio voice-webhook form fields (`CallSid`, `From`, `To`, `CallStatus`,
 `Digits` on the cell action). The session that answers is a DRY RUN: the ws
 upgrade proves the sandbox source from the call_log row and the relay answers
@@ -9349,10 +9381,10 @@ an internal row by its stored source, whatever `To` the `/call-status`
 callback that scheduled it carried. Any change to the
 number gate or the dry-run invariant is security-critical).
 `/api/webhooks/twilio/relay-sandbox/live-complete` + the `/ws/voice-live/{CallSid}/{token}` WebSocket path
-(GPT-Live trial, dark behind `GATE_VOICE_GPT_LIVE_TEST`, owner 2026-11-19, spend cap $5. With the gate on, cell code
-`71` or `72` on the sandbox number answers `/relay-sandbox/cell` with a disclosure replay and
+(GPT-Live trial, dark behind `GATE_VOICE_GPT_LIVE_TEST`, owner 2026-11-19 spend cap $5; owner 2026-11-28 explicitly approved making cell `71` Marin the direct default on `POST /relay-sandbox` with no keypad wait). With the gate on, plain `POST /relay-sandbox`, `POST /relay-sandbox?cell=71`/`72`, or cell code
+`71`/`72` on `/relay-sandbox/cell` answers with one full remastered disclosure clip, optional staff `<Start><Recording>` strictly after `<Play>` and before `<Connect>`, and
 `<Connect action="…/relay-sandbox/live-complete"><Stream url="wss://HOST/ws/voice-live/CALLSID/TOKEN"/></Connect>`
-(Twilio forbids a query string on a `<Stream>` url, so the CallSid and the per-call minted token are path segments).
+(Twilio forbids a query string on a `<Stream>` url, so the CallSid and the per-call minted token are path segments). Direct Marin routing replaces ConversationRelay ($0.07/min Twilio + LLM/TTS) with OpenAI GPT-Live ($0.05/min) + Twilio Media Streams (~$0.004/min, ~$0.054/min total; ~1–2 practice calls/day ≈ $0.11–$0.22/day, $3–$5/mo bounded on OpenAI voice minutes by the $5 ledger cap and 10-minute Twilio/bridge call cap; Twilio Media Stream minutes and tools-mode brain model rounds remain outside the OpenAI dollar ledger).
 `live-complete` is a POST TwiML webhook, Twilio-signature validated at the mount, refused with a 403 `<Hangup/>` unless
 `To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`, and answers a bare `<Hangup/>`. The WebSocket upgrade first requires the
 raw request target to be exactly the canonical `/ws/voice-live/{encoded CallSid}/{token}` (no query string), then checks
@@ -9385,10 +9417,15 @@ starts a paid provider request** (no geocode, weather forecast, date parser or r
 city-centroid practice lookups only, never booked or held. The only provider requests the tools make are the
 brain's own model rounds (the only paid calls besides GPT-Live's voice time itself). The conversation has no transfer tool and no automatic handoff, so no
 handoff packet is ever written, and it never texts. The bridge keeps the caller's and GPT-Live's transcript fragments in
-memory only and the summary stores counts and times only. Before any write, the cell
-route verifies the request's Twilio signature itself (the shared middleware lets unsigned requests through in its
-`log` and `disabled` modes); unsigned or invalid = refused with no ledger write and no Twilio update. The cell route
-reserves one call's worst-case GPT-Live voice cost in its own ledger table (`voice_gpt_live_ledger`, one row per CallSid)
+memory only and the summary stores counts and times only. Signature failure responses follow the mount's middleware mode: in `enforce`
+mode, `validateTwilioSignature` answers missing/invalid `X-Twilio-Signature`
+with an empty `403` and missing `TWILIO_AUTH_TOKEN` with `500` empty
+`<Response></Response>` XML before the route runs; when a request reaches the
+handler (e.g. `log` or `disabled` middleware mode), both the direct
+`/relay-sandbox` GPT-Live path and `/relay-sandbox/cell` verify the request's
+Twilio signature themselves before any `call_log`/ledger write or Twilio REST
+update and refuse unsigned/invalid requests with a spoken notice + `<Hangup/>`. Both routes
+reserve one call's worst-case GPT-Live voice cost in the dedicated ledger table (`voice_gpt_live_ledger`, one row per CallSid)
 under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
 within the token's life), and refuses the call
 when that reservation does not fit under `VOICE_GPT_LIVE_TEST_MAX_USD` (default 5), and on any database error there.

@@ -100,8 +100,8 @@ describe('Customer 360 → contacts\' own notification choices', () => {
     stubFetch();
     const panel = await openPanel();
     expect(within(panel).getByText('Sam Spouse')).toBeInTheDocument();
-    expect(within(panel).getByText(/Texts on · 5 of 6 alerts · Account defaults · Opt-in text pending/)).toBeInTheDocument();
-    expect(within(panel).getByText(/Texts on · 5 of 6 alerts · Own choices · Agreed to texts in the app/)).toBeInTheDocument();
+    expect(within(panel).getByText(/Texts on · Emails on · 5 of 6 alerts · Account defaults · Opt-in text pending/)).toBeInTheDocument();
+    expect(within(panel).getByText(/Texts on · 4 of 5 alerts · Own choices · Agreed to texts in the app/)).toBeInTheDocument();
     expect(within(panel).getByText(/Service reports are withheld from this contact/)).toBeInTheDocument();
   });
 

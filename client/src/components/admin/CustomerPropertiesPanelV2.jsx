@@ -622,7 +622,7 @@ export default function CustomerPropertiesPanelV2({
           </form>
         )}
         {/* GET/POST/DELETE multi-home-family are requireAdmin; this panel is mounted for admins only (canEdit). */}
-        {canEdit && <CustomerSameFamilySection customerId={customerId} />}
+        {canEdit && <CustomerSameFamilySection customerId={customerId} refreshToken={refreshToken} />}
       </CardBody>
       {primaryPreview && <Dialog open layer={1100} onClose={() => { if (!writeBusy) setPrimaryPreview(null); }}>
         <DialogHeader><DialogTitle>Change primary property</DialogTitle></DialogHeader>

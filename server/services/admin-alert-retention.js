@@ -172,6 +172,8 @@ const RERING = [
     decision: 'expire: only a new message the customer writes in their portal thread raises it again (one open row per thread)' },
   { emitter: 'inventory-margin-watchdog', files: ['services/inventory-margin-watchdog.js'], prefixes: ['inventory-margin-watchdog:'], kind: 'periodic',
     decision: 'expire, capped: while a vendor cost spike or modeled margin breach still holds, the next daily watchdog sweep raises one fresh row' },
+  { emitter: 'family-drop-below-two', files: ['services/multi-home-family.js'], prefixes: ['family-drop-below-two:'], kind: 'event',
+    decision: 'expire: only another family unlink, archive, or cancellation that drops a family below 2 active homes raises it again' },
 ];
 
 const parseMeta = (metadata) => {
