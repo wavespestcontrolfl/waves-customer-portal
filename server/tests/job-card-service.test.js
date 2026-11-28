@@ -4550,6 +4550,45 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(aceMlCalc.rateSource).toBe('catalog');
     expect(aceMlCalc.warnings.join(' ')).toContain('allows no more than 0.37 fl oz per 1,000 sq ft in one spray');
 
+    // A dual-rate product (carrying both default_rate_per_1000 and a per-gallon default_rate) still enforces its catalog per-gallon ceiling
+    // instead of dosing above the ceiling through the protocol-only fallback.
+    const dualRateAce = { id: 'ace-dual', name: 'Acelepryn Insecticide', epa_reg_number: '100-1489', default_rate_per_1000: 0.37, rate_unit: 'fl_oz', default_rate: '0.02-0.10', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const dualRateDb = dbFor({
+      scheduled_services: [{ id: 'svc33', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [dualRateAce],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const dualRateCalc = await jobCard.mixForProduct('ace-dual', 100, { serviceId: 'svc33', dbh: dualRateDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(dualRateCalc).toMatchObject({ rateSource: 'catalog', amount: 2, amountMax: 10, unit: 'fl_oz' });
+    expect(dualRateCalc.warnings).toContain('Protocol dilution exceeds verified catalog label rate — confirm label before mixing.');
+
+    // Admin rig picks on a technician-assigned visit obey the assigned technician's calibration scope (matching the plan engine and tank sheet),
+    // and a failed lookup for a calibration-only pin fails closed instead of switching to a replacement calibration.
+    const adminPickVisitDb = dbFor({
+      scheduled_services: [{ id: 'svc34', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const adminPickedOtherTech = await jobCard.mixForProduct('oil', 110, { serviceId: 'svc34', equipmentSystemId: 'sys-1', technicianId: null, dbh: adminPickVisitDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(adminPickedOtherTech.tank.source).toBeNull();
+
+    const failedPinDbWrap = (t) => {
+      const chain = pinnedVisitDb(t);
+      if (String(t) === 'equipment_calibrations') {
+        chain.first = () => Promise.reject(new Error('lookup failed'));
+      }
+      return chain;
+    };
+    failedPinDbWrap.raw = pinnedVisitDb.raw;
+    const failedPinPick = await jobCard.mixForProduct('oil', 110, { serviceId: 'svc30', equipmentSystemId: 'sys-1', dbh: failedPinDbWrap, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(failedPinPick.tank.source).toBeNull();
+
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
       products_catalog: [tristar],

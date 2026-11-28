@@ -781,15 +781,16 @@ async function getActiveCalibration(equipmentSystemId, { calibrationId = null, s
 }
 
 async function loadSheetCalibration(req, scheduled) {
+  const visit = scheduled || {};
   const pickedRigId = req.query.equipmentSystemId || null;
   const assignedSystemId = await assignedRigId(scheduled);
   const rigId = pickedRigId || assignedSystemId;
-  const rigOverridden = Boolean(pickedRigId && String(pickedRigId) !== String(assignedSystemId || ''));
-  const calibrationId = rigOverridden ? null : (scheduled?.assigned_calibration_id || null);
+  const keepPin = Boolean(visit.assigned_calibration_id && (!pickedRigId || !assignedSystemId || String(pickedRigId) === String(assignedSystemId)));
+  const calibrationId = keepPin ? visit.assigned_calibration_id : null;
   const isTech = isTechnicianRequest(req);
-  const scopeByTechnician = isTech || Boolean(scheduled);
-  const viewerTechId = isTech ? (req.technicianId || null) : null;
-  const technicianId = pickedRigId || !scheduled ? (viewerTechId || scheduled?.technician_id || null) : (scheduled.technician_id || null);
+  const scopeByTechnician = isTech || Boolean(scheduled && (!pickedRigId || visit.technician_id));
+  const viewerTechId = isTech ? req.technicianId : null;
+  const technicianId = (!pickedRigId && scheduled ? visit.technician_id : (viewerTechId || visit.technician_id)) || null;
   const calibrationScope = { scopeByTechnician, technicianId };
   const calibration = await getActiveCalibration(rigId, { calibrationId, ...calibrationScope });
   return { rigId, calibration, calibrationScope };
@@ -808,7 +809,7 @@ function otherTankLines(calibration, bigTanks, items) {
 async function assignedRigId(scheduled) {
   if (scheduled?.assigned_equipment_system_id) return scheduled.assigned_equipment_system_id;
   if (!scheduled?.assigned_calibration_id) return null;
-  const row = await db('equipment_calibrations').where({ id: scheduled.assigned_calibration_id }).first('equipment_system_id');
+  const row = await db('equipment_calibrations').where({ id: scheduled.assigned_calibration_id }).first('equipment_system_id').catch(() => null);
   return row?.equipment_system_id || null;
 }
 

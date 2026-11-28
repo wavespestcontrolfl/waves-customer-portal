@@ -2424,20 +2424,10 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   const rateUnit = plannedRate?.rateUnit || product.rate_unit;
   // Pest / tree products whose label rate is per gallon of finished spray
   // (default_rate "X" or "X-Y" + default_unit "<unit>/gal") dilute straight
-  // into the tank — no carrier calibration involved.
-  const labelPerGallon = ratePer1000 == null ? perGallonRate(product) : null;
-  // The matched protocol line's own band narrows the verified label band —
-  // recognising the line can never widen the dose (March Tree & Shrub's
-  // Distance IGR: 6-8 fl oz/100 gal on the protocol, 0.06-0.12 fl oz/gal on
-  // the label → 0.06-0.08). A band outside the label, or on another unit,
-  // leaves the label band standing.
-  const protocolPerGallon = protocolBand(labelPerGallon, protocolLine);
-  // A product whose catalog row states only a per-area rate (Acelepryn's lawn rate) but whose booked line states its own dilution
-  // (a Tree & Shrub foliar spray per 100 gallons) is dosed at the line's dilution, never the lawn rate through the rig (owner 2026-11-26).
-  const lineOnlyBand = !labelPerGallon && !plannedRate && protocolLine?.rate && protocolLine.explicitDilution ? protocolLine.rate : null;
-  // The line's own band: its card rate clipped to the label band, else its own dilution (never both: lineOnlyBand needs no label band).
-  const lineBand = protocolPerGallon || lineOnlyBand;
-  const perGallon = lineBand || labelPerGallon;
+  // into the tank — no carrier calibration involved. When a dual-rate product
+  // also carries default_rate_per_1000, an explicit protocol dilution is still
+  // checked against the catalog per-gallon band so it cannot bypass the ceiling.
+  const { dilutionLabel: labelPerGallon, lineOnlyBand, lineBand, perGallon } = resolveDilutionBands(product, { ratePer1000, plannedRate, protocolLine });
   // A card's label rate is stated over its own spray volume (Tekko Pro on cockroaches: 2 fl oz per gallon at 1 gallon per
   // 1,000 sq ft). The mix per gallon is the label amount per area only at that volume, so:
   //   - the answer names the volume and the area the tank covers at it;
@@ -2639,15 +2629,29 @@ async function loadCalibrationSystemId(dbh, calibrationId, activeRigs = []) {
   return row?.equipment_system_id || null;
 }
 
+function resolveDilutionBands(product, { ratePer1000, plannedRate, protocolLine }) {
+  const catalogPerGallon = perGallonRate(product);
+  const labelPerGallon = ratePer1000 == null ? catalogPerGallon : null;
+  const hasExplicitDilution = Boolean(
+    protocolLine?.explicitDilution || protocolLine?.conflictLines?.some((line) => line.explicitDilution),
+  );
+  const dilutionLabel = labelPerGallon || (!plannedRate && hasExplicitDilution ? catalogPerGallon : null);
+  const protocolPerGallon = protocolBand(dilutionLabel, protocolLine);
+  const lineOnlyBand = !dilutionLabel && !plannedRate && protocolLine?.rate && protocolLine.explicitDilution ? protocolLine.rate : null;
+  const lineBand = protocolPerGallon || lineOnlyBand;
+  return { dilutionLabel, lineOnlyBand, lineBand, perGallon: lineBand || dilutionLabel };
+}
+
 async function resolveMixTank(dbh, rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback }) {
   const assigned = rigAssignment(svc);
   if (!pickedRig) return procedureCalibrationTank(rigs, assigned, svc.technician_id || null, fallback);
   const assignedSystem = assigned.equipmentSystemId
     || (assigned.calibrationId ? await loadCalibrationSystemId(dbh, assigned.calibrationId, rigs) : null);
-  if (assigned.calibrationId && assignedSystem && String(equipmentSystemId) === String(assignedSystem)) {
+  if (assigned.calibrationId && (!assignedSystem || String(equipmentSystemId) === String(assignedSystem))) {
     return tankFromCalibrations(rigRows(rigs, { equipmentSystemId, calibrationId: assigned.calibrationId }), fallback);
   }
-  return tankFromCalibrations(viewerRows(rigRows(rigs, { equipmentSystemId }), technicianId), fallback);
+  const effectiveTechId = technicianId || svc.technician_id || null;
+  return tankFromCalibrations(viewerRows(rigRows(rigs, { equipmentSystemId }), effectiveTechId), fallback);
 }
 
 function recordSprayVolumeSpec(out, per1000, qual, { reciprocal = false } = {}) {
