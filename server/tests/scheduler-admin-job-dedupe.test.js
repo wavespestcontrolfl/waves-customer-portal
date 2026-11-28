@@ -41,6 +41,13 @@ jest.mock('../services/dashboard-alerts-cron', () => ({
   COUNT_ESCALATION_COOLDOWN_MS: {},
 }));
 jest.mock('../services/seo/seo-advisor', () => ({ generateWeeklyReport: jest.fn() }));
+jest.mock('../services/ads/campaign-advisor', () => ({
+  hasModelReportToday: jest.fn(async () => false),
+  generateDailyAdvice: jest.fn(),
+}));
+jest.mock('../services/ads/negative-keyword-actions', () => ({
+  ringNegativeBells: jest.fn(async () => 0),
+}));
 
 const cron = require('../utils/scheduled-cron');
 const db = require('../models/db');
@@ -171,5 +178,23 @@ describe('the weekly SEO Advisor report runs under a lock', () => {
     runExclusive.mockResolvedValue({ skipped: true, reason: 'lease_held' });
     await tick();
     expect(SEOAdvisor.generateWeeklyReport).not.toHaveBeenCalled();
+  });
+});
+
+describe('the weekly AI Campaign Advisor runs Mondays at 8 AM ET under a lock', () => {
+  test('Ads Advisor: scheduled weekly (0 8 * * 1) and runs once per lease', async () => {
+    const CampaignAdvisor = require('../services/ads/campaign-advisor');
+    const tick = tickFor('0 8 * * 1', 'ads-daily-advisor');
+    await tick();
+    expect(runExclusive).toHaveBeenCalledWith('ads-daily-advisor', expect.any(Function));
+    expect(CampaignAdvisor.generateDailyAdvice).toHaveBeenCalledTimes(1);
+  });
+
+  test('Negative-keyword bells still drain daily at 8:05 AM ET without running the model advisor', async () => {
+    const { ringNegativeBells } = require('../services/ads/negative-keyword-actions');
+    const tick = tickFor('5 8 * * *', 'ads-negative-bells');
+    await tick();
+    expect(runExclusive).toHaveBeenCalledWith('ads-negative-bells', expect.any(Function));
+    expect(ringNegativeBells).toHaveBeenCalledTimes(1);
   });
 });

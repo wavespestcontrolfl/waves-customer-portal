@@ -1224,8 +1224,8 @@ function AdvisorNoReports() {
         No Reports Yet
       </div>{" "}
       <div className="text-ui-body text-ink-secondary">
-        Click "Regenerate" to run the AI advisor, or wait for the daily 8 AM
-        auto-run.
+        Click "Regenerate" to run the AI advisor, or wait for the weekly Monday
+        8 AM ET auto-run.
       </div>{" "}
     </UiCard>
   );

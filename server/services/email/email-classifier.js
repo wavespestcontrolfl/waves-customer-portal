@@ -59,16 +59,16 @@ SENDER DOMAIN: ${senderDomain}
 Categories:
 - lead_inquiry: Someone asking about pest control, lawn care, mosquito, termite, or other services. They want a quote, estimate, or to schedule service.
 - customer_request: An existing customer asking about their account, scheduling, billing, rescheduling, or service questions.
-- complaint: A customer expressing dissatisfaction, frustration, or reporting a problem with service.
-- vendor_invoice: An invoice, statement, receipt, or billing document from a known vendor/supplier.
-- vendor_communication: Non-invoice email from a vendor (sales rep correspondence, product updates, promotions, order confirmations).
+- complaint: A customer expressing dissatisfaction, frustration, or reporting a problem with service (including a missed appointment or no-show — even when replying to an appointment confirmation).
+- vendor_invoice: An invoice, statement, receipt, or billing document for money Waves owes or paid to a known vendor/supplier (never incoming payouts or deposits).
+- vendor_communication: Non-invoice email from a vendor or payment processor (sales rep correspondence, product updates, order confirmations, Stripe payout/settlement notices). Promotional tips or optimization newsletters from ad platforms (e.g., Google Ads tips) belong in marketing_newsletter.
 - scheduling: Email specifically about appointment scheduling, confirmations, or calendar-related.
 - review_notification: Google review alert, Yelp notification, or any review platform email.
 - regulatory: FDACS, EPA, DEP, or any government/regulatory body communication.
-- marketing_newsletter: Marketing emails, newsletters, promotional offers FROM other companies (not customer inquiries about our services).
+- marketing_newsletter: Marketing emails, newsletters, promotional offers, or optimization tips FROM other companies/platforms (not customer inquiries about our services).
 - internal: Email from team members, internal communications.
 - spam: Unsolicited commercial email, phishing, irrelevant solicitations, SEO services pitches, link building outreach, "business opportunity" spam.
-- other: Doesn't fit any category above.
+- other: Automated developer/system notifications (e.g., GitHub PR/CI/bot alerts), account login codes, or anything that doesn't fit any category above.
 
 Respond ONLY in JSON, no markdown:
 {

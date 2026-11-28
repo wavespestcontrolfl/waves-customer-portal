@@ -9566,9 +9566,10 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8AM — AI Campaign Advisor (includes paid + organic)
+  // WEEKLY MONDAY 8AM — AI Campaign Advisor (includes paid + organic; moved
+  // from daily to weekly 2026-11-27 while one $5/day campaign runs)
   // =========================================================================
-  cron.schedule('0 8 * * *', async () => {
+  cron.schedule('0 8 * * 1', async () => {
     logger.info('Running: AI campaign advisor');
     try {
       await runExclusive('ads-daily-advisor', async () => {
@@ -9582,6 +9583,19 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`AI campaign advisor failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 8:05AM — drain pending negative-keyword bells (up to 3/day, $0 DB-only)
+  // so overflow suggestions queued by Monday's weekly advisor don't wait 7 days.
+  cron.schedule('5 8 * * *', async () => {
+    try {
+      await runExclusive('ads-negative-bells', async () => {
+        const { ringNegativeBells } = require('./ads/negative-keyword-actions');
+        await ringNegativeBells();
+      });
+    } catch (err) {
+      logger.error(`Ads negative-keyword bells failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

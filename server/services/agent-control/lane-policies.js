@@ -199,15 +199,11 @@ const LANE_RUNTIME = {
   // per call, inside the same technician-reviewed visit as lawn_visit_assessment; a miss leaves Gemini's read standing.
   lawn_assessment_referee: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
   tree_shrub: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
-  // Plant photo ID (owner rulings 2026-09-28/29): the plant engine's Gemini -> Sol ladder and its gated
-  // Fable name tie-break, both through the llm adapters (one ledger row per call). No runtime caller until
-  // the L4 route ships; customer-visible once it does. The referee is dark (GATE_PLANT_ID_REFEREE).
-  // Both run in-request with a hard timeout and a deterministic result: Gemini -> Sol, and a referee
-  // that times out or fails leaves the Gemini/Sol answer standing (interactive, never queued).
+  // Plant photo ID (owner ruling 2026-09-28): the plant engine's Gemini -> Sol ladder through the llm
+  // adapters (one ledger row per call), running in-request with a hard timeout (interactive, never queued).
   plant_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   plant_id_app: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   pest_id_app: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
-  plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   // SMS scheduling decide step (GATE_SMS_SCHEDULING_DECIDE, dark): shadow only — reads a customer's reply to a
   // recorded offer and records what it would book in sms_offer_decisions. Never a send, move or booking; a miss
   // records an error row and the text stays with staff. No queue, no fallback provider.

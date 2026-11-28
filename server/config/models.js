@@ -270,20 +270,13 @@ const DEFAULTS = Object.freeze({
   // replaces Astra, matching the plant engine's second opinion — about a
   // third of Astra's cost and no worse on the hardest photo tests.
   OPENAI_LAWN_ASSESSMENT: 'gpt-6-sol',
-  // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28): Claude
-  // Fable 5.1 at high effort, a deciding third look only when a scope is
-  // still unsure after the second opinion. requires:'deep' in MODEL_CATALOG
-  // below; dispatched through services/llm/call.js like every other route,
-  // which already sizes max_tokens for always-thinking models and reads the
-  // answer past any thinking block (anthropicText) — see plant-engine.js.
-  PLANT_ID_REFEREE: 'claude-fable-5-1',
   // Lawn visit assessment name referee (owner ruling 2026-09-29): Claude Fable
   // 5.1 at high effort, a tie-break on grass type / finding names only, and
   // only when Gemini and the Sol second opinion disagreed. Dark behind
   // GATE_LAWN_ASSESSMENT_REFEREE.
   LAWN_ASSESSMENT_REFEREE: 'claude-fable-5-1',
-  // Daily Google Ads campaign advisor (owner ruling 2026-10-01): Claude Fable
-  // 5.1 at high effort writes the daily report. requires:'deep' in
+  // Weekly Google Ads campaign advisor (owner 2026-10-01; moved to weekly 2026-11-27):
+  // Claude Fable 5.1 at high effort writes the report. requires:'deep' in
   // MODEL_CATALOG; dispatched through services/llm/call.js, which floors
   // max_tokens for always-thinking models and reads past thinking blocks.
   ADS_ADVISOR: 'claude-fable-5-1',
@@ -476,13 +469,10 @@ const OPENAI_PLANT_ID      = process.env.MODEL_OPENAI_PLANT_ID     || DEFAULTS.O
 // off OPENAI_FRONTIER / OPENAI_PLANT_ID, so the lawn lane moves independently
 // of the pest identifier's Astra second look and the plant engine.
 const OPENAI_LAWN_ASSESSMENT = process.env.MODEL_OPENAI_LAWN_ASSESSMENT || DEFAULTS.OPENAI_LAWN_ASSESSMENT;
-// Plant photo ID referee (owner ruling 2026-09-28) — explicit opt-in via
-// GATE_PLANT_ID_REFEREE (server/config/feature-gates.js), never automatic.
-const PLANT_ID_REFEREE     = process.env.MODEL_PLANT_ID_REFEREE    || DEFAULTS.PLANT_ID_REFEREE;
 // Lawn visit assessment name referee (owner ruling 2026-09-29) — explicit
 // opt-in via GATE_LAWN_ASSESSMENT_REFEREE, never automatic.
 const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEFAULTS.LAWN_ASSESSMENT_REFEREE;
-// Daily ads advisor (owner ruling 2026-10-01) — its own selector so the
+// Weekly ads advisor (owner ruling 2026-10-01; weekly 2026-11-27) — its own selector so the
 // advisor moves independently of FLAGSHIP / the highStakes policy.
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 // SMS scheduling decide step (owner ruling 2026-10-02) — its own selector.
@@ -639,12 +629,6 @@ const ROUTES = Object.freeze({
   smsDraftDefault:   Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // default draft; OpenAI Sol backup
   smsDraftSaveSale:  Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // cancel/complaint draft; OpenAI Sol backup
   smsToneRewrite:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // tone rewrite; OpenAI Terra backup
-  // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28,
-  // plant-engine.js's runReferee): single-leg, no automatic fallback — a
-  // referee miss leaves the Gemini -> Sol escalation result unchanged rather
-  // than trying a third provider. `effort: 'high'` reaches only the
-  // Anthropic leg (services/llm/call.js#dispatch).
-  plantIdReferee:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: PLANT_ID_REFEREE, effort: 'high' }),
   // SMS scheduling decide step (owner ruling 2026-10-02, sms-scheduling-decide.js):
   // single leg, no automatic fallback — a miss records an error row and the
   // text stays with staff, exactly as today. Shadow behind GATE_SMS_SCHEDULING_DECIDE.
@@ -895,9 +879,7 @@ const TEXT_POLICIES = Object.freeze({
     // unchanged): Gemini 3.8 Flash reads the photo; a miss, an unsure answer
     // (PHOTO_ID_ESCALATE_BELOW) or a risky runner-up goes to GPT-6 Sol as the
     // second opinion. Sequential, same GEMINI_VISION_MODEL override as
-    // photoIdVision. A scope still unsure after this second opinion may get
-    // one more look from Claude Fable 5.1 (ROUTES.plantIdReferee), gated
-    // behind GATE_PLANT_ID_REFEREE — not part of this two-provider policy.
+    // photoIdVision.
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
   }),
@@ -993,7 +975,6 @@ module.exports = {
   OPENAI_IMAGE_SCREEN,
   OPENAI_PLANT_ID,
   OPENAI_LAWN_ASSESSMENT,
-  PLANT_ID_REFEREE,
   LAWN_ASSESSMENT_REFEREE,
   ADS_ADVISOR,
   SMS_SCHEDULING_DECIDE,

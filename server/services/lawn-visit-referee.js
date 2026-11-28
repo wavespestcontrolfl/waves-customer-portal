@@ -1,7 +1,7 @@
 /**
  * Lawn visit assessment name referee (owner ruling 2026-09-29, dark behind
  * GATE_LAWN_ASSESSMENT_REFEREE — see feature-gates.js#lawnAssessmentRefereeLive).
- * Mirrors the plant engine's narrowed referee (photo-id-v2/plant-engine.js#runReferee).
+ * Breaks Gemini vs. Sol name disagreements on grass type and lawn findings.
  *
  * Flow, all inside lawn-visit-assessment.js#analyzeVisit and only when the gate
  * is on AND Gemini itself answered (not the OpenAI fallback):

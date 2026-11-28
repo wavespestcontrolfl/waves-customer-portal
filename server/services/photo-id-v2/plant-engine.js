@@ -9,12 +9,7 @@
  * own `MODELS.TEXT_POLICIES.photoIdVision` ladder (Gemini -> GPT-6 Astra, no
  * Claude, owner ruling 2026-09-26) — this file reads
  * `MODELS.TEXT_POLICIES.plantIdVision` instead (Gemini -> GPT-6 Sol, owner
- * ruling 2026-09-28, PLANT ENGINE ONLY), both read at call time, plus an
- * optional Claude Fable referee (`runReferee`, `GATE_PLANT_ID_REFEREE`) that
- * breaks a plant-NAME tie: identify mode only, and only for an identity lane
- * where Gemini and Sol disagreed (owner ruling 2026-09-29, narrowed from the
- * 09-28 shape — workups and low-confidence/missing-second-opinion scopes
- * never draw a referee call).
+ * ruling 2026-09-28, PLANT ENGINE ONLY), read at call time.
  *
  * **L3 has no runtime caller.** No route, no gate, no storage — L4 wires
  * `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`.
@@ -41,7 +36,6 @@ const catalog = require('../species-catalog');
 const { isApproved } = require('../species-catalog-approval');
 const { dispatch, rejectCall } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
-const { plantIdRefereeLive } = require('../../config/feature-gates');
 const Ajv = require('ajv');
 const {
   dedupeCandidates, sameCandidateKey, deepestSharedNode, VERDICT_LABELS, ROLE_LABELS, RISK_LABELS, ACTION_LABELS, UNNAMED_SAFETY_CLAUSES, NO_PHOTO_CONFIRMS,
@@ -59,8 +53,6 @@ const {
   buildCustomerFactsBlock,
   buildConditionSelectionPrompt,
   buildEscalationPrompt,
-  buildRefereeSystemPrompt,
-  buildRefereePrompt,
 } = require('./plant-engine-prompts');
 
 const PROMPT_VERSION = 'photo-id-v2-plant-2';
@@ -1876,178 +1868,6 @@ async function runEscalation(run, identity, conditions, { skip = false } = {}) {
   };
 }
 
-// ── referee (Claude Fable, GATE_PLANT_ID_REFEREE) ─────────────────────────
-// Owner ruling 2026-09-29 (narrowed from 09-28): the referee breaks a plant
-// NAME tie only. It runs ONLY in identify mode, for an identity lane
-// (turf/weeds for a lawn, host for tree_shrub/palm — `identifyLaneSlotsFor`)
-// where Gemini and Sol's escalation DISAGREED. Workups (problem checks) stay
-// Gemini -> Sol with no referee; a missing second opinion or a low-confidence
-// AGREEMENT never draws a call either. Ships dark behind
-// GATE_PLANT_ID_REFEREE, off by default.
-
-// Fable thinks before answering; llm/call.js#dispatch already raises this to
-// the always-thinking floor (anthropicMaxTokens, services/llm/anthropic-wire.js)
-// for a model that needs it, so this is a generous starting cap, not the
-// final wire size.
-const REFEREE_MAX_TOKENS = 8192;
-// A tie-break never holds the customer's request for the whole ladder budget:
-// the referee gets at most this long (or what is left, if less), and a
-// timeout leaves the lane exactly as the escalation left it.
-const REFEREE_MAX_MS = 60 * 1000;
-
-function describeIdentityRead(candidate) {
-  if (!candidate) return null;
-  // A resolved candidate's off-catalog name lives on the normalized
-  // `offCatalogName` field (`resolveIdentityCandidate`) — the raw model
-  // output's `off_catalog_name` never survives resolution, so reading it
-  // here always fell through to 'unknown' (Codex #5307 r1 finding 7).
-  return { slug: candidate.slug || candidate.offCatalogName || 'unknown', confidence: candidate.confidence ?? 0 };
-}
-
-/** Per disagreed identity slot: the first (Gemini) read and Sol's own
- * ranked top for that slot. `combineIdentity` sets `disagreementPair` to
- * `[geminiTop, openaiTop]`, so `[1]` already IS Sol's own top — never a
- * merged (Gemini+OpenAI) list's top (Codex #5307 r7 finding 4, verified: no
- * change needed, made explicit here). The "Earlier reads" block
- * `buildRefereePrompt` renders into the referee's prompt. */
-function earlierReadsFor(escalation, unsureScopes) {
-  return unsureScopes.map((scope) => {
-    const [first, second] = escalation.identityFlags[scope].disagreementPair;
-    return { scope, first: describeIdentityRead(first), second: describeIdentityRead(second) };
-  });
-}
-
-// A settled scope is never allowed back to `pretty_sure` (a referee-settled
-// split is still only one extra look, not certainty) — `blockPrettySure`
-// stays true even though the scope is no longer disagreed.
-const REFEREE_SETTLED_FLAGS = Object.freeze({
-  disagreed: false, blockPrettySure: true, openaiAnswered: true, disagreementPair: null,
-});
-
-/** `sameCandidateKey` (shared with the pest engine — never changed here)
- * matches two off-catalog candidates by `groupId` alone, so two different
- * off-catalog names in the same group (e.g. "Zoysia" vs "Centipede", both
- * off-catalog turf guesses) count as the same candidate. The referee's A/B
- * tie-break needs a REAL name match for an off-catalog side, so this local
- * helper adds a normalized `offCatalogName` compare on top of
- * `sameCandidateKey` (Codex #5307 r7 finding 1). */
-function normalizedOffCatalogName(candidate) {
-  return String(candidate?.offCatalogName || '').trim().toLowerCase().replace(/\s+/g, ' ');
-}
-function refereeMatchesSide(candidate, side) {
-  if (!sameCandidateKey(candidate, side)) return false;
-  if (candidate?.slug || side?.slug) return true;
-  return normalizedOffCatalogName(candidate) === normalizedOffCatalogName(side);
-}
-
-/** One identity slot's referee tie-break (owner ruling 2026-09-29, narrowed
- * from the 09-28 2-of-3 shape): `R` is the referee's own top, resolved
- * against this slot's own index. `R` matching side A or B of the
- * disagreement settles it — that side goes first, `disagreed: false`,
- * `disagreementPair: null`, wording capped at `likely`. Anything else (a
- * third name, or no referee answer for this slot at all) leaves the lane
- * EXACTLY as the escalation left it — the referee never adds a third
- * candidate and never confirms an undisputed top (only disagreed lanes ever
- * reach this function). */
-function mergeIdentityScope(run, slot, escalation, refereeJson) {
-  const flags = escalation.identityFlags[slot];
-  const refereeCandidates = dedupeCandidates((refereeJson?.[slot] || []).map((r) => resolveIdentityCandidate(r, run.indexes[slot])));
-  const topReferee = refereeCandidates[0] || null;
-  if (!topReferee) return { outcome: 'unavailable' };
-  const [a, b] = flags.disagreementPair;
-  const matched = refereeMatchesSide(topReferee, a) ? a : (refereeMatchesSide(topReferee, b) ? b : null);
-  if (!matched) return { outcome: 'no_majority' };
-  const rest = escalation.slots[slot].filter((c) => !sameCandidateKey(c, matched));
-  return { outcome: 'settled', slots: [matched, ...rest].slice(0, 3), flags: { ...flags, ...REFEREE_SETTLED_FLAGS } };
-}
-
-const NO_REFEREE_INFO = Object.freeze({
-  triggered: false, result: null, json: null, scopes: [], outcomes: {},
-});
-
-/** The identity slots the referee may ever be asked about — identify mode's
- * own lane slots (turf/weeds for a lawn, host for tree_shrub/palm), the same
- * scope `identifyLaneSlotsFor` draws the final lane from. A workup (problem
- * check) is never a referee candidate (owner ruling 2026-09-29: the referee
- * breaks a plant-NAME tie only, and only in identify mode). */
-function refereeCandidateScopes(run) {
-  return run.mode === 'identify' ? identifyLaneSlotsFor(run.subject) : [];
-}
-
-/** Step after `runEscalation` AND after the `legFailureReason` short-circuit (owner ruling
- * 2026-09-29, narrowed from 09-28's 2-of-3 shape). Returns `escalation`
- * unchanged (plus a `refereeInfo` diagnostic for `internalFor`) when the
- * gate is off, the run is not `identify`, the budget has no room left, or no
- * identity lane the subject actually uses came back disagreed. Otherwise ONE
- * call covers every disagreed lane, and a lane the referee did not settle (a
- * third name, no answer, schema-invalid, or unusable referee photos) leaves
- * that lane's escalation result exactly as it was — `identifyPlantV2` skips
- * this call entirely once the combined prior read is already `blocked`
- * (Codex #5307 r7 finding 2: a blocked identify result discards every
- * candidate, so the referee's vote could never surface). */
-async function runReferee(run, identity, conditions, escalation, { skip = false } = {}) {
-  const unchanged = { ...escalation, refereeInfo: NO_REFEREE_INFO };
-  if (skip || run.singleRead || !plantIdRefereeLive()) return unchanged;
-  const remainingMs = run.deadline - Date.now();
-  if (remainingMs < MIN_LEG_TIMEOUT_MS) return unchanged;
-
-  // Identify mode's own identity lanes only — never a slot the subject never
-  // populates (a whole-ladder Gemini miss trips `gemini_missed` on every
-  // identity slot uniformly), and never a workup's conditions scope (workups
-  // stay Gemini -> Sol, no referee, owner ruling 2026-09-29).
-  const candidateScopes = refereeCandidateScopes(run);
-  const unsureScopes = candidateScopes.filter((scope) => {
-    const flags = escalation.identityFlags[scope];
-    return flags.disagreed && !!flags.disagreementPair;
-  });
-  if (!unsureScopes.length) return unchanged;
-
-  const promptArgs = escalationPromptArgs(run, identity, conditions);
-  const earlierReads = earlierReadsFor(escalation, unsureScopes);
-  const system = buildRefereeSystemPrompt(promptArgs);
-  const result = await callWithProvider(MODELS.ROUTES.plantIdReferee, {
-    system,
-    text: `${buildCustomerFactsBlock(promptArgs)}\n\n${buildRefereePrompt(earlierReads)}\n\nIdentify and assess these photos fresh, as the deciding vote.`,
-    images: run.images,
-    jsonMode: true,
-    jsonSchema: ESCALATION_SCHEMA,
-    maxTokens: REFEREE_MAX_TOKENS,
-    timeoutMs: Math.min(remainingMs, REFEREE_MAX_MS),
-    laneId: 'plant_id_referee',
-    promptVersion: `${PROMPT_VERSION}:referee`,
-  });
-  const json = validJson(result, 'escalation');
-  const refereeInfo = {
-    triggered: true, result, scopes: unsureScopes, outcomes: {}, json: json || null,
-  };
-  if (!json) {
-    for (const scope of unsureScopes) refereeInfo.outcomes[scope] = 'unavailable';
-    return { ...escalation, refereeInfo };
-  }
-  // The referee's own photo-quality verdict feeds `photoReadFor`'s
-  // conservative combine either way (see below); when it says the photos
-  // are unusable, its identity vote is not trustworthy evidence either, so
-  // every disagreed lane is left exactly as it was (no merge).
-  const refereePhotosUnusable = json.quality?.usable === false || json.shows === 'nothing';
-  if (refereePhotosUnusable) {
-    for (const scope of unsureScopes) refereeInfo.outcomes[scope] = 'unavailable';
-    return { ...escalation, refereeInfo };
-  }
-
-  let { slots, identityFlags } = escalation;
-  for (const scope of unsureScopes) {
-    const merged = mergeIdentityScope(run, scope, escalation, json);
-    refereeInfo.outcomes[scope] = merged.outcome;
-    if (merged.outcome === 'settled') {
-      slots = { ...slots, [scope]: merged.slots };
-      identityFlags = { ...identityFlags, [scope]: merged.flags };
-    }
-  }
-  return {
-    ...escalation, slots, identityFlags, refereeInfo,
-  };
-}
-
 // A group-level answer's rank by how specific its rung is.
 const CLIMBED_ANSWER_RANK = Object.freeze({ subgroup: 3, group: 2, category: 1 });
 
@@ -2132,20 +1952,9 @@ function legFailureReason(run, identity, conditions, escalation) {
 }
 
 function photoReadFor(identity, conditions, escalation) {
-  // The referee's own parsed answer (`refereeInfo.json`) carries a
-  // `quality`/`shows` verdict of its own leg over the SAME photos, and it
-  // must join the conservative combine like every other leg — an "unusable"
-  // referee read (Codex #5307 r1 finding 4) still counts here even though
-  // its votes are never merged.
-  // The referee's own quality verdict tightens the read only when its vote
-  // actually decided a lane: a tie-break that merged nothing (an unusable
-  // referee read included — it never merges) must never downgrade the
-  // Gemini/Sol answer that stands (pre-push audit on Codex #5307 r8).
-  const refereeSettled = Object.values(escalation.refereeInfo?.outcomes || {}).includes('settled');
-  const refereeJson = refereeSettled ? escalation.refereeInfo.json : null;
   return combineQuality(
-    [identity.candidatesJson?.quality, conditions.json?.quality, escalation.json?.quality, escalation.rerun?.quality, refereeJson?.quality],
-    [identity.candidatesJson?.shows, escalation.json?.shows, refereeJson?.shows],
+    [identity.candidatesJson?.quality, conditions.json?.quality, escalation.json?.quality, escalation.rerun?.quality],
+    [identity.candidatesJson?.shows, escalation.json?.shows],
   );
 }
 
@@ -2168,7 +1977,6 @@ function legInfo(result) {
 function internalFor(run, { identity, conditions, escalation }, lane) {
   const slotFlags = IDENTITY_SLOTS.map((slot) => escalation.identityFlags[slot]);
   const { conditionFlags } = escalation;
-  const refereeInfo = escalation.refereeInfo || NO_REFEREE_INFO;
   return {
     models: {
       candidates: legInfo(identity.candidatesResult),
@@ -2176,19 +1984,10 @@ function internalFor(run, { identity, conditions, escalation }, lane) {
       conditions: legInfo(conditions.result),
       escalation: legInfo(escalation.result),
       condition_rerun: legInfo(escalation.rerun?.result),
-      referee: legInfo(refereeInfo.result),
     },
     ladder: run.singleRead ? 'gemini_only' : 'full',
     escalation_triggered: escalation.all.length > 0,
     escalation_reasons: escalation.all,
-    // Admin-only, never merged into `v2` (owner ruling 2026-09-29):
-    // `outcome` keys are the identity lanes the referee actually looked at
-    // ('settled' | 'no_majority' | 'unavailable').
-    referee: {
-      triggered: refereeInfo.triggered,
-      scopes: refereeInfo.scopes,
-      outcome: refereeInfo.outcomes,
-    },
     disagreed: [...slotFlags, conditionFlags].some((f) => f.disagreed),
     openai_answered: [...slotFlags, conditionFlags].some((f) => f.openaiAnswered),
     identity: {
@@ -2229,22 +2028,13 @@ async function identifyPlantV2({
   const photosUnusable = irrevocablyUnusable(identity.candidatesJson);
   const conditions = photosUnusable ? NO_CONDITIONS : await runConditionLadder(run, identity);
   const escalation = await runEscalation(run, identity, conditions, { skip: photosUnusable });
-  // A run with nothing usable to build from fails BEFORE the billed referee
-  // (Codex #5307 r2): its answer could never be returned anyway.
   const failure = legFailureReason(run, identity, conditions, escalation);
   if (failure) return { ok: false, reason: failure };
-  // Every prior leg's own photo-quality verdict, combined exactly as the
-  // final answer's will be: a `blocked` read (unusable, OR the providers
-  // disagreed on what the photos show, OR multiple subjects) discards every
-  // identify candidate either way, so it never draws the billed referee call
-  // (Codex #5307 r6, widened by r7 finding 2 from `.unusable` alone).
-  const priorBlocked = namingGateFor(photoReadFor(identity, conditions, escalation)).blocked;
-  const refereed = await runReferee(run, identity, conditions, escalation, { skip: photosUnusable || priorBlocked });
 
-  const quality = photoReadFor(identity, conditions, refereed);
-  const lane = mode === 'identify' ? identifyLaneFor(subject, refereed.slots, refereed.identityFlags) : null;
-  const v2 = lane ? assembleIdentity(run, refereed, quality, lane) : assembleWorkup(run, refereed, quality);
-  return { ok: true, v2, internal: internalFor(run, { identity, conditions, escalation: refereed }, lane) };
+  const quality = photoReadFor(identity, conditions, escalation);
+  const lane = mode === 'identify' ? identifyLaneFor(subject, escalation.slots, escalation.identityFlags) : null;
+  const v2 = lane ? assembleIdentity(run, escalation, quality, lane) : assembleWorkup(run, escalation, quality);
+  return { ok: true, v2, internal: internalFor(run, { identity, conditions, escalation }, lane) };
 }
 
 module.exports = {
@@ -2321,11 +2111,5 @@ module.exports = {
     validJson,
     callWithProvider,
     SCHEMA_INVALID_REASON,
-    runReferee,
-    REFEREE_MAX_MS,
-    mergeIdentityScope,
-    refereeCandidateScopes,
-    earlierReadsFor,
-    describeIdentityRead,
   },
 };

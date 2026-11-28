@@ -99,13 +99,6 @@ const SELECTORS = [
   // is the env change below after a replay on the new pinned version.
   { key: 'TYPESAFE_JEV', env: 'MODEL_TYPESAFE_JEV', description: 'Typed decisions (TypeSafe Jev, pinned; dark behind GATE_TYPED_DECISIONS)', accepts: { providers: ['typesafe'], cap: 'decision' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'decision-only model; pin a new jev-N.N.N via MODEL_TYPESAFE_JEV after a replay, no picker discovery' } },
   { key: 'CLOUDFLARE_CLEF', env: 'MODEL_CLOUDFLARE_CLEF', description: 'Typed decisions, second provider (Cloudflare Clef on Workers AI; dark behind GATE_TYPED_DECISIONS_CLEF)', accepts: { providers: ['cloudflare'], cap: 'decision' }, lock: { kind: 'provider', label: 'Provider-specific', detail: 'decision-only model; clef-flash or clef via MODEL_CLOUDFLARE_CLEF, no picker discovery' } },
-  // deep: true — same rationale as NEWSLETTER above: its only call site
-  // (plant-engine.js's runReferee, ROUTES.plantIdReferee) reaches the model
-  // through llm/call.js#dispatch, which already floors max_tokens for
-  // always-thinking models and reads past thinking blocks/refusals. Its
-  // default (Fable 5.1) is itself a requires:'deep' catalog model. cap:
-  // 'vision' (Codex #5307 r1 finding 6) — the referee call sends the SAME
-  // photos every other photo-model selector below sends, not text alone.
   { key: 'SMS_SCHEDULING_DECIDE', env: 'MODEL_SMS_SCHEDULING_DECIDE', description: 'SMS scheduling decide step (owner ruling 2026-10-02: one model, Sonnet 5.5; shadow behind GATE_SMS_SCHEDULING_DECIDE)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'AUTO_DISPATCH_PROOFREADER', env: 'MODEL_AUTO_DISPATCH_PROOFREADER', description: 'Auto-dispatch move proofreader (owner 2026-10-09: reads the customer record before an automatic move; the nightly run asks it behind GATE_AUTO_DISPATCH_PROOFREADER, and only an allow moves the visit; also the replay script)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   // deep: true — its only call site (report-ask-ai.js, TEXT_POLICIES.reportAsk)
@@ -114,16 +107,15 @@ const SELECTORS = [
   // deep: true — its only call site (sms-operational-extractor.js, TEXT_POLICIES.smsOperationalActions)
   // goes through llm/call.js.
   { key: 'SMS_OPERATIONAL_ACTIONS', env: 'MODEL_SMS_OPERATIONAL_ACTIONS', description: 'SMS operational extraction, text channel (2026-11-27 replay test: Sonnet 5.5; before that Opus 5.5)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
-  { key: 'PLANT_ID_REFEREE', env: 'MODEL_PLANT_ID_REFEREE', description: 'Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28: Fable 5.1, effort high; gated by GATE_PLANT_ID_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
-  // deep: true, cap 'vision' — same rationale as PLANT_ID_REFEREE above: its
-  // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
-  // through llm/call.js#dispatch and sends the visit's photos.
+  // deep: true, cap 'vision' — its only call site (lawn-visit-referee.js,
+  // ROUTES.lawnAssessmentReferee) goes through llm/call.js#dispatch and sends
+  // the visit's photos.
   { key: 'LAWN_ASSESSMENT_REFEREE', env: 'MODEL_LAWN_ASSESSMENT_REFEREE', description: 'Lawn visit assessment name referee (owner ruling 2026-09-29: Fable 5.1, effort high; gated by GATE_LAWN_ASSESSMENT_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   // deep: true — its only call site (campaign-advisor.js, TEXT_POLICIES.adsAdvisor)
   // goes through llm/call.js#dispatch, which floors max_tokens for always-thinking
   // models and reads past thinking blocks; its default (Fable 5.1) is itself a
   // requires:'deep' catalog model.
-  { key: 'ADS_ADVISOR', env: 'MODEL_ADS_ADVISOR', description: 'Daily Google Ads advisor (owner ruling 2026-10-01: Fable 5.1, effort high)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  { key: 'ADS_ADVISOR', env: 'MODEL_ADS_ADVISOR', description: 'Weekly Google Ads advisor (owner 2026-10-01; weekly 2026-11-27: Fable 5.1, effort high)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'SMS_SONNET', env: 'MODEL_SMS_SONNET', description: 'Every SMS draft route', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'CALL_EXTRACTION_ANTHROPIC', env: 'MODEL_CALL_EXTRACTION_ANTHROPIC', description: 'Call extraction Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 25-call bake-off route; run a new bake-off to move it' } },
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
@@ -168,7 +160,6 @@ const ROUTE_SELECTOR = {
   smsDraftDefault: 'SMS_SONNET',
   smsDraftSaveSale: 'SMS_SONNET',
   smsToneRewrite: 'SMS_SONNET',
-  plantIdReferee: 'PLANT_ID_REFEREE',
   smsSchedulingDecide: 'SMS_SCHEDULING_DECIDE',
   autoDispatchProofreader: 'AUTO_DISPATCH_PROOFREADER',
   lawnAssessmentReferee: 'LAWN_ASSESSMENT_REFEREE',
@@ -462,13 +453,8 @@ const LANES = [
   // OpenAI only when Gemini returns nothing usable. No verify, no referee.
   L('plant_id_app', 'Plant/tree/shrub/palm photo ID (customer app)', 'photo-id-v2/plant-engine.js', 'multimodal', P('photoIdPlantV2', 'primary'), P('photoIdPlantV2', 'fallback'), { inbound: true, note: 'Gemini-only (owner 2026-10-02); OpenAI stands in on a Gemini miss' }),
   L('plant_id', 'Plant/tree/shrub/palm photo ID (lawn + tree/shrub/palm)', 'photo-id-v2/plant-engine.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('plantIdVision', 'fallback'), { inbound: true, note: `L3 only, no runtime caller yet; Gemini-first, Sol second opinion (owner ruling 2026-09-28) · ${SHARED_GEMINI_PIN}` }),
-  // The gated tie-break referee (owner ruling 2026-09-29, narrowed from
-  // 09-28): identify mode only, and only for an identity lane where Gemini
-  // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
-  // invalid, or out of budget leaves the escalation result unchanged.
   L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE: records what it would do (owner ruling 2026-10-02: one model, Sonnet 5.5); a would-move is carried out by code only when GATE_SMS_SCHEDULING_ACT_MOVE is on' }),
   L('auto_dispatch_proofreader', 'Auto-dispatch move proofreader (may a move break a time promise?)', 'auto-dispatch/proofreader/index.js', 'reason', R('autoDispatchProofreader'), null, { note: 'Owner 2026-10-09: allow / hold / unknown on one planned move, from the full customer record. Called by the 04:10 auto-dispatch run behind GATE_AUTO_DISPATCH_PROOFREADER (auto-dispatch/proofreader/nightly.js: only an allow moves the visit; an unknown raises an admin notice) and by the replay (scripts/auto-dispatch-proofreader-replay.js)' }),
-  L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
   // not a fan-out: Gemini live, then the prior Gemini model, then Claude
@@ -583,7 +569,7 @@ const LANES = [
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
-  L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('adsAdvisor', 'primary'), P('adsAdvisor', 'fallback')),
+  L('ads_advisor', 'Ads campaign advisor (weekly)', 'ads/campaign-advisor.js', 'qa', P('adsAdvisor', 'primary'), P('adsAdvisor', 'fallback')),
   L('chart_builder_image', 'AI chart builder · image intent read', 'ai-chart-builder.js', 'qa', T('GEMINI_VISION_BEST'), T('FLAGSHIP'), { note: 'image-backed charts only; stage 1 of 2' }),
   L('chart_builder_sql', 'AI chart builder · SQL + chart spec', 'ai-chart-builder.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'every chart; stage 2' }),
 
@@ -743,7 +729,6 @@ const LANE_AREA = {
   pest_id_app: 'photos',
   plant_id: 'photos',
   plant_id_app: 'photos',
-  plant_id_referee: 'photos',
   lawn_assessment_referee: 'photos',
   lawn_assess: 'photos',
   lawn_visit_assessment: 'photos',
@@ -915,7 +900,6 @@ const LANE_DESCRIBE = {
   pest_id_app: "Identifies the pest in a photo a customer takes in the app's Photo ID",
   plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
   plant_id_app: "Identifies the grass, weed, shrub or palm in a photo a customer takes in the app's Photo ID, and what may be wrong with it",
-  plant_id_referee: 'Breaks a tie when the two photo models name different plants (dark)',
   typed_decisions: 'Answers fixed yes/no questions about a call or text, recorded for review only (dark)',
   typed_decisions_clef: 'The same fixed questions put to a second provider (Cloudflare Clef) for comparison, recorded for review only (dark)',
   lawn_assessment_referee: 'Breaks a tie when the two photo models name a different grass or lawn problem (dark)',

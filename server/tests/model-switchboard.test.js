@@ -505,18 +505,11 @@ describe('model-switchboard', () => {
     expect(selectors.find((s) => s.key === 'FLAGSHIP').accepts.cap).toBe('vision');
     // OPENAI_BALANCED is the OpenAI leg of ROUTES.visionAnalysis (vision-delta, admin dispatch send images).
     expect(selectors.find((s) => s.key === 'OPENAI_BALANCED').accepts.cap).toBe('vision');
-    // PLANT_ID_REFEREE (ROUTES.plantIdReferee, plant-engine.js's runReferee)
-    // sends the SAME photos as the Gemini/Sol legs it decides between — a
-    // vision selector, matching the other photo-model selectors, never text
-    // (Codex #5307 r1 finding 6).
-    expect(selectors.find((s) => s.key === 'PLANT_ID_REFEREE').accepts.cap).toBe('vision');
+    expect(selectors.find((s) => s.key === 'PLANT_ID_REFEREE')).toBeUndefined();
     // LAWN_ASSESSMENT_REFEREE (owner ruling 2026-09-29) sends the visit's photos
     // the same way: a deep-safe vision selector.
     expect(selectors.find((s) => s.key === 'LAWN_ASSESSMENT_REFEREE')).toMatchObject({ env: 'MODEL_LAWN_ASSESSMENT_REFEREE', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } });
-    // Codex #5307 r7 finding 3: LANES had no entry for either the plant
-    // engine's own Gemini/Sol ladder or the gated referee, so the Models tab
-    // reported zero blast radius for GEMINI_VISION_BEST/OPENAI_PLANT_ID's
-    // plant use and for PLANT_ID_REFEREE entirely.
+    // Codex #5307 r7 finding 3: LANES lists the plant engine's own Gemini/Sol ladder.
     const plantId = lanes.find((l) => l.id === 'plant_id');
     expect(plantId.primary.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.primary.model);
     expect(plantId.fallback.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.fallback.model);
@@ -525,15 +518,9 @@ describe('model-switchboard', () => {
     // like pest_id, sits under Photos with a description, and the engine's
     // own call-ledger rows carry these exact lane ids (hub-read joins on id).
     expect(plantId.primary.pinEnv).toBe('GEMINI_VISION_MODEL');
-    for (const id of ['plant_id', 'plant_id_referee']) {
-      const lane = lanes.find((l) => l.id === id);
-      expect(lane.area).toBe('photos');
-      expect(lane.describe).toEqual(expect.any(String));
-    }
-    const plantReferee = lanes.find((l) => l.id === 'plant_id_referee');
-    expect(plantReferee.primary.model).toBe(MODELS.ROUTES.plantIdReferee.model);
-    expect(plantReferee.primary.selector).toBe('PLANT_ID_REFEREE');
-    expect(plantReferee.fallback).toBeNull();
+    expect(plantId.area).toBe('photos');
+    expect(plantId.describe).toEqual(expect.any(String));
+    expect(lanes.find((l) => l.id === 'plant_id_referee')).toBeUndefined();
     const lawnReferee = lanes.find((l) => l.id === 'lawn_assessment_referee');
     expect(lawnReferee.area).toBe('photos');
     expect(lawnReferee.describe).toEqual(expect.any(String));
@@ -556,7 +543,7 @@ describe('model-switchboard', () => {
     // SMS_OPERATIONAL_ACTIONS: its default (Sonnet 5.5) is a requires:'deep' model; its one site goes through llm/call.js.
     // EMAIL_CLASSIFY: its default (Opus 5.5) is a requires:'deep' model; its one site goes through llm/call.js.
     // ALERT_CLEAR: its default (Sonnet 5.5) is a requires:'deep' model; its one direct site floors max_tokens and reads the first text block.
-    expect(deepSafe).toEqual(['ADS_ADVISOR', 'ALERT_CLEAR', 'AUTO_DISPATCH_PROOFREADER', 'CONTENT', 'DEEP', 'EMAIL_CLASSIFY', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'REPORT_ASK', 'ROUTINE', 'SMS_OPERATIONAL_ACTIONS', 'SMS_SCHEDULING_DECIDE']);
+    expect(deepSafe).toEqual(['ADS_ADVISOR', 'ALERT_CLEAR', 'AUTO_DISPATCH_PROOFREADER', 'CONTENT', 'DEEP', 'EMAIL_CLASSIFY', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'REPORT_ASK', 'ROUTINE', 'SMS_OPERATIONAL_ACTIONS', 'SMS_SCHEDULING_DECIDE']);
     // Low effort rides the always-thinking default only; an Opus 4.8 rollback sends none.
     expect(MODELS.ROUTINE_EFFORT).toBe(MODELS.anthropicThinkingAlwaysOn(MODELS.ROUTINE) ? 'low' : undefined);
     const routineLeg = { provider: 'anthropic', model: MODELS.ROUTINE, ...(MODELS.ROUTINE_EFFORT ? { effort: MODELS.ROUTINE_EFFORT } : {}) };

@@ -4761,12 +4761,6 @@ const gates = {
   // fastCompleteInvoicedVisitsLive().
   fastCompleteInvoicedVisits: process.env.GATE_FAST_COMPLETE_INVOICED_VISITS === 'true',
 
-  // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28): a
-  // still-unsure scope after the Gemini -> OpenAI Sol escalation gets one
-  // more look from Claude Fable 5.1. Ships DARK: off unless exactly 'true'.
-  // This entry is for logGateStatus only: plant-engine.js's runReferee()
-  // reads GATE_PLANT_ID_REFEREE at call time via plantIdRefereeLive().
-  plantIdReferee: process.env.GATE_PLANT_ID_REFEREE === 'true',
   // Lawn visit assessment name referee (owner ruling 2026-09-29): this entry
   // is for logGateStatus only; lawn-visit-assessment.js reads
   // GATE_LAWN_ASSESSMENT_REFEREE at call time via lawnAssessmentRefereeLive().
@@ -6650,17 +6644,6 @@ function visitPrepPhotosLive() {
   return process.env.GATE_VISIT_PREP_PHOTOS === 'true';
 }
 
-// GATE_PLANT_ID_REFEREE read at CALL time — ships DARK, off unless exactly
-// 'true' (owner ruling 2026-09-28, plant engine only — the pest engine's
-// TEXT_POLICIES.photoIdVision ladder is untouched). The one canonical reader
-// for plant-engine.js's runReferee(): on, a scope still unsure after the
-// Gemini -> OpenAI Sol escalation gets one more look from Claude Fable 5.1 as
-// a deciding vote. Off, byte-identical to the Gemini -> Sol ladder — no third
-// call, no third-vote merge.
-function plantIdRefereeLive() {
-  return process.env.GATE_PLANT_ID_REFEREE === 'true';
-}
-
 // GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL read at CALL time — strict
 // `=== 'true'`, ships DARK (owner ruling 2026-09-30). The one canonical reader
 // for call-recording-processor.js's on-file verdict path: on, a web-form lead's
@@ -8187,7 +8170,6 @@ module.exports.smsVoiceProfilePinVersion = smsVoiceProfilePinVersion;
 module.exports.smsPromptB1Live = smsPromptB1Live;
 module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
-module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callCommercialDictatedBookingLive = callCommercialDictatedBookingLive;
 module.exports.callCommercialAssessmentBookingLive = callCommercialAssessmentBookingLive;
 module.exports.callExtractionSystemPromptLive = callExtractionSystemPromptLive;

@@ -29,7 +29,7 @@
 #                                         (default medium; never inherits
 #                                         ~/.codex/config.toml's effort)
 #   CODEX_REVIEW_MAX_DIFF_BYTES=0      — disable the diff-size cap (default 500000)
-#   CODEX_REVIEW_BLOCK_ROUNDS=3        — P0s block only the first N audited
+#   CODEX_REVIEW_BLOCK_ROUNDS=2        — P0s block only the first N audited
 #                                         pushes of a branch (0 = every push)
 #   SKIP_CLAUDE_FALLBACK=1             — Codex only; no Claude fallback auditor
 #   CLAUDE_REVIEW_TIMEOUT=900          — per-ref claude budget in seconds, BOTH
@@ -1666,7 +1666,7 @@ echo "────────────────────────�
 
 # ── Round cap: block on the first rounds only ────────────────────────────
 # Owner 2026-11-27 ("yes" to the blocks-report fixes): after
-# CODEX_REVIEW_BLOCK_ROUNDS audited pushes of a branch (default 3), its P0s
+# CODEX_REVIEW_BLOCK_ROUNDS audited pushes of a branch (default 2), its P0s
 # stop blocking. The audit still runs and prints every finding, and the
 # GitHub @codex round stays the merge bar (the merge guard needs a clean
 # verdict on the head). Why: branches looped for 25-47 local rounds before
@@ -1691,7 +1691,7 @@ prior_audited_rounds() {
   echo "$n"
 }
 
-ROUND_CAP="${CODEX_REVIEW_BLOCK_ROUNDS:-3}"
+ROUND_CAP="${CODEX_REVIEW_BLOCK_ROUNDS:-2}"
 ROUND_CAP_HIT=0
 ROUND_CAP_NOTE=""
 if [ "$P0_TOTAL" -gt 0 ] && [ "$ROUND_CAP" -gt 0 ] 2>/dev/null; then
