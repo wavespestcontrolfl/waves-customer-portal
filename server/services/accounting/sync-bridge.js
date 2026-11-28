@@ -3661,7 +3661,9 @@ async function syncPayrollRuns(conn, from, to, ctx) {
 
 function matchesSettlementKeyBase(entryKey, keyBase) {
   if (!entryKey || !keyBase) return false;
-  return entryKey === keyBase || entryKey.startsWith(`${keyBase}:rev-`);
+  return entryKey === keyBase
+    || entryKey.startsWith(`${keyBase}:rev-`)
+    || entryKey.startsWith(`${keyBase}:adj:`);
 }
 
 /**
@@ -3684,21 +3686,75 @@ function isBankCheckSupersededByMercury(bt, paymentRows) {
   return Boolean(btDay && paperDay && btDay < paperDay);
 }
 
+async function loadActiveSettlementBookedByCode(trx, activeEntryIds) {
+  const bookedByCode = new Map();
+  if (!activeEntryIds.length) return bookedByCode;
+  const lines = await trx('gl_journal_lines as l')
+    .join('gl_accounts as a', 'a.id', 'l.account_id')
+    .whereIn('l.entry_id', activeEntryIds)
+    .select('a.code', 'l.debit_cents', 'l.credit_cents');
+  for (const r of lines) {
+    const net = Number(r.debit_cents) - Number(r.credit_cents);
+    bookedByCode.set(r.code, (bookedByCode.get(r.code) || 0) + net);
+  }
+  return bookedByCode;
+}
+
+function buildSettlementReclassEntry(desired, keyBase, bookedByCode, revisionSeq, adjDate, accountsById) {
+  const bankTxnLine = (desired.lines || []).find((l) => l.bankTransactionId);
+  return buildDeltaEntry({
+    sourceType: desired.sourceType,
+    sourceId: desired.sourceId,
+    keyPrefix: `${keyBase}:adj`,
+    revisionSeq,
+    desiredLines: desired.lines,
+    bookedByCode,
+    adjustmentDate: adjDate,
+    basisScope: desired.basisScope || 'both',
+    reference: desired.reference || desired.sourceId,
+    memo: `Settlement account reclassification — ${desired.memo || desired.sourceId}`.slice(0, 500),
+    lineMeta: {
+      bankTransactionId: bankTxnLine?.bankTransactionId || null,
+      serviceLine: bankTxnLine?.serviceLine || null,
+    },
+    accountsById,
+  });
+}
+
 async function postOrRepostSettlement(trx, { keyBase, buildEntry, ctx, bucket }) {
   const existingRows = await trx('gl_journal_entries')
     .where('status', 'posted')
     .where((q) => {
       q.where('idempotency_key', keyBase)
-        .orWhere('idempotency_key', 'like', `${keyBase}:rev-%`);
+        .orWhere('idempotency_key', 'like', `${keyBase}:rev-%`)
+        .orWhere('idempotency_key', 'like', `${keyBase}:adj:%`);
     })
     .select('id', 'idempotency_key', 'reversed_by_entry_id');
 
-  if (existingRows.some((r) => !r.reversed_by_entry_id)) {
+  const activeRows = existingRows.filter((r) => !r.reversed_by_entry_id);
+  if (!activeRows.length) {
+    const revKey = existingRows.length === 0 ? keyBase : `${keyBase}:rev-${existingRows.length}`;
+    return postOrPreview(buildEntry(revKey), ctx, bucket, { connOverride: trx });
+  }
+
+  const desired = buildEntry(keyBase);
+  const bookedByCode = await loadActiveSettlementBookedByCode(trx, activeRows.map((r) => r.id));
+  if (!bookedByCode.size) {
     ctx.stats[bucket].skipped += 1;
     return false;
   }
-  const revKey = existingRows.length === 0 ? keyBase : `${keyBase}:rev-${existingRows.length}`;
-  return postOrPreview(buildEntry(revKey), ctx, bucket, { connOverride: trx });
+  const desiredDate = desired.entryDate;
+  const locked = ctx.caches?.lockedMonths?.has(desiredDate.slice(0, 7));
+  const today = etDateString(new Date());
+  const adjDate = locked && today >= desiredDate ? today : desiredDate;
+  const adjEntry = buildSettlementReclassEntry(
+    desired, keyBase, bookedByCode, existingRows.length, adjDate, ctx.caches?.accountsById,
+  );
+  if (!adjEntry) {
+    ctx.stats[bucket].skipped += 1;
+    return false;
+  }
+  return postOrPreview(adjEntry, ctx, bucket, { isAdjustment: true, connOverride: trx });
 }
 
 async function applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx) {
@@ -3720,7 +3776,13 @@ async function applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx)
       if (!reversedBt) return;
     }
   }
-  const posted = await postOrPreview(entry, ctx, 'payroll_settlements', { connOverride: trx });
+  const keyBase = `payroll-settle:net_pay:pp:${pp.id}`;
+  const posted = await postOrRepostSettlement(trx, {
+    keyBase,
+    buildEntry: (revKey) => ({ ...entry, idempotencyKey: revKey }),
+    ctx,
+    bucket: 'payroll_settlements',
+  });
   if (reversedBt && !posted && !ctx.dryRun) {
     ctx.stats.payroll_settlements.reversed = Math.max(0, ctx.stats.payroll_settlements.reversed - 1);
     const err = new Error('ABORT_SETTLEMENT_REPLACEMENT');
@@ -3731,7 +3793,7 @@ async function applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx)
 
 async function reconcileRevokedMercuryPayrollPayments(conn, from, to, ctx) {
   const revokedRows = await conn('gl_journal_entries as e')
-    .join('payroll_payments as pp', conn.raw("e.idempotency_key = 'payroll-settle:net_pay:pp:' || pp.id::text"))
+    .join('payroll_payments as pp', conn.raw("(e.idempotency_key = 'payroll-settle:net_pay:pp:' || pp.id::text OR e.idempotency_key LIKE 'payroll-settle:net_pay:pp:' || pp.id::text || ':rev-%' OR e.idempotency_key LIKE 'payroll-settle:net_pay:pp:' || pp.id::text || ':adj:%')"))
     .leftJoin('payroll_checks as pc', 'pc.id', 'pp.check_id')
     .where('e.status', 'posted')
     .whereNull('e.reversed_by_entry_id')
@@ -4100,7 +4162,7 @@ async function syncSubledgersToGl({ fromDate = null, toDate = null, dryRun = fal
       unmatched_contractor_vendors: [],
     }),
     payroll_runs: makeBucket({ reversed: 0, would_reverse: 0 }),
-    payroll_settlements: makeBucket({ reversed: 0, would_reverse: 0 }),
+    payroll_settlements: makeBucket({ adjusted: 0, would_adjust: 0, reversed: 0, would_reverse: 0 }),
   };
 
   const ctx = { dryRun: Boolean(dryRun), actorId, requestMeta, stats, conn, caches };
@@ -4149,6 +4211,7 @@ module.exports = {
   classifyTaxFilingSettlement,
   isBankCheckSupersededByMercury,
   matchesSettlementKeyBase,
+  buildSettlementReclassEntry,
   decideExpenseVendorAction,
   extractMerchantRefundTarget,
   recoverGrossExpenseCents,

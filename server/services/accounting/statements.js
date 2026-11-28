@@ -284,33 +284,76 @@ function allocateProportionalAdjustment(accountDeltas, totalAdjustmentCents, tar
   }
 }
 
-function accumulateNonCashEntryLine(rec, acct, row) {
+function accumulateFixedAssetEntryLine(rec, acct, row) {
   if (!acct) return;
+  const dr = Math.trunc(Number(row.debit_cents) || 0);
+  const cr = Math.trunc(Number(row.credit_cents) || 0);
   if (INCOME_STATEMENT_TYPES.has(acct.account_type)) {
     rec.hasIncomeLine = true;
+    const incomeEffect = acct.account_type === 'revenue' ? (cr - dr) : (dr - cr) * -1;
+    rec.incomeDelta += incomeEffect;
     return;
   }
-  const signed = sectionSignedBalanceCents(acct, row.debit_cents, row.credit_cents);
+  const signed = sectionSignedBalanceCents(acct, dr, cr);
   if (signed === 0) return;
-  if (acct.account_type === 'asset' && acct.sub_type === 'fixed_asset') {
+  if (acct.account_type === 'asset' && CASH_SUB_TYPES.has(acct.sub_type)) {
+    rec.cashDelta += signed;
+  } else if (acct.account_type === 'asset' && acct.sub_type === 'fixed_asset') {
     rec.fixedByAcct.set(acct.id, (rec.fixedByAcct.get(acct.id) || 0) + signed);
     rec.fixedTotal += signed;
+  } else if (acct.account_type === 'asset' && acct.sub_type === 'accum_depreciation') {
+    rec.accumDeprByAcct.set(acct.id, (rec.accumDeprByAcct.get(acct.id) || 0) + signed);
+    rec.accumDeprTotal += signed;
   } else if (acct.account_type === 'liability' || acct.account_type === 'equity') {
     rec.counterpartByAcct.set(acct.id, (rec.counterpartByAcct.get(acct.id) || 0) + signed);
     rec.counterpartTotal += signed;
   }
 }
 
+function applyFixedAssetDisposalAdjustment(rec, adjustmentsByAccountId, disclosures) {
+  // Remove fixed-asset cost write-off and accumulated-depreciation write-off from aggregate deltas.
+  for (const [acctId, d] of rec.fixedByAcct.entries()) {
+    adjustmentsByAccountId.set(acctId, (adjustmentsByAccountId.get(acctId) || 0) - d);
+  }
+  for (const [acctId, d] of rec.accumDeprByAcct.entries()) {
+    adjustmentsByAccountId.set(acctId, (adjustmentsByAccountId.get(acctId) || 0) - d);
+  }
+  // Net sale price = book value removed + recognized gain (or minus loss).
+  const saleProceeds = -(rec.fixedTotal + rec.accumDeprTotal) + rec.incomeDelta;
+  let investingProceeds = saleProceeds;
+  // If buyer retired/assumed debt directly on the disposal entry, exclude the noncash debt offset.
+  if (saleProceeds > 0 && rec.counterpartTotal < 0) {
+    const nonCashDebtRetired = Math.min(saleProceeds, Math.abs(rec.counterpartTotal));
+    allocateProportionalAdjustment(rec.counterpartByAcct, nonCashDebtRetired, adjustmentsByAccountId);
+    investingProceeds -= nonCashDebtRetired;
+    disclosures.push({
+      entry_id: rec.entry_id,
+      entry_date: rec.entry_date,
+      memo: rec.memo,
+      amount_cents: nonCashDebtRetired,
+    });
+  }
+  return {
+    disposalGainLossAddbackCents: -rec.incomeDelta,
+    disposalProceedsCents: investingProceeds,
+  };
+}
+
 /**
- * Pure: identify noncash investing/financing offsets (e.g. DR Vehicles / CR Loans Payable,
- * owner-contributed fixed assets, or partially financed equipment purchases) from entry-level
- * journal lines so ASC 230 investing and financing cash flows reflect actual cash movement only.
+ * Pure: analyze fixed-asset journal entries per ASC 230 to:
+ * 1. Exclude noncash financed/contributed fixed-asset acquisitions from investing & financing flows
+ *    and surface them in non_cash_investing_financing disclosures.
+ * 2. Separate fixed-asset disposals/sales from depreciation and acquisition deltas, removing
+ *    disposal gains/losses from operating income and reporting actual disposal proceeds under investing.
  */
-function computeNonCashInvestingFinancingAdjustments(accounts, fixedAssetEntryLines) {
+function computeFixedAssetCashFlowAdjustments(accounts, fixedAssetEntryLines) {
   const adjustmentsByAccountId = new Map();
   const disclosures = [];
+  let disposalGainLossAddbackCents = 0;
+  let disposalProceedsCents = 0;
+
   if (!Array.isArray(fixedAssetEntryLines) || !fixedAssetEntryLines.length) {
-    return { adjustmentsByAccountId, disclosures };
+    return { adjustmentsByAccountId, disclosures, disposalGainLossAddbackCents, disposalProceedsCents };
   }
 
   const acctById = new Map(accounts.map((a) => [a.id, a]));
@@ -324,17 +367,27 @@ function computeNonCashInvestingFinancingAdjustments(accounts, fixedAssetEntryLi
         entry_date: dateCellText(row.entry_date),
         memo: row.memo || null,
         hasIncomeLine: false,
+        incomeDelta: 0,
+        cashDelta: 0,
         fixedByAcct: new Map(),
+        accumDeprByAcct: new Map(),
         counterpartByAcct: new Map(),
         fixedTotal: 0,
+        accumDeprTotal: 0,
         counterpartTotal: 0,
       };
       byEntry.set(key, rec);
     }
-    accumulateNonCashEntryLine(rec, acctById.get(row.account_id), row);
+    accumulateFixedAssetEntryLine(rec, acctById.get(row.account_id), row);
   }
 
   for (const rec of byEntry.values()) {
+    if (rec.fixedTotal < 0 && (rec.hasIncomeLine || rec.accumDeprTotal !== 0)) {
+      const disp = applyFixedAssetDisposalAdjustment(rec, adjustmentsByAccountId, disclosures);
+      disposalGainLossAddbackCents += disp.disposalGainLossAddbackCents;
+      disposalProceedsCents += disp.disposalProceedsCents;
+      continue;
+    }
     if (rec.hasIncomeLine || rec.fixedTotal === 0 || rec.counterpartTotal === 0) continue;
     if (Math.sign(rec.fixedTotal) !== Math.sign(rec.counterpartTotal)) continue;
     const offset = Math.sign(rec.fixedTotal) * Math.min(Math.abs(rec.fixedTotal), Math.abs(rec.counterpartTotal));
@@ -350,18 +403,23 @@ function computeNonCashInvestingFinancingAdjustments(accounts, fixedAssetEntryLi
     });
   }
 
-  return { adjustmentsByAccountId, disclosures };
+  return { adjustmentsByAccountId, disclosures, disposalGainLossAddbackCents, disposalProceedsCents };
 }
 
 /**
  * Pure: Indirect Statement of Cash Flows over [from, to].
  * Reconciles Net Income -> Operating -> Investing -> Financing -> Ending Cash,
- * excluding noncash financed/contributed fixed-asset acquisitions per ASC 230.
+ * separating fixed-asset disposals and excluding noncash acquisitions per ASC 230.
  */
 function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to, nonCashEntries = [] } = {}) {
   const pnl = computeProfitAndLoss(accounts, periodSums, { from, to, basis: 'accrual' });
   const netIncomeCents = pnl.totals.net_income_cents;
-  const { adjustmentsByAccountId, disclosures } = computeNonCashInvestingFinancingAdjustments(accounts, nonCashEntries);
+  const {
+    adjustmentsByAccountId,
+    disclosures,
+    disposalGainLossAddbackCents,
+    disposalProceedsCents,
+  } = computeFixedAssetCashFlowAdjustments(accounts, nonCashEntries);
 
   let beginningCashCents = 0;
   let periodCashChangeCents = 0;
@@ -402,7 +460,15 @@ function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to,
     }
   }
 
-  const operatingCashCents = netIncomeCents + nonCashDepreciationCents
+  if (disposalProceedsCents !== 0) {
+    investing.push({
+      code: 'DISPOSAL',
+      name: 'Proceeds from sale of fixed assets',
+      amount_cents: disposalProceedsCents,
+    });
+  }
+
+  const operatingCashCents = netIncomeCents + nonCashDepreciationCents + disposalGainLossAddbackCents
     + workingCapital.reduce((s, r) => s + r.amount_cents, 0);
   const investingCashCents = investing.reduce((s, r) => s + r.amount_cents, 0);
   const financingCashCents = financing.reduce((s, r) => s + r.amount_cents, 0);
@@ -415,6 +481,7 @@ function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to,
     operating: {
       net_income_cents: netIncomeCents,
       depreciation_addback_cents: nonCashDepreciationCents,
+      disposal_gain_loss_adjustment_cents: disposalGainLossAddbackCents,
       working_capital: workingCapital,
       total_cents: operatingCashCents,
     },

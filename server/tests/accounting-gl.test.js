@@ -104,6 +104,7 @@ const {
   classifyTaxFilingSettlement,
   isBankCheckSupersededByMercury,
   matchesSettlementKeyBase,
+  buildSettlementReclassEntry,
   decideExpenseVendorAction,
   extractMerchantRefundTarget,
   recoverGrossExpenseCents,
@@ -3185,5 +3186,201 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     const duesPreview = await syncSubledgersToGl({ fromDate: '2026-12-01', toDate: '2026-12-31', dryRun: true, conn: duesConn });
     expect(duesPreview.payments.would_post).toBe(2);
     expect(duesPreview.payments.errors).toEqual([]);
+  });
+
+  test('Codex R12: separate asset disposals from depreciation/acquisitions in cash flows and reconcile settlement accounts after bank mapping edits', async () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    // 1. Selling a $10,000 vehicle with $2,000 accum depr for $9,000 cash ($1,000 gain)
+    //    must report $0 operating cash flow (not -$1,000) and +$9,000 investing proceeds (not +$10,000)
+    const chk = byCode.get(SYSTEM_CODES.CHECKING_PRIMARY);
+    const veh = byCode.get(SYSTEM_CODES.FIXED_ASSETS_VEHICLES);
+    const accum = byCode.get(SYSTEM_CODES.ACCUM_DEPRECIATION);
+    const otherRev = byCode.get(SYSTEM_CODES.REV_OTHER);
+    const lossAcct = byCode.get(SYSTEM_CODES.OPEX_UNCATEGORIZED);
+
+    const gainDisposalSums = accumulateEntries(accounts, [{
+      entryDate: '2026-07-01',
+      entryType: 'adjusting',
+      memo: 'Sell depreciated vehicle at gain',
+      lines: [
+        { accountCode: SYSTEM_CODES.CHECKING_PRIMARY, debitCents: 900000, creditCents: 0 },
+        { accountCode: SYSTEM_CODES.ACCUM_DEPRECIATION, debitCents: 200000, creditCents: 0 },
+        { accountCode: SYSTEM_CODES.FIXED_ASSETS_VEHICLES, debitCents: 0, creditCents: 1000000 },
+        { accountCode: SYSTEM_CODES.REV_OTHER, debitCents: 0, creditCents: 100000 },
+      ],
+    }]);
+    const gainCf = computeCashFlowStatement(accounts, gainDisposalSums, new Map(), {
+      from: '2026-07-01',
+      to: '2026-07-31',
+      nonCashEntries: [
+        { entry_id: 'je-disp-gain', entry_date: '2026-07-01', memo: 'Sell vehicle', account_id: chk.id, debit_cents: 900000, credit_cents: 0 },
+        { entry_id: 'je-disp-gain', entry_date: '2026-07-01', memo: 'Sell vehicle', account_id: accum.id, debit_cents: 200000, credit_cents: 0 },
+        { entry_id: 'je-disp-gain', entry_date: '2026-07-01', memo: 'Sell vehicle', account_id: veh.id, debit_cents: 0, credit_cents: 1000000 },
+        { entry_id: 'je-disp-gain', entry_date: '2026-07-01', memo: 'Sell vehicle', account_id: otherRev.id, debit_cents: 0, credit_cents: 100000 },
+      ],
+    });
+    expect(gainCf.operating.net_income_cents).toBe(100000);
+    expect(gainCf.operating.depreciation_addback_cents).toBe(0);
+    expect(gainCf.operating.disposal_gain_loss_adjustment_cents).toBe(-100000);
+    expect(gainCf.operating.total_cents).toBe(0);
+    expect(gainCf.investing.total_cents).toBe(900000);
+    expect(gainCf.summary.reconciles_to_cash).toBe(true);
+
+    // Loss disposal ($10k vehicle, $2k accum depr, sold for $6,500 cash -> $1,500 loss) -> $0 operating, +$6,500 investing
+    const lossDisposalSums = accumulateEntries(accounts, [{
+      entryDate: '2026-07-15',
+      entryType: 'adjusting',
+      memo: 'Sell vehicle at loss',
+      lines: [
+        { accountCode: SYSTEM_CODES.CHECKING_PRIMARY, debitCents: 650000, creditCents: 0 },
+        { accountCode: SYSTEM_CODES.ACCUM_DEPRECIATION, debitCents: 200000, creditCents: 0 },
+        { accountCode: SYSTEM_CODES.OPEX_UNCATEGORIZED, debitCents: 150000, creditCents: 0 },
+        { accountCode: SYSTEM_CODES.FIXED_ASSETS_VEHICLES, debitCents: 0, creditCents: 1000000 },
+      ],
+    }]);
+    const lossCf = computeCashFlowStatement(accounts, lossDisposalSums, new Map(), {
+      from: '2026-07-01',
+      to: '2026-07-31',
+      nonCashEntries: [
+        { entry_id: 'je-disp-loss', entry_date: '2026-07-15', memo: 'Sell vehicle at loss', account_id: chk.id, debit_cents: 650000, credit_cents: 0 },
+        { entry_id: 'je-disp-loss', entry_date: '2026-07-15', memo: 'Sell vehicle at loss', account_id: accum.id, debit_cents: 200000, credit_cents: 0 },
+        { entry_id: 'je-disp-loss', entry_date: '2026-07-15', memo: 'Sell vehicle at loss', account_id: lossAcct.id, debit_cents: 150000, credit_cents: 0 },
+        { entry_id: 'je-disp-loss', entry_date: '2026-07-15', memo: 'Sell vehicle at loss', account_id: veh.id, debit_cents: 0, credit_cents: 1000000 },
+      ],
+    });
+    expect(lossCf.operating.total_cents).toBe(0);
+    expect(lossCf.investing.total_cents).toBe(650000);
+    expect(lossCf.summary.reconciles_to_cash).toBe(true);
+
+    // 2. Reconcile settlement bank account after secondary Plaid account is mapped
+    const customChecking = {
+      id: '00000000-0000-4000-8000-000000001015',
+      code: '1015',
+      name: 'Secondary Checking',
+      account_type: 'asset',
+      sub_type: 'checking',
+      normal_balance: 'debit',
+      active: true,
+      is_system: false,
+      plaid_account_id: 'plaid-sec-chk',
+    };
+    const accountsWithCustom = [...accounts, customChecking];
+    const accountsById = new Map(accountsWithCustom.map((a) => [String(a.id).toLowerCase(), a]));
+    const btId = '00000000-0000-4000-8000-00000000b715';
+    const keyBase = `sales-tax-remit:bt:${btId}`;
+
+    // Originally booked to default 1010 Checking; after mapping Plaid account -> desired targets 1015
+    const origRemit = rules.buildSalesTaxRemittanceEntry({
+      sourceId: `bt-filing:${btId}`,
+      idempotencyKey: keyBase,
+      paymentDate: '2026-07-15',
+      amountCents: 100000,
+      periodLabel: '2026-06',
+      bankAccountCode: SYSTEM_CODES.CHECKING_PRIMARY,
+      bankTransactionId: btId,
+    });
+    const desiredRemit = rules.buildSalesTaxRemittanceEntry({
+      sourceId: `bt-filing:${btId}`,
+      idempotencyKey: keyBase,
+      paymentDate: '2026-07-15',
+      amountCents: 100000,
+      periodLabel: '2026-06',
+      bankAccountId: customChecking.id,
+      bankTransactionId: btId,
+    });
+    const bookedMap = new Map([
+      [SYSTEM_CODES.SALES_TAX_PAYABLE, 100000],
+      [SYSTEM_CODES.CHECKING_PRIMARY, -100000],
+    ]);
+    const reclassJe = buildSettlementReclassEntry(desiredRemit, keyBase, bookedMap, 1, '2026-07-15', accountsById);
+    expect(reclassJe).not.toBeNull();
+    expect(matchesSettlementKeyBase(reclassJe.idempotencyKey, keyBase)).toBe(true);
+    expect(validateJournalEntryInput(reclassJe).totalCents).toBe(100000);
+
+    // Default 1010 Checking clears back to $0, Secondary 1015 Checking carries -$1,000, 2100 Tax stays +$1,000
+    const remitSums = accumulateEntries(accountsWithCustom, [origRemit, reclassJe]);
+    expect(bal(remitSums, SYSTEM_CODES.CHECKING_PRIMARY)).toBe(0);
+    expect(naturalBalanceCents(customChecking, remitSums.get(customChecking.id)?.debitCents || 0, remitSums.get(customChecking.id)?.creditCents || 0)).toBe(-100000);
+    expect(bal(remitSums, SYSTEM_CODES.SALES_TAX_PAYABLE)).toBe(-100000);
+
+    // End-to-end dryRun sync previews would_adjust = 1 on the remapped tax filing settlement
+    const settleConn = (table) => {
+      const state = { isFilingQuery: false, isEntryKeyQuery: false };
+      const chain = {
+        leftJoin: () => chain,
+        join: (t) => {
+          if (String(t).startsWith('tax_filing_calendar')) state.isFilingQuery = true;
+          return chain;
+        },
+        where: () => chain,
+        whereIn: (col) => {
+          if (col === 'l.entry_id') state.isEntryKeyQuery = true;
+          return chain;
+        },
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(accountsWithCustom);
+          if (table === 'gl_accounts as g') {
+            return Promise.resolve([{
+              id: customChecking.id,
+              code: customChecking.code,
+              plaid_external_id: 'plaid-sec-chk',
+              account_label: 'Secondary Checking',
+            }]);
+          }
+          if (table === 'bank_transactions as bt' && state.isFilingQuery) {
+            return Promise.resolve([{
+              id: btId,
+              txn_date: '2026-07-15',
+              amount: '1000.00',
+              description: 'FL DOR DR-15',
+              account_label: 'Secondary Checking',
+              account_type: 'checking',
+              plaid_account_id: 'plaid-sec-chk',
+              matched_tax_filing_id: 'tfc-1',
+              filing_type: 'dr15_sales_tax',
+              filing_title: 'FL DR-15 Sales Tax',
+              filing_period_label: '2026-06',
+              filing_source_key: 'dr15:2026-06',
+            }]);
+          }
+          if (table === 'gl_journal_entries') {
+            return Promise.resolve([{ id: 'je-remit-orig', idempotency_key: keyBase, reversed_by_entry_id: null }]);
+          }
+          if (table === 'gl_journal_lines as l' && state.isEntryKeyQuery) {
+            return Promise.resolve([
+              { code: SYSTEM_CODES.SALES_TAX_PAYABLE, debit_cents: 100000, credit_cents: 0 },
+              { code: SYSTEM_CODES.CHECKING_PRIMARY, debit_cents: 0, credit_cents: 100000 },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return chain;
+    };
+    settleConn.raw = (sql) => sql;
+    settleConn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+    const settlePreview = await syncSubledgersToGl({ fromDate: '2026-07-01', toDate: '2026-07-31', dryRun: true, conn: settleConn });
+    expect(settlePreview.payroll_settlements.would_adjust).toBe(1);
+    expect(settlePreview.payroll_settlements.errors).toEqual([]);
   });
 });
