@@ -1922,7 +1922,7 @@ class SmartRebooker {
       // The single-row CAS found the row grouped AFTER the pre-read (codex
       // #3609 r13 P2): re-enter once so the fresh read routes through the
       // unit mover (whole-visit move) instead of moving the lone member.
-      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED' && !options._membershipRetried) {
+      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED' && !options._membershipRetried && !options.trx) {
         return this.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, _membershipRetried: true });
       }
       throw err;
@@ -1930,7 +1930,8 @@ class SmartRebooker {
   }
 
   async rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
-    const service = await db('scheduled_services').where({ id: serviceId }).first();
+    const readConn = options.trx || db;
+    const service = await readConn('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
@@ -2294,6 +2295,7 @@ class SmartRebooker {
     // a chosen-victim reschedule fails instead of re-entering the
     // membership check. Nothing committed on a 40P01 abort.
     const moveTrx = async (body) => {
+      if (options.trx) return body(options.trx);
       for (let attempt = 0; ; attempt += 1) {
         try {
           return await db.transaction(body);
@@ -2796,20 +2798,30 @@ class SmartRebooker {
       }
     });
 
-    // Tech-facing notice (tech-visit-notifications.js), post-commit,
-    // best-effort and NOT awaited (push delivery stays off the caller's
-    // response path): a tech change tells both techs; a same-tech
-    // date/window move tells the holder. options.actorId is the acting staff row when a
-    // staff surface made the move (so their own move stays silent); system
-    // callers are named by initiatedBy. options.suppressTechNotice: the unit
-    // mover's member moves — the canonical assignment right after sends the
-    // pair, so no intermediate "visit moved" card.
-    if (options.suppressTechNotice !== true) try {
+    const postCommit = () => this.finishSingleReschedulePostCommit({
+      serviceId, service, updates, originalDate, newDateStr, committedTechId, landedStatus, wasLive, lifecycleRewound, initiatedBy, options,
+    });
+    if (!options.trx) await postCommit();
+
+    const baseResult = {
+      success: true, originalDate, newDate, previousStatus: service.status, landedStatus, technicianId: committedTechId,
+      ...(options.trx ? { postCommit } : {}),
+    };
+    if (overlapWarned || offDayWarnings.size) {
+      const { slotOverlapWarning } = require('./scheduling/window-rules');
+      return {
+        ...baseResult,
+        warnings: [...(overlapWarned ? [arrivalWarning || slotOverlapWarning(newDateStr)] : []), ...offDayWarnings],
+      };
+    }
+    return baseResult;
+  }
+
+  notifyTechAfterSingleMove({ serviceId, service, updates, newDateStr, committedTechId, initiatedBy, options }) {
+    if (options.suppressTechNotice === true) return;
+    try {
       const techNotices = require('./tech-visit-notifications');
       const noticeActor = options.actorId || initiatedBy || null;
-      // A tech change pinned the prior tech in the CAS (so `service` names
-      // the real "from"); a same-tech move reads the holder off the
-      // committed row.
       const priorTechId = service.technician_id || null;
       const noticeTechChanged = Object.prototype.hasOwnProperty.call(options, 'technicianId')
         && (options.technicianId || null) !== priorTechId;
@@ -2817,8 +2829,6 @@ class SmartRebooker {
         void techNotices.notifyAssignmentChange({
           visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
           snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
-          // The old slot rides along so a move off today/tomorrow stays a
-          // today/tomorrow change on the Today page (Codex #5783 P2).
           previous: { date: service.scheduled_date, windowStart: service.window_start, windowEnd: service.window_end },
         });
       } else if (committedTechId) {
@@ -2842,28 +2852,16 @@ class SmartRebooker {
     } catch (noticeErr) {
       logger.warn(`[rebooker] tech notice failed for ${serviceId} (move already committed): ${noticeErr.message}`);
     }
+  }
 
-    // Live override post-commit cleanup:
-    //   1. The tech's tech_status row still points at this job
-    //      (en_route / on_site). Release it so the tech shows idle and
-    //      the next job can claim them. Best-effort outside the trx —
-    //      same pattern as track-transitions.markComplete; a failure
-    //      here leaves a stale pointer, not inconsistent job state.
-    //   2. A customer watching the public tracker would otherwise stay
-    //      on the stale en-route / on-site screen — push the refresh.
+  async finishSingleReschedulePostCommit({
+    serviceId, service, updates, originalDate, newDateStr, committedTechId, landedStatus, wasLive, lifecycleRewound, initiatedBy, options,
+  }) {
+    this.notifyTechAfterSingleMove({ serviceId, service, updates, newDateStr, committedTechId, initiatedBy, options });
     if (wasLive || lifecycleRewound) {
-      // lifecycleRewound without wasLive: a manual En Route tap advanced
-      // track_state (and pinned tech_status) without syncing status — the
-      // rewind above cleared the row, so the tech pointer and any open
-      // customer tracker need the same cleanup. This path lands the row on
-      // 'confirmed' either way, so the refresh status is unchanged.
       if (service.technician_id) {
         try {
-          await clearTechCurrentJob({
-            tech_id: service.technician_id,
-            current_job_id: serviceId,
-            status: 'idle',
-          });
+          await clearTechCurrentJob({ tech_id: service.technician_id, current_job_id: serviceId, status: 'idle' });
         } catch (err) {
           logger.error(`[rebooker] tech_status clear after live reschedule failed for ${serviceId}: ${err.message}`);
         }
@@ -2871,8 +2869,6 @@ class SmartRebooker {
       emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, landedStatus);
     }
 
-    // Keep a call-created follow-up (visit 2) spaced from its parent —
-    // shared with the admin schedule-edit path; best-effort outside the trx.
     const followUpReport = {};
     try {
       const shifted = options.skipCallFollowUpShift ? 0 : await shiftCallFollowUpsForParentMove({
@@ -2880,13 +2876,9 @@ class SmartRebooker {
         parentServiceId: serviceId,
         fromDate: originalDate,
         toDate: newDateStr,
-        // Same actor and suppression as the parent's own notice above.
         noticeActorId: options.actorId || initiatedBy || null,
         suppressTechNotice: options.suppressTechNotice === true,
-        // Reported so the route refresh below covers the child's own two
-        // days, not just the parent's (codex #4295 r1 P2).
         report: followUpReport,
-        // A grouped stop's member too (skipVisitSeam): its follow-up is its own row.
         shiftLive: automaticShiftLive(initiatedBy),
       });
       if (shifted > 0) {
@@ -2896,18 +2888,9 @@ class SmartRebooker {
       logger.error(`[rebooker] call follow-up shift failed for ${serviceId}: ${err.message}`);
     }
 
-    // Check escalation — best-effort, post-commit: the move is already
-    // committed, so a failure here must not be reported as a failed move
-    // (a grouped unit move would otherwise abort with its primary landed —
-    // codex #3609 r13 P1).
     try {
-      const count = await db('reschedule_log')
-        .where({ scheduled_service_id: serviceId })
-        .count('* as count').first();
-
+      const count = await db('reschedule_log').where({ scheduled_service_id: serviceId }).count('* as count').first();
       if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
-        // IDs only — never the customer's name in plaintext logs (AGENTS.md
-        // non-card PII rule; local codex audit).
         logger.warn(`[rebooker] service ${serviceId} (customer ${service.customer_id}) has been rescheduled ${count.count} times — needs manual review`);
         await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
           .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
@@ -2916,12 +2899,6 @@ class SmartRebooker {
       logger.warn(`[rebooker] escalation check failed for ${serviceId} (move already committed): ${escErr.message}`);
     }
 
-    // This writer moves the visit with a direct UPDATE, not
-    // transitionJobStatus — a LEGACY outbound-review row (pending before the
-    // 2026-08-11 review-hold removal) rescheduled here would otherwise move
-    // and message the customer while still unactivated: reminders unarmed,
-    // lead unconverted, review card open (Codex #3361 r2 P0). Best-effort
-    // post-commit, at-most-once via the helper's guarded stamp.
     if (options.pendingConfirmation !== true) {
       try {
         const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
@@ -2931,12 +2908,6 @@ class SmartRebooker {
       }
     }
 
-    // Visit-group seam (visit-group-scope.md §2): a moved child whose stop
-    // no longer matches its visit detaches; the remainder dissolves when one
-    // untouched row is left. A unit move (moveVisitAsUnit) passes
-    // skipVisitSeam and runs this once for every member AFTER they all
-    // moved — per member it would detach the first mover from siblings
-    // still on the old stop. Best-effort post-commit.
     if (!options.skipVisitSeam) {
       try {
         await require('./visit-groups').handleChildStopChanged(serviceId);
@@ -2945,11 +2916,6 @@ class SmartRebooker {
       }
     }
 
-    // A caller that mutates several visits in one pass (rain-out's per-job
-    // loop, a future batch) passes a shared Set here and flushes it once
-    // itself instead of every row awaiting its own repair/measurement pass
-    // (codex #4295 r2 P2) — a caller with no batch of its own keeps the
-    // inline refresh.
     const changeDates = [originalDate, newDateStr, ...(followUpReport.shifted || []).flatMap(row => [row.previousDate, row.date])];
     if (options.qualityDates) {
       for (const date of changeDates) if (date) options.qualityDates.add(date);
@@ -2959,20 +2925,6 @@ class SmartRebooker {
         dates: changeDates,
       });
     }
-
-    if (overlapWarned || offDayWarnings.size) {
-      const { slotOverlapWarning } = require('./scheduling/window-rules');
-      // previousStatus: the status the CAS matched — the row's real
-      // pre-move state; landedStatus: the one the move wrote (auto-dispatch
-      // reports and fences on it).
-      return {
-        success: true, originalDate, newDate, previousStatus: service.status, landedStatus, technicianId: committedTechId,
-        warnings: [...(overlapWarned ? [arrivalWarning || slotOverlapWarning(newDateStr)] : []), ...offDayWarnings],
-      };
-    }
-    // technicianId: the holder on the COMMITTED row — a caller that suppressed
-    // the per-move tech notice (options.suppressTechNotice) tells them itself.
-    return { success: true, originalDate, newDate, previousStatus: service.status, landedStatus, technicianId: committedTechId };
   }
 
   // Reschedule the dropped occurrence AND every future sibling in the

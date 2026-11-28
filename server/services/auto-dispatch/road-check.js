@@ -314,24 +314,32 @@ async function lookupGoogleLegs(legs, travel) {
   return mins.some((m) => m == null) ? null : mins;
 }
 
-// Real-road drive of a 2-stop source day: home -> first -> second -> home.
+// Real-road drive of a 2-stop source day: home -> first -> second -> home,
+// each leg priced at its own expected departure minute.
 async function sourceDayRoadDrive(sourceLegs, travel) {
-  if (!sourceLegs) return null;
-  const { date, startMin, home, first, second } = sourceLegs;
-  const leg = (from, to) => ({ date, from, to, departureMin: startMin });
-  const mins = await lookupGoogleLegs([leg(home, first), leg(first, second), leg(second, home)], travel);
+  if (!sourceLegs || !sourceLegs.date) return null;
+  const { date, firstStartMin, secondStartMin, home, first, second } = sourceLegs;
+  const dep1 = Number.isFinite(firstStartMin) ? firstStartMin : sourceLegs.startMin;
+  const dep2 = Number.isFinite(secondStartMin) ? secondStartMin : dep1;
+  if (!Number.isFinite(dep1) || !Number.isFinite(dep2)) return null;
+  const leg = (from, to, departureMin) => ({ date, from, to, departureMin });
+  const mins = await lookupGoogleLegs([leg(home, first, dep1), leg(first, second, dep2), leg(second, home, dep2)], travel);
   return mins ? round2(mins[0] + mins[1] + mins[2]) : null;
 }
 
 // Real-road added detour for a pair landing on the same destination day:
 // adjacent inserted stops change 4 legs; disjoint stops change two independent 3-leg detours.
 async function sameDestRoadAdded(destSpec, travel) {
-  if (!destSpec) return null;
+  if (!destSpec || !destSpec.date) return null;
   const { date, startMin, adjacent, disjoint } = destSpec;
   const leg = (from, to, dep = startMin) => ({ date, from, to, departureMin: dep });
   if (adjacent) {
-    const { prev, first, second, next } = adjacent;
-    const mins = await lookupGoogleLegs([leg(prev, first), leg(first, second), leg(second, next), leg(prev, next)], travel);
+    const { prev, first, second, next, firstStartMin, secondStartMin } = adjacent;
+    const dep1 = Number.isFinite(firstStartMin) ? firstStartMin : startMin;
+    const dep2 = Number.isFinite(secondStartMin) ? secondStartMin : dep1;
+    const mins = await lookupGoogleLegs([
+      leg(prev, first, dep1), leg(first, second, dep2), leg(second, next, dep2), leg(prev, next, dep1),
+    ], travel);
     return mins ? Math.max(0, round2(mins[0] + mins[1] + mins[2] - mins[3])) : null;
   }
   if (disjoint) {
@@ -356,14 +364,12 @@ async function pairAddedRoadDrive(pair, travel) {
 
 /**
  * Confirm the top qualifying 2-stop pair-clearing candidates on real Google roads.
- * Fails closed when road checks are enabled and Google returns no answer (never
- * commits a paired move on an unconfirmed straight-line estimate alone).
+ * Always requires real Google confirmation (minutes-only pair moves bypass the
+ * per-visit score bar and never commit on an unconfirmed straight-line estimate).
  */
 async function confirmPairOnRoads(pairs, { sourceLegs, floor, config, travel }) {
   if (!Array.isArray(pairs) || !pairs.length) return null;
-  if (!config || config.roadCheckEnabled !== true || !travel) {
-    return { pair: pairs[0], road: null };
-  }
+  if (!config || config.roadCheckEnabled !== true || !travel) return null;
   try {
     const sourceDrive = await sourceDayRoadDrive(sourceLegs, travel);
     if (sourceDrive == null) return null;

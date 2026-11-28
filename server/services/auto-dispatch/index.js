@@ -28,7 +28,7 @@ const southDayKept = require('./south-day-kept');
 const { resolveGeo } = require('./geo');
 const { scoreAppointmentPlacement } = require('./scoring');
 const {
-  applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
+  applyAutoDispatchMove, applyAutoDispatchPairMove, revalidatePlacement, unitMoveSize, previewGroupMove,
 } = require('./apply');
 const { startPointRefusal } = require('./start-point-fence');
 const { techChangeRefusal } = require('./keep-tech');
@@ -1810,8 +1810,10 @@ async function runPassTwo(run) {
 
 async function flushDeferredNoChanges(run) {
   if (!run.pairEligible || !run.pairEligible.size) return;
-  for (const [id, entry] of run.pairEligible) {
+  for (const [id, entry] of [...run.pairEligible.entries()]) {
+    run.pairEligible.delete(id);
     if (run.claimedPairIds.has(id)) continue;
+    run.claimedPairIds.add(id);
     await audit.logDecision(run.runId, {
       action: 'no_change',
       service: entry.service,
@@ -1865,54 +1867,76 @@ function pairMoveRefusal(attempt, err) {
   return null;
 }
 
-async function commitPairMove(entry, evalResult, checked, run) {
-  const { runId, config, totals, lockBoundary } = run;
-  const attempt = { fresh: evalResult, checked };
+function pairMoveConfig(entry, evalResult, checked, run) {
+  const { config, totals, lockBoundary } = run;
+  return {
+    ...config,
+    remainingChanges: config.maxChangesPerRun - totals.changed,
+    prefs: entry.prefs,
+    lockBoundary,
+    sourceConflict: null,
+    startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(entry.ctx, technicianId),
+    sourceDayTechnicianId: (evalResult.current && evalResult.current.day_technician_id) || null,
+    ...moveCheck.writeOptions(checked, { alternateCandidates: [] }),
+  };
+}
+
+async function logCommittedPairLeg(entry, evalResult, checked, result, run) {
+  const { runId, lockBoundary } = run;
+  const appliedAudit = buildAppliedPlacementAudit(evalResult, entry.service, entry.prefs, entry.ctx, lockBoundary, result);
+  const pairMeta = evalResult.audit.constraints && evalResult.audit.constraints.two_stop_pair_clear;
+  const note = pairMeta ? ` (2-stop day clear, -${pairMeta.pair_drive_saving_minutes} min drive)` : '';
+  await audit.logDecision(runId, {
+    action: 'changed',
+    service: entry.service,
+    reason_code: 'CHANGE_APPLIED',
+    reason_description: `${movedDescription(appliedAudit)}${note}`,
+    oldPlacement: {
+      date: toDateStr(entry.service.scheduled_date),
+      window_start: entry.service.window_start,
+      window_end: entry.service.window_end,
+      technician_id: entry.service.technician_id,
+      status: result.pre_status,
+    },
+    newPlacement: { ...appliedAudit.newPlacement, status: result.post_status },
+    scores: appliedAudit.scores,
+    prefsSnapshot: evalResult.audit.prefsSnapshot,
+    routeMetrics: { ...appliedAudit.routeMetrics, attempts: appliedAudit.attempts },
+    constraints: {
+      ...appliedAudit.constraints,
+      ...(pairMeta ? { two_stop_pair_clear: pairMeta } : {}),
+      ...(checked ? { proofreader: checked.audit } : {}),
+    },
+    appliedBy: 'auto_dispatch',
+  });
+}
+
+async function commitAtomicPair({ entryA, evalA, checkedA, entryB, evalB, checkedB, sourceTechId, sourceDate, verifySourceInTrx, run }) {
+  const { runId, totals } = run;
   try {
-    const result = await applyAutoDispatchMove(entry.service, evalResult.best, runId, {
-      ...config,
-      remainingChanges: config.maxChangesPerRun - totals.changed,
-      prefs: entry.prefs,
-      lockBoundary,
-      sourceConflict: null,
-      startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(entry.ctx, technicianId),
-      sourceDayTechnicianId: (evalResult.current && evalResult.current.day_technician_id) || null,
-      ...moveCheck.writeOptions(checked, { alternateCandidates: [] }),
-    });
-    totals.changed += result.movedCount || 1;
+    const { resultA, resultB } = await applyAutoDispatchPairMove(
+      { service: entryA.service, best: evalA.best, config: pairMoveConfig(entryA, evalA, checkedA, run) },
+      { service: entryB.service, best: evalB.best, config: pairMoveConfig(entryB, evalB, checkedB, run) },
+      runId,
+      { sourceTechId, sourceDate, verifySourceInTrx },
+    );
+    totals.changed += (resultA.movedCount || 1) + (resultB.movedCount || 1);
     run.southDays.invalidate();
-    const appliedAudit = buildAppliedPlacementAudit(evalResult, entry.service, entry.prefs, entry.ctx, lockBoundary, result);
-    const pairMeta = evalResult.audit.constraints && evalResult.audit.constraints.two_stop_pair_clear;
-    const note = pairMeta ? ` (2-stop day clear, -${pairMeta.pair_drive_saving_minutes} min drive)` : '';
-    await audit.logDecision(runId, {
-      action: 'changed',
-      service: entry.service,
-      reason_code: 'CHANGE_APPLIED',
-      reason_description: `${movedDescription(appliedAudit)}${note}`,
-      oldPlacement: {
-        date: toDateStr(entry.service.scheduled_date),
-        window_start: entry.service.window_start,
-        window_end: entry.service.window_end,
-        technician_id: entry.service.technician_id,
-        status: result.pre_status,
-      },
-      newPlacement: { ...appliedAudit.newPlacement, status: result.post_status },
-      scores: appliedAudit.scores,
-      prefsSnapshot: evalResult.audit.prefsSnapshot,
-      routeMetrics: { ...appliedAudit.routeMetrics, attempts: appliedAudit.attempts },
-      constraints: {
-        ...appliedAudit.constraints,
-        ...(pairMeta ? { two_stop_pair_clear: pairMeta } : {}),
-        ...(checked ? { proofreader: checked.audit } : {}),
-      },
-      appliedBy: 'auto_dispatch',
-    });
+    run.claimedPairIds.add(String(entryA.service.id));
+    run.claimedPairIds.add(String(entryB.service.id));
+    await logCommittedPairLeg(entryA, evalA, checkedA, resultA, run);
+    await logCommittedPairLeg(entryB, evalB, checkedB, resultB, run);
     return true;
   } catch (applyErr) {
-    run.claimedPairIds.add(String(entry.service.id));
-    const notAFailure = pairMoveRefusal(attempt, applyErr);
-    if (notAFailure) await logOrdinaryRefusal(entry, attempt, run, notAFailure);
-    else await recordApplyFailure(entry, evalResult, applyErr, run);
+    const attemptA = { fresh: evalA, checked: checkedA };
+    const notAFailure = pairMoveRefusal(attemptA, applyErr);
+    if (notAFailure) {
+      run.claimedPairIds.add(String(entryA.service.id));
+      await logOrdinaryRefusal(entryA, attemptA, run, notAFailure);
+    } else {
+      run.claimedPairIds.add(String(entryA.service.id));
+      await recordApplyFailure(entryA, evalA, applyErr, run);
+    }
     return false;
   }
 }
@@ -1923,7 +1947,7 @@ function pairClearHelpers() {
     checkProofreader: checkPairProofreader,
     preferencesChanged,
     buildPlacementAudit,
-    commitPairMove,
+    commitAtomicPair,
     logDryRunPair: (service, evalResult, pair, road, run) => logDryRunRecommendation(
       run, service, evalResult, ` (2-stop day clear, -${road ? road.saving_minutes : pair.saving} min drive)`,
     ),
