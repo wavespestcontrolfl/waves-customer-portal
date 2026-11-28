@@ -108,18 +108,37 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
   };
 }
 
+function emitScopedHoldJobUpdate(io, payload, previousTechnicianId) {
+  const { techRoom, technicianRoomsLive } = require('../sockets/tech-rooms');
+  const techPing = { job_id: payload.job_id, status: payload.status, tech_id: payload.tech_id || null };
+  const targetTechs = new Set([payload.tech_id, previousTechnicianId].filter(Boolean).map(String));
+  const sockets = io.sockets?.sockets?.values?.();
+  if (sockets) {
+    for (const socket of sockets) {
+      if (socket?.disconnected) continue;
+      if (socket.userType === 'admin') socket.emit(ADMIN_EVENT, payload);
+      else if (socket.userType === 'technician' && targetTechs.has(String(socket.userId))) socket.emit(ADMIN_EVENT, techPing);
+    }
+    return;
+  }
+  if (technicianRoomsLive()) io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
+  for (const id of targetTechs) io.to(techRoom(id)).emit(ADMIN_EVENT, techPing);
+}
+
 // `previousTechnicianId`: the technician who held the visit before this change
 // (null = it was unassigned). A caller that reassigns passes it so the old
 // technician's own screen hears the stop left. Left out (undefined), the emit
 // point cannot tell, so with GATE_TECH_LOGIN_PRIVACY on every other connected
 // technician room gets a ping with no payload (sockets/tech-rooms.js).
-async function emitDispatchJobUpdate({ jobId, actorId, previousDate, previousTechnicianId, qualityDates = null }) {
+async function emitDispatchJobUpdate({ jobId, actorId, previousDate, previousTechnicianId, qualityDates = null, verifiedAdminsOnly = false }) {
   const payload = await buildDispatchJobUpdatePayload(jobId, actorId);
   if (!payload) return null;
 
   const io = getIo();
   if (!io) {
     logger.warn('[dispatch-assignment] io not initialized; skipping dispatch:job_update');
+  } else if (verifiedAdminsOnly) {
+    emitScopedHoldJobUpdate(io, payload, previousTechnicianId);
   } else {
     io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
     // GATE_TECH_LOGIN_PRIVACY: ADMIN_ROOM is office-only with the gate on. The

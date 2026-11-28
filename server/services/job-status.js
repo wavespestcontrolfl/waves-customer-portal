@@ -141,12 +141,14 @@ const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
 const CUSTOMER_ETA_TIMEOUT_MS = 750;
 
 function enclosingCommitPromise(trx) {
-  const rootCommit = require('../utils/trx-commit-promise').commitPromiseOf(trx);
-  if (!rootCommit) return null;
-  if (trx && trx.parentTransaction && trx.executionPromise) {
-    return Promise.all([trx.executionPromise, rootCommit]);
+  const promises = [];
+  let cur = trx;
+  while (cur) {
+    if (cur.executionPromise) promises.push(cur.executionPromise);
+    cur = cur.parentTransaction;
   }
-  return rootCommit;
+  if (!promises.length) return null;
+  return promises.length === 1 ? promises[0] : Promise.all(promises);
 }
 
 // Strictly-increasing claim timestamps within this process — the sweep

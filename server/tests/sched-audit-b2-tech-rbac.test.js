@@ -467,23 +467,23 @@ describe('P1-2 & P2: visit-hold alert cleanup, release guards, job-status holdFe
     await jest.isolateModulesAsync(async () => {
       jest.doMock('../models/db', () => jest.fn());
       jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/technician-capabilities', () => ({
+        stateOf: jest.fn(() => 'on'),
+        inactiveCapabilitiesForServices: jest.fn(async () => [{ technician_id: 'tech-a' }]),
+      }));
       jest.doMock('../services/technician-eligibility', () => ({
         applyAssignable: (q) => q,
         absentTechDays: jest.fn(async () => new Set()),
       }));
       jest.doMock('../services/scheduling/line-technician', () => ({
-        serviceLineFor: jest.fn(async (_c, { serviceType }) => ({
-          line: /rodent/i.test(String(serviceType || '')) ? 'rodent' : 'general',
-        })),
+        serviceLineFor: jest.fn(async () => ({ line: 'general' })),
         lineMapLive: () => false,
         pickLineTechnician: jest.fn(),
       }));
       jest.doMock('../services/scheduling/pick-technician', () => ({ pickTechnicianActive: () => false }));
 
-      const conn = jest.fn((table) => {
-        const rows = table === 'technicians'
-          ? [{ id: 'tech-a', name: 'Tech A' }, { id: 'tech-b', name: 'Tech B' }]
-          : [{ technician_id: 'tech-a', service_category: 'rodent', capability_level: 'off', active: false }];
+      const conn = jest.fn(() => {
+        const rows = [{ id: 'tech-a', name: 'Tech A' }, { id: 'tech-b', name: 'Tech B' }];
         const c = {};
         c.where = jest.fn(() => c);
         c.whereIn = jest.fn(() => c);
@@ -498,6 +498,46 @@ describe('P1-2 & P2: visit-hold alert cleanup, release guards, job-status holdFe
         serviceAddons: [{ serviceType: 'Rodent Trapping' }],
       });
       expect(picked).toEqual({ technicianId: 'tech-b', result: 'assigned', reason: 'only_assignable' });
+    });
+  });
+
+  test('verifiedAdminsOnly hold broadcast skips unrelated technician sockets even when GATE_TECH_LOGIN_PRIVACY is off', async () => {
+    await jest.isolateModulesAsync(async () => {
+      const adminSocket = { userType: 'admin', userId: 'admin-1', disconnected: false, emit: jest.fn() };
+      const assignedTechSocket = { userType: 'technician', userId: 'tech-1', disconnected: false, emit: jest.fn() };
+      const otherTechSocket = { userType: 'technician', userId: 'tech-2', disconnected: false, emit: jest.fn() };
+      const io = {
+        to: jest.fn(() => ({ emit: jest.fn() })),
+        sockets: { sockets: new Map([['s1', adminSocket], ['s2', assignedTechSocket], ['s3', otherTechSocket]]) },
+      };
+      const fakeDb = jest.fn(() => ({
+        leftJoin: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          job_id: 'job-hold-1',
+          customer_id: 'cust-1',
+          cust_first_name: 'Pat',
+          first_name: 'Pat',
+          last_name: 'Sample',
+          internal_notes: 'Gate code 1234',
+          status: 'confirmed',
+          tech_id: 'tech-1',
+          scheduled_date: '2026-12-01',
+        }),
+      }));
+      fakeDb.raw = jest.fn((s) => s);
+      jest.doMock('../models/db', () => fakeDb);
+      jest.doMock('../sockets', () => ({ getIo: () => io }));
+      jest.doMock('../sockets/tech-rooms', () => ({ techRoom: (id) => `tech:${id}`, technicianRoomsLive: () => false, pingTechnicianRooms: jest.fn() }));
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/scheduling/quality-after-change', () => ({ refreshScheduleQualityAfterChange: jest.fn().mockResolvedValue(null) }));
+
+      const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+      await emitDispatchJobUpdate({ jobId: 'job-hold-1', actorId: 'admin-1', verifiedAdminsOnly: true });
+      expect(adminSocket.emit).toHaveBeenCalledWith('dispatch:job_update', expect.objectContaining({ customer_name: 'Pat S.', internal_notes: 'Gate code 1234' }));
+      expect(assignedTechSocket.emit).toHaveBeenCalledWith('dispatch:job_update', { job_id: 'job-hold-1', status: 'confirmed', tech_id: 'tech-1' });
+      expect(otherTechSocket.emit).not.toHaveBeenCalled();
     });
   });
 

@@ -6770,7 +6770,7 @@ router.post('/:id/hold', async (req, res, next) => {
       visitId: req.params.id, note: req.body?.note, heldBy: req.technicianId || null, scopeReq: req, conn: db,
     });
     if (result.changed) {
-      try { await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId }); } catch {}
+      try { await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId, verifiedAdminsOnly: true }); } catch {}
     }
     return res.json({ success: true, changed: result.changed, heldAt: result.heldAt });
   } catch (err) {
@@ -6785,7 +6785,7 @@ router.post('/:id/hold/release', requireAdmin, async (req, res, next) => {
     if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
     const result = await visitHoldService.releaseVisitHold({ visitId: req.params.id, conn: db });
     if (result.changed) {
-      try { await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId }); } catch {}
+      try { await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId, verifiedAdminsOnly: true }); } catch {}
     }
     return res.json({ success: true, changed: result.changed });
   } catch (err) {
@@ -25318,7 +25318,8 @@ router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-function sanitizeEstimatePostureForTech(deposit, payment) {
+function sanitizeEstimatePostureForTech(req, deposit, payment) {
+  if (!isTechnicianRequest(req)) return {};
   return {
     deposit: deposit
       ? { payerBilled: Boolean(deposit.payerBilled), required: Boolean(deposit.required) }
@@ -25443,7 +25444,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         deposit,
         payment,
       }),
-      ...(isTechnicianRequest(req) ? sanitizeEstimatePostureForTech(deposit, payment) : {}),
+      ...sanitizeEstimatePostureForTech(req, deposit, payment),
       // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
@@ -29509,12 +29510,12 @@ router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
     const { date } = req.query;
     if (!date) return res.status(400).json({ error: 'date required' });
 
-    // Basic slot finder: check live non-held, non-cancelled services on that date
+    // Basic slot finder: check live non-held, non-cancelled services (including active reservations) on that date
     const existing = await require('../services/visit-hold').excludeHeld(
       db('scheduled_services')
         .where({ scheduled_date: date })
         .whereNotIn('status', ['cancelled', 'rescheduled'])
-        .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at')),
+        .where((q) => q.whereNotNull('customer_id').orWhere('reservation_expires_at', '>', db.fn.now())),
       'scheduled_services'
     ).select('window_start', 'window_end', 'estimated_duration_minutes');
 
@@ -29525,9 +29526,9 @@ router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
       return { startMin: sh * 60 + sm, endMin: sh * 60 + sm + dur };
     });
 
-    // Find open 30-min windows between 8 AM (480) and 5 PM (1020)
+    // Find open on-the-hour windows between 8 AM (480) and 5 PM (1020)
     const candidates = [];
-    for (let min = 480; min <= 1020; min += 30) {
+    for (let min = 480; min <= 1020; min += 60) {
       const conflicts = busySlots.filter(b => min < b.endMin && min + 30 > b.startMin).length;
       candidates.push({ min, conflicts });
     }
