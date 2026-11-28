@@ -50,7 +50,7 @@ function money(n) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export default function MobileCustomerDetailSheet({ customerId, focusServiceId = null, onClose }) {
+export default function MobileCustomerDetailSheet({ customerId, focusServiceId = null, adminActions = true, onClose }) {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -84,7 +84,6 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
   // payments, cards, ... } — note camelCase on customer + nested address.
   const c = data?.customer || null;
   const payments = data?.payments || [];
-  const cards = data?.cards || [];
 
   // Visit stats come from the server (data.visitStats): distinct days with a
   // completed service record, over the whole history. Counting the capped
@@ -127,15 +126,17 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
         >
           ✕
         </button>
-        <button
-          type="button"
-          onClick={() => { if (c?.id) navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`); }}
-          aria-label="Edit customer"
-          className="rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
-          style={{ height: 44, padding: '0 26px', fontSize: 15 }}
-        >
-          Edit
-        </button>
+        {adminActions && (
+          <button
+            type="button"
+            onClick={() => { if (c?.id) navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`); }}
+            aria-label="Edit customer"
+            className="rounded-full bg-zinc-900 text-white font-medium u-focus-ring"
+            style={{ height: 44, padding: '0 26px', fontSize: 15 }}
+          >
+            Edit
+          </button>
+        )}
       </div>
 
       <div className="px-5 py-6 mx-auto" style={{ maxWidth: 560 }}>
@@ -164,17 +165,18 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
               <StatCell label="First visit" value={firstVisitAt ? fmtMonthYear(firstVisitAt) : '—'} />
             </section>
 
-            {/* View full profile — the sheet is a quick in-context card; the
-                full Customer 360 (health, tier, history, intelligence) lives
-                on /admin/customers, opened via the customerId param. */}
-            <button
-              type="button"
-              onClick={() => navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`)}
-              className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary font-medium u-focus-ring"
-              style={{ padding: '13px 20px', fontSize: 15, marginBottom: 24 }}
-            >
-              View full profile
-            </button>
+            {/* View full profile — office-only (/admin/customers is admin-only
+                and redirects technicians). */}
+            {adminActions && (
+              <button
+                type="button"
+                onClick={() => navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`)}
+                className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary font-medium u-focus-ring"
+                style={{ padding: '13px 20px', fontSize: 15, marginBottom: 24 }}
+              >
+                View full profile
+              </button>
+            )}
 
             {/* Phone */}
             {c.phone && (
@@ -199,139 +201,163 @@ export default function MobileCustomerDetailSheet({ customerId, focusServiceId =
               </ContactRow>
             )}
 
-            {/* Payment on file */}
-            <Section title="Payment on file" bottomBorder>
-              {cards.length === 0 ? (
-                <div className="text-ink-tertiary" style={{ fontSize: 15 }}>None saved</div>
-              ) : (
-                cards.map((pm) => (
-                  <div
-                    key={pm.id}
-                    className="flex items-center gap-3 py-2"
-                    style={{ fontSize: 17 }}
-                  >
-                    <div
-                      className="inline-flex items-center justify-center rounded-sm bg-white border-hairline border-zinc-200 text-ink-primary font-medium"
-                      style={{ width: 40, height: 28, fontSize: 11, letterSpacing: '0.04em' }}
-                    >
-                      {(pm.card_brand || '').toUpperCase().slice(0, 5)}
-                    </div>
-                    <div className="flex-1">
-                      {(pm.card_brand || 'Card')[0].toUpperCase() + (pm.card_brand || 'card').slice(1)} {pm.last_four}
-                      {pm.is_default && <span className="text-ink-tertiary" style={{ fontSize: 13 }}> · default</span>}
-                    </div>
-                  </div>
-                ))
-              )}
-            </Section>
+            {/* Payment on file — office-only and only rendered when cards were
+                actually returned (never falsely prints "None saved" when omitted). */}
+            <PaymentOnFileSection adminActions={adminActions} rawCards={data?.cards} />
 
-            {/* Transactions */}
-            {txns.length > 0 && (
-              <Section title="Transactions" bottomBorder>
-                {txns.map((p) => (
-                  <div key={p.id} className="flex items-start gap-3 py-3 border-b border-hairline border-zinc-100 last:border-b-0">
-                    <div
-                      className="inline-flex items-center justify-center rounded-sm bg-white border border-hairline border-zinc-200 text-ink-tertiary flex-shrink-0"
-                      style={{ width: 40, height: 40 }}
-                    >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
-                        <rect x="2" y="5" width="20" height="14" rx="2" />
-                        <line x1="2" y1="10" x2="22" y2="10" />
-                      </svg>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-ink-primary" style={{ fontSize: 16, fontWeight: 500 }}>
-                        {money(p.amount)} {p.status === 'refunded' ? 'Refund at' : 'Purchase at'} Waves Pest Control
-                      </div>
-                      <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
-                        {fmtMonthDay(p.payment_date || p.created_at)}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </Section>
-            )}
+            {/* Transactions — office-only money history */}
+            <CustomerTransactionsSection adminActions={adminActions} txns={txns} />
 
-            {/* Appointments */}
-            <section style={{ paddingTop: 24 }}>
-              <h2 className="text-ink-primary" style={{ fontSize: 20, fontWeight: 500, margin: '0 0 14px' }}>
-                Appointments
-              </h2>
-              <div className="flex items-center border-b border-hairline border-zinc-200" style={{ marginBottom: 14 }}>
-                {['upcoming', 'previous'].map((k) => (
-                  <button
-                    key={k}
-                    type="button"
-                    onClick={() => setApptTab(k)}
-                    className={apptTab === k ? 'text-ink-primary' : 'text-ink-secondary'}
-                    style={{
-                      padding: '10px 14px', fontSize: 16, fontWeight: apptTab === k ? 700 : 500,
-                      borderBottom: apptTab === k ? '2px solid #18181B' : '2px solid transparent',
-                      background: 'none',
-                    }}
-                  >
-                    {k === 'upcoming' ? 'Upcoming' : 'Previous'}
-                  </button>
-                ))}
-              </div>
-              {apptList.length === 0 ? (
-                <div className="text-ink-tertiary py-4" style={{ fontSize: 15 }}>
-                  No {apptTab === 'upcoming' ? 'upcoming' : 'previous'} appointments
-                </div>
-              ) : (
-                apptList.slice(0, 8).map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex items-start gap-3 py-3 border-b border-hairline border-zinc-100 last:border-b-0"
-                    style={{ borderLeft: '3px solid #1B2C5B', paddingLeft: 12, marginLeft: -12 }}
-                  >
-                    <div
-                      className="inline-flex items-center justify-center rounded-sm bg-white border border-hairline border-zinc-200 text-ink-tertiary flex-shrink-0"
-                      style={{ width: 40, height: 40 }}
-                    >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
-                        <rect x="3" y="4" width="18" height="18" rx="2" />
-                        <line x1="3" y1="10" x2="21" y2="10" />
-                        <line x1="8" y1="2" x2="8" y2="6" />
-                        <line x1="16" y1="2" x2="16" y2="6" />
-                      </svg>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="text-ink-primary line-clamp-2" style={{ fontSize: 16, fontWeight: 500 }}>
-                          {s.service_type || 'Appointment'}
-                        </div>
-                        {s.is_recurring && (
-                          <span
-                            className="inline-flex items-center rounded-full bg-white border border-hairline border-zinc-200 text-ink-secondary flex-shrink-0"
-                            style={{ fontSize: 12, padding: '4px 10px', fontWeight: 500 }}
-                          >
-                            Repeating
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
-                        {fmtApptDate(s.scheduled_date, s.window_start)}
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-              {apptList.length > 8 && (
-                <button
-                  type="button"
-                  onClick={() => navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`)}
-                  className="text-ink-primary"
-                  style={{ fontSize: 16, fontWeight: 500, marginTop: 16, padding: '8px 0', background: 'none' }}
-                >
-                  View all
-                </button>
-              )}
-            </section>
+            <CustomerAppointmentsSection
+              apptTab={apptTab}
+              setApptTab={setApptTab}
+              apptList={apptList}
+              adminActions={adminActions}
+              onViewAll={() => navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`)}
+            />
           </>
         )}
       </div>
     </div>
+  );
+}
+
+function CustomerTransactionsSection({ adminActions, txns }) {
+  if (!adminActions || txns.length === 0) return null;
+  return (
+    <Section title="Transactions" bottomBorder>
+      {txns.map((p) => (
+        <div key={p.id} className="flex items-start gap-3 py-3 border-b border-hairline border-zinc-100 last:border-b-0">
+          <div
+            className="inline-flex items-center justify-center rounded-sm bg-white border border-hairline border-zinc-200 text-ink-tertiary flex-shrink-0"
+            style={{ width: 40, height: 40 }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+              <rect x="2" y="5" width="20" height="14" rx="2" />
+              <line x1="2" y1="10" x2="22" y2="10" />
+            </svg>
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-ink-primary" style={{ fontSize: 16, fontWeight: 500 }}>
+              {money(p.amount)} {p.status === 'refunded' ? 'Refund at' : 'Purchase at'} Waves Pest Control
+            </div>
+            <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
+              {fmtMonthDay(p.payment_date || p.created_at)}
+            </div>
+          </div>
+        </div>
+      ))}
+    </Section>
+  );
+}
+
+function PaymentOnFileSection({ adminActions, rawCards }) {
+  if (!adminActions || !Array.isArray(rawCards)) return null;
+  return (
+    <Section title="Payment on file" bottomBorder>
+      {rawCards.length === 0 ? (
+        <div className="text-ink-tertiary" style={{ fontSize: 15 }}>None saved</div>
+      ) : (
+        rawCards.map((pm) => (
+          <div
+            key={pm.id}
+            className="flex items-center gap-3 py-2"
+            style={{ fontSize: 17 }}
+          >
+            <div
+              className="inline-flex items-center justify-center rounded-sm bg-white border-hairline border-zinc-200 text-ink-primary font-medium"
+              style={{ width: 40, height: 28, fontSize: 11, letterSpacing: '0.04em' }}
+            >
+              {(pm.card_brand || '').toUpperCase().slice(0, 5)}
+            </div>
+            <div className="flex-1">
+              {(pm.card_brand || 'Card')[0].toUpperCase() + (pm.card_brand || 'card').slice(1)} {pm.last_four}
+              {pm.is_default && <span className="text-ink-tertiary" style={{ fontSize: 13 }}> · default</span>}
+            </div>
+          </div>
+        ))
+      )}
+    </Section>
+  );
+}
+
+function CustomerAppointmentsSection({ apptTab, setApptTab, apptList, adminActions, onViewAll }) {
+  return (
+    <section style={{ paddingTop: 24 }}>
+      <h2 className="text-ink-primary" style={{ fontSize: 20, fontWeight: 500, margin: '0 0 14px' }}>
+        Appointments
+      </h2>
+      <div className="flex items-center border-b border-hairline border-zinc-200" style={{ marginBottom: 14 }}>
+        {['upcoming', 'previous'].map((k) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setApptTab(k)}
+            className={apptTab === k ? 'text-ink-primary' : 'text-ink-secondary'}
+            style={{
+              padding: '10px 14px', fontSize: 16, fontWeight: apptTab === k ? 700 : 500,
+              borderBottom: apptTab === k ? '2px solid #18181B' : '2px solid transparent',
+              background: 'none',
+            }}
+          >
+            {k === 'upcoming' ? 'Upcoming' : 'Previous'}
+          </button>
+        ))}
+      </div>
+      {apptList.length === 0 ? (
+        <div className="text-ink-tertiary py-4" style={{ fontSize: 15 }}>
+          No {apptTab === 'upcoming' ? 'upcoming' : 'previous'} appointments
+        </div>
+      ) : (
+        apptList.slice(0, 8).map((s) => (
+          <div
+            key={s.id}
+            className="flex items-start gap-3 py-3 border-b border-hairline border-zinc-100 last:border-b-0"
+            style={{ borderLeft: '3px solid #1B2C5B', paddingLeft: 12, marginLeft: -12 }}
+          >
+            <div
+              className="inline-flex items-center justify-center rounded-sm bg-white border border-hairline border-zinc-200 text-ink-tertiary flex-shrink-0"
+              style={{ width: 40, height: 40 }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+                <rect x="3" y="4" width="18" height="18" rx="2" />
+                <line x1="3" y1="10" x2="21" y2="10" />
+                <line x1="8" y1="2" x2="8" y2="6" />
+                <line x1="16" y1="2" x2="16" y2="6" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-start justify-between gap-2">
+                <div className="text-ink-primary line-clamp-2" style={{ fontSize: 16, fontWeight: 500 }}>
+                  {s.service_type || 'Appointment'}
+                </div>
+                {s.is_recurring && (
+                  <span
+                    className="inline-flex items-center rounded-full bg-white border border-hairline border-zinc-200 text-ink-secondary flex-shrink-0"
+                    style={{ fontSize: 12, padding: '4px 10px', fontWeight: 500 }}
+                  >
+                    Repeating
+                  </span>
+                )}
+              </div>
+              <div className="text-ink-secondary" style={{ fontSize: 13, marginTop: 2 }}>
+                {fmtApptDate(s.scheduled_date, s.window_start)}
+              </div>
+            </div>
+          </div>
+        ))
+      )}
+      {adminActions && apptList.length > 8 && (
+        <button
+          type="button"
+          onClick={onViewAll}
+          className="text-ink-primary"
+          style={{ fontSize: 16, fontWeight: 500, marginTop: 16, padding: '8px 0', background: 'none' }}
+        >
+          View all
+        </button>
+      )}
+    </section>
   );
 }
 

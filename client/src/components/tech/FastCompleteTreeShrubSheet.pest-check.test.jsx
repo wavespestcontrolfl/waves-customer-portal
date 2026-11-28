@@ -177,25 +177,25 @@ describe('the block', () => {
 });
 
 describe('the Merit rule', () => {
-  test('armored scale only with Merit: the line shows, Complete is held, Remove Merit clears it', async () => {
+  test('armored scale only with Merit: the warning shows without blocking Complete, Remove Merit clears it', async () => {
     const request = makeRequest();
     await readyVisit(request);
     await useProduct('Merit 2F');
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
     tick('Yes');
     tick('Armored scale');
     tick('Crawlers / nymphs');
     expect(screen.getAllByText(MERIT_LINE).length).toBeGreaterThan(0);
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Remove Merit from this visit' }));
     expect(screen.queryByText(MERIT_LINE)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove Merit from this visit' })).toBeNull();
     // TriStar is not an armored scale product either (owner 2026-10-09): it
-    // holds Complete until another target it covers is recorded.
+    // warns without blocking Complete until another target it covers is recorded.
     await useProduct('TriStar 8.5 SL');
     expect(screen.getAllByText(TRISTAR_LINE).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Remove TriStar from this visit' })).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
     tick('Whitefly');
     expect(screen.queryByRole('button', { name: 'Remove TriStar from this visit' })).toBeNull();
     expect(completeButton().disabled).toBe(false);
@@ -225,7 +225,7 @@ describe('the Merit rule', () => {
 });
 
 describe('the Distance scale hold', () => {
-  test('soft scale holds Distance until the product is removed; whitefly stays allowed', async () => {
+  test('soft scale warns on Distance without blocking Complete; removing scale clears the warning', async () => {
     await readyVisit();
     await useProduct('Distance IGR');
     tick('Yes');
@@ -233,10 +233,11 @@ describe('the Distance scale hold', () => {
     tick('Crawlers / nymphs');
     expect(screen.getByText('Distance IGR scale use is on hold. Remove Distance or record a non-scale target supported by the label.', { selector: '[role="alert"]' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Remove Distance from this visit' })).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
     tick('Whitefly');
-    // Scale is still selected, so an added whitefly target cannot erase the hold.
-    expect(completeButton().disabled).toBe(true);
+    // Scale is still selected, so the warning stays visible even with whitefly added.
+    expect(screen.getByRole('button', { name: 'Remove Distance from this visit' })).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
     tick('Soft scale');
     expect(screen.queryByRole('button', { name: 'Remove Distance from this visit' })).toBeNull();
     expect(completeButton().disabled).toBe(false);
@@ -244,22 +245,24 @@ describe('the Distance scale hold', () => {
 });
 
 describe('treatment evidence', () => {
-  test('No with TriStar on the visit holds because it is live-finds-only', async () => {
+  test('No with TriStar on the visit warns because it is live-finds-only without blocking Complete', async () => {
     await readyVisit();
     await useProduct('TriStar 8.5 SL');
     tick('No');
     fireEvent.change(screen.getByLabelText('Label-supported preventive reason'), { target: { value: 'Routine calendar treatment.' } });
     expect(screen.getByText('TriStar requires a live target and stage. Remove the treatment or record what was found.', { selector: '[role="alert"]' })).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
   });
 
-  test('No with a systemic treatment requires and records a label-supported preventive reason', async () => {
+  test('No with a systemic treatment warns when preventive reason is missing and records it when entered', async () => {
     const request = makeRequest();
     await readyVisit(request);
     await useProduct('Merit 2F');
     tick('No');
-    expect(completeButton().disabled).toBe(true);
+    expect(screen.getByText('Enter the label-supported preventive reason before recording an insect treatment.', { selector: '[role="alert"]' })).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
     fireEvent.change(screen.getByLabelText('Label-supported preventive reason'), { target: { value: 'Spring systemic timing supported by the label and property history.' } });
+    expect(screen.queryByText(/Enter the label-supported preventive reason/)).toBeNull();
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.treeShrubReview.pestCheck).toEqual({

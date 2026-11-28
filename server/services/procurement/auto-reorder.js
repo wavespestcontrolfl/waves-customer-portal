@@ -92,11 +92,15 @@ async function findLowStockCandidates(conn = db) {
 // order (Codex r4 P2, r8 P1). Runs inside the caller's transaction, so a
 // failure propagates — swallowing it would leave the transaction aborted
 // and the next write failing anyway (Codex r10 P2); the sweep's per-product
-// catch records it.
-async function vendorPricingFor(conn, productId, vendorId) {
+// catch records it. Shared by history-order-policy.js with deterministic
+// tie-breaking (is_best_price, updated_at, id) so approval and sweep always
+// pick the exact same SKU.
+async function vendorPricingFor(conn, productId, vendorId, now = new Date()) {
   if (!vendorId) return null;
-  return eligibleVendorPricing(conn('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }))
+  return eligibleVendorPricing(conn('vendor_pricing').where({ product_id: productId, vendor_id: vendorId }), now)
     .orderBy('is_best_price', 'desc')
+    .orderBy('updated_at', 'desc')
+    .orderBy('id', 'asc')
     .first();
 }
 
@@ -342,17 +346,20 @@ async function handleLiveRequest(ctx, p, existing) {
   if (await require('./order-dispatch').findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
   // A pre-submit park (no_price, dry_run, …) left this request a versioned
   // ledger bell that already says "order manually": the generic hand-off
-  // must not ring beside it. Settle the ledger's bell first; when that
-  // fails, stand down — the ledger bell, re-rung by the dispatcher, still
-  // owns the request (Codex r31 P2).
-  if (!(await settleParkedLedgerBell(ctx, p, request))) return;
+  // must not ring beside it. Settle the ledger's bell first under its lock;
+  // if a vendor order may already cover the request (evidence.outstandingOrder),
+  // preserve that warning atomically under the same lock and suppress the plain
+  // manual hand-off. When settlement fails, stand down too (Codex r31 P2).
+  const settled = await settleParkedLedgerBell(ctx, p, request);
+  if (settled === 'preserved') { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'vendor_order_outstanding' }); return; }
+  if (!settled) return;
   await bellOrWarn(ctx, p, request, 'renotified');
 }
 
 async function settleParkedLedgerBell(ctx, product, request) {
   try {
-    await ctx.conn.transaction((trx) => require('./order-dispatch').settleRequestLedgerBells(trx, request.id));
-    return true;
+    const out = await ctx.conn.transaction((trx) => require('./order-dispatch').settleRequestLedgerBells(trx, request.id, { preserveOutstanding: true }));
+    return out?.preserved ? 'preserved' : true;
   } catch (err) {
     logger.error(`[auto-reorder] parked ledger bell for ${product.name} (request ${request.id}) NOT settled — hand-off bell withheld: ${err.message}`);
     ctx.result.errors.push({ productId: product.id, name: product.name, requestId: request.id, message: `ledger bell: ${err.message}` });

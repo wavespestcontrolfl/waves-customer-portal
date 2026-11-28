@@ -152,9 +152,9 @@ const BOOKING_FUNNEL_SERVICE_LINES = Object.freeze({ rodent: 'exclusion' });
 // vocabulary normalizeBookingServiceKeys checks, so passing it AS serviceKey
 // silently degrades to the no-credit legacy gap. Tried only when serviceKey
 // resolves to no funnel key, so every existing funnel caller is unaffected.
-async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, serviceIdentity = null) {
+async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, serviceIdentity = null, preferServiceIdentity = false) {
   if (!travelGapEnabled()) return durationMinutes;
-  const keys = normalizeBookingServiceKeys(serviceKey);
+  const keys = preferServiceIdentity && serviceIdentity ? [] : normalizeBookingServiceKeys(serviceKey);
   if (keys.length) {
     const services = keys.map((key) => ({
       catalogServiceKey: BOOKING_FUNNEL_SERVICE_CATALOG_KEYS[key] || null,
@@ -962,6 +962,86 @@ async function findAccountPropertyByAddress(customer, { address, zip, unit }, co
   return (accountRows || []).find(row => addressMatchesCustomer(row, address, zip, unit)) || null;
 }
 
+const { nanpNationalDigits, isValidNanpNumber } = require('../utils/phone');
+
+function normalizeUsPhoneLast10(raw) {
+  if (!isValidNanpNumber(raw)) return '';
+  return nanpNationalDigits(raw) || '';
+}
+
+function consumedHandoffContactMatches(submitted, consumedCust) {
+  const rawPhone = submitted?.phone ? String(submitted.phone).trim() : '';
+  const submitted10 = normalizeUsPhoneLast10(rawPhone);
+  if (rawPhone) {
+    const onFile10 = normalizeUsPhoneLast10(consumedCust?.phone);
+    return !!submitted10 && submitted10 === onFile10;
+  }
+  const submittedEmail = String(submitted?.email || '').trim().toLowerCase();
+  return !!submittedEmail && submittedEmail === String(consumedCust?.email || '').trim().toLowerCase();
+}
+
+const EXACT_US_PHONE_SQL = "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')";
+
+function queryActiveCustomerByPhone(rawDigits) {
+  const phone10 = normalizeUsPhoneLast10(rawDigits);
+  const query = phone10
+    ? db('customers').whereRaw(EXACT_US_PHONE_SQL, [phone10, `1${phone10}`])
+    : db('customers').whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [rawDigits]);
+  return query
+    .where(function () {
+      this.whereNull('deleted_at');
+    })
+    .andWhere(function () {
+      this.whereNull('active').orWhere('active', true);
+    });
+}
+
+async function findExistingCustomerForPhoneConfirm(phoneDigits, customerId) {
+  const phone10 = normalizeUsPhoneLast10(phoneDigits);
+  if (!phone10) return null;
+  const isUsMatch = (row) => !!row && (!row.phone || normalizeUsPhoneLast10(row.phone) === phone10);
+  if (customerId) {
+    const matched = await queryActiveCustomerByPhone(phone10).where('id', customerId).first();
+    if (isUsMatch(matched)) return matched;
+  }
+  const found = await queryActiveCustomerByPhone(phone10).first();
+  return isUsMatch(found) ? found : null;
+}
+
+async function resolveSelfBookingPhoneOwner(phoneDigits, customerId) {
+  const phone10 = normalizeUsPhoneLast10(phoneDigits);
+  if (!phone10) {
+    return { error: { ok: false, status: 400, error: 'Please enter a valid 10-digit US phone number.' } };
+  }
+  const existing = await findExistingCustomerForPhoneConfirm(phone10, customerId);
+  if (!existing) return { custId: null };
+  if (!customerId) {
+    // NOTE: a new_customer double-submit retry lands here (the first
+    // attempt created the profile) and gets this 409 rather than an
+    // idempotent replay — deliberately. Phone + date + start time is
+    // NOT proof of identity on a public route; replaying the booking
+    // row + confirmation code here would let anyone with a
+    // customer's phone number probe slots and harvest booking
+    // details. The in-transaction replay guard still covers callers
+    // that proved identity (customer_id / estimate token).
+    return { error: { ok: false, status: 409, error: 'This phone number is already on file. Please verify the customer profile before booking.' } };
+  }
+  if (String(existing.id) !== String(customerId)) {
+    return { error: { ok: false, status: 400, error: 'Customer lookup mismatch' } };
+  }
+  // Phone + customer_id resolves the BOOKING, but is knowledge, not
+  // possession: the id comes from the public address lookup and the
+  // phone can be typed by anyone who knows it. Not enough to WRITE a
+  // unit onto the record — only token-proven estimate paths backfill.
+  return { custId: existing.id };
+}
+
+function invalidateEstimateSlotCaches() {
+  try {
+    require('../services/estimate-slot-availability').invalidateAllEstimates();
+  } catch { /* best-effort */ }
+}
+
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
@@ -971,28 +1051,22 @@ router.get('/customer-lookup', async (req, res, next) => {
     let customer = null;
 
     if (phone) {
-      const digits = String(phone).replace(/\D/g, '');
-      if (digits.length !== 10) return res.json({ customer: null });
+      const digits = normalizeUsPhoneLast10(phone);
+      if (!digits || !address) return res.json({ customer: null });
 
-      const query = db('customers')
-        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [digits])
-        .where(function () {
-          this.whereNull('deleted_at');
-        })
-        .andWhere(function () {
-          this.whereNull('active').orWhere('active', true);
-        });
-
-      customer = await query.select(phoneCustomerFields).first();
       // SECURITY: never disclose a customer's PII (name/email/address) on a
       // phone number alone — that lets anyone enumerate identities from a
-      // number they merely possess. Require a matching address before
-      // disclosing. The booking funnel always collects the address (step 1)
-      // before the phone step, so legitimate returning-customer autofill is
-      // unaffected; only the address-less enumeration path is closed.
-      if (customer && !(address && addressMatchesCustomer(customer, address, zip, unit))) {
-        customer = null;
-      }
+      // number they merely possess. Validate stored NANP numbers, match the
+      // submitted address across all shared-phone profiles, prefer exact unit
+      // matches via narrowCandidatesByUnit, and fail closed when multiple
+      // profiles remain ambiguous.
+      const candidates = await queryActiveCustomerByPhone(digits).select(phoneCustomerFields);
+      const addressMatched = (candidates || []).filter(
+        (row) => normalizeUsPhoneLast10(row.phone) === digits && addressMatchesCustomer(row, address, zip, unit),
+      );
+      const submittedUnit = unit || splitStreetLineUnit(address).unit;
+      const narrowed = narrowCandidatesByUnit(addressMatched, submittedUnit);
+      customer = narrowed.length === 1 ? narrowed[0] : null;
       // address_line2 is needed ABOVE for the unit-aware match but must not
       // be disclosed: a blank submitted unit stays compatible by design, so
       // phone + street knowledge would otherwise read back the apartment
@@ -1000,7 +1074,7 @@ router.get('/customer-lookup', async (req, res, next) => {
       // response carries the street only. The booking UI never consumes
       // either field from this response.
       if (customer) {
-        const { address_line2: _undisclosedUnit, ...publicCustomer } = customer;
+        const { address_line2: _undisclosedUnit, phone: _internalPhone, ...publicCustomer } = customer;
         publicCustomer.address_line1 = splitStreetLineUnit(publicCustomer.address_line1 || '').street
           || publicCustomer.address_line1;
         return res.json({ customer: publicCustomer });
@@ -1750,7 +1824,42 @@ function crewSlots(slots, crew) {
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
 // Per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) find-time's slots of a truck on another truck's zone
 // day go before any start is claimed (dropOtherTruckDays), so a start goes to the zone day's own truck.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, crew, verifiedOnly }) {
+// Surfaces that never redeem offers through POST /api/booking/confirm run
+// their own auth/revalidation paths; omitting `slot_sig` blocks cross-surface
+// replay onto /api/booking/confirm.
+const NON_REDEEMABLE_OFFER_SURFACES = new Set([
+  'reschedule', 'reservice', 'inspection', 'commercial_first_visit', 'voice',
+]);
+
+function applySignedOfferPolicy(response, { mintSignedOffers, surface }) {
+  if (mintSignedOffers !== false && !NON_REDEEMABLE_OFFER_SURFACES.has(surface)) {
+    return response;
+  }
+  const omitSig = ({ slot_sig: _omitted, ...slot }) => slot;
+  return {
+    ...response,
+    slots: (response.slots || []).map(omitSig),
+    days: (response.days || []).map((day) => ({
+      ...day,
+      slots: (day.slots || []).map(omitSig),
+    })),
+  };
+}
+
+function shouldUseCapacityFanOut(noCustomerReads) {
+  return capacityEnabled() && !noCustomerReads;
+}
+
+function loadOfferFunnelIfAllowed({ noCustomerReads, slots, address, city, customerCity, dateFrom, dateTo, conn }) {
+  if (noCustomerReads || !slots?.length) return Promise.resolve(null);
+  return offerFunnelView({ address, city, customerCity, dateFrom, dateTo, conn });
+}
+
+function routeCheckSurfaceFor(surface, noCustomerReads) {
+  return noCustomerReads ? null : surface;
+}
+
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, preferServiceIdentity, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, noCustomerReads = false, crew, verifiedOnly, mintSignedOffers }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1819,7 +1928,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     serviceIdentity, serviceLabels, lat, lng, today, skip: paidLookups === false || reserviceRankIsActive(rankProfile), db,
   });
 
-  const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
+  const candidateExpectedMinutes = await bookingExpectedMinutes(
+    db,
+    serviceKey,
+    duration,
+    serviceIdentity,
+    preferServiceIdentity,
+  );
   // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): a
   // self-serve caller resolves the request's zone FROM COORDINATES (not city
   // text — 'North Venice' / 'Northport' are not in service_zones.cities) so
@@ -1901,6 +2016,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // availabilityForPin's read-only caller passes it (the hourly route check's slot-rule
     // decision); unset for every other caller = the shared allowance, as before.
     providerTravel: paidLookups,
+    // Practice line boundary: skip all `customers` joins/reads when true.
+    noCustomerReads: noCustomerReads === true,
     // An unreadable closed-day list (find-time's blackout read) throws for a caller that
     // counts openings (availabilityForPin `verifiedOnly`), as for the nightly dispatch
     // search; every other caller fails open (closed days offered), as before.
@@ -1938,7 +2055,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // gated (violatesTravelGap itself returns false when the gate is off);
     // the anchor load is no longer where that gate lives (GH codex #3803
     // r2 P2's dark-scan optimization is superseded by the shared loader).
-    const anchors = await loadPackingAnchors({ dateFrom: rangeFrom, dateTo: rangeTo, excludeServiceIds });
+    const anchors = await loadPackingAnchors({ dateFrom: rangeFrom, dateTo: rangeTo, excludeServiceIds, noCustomerReads: noCustomerReads === true });
     occupiedByDate = new Map();
     for (const anchor of anchors) {
       const row = {
@@ -2109,16 +2226,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
 
   // The far-south funnel's zone days (zoneFunnelAddress), read before the claims: per truck, a truck on another
   // truck's zone day never claims a start, so the zone truck keeps each start it has. Null = no funnel.
-  const offerFunnel = result.slots?.length
-    ? await offerFunnelView({ address: zoneFunnelAddress, city: zoneFunnelCity, customerCity: zoneFunnelCustomerCity, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
-    : null;
+  const offerFunnel = await loadOfferFunnelIfAllowed({
+    noCustomerReads, slots: result.slots, address: zoneFunnelAddress, city: zoneFunnelCity, customerCity: zoneFunnelCustomerCity,
+    dateFrom: rangeFrom, dateTo: rangeTo, conn: db,
+  });
   const findTimeSlots = dropOtherTruckDays(result.slots || [], offerFunnel || {}, (slot) => slot?.technician?.id);
   // A graced build never offers a slot whose simulated arrival delay is past
   // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
   // confirm. Ungraced builds pass every slot through untouched.
   const offerSlots = orderByLineRank(crewSlots(graceBuild ? findTimeSlots.filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : findTimeSlots, crew), lineRanking);
   for (const slot of offerSlots) {
-    if (capacityEnabled()) {
+    if (shouldUseCapacityFanOut(noCustomerReads)) {
       // Capacity evaluates each start against the whole route and live blocks.
       // Never synthesize additional hours from an otherwise empty route.
       addCandidate(slot, timeToMin(slot.start_time));
@@ -2178,7 +2296,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const stampedCandidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
   // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
   // off or no surface named, and nothing below runs.
-  const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today, floor: !crew, verifiedOnly });
+  const routeCheck = routeCheckPlan({ surface: routeCheckSurfaceFor(surface, noCustomerReads), lat, lng, duration, excludeServiceIds, today, floor: !crew, verifiedOnly });
   // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL), opt-in per caller with the address text
   // (the lead assessment link): the pool narrows BEFORE the customer route check, as on the estimate page.
   const funneledCandidates = await funnelOfferPool(stampedCandidates, offerFunnel, { routeDaySlug: zoneSlug, conn: db });
@@ -2267,7 +2385,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     ...rankProfileFields,
   };
   detachVoiceRouteCheck(routeCheck, stampedCandidates);
-  return response;
+  return applySignedOfferPolicy(response, { mintSignedOffers, surface });
 }
 
 // The /book funnel's default offer window — anchored to ET calendar days so it
@@ -3108,7 +3226,11 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
-    const phoneDigits = new_customer?.phone ? String(new_customer.phone).replace(/\D/g, '') : '';
+    const rawSubmittedPhone = new_customer?.phone ? String(new_customer.phone).trim() : '';
+    const phoneDigits = rawSubmittedPhone ? rawSubmittedPhone.replace(/\D/g, '') : '';
+    if (rawSubmittedPhone && !normalizeUsPhoneLast10(rawSubmittedPhone)) {
+      return { ok: false, status: 400, error: 'Please enter a valid 10-digit US phone number.' };
+    }
     // Customer-less draft replay recovery — GATE-INDEPENDENT (Codex #3500):
     // when the quote's customer mirror failed, the first signed booking
     // created the customer and consumed the draft; an identical retry must
@@ -3132,59 +3254,22 @@ async function createSelfBooking(payload = {}) {
             // slot tuple must not resolve someone else's identity and pull
             // their confirmation/notes/card URL through the replay. The
             // SUBMITTED contact must match the consuming booking's
-            // customer (same last-10-phone / email rule as
-            // bindGateEstimate) before the replay identity is assigned.
+            // customer (exact validated NANP digits / email) before the
+            // replay identity is assigned.
             const consumedCust = await db('customers')
               .where({ id: consumed.customer_id })
               .first('phone', 'email');
-            const last10 = (v) => {
-              const digits = String(v || '').replace(/\D/g, '');
-              return digits.length >= 10 ? digits.slice(-10) : '';
-            };
-            const submitted10 = last10(new_customer?.phone);
-            const submittedEmail = String(new_customer?.email || '').trim().toLowerCase();
-            const contactMatches = submitted10
-              ? submitted10 === last10(consumedCust?.phone)
-              : (!!submittedEmail
-                && submittedEmail === String(consumedCust?.email || '').trim().toLowerCase());
-            if (contactMatches) custId = consumed.customer_id;
+            if (consumedHandoffContactMatches(new_customer, consumedCust)) custId = consumed.customer_id;
           }
         }
       } catch (err) {
         logger.warn(`[booking:confirm] consumed-handoff customer recovery failed (continuing): ${err.message}`);
       }
     }
-    if (!custId && phoneDigits) {
-      const existing = await db('customers')
-        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [phoneDigits])
-        .where(function () {
-          this.whereNull('deleted_at');
-        })
-        .andWhere(function () {
-          this.whereNull('active').orWhere('active', true);
-        })
-        .first();
-      if (existing) {
-        if (!customer_id) {
-          // NOTE: a new_customer double-submit retry lands here (the first
-          // attempt created the profile) and gets this 409 rather than an
-          // idempotent replay — deliberately. Phone + date + start time is
-          // NOT proof of identity on a public route; replaying the booking
-          // row + confirmation code here would let anyone with a
-          // customer's phone number probe slots and harvest booking
-          // details. The in-transaction replay guard still covers callers
-          // that proved identity (customer_id / estimate token).
-          return { ok: false, status: 409, error: 'This phone number is already on file. Please verify the customer profile before booking.' };
-        }
-        if (String(existing.id) !== String(customer_id)) {
-          return { ok: false, status: 400, error: 'Customer lookup mismatch' };
-        }
-        custId = existing.id;
-        // Phone + customer_id resolves the BOOKING, but is knowledge, not
-        // possession: the id comes from the public address lookup and the
-        // phone can be typed by anyone who knows it. Not enough to WRITE a
-        // unit onto the record — only token-proven estimate paths backfill.
-      }
+    if (!custId && rawSubmittedPhone) {
+      const phoneMatch = await resolveSelfBookingPhoneOwner(rawSubmittedPhone, customer_id);
+      if (phoneMatch.error) return phoneMatch.error;
+      if (phoneMatch.custId) custId = phoneMatch.custId;
     }
 
     if (customer_id && !custId && !phoneDigits && !estimate_id) {
@@ -3433,8 +3518,9 @@ async function createSelfBooking(payload = {}) {
       const account = await ensureCustomerAccount(db, {
         firstName: new_customer.first_name,
         lastName: new_customer.last_name || '',
-        phone: phoneDigits,
+        phone: normalizeUsPhoneLast10(rawSubmittedPhone) || phoneDigits,
         email: new_customer.email || null,
+        exactUsPhone: true,
       });
       // Only an account this request PROVABLY minted (the helper's explicit
       // flag) is ever rolled back — never an existing profile-less account
@@ -4949,6 +5035,7 @@ async function createSelfBooking(payload = {}) {
     // map would pick beside the one saved. Post-commit, never awaited, never throws;
     // gate off = returns at once. A double-submit replay has no serviceRow: no row.
     if (txResult?.serviceRow) {
+      invalidateEstimateSlotCaches();
       const row = txResult.serviceRow;
       void require('../services/scheduling/line-technician').recordLinePickShadow({
         source: 'book', scheduledServiceId: row.id, customerId: row.customer_id, date: row.scheduled_date,

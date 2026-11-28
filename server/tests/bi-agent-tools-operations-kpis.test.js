@@ -211,7 +211,7 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
     // it's testing.
     const GOOD = {
       completion: 90, callback: 3, response: 50, conversion: 25,
-      rpmh: 130, margin: 45, arDays: 20, retention: 90, collection: 75,
+      rpmh: 130, margin: 56, arDays: 20, retention: 90, collection: 75,
     };
 
     it('ranks two off-target metrics bad-before-warn', async () => {
@@ -246,17 +246,17 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
 
     it('lists only the worst 4 when more than 4 metrics are off target', async () => {
       // bad (desc relative miss): ar_days (2.0), response_speed_min (1.5),
-      // collection_rate (1.0); warn (desc relative miss): gross_margin (0.1)
+      // collection_rate (1.0); warn (desc relative miss): gross_margin (0.0909)
       // ahead of retention_pct (0.0824) and completion_rate (0.0588) — both
       // excluded by the top-4 cutoff. callback_rate, lead_conversion, rpmh
       // stay at GOOD; stops_per_hour has no target.
       mockComputeCoreKpis.mockResolvedValue(kpiSet({
         completion: 80, callback: GOOD.callback, response: 150, conversion: GOOD.conversion,
-        rpmh: GOOD.rpmh, margin: 36, arDays: 90, retention: 78, collection: 0,
+        rpmh: GOOD.rpmh, margin: 50, arDays: 90, retention: 78, collection: 0,
       }));
       const result = await executeBITool('get_operations_snapshot', {});
       expect(result.opsLine).toBe(
-        'Ops 7d: AR days 90d (tgt 30d), resp 150m (tgt 60m), collections 0% (tgt 70%), margin 36% (tgt 40%)'
+        'Ops 7d: AR days 90d (tgt 30d), resp 150m (tgt 60m), collections 0% (tgt 70%), margin 50% (tgt 55%)'
       );
     });
   });
@@ -267,7 +267,7 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
     // `n={kpis.billing?.issuedCount}`.
     const GOOD = {
       completion: 90, callback: 3, response: 50, conversion: 25,
-      rpmh: 130, margin: 45, arDays: 20, retention: 90,
+      rpmh: 130, margin: 56, arDays: 20, retention: 90,
     };
 
     it('1-4 issued invoices: tone is null, the row is marked lowSample, and it never appears in opsLine even far off target', async () => {

@@ -245,6 +245,33 @@ describe("BillingRecoveryPage gated feedback and table controls", () => {
     );
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/aging"))).toHaveLength(2);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/at-risk-mrr"))).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/unsent-drafts?"))).toHaveLength(2);
+  });
+
+  it("refreshes unsent drafts immediately after Bill (legacy), Mark free, and Billed elsewhere", async () => {
+    // Legacy mode Bill
+    let fetchMock = mockReads();
+    renderPage("/admin/billing-recovery");
+    fireEvent.click((await screen.findAllByRole("button", { name: "Bill" }))[0]);
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/unsent-drafts?")).length).toBe(2));
+
+    // Mark free
+    cleanup();
+    fetchMock = mockReads();
+    renderPage("/admin/billing-recovery?feedback=1");
+    fireEvent.click((await screen.findAllByRole("button", { name: "Mark free" }))[0]);
+    const freeButtons = screen.getAllByRole("button", { name: "Mark free" });
+    fireEvent.click(freeButtons[freeButtons.length - 1]);
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/unsent-drafts?")).length).toBe(2));
+
+    // Billed elsewhere
+    cleanup();
+    fetchMock = mockReads();
+    renderPage("/admin/billing-recovery?feedback=1");
+    fireEvent.click((await screen.findAllByRole("button", { name: "Billed elsewhere" }))[0]);
+    fireEvent.change(screen.getByPlaceholderText("WPC-2026-0000"), { target: { value: "WPC-2026-9999" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/unsent-drafts?")).length).toBe(2));
   });
 
   it("refreshes the current window after a pending action resolves", async () => {

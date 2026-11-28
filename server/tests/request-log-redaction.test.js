@@ -148,6 +148,20 @@ describe('request URL log redaction', () => {
     expect(redactRequestUrl('/api/admin/estimates/slots')).toBe('/api/admin/estimates/slots');
   });
 
+  test('redacts cell and mode query values on /api/webhooks/twilio/relay-sandbox in URLs and Morgan access lines', () => {
+    const url = '/api/webhooks/twilio/relay-sandbox?cell=%2B19415550199&mode=9415550123';
+    const masked = '/api/webhooks/twilio/relay-sandbox?cell=[REDACTED]&mode=[REDACTED]';
+    expect(redactRequestUrl(url)).toBe(masked);
+    expect(redactRequestUrl(`https://portal.wavespestcontrol.com${url}`)).toBe(`https://portal.wavespestcontrol.com${masked}`);
+    // Non-sandbox routes keep their own mode/cell query params intact.
+    expect(redactRequestUrl('/api/admin/schedule?mode=week&cell=2')).toBe('/api/admin/schedule?mode=week&cell=2');
+    registerRedactedTokens(morgan);
+    const req = { method: 'POST', httpVersionMajor: 1, httpVersionMinor: 1, headers: { 'user-agent': 'TwilioProxy/1.1' }, originalUrl: url, url, socket: { remoteAddress: '203.0.113.9' } };
+    const line = morgan.compile(REDACTED_COMBINED_LOG)(morgan, req, { statusCode: 200, getHeader: () => '-' });
+    expect(line).toContain(`POST ${masked} HTTP/1.1`);
+    expect(line).not.toMatch(/9415550199|9415550123/);
+  });
+
   test('keeps non-credential path segments (row-id UUIDs, invoice numbers, short ids)', () => {
     const uuid = '123e4567-e89b-42d3-a456-426614174000';
     expect(redactRequestUrl(`/api/admin/customers/${uuid}`)).toBe(`/api/admin/customers/${uuid}`);

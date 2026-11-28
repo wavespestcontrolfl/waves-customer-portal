@@ -145,6 +145,9 @@ describe('newsletter rendering contract', () => {
     expect(transactional).toContain('.dm-lightcard { background: #FFFFFF !important; }');
     expect(transactional).toContain('class="dm-ink"');
     expect(transactional).toContain('class="dm-page-text"');
+    expect(transactional).toContain('alt="Waves Pest Control"');
+    expect(transactional).not.toContain('&amp; Lawn Care');
+    expect(transactional).not.toContain('& Lawn Care');
     // Every anchor inside the dark-aware newsletter card recolors.
     expect(html).toContain('.dm-card a { color: #6CC1F0 !important; }');
     // Legacy bodies without dm-* hooks stay on the light card.

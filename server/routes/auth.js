@@ -662,8 +662,8 @@ router.get('/me', authenticate, async (req, res, next) => {
     // Portal slider (owner ruling 2026-08-28): automatic credit application
     // is the customer's choice; default OFF.
     autoApplyAccountCredit: customer.auto_apply_account_credit === true,
-    // Edit-profile control (GATE_CUSTOMER_PROFILE_EDIT): the app shows it only while this is true.
-    profileEdit: require('../config/feature-gates').customerProfileEditLive(),
+    // Edit-profile control (GATE_CUSTOMER_PROFILE_EDIT): active non-cancelled account holders only.
+    profileEdit: require('../config/feature-gates').customerProfileEditLive() && req.customerInactive !== true && !req.contactSession && customer.active === true,
     credits,
     annualPrepay,
     // C4: the cancelled state the portal renders read-only. cancelledAt is
@@ -773,8 +773,9 @@ router.post('/select-property', authenticate, async (req, res, next) => {
     // account with the same contact claim (a saved-property selection is
     // never a contact's).
     if (req.contactSession) {
-      const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
-      if (!findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey)) {
+      const { findServiceContactSlotByPhoneKey, contactSlotMayLogIn } = require('../services/customer-contact');
+      if (!findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey)
+        || !contactSlotMayLogIn(target, req.contactSession.phoneKey)) {
         return res.status(403).json({ error: 'Property is not available for this account' });
       }
       const switched = await rotateRefreshSession(currentRefreshToken, {

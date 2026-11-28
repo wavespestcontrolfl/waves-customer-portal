@@ -181,7 +181,7 @@
         }
       },
       "required": [],
-      "reviewed": "Handler read end to end (admin-automations.js PUT /steps/:id): loads the step, then one UPDATE of automation_steps in which each field falls back to its stored value. Delay, order, enabled, sender and reply-to are left off the allow-list (they change when or from where a step sends). Re-read 2026-11-24 after the new_lead drip change: the handler now keeps the stored enabled value for the two seeded drip steps (a constant id list, Array.includes), which only narrows what a save can change.",
+      "reviewed": "Handler read end to end (admin-automations.js PUT /steps/:id): loads the step, then one UPDATE of automation_steps in which each field falls back to its stored value. Delay, order, enabled, sender and reply-to are left off the allow-list (they change when or from where a step sends). Re-read 2026-11-27 after adding extended new_lead drip steps 3-4: the handler now calls isGateControlledNewLeadStepId(step.id) to keep the stored enabled=false value for all four gate-controlled seeded drip steps (two constant id lists), which only narrows what a save can change.",
       "reason": "Changes the subject or wording of one step in an email automation. The handler writes only automation_steps. It does not enroll, schedule, send or queue anything.",
       "noSend": "Changes the step's wording only. No email is sent or queued now; emails that step sends later use the new wording.",
       "writes": [
@@ -192,10 +192,9 @@
         "write:update"
       ],
       "unresolved": [
-        "routes/admin-automations.js#NEW_LEAD_DRIP_STEP_IDS.includes",
         "routes/admin-automations.js#db.update"
       ],
-      "hash": "9993d0af13e8b730d01a67876d9e1a0a"
+      "hash": "5eb77cce6145306cc544c8cb587a7b21"
     },
     {
       "method": "PUT",

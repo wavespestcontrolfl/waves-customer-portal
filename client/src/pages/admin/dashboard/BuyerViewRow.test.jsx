@@ -110,6 +110,15 @@ describe("BuyerViewRow", () => {
     expect(screen.queryByText("Recurring share")).not.toBeInTheDocument();
   });
 
+  test("sparse prior baseline renders 'prior 12 months incomplete' instead of a misleading growth spike", () => {
+    const data = {
+      ...DATA,
+      revenue: { ...DATA.revenue, growthPct: null, growthUnavailableReason: "prior_incomplete", monthsCounted: 12 },
+    };
+    render(<BuyerViewRow data={data} />);
+    expect(screen.getByText(/prior 12 months incomplete/)).toBeInTheDocument();
+  });
+
   test("stored months written before the Stripe ledger finished are called out", () => {
     render(<BuyerViewRow data={{ ...DATA, pnlIncompleteMonths: ["2026-05-01"] }} />);
     expect(screen.getByText(/1 stored month\(s\) were written before the Stripe ledger finished/)).toBeInTheDocument();

@@ -182,7 +182,7 @@ describe('ProjectReportViewPage Poison Control (owner 2026-09-26)', () => {
   it.each([true, false])('links to the public Products & Safety page (poisonControl %s)', async (poisonControl) => {
     const { findByRole } = renderProjectReport(payload('flea', { poisonControl }));
     const link = await findByRole('link', { name: /see every product we use and our safety protocol/i });
-    expect(link.closest('footer')).not.toBeNull();
+    expect(link.closest('[data-testid="project-report-closing"]')).not.toBeNull();
     expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');

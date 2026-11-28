@@ -1172,7 +1172,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             radios: true,
             spacedAccordionItems: true,
           },
-          paymentMethodOrder: ['card', 'us_bank_account'],
+          paymentMethodOrder: ['us_bank_account', 'card'],
           wallets: { applePay: 'never', googlePay: 'never' },
           ...(Object.keys(billingDetails).length ? { defaultValues: { billingDetails } } : {}),
         });
@@ -1535,6 +1535,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
 
   const disabled = !ready || processing || syncingAmount || amountSyncError;
   const methodControlsDisabled = !ready || processing || syncingAmount;
+  const showReviewTotals = isCardFamily
+    && (displayedSurcharge > 0 || (quoteData && quoteData.funding !== 'credit'));
   const methodOptions = [
     // Bank first (owner 2026-11-01). The initial selection stays card: the
     // invoice PaymentIntent is minted card-locked.
@@ -1652,13 +1654,22 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       </div>
 
+      {isCardFamily && (
+        <p
+          data-testid="card-surcharge-pre-disclosure"
+          style={{ margin: 0, fontSize: FS.body, lineHeight: LH.body, color: DOC.muted }}
+        >
+          Up to {pct}% credit card surcharge when entered directly — no fee for debit, prepaid, Apple Pay, Google Pay, Link, or bank account.
+        </p>
+      )}
+
       {/* Express wallet button (Google Pay / Apple Pay / Link) —
           Stripe only renders one on browser + device combos where the
           customer actually has a wallet set up, so this div will be
           empty for most desktop Chrome users without a Google Pay card
           on file. That's the Stripe-recommended behavior. */}
-      <div ref={expressMountRef} style={{ display: isCardFamily ? 'block' : 'none' }} />
-      <div ref={mountRef} style={{ minHeight: 90, padding: SP.md, ...PAY_BOX }} />
+      <div ref={expressMountRef} data-testid="stripe-express-mount" style={{ display: isCardFamily ? 'block' : 'none' }} />
+      <div ref={mountRef} data-testid="stripe-payment-mount" style={{ minHeight: 90, padding: SP.md, ...PAY_BOX }} />
 
       {/* Save-payment-method opt-in. methodType drives both the headline
           and the authorization copy (ACH variant satisfies NACHA/Reg E,
@@ -1700,11 +1711,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // Empty until a quote exists: taken out of the grid flow (absolute,
         // 1px, clipped) so it adds no row/gap before the Pay button; it
         // becomes a normal grid item the moment the totals render.
-        style={(isCardFamily && (displayedSurcharge > 0 || (quoteData && quoteData.funding !== 'credit')))
+        style={showReviewTotals
           ? undefined
           : { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}
       >
-      {(isCardFamily && (displayedSurcharge > 0 || (quoteData && quoteData.funding !== 'credit'))) && (
+      {showReviewTotals && (
       <div data-glass="soft" style={{
         padding: SP.md,
         borderRadius: RADIUS.input,
@@ -1719,7 +1730,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           </span>
           <span style={{ color: DOC.ink }}>{fmtCurrency(displayedBase)}</span>
         </div>
-        {isCardFamily && displayedSurcharge > 0 && (
+        {displayedSurcharge > 0 && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
             <span style={{ color: DOC.muted, fontFamily: DOC_FONT }}>
               Credit card surcharge ({pct}%)
@@ -1727,12 +1738,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             <span style={{ color: DOC.ink }}>+ {fmtCurrency(displayedSurcharge)}</span>
           </div>
         )}
-        {isCardFamily && displayedSurcharge > 0 && (
+        {displayedSurcharge > 0 && (
           <div data-testid="card-surcharge-notice" style={{ color: DOC.muted, fontFamily: DOC_FONT, fontSize: FS.body, lineHeight: LH.snug, marginBottom: 6 }}>
             {CARD_SURCHARGE_NOTICE}
           </div>
         )}
-        {isCardFamily && quoteData && quoteData.funding !== 'credit' && (
+        {quoteData && quoteData.funding !== 'credit' && (
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
             <span style={{ color: DOC.muted, fontFamily: DOC_FONT }}>
               No card surcharge ({quoteData.funding || 'debit'} card)

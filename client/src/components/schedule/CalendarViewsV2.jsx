@@ -298,34 +298,32 @@ export function WeekViewV2({ startDate, onDateClick }) {
 
 // ─── MONTH VIEW ──────────────────────────────────────────────────
 
+const NON_DRAGGABLE_CHIP_STATUSES = new Set(['completed', 'cancelled', 'skipped']);
+const MONTH_CHIP_FILL = { en_route: '#1E40AF', on_site: '#18181B', completed: null, skipped: null };
+
 // Flat-blue month-cell chip: solid pill with "time · customer" stacked
 // across the row. Mirrors the appointment-block palette in
 // TimeGridDay/TimeGridDays so the calendar reads as one visual system.
 function MonthServiceChip({ service, onViewCustomer }) {
+  const completed = service.status === 'completed';
+  const dragDisabled = NON_DRAGGABLE_CHIP_STATUSES.has(service.status);
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `msvc-${service.id}`,
     data: { service },
+    disabled: dragDisabled,
   });
   const startMin = parseHHMM(service.windowStart);
   const time = startMin != null ? minutesToLabelMonth(startMin) : '';
-  const completed = service.status === 'completed';
-  const fill = completed
-    ? null                    // bg-zinc-200 via class — faded done state
-    : service.status === 'en_route'
-      ? '#1E40AF'             // deeper blue — actively heading
-      : service.status === 'on_site'
-        ? '#18181B'           // black — active here
-        : service.status === 'skipped'
-          ? null              // class handles alert-bg/alert-fg
-          : '#3B82F6';        // default scheduled / confirmed fill
+  const fill = service.status in MONTH_CHIP_FILL ? MONTH_CHIP_FILL[service.status] : '#3B82F6';
 
   return (
     <div
       ref={setNodeRef}
       {...attributes}
-      {...listeners}
+      {...(dragDisabled ? {} : listeners)}
       className={cn(
-        'text-14 truncate leading-tight cursor-grab active:cursor-grabbing select-none px-1.5 py-0.5 rounded-[3px] font-medium',
+        'text-14 truncate leading-tight select-none px-1.5 py-0.5 rounded-[3px] font-medium',
+        dragDisabled ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing',
         completed && 'bg-zinc-200 text-zinc-500 line-through',
         service.status === 'skipped' && 'bg-alert-bg text-alert-fg',
         !completed && service.status !== 'skipped' && 'text-white',

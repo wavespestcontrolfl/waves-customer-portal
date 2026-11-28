@@ -24,7 +24,6 @@ import { useGlassMotion } from '../glass/glass-motion';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-const NAVY = '#04395E';
 const AQUA = '#9BD4EA';
 
 // Apple glyph + Play triangle mirror the footer badge SVGs (BrandFooter.jsx)
@@ -130,8 +129,6 @@ const GLASS_MATERIAL = {
   background: 'rgba(255,255,255,0.14)',
   border: '1px solid rgba(255,255,255,0.32)',
   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.35)',
-  backdropFilter: 'blur(20px) saturate(160%)',
-  WebkitBackdropFilter: 'blur(20px) saturate(160%)',
   color: '#FFFFFF',
   textDecoration: 'none',
   cursor: 'pointer',
@@ -163,6 +160,50 @@ const SMS_ICON = (
     <path d="M12 3C6.48 3 2 6.92 2 11.75c0 2.76 1.55 5.2 3.97 6.8-.1.98-.53 2.25-1.42 3.25 1.93-.14 3.5-1.03 4.53-1.83.93.23 1.9.35 2.92.35 5.52 0 10-3.92 10-8.75S17.52 3 12 3z" fill="currentColor" />
   </svg>
 );
+
+function CardTerminalScene({ status, scene, onRetry }) {
+  return (
+    <div style={scene}>
+      {status === 'loading' && (
+        <div role="status" style={{
+          marginTop: 60,
+          padding: '18px 24px',
+          borderRadius: 20,
+          background: 'rgba(255,255,255,0.14)',
+          border: '1px solid rgba(255,255,255,0.28)',
+          color: '#FFFFFF',
+          fontSize: 16,
+          fontWeight: 500,
+        }}>
+          Loading your card…
+        </div>
+      )}
+      {status === 'error' && (
+        <PublicStateCard
+          state="error"
+          tone="light"
+          title="We couldn&rsquo;t load that card"
+          onRetry={onRetry}
+          style={{ marginTop: 60 }}
+        >
+          This looks temporary. Your link is still valid&mdash;check your connection and try again.
+        </PublicStateCard>
+      )}
+      {status === 'missing' && (
+        <PublicStateCard
+          state="not-found"
+          tone="light"
+          title="This card isn&rsquo;t available"
+          contact="none"
+          style={{ marginTop: 60 }}
+        >
+          The link may be incomplete. Reach us any time at{' '}
+          <a href="https://wavespestcontrol.com" style={{ color: AQUA }}>wavespestcontrol.com</a>.
+        </PublicStateCard>
+      )}
+    </div>
+  );
+}
 
 export default function CardPage() {
   const { token } = useParams();
@@ -211,6 +252,8 @@ export default function CardPage() {
 
   const scene = {
     flex: 1,
+    minHeight: '100vh',
+    boxSizing: 'border-box',
     background: 'radial-gradient(130% 150% at 18% -10%, #0A5480 0%, #04395E 48%, #021D33 100%)',
     display: 'flex',
     justifyContent: 'center',
@@ -220,33 +263,7 @@ export default function CardPage() {
   };
 
   if (status !== 'ready') {
-    return (
-      <div style={scene}>
-        {status === 'error' && (
-          <PublicStateCard
-            state="error"
-            tone="light"
-            title="We couldn&rsquo;t load that card"
-            onRetry={() => setLoadAttempt(a => a + 1)}
-            style={{ marginTop: 60 }}
-          >
-            This looks temporary. Your link is still valid&mdash;check your connection and try again.
-          </PublicStateCard>
-        )}
-        {status === 'missing' && (
-          <PublicStateCard
-            state="not-found"
-            tone="light"
-            title="This card isn&rsquo;t available"
-            contact="none"
-            style={{ marginTop: 60 }}
-          >
-            The link may be incomplete. Reach us any time at{' '}
-            <a href="https://wavespestcontrol.com" style={{ color: AQUA }}>wavespestcontrol.com</a>.
-          </PublicStateCard>
-        )}
-      </div>
-    );
+    return <CardTerminalScene status={status} scene={scene} onRetry={() => setLoadAttempt(a => a + 1)} />;
   }
 
   // Business layer is Eastern-only: pin the timezone so an evening ET
@@ -266,7 +283,7 @@ export default function CardPage() {
   const initials = techName.split(/\s+/).map((p) => p[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
 
   return (
-    <div style={scene}>
+    <div className="wcard-scene" style={scene}>
       <style>{`
         .wcard-tap { transition: transform 140ms ease, filter 140ms ease; }
         @media (prefers-reduced-motion: no-preference) {
@@ -274,9 +291,25 @@ export default function CardPage() {
           .wcard-tap:active { transform: scale(0.97); }
         }
         .wcard-tap:focus-visible { outline: 2px solid ${AQUA}; outline-offset: 2px; }
+        @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+          .wcard-surface { background: #063F66 !important; border-color: rgba(255,255,255,0.45) !important; }
+        }
+        @media (prefers-reduced-transparency: reduce) {
+          .wcard-surface { background: #063F66 !important; border-color: rgba(255,255,255,0.45) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+        }
+        @media (forced-colors: active) {
+          .wcard-scene { background: Canvas !important; color: CanvasText !important; }
+          .wcard-surface { background: Canvas !important; color: CanvasText !important; border: 1px solid CanvasText !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; box-shadow: none !important; }
+          .wcard-tap { background: ButtonFace !important; color: ButtonText !important; border: 1px solid ButtonText !important; }
+          .wcard-qr { background: #04395E !important; border: 1px solid CanvasText !important; forced-color-adjust: none; }
+        }
+        @media print {
+          .wcard-scene { background: #FFFFFF !important; padding: 16px !important; min-height: 0 !important; }
+          .wcard-surface { background: #04395E !important; box-shadow: none !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+        }
       `}</style>
 
-      <div data-glass-motion="card" style={{
+      <div className="wcard-surface" data-glass-motion="card" style={{
         position: 'relative',
         width: 'min(378px, 100%)',
         borderRadius: 32,
@@ -343,7 +376,7 @@ export default function CardPage() {
             }}>{initials || 'W'}</div>
           )}
           <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 130px', gap: 2, minWidth: 0, overflowWrap: 'anywhere' }}>
-            <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em' }}>{techName}</div>
+            <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em' }}>{techName}</h1>
             <div style={{ fontSize: 14, color: AQUA }}>Your Waves technician</div>
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', flexShrink: 0, gap: 8 }}>
@@ -395,7 +428,7 @@ export default function CardPage() {
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
               background: '#000000', color: '#FFFFFF', borderRadius: 14,
-              minHeight: 48, padding: '11px 18px', fontSize: 16, fontWeight: 620,
+              minHeight: 48, padding: '11px 18px', fontSize: 16, fontWeight: 600,
               textDecoration: 'none', boxShadow: '0 8px 20px rgba(1,16,28,0.40)',
             }}
           >
@@ -420,7 +453,7 @@ export default function CardPage() {
               <svg width="20" height="24" viewBox="0 0 24 24" aria-hidden="true" style={{ flexShrink: 0 }}><path fill="currentColor" d={APPLE_GLYPH_PATH} /></svg>
               <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.12, textAlign: 'left' }}>
                 <span style={{ fontSize: 14, letterSpacing: '0.02em', opacity: 0.85, whiteSpace: 'nowrap' }}>Download on the</span>
-                <span style={{ fontSize: 16, fontWeight: 640, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>App Store</span>
+                <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>App Store</span>
               </span>
             </a>
             <a className="wcard-tap" href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Get the Waves app on Google Play" data-glass-motion="control"
@@ -433,7 +466,7 @@ export default function CardPage() {
               </svg>
               <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.12, textAlign: 'left' }}>
                 <span style={{ fontSize: 14, letterSpacing: '0.06em', opacity: 0.85, whiteSpace: 'nowrap' }}>GET IT ON</span>
-                <span style={{ fontSize: 16, fontWeight: 640, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>Google Play</span>
+                <span style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>Google Play</span>
               </span>
             </a>
           </div>
@@ -463,10 +496,10 @@ export default function CardPage() {
           <>
             <div style={{ height: 1, background: 'rgba(255,255,255,0.16)' }} />
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, textAlign: 'center', paddingTop: 2 }}>
-              <span style={{ fontSize: 16, fontWeight: 620, color: 'rgba(255,255,255,0.88)' }}>
+              <span style={{ fontSize: 16, fontWeight: 600, color: 'rgba(255,255,255,0.88)' }}>
                 {techFirst ? `Did ${techFirst} take good care of you?` : 'Did we take good care of you?'}
               </span>
-              <div data-glass-motion="soft" style={{
+              <div className="wcard-qr" data-glass-motion="fade" style={{
                 background: 'rgba(255,255,255,0.09)',
                 border: '1px solid rgba(255,255,255,0.24)',
                 boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.22)',
@@ -482,7 +515,7 @@ export default function CardPage() {
                 rel="noopener noreferrer"
                 style={{
                   minHeight: 44, display: 'inline-flex', alignItems: 'center',
-                  fontSize: 16, fontWeight: 640, color: '#BFE3F5',
+                  fontSize: 16, fontWeight: 600, color: '#BFE3F5',
                   textDecoration: 'underline', textUnderlineOffset: 3,
                   textDecorationColor: 'rgba(191,227,245,0.5)',
                 }}
@@ -493,7 +526,7 @@ export default function CardPage() {
           </>
         )}
 
-        <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.60)', textAlign: 'center' }}>
+        <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.78)', textAlign: 'center' }}>
           wavespestcontrol.com · {WAVES_FL_LICENSE_LINE}
         </div>
 

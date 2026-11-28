@@ -144,6 +144,7 @@ async function mostRecentActiveAllocations(trx, { customerId, ids }) {
 }
 
 async function retireActiveAllocationAudits(trx, { customerId, parentId, ids }) {
+  if (!ids.length) return;
   const audits = await trx('audit_log as allocation')
     .where({
       'allocation.action': 'prepaid_series.allocated',
@@ -389,7 +390,12 @@ async function clearSeriesPrepaid(db, anchor) {
     // stamps so a concurrent payment cannot be retired without being cleared.
     await fetchSeriesRows(trx, parentId, { lock: true });
     const family = await fetchSeriesRows(trx, parentId);
-    const familyIds = family.filter((row) => row.customer_id === anchor.customer_id).map((row) => row.id);
+    const completedIds = new Set(
+      family.filter((row) => row.customer_id === anchor.customer_id && row.status === 'completed').map((row) => row.id),
+    );
+    const familyIds = family
+      .filter((row) => row.customer_id === anchor.customer_id && !completedIds.has(row.id))
+      .map((row) => row.id);
     // Symmetry with the manual writers (stampSeriesPrepaid, POST
     // /:id/prepaid, bulk mark_prepaid): a series clear must never erase
     // annual-prepay coverage evidence. Nulling the stamp here (with the
@@ -465,6 +471,7 @@ async function clearSeriesPrepaid(db, anchor) {
     }
     const ids = familyIds.filter((id) => !independentBoosterIds.has(id) && !annualCoveredIds.has(id));
     const cleared = await trx('scheduled_services').whereIn('id', ids)
+      .whereRaw("status IS DISTINCT FROM 'completed'")
       .whereNotNull('prepaid_amount')
       .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null })
       .returning(['id', 'annual_prepay_term_id']);

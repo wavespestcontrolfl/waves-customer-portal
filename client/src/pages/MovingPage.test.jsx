@@ -62,6 +62,12 @@ function renderPage(routes) {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('MovingPage', () => {
+  it('mounts the liquid glass theme on html', async () => {
+    renderPage([[`/public/moving/${TOKEN}`, () => jsonResponse(OPEN_VIEW)]]);
+    await screen.findByRole('heading', { level: 1, name: 'Moving, Pat?' });
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+  });
+
   it('greets the customer, names the plan and says the level and setup fee carry over', async () => {
     renderPage([[`/public/moving/${TOKEN}`, () => jsonResponse(OPEN_VIEW)]]);
     expect(await screen.findByRole('heading', { level: 1, name: 'Moving, Pat?' })).toBeInTheDocument();

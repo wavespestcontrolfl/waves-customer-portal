@@ -15,6 +15,10 @@ const { ownerForSnapshot, ownerFieldMinutes, PLAN_START_SQL, PLAN_VISIT_SQL, pla
 
 const WINDOW_MONTHS = 12;
 const HOURS_WEEKS = 12;
+// Prior 12-month growth needs at least half a year of non-zero cash months in
+// the earlier run — a near-empty pre-portal baseline (e.g. one $267 month)
+// otherwise produces a meaningless +36,000% growth spike.
+const MIN_PRIOR_ACTIVE_MONTHS = 6;
 
 const num = (v) => {
   const n = Number(v);
@@ -75,14 +79,21 @@ function revenueMetric({ window, prior }) {
   const now = sumColumn(window, 'cash_revenue');
   const before = sumColumn(prior, 'cash_revenue');
   const complete = now.months === WINDOW_MONTHS && before.months === WINDOW_MONTHS;
+  const priorActiveMonths = prior.filter((r) => r.cash_revenue != null && num(r.cash_revenue) > 0).length;
+  const priorBaselineValid = before.total > 0 && priorActiveMonths >= MIN_PRIOR_ACTIVE_MONTHS;
+  let growthUnavailableReason = null;
+  if (!complete) growthUnavailableReason = 'needs_24_months';
+  else if (!priorBaselineValid) growthUnavailableReason = 'prior_incomplete';
   return {
     value: round2(now.total),
     priorValue: round2(before.total),
-    growthPct: complete && before.total > 0 ? round1((now.total / before.total - 1) * 100) : null,
+    growthPct: complete && priorBaselineValid ? round1((now.total / before.total - 1) * 100) : null,
+    growthUnavailableReason,
     monthsCounted: now.months,
     priorMonthsCounted: before.months,
+    priorActiveMonths,
     basis: 'Cash revenue from the books (P&L): money received less refunds and sales tax, summed over the newest 12 stored months. '
-      + 'Growth compares them with the 12 months before, and is blank unless both runs are 12 full months.',
+      + `Growth compares them with the 12 months before, and is blank unless both runs are 12 full months and the earlier 12 months have at least ${MIN_PRIOR_ACTIVE_MONTHS} months with revenue.`,
   };
 }
 
@@ -292,4 +303,5 @@ module.exports = {
   timeCounted,
   currentRateNote,
   keptWindows,
+  MIN_PRIOR_ACTIVE_MONTHS,
 };
