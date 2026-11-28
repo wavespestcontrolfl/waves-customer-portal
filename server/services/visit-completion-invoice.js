@@ -243,10 +243,7 @@ async function memberBillingEligibility(member, customer, trx, payerSeen = null)
 // { payerId, payerTaxExempt } = all of them resolve to that ONE payer;
 // { office } = self-pay and payer-billed members mixed, or two payers (never split).
 function payerOwnerForPacket(payerSeen) {
-  const entries = [...payerSeen.entries()].map(([memberId, value]) => {
-    const info = value && typeof value === 'object' ? value : { payerId: value, taxExempt: false };
-    return [memberId, info];
-  });
+  const entries = [...payerSeen.entries()];
   const payers = new Set(entries.map(([, info]) => (info.payerId == null ? 'self' : String(info.payerId))));
   if (![...payers].some((id) => id !== 'self')) return { payerId: null, payerTaxExempt: false };
   const [memberId, info] = entries.find(([, entry]) => entry.payerId != null);
