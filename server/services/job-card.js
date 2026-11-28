@@ -2278,7 +2278,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
       .catch((err) => logger.warn(`[job-card] rain rule shadow not recorded: ${err.message}`));
   }
   if (readinessOnly) {
-    const readiness = dispatchReadiness({ facts, lines, products, blocks, sprayCheck, tank, isToday, now });
+    const extraRequiredLines = requiredMixRateLines(procedureEntries, lines, catalog);
+    const readiness = dispatchReadiness({ facts, lines: [...lines, ...extraRequiredLines], products, blocks, sprayCheck, tank, isToday, now });
     // Truck kit (docs/tool-inventory-tracker-scope.md PR 2): a required tool
     // the assigned truck lacks is a hold like stock or weather (add-ons and
     // the never-fatal read live in truck-kit.js).
@@ -2853,6 +2854,27 @@ function mergeSprayCheckProducts(lineProducts, entries, catalog) {
   return [...byId.values()];
 }
 
+function isConditionalMixRow(row) {
+  return CONDITIONAL_MIX_ROW_RE.test([row?.condition, row?.where, row?.limit].filter(Boolean).join('; '));
+}
+
+function requiredMixRateLines(entries, lines, catalog) {
+  const lineIds = new Set(lines.map((l) => String(l.product.id)));
+  const catalogById = new Map(catalog.map((p) => [String(p.id), p]));
+  const out = [];
+  for (const entry of entries) {
+    for (const row of entryMixRateRows(entry)) {
+      const id = row.productId ? String(row.productId) : null;
+      if (!id || lineIds.has(id) || isConditionalMixRow(row)) continue;
+      const product = catalogById.get(id);
+      if (!product) continue;
+      lineIds.add(id);
+      out.push({ product, selected: true, raw: row.product || '' });
+    }
+  }
+  return out;
+}
+
 function sprayServicesForProduct(product, lines, entries, facts) {
   const pid = String(product.id);
   const fromLines = lines.filter((l) => String(l.product.id) === pid).map((l) => lineService(l, facts));
@@ -3059,6 +3081,7 @@ function mixedMethodUseNotes(tankRow, directRows) {
   if (!tankRow || !directRows.length) return [];
   const sprayVol = unrepresentedSprayVolume(tankRow);
   const notes = [
+    tankRow.condition ? `Condition: ${tankRow.condition}` : null,
     tankRow.where ? `Tank amount is for: ${tankRow.where}` : null,
     sprayVol ? `Spray volume: ${sprayVol}` : null,
     tankRow.limit ? `Tank limit: ${tankRow.limit}` : null,
@@ -3069,7 +3092,7 @@ function mixedMethodUseNotes(tankRow, directRows) {
 function mixRowRestrictionNotes(row, hit) {
   if (!row) return [];
   const covered = hit?.selected === false ? String(hit.raw || '').toLowerCase() : '';
-  const parts = [row.where, unrepresentedSprayVolume(row), row.limit]
+  const parts = [row.condition, row.where, unrepresentedSprayVolume(row), row.limit]
     .map((part) => String(part || '').trim())
     .filter((part) => part && (!covered || !covered.includes(part.toLowerCase())));
   return parts.length ? [`Protocol use: ${parts.join(' — ')}`] : [];

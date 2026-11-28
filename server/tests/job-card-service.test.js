@@ -4262,24 +4262,39 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     // Home + vehicle cockroach visits share Tekko Pro's rate and carrier; both services keep their own placement/limit warnings beside the shared amount.
     const tekko = { id: 'tekko', name: 'Tekko Pro IGR', epa_reg_number: '53883-335', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
     const sharedRoachDb = dbFor({
-      scheduled_services: [{ id: 'svc20', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'German Cockroach Cleanout', service_category: 'cockroach', service_key: 'cockroach_initial', first_name: 'A', last_name: 'B' }],
+      scheduled_services: [{ id: 'svc20', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'German Cockroach Cleanout', service_category: 'pest_control', service_key: 'cockroach_initial', first_name: 'A', last_name: 'B' }],
       products_catalog: [tekko],
       product_aliases: [],
       equipment_calibrations: [],
       equipment_systems: [],
-      scheduled_service_addons: [{ service_name: 'Vehicle Cockroach Cleanout', category: 'cockroach', service_key: 'cockroach_vehicle_initial' }],
+      scheduled_service_addons: [{ service_name: 'Vehicle Cockroach Cleanout', category: 'pest_control', service_key: 'cockroach_vehicle_initial' }],
     });
     const sharedRoachCalc = await jobCard.mixForProduct('tekko', 1, { serviceId: 'svc20', dbh: sharedRoachDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(sharedRoachCalc.amount).toBe(2);
     expect(sharedRoachCalc.warnings.join(' ')).toContain('German Cockroach Cleanout: Protocol use: Inside: cracks, crevices and spots');
     expect(sharedRoachCalc.warnings.join(' ')).toContain('Vehicle Cockroach Cleanout: Protocol use: Vehicle: cracks and spots, light application — Do not wet carpet; keep off electrical parts');
 
-    // Dispatch readiness uses products resolved via mixRates for weather checks instead of reporting "No products resolved".
-    const windyTaurus = { ...taurus, max_wind_mph: 10 };
+    // March Mainspring preserves the field guide's visit-specific condition ("If you find: Whitefly") alongside its broader foliar line.
+    const mainspring = { id: 'ms', name: 'Mainspring GNL', epa_reg_number: '100-1543', default_rate: '0.02-0.08', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const mainspringDb = dbFor({
+      scheduled_services: [{ id: 'svc22', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [mainspring],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const mainspringCalc = await jobCard.mixForProduct('ms', 100, { serviceId: 'svc22', dbh: mainspringDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(mainspringCalc).toMatchObject({ amount: 4, amountMax: 8, unit: 'fl_oz' });
+    expect(mainspringCalc.warnings.join(' ')).toContain('If you find: Whitefly');
+
+    // Dispatch readiness uses required mixRates-only products for both weather and stock checks (while keeping optional mix rows out of stock holds).
+    const windyEmptyTaurus = { ...taurus, max_wind_mph: 10, inventory_on_hand: 0, inventory_unit: 'fl_oz' };
+    const readinessHourly = [15, 16, 17, 18].map((h) => ({ startTime: `2028-03-10T${h}:00:00Z`, temperatureF: 75, windMph: 18, rainChance: 0 }));
     const readinessDb = dbFor({
       scheduled_services: [{ id: 'svc21', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
       property_preferences: [{}],
-      products_catalog: [windyTaurus],
+      products_catalog: [windyEmptyTaurus],
       product_aliases: [],
       equipment_calibrations: [],
       equipment_systems: [],
@@ -4288,12 +4303,34 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const readiness = await jobCard.buildJobCard('svc21', {
       dbh: readinessDb,
       readinessOnly: true,
-      deps: { getHourly: async () => [{ time: '2028-03-10T15:00:00Z', tempF: 75, windMph: 18, rainProb: 0 }] },
+      deps: { getHourly: async () => readinessHourly },
       now: new Date('2028-03-10T15:00:00Z'),
     });
     expect(readiness.issues.some((i) => i.kind === 'protocol')).toBe(false);
     expect(readiness.issues).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'weather', status: 'caution', label: expect.stringContaining('Taurus SC') }),
+      expect.objectContaining({ kind: 'weather', status: 'caution', label: 'Wind caution · Taurus SC' }),
+      expect.objectContaining({ kind: 'stock', status: 'hold', label: 'Company stock short' }),
+    ]));
+
+    // Optional mixRates-only products (work-order-only Taurus SC on termite trench) do not trigger a stock hold when zero on hand.
+    const optionalReadinessDb = dbFor({
+      scheduled_services: [{ id: 'svc23', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [windyEmptyTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const optionalReadiness = await jobCard.buildJobCard('svc23', {
+      dbh: optionalReadinessDb,
+      readinessOnly: true,
+      deps: { getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(optionalReadiness.issues.some((i) => i.kind === 'stock')).toBe(false);
+    expect(optionalReadiness.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'weather', status: 'caution', label: 'Wind caution · Taurus SC' }),
     ]));
 
     const tristarDb = dbFor({
