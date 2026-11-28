@@ -69,7 +69,7 @@ module.exports = [
     interactions: [{ name: 'open-first-dialog', fullPage: false, run: async (page) => { await page.getByRole('button', { name: /add|update|change|manage/i }).first().click(); } }] },
   { id: 'portal-refer', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=refer', url: '/preview-portal.html?tab=refer', ready: 'css:[data-glass="card"]', handle: noApi },
   { id: 'portal-documents', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=documents', url: '/preview-portal.html?tab=documents', ready: 'css:[data-glass="card"]', handle: noApi },
-  { id: 'portal-messages', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=messages', url: '/preview-portal.html?tab=messages', ready: 'css:[data-glass="card"]', handle: noApi },
+  { id: 'portal-messages', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=messages', url: '/preview-portal.html?tab=messages', ready: 'Do you spray around the pool cage too?', handle: noApi },
   { id: 'portal-property', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=property', url: '/preview-portal.html?tab=property', ready: 'css:[data-glass="card"]', handle: noApi,
     states: [{ name: 'default' }, { name: 'saved-properties', url: '/preview-portal.html?tab=property&properties=saved', ready: 'css:[data-glass="card"]' }] },
   { id: 'portal-learn', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=learn', url: '/preview-portal.html?tab=learn', ready: 'css:[data-glass="card"]', handle: noApi },

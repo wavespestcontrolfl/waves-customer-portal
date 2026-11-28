@@ -301,6 +301,7 @@ export default function CardPage() {
           .wcard-scene { background: Canvas !important; color: CanvasText !important; }
           .wcard-surface { background: Canvas !important; color: CanvasText !important; border: 1px solid CanvasText !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; box-shadow: none !important; }
           .wcard-tap { background: ButtonFace !important; color: ButtonText !important; border: 1px solid ButtonText !important; }
+          .wcard-qr { background: #04395E !important; border: 1px solid CanvasText !important; forced-color-adjust: none; }
         }
         @media print {
           .wcard-scene { background: #FFFFFF !important; padding: 16px !important; min-height: 0 !important; }
@@ -498,7 +499,7 @@ export default function CardPage() {
               <span style={{ fontSize: 16, fontWeight: 600, color: 'rgba(255,255,255,0.88)' }}>
                 {techFirst ? `Did ${techFirst} take good care of you?` : 'Did we take good care of you?'}
               </span>
-              <div data-glass-motion="fade" style={{
+              <div className="wcard-qr" data-glass-motion="fade" style={{
                 background: 'rgba(255,255,255,0.09)',
                 border: '1px solid rgba(255,255,255,0.24)',
                 boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.22)',

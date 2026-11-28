@@ -436,14 +436,14 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged, o
       {notice ? <p role="alert" style={noticeStyle}>{notice}</p> : null}
       <div role="group" aria-label="Day" style={{ display: 'flex', gap: SP.xs, overflowX: 'auto', paddingBottom: SP.xxs }}>
         {days.map((d) => (
-          <button key={d} type="button" data-glass={d === day ? undefined : 'chip'} aria-pressed={d === day} onClick={() => setDay(d)} style={chipStyle(d === day)}>
+          <button key={d} type="button" aria-pressed={d === day} onClick={() => setDay(d)} style={chipStyle(d === day)}>
             {dayChipLabel(d)}
           </button>
         ))}
       </div>
       <div role="group" aria-label="Time" style={{ marginTop: SP.sm, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: SP.xs }}>
         {dayOffers.map((o) => (
-          <button key={`${o.date}-${o.start_time}-${o.slot_sig}`} type="button" data-glass="chip" onClick={() => { setNotice(null); setPicked(o); }} style={slotStyle}>
+          <button key={`${o.date}-${o.start_time}-${o.slot_sig}`} type="button" onClick={() => { setNotice(null); setPicked(o); }} style={slotStyle}>
             {slotLabel(o)}
           </button>
         ))}
