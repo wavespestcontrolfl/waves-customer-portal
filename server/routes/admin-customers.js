@@ -6090,6 +6090,14 @@ function annualPrepayConflictPayload(err) {
   return err ? (err.annualPrepayOverlap || err.existingPlanConflict || null) : null;
 }
 
+function readAnnualPrepayScopeRequest(body) {
+  return {
+    allowOverlap: body?.allowOverlap === true,
+    propertyId: body?.propertyId || null,
+    scheduledServiceId: body?.scheduledServiceId || null,
+  };
+}
+
 // POST /api/admin/customers/:id/annual-prepay-invoice - create and send an
 // unpaid annual prepay invoice. The linked annual_prepay_terms row stays
 // payment_pending until Stripe/manual payment marks the invoice paid; the
@@ -6326,9 +6334,11 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     let appliedDepositCredit = 0;
     let depositCreditEstimateId = null;
     let settledByDepositCredit = false;
-    const allowOverlap = req.body?.allowOverlap === true;
-    const requestedPropertyId = req.body?.propertyId || null;
-    const requestedScheduledServiceId = req.body?.scheduledServiceId || null;
+    const {
+      allowOverlap,
+      propertyId: requestedPropertyId,
+      scheduledServiceId: requestedScheduledServiceId,
+    } = readAnnualPrepayScopeRequest(req.body);
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -6812,9 +6822,11 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
     const sendReceipt = require('../config/feature-gates').gates.recordedAnnualPrepayReceipt;
     let result;
-    const allowOverlap = req.body?.allowOverlap === true;
-    const requestedPropertyId = req.body?.propertyId || null;
-    const requestedScheduledServiceId = req.body?.scheduledServiceId || null;
+    const {
+      allowOverlap,
+      propertyId: requestedPropertyId,
+      scheduledServiceId: requestedScheduledServiceId,
+    } = readAnnualPrepayScopeRequest(req.body);
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
