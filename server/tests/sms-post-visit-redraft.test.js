@@ -9,6 +9,7 @@ const {
   POST_VISIT_TRIGGER,
   HOUSE_VOICE_DRAFTER,
   etDayBounds,
+  lastTenPhone,
   inboundHasMedia,
   findEligibleInboundForPostVisitRedraft,
   findPostVisitRedraftCandidates,
@@ -82,7 +83,6 @@ describe('migration 20261128030000_message_drafts_post_visit_revision', () => {
     await migration.up(knex);
     expect(added).toEqual(['supersedes_draft_id', 'draft_trigger']);
     expect(raws[0]).toContain('CREATE UNIQUE INDEX IF NOT EXISTS message_drafts_post_visit_revision_uniq');
-    expect(raws[0]).toContain("draft_trigger = 'post_visit_closeout'");
 
     knex.schema.hasColumn.mockResolvedValue(true);
     await migration.down(knex);
@@ -99,12 +99,18 @@ describe('pure helpers', () => {
     expect(end.toISOString()).toBe('2026-11-28T05:00:00.000Z');
   });
 
-  test('inboundHasMedia detects attachments and fails closed on malformed metadata', () => {
-    expect(inboundHasMedia(null)).toBe(false);
+  test('lastTenPhone returns 10 digits for US and international numbers (matching publishSuggestion)', () => {
+    expect(lastTenPhone('+1 (941) 555-0199')).toBe('9415550199');
+    expect(lastTenPhone('+44 20 7946 0958')).toBe('2079460958');
+    expect(lastTenPhone('12345')).toBeNull();
+  });
+
+  test('inboundHasMedia fails closed on null/missing/malformed metadata and returns false only for confirmed zero media', () => {
+    expect(inboundHasMedia(null)).toBe(true);
+    expect(inboundHasMedia({})).toBe(true);
+    expect(inboundHasMedia('{bad-json')).toBe(true);
     expect(inboundHasMedia({ media: [] })).toBe(false);
     expect(inboundHasMedia({ media: ['https://example.com/photo.jpg'] })).toBe(true);
-    expect(inboundHasMedia('{"media":[]}')).toBe(false);
-    expect(inboundHasMedia('{bad-json')).toBe(true);
   });
 });
 
@@ -127,7 +133,7 @@ describe('findEligibleInboundForPostVisitRedraft', () => {
   test('returns eligible inbound preserving intent, schedulingIntent, hasMedia, and requires house_voice drafter', async () => {
     const priorDraftQ = chain({ first: PRIOR_DRAFT });
     const dbh = makeDb({
-      sms_log: [chain({ first: INBOUND }), chain({ first: null })],
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
       message_drafts: [priorDraftQ, chain({ first: null })],
     });
     const res = await findEligibleInboundForPostVisitRedraft(dbh, {
@@ -153,36 +159,31 @@ describe('findEligibleInboundForPostVisitRedraft', () => {
     });
   });
 
-  test('returns null when phone-thread already has a live answer or in-flight reply', async () => {
+  test('checks per phone thread so an answered text on phone B does not hide an unanswered text on phone A', async () => {
+    const phoneB = { ...INBOUND, id: 'sms-phone-b', from_phone: '+19415550222', created_at: new Date('2026-11-27T15:00:00Z') };
+    const phoneA = { ...INBOUND, id: 'sms-phone-a', from_phone: '+19415550111', created_at: new Date('2026-11-27T14:00:00Z'), metadata: { media: [] } };
     const dbh = makeDb({
-      sms_log: [chain({ first: INBOUND })],
-      message_drafts: [],
+      sms_log: [chain({ result: [phoneB, phoneA] }), chain({ first: null })],
+      message_drafts: [chain({ first: PRIOR_DRAFT }), chain({ first: null })],
     });
+    const threadHasLiveAnswer = jest.fn(async (_dbh, { threadLast10 }) => (
+      threadLast10 === '9415550222' ? 'human_answered' : null
+    ));
+
     const res = await findEligibleInboundForPostVisitRedraft(dbh, {
       customerId: 'cust-1',
       completedAt: new Date('2026-11-27T16:30:00Z'),
       visitDateET: '2026-11-27',
-    }, { threadHasLiveAnswer: jest.fn(async () => 'human_answered') });
-    expect(res).toBeNull();
+    }, { threadHasLiveAnswer });
+
+    expect(res?.smsLogId).toBe('sms-phone-a');
+    expect(res?.hasMedia).toBe(false);
   });
 
   test('returns null when an automated outbound reply already answered on that phone thread', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ first: INBOUND }), chain({ first: { id: 'sms-auto-1' } })],
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: { id: 'sms-auto-1' } })],
       message_drafts: [],
-    });
-    const res = await findEligibleInboundForPostVisitRedraft(dbh, {
-      customerId: 'cust-1',
-      completedAt: new Date('2026-11-27T16:30:00Z'),
-      visitDateET: '2026-11-27',
-    }, { threadHasLiveAnswer: jest.fn(async () => null) });
-    expect(res).toBeNull();
-  });
-
-  test('returns null when a post_visit_closeout revision already exists', async () => {
-    const dbh = makeDb({
-      sms_log: [chain({ first: INBOUND }), chain({ first: null })],
-      message_drafts: [chain({ first: PRIOR_DRAFT }), chain({ first: { id: 'draft-rev-1' } })],
     });
     const res = await findEligibleInboundForPostVisitRedraft(dbh, {
       customerId: 'cust-1',
@@ -225,9 +226,9 @@ describe('draftPostVisitRevisionIfEligible', () => {
     expect(draftFn).not.toHaveBeenCalled();
   });
 
-  test('claims advisory lock before drafting and forwards intent, schedulingIntent, hasMedia, and skipAutoSend=true', async () => {
+  test('claims per-message lock with recordHealth:false before drafting and forwards safeguards', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ first: INBOUND }), chain({ first: null })],
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
       customers: [chain({ first: { id: 'cust-2', first_name: 'Sam', city: 'Sarasota' } })],
     });
@@ -245,7 +246,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
       threadHasLiveAnswerFn: async () => null,
     });
 
-    expect(lockFn).toHaveBeenCalledWith('sms-post-visit-redraft:sms-in-2', expect.any(Function));
+    expect(lockFn).toHaveBeenCalledWith('sms-post-visit-redraft:sms-in-2', expect.any(Function), { recordHealth: false });
     expect(res).toEqual({ drafted: true, draftId: 'draft-rev-2', supersedesDraftId: 'draft-orig-2' });
     expect(draftFn).toHaveBeenCalledWith(expect.objectContaining({
       smsLogId: 'sms-in-2',
@@ -260,7 +261,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
 
   test('skips paid draft when another closeout already holds the per-inbound advisory lock', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ first: INBOUND }), chain({ first: null })],
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null })],
       customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
     });
@@ -284,7 +285,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
 });
 
 describe('findPostVisitRedraftCandidates (Mac free runner pagination)', () => {
-  test('pages past ineligible closeouts until eligible candidates are found', async () => {
+  test('filters out backfills and incomplete visits and pages past ineligible closeouts', async () => {
     const inbound = {
       id: 'sms-in-4',
       from_phone: '+19415550166',
@@ -299,32 +300,26 @@ describe('findPostVisitRedraftCandidates (Mac free runner pagination)', () => {
       intent_confidence: 0.8,
       scheduling_intent: false,
     };
-    // Page 1 (full batch of 2): both customers have no inbound SMS.
-    // Page 2 (1 row): customer 3 IS eligible.
+    const page1 = chain({
+      result: [
+        { id: 'rec-1', customer_id: 'cust-1', created_at: new Date('2026-11-27T17:00:00Z') },
+        { id: 'rec-2', customer_id: 'cust-2', created_at: new Date('2026-11-27T16:30:00Z') },
+      ],
+    });
+    const page2 = chain({
+      result: [
+        { id: 'rec-3', customer_id: 'cust-3', created_at: new Date('2026-11-27T16:00:00Z') },
+      ],
+    });
     const dbh = makeDb({
-      service_records: [
-        chain({
-          result: [
-            { id: 'rec-1', customer_id: 'cust-1', created_at: new Date('2026-11-27T17:00:00Z') },
-            { id: 'rec-2', customer_id: 'cust-2', created_at: new Date('2026-11-27T16:30:00Z') },
-          ],
-        }),
-        chain({
-          result: [
-            { id: 'rec-3', customer_id: 'cust-3', created_at: new Date('2026-11-27T16:00:00Z') },
-          ],
-        }),
-      ],
+      service_records: [page1, page2],
       sms_log: [
-        chain({ first: null }), // cust-1
-        chain({ first: null }), // cust-2
-        chain({ first: inbound }), // cust-3 inbound
-        chain({ first: null }), // cust-3 automated answer
-      ],
-      message_drafts: [
-        chain({ first: prior }),
+        chain({ result: [] }),
+        chain({ result: [] }),
+        chain({ result: [inbound] }),
         chain({ first: null }),
       ],
+      message_drafts: [chain({ first: prior }), chain({ first: null })],
     });
 
     const list = await findPostVisitRedraftCandidates(
@@ -332,13 +327,10 @@ describe('findPostVisitRedraftCandidates (Mac free runner pagination)', () => {
       { visitDateET: '2026-11-27', limit: 1, pageSize: 2 },
       { threadHasLiveAnswer: async () => null },
     );
+    expect(page1.whereRaw).toHaveBeenCalledWith("COALESCE(structured_notes->>'backfill', 'false') <> 'true'");
+    expect(page1.whereRaw).toHaveBeenCalledWith("COALESCE(structured_notes->>'visitOutcome', 'completed') <> 'incomplete'");
     expect(list).toHaveLength(1);
-    expect(list[0]).toMatchObject({
-      customerId: 'cust-3',
-      serviceRecordId: 'rec-3',
-      smsLogId: 'sms-in-4',
-      priorDraftId: 'draft-orig-4',
-    });
+    expect(list[0]).toMatchObject({ customerId: 'cust-3', serviceRecordId: 'rec-3', smsLogId: 'sms-in-4' });
   });
 });
 

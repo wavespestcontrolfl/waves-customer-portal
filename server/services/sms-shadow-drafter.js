@@ -7185,6 +7185,10 @@ async function draftShadowReply({
       })
       .returning('id');
 
+    // Post-visit closeout revisions stay in shadow status only: never supersede or
+    // alter the original draft's status/card and never auto-send.
+    if (isRevision) return row?.id || null;
+
     // Gratitude is never sent or published from the webhook/drafter. The
     // existing scheduled sweep rechecks the immutable source, entire recent
     // thread, cutoff, quiet window and exact fixed copy before considering
