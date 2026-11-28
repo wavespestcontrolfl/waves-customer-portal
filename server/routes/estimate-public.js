@@ -9268,8 +9268,9 @@ function renderEstimatePageHtml(token, estimate, estData, membership, opts = {})
   ));
 }
 
-function sendEstimatePageHtml(res, html) {
+function sendEstimatePageHtml(res, html, status = 200) {
   res
+    .status(status)
     .set('Cache-Control', 'no-cache, no-store, must-revalidate')
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
@@ -9570,7 +9571,7 @@ async function handleEstimateView(req, res, next) {
   try {
     let estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) {
-      return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+      return sendEstimatePageHtml(res, renderEstimateNotFoundPage(), 404);
     }
 
     // Centralized-viewability gate, SSR half. GET /:token/data owns this gate
@@ -9603,7 +9604,7 @@ async function handleEstimateView(req, res, next) {
       // scheduler drained the queue.
       || await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
       if (req.path.startsWith('/estimate/')) return next();
-      return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+      return sendEstimatePageHtml(res, renderEstimateNotFoundPage(), 404);
     }
 
     // A call reprocess may have held a published sibling during the original
@@ -9613,7 +9614,7 @@ async function handleEstimateView(req, res, next) {
       const fresh = await refreshExpiredGroupNavigation(db, estimate);
       if (!fresh) {
         if (req.path.startsWith('/estimate/')) return next();
-        return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
+        return sendEstimatePageHtml(res, renderEstimateNotFoundPage(), 404);
       }
       estimate = fresh;
     }
@@ -9854,12 +9855,14 @@ async function handleEstimateView(req, res, next) {
     }
 
     if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted') {
-      return res.set('Content-Type', 'text/html').send(
+      return sendEstimatePageHtml(
+        res,
         renderExpiredPage({
           address: estimate.address,
           customerName: estimate.customer_name,
           greetingFirstName: await estimateGreetingFirstToken(db, estimate),
-        })
+        }),
+        200,
       );
     }
     // The /api/estimates/:token mount renders legacy HTML regardless of the

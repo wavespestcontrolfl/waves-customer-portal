@@ -25,6 +25,10 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     expect(src).toContain("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Estimate Expired");
     expect(src).toContain("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Estimate Not Found");
     expect(src).toContain(".set('X-Robots-Tag', 'noindex')");
+    expect(src).toContain('sendEstimatePageHtml(res, renderEstimateNotFoundPage(), 404)');
+    expect(src).toContain('renderExpiredPage({');
+    expect(src).not.toContain("res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage())");
+    expect(src).not.toContain("res.set('Content-Type', 'text/html').send(\n        renderExpiredPage(");
   });
 
   test('public-newsletter.js renderConfirmPage sets noindex + AA link contrast and expired POST uses expired heading', () => {
@@ -129,13 +133,24 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     }
   });
 
-  test('prep-guide-pdf paginates long paragraphs cleanly without triggering automatic PDFKit page breaks', async () => {
-    const longParagraph = Array.from({ length: 240 }, (_, i) => `Step ${i + 1}: clear baseboards, closets, and pet bowls before your Waves technician arrives.`).join(' ');
+  test('prep-guide-pdf paginates long paragraphs cleanly without triggering automatic PDFKit page breaks and preserves newlines', async () => {
+    const longParagraph = [
+      Array.from({ length: 120 }, (_, i) => `Step ${i + 1}: clear baseboards, closets, and pet bowls before your Waves technician arrives.`).join(' '),
+      '',
+      'Section 2 instruction on its own line.',
+      Array.from({ length: 120 }, (_, i) => `Aftercare ${i + 1}: allow treated surfaces to dry completely before pets re-enter.`).join(' '),
+    ].join('\n');
     const addPageStacks = [];
+    const printedTexts = [];
     const origAddPage = PDFKit.prototype.addPage;
+    const origText = PDFKit.prototype.text;
     PDFKit.prototype.addPage = function patchedAddPage(...args) {
       addPageStacks.push(new Error().stack || '');
       return origAddPage.apply(this, args);
+    };
+    PDFKit.prototype.text = function patchedText(str, ...rest) {
+      if (typeof str === 'string') printedTexts.push(str);
+      return origText.call(this, str, ...rest);
     };
     let buf;
     try {
@@ -165,10 +180,12 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
       });
     } finally {
       PDFKit.prototype.addPage = origAddPage;
+      PDFKit.prototype.text = origText;
     }
     expect(buf.slice(0, 5).toString()).toBe('%PDF-');
     const parsed = await PDFDocument.load(buf);
     expect(parsed.getPageCount()).toBeGreaterThanOrEqual(3);
+    expect(printedTexts).toContain('Section 2 instruction on its own line.');
     // Page 1 is created in PDFDocument constructor; every subsequent page must
     // come from prep-guide-pdf.js (never from PDFKit internal auto-pagination).
     const continuationCalls = addPageStacks.slice(1);

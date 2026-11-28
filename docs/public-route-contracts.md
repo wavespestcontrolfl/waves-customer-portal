@@ -5851,7 +5851,7 @@ models or customer copy. Privacy headers on all responses.
 `/api/card/:token` (read-only digital business card payload; 64-hex
 `customer_cards.share_token` format gate, generic 404 for unknown/malformed
 tokens and archived/merged customers, 60 req/min per-IP read limit on top of
-the global /api limiter, `Cache-Control: private, no-store`; payload is a
+the global /api limiter, `Cache-Control: private, no-store`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`; payload is a
 strict whitelist — customer FIRST NAME + member-since year +
 has_left_google_review flag only, tech name + presigned photo, the
 office phone — or, with GATE_TECH_LINES on and the card's tech holding a
@@ -5861,13 +5861,13 @@ tracked /l review short-link, and the customer's referral link
 the SPA shell `/card/:token` carries the same noindex/no-referrer/no-store
 headers via sensitive-spa-headers.js),
 `/api/card/:token/contact.vcf` (read-only Save-contact vCard; same 64-hex
-token gate + archived-customer 404 + rate limit + `no-store`; contents are
+token gate + archived-customer 404 + rate limit + `Cache-Control: private, no-store`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`; contents are
 COMPANY-ONLY — tech name/title, office line (or the tech's own line under
 the same GATE_TECH_LINES condition as the JSON payload), company
 email/site/address, license line — never customer data),
 `/api/card/:token/wallet.pkpass` (read-only signed Apple Wallet pass; same
 64-hex token gate + archived-customer 404 + per-route rate limit +
-`no-store`; 404s whenever the PASS_* signing env vars are unset (config
+`Cache-Control: no-store`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`; 404s whenever the PASS_* signing env vars are unset (config
 self-gate — the card payload's walletAvailable mirrors it so the button
 never renders a dead tap); pass carries customer FIRST NAME + member-since
 year only — NO home coordinates, NO next-visit date (static pass, no
@@ -10887,8 +10887,8 @@ Public HTML, newsletter, estimate, and card privacy & error response updates (20
 - `/api/public/newsletter/*` tokenized HTML pages (`GET`/`POST /unsubscribe/:token`, `GET`/`POST /confirm/:token`, `GET`/`POST /quiz/:token/:quizId/:answer`, `GET`/`POST /feedback/:token/:reaction`): every HTML response via `sendConfirmHtml` now stamps `Cache-Control: no-store`, `X-Robots-Tag: noindex`, and `Referrer-Policy: no-referrer`, and `renderConfirmPage` adds `<meta name="robots" content="noindex">`.
 - `POST /api/public/newsletter/unsubscribe/:token`: RFC 8058 mail-client/API POSTs (without `confirm_unsubscribe=1`) remain unchanged — uniform `200 { success: true }` on both success and errors. Browser form submissions (`confirm_unsubscribe=1`) now render `<h1>Link expired or invalid.</h1>` (still `200` HTML) when the token does not resolve to a subscriber row, and return a branded `500` HTML error page on unexpected server errors (instead of raw `200` JSON).
 - `GET /api/public/newsletter/unsubscribe/:token`, `GET /api/public/newsletter/quiz/:token/:quizId/:answer`, `GET /api/public/newsletter/feedback/:token/:reaction`, and form-submitted `POST /api/public/newsletter/confirm/:token` (`application/x-www-form-urlencoded` or `multipart/form-data`): unexpected server errors now return a branded `500` HTML error page with the same privacy headers (non-form `POST /confirm/:token` keeps `500 { error: 'confirm failed' }`).
-- `GET /api/public/card/:token`, `GET /api/public/card/:token/wallet.pkpass`, and `GET /api/public/card/:token/contact.vcf` (`server/routes/card-public.js`): stamp `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer` alongside existing `Cache-Control` `no-store` headers. Static Apple Wallet passes (`wallet-pass.js`) keep the stable office number (`location.phone`) so installed passes do not drift after technician reassignments (the pass links the live card for current technician contact).
-- SSR estimate HTML responses (`sendEstimatePageHtml` in `server/routes/estimate-public.js`): stamp `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer` alongside existing `Cache-Control: no-cache, no-store, must-revalidate` headers; expired and not-found SSR pages include `lang="en"`.
+- `GET /api/card/:token`, `GET /api/card/:token/wallet.pkpass`, and `GET /api/card/:token/contact.vcf` (`server/routes/card-public.js`, mounted at `/api/card`): stamp `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer` alongside existing `Cache-Control` `no-store` headers. Static Apple Wallet passes (`wallet-pass.js`) keep the stable office number (`location.phone`) so installed passes do not drift after technician reassignments (the pass links the live card for current technician contact).
+- SSR estimate HTML responses (`sendEstimatePageHtml` in `server/routes/estimate-public.js`, including active, expired, and not-found HTML pages): stamp `Cache-Control: no-cache, no-store, must-revalidate`, `Pragma: no-cache`, `Expires: 0`, `X-Robots-Tag: noindex`, and `Referrer-Policy: no-referrer` while preserving each branch's HTTP status code (`200` / `404`); expired and not-found SSR pages include `lang="en"`.
 
 
 

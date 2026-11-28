@@ -93,6 +93,39 @@ function sectionHeading(doc, text) {
   doc.y = drawFieldSectionHeading(doc, text, L, doc.y, W);
 }
 
+function drawChunkedHardLine(doc, line, setBodyFont) {
+  if (!line.trim()) {
+    ensureRoom(doc, 14);
+    doc.moveDown(0.5);
+    return;
+  }
+  const tokens = line.match(/\S+\s*/g) || [line];
+  let chunk = '';
+  for (const token of tokens) {
+    const candidate = chunk + token;
+    setBodyFont();
+    const h = Math.ceil(doc.heightOfString(candidate.trimEnd(), { width: W, lineGap: 2 }));
+    if (chunk && doc.y + h > CONTENT_BOTTOM - 10) {
+      setBodyFont().fillColor(BODY).text(chunk.trimEnd(), L, doc.y, { width: W, lineGap: 2 });
+      footer(doc);
+      doc.addPage();
+      drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
+      chunk = token;
+    } else if (!chunk && doc.y + h > CONTENT_BOTTOM - 10) {
+      ensureRoom(doc, h + 10);
+      chunk = token;
+    } else {
+      chunk = candidate;
+    }
+  }
+  if (chunk.trimEnd()) {
+    setBodyFont();
+    const h = Math.ceil(doc.heightOfString(chunk.trimEnd(), { width: W, lineGap: 2 }));
+    ensureRoom(doc, h + 10);
+    setBodyFont().fillColor(BODY).text(chunk.trimEnd(), L, doc.y, { width: W, lineGap: 2 });
+  }
+}
+
 function paragraph(doc, text) {
   if (!text) return;
   const setBodyFont = () => doc.font('Helvetica').fontSize(9.5);
@@ -105,32 +138,10 @@ function paragraph(doc, text) {
     doc.moveDown(0.55);
     return;
   }
-  // Very long paragraph: emit word chunks with explicit 9.5pt font restoration
-  // before every measurement so continuation mastheads (9pt) never under-measure.
-  const words = String(text).split(/\s+/);
-  let chunk = '';
-  for (const word of words) {
-    const candidate = chunk ? `${chunk} ${word}` : word;
-    setBodyFont();
-    const h = Math.ceil(doc.heightOfString(candidate, { width: W, lineGap: 2 }));
-    if (chunk && doc.y + h > CONTENT_BOTTOM - 10) {
-      setBodyFont().fillColor(BODY).text(chunk, L, doc.y, { width: W, lineGap: 2 });
-      footer(doc);
-      doc.addPage();
-      drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
-      chunk = word;
-    } else if (!chunk && doc.y + h > CONTENT_BOTTOM - 10) {
-      ensureRoom(doc, h + 10);
-      chunk = word;
-    } else {
-      chunk = candidate;
-    }
-  }
-  if (chunk) {
-    setBodyFont();
-    const h = Math.ceil(doc.heightOfString(chunk, { width: W, lineGap: 2 }));
-    ensureRoom(doc, h + 10);
-    setBodyFont().fillColor(BODY).text(chunk, L, doc.y, { width: W, lineGap: 2 });
+  // Very long paragraph: preserve explicit authored newlines while chunking
+  // across pages and restoring 9.5pt font after every continuation masthead.
+  for (const hardLine of String(text).replace(/\r\n/g, '\n').split('\n')) {
+    drawChunkedHardLine(doc, hardLine, setBodyFont);
   }
   doc.moveDown(0.55);
 }
