@@ -80,6 +80,6 @@ describe('/auto-routed attaches the verdict through the shared route_feedback jo
     // the old by-call / by-id-only join is gone
     expect(sql).not.toMatch(/left join "route_feedback"/i);
     // the newest-per-call subquery spans base and revision versions
-    expect(bindings).toEqual(expect.arrayContaining(['v2-1.50.0', 'v2-1.50.0+r1']));
+    expect(bindings).toEqual(expect.arrayContaining(['v2-1.51.0', 'v2-1.51.0+r1']));
   });
 });
