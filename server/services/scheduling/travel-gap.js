@@ -272,25 +272,28 @@ async function resolveStopCoords(db, scheduledServiceId) {
   const none = { lat: null, lng: null };
   if (!db || !scheduledServiceId) return none;
   try {
-    const { guardedCoordSelects } = require('./day-stops');
-    const row = await db('scheduled_services')
-      .where('scheduled_services.id', scheduledServiceId)
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select(
-        ...guardedCoordSelects(db),
-        'scheduled_services.estimated_duration_minutes',
-        'scheduled_services.service_key_snapshot',
-        'scheduled_services.service_type',
-      )
-      .first();
-    const coords = coordsOf(row) || none;
-    if (!row) return coords;
-    const { expectedServiceMinutes } = require('./expected-service-minutes');
-    const windowMinutes = Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60;
-    const expectedMinutes = await expectedServiceMinutes(db, {
-      serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes,
+    const { savepointRead } = require('./savepoint-read');
+    return await savepointRead(db, async (dbh) => {
+      const { guardedCoordSelects } = require('./day-stops');
+      const row = await dbh('scheduled_services')
+        .where('scheduled_services.id', scheduledServiceId)
+        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+        .select(
+          ...guardedCoordSelects(dbh),
+          'scheduled_services.estimated_duration_minutes',
+          'scheduled_services.service_key_snapshot',
+          'scheduled_services.service_type',
+        )
+        .first();
+      const coords = coordsOf(row) || none;
+      if (!row) return coords;
+      const { expectedServiceMinutes } = require('./expected-service-minutes');
+      const windowMinutes = Number(row.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60;
+      const expectedMinutes = await expectedServiceMinutes(dbh, {
+        serviceKey: row.service_key_snapshot, serviceType: row.service_type, windowMinutes,
+      });
+      return { ...coords, expectedMinutes };
     });
-    return { ...coords, expectedMinutes };
   } catch {
     return none;
   }

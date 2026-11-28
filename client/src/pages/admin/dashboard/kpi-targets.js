@@ -27,7 +27,7 @@ export const KPI_METRIC_LABELS = {
   csat_avg: "CSAT (0-10)",
   retention_pct: "Retention (%)",
   collection_rate: "Collection rate (%)",
-  autopay_pct: "Autopay coverage (%)",
+  recurring_autopay_pct: "Autopay coverage — recurring plans (%)",
   net_customers: "Net customers (month)",
   net_mrr: "Net MRR (month, $)",
 };
@@ -36,5 +36,9 @@ export const KPI_METRIC_LABELS = {
 // wave3); null/undefined while unfetched.
 export function resolveTargetDef(metricKey, targets) {
   if (!metricKey) return null;
-  return targets?.[metricKey] || DEFAULT_KPI_TARGETS[metricKey] || null;
+  if (targets?.[metricKey]) return targets[metricKey];
+  // Rolling-deploy fallback: honor a legacy saved autopay_pct target before
+  // the migration copies it to recurring_autopay_pct.
+  if (metricKey === "recurring_autopay_pct" && targets?.autopay_pct) return targets.autopay_pct;
+  return DEFAULT_KPI_TARGETS[metricKey] || null;
 }

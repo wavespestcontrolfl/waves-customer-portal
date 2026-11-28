@@ -63,7 +63,7 @@ maybeDescribe('Multi-Home Discount on every home (real schema, rolled back)', ()
     await trx('customers').insert({
       id, first_name: 'Sample', last_name: `Example${n}`, phone: `+1941555${String(4000 + n)}`,
       address_line1: `${200 + n} Example Loop`, city: 'Sarasota', state: 'FL', zip: '34231',
-      pipeline_stage: 'new_lead', active: true, billing_mode: 'per_application', per_application_fee: 117, ...extra,
+      pipeline_stage: 'active_customer', active: true, billing_mode: 'per_application', per_application_fee: 117, ...extra,
     });
     return id;
   }

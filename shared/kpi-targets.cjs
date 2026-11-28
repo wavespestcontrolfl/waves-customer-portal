@@ -20,7 +20,9 @@ const DEFAULT_KPI_TARGETS = {
   callback_rate: { target: 5.9, lowerIsBetter: true, amberBandPct: 10 },
   lead_conversion: { target: 20, lowerIsBetter: false, amberBandPct: 10 },
   response_speed_min: { target: 60, lowerIsBetter: true, amberBandPct: 10 },
-  gross_margin: { target: 40, lowerIsBetter: false, amberBandPct: 10 },
+  // Aligns with company_financials.target_gross_margin_pct (55%) and the
+  // Margin by Service Line card's 45% warning floor (55 - 55*0.1819 = 44.9955).
+  gross_margin: { target: 55, lowerIsBetter: false, amberBandPct: 18.19 },
   // The old tile went red only below $90 against a $120 target — a deliberate
   // two-threshold design, translated as a 25% amber band.
   revenue_per_man_hour: { target: 120, lowerIsBetter: false, amberBandPct: 25 },

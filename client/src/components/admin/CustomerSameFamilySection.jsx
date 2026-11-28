@@ -12,7 +12,16 @@ const inputCls =
   "w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
 
 function customerName(c) {
-  return [c.firstName, c.lastName].filter(Boolean).join(" ") || "Unnamed customer";
+  return [c.firstName, c.lastName].filter(Boolean).join(" ") || c.companyName || "Unnamed customer";
+}
+
+const LIVE_STAGES = new Set(["active_customer", "won", "at_risk"]);
+
+function pickerBadges(c) {
+  const notes = [];
+  if (c.active === false) notes.push("Inactive");
+  else if (c.pipelineStage && !LIVE_STAGES.has(c.pipelineStage)) notes.push(c.pipelineStage.replace(/_/g, " "));
+  return notes.length ? ` [${notes.join(" · ")}]` : "";
 }
 
 function LinkPicker({ query, onQuery, searchFailed, results, picked, onPick, busy, onCancel, onLink }) {
@@ -42,7 +51,7 @@ function LinkPicker({ query, onQuery, searchFailed, results, picked, onPick, bus
                 onClick={() => onPick(c)}
                 className={`w-full text-left border border-hairline border-solid rounded-sm px-3 py-1.5 text-ui-label ${picked?.id === c.id ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white"}`}
               >
-                {customerName(c)}{c.address ? ` · ${c.address}` : ""}
+                {customerName(c)}{c.address ? ` · ${c.address}` : ""}{pickerBadges(c)}
               </button>
             </li>
           ))}
@@ -59,9 +68,16 @@ function LinkPicker({ query, onQuery, searchFailed, results, picked, onPick, bus
 function FamilyMemberRow({ member }) {
   return (
     <div className="py-2" data-testid="same-family-member">
-      <div className="text-ui-body text-zinc-900 break-words">{member.name}</div>
+      <div className="text-ui-body text-zinc-900 break-words">
+        <a href={`/admin/customers/${encodeURIComponent(member.id)}`} className="underline decoration-zinc-300 hover:decoration-zinc-900 text-zinc-900">
+          {member.name}
+        </a>
+      </div>
       {member.address && <div className="text-ui-label text-ink-secondary break-words">{member.address}</div>}
       {!member.active && <div className="text-ui-label text-ink-secondary">Inactive profile (does not count until active)</div>}
+      {member.active && member.qualifies === false && (
+        <div className="text-ui-label text-ink-secondary">Not in an active customer stage (does not count toward the 10% discount)</div>
+      )}
     </div>
   );
 }
@@ -99,7 +115,7 @@ function FamilyMembers({ familyId, others, linking, ...unlinkProps }) {
   );
 }
 
-export default function CustomerSameFamilySection({ customerId }) {
+export default function CustomerSameFamilySection({ customerId, refreshToken = "" }) {
   const [members, setMembers] = useState([]);
   const [familyId, setFamilyId] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -135,7 +151,7 @@ export default function CustomerSameFamilySection({ customerId }) {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [customerId]);
+  }, [customerId, refreshToken]);
 
   useEffect(() => {
     const term = query.trim();

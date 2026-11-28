@@ -15,7 +15,7 @@ jest.mock('../services/inspection-credit', () => ({ markBookingForInspectionCred
 // No closed day, as in production: a weekend run seeds a weekend first visit
 // with weekday follow-ups, and the schedule check must accept that plan.
 jest.mock('../services/scheduling/blackout-dates', () => ({
-  isBlackoutDate: async () => false, getBlackoutLayers: async () => ({ dates: new Set() }),
+  isBlackoutDate: async () => false, getBlackoutDates: async () => new Set(), getBlackoutLayers: async () => ({ dates: new Set() }),
   lockClosureState: jest.requireActual('../services/scheduling/blackout-dates').lockClosureState,
 }));
 jest.mock('../services/slot-zone', () => ({ resolveEstimateZone: async () => null, zoneSlugOf: () => null }));

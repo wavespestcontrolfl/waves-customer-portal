@@ -258,6 +258,8 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
   'delete_duplicate_customer', // mirrors requireAdmin DELETE /api/admin/customers/:id
+  'link_customer_family', // mirrors requireAdmin POST /api/admin/customers/:id/multi-home-family
+  'unlink_customer_family', // mirrors requireAdmin DELETE /api/admin/customers/:id/multi-home-family
   // Billing readers show invoices, balances and payment evidence: admin only,
   // like the requireAdmin invoice routes they mirror.
   ...BILLING_READER_TOOLS.map(t => t.name),

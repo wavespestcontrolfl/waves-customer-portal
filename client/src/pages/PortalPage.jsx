@@ -967,7 +967,7 @@ function BeforeAfterSlider({ beforeAfter }) {
         paddingBottom: 16,
       }}>
         <div style={{
-          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
           <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>
@@ -991,7 +991,7 @@ function BeforeAfterSlider({ beforeAfter }) {
         transition: dragging.current ? 'none' : 'clip-path 0.05s ease-out',
       }}>
         <div style={{
-          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
           <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>
@@ -1839,6 +1839,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     );
   };
 
+  const desktopScrimBlur = compact ? 'none' : 'blur(5px)';
+
   // Portaled to <body>: the launch button lives inside a data-glass card
   // whose backdrop-filter makes it the fixed-position containing block —
   // rendered in place, the overlay pins to the card instead of the viewport
@@ -1847,7 +1849,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
       background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
-      backdropFilter: compact ? 'none' : 'blur(5px)',
+      backdropFilter: desktopScrimBlur,
+      WebkitBackdropFilter: desktopScrimBlur,
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',
@@ -1877,7 +1880,6 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
         <header style={{
           flexShrink: 0,
           background: 'rgba(255,255,255,0.96)',
-          backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           padding: compact
             ? 'calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 12px calc(14px + env(safe-area-inset-left, 0px))'
@@ -5566,23 +5568,24 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
 function ReminderContactsSection({ property, enabled, savedContactsKey, muted, buttonStyle }) {
   const profileId = property.customerId || property.id;
   const [list, setList] = useState([]);
+  const [loadErr, setLoadErr] = useState('');
   const [busyId, setBusyId] = useState(null);
   // A Stop / Restart bumps this: a read that started before it is dropped, so it never puts back the old state, and
   // the list then reads again (reloads), so nothing a dropped read carried (such as "also in your contacts") is lost.
   const readSeq = useRef(0);
   const [reloads, setReloads] = useState(0);
   useEffect(() => {
-    if (!enabled || !profileId) { setList([]); return undefined; }
+    if (!enabled || !profileId) { setList([]); setLoadErr(''); return undefined; }
     let alive = true;
     const mine = ++readSeq.current;
     const current = () => alive && readSeq.current === mine;
     Promise.resolve(api.getReminderContacts(profileId))
-      .then((res) => { if (current()) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
-      .catch((err) => { console.error(err); if (current()) setList([]); });
+      .then((res) => { if (current()) { setLoadErr(''); setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); } })
+      .catch((err) => { console.error(err); if (current()) setLoadErr('Could not refresh reminder contacts.'); });
     return () => { alive = false; };
   // savedContactsKey: a count of contact saves, so "also in your contacts" stays current after the editor above saves.
   }, [enabled, profileId, savedContactsKey, reloads]);
-  if (!enabled || !list.length) return null;
+  if (!enabled || (!list.length && !loadErr)) return null;
   const toggle = async (person) => {
     if (busyId) return;
     setBusyId(person.id);
@@ -5610,6 +5613,12 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
       <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.4 }}>
         People named on a call get the booking, reminder and on-the-way texts for every visit. Stop and Restart apply to every address on this profile. Being on this list does not give app access.
       </div>
+      {loadErr && (
+        <div role="alert" style={{ fontSize: 14, color: B.orange, marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span>{loadErr}</span>
+          <button type="button" onClick={() => setReloads((n) => n + 1)} style={{ ...buttonStyle, padding: '4px 10px', fontSize: 14 }}>Retry</button>
+        </div>
+      )}
       {list.map((person) => {
         const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'Contact';
         const busy = busyId === person.id;
@@ -12333,6 +12342,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         zIndex: 180,
         background: 'rgba(15,23,42,0.48)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex',
         alignItems: compact ? 'flex-end' : 'center',
         justifyContent: 'center',
@@ -17205,6 +17215,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
   if (!open) return null;
 
+  const overlayBackdropBlur = compact ? 'none' : 'blur(5px)';
+
   return (
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
@@ -17212,7 +17224,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       // Mobile: full-screen sheet — keep the backdrop clear so the glass
       // modal frosts the portal scene instead of an opaque tan wash.
       background: compact ? 'transparent' : 'rgba(15,23,42,0.48)',
-      backdropFilter: compact ? 'none' : 'blur(5px)',
+      backdropFilter: overlayBackdropBlur,
+      WebkitBackdropFilter: overlayBackdropBlur,
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',
@@ -17251,8 +17264,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       >
         <header style={{
           flexShrink: 0,
-          background: 'rgba(255,255,255,0.35)',
-          backdropFilter: 'blur(12px)',
+          background: 'rgba(255,255,255,0.88)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           // Full-screen overlay: keep the header below the iOS status bar / notch.
           padding: compact
@@ -17777,8 +17789,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
             <footer style={{
               flexShrink: 0,
               borderTop: '1px solid rgba(255,255,255,0.65)',
-              background: 'rgba(255,255,255,0.35)',
-              backdropFilter: 'blur(12px)',
+              background: 'rgba(255,255,255,0.88)',
               padding: compact
                 ? '10px calc(14px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))'
                 : '14px 18px',
@@ -18082,7 +18093,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef,
       left: 'calc(10px + env(safe-area-inset-left, 0px))',
       right: 'calc(10px + env(safe-area-inset-right, 0px))',
       zIndex: 98,
-      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
+      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
       borderRadius: 8,
       boxShadow: '0 14px 32px rgba(15,23,42,0.16)',
@@ -18150,6 +18161,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
         position: 'fixed', inset: 0, zIndex: 150,
         background: 'rgba(15,23,42,0.42)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
@@ -18342,6 +18354,7 @@ function WavesChatSheet({ onClose, onUnread, firstName }) {
         ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
         background: 'rgba(15,23,42,0.42)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
         padding: compact ? 0 : 24,
         boxSizing: 'border-box',
@@ -18736,7 +18749,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
     <div data-glass-scrim="" style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, top: 0, zIndex: 200,
       ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
-      background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)',
+      background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)', WebkitBackdropFilter: 'blur(5px)',
       display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
       padding: compact ? 0 : 24,
     }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -18778,7 +18791,6 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           background: 'rgba(255,255,255,0.96)',
-          backdropFilter: 'blur(12px)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <img src="/waves-logo.png" alt="Waves" style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }} />
@@ -18911,6 +18923,25 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
 // on screen, unlocked and with no sheet open, before the app asks.
 const APP_RATING_ASK_DELAY_MS = 8000;
 
+function usePendingProfileState(customer) {
+  const customerId = customer?.id;
+  const activeIdRef = useRef(customerId);
+  activeIdRef.current = customerId;
+  const [state, setState] = useState({ ownerId: null, email: '', notice: '' });
+  const isOwner = state.ownerId === customerId;
+  const setEmail = useCallback((nextEmail) => {
+    const originId = customerId;
+    if (activeIdRef.current !== originId) return;
+    setState((prev) => ({ ownerId: originId, email: nextEmail, notice: prev.ownerId === originId ? prev.notice : '' }));
+  }, [customerId]);
+  const setNotice = useCallback((nextNotice) => {
+    const originId = customerId;
+    if (activeIdRef.current !== originId) return;
+    setState((prev) => ({ ownerId: originId, email: prev.ownerId === originId ? prev.email : '', notice: nextNotice }));
+  }, [customerId]);
+  return [isOwner ? state.email : '', setEmail, isOwner ? state.notice : '', setNotice];
+}
+
 export default function PortalPage() {
   const { customer, customerSaved = false, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
@@ -18986,6 +19017,7 @@ export default function PortalPage() {
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
   const [showMenu, setShowMenu] = useState(false);
+  const [pendingProfileEmail, setPendingProfileEmail, pendingProfileNotice, setPendingProfileNotice] = usePendingProfileState(customer);
   const accountMenuDialogRef = useModalFocus(showMenu, () => setShowMenu(false));
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
@@ -19568,7 +19600,14 @@ export default function PortalPage() {
                     </div>
                   </div>
                   {/* Edit own name and email (GATE_CUSTOMER_PROFILE_EDIT): /auth/me profileEdit is true only while the gate is on. */}
-                  <ProfileEditCard customer={customer} refreshCustomer={refreshCustomer} />
+                  <ProfileEditCard
+                    customer={customer}
+                    refreshCustomer={refreshCustomer}
+                    pendingEmail={pendingProfileEmail}
+                    onPendingEmailChange={setPendingProfileEmail}
+                    notice={pendingProfileNotice}
+                    onNoticeChange={setPendingProfileNotice}
+                  />
                 </div>
                 {propertiesError && (
                   <div role="alert" style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}`, background: '#FFF7ED' }}>

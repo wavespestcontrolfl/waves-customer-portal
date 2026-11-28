@@ -1521,6 +1521,49 @@ function compactServiceContactSlots(updates, before = {}) {
   return updates;
 }
 
+const SERVICE_CONTACT_ALL_COLS = SERVICE_CONTACT_SLOT_FIELDS.flat();
+
+function snapshotServiceContactPatch(updates, ibRoles) {
+  const raw = Object.fromEntries(
+    SERVICE_CONTACT_ALL_COLS.filter((col) => updates[col] !== undefined).map((col) => [col, updates[col]]),
+  );
+  const active = Object.keys(raw).length > 0 || Object.keys(ibRoles || {}).length > 0;
+  return { raw, active };
+}
+
+function assertPartialSlotIdentityUnchanged(contactPatch, before, lockedBefore) {
+  if (!before || !lockedBefore) return;
+  for (const [n, p, e] of SERVICE_CONTACT_SLOT_FIELDS) {
+    const provided = [n, p, e].filter((col) => contactPatch.raw[col] !== undefined);
+    if (provided.length === 0) continue;
+    const norm = (row) => [row[n], row[p], row[e]].map((v) => String(v || '').trim().toLowerCase());
+    if (JSON.stringify(norm(before)) !== JSON.stringify(norm(lockedBefore))) {
+      throw Object.assign(new Error('Service contact slots changed while saving. Reload the customer and try again.'), {
+        statusCode: 409, isOperational: true, code: 'contact_slot_changed',
+      });
+    }
+  }
+}
+
+function applyLockedServiceContactCompaction(updates, contactPatch, ibRoles, lockedBefore, preLockBefore = null) {
+  if (!contactPatch.active) return;
+  assertPartialSlotIdentityUnchanged(contactPatch, preLockBefore, lockedBefore);
+  for (const col of SERVICE_CONTACT_ALL_COLS) {
+    if (contactPatch.raw[col] !== undefined) updates[col] = contactPatch.raw[col];
+    else delete updates[col];
+  }
+  delete updates.service_contacts_consent_at;
+  delete updates.service_contacts_consent_source;
+  delete updates.service_contacts_consent_text_version;
+  Object.assign(updates, ibRoles);
+  compactServiceContactSlots(updates, lockedBefore);
+  const CustomerContact = require('../services/customer-contact');
+  const survivingPhones = CustomerContact.getServiceContactSlots({ ...lockedBefore, ...updates })
+    .map((s) => s.phone).filter(Boolean);
+  const prunedPrefs = CustomerContact.pruneRemovedUnconsentedSlotKeys(lockedBefore, survivingPhones, null);
+  if (prunedPrefs) updates.service_preferences = JSON.stringify(prunedPrefs);
+}
+
 function applyCustomerListFilters(query, filters, healthColumns) {
   const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, searchHomes } = filters;
   if (search) query = applyCustomerSearchFilter(query, search, { homes: searchHomes === true });
@@ -2909,6 +2952,8 @@ const REMINDER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 router.get('/:id/reminder-contacts', requireAdmin, async (req, res, next) => {
   try {
     if (!REMINDER_ID.test(String(req.params.id))) return res.status(400).json({ error: 'Invalid customer id' });
+    const exists = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first('id');
+    if (!exists) return res.status(404).json({ error: 'Customer not found' });
     const VisitRecipient = require('../services/call-visit-recipient');
     res.json({ reminderContacts: await VisitRecipient.listReminderContacts(req.params.id) });
   } catch (err) { next(err); }
@@ -4532,6 +4577,10 @@ const customerUpdateHandler = async (req, res, next) => {
       // too. (member_since/churned_at aren't editable fields, so no clobber.)
       Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
     }
+    // Snapshot raw contact slot fields before pre-lock compaction so the
+    // locked transaction below can re-compact deterministically against
+    // lockedBefore instead of a stale pre-lock read (P1-E3).
+    const contactPatch = snapshotServiceContactPatch(updates, req.ibServiceContactRoles);
     // req.ibServiceContactRoles is set only by setServiceContactsFromBar (never an HTTP field): the relationship the bar
     // card recorded, as role columns ({ service_contact2_role: 'tenant' }), applied before compaction so it travels with
     // its person, as the call pipeline's explicit role does.
@@ -4668,6 +4717,10 @@ const customerUpdateHandler = async (req, res, next) => {
           // invoice FOR UPDATE; service-contact-tools.js lockedPlanCheck: the locked contact slots) and throws
           // preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
           if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
+          // Re-compact service contact slots against the LOCKED row (P1-E3) and
+          // prune removed keys from unconsented_slot_phone_keys (P1-E2) so
+          // concurrent saves never lose roles or leave stale unconsented keys.
+          applyLockedServiceContactCompaction(updates, contactPatch, req.ibServiceContactRoles, lockedBefore, before);
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
           // phone; a save that moved the number and marked it since keeps its
@@ -5284,11 +5337,15 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       ...Object.fromEntries(Object.values(ContactPrefs.CONTACT_CHANNEL_KEY_BY_COLUMN).map((key) => [key, Joi.string().valid(...ContactPrefs.CONTACT_CHANNEL_VALUES)])),
       smsEnabled: Joi.boolean(),
       emailEnabled: Joi.boolean(),
+      expectedPhoneKey: Joi.string().trim().max(32).allow('', null),
     }).min(1);
     const { value: updates, error } = schema.validate(req.body || {});
     if (error) return res.status(400).json({ error: error.message });
-    const patch = ContactPrefs.contactPrefPatchFromBody(updates);
+    const { expectedPhoneKey, ...prefUpdates } = updates;
+    if (!Object.keys(prefUpdates).length) return res.status(400).json({ error: 'At least one notification preference must be provided' });
+    const patch = ContactPrefs.contactPrefPatchFromBody(prefUpdates);
     const asksEmailOnly = Object.values(patch).includes('email');
+    const asksEmailOn = prefUpdates.emailEnabled === true;
     // Every input the save depends on is read under the comms lock, as the
     // contact's own PUT reads it (codex #6364 r1 P2): the slot (a holder
     // replacing it meanwhile must not have the pruned row recreated), the
@@ -5300,7 +5357,8 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       const slots = getServiceContactSlots(customer);
       const slot = slots[slotNo - 1];
       if (!slot || !slot.phone) return { code: 'no_slot' };
-      if (asksEmailOnly && !contactEmailOnFile(slots, phoneKeyOf(slot.phone))) return { code: 'email_unavailable' };
+      if (expectedPhoneKey && phoneKeyOf(slot.phone) !== phoneKeyOf(expectedPhoneKey)) return { code: 'slot_changed' };
+      if ((asksEmailOnly || asksEmailOn) && !contactEmailOnFile(slots, phoneKeyOf(slot.phone))) return { code: 'email_unavailable' };
       const [existing, accountRow] = await Promise.all([
         ContactPrefs.getContactPrefRow(req.params.id, slot.phone, { dbh: trx }),
         trx('notification_prefs').where({ customer_id: req.params.id }).first().catch(() => null),
@@ -5310,13 +5368,16 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       if (ContactPrefs.textPathsOpened(accountRow, existing, patch) && !existing?.consent_attested_at) return { code: 'consent_required' };
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.params.id, slot.phone, patch);
       await auditCustomerMutation(req, 'customer.contact_notification_prefs.update', req.params.id,
-        { slot: slotNo, fields: Object.keys(updates).sort() }, false, trx);
+        { slot: slotNo, fields: Object.keys(prefUpdates).sort() }, false, trx);
       return { code: 'saved' };
     });
     if (outcome.code === 'not_found') return res.status(404).json({ error: 'Customer not found' });
     if (outcome.code === 'no_slot') return res.status(404).json({ error: 'No contact with a phone number in that slot' });
+    if (outcome.code === 'slot_changed') {
+      return res.status(409).json({ error: 'That contact slot changed while saving. Reload the customer and try again.' });
+    }
     if (outcome.code === 'email_unavailable') {
-      return res.status(400).json({ error: 'This contact has no email address on file, so email-only delivery cannot be chosen.' });
+      return res.status(400).json({ error: 'This contact has no email address on file, so email notifications or email-only delivery cannot be chosen.' });
     }
     if (outcome.code === 'consent_required') {
       return res.status(400).json({
@@ -5925,9 +5986,13 @@ async function customerArchiveHandler(req, res, next) {
     // the rest, the ordering every termite writer follows) — no separate
     // lock session that could be lost while deleted_at commits.
     const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+    const Family = require('../services/multi-home-family');
     let relink;
     try {
       relink = await withCustomerDeletionGate(req.params.id, async (trx) => {
+        // Take the family-changes advisory lock BEFORE customers FOR UPDATE so
+        // archive and link/unlink follow the same global lock order.
+        await Family.lockFamilyChanges(trx);
         if (req.archiveAlsoLock) {
           // A caller that also depends on a second customer row (the bar's
           // duplicate delete reads its retained twin) locks both rows in ONE
@@ -5957,21 +6022,23 @@ async function customerArchiveHandler(req, res, next) {
           throw err;
         }
         // Billing was just wound down by churnGuardForRow on this same
-        // transaction — stamp deleted_at and close any live moving links so
-        // an archived customer cannot keep opening /moving/:token or burning
-        // paid Google Address Validation checks (P2-M2).
+        // transaction — stamp deleted_at, close any live moving links so an
+        // archived customer cannot keep opening /moving/:token or burning paid
+        // Google Address Validation checks (P2-M2), and unlink any Same-Family
+        // membership (cleaning up a 1-member orphan so surviving homes are not stranded).
         const archiveNow = new Date();
         await trx('customers').where({ id: req.params.id }).update({ deleted_at: archiveNow });
         await trx('customer_moves')
           .where({ customer_id: req.params.id })
           .whereIn('status', ['open', 'submitted'])
           .update({ status: 'closed', closed_reason: 'cancelled', closed_at: archiveNow, updated_at: archiveNow });
+        const familyUnlink = await Family.unlinkMemberInExistingTx(trx, req.params.id, req.technicianId, { reason: 'customer_archived' });
         const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
         await auditCustomerMutation(req, 'customer.archive', req.params.id, {
           previousDeletedAt: customer.deleted_at || null,
           newsletterRelinked: result.relinked,
         }, true, trx);
-        return result;
+        return { ...result, familyUnlink };
       });
     } catch (e) {
       if (e && e.churnBlocked) return res.status(409).json(e.payload);
@@ -5982,6 +6049,13 @@ async function customerArchiveHandler(req, res, next) {
         });
       }
       throw e;
+    }
+    if (relink.familyUnlink?.removed && relink.familyUnlink.formerMemberIds?.length) {
+      await Family.alertFamilyDropBelowTwo(db, {
+        formerMemberIds: relink.familyUnlink.formerMemberIds,
+        departedCustomerId: req.params.id,
+        reason: 'archived',
+      });
     }
     logger.info(`[customers] Soft-deleted customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
@@ -7314,6 +7388,8 @@ router._private = {
   addMonthsDateOnly,
   cadenceFromEstimateLine,
   compactServiceContactSlots,
+  snapshotServiceContactPatch,
+  applyLockedServiceContactCompaction,
   customerSearchTerms,
   defaultAnnualPrepayTermStart,
   hasMembership,

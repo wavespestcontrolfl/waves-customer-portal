@@ -152,9 +152,9 @@ const BOOKING_FUNNEL_SERVICE_LINES = Object.freeze({ rodent: 'exclusion' });
 // vocabulary normalizeBookingServiceKeys checks, so passing it AS serviceKey
 // silently degrades to the no-credit legacy gap. Tried only when serviceKey
 // resolves to no funnel key, so every existing funnel caller is unaffected.
-async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, serviceIdentity = null) {
+async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, serviceIdentity = null, preferServiceIdentity = false) {
   if (!travelGapEnabled()) return durationMinutes;
-  const keys = normalizeBookingServiceKeys(serviceKey);
+  const keys = preferServiceIdentity && serviceIdentity ? [] : normalizeBookingServiceKeys(serviceKey);
   if (keys.length) {
     const services = keys.map((key) => ({
       catalogServiceKey: BOOKING_FUNNEL_SERVICE_CATALOG_KEYS[key] || null,
@@ -1859,7 +1859,7 @@ function routeCheckSurfaceFor(surface, noCustomerReads) {
   return noCustomerReads ? null : surface;
 }
 
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, noCustomerReads = false, crew, verifiedOnly, mintSignedOffers }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, preferServiceIdentity, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, noCustomerReads = false, crew, verifiedOnly, mintSignedOffers }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1928,7 +1928,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     serviceIdentity, serviceLabels, lat, lng, today, skip: paidLookups === false || reserviceRankIsActive(rankProfile), db,
   });
 
-  const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
+  const candidateExpectedMinutes = await bookingExpectedMinutes(
+    db,
+    serviceKey,
+    duration,
+    serviceIdentity,
+    preferServiceIdentity,
+  );
   // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): a
   // self-serve caller resolves the request's zone FROM COORDINATES (not city
   // text — 'North Venice' / 'Northport' are not in service_zones.cities) so
