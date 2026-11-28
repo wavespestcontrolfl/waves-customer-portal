@@ -225,6 +225,90 @@ describe('P1-18 & P2: unassigned-overdue-detector normalizes date, enforces max 
   });
 });
 
+describe('P1-16: tech-open-visit-nudge zero-spend guard on ordinary stuck carryover visits', () => {
+  const prevNudgeGate = process.env.GATE_TECH_OPEN_VISIT_NUDGE;
+  afterEach(() => {
+    if (prevNudgeGate === undefined) delete process.env.GATE_TECH_OPEN_VISIT_NUDGE;
+    else process.env.GATE_TECH_OPEN_VISIT_NUDGE = prevNudgeGate;
+  });
+
+  test('surfaces ordinary on_site carryover on free banner but does not trigger paid SMS fallback when banner fails', async () => {
+    process.env.GATE_TECH_OPEN_VISIT_NUDGE = 'true';
+    await jest.isolateModulesAsync(async () => {
+      const sendSMS = jest.fn();
+      const triggerNotification = jest.fn().mockResolvedValue({ push: { sent: 0 } });
+      let callIdx = 0;
+      const makeQuery = (rows) => {
+        const c = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereNull', 'whereNotExists', 'orderBy']) {
+          c[m] = jest.fn().mockReturnValue(c);
+        }
+        c.select = jest.fn().mockResolvedValue(rows);
+        return c;
+      };
+      const fakeDb = jest.fn((table) => {
+        if (table === 'scheduled_services as s') {
+          callIdx += 1;
+          // 1 & 3 = today (empty), 2 & 4 = carryover (ordinary on_site visit)
+          const isCarry = callIdx % 2 === 0;
+          return makeQuery(isCarry ? [{
+            visit_id: 'svc-carry-1',
+            stop_id: null,
+            technician_id: 'owner-1',
+            customer_id: 'cust-1',
+            service_type: 'Quarterly Pest Control',
+            is_callback: false,
+            service_key: 'pest_control',
+            status: 'on_site',
+            window_start: '09:00:00',
+            scheduled_day: '2026-11-26',
+            tech_name: 'Owner',
+            employment_status: 'active',
+            field_dispatchable: true,
+            tech_phone: '+19415550100',
+            cust_first_name: 'Sam',
+            cust_last_name: 'Oak',
+          }] : []);
+        }
+        if (table === 'tech_notifications') {
+          return {
+            insert: jest.fn().mockReturnThis(),
+            onConflict: jest.fn().mockReturnThis(),
+            ignore: jest.fn().mockReturnThis(),
+            returning: jest.fn().mockResolvedValue([{ id: 'notif-1' }]),
+            where: jest.fn().mockReturnThis(),
+            del: jest.fn().mockResolvedValue(1),
+          };
+        }
+        return makeQuery([]);
+      });
+      fakeDb.raw = jest.fn((s) => s);
+      jest.doMock('../models/db', () => fakeDb);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/twilio', () => ({ isKnownOwnerPhone: jest.fn(() => true), sendSMS }));
+      jest.doMock('../services/notification-triggers', () => ({ triggerNotification }));
+      jest.doMock('../services/technician-eligibility', () => ({
+        isAssignable: jest.fn(() => true),
+        absentTechDays: jest.fn().mockResolvedValue(new Set()),
+      }));
+      jest.doMock('../services/visit-hold', () => ({ excludeHeld: jest.fn((q) => q) }));
+      jest.doMock('../services/street-level-hold', () => ({ heldVisitSubquery: jest.fn() }));
+      jest.doMock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn(() => false) }));
+
+      const { runTechOpenVisitNudge } = require('../services/tech-open-visit-nudge');
+      const res = await runTechOpenVisitNudge({ now: new Date('2026-11-27T23:00:00Z') });
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      expect(triggerNotification).toHaveBeenCalledWith(
+        'open_visits_nudge',
+        expect.objectContaining({ headline: '1 visit from earlier days is still open' }),
+        expect.any(Object),
+      );
+      expect(sendSMS).not.toHaveBeenCalled();
+      expect(res.sent).toBe(0);
+    });
+  });
+});
+
 describe('P2: unassigned-timed-visits-check keeps booked visits with leftover reservation_expires_at', () => {
   test('SQL allows customer_id IS NOT NULL even when reservation_expires_at is set', async () => {
     jest.dontMock('../services/visit-hold');

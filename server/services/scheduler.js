@@ -10820,7 +10820,10 @@ function initScheduledJobs() {
       if (require('./no-show-detector').enabled()) {
         await runTechLateCheck();
       } else {
-        await runExclusive('tech-late-detector', () => runTechLateCheck());
+        await runExclusive('tech-late-detector', async () => {
+          const result = await runTechLateCheck();
+          if (result?.error) throw new Error(result.error);
+        });
       }
     } catch (err) {
       logger.error(`[tech-late-detector] tick failed: ${err.message}`);
@@ -10861,7 +10864,8 @@ function initScheduledJobs() {
     try {
       await runExclusive('unassigned-overdue-detector', async () => {
         const { runUnassignedOverdueCheck } = require('./unassigned-overdue-detector');
-        await runUnassignedOverdueCheck();
+        const result = await runUnassignedOverdueCheck();
+        if (result?.error) throw new Error(result.error);
       });
     } catch (err) {
       logger.error(`[unassigned-overdue-detector] tick failed: ${err.message}`);

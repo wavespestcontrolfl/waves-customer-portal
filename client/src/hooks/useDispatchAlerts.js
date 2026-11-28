@@ -163,11 +163,9 @@ export function useDispatchAlerts() {
       if (known) relayTechOutAlertChange(known);
       else relayTechOutAlertChange({ type: TECH_OUT_ALERT_TYPE, tech_id: null });
     }
-    setAlerts((prev) => {
-      const next = prev.filter((a) => !gone.has(a.id));
-      if (newlyResolved > 0) setTotal((t) => Math.max(next.length, t - newlyResolved));
-      return next;
-    });
+    const nextAlerts = alertsRef.current.filter((a) => !gone.has(a.id));
+    setAlerts((prev) => prev.filter((a) => !gone.has(a.id)));
+    if (newlyResolved > 0) setTotal((t) => Math.max(nextAlerts.length, t - newlyResolved));
     return newlyResolved;
   }, []);
   const [loading, setLoading] = useState(true);
@@ -192,11 +190,9 @@ export function useDispatchAlerts() {
     const fetched = Array.isArray(data.alerts) ? data.alerts : [];
     const serverTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : fetched.length;
     const changedSinceRead = (id) => (changedAtRef.current.get(id) || 0) > countAtStart;
-    setAlerts((prev) => {
-      const merged = mergeHydration(prev, fetched, resolvedIdsRef.current, changedSinceRead);
-      setTotal(Math.max(serverTotal, merged.length));
-      return merged;
-    });
+    const merged = mergeHydration(alertsRef.current, fetched, resolvedIdsRef.current, changedSinceRead);
+    setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current, changedSinceRead));
+    setTotal(Math.max(serverTotal, merged.length));
     setError(null);
     setLoading(false);
   }, []);
@@ -315,11 +311,9 @@ export function useDispatchAlerts() {
       if (payload.resolved_at || resolvedIdsRef.current.has(payload.id)) return;
       broadcastCountRef.current += 1;
       changedAtRef.current.set(payload.id, broadcastCountRef.current);
-      setAlerts((prev) => {
-        const next = mergeAlertBroadcast(prev, payload, resolvedIdsRef.current);
-        if (next.length > prev.length) setTotal((t) => Math.max(next.length, t + (next.length - prev.length)));
-        return next;
-      });
+      const wasPresent = alertsRef.current.some((a) => a.id === payload.id);
+      setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
+      if (!wasPresent) setTotal((t) => Math.max(alertsRef.current.length + 1, t + 1));
       relayTechOutAlertChange(payload);
       // The socket broadcast carries only the bare dispatch_alerts row (no
       // joined tech_name / customer / address). Hydrate immediately for
@@ -373,8 +367,9 @@ export function useDispatchAlerts() {
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     markResolved([id]);
+    if (total > alertsRef.current.length) requestResync();
     return res.json();
-  }, [markResolved]);
+  }, [markResolved, requestResync, total]);
 
   const clearAlerts = useCallback(async () => {
     const res = await fetch(
