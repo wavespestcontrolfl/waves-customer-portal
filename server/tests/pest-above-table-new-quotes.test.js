@@ -537,36 +537,37 @@ test('the public pest range note says the $8 is per application on the quarterly
 });
 
 // The phone price tool (get_pricing = pricingText) on the REAL engine. A caller states the home size; the tool had no lot, so it
-// priced on a stand-in lot of 4 x the home size. For a home above the table that lot is above the engine's 20,000 sq ft lot review,
-// so a caller who answered the story question still got no price. The tool asks for both at once.
-describe('the phone price tool: a home above 5,500 sq ft prices once the caller gives the story count and the lot size', () => {
+// Phone price tool (get_pricing -> pricingText): a home above 5,500 sq ft prices once the caller gives the story count.
+// Lot size no longer blocks pest pricing, so the tool asks only for stories and prices with or without a lot size.
+describe('the phone price tool: a home above 5,500 sq ft prices once the caller gives the story count', () => {
   const { pricingText } = require('../services/voice-agent/relay-context');
   const ask = (input) => pricingText({ service: 'pest_control', home_sqft: 12000, ...input });
 
-  test('both are asked for at once, and each alone asks only for the other; no price is stated meanwhile', async () => {
-    const both = await ask({});
-    expect(both).toContain('still needed: how many stories the home has (stories) and the approximate lot size in square feet (lot_sqft)');
-    const lotOnly = await ask({ stories: 2 });
-    expect(lotOnly).toContain('still needed: the approximate lot size in square feet (lot_sqft)');
-    expect(lotOnly).not.toContain('how many stories');
-    const storiesOnly = await ask({ lot_sqft: 15000 });
-    expect(storiesOnly).toContain('still needed: how many stories the home has (stories)');
-    expect(storiesOnly).not.toContain('lot_sqft');
-    for (const out of [both, lotOnly, storiesOnly]) expect(out).not.toMatch(/\$\d/);
+  test('missing stories asks only for stories (never lot_sqft); no price is stated meanwhile', async () => {
+    const noStories = await ask({});
+    expect(noStories).toContain('still needed: how many stories the home has (stories)');
+    expect(noStories).not.toContain('lot_sqft');
+    expect(noStories).not.toMatch(/\$\d/);
+    const lotOnly = await ask({ lot_sqft: 15000 });
+    expect(lotOnly).toContain('still needed: how many stories the home has (stories)');
+    expect(lotOnly).not.toContain('lot_sqft');
+    expect(lotOnly).not.toMatch(/\$\d/);
   });
 
-  test('with both, the footprint prices: two floors $132, one floor $180', async () => {
+  test('with stories (with or without lot_sqft), the footprint prices: two floors $132, one floor $180', async () => {
     // Two floors = a 6,000 sq ft footprint: $128 + $8 x 0.5. One floor = 12,000: $128 + $8 x 6.5.
+    expect(await ask({ stories: 2 })).toContain('$132 per application');
+    expect(await ask({ stories: 1 })).toContain('$180 per application');
     expect(await ask({ stories: 2, lot_sqft: 15000 })).toContain('$132 per application');
     expect(await ask({ stories: 1, lot_sqft: 15000 })).toContain('$180 per application');
-    expect(await pricingText({ service: 'pest_control', home_sqft: 8000, stories: 1, lot_sqft: 15000 })).toContain('$148 per application');
+    expect(await pricingText({ service: 'pest_control', home_sqft: 8000, stories: 1 })).toContain('$148 per application');
   });
 
-  test('a lot the engine reviews (above 20,000 sq ft) is still a custom quote: no price is stated', async () => {
+  test('large residential lots (20,001 or 48,000 sq ft) still price pest instead of falling to a custom quote', async () => {
     for (const lot of [20001, 48000]) {
       const out = await ask({ stories: 2, lot_sqft: lot });
-      expect(out).toMatch(/custom quote/i);
-      expect(out).not.toMatch(/\$\d/);
+      expect(out).toContain('$132 per application');
+      expect(out).not.toMatch(/custom quote/i);
     }
   });
 

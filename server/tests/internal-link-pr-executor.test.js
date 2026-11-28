@@ -502,6 +502,7 @@ describe('internal-link dry-run executor helpers', () => {
       'canonical: https://www.wavespestcontrol.com/pest-control-quote-bradenton-fl/',
       'category: pest',
       'primary_keyword: bradenton pest control quote',
+      'modified: "2026-06-19T00:00:00"',
       '---',
       'Call (941) 318-7612 for your free Bradenton pest control quote today.',
     ].join('\n');
@@ -548,6 +549,9 @@ describe('internal-link dry-run executor helpers', () => {
       content: expect.stringContaining('[Bradenton pest control](/pest-control-bradenton-fl/) quote today.'),
     })]);
     expect(files[0].content).toContain('slug: /pest-control-quote-bradenton-fl/');
+    // Link-only edits must NOT bump modified:/updated: (no fake freshness).
+    expect(files[0].content).toContain('modified: "2026-06-19T00:00:00"');
+    expect(files[0].content).not.toContain('T12:00:00"');
     expect(GitHubClient.createPr).toHaveBeenCalledWith(expect.objectContaining({
       head: expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/),
       title: expect.stringContaining('SEO links: 1 internal link'),
@@ -1806,8 +1810,9 @@ describe('internal-link freshness bump', () => {
     expect(bumpFreshnessLine(v2, '2026-09-27')).toBe('---\ntitle: T\npublished: 2025-01-01\nupdated: 2026-09-27\n---\nBody\n');
     expect(restoreFreshnessLine(bumpFreshnessLine(v2, '2026-09-27'), v2)).toBe(v2);
   });
-  test('restore only undoes a well-formed date on the freshness line', () => {
+  test('restore accepts unbumped link-only edits and well-formed legacy bumped dates, rejecting malformed dates', () => {
     const base = '---\nmodified: "2026-06-19T00:00:00"\n---\nB\n';
+    expect(restoreFreshnessLine(base, base)).toBe(base);
     expect(restoreFreshnessLine('---\nmodified: "2026-09-27T12:00:00"\n---\nB\n', base)).toBe(base);
     expect(restoreFreshnessLine('---\nmodified: "tomorrow"\n---\nB\n', base)).not.toBe(base);
   });

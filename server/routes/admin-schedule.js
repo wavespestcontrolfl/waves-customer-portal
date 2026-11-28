@@ -442,7 +442,37 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, adminOnlyFields, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
+
+function normalizeAddonEntry(a) {
+  return {
+    service_type: a.name || a.serviceName || a.service_type || null,
+    service_id: a.serviceId || a.service_id || null,
+    service_key: a.serviceKey || a.service_key || null,
+  };
+}
+
+async function appendVisitCapabilityOffWarnings(trx, technicianId, { primary, addons, serviceId, targetWarnings }) {
+  if (!technicianId) return;
+  const capEntries = [primary];
+  if (Array.isArray(addons)) {
+    for (const a of addons) if (a) capEntries.push(normalizeAddonEntry(a));
+  } else if (serviceId && require('../config/feature-gates').techJobTypeChecksLive?.()) {
+    const readAddons = (conn) => conn('scheduled_service_addons')
+      .where({ scheduled_service_id: serviceId })
+      .select('service_name as service_type', 'service_id');
+    try {
+      const existing = await (trx.isTransaction && typeof trx.transaction === 'function'
+        ? trx.transaction((sp) => readAddons(sp))
+        : readAddons(trx));
+      if (Array.isArray(existing)) capEntries.push(...existing);
+    } catch {
+      // Advisory capability warnings never block saves if the addon read fails.
+    }
+  }
+  const lines = await require('../services/technician-eligibility').capabilityOffWarningsFor(technicianId, capEntries, { conn: trx });
+  for (const line of lines) if (!targetWarnings.includes(line)) targetWarnings.push(line);
+}
 
 // Board/list scoping for technician tokens: the FULL current-assignment
 // predicate, not just technician_id — otherwise ?from=<years ago> or
@@ -1877,7 +1907,10 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
   try {
     const svc = await db('scheduled_services')
       .where({ id: serviceId })
-      .first('customer_id', 'service_type');
+      .first('customer_id', 'service_type', ...visitHoldService.heldColumn());
+    if (visitHoldService.rowIsHeld(svc)) {
+      return { sent: false, error: 'Visit is on hold — reschedule text suppressed' };
+    }
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
     if (!customer) {
       error = 'Customer not found';
@@ -1996,7 +2029,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
     // miss and keeps its fallback reminders. No guard snapshot → skip the
     // mark (worst case is a redundant reminder for the slot we texted,
     // never a silenced newer slot).
-    const guardRow = Array.isArray(guards) && guards.length ? guards[0] : null;
+    const guardRow = Array.isArray(guards) ? guards[0] : null;
     if (guardRow) {
       await AppointmentReminders.markRescheduleNoticeSent(serviceId, {
         guardsByServiceId: { [serviceId]: guardRow },
@@ -6963,6 +6996,9 @@ router.post('/:id/hold', async (req, res, next) => {
     const result = await visitHoldService.putVisitOnHold({
       visitId: req.params.id, note: req.body?.note, heldBy: req.technicianId || null, scopeReq: req, conn: db,
     });
+    if (result.changed) {
+      try { await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId, verifiedAdminsOnly: true }); } catch {}
+    }
     return res.json({ success: true, changed: result.changed, heldAt: result.heldAt });
   } catch (err) {
     if (err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
@@ -6975,6 +7011,9 @@ router.post('/:id/hold/release', requireAdmin, async (req, res, next) => {
   try {
     if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
     const result = await visitHoldService.releaseVisitHold({ visitId: req.params.id, conn: db });
+    if (result.changed) {
+      try { await emitDispatchJobUpdate({ jobId: req.params.id, actorId: req.technicianId, verifiedAdminsOnly: true }); } catch {}
+    }
     return res.json({ success: true, changed: result.changed });
   } catch (err) {
     if (err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
@@ -8459,10 +8498,12 @@ router.get('/month', async (req, res, next) => {
           completed: daySvcs.filter(s => s.status === 'completed').length,
           categoryCounts,
           techCounts,
-          estimatedRevenue: daySvcs.reduce((sum, s) => {
-            const rev = { pest: 110, lawn: 75, mosquito: 89, termite: 200, tree_shrub: 130, rodent: 95 };
-            return sum + (rev[s.serviceCategory] || 95);
-          }, 0),
+          ...adminOnlyFields(req, {
+            estimatedRevenue: daySvcs.reduce((sum, s) => {
+              const rev = { pest: 110, lawn: 75, mosquito: 89, termite: 200, tree_shrub: 130, rodent: 95 };
+              return sum + (rev[s.serviceCategory] || 95);
+            }, 0),
+          }),
         });
 
         currentDate.setDate(currentDate.getDate() + 1);
@@ -9783,7 +9824,7 @@ async function scheduleCreateHandler(req, res, next) {
       if (!resolvedTechId) {
         const auto = await require('../services/scheduling/office-auto-technician').resolveOfficeAutoTechnician({
           date: scheduledDate, windowStart, windowEnd, durationMinutes: duration,
-          serviceId: serviceId || null, serviceKey: serviceRecord?.service_key, serviceType,
+          serviceId: serviceId || null, serviceKey: serviceRecord?.service_key, serviceType, serviceAddons,
           customerId, lat: bookingProperty?.lat ?? customer?.latitude ?? null, lng: bookingProperty?.lng ?? customer?.longitude ?? null,
           // The selected property's ZIP leads the territory pick (GATE_TERRITORY_ROUTING): a
           // secondary property with no pin must not read as the main one's coordinates.
@@ -10298,13 +10339,11 @@ async function scheduleCreateHandler(req, res, next) {
       }));
       // Job type (GATE_TECH_JOB_TYPE_CHECKS): the chosen technician is set to Off for this
       // service's category - the same advisory path, never a block ([] with the gate off).
-      if (resolvedTechId) {
-        bookingWarnings.push(...await require('../services/technician-eligibility').capabilityOffWarningsFor(
-          resolvedTechId,
-          [{ service_type: serviceType, service_id: serviceId || null, service_key: pricing.primaryServiceKey || null }],
-          { conn: trx },
-        ));
-      }
+      await appendVisitCapabilityOffWarnings(trx, resolvedTechId, {
+        primary: { service_type: serviceType, service_id: serviceId || null, service_key: pricing.primaryServiceKey || null },
+        addons: Array.isArray(serviceAddons) ? serviceAddons : [],
+        targetWarnings: bookingWarnings,
+      });
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -11807,6 +11846,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               await acquireOccupancyLock(trx, bulkTargetDate);
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
+              if (visitHoldService.rowIsHeld(svc)) {
+                throw Object.assign(new Error('visit is on hold — release the hold before rescheduling'), { isValidation: true, code: 'visit_on_hold' });
+              }
               // Terminal rows are one-way (#2717 pattern — see the cancel
               // branch below): a stale board selection must not resurrect a
               // finished visit onto a new date.
@@ -12103,7 +12145,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     // a row grouped since the read misses instead of moving
                     // alone (knex renders null as IS NULL).
                     visit_id: svc.visit_id ?? null,
-                  }),
+                  })
+                  .where(visitHoldService.unheldPredicate()),
                 svc,
               )
                 .update({ ...updates, ...recurringDispatchDuePatch(svc, updates), updated_at: new Date() })
@@ -15978,7 +16021,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // other). One check, on the tech-day fence already taken above, before
       // any write in this transaction — refuse before the first write, same
       // as the create-appointment path.
-      if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
+      if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined || serviceEditPosted || Array.isArray(addons)) {
         const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
           .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', 'window_start', 'window_end', 'estimated_duration_minutes',
             trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
@@ -16004,16 +16047,16 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           const offDayLine = await require('../services/technician-eligibility').dayWarningFor(finalTechnicianId, finalDate, { conn: trx, block: { ...eligibilityRow, ...updates } });
           dayLineAsked = true;
           if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
-          // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
-          // category. Advisory, never a block ([] with the gate off).
-          if (finalTechChanging) {
-            const capabilityLines = await require('../services/technician-eligibility').capabilityOffWarningsFor(finalTechnicianId, [{
-              service_type: updates.service_type !== undefined ? updates.service_type : eligibilityRow?.service_type,
-              service_id: updates.service_id !== undefined ? updates.service_id : eligibilityRow?.service_id,
-              service_key: updates.service_key_snapshot !== undefined ? updates.service_key_snapshot : eligibilityRow?.service_key_snapshot,
-            }], { conn: trx });
-            for (const line of capabilityLines) if (!editWarnings.includes(line)) editWarnings.push(line);
-          }
+        }
+        // Job type (GATE_TECH_JOB_TYPE_CHECKS): check primary service + add-ons
+        // whenever the technician, primary service, or add-ons change (P1-4).
+        if (finalTechChanging || serviceEditPosted || Array.isArray(addons)) {
+          await appendVisitCapabilityOffWarnings(trx, finalTechnicianId, {
+            primary: { ...eligibilityRow, ...updates },
+            addons,
+            serviceId: req.params.id,
+            targetWarnings: editWarnings,
+          });
         }
       }
       // Match customer editors and grouping: maintenance/comms,
@@ -20278,6 +20321,12 @@ router.post('/:id/invoice', async (req, res, next) => {
         'customers.billing_mode as cust_billing_mode')
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
+    // P0-6: Technicians may collect at the server-calculated visit total only —
+    // reject custom items/discounts before payer/prepay/existing-invoice paths.
+    if (extras.length > 0 && isTechnicianRequest(req)) {
+      return res.status(403).json({ error: 'Only admins can add extra items or discounts during checkout.' });
+    }
 
     // Third-party Bill-To: this endpoint mints a collectible invoice and returns
     // its token to the tech checkout sheet for in-person card/ACH collection. A
@@ -20577,7 +20626,6 @@ router.post('/:id/invoice', async (req, res, next) => {
     // caller of this endpoint, and any client older than this slice) skips
     // the check entirely — byte-identical to before.
     const expectedDiscountStacking = req.body?.expected_discount_stacking;
-    const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
     // Technicians may collect at the server-calculated visit total only —
     // never add custom services, negative lines, or discounts during checkout.
     const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extras, amount, req);
@@ -22299,6 +22347,16 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
   // the gate is off or nothing is stamped).
   parent = overlayRecurringTemplateOverrides(parent, cols);
   if (parent && parent.is_recurring && parent.recurring_pattern) {
+    // P1-4b: Do not auto-extend recurring series for inactive, deleted, or
+    // former customers — matches topUpOngoingSeriesLocked's eligibility fence.
+    const seriesCustomer = parent.customer_id
+      ? await conn('customers').where({ id: parent.customer_id }).first(...SERIES_CUSTOMER_COLUMNS)
+      : null;
+    const customerSkip = seriesCustomerSkipReason(seriesCustomer);
+    if (customerSkip) {
+      logger.info(`[recurring] Skipping maintenance for parent=${parentId} (customer ${customerSkip})`);
+      return null;
+    }
     // upcomingCount + latest must reflect the BASE recurring series
     // only — see countUpcomingSeriesVisits for the booster and
     // pending-vs-confirmed rationale.
@@ -25476,6 +25534,26 @@ router.get('/:id/visit-summary', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function sanitizeEstimatePostureForTech(req, deposit, payment) {
+  if (!isTechnicianRequest(req)) return {};
+  return {
+    deposit: deposit
+      ? { payerBilled: Boolean(deposit.payerBilled), required: Boolean(deposit.required) }
+      : null,
+    payment: payment
+      ? {
+          billingTerm: payment.billingTerm || null,
+          ...(payment.annualPrepay ? {
+            annualPrepay: {
+              coversThisVisit: payment.annualPrepay.coversThisVisit,
+              refunded: Boolean(payment.annualPrepay.refunded),
+            },
+          } : {}),
+        }
+      : null,
+  };
+}
+
 // GET /api/admin/schedule/:id/estimate-source
 router.get('/:id/estimate-source', async (req, res, next) => {
   try {
@@ -25570,11 +25648,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
       estimateSlug: est.estimate_slug || null,
-      quotedTotal,
       linkedSeriesCount,
-      monthlyTotal: Number(est.monthly_total || 0),
-      annualTotal: Number(est.annual_total || 0),
-      onetimeTotal: Number(est.onetime_total || 0),
       estimateStatus: est.status,
       createdAt: est.created_at,
       lines,
@@ -25795,8 +25869,17 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
 
 // The series anchor + accepted-estimate provenance for an on-site switch.
 // Shared by the preview and the supersede/undo writes so "is this a legit
-// post-accept switch?" has one answer. Returns { ok, visit, anchor,
-// estimateId } or { ok: false, status, blockReason }.
+function parseEstimateDataJson(raw) {
+  if (!raw) return null;
+  if (typeof raw !== 'string') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function estimatePrepayNoPercent(estimateData) {
+  return estimateData
+    ? require('../services/estimate-converter').estimateHasNoYear1PrepayPercent(estimateData)
+    : false;
+}
 async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   const visit = await conn('scheduled_services')
     .where({ id: scheduledServiceId })
@@ -25861,7 +25944,7 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   try {
     estimate = await conn('estimates')
       .where({ id: anchor.source_estimate_id })
-      .first('id', 'status', 'accepted_at');
+      .first('id', 'status', 'accepted_at', 'estimate_data');
   } catch (err) {
     logger.warn(`[schedule:prepay-switch] estimate lookup failed for ${anchor.id}: ${err.message} — refusing`);
     return { ok: false, status: 409, blockReason: 'couldn’t confirm the linked quote’s status — refresh and try again' };
@@ -25869,12 +25952,14 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   if (!estimate || !estimate.accepted_at || String(estimate.status || '').toLowerCase() !== 'accepted') {
     return { ok: false, status: 409, blockReason: 'is handled by the linked quote — accept it as annual prepay from the estimate instead' };
   }
+  const estimateData = parseEstimateDataJson(estimate.estimate_data);
   return {
     ok: true,
     visit,
     anchor,
     customerId: String(anchor.customer_id || visit.customer_id || ''),
     estimateId: String(anchor.source_estimate_id),
+    estimateData,
     visitIds: seriesIds,
   };
 }
@@ -26015,6 +26100,7 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // supersede match is bound to, so only ITS accept-minted invoice can be
     // replaced.
     let anchorEstimateId = null;
+    let anchorEstimateData = null;
     if (scheduledServiceId) {
       const visit = await conn('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -26057,6 +26143,7 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         if (!target.ok) return blocked(target.blockReason);
         isAcceptedSwitch = true;
         anchorEstimateId = target.estimateId;
+        anchorEstimateData = target.estimateData;
         supersedeVisitIds = target.visitIds;
       }
       // Fail CLOSED on an unreadable add-on count (Codex #3161 r2 P2):
@@ -26401,7 +26488,13 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
       .filter((li) => RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
       .reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
     const unwaivedSetupFee = directSetupFee > 0 ? directSetupFee : supersededRodentSetup;
-    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
+    const pricing = computeSeriesPrepayPricing({
+      perVisit,
+      visitsPerYear,
+      planClass,
+      unwaivedSetupFee,
+      noYear1PrepayPercent: estimatePrepayNoPercent(anchorEstimateData),
+    });
     // payPage: a bait-station setup is carried onto the prepay, never waived,
     // which the two-option block does not explain. Those plans switch through
     // the office.
@@ -29635,23 +29728,17 @@ router.get('/services-dropdown', async (req, res, next) => {
 // GET /api/admin/schedule/recommend-slots — smart slot recommendations
 router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
   try {
-    const { customerId, serviceType, date, serviceId } = req.query;
+    const { date } = req.query;
     if (!date) return res.status(400).json({ error: 'date required' });
 
-    // Try CSR booker first
-    try {
-      const CSRBooker = require('../services/csr-booker');
-      if (CSRBooker.recommendSlots) {
-        const result = await CSRBooker.recommendSlots({ customerId, serviceType, date, serviceId });
-        if (result?.slots?.length) return res.json(result);
-      }
-    } catch (e) { logger.warn(`[recommend-slots] CSR booker unavailable: ${e.message}`); }
-
-    // Basic slot finder: check existing services on that date
-    const existing = await db('scheduled_services')
-      .where({ scheduled_date: date })
-      .whereNotIn('status', ['cancelled'])
-      .select('window_start', 'window_end', 'estimated_duration_minutes');
+    // Basic slot finder: check live non-held, non-cancelled services (including active reservations) on that date
+    const existing = await require('../services/visit-hold').excludeHeld(
+      db('scheduled_services')
+        .where({ scheduled_date: date })
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', db.fn.now())),
+      'scheduled_services'
+    ).select('window_start', 'window_end', 'estimated_duration_minutes');
 
     const busySlots = existing.map(s => {
       const start = s.window_start || '08:00';
@@ -29660,16 +29747,16 @@ router.get('/recommend-slots', requireAdmin, async (req, res, next) => {
       return { startMin: sh * 60 + sm, endMin: sh * 60 + sm + dur };
     });
 
-    // Find open 30-min windows between 7 AM (420) and 5 PM (1020)
+    // Find open on-the-hour windows between 8 AM (480) and 5 PM (1020)
     const candidates = [];
-    for (let min = 420; min <= 1020; min += 30) {
+    for (let min = 480; min <= 1020; min += 60) {
       const conflicts = busySlots.filter(b => min < b.endMin && min + 30 > b.startMin).length;
       candidates.push({ min, conflicts });
     }
 
     // Sort by fewest conflicts, pick top 3, spread across morning/midday/afternoon
     candidates.sort((a, b) => a.conflicts - b.conflicts);
-    const morning = candidates.find(c => c.min >= 420 && c.min < 660);
+    const morning = candidates.find(c => c.min >= 480 && c.min < 660);
     const midday = candidates.find(c => c.min >= 660 && c.min < 840);
     const afternoon = candidates.find(c => c.min >= 840 && c.min <= 1020);
 

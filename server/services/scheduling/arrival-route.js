@@ -311,7 +311,7 @@ async function loadArrivalRouteContext({
   (movedTarget?.memberIds || []).forEach(id => excluded.add(String(id)));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
-    && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
+    && (row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
     && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at
       && (!includeClaimedReservations || row.customer_id == null))), planningMinutes);
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
@@ -676,12 +676,12 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
     const hitsFixed = simulation.arrivals.some((arrival, index) => fixed.some(row => {
       if (row.id === arrival.id) return false;
       const start = minuteOfDay(row.window_start);
-      const end = Math.max(start + workDuration(row), row.endMin ?? 0);
+      const end = Math.max(start + workDuration(row), row.endMin ?? minuteOfDay(row.window_end) ?? 0);
       const occupiedFrom = index === 0 ? startMin : simulation.arrivals[index - 1].departureMin;
       return (capacity && start == null) || (start != null && occupiedFrom < end && arrival.departureMin > start);
     })) || (capacity && fixed.some(row => {
       const start = minuteOfDay(row.window_start);
-      const end = Math.max(start + workDuration(row), row.endMin ?? 0);
+      const end = Math.max(start + workDuration(row), row.endMin ?? minuteOfDay(row.window_end) ?? 0);
       return start == null || (simulation.serviceFinishMin < end && simulation.returnFinishMin > start);
     }));
     if (hitsFixed) continue;

@@ -25,20 +25,51 @@ jest.mock('../middleware/auth', () => {
 });
 
 let mockRow;
+let mockSiblings;
+let mockAccountRow;
 let mockUpdates;
+let mockAccountUpdates;
+let mockSiblingUpdates;
 let mockOrder;
 let mockLockedWhere;
 let mockSavedInHour;
 let mockWhereIn;
 const mockTrxBuilder = (table) => {
+  let targetId = null;
+  let firstRead = false;
   const b = {
     count: jest.fn(() => b),
-    where: jest.fn((cond) => { if (!mockLockedWhere) mockLockedWhere = cond; return b; }),
+    where: jest.fn((cond) => {
+      if (typeof cond === 'object' && cond && 'id' in cond) targetId = cond.id;
+      if (!mockLockedWhere && targetId) mockLockedWhere = { id: targetId };
+      return b;
+    }),
     whereNull: jest.fn(() => b),
     whereIn: jest.fn((col, vals) => { mockWhereIn.push({ table, col, vals }); return b; }),
+    orderBy: jest.fn(() => b),
     forUpdate: jest.fn(() => b),
-    first: jest.fn(async () => (table === 'audit_log' ? { n: mockSavedInHour } : mockRow)),
-    update: jest.fn(async (patch) => { mockOrder.push('update'); mockUpdates.push(patch); return 1; }),
+    select: jest.fn(async () => {
+      if (table === 'customers') return mockRow ? [mockRow, ...(mockSiblings || [])] : [];
+      return [];
+    }),
+    first: jest.fn(async () => {
+      firstRead = true;
+      if (table === 'audit_log') return { n: mockSavedInHour };
+      if (table === 'customer_accounts') return mockAccountRow;
+      if (table === 'customers') return mockRow;
+      return mockRow;
+    }),
+    update: jest.fn(async (patch) => {
+      if (table === 'customer_accounts') {
+        mockAccountUpdates.push(patch);
+      } else if (table === 'customers' && targetId && mockRow && String(targetId) !== String(mockRow.id)) {
+        mockSiblingUpdates.push({ id: targetId, ...patch });
+      } else {
+        mockOrder.push('update');
+        mockUpdates.push(patch);
+      }
+      return firstRead ? 1 : 1;
+    }),
   };
   return b;
 };
@@ -119,7 +150,11 @@ beforeEach(() => {
   CUSTOMER_ID = `11111111-1111-4111-8111-${String(seq).padStart(12, '0')}`;
   mockSession = { customerId: CUSTOMER_ID };
   mockRow = { id: CUSTOMER_ID, active: true, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
+  mockSiblings = [];
+  mockAccountRow = null;
   mockUpdates = [];
+  mockAccountUpdates = [];
+  mockSiblingUpdates = [];
   mockOrder = [];
   mockWhereIn = [];
   forwardedError = null;
@@ -474,6 +509,56 @@ describe('PUT /api/customer/profile', () => {
     expect((await put({ firstName: 'Sam' })).status).toBe(200);
     expect(mockUpdates).toHaveLength(1);
     mockSend.mockResolvedValue({ ok: true });
+  });
+
+  test('passes bypassEmailOptOut: true on security notices and syncs matching customer_accounts + identical-holder siblings without clobbering distinct or surname-only siblings', async () => {
+    const ACCT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const SIB_MATCH = '22222222-2222-4222-8222-222222222222';
+    const SIB_SURNAME = '44444444-4444-4444-8444-444444444444';
+    const SIB_DIFF = '33333333-3333-4333-8333-333333333333';
+    mockSession = { customerId: CUSTOMER_ID, accountId: ACCT };
+    mockRow = { id: CUSTOMER_ID, account_id: ACCT, active: true, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
+    mockAccountRow = { id: ACCT, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
+    mockSiblings = [
+      { id: SIB_MATCH, account_id: ACCT, active: true, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL },
+      { id: SIB_SURNAME, account_id: ACCT, active: true, first_name: 'Robin', last_name: 'Sample', email: 'robin@example.test' },
+      { id: SIB_DIFF, account_id: ACCT, active: true, first_name: 'Alex', last_name: 'Tenant', email: 'tenant@example.test' },
+    ];
+    expect((await put({ firstName: 'Sam', lastName: 'Updated' })).status).toBe(200);
+    await flush();
+    expect(mockSend.mock.calls[0][0].bypassEmailOptOut).toBe(true);
+    expect(mockAccountUpdates).toEqual([{ first_name: 'Sam', last_name: 'Updated', updated_at: 'NOW' }]);
+    expect(mockSiblingUpdates).toEqual([{ id: SIB_MATCH, first_name: 'Sam', last_name: 'Updated', updated_at: 'NOW' }]);
+    expect(mockNameFanout).toHaveBeenCalledTimes(2);
+    expect(mockNameFanout.mock.calls.map((c) => c[0].after.id)).toEqual([CUSTOMER_ID, SIB_MATCH]);
+  });
+
+  test('confirm-email routes matching-holder sibling email updates through applyOperatorCustomerEmail, Stripe sync, and post-commit fanout', async () => {
+    const ACCT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const SIB_MATCH = '22222222-2222-4222-8222-222222222222';
+    const SIB_SURNAME = '44444444-4444-4444-8444-444444444444';
+    const holderBefore = { id: CUSTOMER_ID, account_id: ACCT, active: true, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
+    mockSession = { customerId: CUSTOMER_ID, accountId: ACCT };
+    mockRow = holderBefore;
+    mockAccountRow = { id: ACCT, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
+    mockSiblings = [
+      { id: SIB_MATCH, account_id: ACCT, active: true, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL },
+      { id: SIB_SURNAME, account_id: ACCT, active: true, first_name: 'Robin', last_name: 'Sample', email: 'robin@example.test' },
+    ];
+    mockCode.checkCode.mockResolvedValue({ outcome: 'ok', request: { id: 'req-1', new_email: NEW_EMAIL } });
+    mockApplyEmail.mockImplementation(async (_trx, { customerId }) => ({
+      outcome: 'updated',
+      before: customerId === SIB_MATCH ? mockSiblings[0] : holderBefore,
+      emailSync: { pendingConfirmation: { id: `sub-${customerId}`, email: NEW_EMAIL } },
+    }));
+    const res = await fetch(`${baseUrl}/api/customer/profile/confirm-email`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: '123456', email: NEW_EMAIL }),
+    });
+    expect(res.status).toBe(200);
+    expect(mockApplyEmail.mock.calls.map((c) => c[1].customerId)).toEqual([CUSTOMER_ID, SIB_MATCH]);
+    expect(mockEnqueueStripeSync.mock.calls.map((c) => c[1])).toEqual([SIB_MATCH, CUSTOMER_ID]);
+    expect(mockResend).toHaveBeenCalledWith({ id: `sub-${CUSTOMER_ID}`, email: NEW_EMAIL });
+    expect(mockResend).toHaveBeenCalledWith({ id: `sub-${SIB_MATCH}`, email: NEW_EMAIL });
   });
 });
 

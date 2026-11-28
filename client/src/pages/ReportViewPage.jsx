@@ -1,31 +1,23 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
+import { lazyPanel } from '../components/LazyPanel';
+import { staffTab, trackStaffImport } from '../lib/staleChunkReload';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import { AccountHomeLink, signedInSafe } from '../components/brand/BackToAccount';
-import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
-import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
-import { LawnLeadCard, LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
-import { LawnLayoutBody, LawnLayoutSwitch, LawnYourPartCard } from '../components/report/lawnV2/LawnLayout';
-import LawnNewSodCard from '../components/report/lawnV2/LawnNewSodCard';
-import { alsoSteps, lawnLayoutActive, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow, withoutRepeatedAppliedCard } from '../components/report/lawnV2/lawnLayoutRules';
+import { PrintContext as LawnPrintContext } from '../components/report/lawnV2/lawnPrintContext';
+import { LawnLayoutSwitch, alsoSteps, lawnLayoutActive, lawnLayoutStatusData, lawnTodaysResult, reentryIsTimed, reentryRow, withoutRepeatedAppliedCard } from '../components/report/lawnV2/lawnLayoutRules';
 import '../components/report/lawnV2/lawnStory.css';
-import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
-import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
-import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
-import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
-import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
-import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
 import ReportText, { reportSectionsForText } from '../components/report/ReportSections';
-import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
-import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
+import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/fieldKeys';
+import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/fieldKeys';
 import { isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { isLawnFindingSelection } from '../lib/lawn-completion';
 import { serviceCompletionChoicesFor } from '../lib/service-completion-choices';
-import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
+import { sanitizeReentryCopy } from '../lib/sanitizeReentryCopy';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -63,18 +55,153 @@ import {
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
 import CustomerReportHeader, { usesSharedReportTemplate } from '../components/report/CustomerReportHeader';
-import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import TREATMENT_AREA_SCOPES from '../../../shared/treatment-area-scopes.json';
-import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import { reportGreetingFirstName } from '../lib/reportGreeting';
 import { adminLoginUrl } from '../utils/admin-fetch';
+
+// Code-split heavy service-specific dashboards, maps, and PDF document via
+// lazyPanel so each report open only downloads the chunks for its service line
+// and mode, while preloading eligible chunks before data commits so prints and
+// interactive cards render in a single frame.
+function createPreloadablePanel(loader, pick = (mod) => mod?.default) {
+  let resolved = null;
+  let inflight = null;
+  const load = () => {
+    if (resolved) return Promise.resolve({ default: resolved });
+    if (!inflight) {
+      const runLoader = () => (typeof window !== 'undefined' && staffTab() ? trackStaffImport(loader) : loader());
+      inflight = runLoader()
+        .then((mod) => {
+          // Preserve an undefined missing-module signal so lazyPanel shows its fallback cleanly.
+          if (!mod) {
+            inflight = null;
+            return mod;
+          }
+          const Comp = pick(mod);
+          if (Comp) resolved = Comp;
+          return { default: Comp };
+        })
+        .catch((err) => {
+          inflight = null;
+          throw err;
+        });
+    }
+    return inflight;
+  };
+  const LazyComp = lazyPanel(load);
+  function Panel(props) {
+    if (resolved) {
+      const Comp = resolved;
+      return <Comp {...props} />;
+    }
+    return (
+      <Suspense fallback={null}>
+        <LazyComp {...props} />
+      </Suspense>
+    );
+  }
+  Panel.preload = load;
+  return Panel;
+}
+
+const ServiceReportDocument = createPreloadablePanel(() => import('./ServiceReportDocument'));
+const LawnReportV2Section = createPreloadablePanel(() => import('../components/report/lawnV2/LawnReportV2Section'));
+const PreloadableLawnNewSodCard = createPreloadablePanel(() => import('../components/report/lawnV2/LawnNewSodCard'));
+const LawnLayoutBody = createPreloadablePanel(() => import('../components/report/lawnV2/LawnLayout'), (m) => m.LawnLayoutBody);
+const LawnYourPartCard = createPreloadablePanel(() => import('../components/report/lawnV2/LawnLayout'), (m) => m.LawnYourPartCard);
+const LawnLeadCard = createPreloadablePanel(() => import('../components/report/lawnV2/LawnReportV2'), (m) => m.LawnLeadCard);
+const LawnVisitTimeline = createPreloadablePanel(() => import('../components/report/lawnV2/LawnReportV2'), (m) => m.LawnVisitTimeline);
+const LawnWateringBanner = createPreloadablePanel(() => import('../components/report/lawnV2/LawnReportV2'), (m) => m.LawnWateringBanner);
+const PestReportV2Section = createPreloadablePanel(() => import('../components/report/pestV2/PestReportV2Section'));
+const PestCustomerConcern = createPreloadablePanel(() => import('../components/report/pestV2/PestReportV2'), (m) => m.PestCustomerConcern);
+const MosquitoReportV2Section = createPreloadablePanel(() => import('../components/report/mosquitoV2/MosquitoReportV2Section'));
+const TermiteReportV2Section = createPreloadablePanel(() => import('../components/report/termiteV2/TermiteReportV2Section'));
+const CockroachReportV2Section = createPreloadablePanel(() => import('../components/report/cockroachV2/CockroachReportV2Section'));
+const TreeShrubReportV2Section = createPreloadablePanel(() => import('../components/report/treeShrubV2/TreeShrubReportV2Section'));
+const PreloadableStationMapCard = createPreloadablePanel(() => import('../components/StationMapCard'), (m) => m.StationMapCard);
+const TracedTreatmentZoneMap = createPreloadablePanel(() => import('../components/report/TracedTreatmentZoneMap'));
+const ReferralShareCard = createPreloadablePanel(() => import('../components/referral/ReferralShareCard'));
+
+function isNewSodEligible(data, mode) {
+  const card = data?.lawnNewSod;
+  return mode === 'live' && Boolean(card) && typeof card.title === 'string' && Array.isArray(card.items) && card.items.length > 0;
+}
+
+function isStationMapEligible(stationMap) {
+  return Boolean(stationMap?.available && Array.isArray(stationMap.stations) && stationMap.stations.length > 0 && stationMap.image?.url);
+}
+
+function LawnNewSodCard(props) {
+  if (!isNewSodEligible(props.data, props.mode)) return null;
+  return <PreloadableLawnNewSodCard {...props} />;
+}
+
+function StationMapCard(props) {
+  if (!isStationMapEligible(props.stationMap)) return null;
+  return <PreloadableStationMapCard {...props} />;
+}
+
+const LIVE_CHUNK_PRELOADERS = [
+  [(d) => d.serviceLine === 'lawn' && Boolean(d.reportV2), () => LawnReportV2Section.preload()],
+  [(d) => d.serviceLine === 'lawn' && Boolean(d.reportV2), () => LawnVisitTimeline.preload()],
+  [(d) => d.serviceLine === 'lawn' && Boolean(d.reportV2?.banner), () => LawnWateringBanner.preload()],
+  [(d) => d.serviceLine === 'lawn' && Boolean(d.reportV2?.lead), () => LawnLeadCard.preload()],
+  [(d, m) => lawnLayoutActive(d, m), () => LawnLayoutBody.preload()],
+  [(d, m) => lawnLayoutActive(d, m), () => LawnYourPartCard.preload()],
+  [(d) => d.serviceLine === 'tree_shrub' && Boolean(d.reportV2), () => TreeShrubReportV2Section.preload()],
+  [(d) => d.serviceLine === 'tree_shrub' && Boolean(d.reportV2), () => LawnVisitTimeline.preload()],
+  [(d, m) => isNewSodEligible(d, m), () => PreloadableLawnNewSodCard.preload()],
+  [(d) => Boolean(d.customerConcernCard), () => PestCustomerConcern.preload()],
+  [(d) => Boolean(d.pestReportV2), () => PestReportV2Section.preload()],
+  [(d) => Boolean(d.mosquitoReportV2), () => MosquitoReportV2Section.preload()],
+  [(d) => Boolean(d.termiteReportV2), () => TermiteReportV2Section.preload()],
+  [(d) => Boolean(d.cockroachReportV2), () => CockroachReportV2Section.preload()],
+  [(d, m) => isStationMapEligible(d.stationMap) && (m === 'live' || Boolean(d.termiteReportV2)), () => PreloadableStationMapCard.preload()],
+  [(d) => Boolean(d.treatmentMap?.traced), () => TracedTreatmentZoneMap.preload()],
+  [(d, m) => m === 'live' && Boolean(d.referral?.headline), () => ReferralShareCard.preload()],
+];
+
+async function preloadReportChunks(payload, effectiveMode) {
+  if (!payload || payload.error || payload.reportVersion !== 'service_report_v1' || effectiveMode === 'sms_preview') return;
+  if (effectiveMode === 'pdf') {
+    await ServiceReportDocument.preload().catch(() => {});
+    return;
+  }
+  const tasks = LIVE_CHUNK_PRELOADERS
+    .filter(([matches]) => matches(payload, effectiveMode))
+    .map(([, preload]) => preload());
+  if (tasks.length) await Promise.allSettled(tasks);
+}
+
+if (import.meta.env.MODE === 'test' && typeof window !== 'undefined') {
+  if (!globalThis.__WAVES_TEST_WARMUP__) globalThis.__WAVES_TEST_WARMUP__ = [];
+  globalThis.__WAVES_TEST_WARMUP__.push(Promise.allSettled([
+    ServiceReportDocument.preload(),
+    LawnReportV2Section.preload(),
+    PreloadableLawnNewSodCard.preload(),
+    LawnLayoutBody.preload(),
+    LawnYourPartCard.preload(),
+    LawnLeadCard.preload(),
+    LawnVisitTimeline.preload(),
+    LawnWateringBanner.preload(),
+    PestReportV2Section.preload(),
+    PestCustomerConcern.preload(),
+    MosquitoReportV2Section.preload(),
+    TermiteReportV2Section.preload(),
+    CockroachReportV2Section.preload(),
+    TreeShrubReportV2Section.preload(),
+    PreloadableStationMapCard.preload(),
+    TracedTreatmentZoneMap.preload(),
+    ReferralShareCard.preload(),
+  ]));
+}
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -10951,7 +11078,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
 
 
-        <footer className="sr-footer">
+        <ServiceReportFooter live={mode === 'live'}>
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
           {/* Owner ask 2026-09-28: every report links to the public Products &
               Safety page. The footer renders on every report, so assessment-
@@ -10982,10 +11109,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               hash chain, and a chain over only a hidden photo (e.g. the gauge
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
-        </footer>
+        </ServiceReportFooter>
       </CustomerColumn>
     </div>
   );
+}
+
+function ServiceReportFooter({ live, children }) {
+  const Tag = live ? 'div' : 'footer';
+  return <Tag className="sr-footer">{children}</Tag>;
 }
 
 function reportDataUrl(token, mode, pinnedAssessment) {
@@ -11140,13 +11272,15 @@ export default function ReportViewPage({ previewServiceId = null } = {}) {
         if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
         return r.json();
       })
-      .then((d) => {
+      .then(async (d) => {
         // A SUPERSEDED effect decides nothing. staffViewTokens is a module
         // global that outlives this mount, so a cancelled response must not
         // touch it: an in-flight staff read can resolve AFTER the reader has
         // navigated away, lost the admin JWT, and reopened the same token,
         // and it would then re-add a suppression the current load just
         // cleared — the dropped-request bug below, arriving from behind.
+        if (cancelled) return;
+        await preloadReportChunks(d, isPreview ? 'live' : mode);
         if (cancelled) return;
         // Must register BEFORE setData: the view-event effect fires on first
         // render of the report, and a staff read may never post events.

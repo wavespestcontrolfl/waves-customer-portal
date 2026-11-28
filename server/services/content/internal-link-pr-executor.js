@@ -539,10 +539,11 @@ class InternalLinkPrExecutor {
       validation: ctx.validation,
       targetUrl: ctx.targetUrl,
       sourceKey: ctx.sourceKey,
-      // Content edits bump the page's freshness field (sitemap lastmod), the
-      // same rule publishRefresh / metadata rewrites follow; a one-line edit
-      // so the rest of the frontmatter stays byte-identical.
-      patchedContent: bumpFreshnessLine(ctx.patchedContent, etDateString()),
+      // Link-only insertions are mechanical edits (not substantive content
+      // refreshes), so leave frontmatter `updated:` / `modified:` untouched
+      // to avoid fake-freshness date bumps (Google Nov 24 AI Overviews rule
+      // and wavespestcontrol-astro/AGENTS.md).
+      patchedContent: ctx.patchedContent,
     };
   }
 

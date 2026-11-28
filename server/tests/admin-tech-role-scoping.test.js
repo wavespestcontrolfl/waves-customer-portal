@@ -212,12 +212,18 @@ describe('schedule per-visit ownership (technician role)', () => {
   });
 
   test.each([
+    ['POST', '/api/admin/schedule/svc-other/prepaid', { amount: 50, method: 'cash' }],
+    ['DELETE', '/api/admin/schedule/svc-other/prepaid', undefined],
+    ['POST', '/api/admin/schedule/svc-own/prepaid', { amount: 50, method: 'cash' }],
+    ['DELETE', '/api/admin/schedule/svc-own/prepaid', undefined],
     ['POST', '/api/admin/schedule/svc-other/regenerate-brief', {}],
     ['POST', '/api/admin/schedule/svc-own/regenerate-brief', {}],
     ['POST', '/api/admin/schedule/optimize', {}],
     ['POST', '/api/admin/schedule/optimize-route', {}],
     ['GET', '/api/admin/schedule/recurring-alerts', undefined],
     ['POST', '/api/admin/schedule/recurring-alerts/alert-1/action', { action: 'renew' }],
+    ['GET', '/api/admin/schedule/zone-density', undefined],
+    ['GET', '/api/admin/schedule/recommend-slots?date=2026-12-01', undefined],
   ])('%s %s is admin-only (dispatch/office function)', async (method, path, body) => {
     const { status, body: res } = await call(method, path, body);
     expect(status).toBe(403);

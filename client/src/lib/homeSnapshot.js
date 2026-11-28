@@ -171,7 +171,7 @@ export function storedHomeIdentity() {
 // response that outlived a login change (another tab's new login adopted by a
 // token refresh) writes nothing, so customer A's name and address can never be
 // saved under B's identity.
-export function writeHomeSnapshot({ token, requestIdentity, me, propertyPayload }) {
+export function writeHomeSnapshot({ token, requestIdentity, me, propertyPayload, savedAt }) {
   const identity = homeIdentityKey(token);
   const properties = snapshotProperties(propertyPayload);
   if (!snapshotEligible(me)) {
@@ -182,9 +182,19 @@ export function writeHomeSnapshot({ token, requestIdentity, me, propertyPayload 
   if (!identity || !properties || identity !== requestIdentity || identity !== storedHomeIdentity()
     || String(payload?.customerId) !== String(me?.id)) return false;
   writeEntry(HOME_SNAPSHOT_KEY, {
-    v: HOME_STORE_VERSION, identity, savedAt: Date.now(), customer: snapshotCustomer(me), properties,
+    v: HOME_STORE_VERSION, identity, savedAt: savedAt ?? Date.now(), customer: snapshotCustomer(me), properties,
   });
   return true;
+}
+
+// Updates only the cached customer identity when /auth/me succeeded but
+// /auth/properties failed transiently, preserving the existing property list and timestamp.
+export function refreshHomeSnapshotCustomer({ token, requestIdentity, me }) {
+  const existing = readHomeSnapshot(token);
+  if (!existing) return false;
+  return writeHomeSnapshot({
+    token, requestIdentity, me, propertyPayload: existing.properties, savedAt: existing.savedAt,
+  });
 }
 
 // The saved account for this token, or null. Never throws.

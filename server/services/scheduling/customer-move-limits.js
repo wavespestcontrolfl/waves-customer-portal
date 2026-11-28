@@ -249,6 +249,8 @@ async function customerMovesSinceTime(svc, { database, since }) {
   return rows.filter(slotChanged);
 }
 
+const { savepointRead } = require('./savepoint-read');
+
 // True when this visit already took DAY_MOVE_CAP customer moves today (ET).
 // Gate off, or an unreadable history: false (a cap only hands the customer to
 // the office, so a missed cap costs less than a wrong refusal).
@@ -256,7 +258,7 @@ async function dayCapReached(svc, { database, now = new Date() } = {}) {
   if (!moveCapAllEnabled() || !svc?.id) return false;
   try {
     const since = parseETDateTime(`${etDateString(now)}T00:00`);
-    return (await customerMovesSinceTime(svc, { database, since })).length >= DAY_MOVE_CAP;
+    return (await savepointRead(database, (dbh) => customerMovesSinceTime(svc, { database: dbh, since }))).length >= DAY_MOVE_CAP;
   } catch {
     return false;
   }
@@ -270,7 +272,7 @@ async function repeatMoveInWindow(svc, { database, now = new Date() } = {}) {
   if (!moveCapAllEnabled() || !svc?.id) return false;
   try {
     const since = new Date(now.getTime() - CORRECTION_MINUTES * 60 * 1000);
-    return (await customerMovesSinceTime(svc, { database, since })).length >= 2;
+    return (await savepointRead(database, (dbh) => customerMovesSinceTime(svc, { database: dbh, since }))).length >= 2;
   } catch {
     return false;
   }
@@ -283,32 +285,34 @@ async function repeatMoveInWindow(svc, { database, now = new Date() } = {}) {
 async function loadMoveLimit(svc, { database, missed = false, now = new Date() } = {}) {
   if (!moveLimitsEnabled() || missed || !svc?.id) return null;
   try {
-    const rows = await database('reschedule_log')
-      .where({ scheduled_service_id: svc.id })
-      .orderBy('created_at', 'asc')
-      .select('initiated_by', 'original_date', 'new_date', 'original_window', 'new_window', 'created_at');
-    const moves = customerMovesSince(rows, svc);
-    const dueDate = moves.length ? dateOnly(moves[0].original_date) : dateOnly(svc.scheduled_date);
-    if (!dueDate) return null;
+    return await savepointRead(database, async (dbh) => {
+      const rows = await dbh('reschedule_log')
+        .where({ scheduled_service_id: svc.id })
+        .orderBy('created_at', 'asc')
+        .select('initiated_by', 'original_date', 'new_date', 'original_window', 'new_window', 'created_at');
+      const moves = customerMovesSince(rows, svc);
+      const dueDate = moves.length ? dateOnly(moves[0].original_date) : dateOnly(svc.scheduled_date);
+      if (!dueDate) return null;
 
-    const allowance = allowanceDays(svc);
-    const lastDate = roundEnd(svc, dueDate) || (allowance ? addDays(dueDate, allowance) : null);
+      const allowance = allowanceDays(svc);
+      const lastDate = roundEnd(svc, dueDate) || (allowance ? addDays(dueDate, allowance) : null);
 
-    let firstVisitBlocked = false;
-    const starts = moveStarts(moves);
-    if (starts.length >= FIRST_VISIT_ONLINE_MOVES) {
-      // The last allowed move may still be corrected, for CORRECTION_MINUTES
-      // from its start. A move past the allowance has no such window.
-      const correcting = starts.length === FIRST_VISIT_ONLINE_MOVES
-        && now.getTime() - starts[starts.length - 1] <= CORRECTION_MINUTES * 60 * 1000;
-      if (!correcting) {
-        const completed = await database('scheduled_services')
-          .where({ customer_id: svc.customer_id, status: 'completed' })
-          .first('id');
-        firstVisitBlocked = !completed;
+      let firstVisitBlocked = false;
+      const starts = moveStarts(moves);
+      if (starts.length >= FIRST_VISIT_ONLINE_MOVES) {
+        // The last allowed move may still be corrected, for CORRECTION_MINUTES
+        // from its start. A move past the allowance has no such window.
+        const correcting = starts.length === FIRST_VISIT_ONLINE_MOVES
+          && now.getTime() - starts[starts.length - 1] <= CORRECTION_MINUTES * 60 * 1000;
+        if (!correcting) {
+          const completed = await dbh('scheduled_services')
+            .where({ customer_id: svc.customer_id, status: 'completed' })
+            .first('id');
+          firstVisitBlocked = !completed;
+        }
       }
-    }
-    return { dueDate, lastDate, firstVisitBlocked };
+      return { dueDate, lastDate, firstVisitBlocked };
+    });
   } catch {
     return null;
   }

@@ -128,7 +128,20 @@ postgres('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
     const after = await row(parentId);
     console.log('single/admin DELETE ->', res.status, JSON.stringify(res.body), '\nrow after:', JSON.stringify(after));
 
-    // EXPECTED (symmetry with POST /:id/prepaid at admin-schedule.js:13384-13388): refusal
+    // DELETE /:id/prepaid is admin-only (requireAdmin): technician tokens are rejected with 403.
+    expect(res.status).toBe(403);
+    expect(after.prepaid_method).toBe('annual_prepay_invoice');
+    expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx)).toBe(true);
+  });
+
+  test('single form, ADMIN token on annual coverage: 409 refusal, stamp and coverage intact', async () => {
+    const { techId, parentId } = await seed();
+    global.__TECH_ID = techId; mockCurrentRole = 'admin';
+    const before = await row(parentId);
+    expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(before, trx)).toBe(true);
+
+    const res = await call('DELETE', `/api/admin/schedule/${parentId}/prepaid`);
+    const after = await row(parentId);
     expect(res.status).toBe(409);
     expect(after.prepaid_method).toBe('annual_prepay_invoice');
     expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx)).toBe(true);

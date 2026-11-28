@@ -1435,8 +1435,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       try {
         const ctx = await filed();
         const { card } = ctx;
-        const tech = await listed(card.id, { 'x-test-role': 'technician' });
-        expect(tech).toBeNull();
+        const techRes = await fetch(`${base}/admin/triage?status=open`, { headers: { 'x-test-role': 'technician' } });
+        expect(techRes.status).toBe(403);
         expect((await get(`${card.id}/call-phone-yes`, { 'x-test-role': 'technician' })).status).toBe(403);
         // The list reads nothing for the tap: it marks the open card; the card's own route reads the state.
         const { items } = await (await fetch(`${base}/admin/triage?status=open`)).json();

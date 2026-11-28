@@ -21,6 +21,7 @@ jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
 // The test database may carry weekly days off (Saturday / Sunday) in system_settings; this suite is about the series dates.
 jest.mock('../services/scheduling/blackout-dates', () => ({
   ...jest.requireActual('../services/scheduling/blackout-dates'),
+  getBlackoutDates: async () => new Set(),
   getBlackoutLayers: async () => ({ dates: new Set(), weeklyDaysOff: new Set(), closedHolidays: new Set() }),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));

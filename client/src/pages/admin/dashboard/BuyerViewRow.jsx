@@ -14,21 +14,36 @@ const partial = (counted, wanted = 12) => (counted < wanted ? ` · ${counted} of
 // A count that belongs to one figure, written beside it: "SDE $31.0k (5 of 12 months)".
 const coverage = (counted, wanted = 12) => (counted < wanted ? ` (${counted} of ${wanted} months)` : "");
 
+const GROWTH_UNAVAILABLE_COPY = {
+  prior_incomplete: "prior 12 months incomplete",
+  needs_24_months: "growth needs 24 stored months",
+};
+
+function revenueGrowthText(revenue) {
+  if (revenue.growthPct != null) return `${signedPct(revenue.growthPct)} vs the 12 months before`;
+  return GROWTH_UNAVAILABLE_COPY[revenue.growthUnavailableReason] || GROWTH_UNAVAILABLE_COPY.needs_24_months;
+}
+
+function ownerFieldTimeNote(ownerPay) {
+  if (!ownerPay?.months) return "";
+  if (ownerPay.fieldMonths === 0) return " · owner field wage not counted";
+  return ownerPay.fieldMonths < ownerPay.months
+    ? ` · field wage in ${ownerPay.fieldMonths} of ${ownerPay.months} months`
+    : "";
+}
+
 function tiles(data, arDays) {
   const { revenue, recurring, planRevenueKept, grossMargin, ownerProfit, officeCost, ownerFieldHoursPerWeek: hours } = data;
   const kept = planRevenueKept && !planRevenueKept.error ? planRevenueKept : null;
-  const ownerPay = ownerProfit.ownerPay || {};
-  const ownerTimeNote = ownerPay.months && ownerPay.fieldMonths === 0
-    ? " · owner field wage not counted"
-    : ownerPay.months && ownerPay.fieldMonths < ownerPay.months ? ` · field wage in ${ownerPay.fieldMonths} of ${ownerPay.months} months` : "";
+  const ownerTimeNote = ownerFieldTimeNote(ownerProfit.ownerPay);
   // SDE and the profit margin cover different months (the margin needs the owner's pay worked out), so each says its own count.
   const profitCoverage = ownerProfit.monthsCounted < 12 ? ` · margin from ${ownerProfit.monthsCounted} of 12 months` : "";
-  const hoursText = hours && hours.value != null ? ` · you work ${hours.value} field hrs/week` : "";
+  const hoursText = hours?.value != null ? ` · you work ${hours.value} field hrs/week` : "";
   return [
     {
       label: "Revenue, 12 months",
       value: revenue.monthsCounted ? fmtMoneyCompact(revenue.value) : dash,
-      sub: `${revenue.growthPct == null ? "growth needs 24 stored months" : `${signedPct(revenue.growthPct)} vs the 12 months before`}${partial(revenue.monthsCounted)}`,
+      sub: `${revenueGrowthText(revenue)}${partial(revenue.monthsCounted)}`,
     },
     {
       label: "Recurring share",

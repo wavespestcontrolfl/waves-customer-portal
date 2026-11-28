@@ -2229,19 +2229,40 @@ function routeCheckModeFor(userOpts) {
   }
 }
 
+// Same service identity slot-reservation stamps on `prospective` so route-check
+// and make-room plan the service's real planning minutes instead of falling back
+// to the full 60-min window in live `plan` mode.
+function prospectiveServiceFields(serviceProfile) {
+  const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
+  if (!services.length) {
+    return serviceProfile?.serviceLabel ? { service_type: serviceProfile.serviceLabel } : {};
+  }
+  const label = services.map((s) => s.label || s.service).filter(Boolean).join(' ') || serviceProfile?.serviceLabel;
+  return {
+    ...(label ? { service_type: label } : {}),
+    ...(services.length > 1 ? { combined_services: true } : {}),
+  };
+}
+
 // ONE check per request, over the FINAL eligible pool: after the collision, lead-time,
 // season, time-of-day and zone-day filters, right before the display selection. It sees
 // only slots the customer could be shown, so its floor is judged on that set and a
 // removal can never leave an empty picker (the floor returns the pool whole). The helper
 // returns the input's own objects in input order. Returns the pool unchanged with the
 // gate off or on any error.
-async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode }) {
+async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode, serviceProfile = null }) {
   try {
     if (mode === 'off' || !pool.length) return pool;
     const routeCheck = require('./scheduling/customer-route-check');
     const checked = await routeCheck.filterOfferedSlots({
       surface: 'estimate', mode, slots: pool, durationMinutes, today: new Date(),
-      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes }, excludeEstimateId: estimateId },
+      target: {
+        prospective: {
+          lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes,
+          ...prospectiveServiceFields(serviceProfile),
+        },
+        excludeEstimateId: estimateId,
+      },
     });
     return Array.isArray(checked.slots) ? checked.slots : pool;
   } catch (err) {
@@ -2369,7 +2390,7 @@ function withMakeRoomSlot(selected, makeRoomSlot, { pool, total }) {
 // is the locked estimate row; `serviceProfile` may be null (an extend has none: the season and service-line rules,
 // which only narrow who may be offered, were proven when the hold was reserved). Resolves { shiftMin, moves } or
 // { reason }; never throws.
-async function verifyMakeRoomOffer({ conn, estimate, serviceProfile = null, serviceMix = null, estimateZone = null, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes }) {
+async function verifyMakeRoomOffer({ conn, estimate, serviceProfile = null, prospectiveService = null, serviceMix = null, estimateZone = null, coords, date, windowStart, techId, durationMinutes, candidateExpectedMinutes }) {
   try {
     if (!coords) return { reason: 'no_pin' };
     const startMin = timeToMinutes(windowStart);
@@ -2378,6 +2399,7 @@ async function verifyMakeRoomOffer({ conn, estimate, serviceProfile = null, serv
     const opts = { ...DEFAULT_OPTS, includeWeekends: true, timeOfDay: 'any', minimumLeadMinutes: selfServeNoticeMinutes() };
     return await require('./scheduling/booking-make-room').verifyMakeRoomHour({
       conn, date, startMin, techId, durationMinutes, point: coords, estimateId: estimate.id, candidateExpectedMinutes,
+      prospectiveService: prospectiveService || prospectiveServiceFields(serviceProfile),
       capabilityRows: serviceMix ? capabilityRowsFor(serviceMix) : null,
       zoneSlug: routeDaySlug,
       // The offer was signed for this exact hour, so the request's own window and zone days were proven then.
@@ -2881,11 +2903,13 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // over the final eligible pool (every filter above has run). Inside this uncached
   // builder, so a wrapper cache hit neither recomputes nor logs.
   const routeChecked = await routeCheckedPool(funneledEligible, {
-    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
+    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode, serviceProfile,
   });
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   const makeRoomArgs = {
-    estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, candidateExpectedMinutes, dateFrom, dateTo,
+    estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, candidateExpectedMinutes,
+    prospectiveService: prospectiveServiceFields(serviceProfile),
+    dateFrom, dateTo,
     // The page's capability rule (filterCollidingSlots) for the technician whose stop would move.
     capabilityRows: serviceProfile.reservationServiceMix ? capabilityRowsFor(serviceProfile.reservationServiceMix) : null,
     // The zone the page passes find-time, for the self-serve drive cap's route-day lift.
