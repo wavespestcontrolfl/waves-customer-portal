@@ -36,6 +36,7 @@ const db = require('../models/db');
 const gh = require('./content-astro/github-client');
 const { isEnabled } = require('../config/feature-gates');
 const { REVIEW_CITY_TO_LOCATION } = require('../config/locations');
+const { PUBLIC_CITY_ALLOWLIST } = require('../utils/public-report-egress');
 
 const ASTRO_FILE = 'src/data/entity-profiles.auto.json';
 const SYNC_BRANCH_PREFIX = 'data/entity-profiles-sync-';
@@ -87,10 +88,9 @@ const EXPLICIT_OFFICE_URLS = new Map([
 ]);
 
 const OFFICE_CITY_KEYS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
-const EXTRA_NON_OFFICE_LOCALITIES = ['venice gardens', 'sarasota springs'];
 const SERVICE_AREA_CITY_PATTERN = [...new Set([
   ...Object.keys(REVIEW_CITY_TO_LOCATION || {}),
-  ...EXTRA_NON_OFFICE_LOCALITIES,
+  ...(PUBLIC_CITY_ALLOWLIST || []),
 ])]
   .filter((c) => !OFFICE_CITY_KEYS.has(c))
   .map((c) => c.trim().replace(/\s+/g, '[-_]?'))
@@ -214,9 +214,22 @@ async function getVerifiedProfilesByOffice() {
   for (const r of rows) {
     const url = String(r.live_url || '').trim();
     if (!/^https:\/\/\S+$/.test(url)) continue;
-    if (sameAsRejectReason(url)) { refused++; continue; }
-    const hp = urlHostAndPath(url);
-    const key = hp ? `${hp.host}${hp.path}` : url.toLowerCase();
+    const reason = sameAsRejectReason(url);
+    let cleanUrl = url;
+    let isQueryVariant = false;
+    if (reason === 'not_profile') {
+      try {
+        const parsed = new URL(url);
+        if (parsed.search) {
+          parsed.search = '';
+          cleanUrl = parsed.toString();
+          isQueryVariant = sameAsRejectReason(cleanUrl) === null;
+        }
+      } catch { /* fall through */ }
+    }
+    if (reason && !isQueryVariant) { refused++; continue; }
+    const hp = urlHostAndPath(cleanUrl);
+    const key = hp ? `${hp.host}${hp.path}` : cleanUrl.toLowerCase();
     let entry = byNormalized.get(key);
     if (!entry) {
       entry = { claimedOffices: new Set(), resolvedOffices: new Set(), urls: new Set() };
@@ -225,13 +238,14 @@ async function getVerifiedProfilesByOffice() {
     if (r.location && r.location !== 'default') {
       entry.claimedOffices.add(LOCATION_TO_OFFICE_SLUG[r.location] || `unknown:${r.location}`);
     }
-    const slug = officeSlugForRow(r.location, url);
+    const slug = officeSlugForRow(r.location, cleanUrl);
     if (slug) entry.resolvedOffices.add(slug);
-    entry.urls.add(url);
+    if (!isQueryVariant) entry.urls.add(url);
   }
   const byOffice = {};
   for (const slug of OFFICE_SLUGS) byOffice[slug] = new Set();
   for (const entry of byNormalized.values()) {
+    if (!entry.urls.size) { refused++; continue; }
     // Reject if multiple offices claim the URL, no valid office was resolved,
     // or any stored location disagrees with the resolved office.
     if (entry.claimedOffices.size > 1 || entry.resolvedOffices.size !== 1) {

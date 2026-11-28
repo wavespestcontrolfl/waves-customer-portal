@@ -107,6 +107,8 @@ describe('getVerifiedProfilesByOffice', () => {
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-south-venice-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-venice-gardens-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-springs-fl/', location: null },
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-south-sarasota-fl/', location: null },
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-west-bradenton-fl/', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-lakewood-ranch-99999', location: 'sarasota' },
       // Competing office claim on a Sarasota-named URL -> omitted completely
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-77777', location: 'sarasota' },
@@ -114,6 +116,9 @@ describe('getVerifiedProfilesByOffice', () => {
       // Unscoped Sarasota URL also claimed once by Venice -> omitted completely
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-66666', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-66666', location: 'venice' },
+      // Clean Venice URL conflicts with tracking-query Sarasota claim on same page -> omitted
+      { live_url: 'https://citysquares.com/b/waves-pest-control-venice-55555', location: 'venice' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-venice-55555?utm_source=x', location: 'sarasota' },
       { live_url: 'https://sub.reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-bradenton-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota/posts/123', location: 'sarasota' },
