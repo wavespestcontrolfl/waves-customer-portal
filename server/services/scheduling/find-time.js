@@ -397,12 +397,14 @@ async function findCapacitySlots(opts) {
   // findArrivalWindowSlots above.
   const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
   const shiftOf = await loadTechShifts(db, { technicianIds: techs.map((tech) => tech.id), now });
-  const { getBlackoutLayers } = require('./blackout-dates');
+  const { getBlackoutDates } = require('./blackout-dates');
   const requestedServices = await resolveCapacityRequestedServices(opts);
   const inactive = opts.arrivalWindow?.serviceId ? []
     : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
   const inactiveTechs = new Set(inactive.map(row => row.technician_id));
-  const blackout = opts.includeBlackoutDates ? new Set() : (await getBlackoutLayers(dateFrom, dateTo)).dates;
+  const blackout = opts.includeBlackoutDates
+    ? new Set()
+    : await getBlackoutDates(dateFrom, dateTo, undefined, { strict: opts.strictBlackout === true });
   const today = etDateString(now);
   const parts = etParts(now);
   const travel = require('../route-optimizer').createSchedulingTravel(travelAllowance(opts));
