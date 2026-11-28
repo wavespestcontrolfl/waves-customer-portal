@@ -38,7 +38,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
-const { askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
+const { askedRequiredLinesForPromise, estimatesCoverAskedLines, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
 const commitments = require('./call-commitments');
 const { etDateString, etCalendarDayOf, etParts, formatETTime } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
@@ -408,7 +408,7 @@ async function quoteAsks(conn, scoped) {
   const calls = await conn('call_log').whereIn('id', [...new Set(quotes.map((x) => x.r.call_log_id))])
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b)).select(...ASK_CALL_COLUMNS);
   const byId = new Map(calls.map((c) => [String(c.id), c]));
-  for (const x of quotes) asks.set(String(x.r.id), askedLinesForPromise(x.r, byId.get(String(x.r.call_log_id))));
+  for (const x of quotes) asks.set(String(x.r.id), askedRequiredLinesForPromise(x.r, byId.get(String(x.r.call_log_id))));
   return asks;
 }
 
@@ -424,9 +424,10 @@ async function quoteAsks(conn, scoped) {
 // sent_at) after the evidence boundary `since`.
 async function quoteEstimateIds(conn, scoped, asks = new Map()) {
   const done = new Set();
-  // Same service-line check as the fulfillment proof (Codex #6344 r2): an
-  // estimate for another line never counts for a quote promise whose ask is known.
-  const fits = (x, e) => estimateMatchesAsk(asks.get(String(x.r.id)) || [], e);
+  // Same multi-service coverage check as the fulfillment proof: every asked
+  // line must be covered across the post-call estimates handed off to the
+  // customer (fail-safe when either side is unclassifiable).
+  const covered = (x, candidates) => estimatesCoverAskedLines(asks.get(String(x.r.id)) || [], candidates);
   const quotes = scoped.filter((x) => x.r.kind === 'send_estimate');
   const linked = quotes.filter((x) => x.r.customer_id);
   if (linked.length) {
@@ -436,7 +437,8 @@ async function quoteEstimateIds(conn, scoped, asks = new Map()) {
     const sent = await commitments.whereEstimateOwnedByAny(commitments.handedOffWithin(conn('estimates'), lowest), linked.map((x) => x.r.customer_id))
       .select(...commitments.HANDOFF_COLS(conn), 'service_interest', 'estimate_data', conn.raw(`${commitments.ESTIMATE_OWNER_SQL} AS owner_customer_id`));
     for (const x of linked) {
-      if (sent.some((e) => String(e.owner_customer_id) === String(x.r.customer_id) && commitments.witnessAt(e, x.since) && fits(x, e))) done.add(x.r.id);
+      const matching = sent.filter((e) => String(e.owner_customer_id) === String(x.r.customer_id) && commitments.witnessAt(e, x.since));
+      if (covered(x, matching)) done.add(x.r.id);
     }
   }
   const unlinked = quotes.filter((x) => x.phone);
@@ -459,7 +461,8 @@ async function quoteEstimateIds(conn, scoped, asks = new Map()) {
     ? (safeByPhone.get(x.phone) || []).includes(String(e.customer_id))
     : phoneKey(e.customer_phone) === x.phone);
   for (const x of unlinked) {
-    if (sent.some((e) => matches(x, e) && commitments.witnessAt(e, x.since) && fits(x, e))) done.add(x.r.id);
+    const matching = sent.filter((e) => matches(x, e) && commitments.witnessAt(e, x.since));
+    if (covered(x, matching)) done.add(x.r.id);
   }
   return done;
 }

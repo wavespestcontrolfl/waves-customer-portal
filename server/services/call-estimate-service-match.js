@@ -38,12 +38,12 @@ const LINE_BY_KEY = {
 // (bundled_waveguard, inspection_only, other, unknown values) = no
 // claim about a line: a bundle spans lines, the others name none.
 const LINE_BY_V2_CATEGORY = {
-  pest_general: 'pest', stinging_insect: 'pest', bed_bug: 'pest',
+  pest_general: 'pest', stinging_insect: 'pest', bed_bug: 'pest', flea_tick: 'pest', fire_ant: 'pest',
   lawn_care: 'lawn',
   mosquito: 'mosquito',
-  palm_injection: 'tree_shrub',
+  palm_injection: 'tree_shrub', tree_shrub: 'tree_shrub', tree_and_shrub: 'tree_shrub',
   rodent: 'rodent', exclusion: 'rodent',
-  termite: 'termite', wdo: 'termite',
+  termite: 'termite', wdo: 'termite', wdo_inspection: 'termite',
 };
 
 const linesOfKeys = (keys) => keys.map((k) => LINE_BY_KEY[k]).filter(Boolean);
@@ -132,6 +132,116 @@ function askedLinesForPromise(commitment, callRow) {
   return callRow?.v2_extraction_status === 'valid' && sameFiling ? askedServiceLines(callRow.ai_extraction_enriched) : [];
 }
 
+// Required coarse service lines the call explicitly asked to have quoted:
+// - Single-line primary categories keep `[primary]` unless `specific_service_name`
+//   explicitly names 2+ service lines (e.g. "Pest Control + Lawn Care"), so
+//   incidental `secondary_categories` chatter (like call 5f7d3fc9: primary
+//   `lawn_care`, secondary `pest_general`, catalog "Lawn Insect Control") never
+//   keeps a satisfied lawn quote promise open.
+// - Explicit bundles (`bundled_waveguard`) collect all lines from
+//   `specific_service_name` and mapped `secondary_categories`.
+function askedServiceLinesRequired(stored) {
+  let v2 = stored;
+  if (typeof v2 === 'string') { try { v2 = JSON.parse(v2); } catch { return []; } }
+  const sr = v2 && typeof v2 === 'object' ? v2.service_request : null;
+  if (!sr || typeof sr !== 'object') return [];
+  const rawPrimary = String(sr.primary_service_category || '').toLowerCase();
+  const primary = lineOfV2Category(rawPrimary);
+  const named = typeof sr.specific_service_name === 'string' && sr.specific_service_name.trim()
+    ? linesOfServiceName(sr.specific_service_name)
+    : [];
+  const out = new Set();
+  if (primary) {
+    out.add(primary);
+    if (named.length > 1) {
+      for (const line of named) out.add(line);
+    }
+    return [...out];
+  }
+  if (rawPrimary === 'bundled_waveguard') {
+    for (const line of named) out.add(line);
+    if (Array.isArray(sr.secondary_categories)) {
+      for (const sec of sr.secondary_categories) {
+        const mapped = lineOfV2Category(sec);
+        if (mapped) out.add(mapped);
+      }
+    }
+    return [...out];
+  }
+  if (named.length >= 1) {
+    for (const line of named) out.add(line);
+  }
+  return [...out];
+}
+
+// Same filing-generation + human-edit fence as `askedLinesForPromise`, returning
+// every required service line (primary + secondary/bundle lines).
+function askedRequiredLinesForPromise(commitment, callRow) {
+  if (commitment?.human_state != null || (commitment?.source && commitment.source !== 'ai')) return [];
+  const sameFiling = commitment?.processing_generation != null && callRow?.processing_generation != null
+    && String(commitment.processing_generation) === String(callRow.processing_generation);
+  return callRow?.v2_extraction_status === 'valid' && sameFiling
+    ? askedServiceLinesRequired(callRow.ai_extraction_enriched)
+    : [];
+}
+
+// Does one estimate's classified lines cover EVERY asked line? Fail-safe:
+// unknown on either side returns true (never reopens an unclassifiable row).
+function estimateCoversAllAskedLines(requiredLines, estimateLines) {
+  if (!requiredLines?.length || !estimateLines?.length) return true;
+  return requiredLines.every((line) => estimateLines.includes(line));
+}
+
+// Do one or more sent candidate estimates collectively cover every required line
+// the caller asked to quote? Fail-safe (Codex #6344): an unclassifiable row
+// (e.g. one-time add-on or custom proposal returning []) keeps old behavior
+// (returns true) so noise never hides a sent custom quote.
+function estimatesCoverAskedLines(requiredLines, estimateRows) {
+  const rows = Array.isArray(estimateRows) ? estimateRows.filter(Boolean) : [];
+  if (!rows.length) return false;
+  if (!requiredLines?.length) return true;
+  const covered = new Set();
+  for (const row of rows) {
+    const lines = estimateServiceLines(row);
+    if (!lines.length) return true;
+    for (const line of lines) covered.add(line);
+  }
+  return requiredLines.every((line) => covered.has(line));
+}
+
+// Which asked lines are STILL missing across the sent candidate estimates?
+function missingAskedServiceLines(requiredLines, estimateRows) {
+  if (!requiredLines?.length) return [];
+  const rows = Array.isArray(estimateRows) ? estimateRows.filter(Boolean) : [];
+  if (!rows.length) return [...requiredLines];
+  const covered = new Set();
+  for (const row of rows) {
+    const lines = estimateServiceLines(row);
+    if (!lines.length) return [];
+    for (const line of lines) covered.add(line);
+  }
+  return requiredLines.filter((line) => !covered.has(line));
+}
+
+// Given candidate estimates in chronological handoff order, return the
+// earliest estimate that completes coverage of ALL `requiredLines` (either one
+// multi-line bundle, one fail-safe unclassifiable row, or the closing estimate
+// whose union with earlier estimates covers every asked line). Returns null if
+// any asked service line is still unquoted.
+function findCoveringEstimate(requiredLines, estimateRows) {
+  const rows = Array.isArray(estimateRows) ? estimateRows.filter(Boolean) : [];
+  if (!rows.length) return null;
+  if (!requiredLines?.length) return rows[0];
+  const covered = new Set();
+  for (const row of rows) {
+    const lines = estimateServiceLines(row);
+    if (!lines.length) return row;
+    for (const line of lines) covered.add(line);
+    if (requiredLines.every((line) => covered.has(line))) return row;
+  }
+  return null;
+}
+
 // Does this estimate row count toward a promise whose ask is `asked`? Unknown
 // on either side keeps it (old behavior); only a clear conflict rejects.
 const estimateMatchesAsk = (asked, row) => !serviceLinesConflict(asked, estimateServiceLines(row));
@@ -139,4 +249,20 @@ const estimateMatchesAsk = (asked, row) => !serviceLinesConflict(asked, estimate
 // The call_log columns askedLinesForPromise reads.
 const ASK_CALL_COLUMNS = ['id', 'ai_extraction_enriched', 'v2_extraction_status', 'processing_generation'];
 
-module.exports = { lineOfV2Category, linesOfServiceName, lineOfServiceName, askedServiceLines, estimateServiceLines, serviceLinesConflict, askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS };
+module.exports = {
+  lineOfV2Category,
+  linesOfServiceName,
+  lineOfServiceName,
+  askedServiceLines,
+  askedServiceLinesRequired,
+  estimateServiceLines,
+  serviceLinesConflict,
+  askedLinesForPromise,
+  askedRequiredLinesForPromise,
+  estimateMatchesAsk,
+  estimateCoversAllAskedLines,
+  estimatesCoverAskedLines,
+  findCoveringEstimate,
+  missingAskedServiceLines,
+  ASK_CALL_COLUMNS,
+};

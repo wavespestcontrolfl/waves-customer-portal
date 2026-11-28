@@ -3788,7 +3788,7 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
 // the estimator engine's entry backstop reads, so the two gates can never
 // disagree and every log line and bell renders the full agreed terms —
 // range, billing unit, and every accepted component.
-const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../utils/call-agreed-price');
+const { resolveCallAgreedPrice, formatAgreedPriceLabel, shouldSuppressDraftForAgreedPrice } = require('../utils/call-agreed-price');
 // The agreed-one-time-job reading (GATE_CALL_AGREED_ONE_TIME_JOB). A line of its own:
 // call-agreed-price-gate.test.js pins the line above as written.
 const { resolveAgreedOneTimeJobPrice } = require('../utils/call-agreed-price');
@@ -19835,9 +19835,15 @@ const CallRecordingProcessor = {
     // QUEUED agreed-price verdict blocked it and that sweep then landed and
     // cleared the entry (codex #4815 r9 P2). Same pass identity.
     let rerunBookingPreDraft = null;
+    const agreedPriceSuppressesDraft = shouldSuppressDraftForAgreedPrice({
+      agreedPrice: callAgreedPrice,
+      quotePromised: callQuotePromised,
+      extracted,
+      v2Extraction: v2CanonicalExtraction,
+    });
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)
-      && callAgreedPrice == null) {
+      && !agreedPriceSuppressesDraft) {
       // Fire-and-forget: the DEEP composer + property pipeline can take
       // minutes, and the scheduling/confirmation work below must not wait on
       // a drafting pass. The engine's own dedupe guards make re-entry safe
@@ -19914,7 +19920,7 @@ const CallRecordingProcessor = {
       // spam/voicemail terminal verdict, this pass is not disqualifying the
       // call itself, so a failure here must not fail the whole run — the
       // post-finalization sweep below is the second, belt-and-braces pass.
-      if (callAgreedPrice != null) {
+      if (agreedPriceSuppressesDraft) {
         logger.info(`[call-proc] estimator engine skipped for ${maskSid(callSid)} — price agreed on call (${formatAgreedPriceLabel(callAgreedPrice)}), skipped:'price_agreed_on_call'`);
         try {
           const { invalidateDraftForCall } = require('./estimator-engine');

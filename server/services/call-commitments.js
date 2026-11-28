@@ -41,7 +41,7 @@ const MODELS = require('../config/models');
 const { anthropicMaxTokens } = require('./llm/anthropic-wire');
 const { parseETDateTime, etDateString, etParts, addETDays, etWallClockOccurrences } = require('../utils/datetime-et');
 const { promiseEvidenceCloseLive } = require('../config/feature-gates');
-const { askedLinesForPromise, estimateMatchesAsk, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
+const { askedRequiredLinesForPromise, findCoveringEstimate, ASK_CALL_COLUMNS } = require('./call-estimate-service-match');
 const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects, operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 
 // A due time typed by the office arrives either as an ISO instant (the
@@ -2029,7 +2029,7 @@ async function estimateSentTo(conn, { after, until, phone, customerId }, accept 
   }
   if (accept) {
     const rows = await estQ.orderByRaw(handoffOrder(conn, after, until)).limit(ASSOCIATION_CANDIDATE_LIMIT).select(...HANDOFF_COLS(conn), "service_interest", "estimate_data");
-    const est = rows.find(accept);
+    const est = typeof accept === "function" ? rows.find(accept) : accept.selectCovering(rows);
     return est ? { id: est.id, at: witnessAt(est, after) } : null;
   }
   const est = await estQ.orderByRaw(handoffOrder(conn, after, until)).first(...HANDOFF_COLS(conn));
@@ -2534,9 +2534,13 @@ async function reusedLeadEstimate({ conn, call, commitment, leadIds, associated 
       .orderByRaw(handoffOrder(conn, after, until));
     // Same service-line vetting as estimateSentTo (audit 2026-10-19).
     const onReused = accept
-      ? (await reusedQ.limit(ASSOCIATION_CANDIDATE_LIMIT).select(...HANDOFF_COLS(conn), "service_interest", "estimate_data")).find(accept)
-      : await reusedQ.first(...HANDOFF_COLS(conn));
-    if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call", hint_only: true };
+      ? (() => {
+        const rows = reusedQ.limit(ASSOCIATION_CANDIDATE_LIMIT).select(...HANDOFF_COLS(conn), "service_interest", "estimate_data");
+        return rows.then((list) => (typeof accept === "function" ? list.find(accept) : accept.selectCovering(list)));
+      })()
+      : reusedQ.first(...HANDOFF_COLS(conn));
+    const resolvedReused = await onReused;
+    if (resolvedReused) return { kind: "estimate_sent", record_type: "estimate", record_id: resolvedReused.id, matched_at: witnessAt(resolvedReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call", hint_only: true };
   }
   return null;
 }
@@ -2562,9 +2566,9 @@ async function resolveSendEstimate(ctx) {
   const vet = async () => {
     if (asked === undefined) {
       const row = await conn("call_log").where({ id: call.id }).modify((b) => require("./voice-agent/relay-protocol").whereNotSandboxCall(b)).first(...ASK_CALL_COLUMNS);
-      asked = askedLinesForPromise(commitment, row);
+      asked = askedRequiredLinesForPromise(commitment, row);
     }
-    return asked.length ? (row) => estimateMatchesAsk(asked, row) : null;
+    return asked.length ? { selectCovering: (rows) => findCoveringEstimate(asked, rows) } : null;
   };
   return associationProof(ctx, [
     async () => reusedLeadEstimate(ctx, probe, await vet()),

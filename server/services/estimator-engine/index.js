@@ -1956,6 +1956,26 @@ async function strictExistingDraftForCall(callLogId, { excludeTerminal = false, 
 // same way as a later pass's genuine correction and deleted the durable
 // block + retry marker on nothing more than a blip. Only 'none' (a
 // SUCCESSFUL read proving no agreed price) may clear anything.
+function applyVerbalPriceReviewNotice(classification, context) {
+  if (!classification || classification.lane === LANES.RED) return classification;
+  const call = context?.call;
+  if (!call || call.v2_extraction_status !== 'valid') return classification;
+  let v2 = call.ai_extraction_enriched;
+  if (typeof v2 === 'string') {
+    try { v2 = JSON.parse(v2); } catch { v2 = null; }
+  }
+  const verbalAgreed = resolveCallAgreedPrice(v2);
+  if (!verbalAgreed) return classification;
+  const notice = `verbal price discussed on call (${formatAgreedPriceLabel(verbalAgreed)}) — verify written quote matches`;
+  const nextReasons = Array.isArray(classification.reasons) ? [...classification.reasons] : [];
+  if (!nextReasons.includes(notice)) nextReasons.push(notice);
+  return {
+    ...classification,
+    lane: LANES.YELLOW,
+    reasons: nextReasons,
+  };
+}
+
 async function resolveAgreedPriceForCall(callLogId) {
   if (!callLogId) return { status: 'none' };
   // A test double for context-builder (jest.mock) commonly stubs only the
@@ -3042,9 +3062,10 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     const draftable = intent.decision === 'draft'
       && Object.keys(intent.services || {}).length > 0
       && !!intent.address;
-    const { lane, reasons, causes = [] } = (engineResult || !draftable)
+    const baseClassification = (engineResult || !draftable)
       ? classifyLane({ intent, propertyFacts, engineResult, engineInput, totals, comps, calibration, context })
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
+    const { lane, reasons, causes = [] } = applyVerbalPriceReviewNotice(baseClassification, context);
     result.lane = lane;
     result.reasons = reasons;
 
@@ -3605,7 +3626,7 @@ module.exports = {
   _private: {
     classifyListingSuiteByLicense,
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
-    parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, supersedeRowScopedDraftBlock,
+    parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, applyVerbalPriceReviewNotice, supersedeRowScopedDraftBlock,
     clearDraftBlockOnCall, redBellCopy, CALL_ORIGIN,
   },
 };

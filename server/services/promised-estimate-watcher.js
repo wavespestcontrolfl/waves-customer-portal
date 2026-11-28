@@ -29,7 +29,7 @@ const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etDateString } = require('../utils/datetime-et');
-const { askedServiceLines, estimateMatchesAsk } = require('./call-estimate-service-match');
+const { askedServiceLinesRequired, estimatesCoverAskedLines } = require('./call-estimate-service-match');
 const { deliveryInstantSql } = require('./self-serve-estimates');
 
 const watcherDisabled = () => ['1', 'true', 'on']
@@ -239,8 +239,8 @@ async function loadUnkeptPromises(conn) {
   const owed = rows.filter((r) => {
     const candidates = Array.isArray(r.duplicate_owner_estimates) ? r.duplicate_owner_estimates : [];
     if (!candidates.length) return true;
-    const asked = askedServiceLines(r.asked_source);
-    return !candidates.some((e) => estimateMatchesAsk(asked, e));
+    const asked = askedServiceLinesRequired(r.asked_source);
+    return !estimatesCoverAskedLines(asked, candidates);
   });
   const oldest = owed.reduce((min, r) => (min == null || new Date(r.created_at) < new Date(min) ? r.created_at : min), null);
   const allIds = owed.map((r) => String(r.id));
