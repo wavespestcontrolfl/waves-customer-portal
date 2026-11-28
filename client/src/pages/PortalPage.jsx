@@ -6075,7 +6075,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     if (s.customerPickBy) {
       return (
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
-          {`Pick a new time by ${formatPickBy(s.customerPickBy)}. If you don't, we'll book the best open time and text you 3 days before.`}
+          {customerPickDeadlineNote(s.customerPickBy)}
           {s.rescheduleUrl && !readOnlyVisits && (
             <div style={{ marginTop: 8 }}>
               <a href={s.rescheduleUrl} data-glass-accent="" style={{

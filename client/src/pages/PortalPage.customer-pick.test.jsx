@@ -59,7 +59,7 @@ const baseVisit = {
 beforeEach(() => {
   Object.values(api).forEach((fn) => { if (typeof fn?.mockResolvedValue === 'function') fn.mockResolvedValue(null); });
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 async function renderSchedule(visit, cust = customer) {
   api.getSchedule.mockResolvedValue({ upcoming: [visit] });
@@ -69,10 +69,11 @@ async function renderSchedule(visit, cust = customer) {
 }
 
 describe('ScheduleTab — visit waiting for the customer to pick a day', () => {
-  // 2026-11-05 01:00Z = Wed, Nov 4 at 8 PM Eastern (EST).
+  // Pin clock before 2026-11-05T01:00Z (Wed, Nov 4 at 8 PM Eastern) for the future-deadline assertions.
   const waiting = { ...baseVisit, customerPickBy: '2026-11-05T01:00:00.000Z' };
 
   it('shows the pick wording, the pick-by time and a link to the reschedule page', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-03T15:00:00.000Z').getTime());
     await renderSchedule(waiting);
     expect(screen.getByText('New day: your pick')).toBeInTheDocument();
     expect(screen.getByText('Pick a time', { selector: 'div' })).toBeInTheDocument();
@@ -86,19 +87,31 @@ describe('ScheduleTab — visit waiting for the customer to pick a day', () => {
     expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
   });
 
+  it('shows the same late pick-by wording as Home after the deadline passes while keeping Pick a time available', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-05T02:00:00.000Z').getTime());
+    await renderSchedule(waiting);
+    expect(screen.getByText(
+      "The pick-by time passed (Wed, Nov 4 at 8 PM). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before."
+    )).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick a time' })).toHaveAttribute('href', waiting.rescheduleUrl);
+  });
+
   it('omits the link when the visit has no reschedule link', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-03T15:00:00.000Z').getTime());
     await renderSchedule({ ...waiting, rescheduleUrl: null });
     expect(screen.getByText(/Pick a new time by Wed, Nov 4 at 8 PM/)).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
   });
 
   it('omits the link for a cancelled (read-only) session', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-03T15:00:00.000Z').getTime());
     await renderSchedule(waiting, { ...customer, cancelled: true, cancelledAt: '2026-08-22' });
     expect(screen.getByText(/Pick a new time by Wed, Nov 4 at 8 PM/)).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
   });
 
   it('shows the minutes when the pick-by is not on the hour', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-11-03T15:00:00.000Z').getTime());
     await renderSchedule({ ...waiting, customerPickBy: '2026-11-05T01:30:00.000Z' });
     expect(screen.getByText(/Pick a new time by Wed, Nov 4 at 8:30 PM\./)).toBeInTheDocument();
   });
