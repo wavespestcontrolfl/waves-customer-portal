@@ -60,10 +60,39 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     expect(cardField.value).toBe('https://portal.wavespestcontrol.com/card/tok1');
   });
 
-  test('card-public.js stamps X-Robots-Tag: noindex on all three token endpoints', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../routes/card-public.js'), 'utf8');
-    const matches = src.match(/X-Robots-Tag/g) || [];
-    expect(matches.length).toBeGreaterThanOrEqual(3);
+  test('card-public.js mounts noStore ahead of rate limiting so 404 and 429 responses carry privacy headers', async () => {
+    const indexSrc = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+    expect(indexSrc).toContain("app.use('/api/card', require('./middleware/no-store').noStore);");
+
+    const express = require('express');
+    const cardRouter = require('../routes/card-public');
+    const app = express();
+    app.use('/api/card', cardRouter);
+    const server = app.listen(0);
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const notFoundRes = await fetch(`${baseUrl}/api/card/not-a-hex-token/contact.vcf`);
+      expect(notFoundRes.status).toBe(404);
+      expect(notFoundRes.headers.get('cache-control')).toContain('no-store');
+      expect(notFoundRes.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(notFoundRes.headers.get('referrer-policy')).toBe('no-referrer');
+
+      // Exhaust the per-route 60 req/min limiter and confirm 429 still carries privacy headers.
+      let rateLimited = null;
+      for (let i = 0; i < 65; i += 1) {
+        const res = await fetch(`${baseUrl}/api/card/not-a-hex-token/contact.vcf`);
+        if (res.status === 429) {
+          rateLimited = res;
+          break;
+        }
+      }
+      expect(rateLimited).not.toBeNull();
+      expect(rateLimited.headers.get('cache-control')).toContain('no-store');
+      expect(rateLimited.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+      expect(rateLimited.headers.get('referrer-policy')).toBe('no-referrer');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   test('payer-statement-pdf and invoice-pdf build valid PDFs with long fields and wire doc.on(error)', async () => {
@@ -142,8 +171,10 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     ].join('\n');
     const addPageStacks = [];
     const printedTexts = [];
+    let heightCalls = 0;
     const origAddPage = PDFKit.prototype.addPage;
     const origText = PDFKit.prototype.text;
+    const origHeight = PDFKit.prototype.heightOfString;
     PDFKit.prototype.addPage = function patchedAddPage(...args) {
       addPageStacks.push(new Error().stack || '');
       return origAddPage.apply(this, args);
@@ -151,6 +182,10 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     PDFKit.prototype.text = function patchedText(str, ...rest) {
       if (typeof str === 'string') printedTexts.push(str);
       return origText.call(this, str, ...rest);
+    };
+    PDFKit.prototype.heightOfString = function patchedHeight(...args) {
+      heightCalls += 1;
+      return origHeight.apply(this, args);
     };
     let buf;
     try {
@@ -181,10 +216,12 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     } finally {
       PDFKit.prototype.addPage = origAddPage;
       PDFKit.prototype.text = origText;
+      PDFKit.prototype.heightOfString = origHeight;
     }
     expect(buf.slice(0, 5).toString()).toBe('%PDF-');
     const parsed = await PDFDocument.load(buf);
     expect(parsed.getPageCount()).toBeGreaterThanOrEqual(3);
+    expect(heightCalls).toBeLessThan(120);
     expect(printedTexts).toContain('Section 2 instruction on its own line.');
     // Page 1 is created in PDFDocument constructor; every subsequent page must
     // come from prep-guide-pdf.js (never from PDFKit internal auto-pagination).

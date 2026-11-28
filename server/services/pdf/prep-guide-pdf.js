@@ -93,6 +93,24 @@ function sectionHeading(doc, text) {
   doc.y = drawFieldSectionHeading(doc, text, L, doc.y, W);
 }
 
+function findFittingTokenEnd(doc, tokens, start, maxH, setBodyFont) {
+  let lo = start + 1;
+  let hi = tokens.length;
+  let best = start + 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    setBodyFont();
+    const h = Math.ceil(doc.heightOfString(tokens.slice(start, mid).join('').trimEnd(), { width: W, lineGap: 2 }));
+    if (h <= maxH) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
 function drawChunkedHardLine(doc, line, setBodyFont) {
   if (!line.trim()) {
     ensureRoom(doc, 14);
@@ -100,29 +118,32 @@ function drawChunkedHardLine(doc, line, setBodyFont) {
     return;
   }
   const tokens = line.match(/\S+\s*/g) || [line];
-  let chunk = '';
-  for (const token of tokens) {
-    const candidate = chunk + token;
+  let idx = 0;
+  while (idx < tokens.length) {
+    const restText = tokens.slice(idx).join('').trimEnd();
     setBodyFont();
-    const h = Math.ceil(doc.heightOfString(candidate.trimEnd(), { width: W, lineGap: 2 }));
-    if (chunk && doc.y + h > CONTENT_BOTTOM - 10) {
-      setBodyFont().fillColor(BODY).text(chunk.trimEnd(), L, doc.y, { width: W, lineGap: 2 });
+    const restH = Math.ceil(doc.heightOfString(restText, { width: W, lineGap: 2 }));
+    const availH = CONTENT_BOTTOM - 10 - doc.y;
+    if (restH <= availH) {
+      setBodyFont().fillColor(BODY).text(restText, L, doc.y, { width: W, lineGap: 2 });
+      break;
+    }
+    const firstH = Math.ceil(doc.heightOfString(tokens[idx].trimEnd(), { width: W, lineGap: 2 }));
+    if (firstH > availH && doc.y > 72) {
       footer(doc);
       doc.addPage();
       drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
-      chunk = token;
-    } else if (!chunk && doc.y + h > CONTENT_BOTTOM - 10) {
-      ensureRoom(doc, h + 10);
-      chunk = token;
-    } else {
-      chunk = candidate;
+      continue;
     }
-  }
-  if (chunk.trimEnd()) {
-    setBodyFont();
-    const h = Math.ceil(doc.heightOfString(chunk.trimEnd(), { width: W, lineGap: 2 }));
-    ensureRoom(doc, h + 10);
-    setBodyFont().fillColor(BODY).text(chunk.trimEnd(), L, doc.y, { width: W, lineGap: 2 });
+    const end = findFittingTokenEnd(doc, tokens, idx, availH, setBodyFont);
+    const chunkText = tokens.slice(idx, end).join('').trimEnd();
+    setBodyFont().fillColor(BODY).text(chunkText, L, doc.y, { width: W, lineGap: 2 });
+    idx = end;
+    if (idx < tokens.length) {
+      footer(doc);
+      doc.addPage();
+      drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
+    }
   }
 }
 

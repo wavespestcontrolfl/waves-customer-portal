@@ -525,6 +525,9 @@ app.use('/api/public/secure-card', (req, res, next) => {
 // (same reasoning as secure-card above), and POST /:token/view's malformed-
 // token 404 + body-ignore decided before the shared body parsers.
 app.use('/api/public/track', require('./middleware/track-public-preparser').trackPublicPreparser);
+// Digital business card (/api/card/:token, wallet.pkpass, contact.vcf): privacy
+// headers ahead of the global /api limiter so 404s and 429s carry them too.
+app.use('/api/card', require('./middleware/no-store').noStore);
 // Email resubscribe confirm link (GATE_PORTAL_EMAIL_RESUBSCRIBE): privacy headers on every
 // outcome, the GLOBAL /api limiter's 429s and the body parsers' 400s included, and while dark
 // the generic 404 page before either of them (same reasoning as secure-card above).
