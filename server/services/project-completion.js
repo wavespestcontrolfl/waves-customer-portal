@@ -595,6 +595,40 @@ async function createProjectFollowupAlert({
   };
 }
 
+async function hydrateWdoVisitAddons(database, project, scheduledService) {
+  if (project.project_type !== 'wdo_inspection'
+    || Array.isArray(scheduledService.service_addons)
+    || Array.isArray(scheduledService.serviceAddons)) {
+    return scheduledService;
+  }
+  const addons = await database('scheduled_service_addons')
+    .where({ scheduled_service_id: scheduledService.id })
+    .select('estimated_price', 'base_price')
+    .catch(() => []);
+  return { ...scheduledService, service_addons: Array.isArray(addons) ? addons : [] };
+}
+
+function populateServiceRecordDeliveryColumns(update, serviceRecord, project, serviceRecordCols, nowValue) {
+  if (serviceRecordCols.completion_source) update.completion_source = 'project_completion';
+  if (serviceRecordCols.protocol_defaults_used) update.protocol_defaults_used = false;
+  if (serviceRecordCols.service_line && !serviceRecord.service_line && serviceRecord.service_type) {
+    update.service_line = detectServiceLine(serviceRecord.service_type);
+  }
+  if (serviceRecordCols.service_data) {
+    const existingServiceData = parseJsonObject(serviceRecord.service_data);
+    update.service_data = serializeJsonb({
+      ...existingServiceData,
+      ...projectServiceData(project),
+    });
+  }
+  if (serviceRecordCols.report_view_token) update.report_view_token = null;
+  if (serviceRecordCols.report_template_version) update.report_template_version = null;
+  if (serviceRecordCols.pdf_storage_key) update.pdf_storage_key = null;
+  if (serviceRecordCols.report_html_storage_key) update.report_html_storage_key = null;
+  if (serviceRecordCols.map_svg_storage_key) update.map_svg_storage_key = null;
+  if (serviceRecordCols.updated_at && nowValue) update.updated_at = nowValue;
+}
+
 function buildServiceRecordProjectCompletionUpdate({
   serviceRecord = {},
   scheduledService = null,
@@ -616,37 +650,14 @@ function buildServiceRecordProjectCompletionUpdate({
     scheduledService,
   });
   const existingStructuredNotes = parseJsonObject(serviceRecord.structured_notes);
-  const existingServiceData = parseJsonObject(serviceRecord.service_data);
-  const update = {
-    status: 'completed',
-  };
-
+  const update = { status: 'completed' };
   if (serviceRecordCols.structured_notes) {
     update.structured_notes = serializeJsonb({
       ...existingStructuredNotes,
       ...structuredNotes,
     });
   }
-  if (serviceRecordCols.completion_source) update.completion_source = 'project_completion';
-  if (serviceRecordCols.protocol_defaults_used) update.protocol_defaults_used = false;
-  // Fill-if-absent on a re-completion: a record created before the line was
-  // stamped at insert gets the same frozen verdict (pre-push codex P1).
-  if (serviceRecordCols.service_line && !serviceRecord.service_line && serviceRecord.service_type) {
-    update.service_line = detectServiceLine(serviceRecord.service_type);
-  }
-  if (serviceRecordCols.service_data) {
-    update.service_data = serializeJsonb({
-      ...existingServiceData,
-      ...projectServiceData(project),
-    });
-  }
-  if (serviceRecordCols.report_view_token) update.report_view_token = null;
-  if (serviceRecordCols.report_template_version) update.report_template_version = null;
-  if (serviceRecordCols.pdf_storage_key) update.pdf_storage_key = null;
-  if (serviceRecordCols.report_html_storage_key) update.report_html_storage_key = null;
-  if (serviceRecordCols.map_svg_storage_key) update.map_svg_storage_key = null;
-  if (serviceRecordCols.updated_at && nowValue) update.updated_at = nowValue;
-
+  populateServiceRecordDeliveryColumns(update, serviceRecord, project, serviceRecordCols, nowValue);
   return {
     ...pickExistingColumns(lifecycleUpdates, serviceRecordCols),
     ...pickExistingColumns(update, serviceRecordCols),
@@ -737,15 +748,7 @@ async function completeProjectBackedService({
       err.status = 400;
       throw err;
     }
-    if (project.project_type === 'wdo_inspection'
-      && !Array.isArray(scheduledService.service_addons)
-      && !Array.isArray(scheduledService.serviceAddons)) {
-      const addons = await trx('scheduled_service_addons')
-        .where({ scheduled_service_id: scheduledService.id })
-        .select('estimated_price', 'base_price')
-        .catch(() => []);
-      scheduledService = { ...scheduledService, service_addons: Array.isArray(addons) ? addons : [] };
-    }
+    scheduledService = await hydrateWdoVisitAddons(trx, project, scheduledService);
     if (String(scheduledService.customer_id) !== String(project.customer_id)) {
       const err = new Error('Project customer does not match linked scheduled service');
       err.status = 400;
@@ -1216,15 +1219,7 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
       canClose: false,
     };
   }
-  if (project.project_type === 'wdo_inspection'
-    && !Array.isArray(scheduledService.service_addons)
-    && !Array.isArray(scheduledService.serviceAddons)) {
-    const addons = await knex('scheduled_service_addons')
-      .where({ scheduled_service_id: scheduledService.id })
-      .select('estimated_price', 'base_price')
-      .catch(() => []);
-    scheduledService = { ...scheduledService, service_addons: Array.isArray(addons) ? addons : [] };
-  }
+  scheduledService = await hydrateWdoVisitAddons(knex, project, scheduledService);
 
   const customer = {
     id: scheduledService.customer_id,

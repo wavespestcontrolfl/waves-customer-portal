@@ -233,28 +233,37 @@ const ADDON_SEED_PRICE_KEYS = ['estimatedPrice', 'estimated_price', 'basePrice',
 function addonSeedPrice(addon) {
   if (!addon) return 0;
   for (const key of ADDON_SEED_PRICE_KEYS) {
-    const val = Number(addon[key]);
-    if (Number.isFinite(val) && val > 0) return val;
+    const raw = addon[key];
+    if (raw === null || raw === undefined || raw === '' || typeof raw === 'boolean') continue;
+    const val = Number(raw);
+    if (Number.isFinite(val) && val >= 0) return val;
   }
   return 0;
 }
 
-export function wdoFeeSeedFromVisit(service) {
-  if (!service) return '';
-  let addonTotal = 0;
-  if (Array.isArray(service.serviceAddons)) {
-    for (const a of service.serviceAddons) addonTotal += addonSeedPrice(a);
-  }
-  const primary = Number(service.primaryLinePrice ?? service.primary_line_price);
+function sumAddonSeedPrices(addons) {
+  if (!Array.isArray(addons)) return 0;
+  return addons.reduce((sum, addon) => sum + addonSeedPrice(addon), 0);
+}
+
+function unDiscountedPrimarySeed(service, primary) {
   const discounted = Number(service.discountAmount || service.discount_amount || 0) > 0
     || Number(service.primaryLineDiscount || service.primary_line_discount || 0) > 0;
+  if (discounted) return '';
+  return Number.isFinite(primary) && primary > 0 ? primary : '';
+}
+
+export function wdoFeeSeedFromVisit(service) {
+  if (!service) return '';
+  const addonTotal = sumAddonSeedPrices(service.serviceAddons);
+  const primary = Number(service.primaryLinePrice ?? service.primary_line_price);
   const rawEst = service.estimatedPrice ?? service.estimated_price;
   if (addonTotal <= 0) {
     if (rawEst != null && rawEst !== '') return rawEst;
-    return !discounted && Number.isFinite(primary) && primary > 0 ? primary : '';
+    return unDiscountedPrimarySeed(service, primary);
   }
   const est = Number(rawEst);
-  if (discounted || !(primary > 0) || rawEst == null || rawEst === '' || !Number.isFinite(est)) return '';
+  if (!unDiscountedPrimarySeed(service, primary) || rawEst == null || rawEst === '' || !Number.isFinite(est)) return '';
   return Math.round((primary + addonTotal) * 100) === Math.round(est * 100) ? primary : '';
 }
 

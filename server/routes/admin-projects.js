@@ -333,6 +333,12 @@ function projectDeliverySendingActive(project) {
   return Date.now() - claimedAtMs <= PROJECT_SEND_STALE_MS;
 }
 
+function addSentOutsideClaimGuard(query, project) {
+  if ('sent_outside_portal_at' in project && !project.sent_outside_portal_at) {
+    query.whereNull('sent_outside_portal_at');
+  }
+}
+
 function markSentOutsideBlock(project) {
   if (project.project_type !== 'wdo_inspection') return { code: 'not_wdo_report', error: 'Only a WDO report can be marked as sent another way' };
   if (project.wdo_signature == null) return { code: 'not_signed', error: 'The WDO report is not signed yet' };
@@ -3082,7 +3088,7 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
 }
 
 const PROJECT_INVOICE_NON_REUSABLE_STATUSES = ['void', 'paid', 'disputed', ...TERMINAL_INVOICE_STATUSES];
-const PROJECT_INVOICE_ALREADY_BILLED_STATUSES = ['paid', 'processing', 'disputed'];
+const PROJECT_INVOICE_ALREADY_BILLED_STATUSES = ['paid', 'prepaid', 'processing', 'disputed'];
 const PROJECT_INVOICE_NON_SENDABLE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'sending', 'disputed'];
 
 function alreadyBilledProjectError(inv) {
@@ -3358,7 +3364,10 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
     if (PROJECT_INVOICE_ALREADY_BILLED_STATUSES.includes(String(explicit.status || '').toLowerCase())) {
-      await persistProjectInvoiceLink(project, explicit.id);
+      const explicitMatchesProject = String(explicit.id) === String(project.invoice_id || '')
+        || (project.scheduled_service_id && String(explicit.scheduled_service_id || '') === String(project.scheduled_service_id))
+        || (project.service_record_id && String(explicit.service_record_id || '') === String(project.service_record_id));
+      if (explicitMatchesProject) await persistProjectInvoiceLink(project, explicit.id);
       throw alreadyBilledProjectError(explicit);
     }
     // A held send links its invoice only when the hold is armed (armReportHold writes the link under the project
@@ -3781,7 +3790,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // A report held (or being released) since the read above sends only through the release: this plain send
     // must not claim it.
     if ('report_hold_status' in project) sendClaimQuery.whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')");
-    if ('sent_outside_portal_at' in project && !project.sent_outside_portal_at) sendClaimQuery.whereNull('sent_outside_portal_at');
+    addSentOutsideClaimGuard(sendClaimQuery, project);
     if (confirmedFirstSend) sendClaimQuery.whereNull('sent_at').whereRaw("status IS DISTINCT FROM 'sent'");
     const sendClaim = await sendClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: sendClaimToken, updated_at: db.fn.now() });
@@ -6258,9 +6267,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if ('report_hold_status' in project) {
       deliveryClaimQuery.whereRaw(SEND_CLAIM_HOLD_EXCLUSION[String(Boolean(holdRequested))]);
     }
-    if ('sent_outside_portal_at' in project && !project.sent_outside_portal_at) {
-      deliveryClaimQuery.whereNull('sent_outside_portal_at');
-    }
+    addSentOutsideClaimGuard(deliveryClaimQuery, project);
     const deliveryClaimRows = await deliveryClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: deliveryClaimToken, updated_at: db.fn.now() });
     if (!deliveryClaimRows) {

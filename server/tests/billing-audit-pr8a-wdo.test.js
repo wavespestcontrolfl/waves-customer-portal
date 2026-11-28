@@ -792,4 +792,93 @@ describe('B-58: held WDO project suppresses title, recommendations, and legacy/s
       expect(await isServiceRecordProjectReportHeld({}, dbMock, { serviceRecordId: 'sr-precloseout' })).toBe(true);
     });
   });
+
+  test('post-audit P0/P1 regressions: trailing USD fees, $0 addon price, prepaid invoice guard, propagated visit lookup error, scheduled_service_id hold & stored report suppression', async () => {
+    const { parseWdoFeeAmount } = require('@waves/report-redaction');
+    expect(parseWdoFeeAmount('Inspection fee: 175 USD')).toBe(175);
+    expect(parseWdoFeeAmount('-175 USD')).toBeNull();
+    expect(parseWdoFeeAmount('(175 USD)')).toBeNull();
+    expect(parseWdoFeeAmount('100 to 175 USD')).toBeNull();
+
+    const { bookedWdoVisitFee, loadLinkedWdoVisit } = require('../services/wdo-inspection-fee');
+    expect(bookedWdoVisitFee({
+      primary_line_price: 175,
+      estimated_price: 175,
+      service_addons: [{ estimated_price: 0, base_price: 80 }],
+    })).toBe(175);
+
+    const failingDb = jest.fn(() => {
+      const q = makeChain([]);
+      q.first = jest.fn(async () => { throw new Error('connection terminated unexpectedly'); });
+      return q;
+    });
+    await expect(loadLinkedWdoVisit({ scheduled_service_id: 'ss-1' }, failingDb)).rejects.toThrow('connection terminated');
+
+    await jest.isolateModulesAsync(async () => {
+      const heldByScheduleDb = jest.fn((table) => {
+        if (table === 'service_records') return makeChain([{ id: 'sr-1', scheduled_service_id: 'ss-held' }]);
+        if (table === 'projects') return makeChain([{ report_hold_status: 'held' }]);
+        return makeChain([]);
+      });
+      jest.doMock('../models/db', () => heldByScheduleDb);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      const { isServiceRecordProjectReportHeld } = require('../services/project-report-hold');
+      expect(await isServiceRecordProjectReportHeld({}, heldByScheduleDb, {
+        serviceRecordId: 'sr-1',
+        scheduledServiceId: 'ss-held',
+      })).toBe(true);
+    });
+
+    await jest.isolateModulesAsync(async () => {
+      const shareToken = 'b'.repeat(64);
+      const heldDoc = {
+        id: 'doc-held-wdo',
+        customer_id: 'cust-1',
+        document_type: 'service_report',
+        linked_service_record_id: 'sr-held-wdo',
+        s3_key: 'reports/held.pdf',
+      };
+      const heldSr = {
+        id: 'sr-held-wdo',
+        customer_id: 'cust-1',
+        scheduled_service_id: 'ss-held-wdo',
+        structured_notes: JSON.stringify({ projectId: 'proj-wdo-held', projectType: 'wdo_inspection', reportHeld: true }),
+      };
+      const docsDb = jest.fn((table) => {
+        if (table === 'customer_documents') return makeChain([heldDoc]);
+        if (table === 'service_records') return makeChain([heldSr]);
+        if (table === 'projects') return makeChain([{ report_hold_status: 'held' }]);
+        if (table === 'document_share_links') return makeChain([{ id: 'lnk-1', document_id: 'doc-held-wdo', customer_id: 'cust-1', expires_at: new Date(Date.now() + 60_000).toISOString() }]);
+        return makeChain([]);
+      });
+      docsDb.raw = jest.fn((sql) => sql);
+      jest.doMock('../models/db', () => docsDb);
+      jest.doMock('../middleware/auth', () => ({ authenticate: (_req, _res, next) => next() }));
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+      const documentsRouter = require('../routes/documents');
+      const invoke = async (method, routePath, req) => {
+        const layer = documentsRouter.stack.find((l) => l.route?.path === routePath && l.route.methods[method]);
+        const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+        let statusCode = 200;
+        let payload = null;
+        const res = {
+          status(code) { statusCode = code; return this; },
+          json(b) { payload = b; return this; },
+        };
+        await handler(req, res, (err) => { throw err; });
+        return { statusCode, payload };
+      };
+
+      expect((await invoke('get', '/:id/download', { params: { id: 'doc-held-wdo' }, customerId: 'cust-1' })).statusCode).toBe(404);
+      expect((await invoke('post', '/share/:id', { params: { id: 'doc-held-wdo' }, customerId: 'cust-1' })).statusCode).toBe(404);
+      expect((await invoke('get', '/shared/:token', { params: { token: shareToken } })).statusCode).toBe(404);
+    });
+
+    const fs = require('fs');
+    const path = require('path');
+    const adminProjectsSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-projects.js'), 'utf8');
+    expect(adminProjectsSrc).toContain("const PROJECT_INVOICE_ALREADY_BILLED_STATUSES = ['paid', 'prepaid', 'processing', 'disputed'];");
+    expect(adminProjectsSrc).toContain('if (explicitMatchesProject) await persistProjectInvoiceLink(project, explicit.id);');
+  });
 });

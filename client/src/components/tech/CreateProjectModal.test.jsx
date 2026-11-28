@@ -1165,4 +1165,12 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/admin/projects/cert-1/send'))).toHaveLength(1);
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('/admin/projects/cert-1/close'))).toHaveLength(2);
   });
+
+  it('respects explicit $0 add-on estimatedPrice when seeding WDO fee from visit', () => {
+    expect(wdoFeeSeedFromVisit({
+      primaryLinePrice: 175,
+      estimatedPrice: 175,
+      serviceAddons: [{ estimatedPrice: 0, basePrice: 80 }],
+    })).toBe(175);
+  });
 });

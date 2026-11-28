@@ -385,24 +385,62 @@ async function reconcileWdoReportHoldOnInvoiceVoid(trx, invoice, { priorStatus =
 // projects row so legacy records closed while held stay gated until released,
 // and records immediately unlock once payment releases the report. Zero DB
 // queries for non-WDO / non-project service records.
-const SCHEMA_MISSING_RE = /column .*report_hold|relation .*projects|column .*service_record_id/i;
+const SCHEMA_MISSING_RE = /column .*report_hold|relation .*projects|column .*(?:service_record_id|scheduled_service_id)/i;
 
-async function isServiceRecordProjectReportHeld(structuredNotes, database = db, { serviceRecordId = null } = {}) {
-  const notes = structuredNotes && typeof structuredNotes === 'object' ? structuredNotes : {};
-  const projectId = notes.projectId || null;
-  const byProject = (notes.projectType === 'wdo_inspection' || notes.reportHeld === true) && projectId;
-  const where = byProject ? { id: projectId } : (serviceRecordId ? { service_record_id: serviceRecordId } : null);
-  if (!where) return notes.reportHeld === true;
+async function resolveHoldScheduledServiceId(database, serviceRecordId, scheduledServiceId) {
+  if (scheduledServiceId || !serviceRecordId) return scheduledServiceId || null;
+  const sr = await database('service_records').where({ id: serviceRecordId }).first('scheduled_service_id');
+  return sr?.scheduled_service_id || null;
+}
+
+function holdMatchClauses({ byProject, projectId, serviceRecordId, scheduledServiceId }) {
+  return [
+    byProject ? { col: 'id', val: projectId } : null,
+    serviceRecordId ? { col: 'service_record_id', val: serviceRecordId } : null,
+    scheduledServiceId ? { col: 'scheduled_service_id', val: scheduledServiceId } : null,
+  ].filter(Boolean);
+}
+
+function holdFallbackFromNotes(notes, byProject) {
+  if (notes.reportHeld === true) return true;
+  if (!byProject) return false;
+  return !(notes.portalAttached && notes.projectReport && notes.projectReport.url);
+}
+
+async function lookupHeldProjectRows(database, matchClauses, notes, byProject) {
   try {
-    const row = await database('projects').where(where).first('report_hold_status');
-    if (row && 'report_hold_status' in row) return isReportHeld(row);
+    const rows = await database('projects')
+      .where(function matchProjectLink() {
+        for (const c of matchClauses) this.orWhere({ [c.col]: c.val });
+      })
+      .select('report_hold_status');
+    if (Array.isArray(rows) && rows.some((r) => isReportHeld(r))) return true;
+    if (Array.isArray(rows) && rows.some((r) => r && 'report_hold_status' in r)) return false;
     return notes.reportHeld === true;
   } catch (err) {
     if (SCHEMA_MISSING_RE.test(err.message)) return notes.reportHeld === true;
     logger.warn(`[report-hold] service-record hold lookup failed: ${err.message}`);
-    if (!byProject) return true;
-    return notes.reportHeld === true || !(notes.portalAttached && notes.projectReport && notes.projectReport.url);
+    return !byProject ? true : holdFallbackFromNotes(notes, byProject);
   }
+}
+
+async function isServiceRecordProjectReportHeld(structuredNotes, database = db, { serviceRecordId = null, scheduledServiceId = null } = {}) {
+  const notes = structuredNotes && typeof structuredNotes === 'object' ? structuredNotes : {};
+  const projectId = notes.projectId || null;
+  const byProject = Boolean((notes.projectType === 'wdo_inspection' || notes.reportHeld === true) && projectId);
+  let resolvedScheduleId = scheduledServiceId || null;
+  if (!byProject) {
+    try {
+      resolvedScheduleId = await resolveHoldScheduledServiceId(database, serviceRecordId, scheduledServiceId);
+    } catch (err) {
+      if (SCHEMA_MISSING_RE.test(err.message)) return notes.reportHeld === true;
+      logger.warn(`[report-hold] service-record schedule lookup failed: ${err.message}`);
+      return true;
+    }
+  }
+  const matchClauses = holdMatchClauses({ byProject, projectId, serviceRecordId, scheduledServiceId: resolvedScheduleId });
+  if (!matchClauses.length) return notes.reportHeld === true;
+  return lookupHeldProjectRows(database, matchClauses, notes, byProject);
 }
 
 module.exports = {

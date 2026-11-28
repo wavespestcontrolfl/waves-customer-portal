@@ -17,12 +17,19 @@ function positiveFee(value) {
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : null;
 }
 
+function nonnegativeFee(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? Math.round(amount * 100) / 100 : null;
+}
+
 const ADDON_PRICE_KEYS = ['estimated_price', 'estimatedPrice', 'base_price', 'basePrice', 'price'];
 
 function firstAddonFee(addon) {
   if (!addon) return null;
   for (const key of ADDON_PRICE_KEYS) {
-    const parsed = positiveFee(addon[key]);
+    // Respect an explicit $0 override on estimated_price rather than falling back to base_price.
+    const parsed = nonnegativeFee(addon[key]);
     if (parsed !== null) return parsed;
   }
   return null;
@@ -38,6 +45,10 @@ function addonCentsTotal(addons) {
   return total;
 }
 
+function hasVisitLevelDiscount(visit) {
+  return Number(visit.discount_amount || visit.discountAmount || visit.primary_line_discount || visit.primaryLineDiscount || 0) > 0;
+}
+
 function bookedWdoVisitFee(visit) {
   if (!visit || typeof visit !== 'object') return null;
   const rawEstimated = visit.estimated_price ?? visit.estimatedPrice;
@@ -50,37 +61,34 @@ function bookedWdoVisitFee(visit) {
     if (primary !== null && estimated !== null) return Math.min(primary, estimated);
     return estimated ?? primary;
   }
-  const discounted = Number(visit.discount_amount || visit.discountAmount || visit.primary_line_discount || visit.primaryLineDiscount || 0) > 0;
-  if (primary === null || discounted || addonCents === 0) return null;
+  if (primary === null || hasVisitLevelDiscount(visit) || addonCents === 0) return null;
   if (estimated !== null && Math.round(primary * 100) + addonCents !== Math.round(estimated * 100)) return null;
   return primary;
 }
 
 async function loadLinkedWdoVisit(project, database) {
   if (!project || !database) return null;
-  try {
-    let scheduledServiceId = project.scheduled_service_id || null;
-    if (!scheduledServiceId && project.service_record_id) {
-      const sr = await database('service_records')
-        .where({ id: project.service_record_id })
-        .first('scheduled_service_id')
-        .catch(() => null);
-      scheduledServiceId = sr?.scheduled_service_id || null;
-    }
-    if (!scheduledServiceId) return null;
-    const visit = await database('scheduled_services')
-      .where({ id: scheduledServiceId })
-      .first('id', 'estimated_price', 'primary_line_price')
-      .catch(() => null);
-    if (!visit) return null;
-    const addons = await database('scheduled_service_addons')
-      .where({ scheduled_service_id: scheduledServiceId })
-      .select('estimated_price', 'base_price')
-      .catch(() => []);
-    return { ...visit, service_addons: Array.isArray(addons) ? addons : [] };
-  } catch {
-    return null;
+  let scheduledServiceId = project.scheduled_service_id || null;
+  if (!scheduledServiceId && project.service_record_id) {
+    const sr = await database('service_records')
+      .where({ id: project.service_record_id })
+      .first('scheduled_service_id');
+    scheduledServiceId = sr?.scheduled_service_id || null;
   }
+  if (!scheduledServiceId) return null;
+  const visit = await database('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .first('id', 'estimated_price', 'primary_line_price');
+  if (!visit) return null;
+  let addons = [];
+  try {
+    addons = await database('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .select('estimated_price', 'base_price');
+  } catch (err) {
+    if (err?.code !== '42P01' && err?.code !== '42703') throw err;
+  }
+  return { ...visit, service_addons: Array.isArray(addons) ? addons : [] };
 }
 
 function resolveWdoInspectionFee(findings, { scheduledService = null, fallbackFee = null } = {}) {

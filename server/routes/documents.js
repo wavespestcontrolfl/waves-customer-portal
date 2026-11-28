@@ -639,7 +639,7 @@ async function signedContractCount(customerId) {
 // neither consumes a page slot nor counts toward the total (codex #6363 r33
 // P2). `scope` (a contact session): the primary property's visits only
 // (codex r16 P1) — the holder's other saved homes are not theirs to read.
-function completedServiceReportsQuery(customerId, serviceRecordCols, scope = null) {
+function completedServiceReportsQuery(customerId, serviceRecordCols, scope = null, projectCols = {}) {
   let query = applyCustomerVisibleServiceRecordFilter(db('service_records')
     .where({ 'service_records.customer_id': customerId, 'service_records.status': 'completed' }));
   if (scope) {
@@ -653,6 +653,46 @@ function completedServiceReportsQuery(customerId, serviceRecordCols, scope = nul
       this.whereNull('service_records.completion_source')
         .orWhereNot('service_records.completion_source', 'project_completion');
     });
+  }
+  if (serviceRecordCols.structured_notes) {
+    query = query.whereRaw("COALESCE(service_records.structured_notes->>'reportHeld', 'false') <> 'true'");
+  }
+  if (projectCols.report_hold_status) {
+    const clauses = ['p.service_record_id = service_records.id'];
+    if (serviceRecordCols.scheduled_service_id) {
+      clauses.push('(service_records.scheduled_service_id IS NOT NULL AND p.scheduled_service_id = service_records.scheduled_service_id)');
+    }
+    if (serviceRecordCols.structured_notes) {
+      clauses.push("(NULLIF(service_records.structured_notes->>'projectId', '') IS NOT NULL AND p.id::text = service_records.structured_notes->>'projectId')");
+    }
+    query = query.whereRaw(
+      `NOT EXISTS (SELECT 1 FROM projects p WHERE p.report_hold_status IN ('held', 'releasing') AND (${clauses.join(' OR ')}))`,
+    );
+  }
+  return query;
+}
+
+function visibleStoredDocumentsQuery(customerId, serviceRecordCols = {}, projectCols = {}) {
+  let query = db('customer_documents').where({ 'customer_documents.customer_id': customerId });
+  if (serviceRecordCols.structured_notes && projectCols.report_hold_status) {
+    const holdClauses = ['p.service_record_id = sr.id'];
+    if (serviceRecordCols.scheduled_service_id) {
+      holdClauses.push('(sr.scheduled_service_id IS NOT NULL AND p.scheduled_service_id = sr.scheduled_service_id)');
+    }
+    holdClauses.push("(NULLIF(sr.structured_notes->>'projectId', '') IS NOT NULL AND p.id::text = sr.structured_notes->>'projectId')");
+    query = query.whereRaw(
+      `(customer_documents.document_type <> 'service_report'
+        OR customer_documents.linked_service_record_id IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM service_records sr
+          WHERE sr.id = customer_documents.linked_service_record_id
+            AND (
+              COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') <> 'auto_send'
+              OR COALESCE(sr.structured_notes->>'reportHeld', 'false') = 'true'
+              OR EXISTS (SELECT 1 FROM projects p WHERE p.report_hold_status IN ('held', 'releasing') AND (${holdClauses.join(' OR ')}))
+            )
+        ))`,
+    );
   }
   return query;
 }
@@ -797,17 +837,27 @@ async function unsuppressedServiceReports(services) {
   return visible;
 }
 
+async function unsuppressedStoredDocs(docs) {
+  const visible = [];
+  for (const doc of docs) {
+    if (!(await storedDocReportSuppressed(doc, db))) visible.push(doc);
+  }
+  return visible;
+}
+
 async function listContactServiceReports(req, res) {
   if (await contactReportsWithheld(req)) return res.json({ documents: {}, total: 0 });
   const page = documentPageBounds(req.query);
-  const serviceRecordCols = await db('service_records').columnInfo().catch(() => ({}));
+  const [serviceRecordCols, projectCols] = await Promise.all([
+    db('service_records').columnInfo().catch(() => ({})),
+    db('projects').columnInfo().catch(() => ({})),
+  ]);
   const scope = await contactRecordScope(req);
-  const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols, scope), page);
+  const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols, scope, projectCols), page);
   const visibleServices = await unsuppressedServiceReports(services);
   const reports = await serviceReportEntries(visibleServices, { contactOnly: true });
-  const [{ count }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols, scope).count('service_records.id as count');
-  const suppressedCount = services.length - visibleServices.length;
-  return res.json({ documents: groupDocumentsByType(reports), total: Math.max(0, parseInt(count, 10) - suppressedCount) });
+  const [{ count }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols, scope, projectCols).count('service_records.id as count');
+  return res.json({ documents: groupDocumentsByType(reports), total: Math.max(0, parseInt(count, 10) || 0) });
 }
 
 // =========================================================================
@@ -818,23 +868,22 @@ router.get('/', authenticate, async (req, res, next) => {
     if (req.contactSession) return await listContactServiceReports(req, res);
     const page = documentPageBounds(req.query);
 
-    // Get uploaded/static documents
-    const docs = await db('customer_documents')
-      .where({ customer_id: req.customerId })
-      .orderBy('created_at', 'desc')
-      .limit(page.limit)
-      .offset(page.offset);
-
     const [serviceRecordCols, projectCols] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('projects').columnInfo().catch(() => ({})),
     ]);
 
+    // Get uploaded/static documents (excluding held/suppressed linked visit reports)
+    const rawDocs = await visibleStoredDocumentsQuery(req.customerId, serviceRecordCols, projectCols)
+      .orderBy('created_at', 'desc')
+      .limit(page.limit)
+      .offset(page.offset);
+    const docs = await unsuppressedStoredDocs(rawDocs);
+
     // Auto-generated service_report entries for completed services
-    const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols), page);
+    const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols, null, projectCols), page);
     const visibleServices = await unsuppressedServiceReports(services);
     const autoGenDocs = await serviceReportEntries(visibleServices, { docs });
-    const suppressedServiceCount = services.length - visibleServices.length;
 
     // Signed agreements, authorizations and forms (customer_contracts).
     const contractDocs = await signedContractDocuments(req.customerId, page);
@@ -953,10 +1002,9 @@ router.get('/', authenticate, async (req, res, next) => {
     // docs + completed-service reports + project reports); the handful of
     // page-level skips (internal-only typed reports, linked-doc dedup) make
     // this a slight upper bound, which the label tolerates.
-    const [{ count: storedDocCount }] = await db('customer_documents')
-      .where({ customer_id: req.customerId })
-      .count('id as count');
-    const [{ count: serviceReportCount }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols)
+    const [{ count: storedDocCount }] = await visibleStoredDocumentsQuery(req.customerId, serviceRecordCols, projectCols)
+      .count('customer_documents.id as count');
+    const [{ count: serviceReportCount }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols, null, projectCols)
       .count('service_records.id as count');
     const contractCount = await signedContractCount(req.customerId);
 
@@ -972,7 +1020,7 @@ router.get('/', authenticate, async (req, res, next) => {
       }
     }
     const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs, ...annualPlanDocs, ...contractDocs];
-    const totalOnFile = parseInt(storedDocCount, 10) + Math.max(0, parseInt(serviceReportCount, 10) - suppressedServiceCount) + projectDocs.length + annualPlanDocs.length + contractCount;
+    const totalOnFile = (parseInt(storedDocCount, 10) || 0) + (parseInt(serviceReportCount, 10) || 0) + projectDocs.length + annualPlanDocs.length + contractCount;
 
     res.json({ documents: groupDocumentsByType(allDocs), total: totalOnFile });
   } catch (err) {
@@ -1015,7 +1063,19 @@ async function serviceRecordReportSuppressed(service, database = db) {
       : (service?.structured_notes || {});
   } catch { notes = {}; }
   if (notes.typedReportDelivery && notes.typedReportDelivery !== 'auto_send') return true;
-  return isServiceRecordProjectReportHeld(notes, database, { serviceRecordId: service?.id || null });
+  return isServiceRecordProjectReportHeld(notes, database, {
+    serviceRecordId: service?.id || null,
+    scheduledServiceId: service?.scheduled_service_id || null,
+  });
+}
+
+async function storedDocReportSuppressed(doc, database = db) {
+  if (!doc || doc.document_type !== 'service_report' || !doc.linked_service_record_id) return false;
+  const linked = await database('service_records')
+    .where({ id: doc.linked_service_record_id })
+    .first('id', 'scheduled_service_id', 'report_template_version', 'structured_notes');
+  if (!linked) return false;
+  return serviceRecordReportSuppressed(linked, database);
 }
 
 // =========================================================================
@@ -1152,7 +1212,9 @@ router.get('/:id/download', authenticate, async (req, res, next) => {
       .where({ id: req.params.id, customer_id: req.customerId })
       .first();
 
-    if (!doc) return res.status(404).json({ error: 'Document not found' });
+    if (!doc || await storedDocReportSuppressed(doc, db)) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
 
     return redirectToStoredDocument(doc, res);
   } catch (err) {
@@ -1195,7 +1257,9 @@ router.post('/share/:id', authenticate, async (req, res, next) => {
       const doc = await db('customer_documents')
         .where({ id: docId, customer_id: req.customerId })
         .first();
-      if (!doc) return res.status(404).json({ error: 'Document not found' });
+      if (!doc || await storedDocReportSuppressed(doc, db)) {
+        return res.status(404).json({ error: 'Document not found' });
+      }
       if (!storedDocumentHasFile(doc)) {
         return res.status(409).json({ error: 'This document does not have a downloadable file yet.' });
       }
@@ -1321,7 +1385,9 @@ router.get('/shared/:token', sharedDocLimiter, async (req, res, next) => {
       const doc = await db('customer_documents')
         .where({ id: link.document_id, customer_id: link.customer_id })
         .first();
-      if (!doc) return res.status(404).json({ error: 'Document not found' });
+      if (!doc || await storedDocReportSuppressed(doc, db)) {
+        return res.status(404).json({ error: 'Document not found' });
+      }
       return redirectToStoredDocument(doc, res);
     }
 
