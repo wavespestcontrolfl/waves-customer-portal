@@ -863,7 +863,10 @@ describe('Round-4 charge-now idempotency & replay dedupe', () => {
       await expect(replayRes.json()).resolves.toMatchObject({ idempotent_replay: true });
       expect(logAutopay).not.toHaveBeenCalled();
       expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
-        notificationEventKey: 'admin_manual_charge_receipt:pay-paid-2',
+        purpose: 'payment_receipt',
+        metadata: expect.objectContaining({
+          notificationEventKey: 'admin_manual_charge_receipt:pay-paid-2',
+        }),
       }));
     });
   });

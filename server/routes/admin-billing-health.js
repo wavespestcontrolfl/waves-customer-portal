@@ -601,8 +601,8 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     const eventType = payment?.status === 'paid' ? 'manual_charge' : 'manual_charge_processing';
 
     // Deduplicate manual-charge logging and receipt SMS separately: logging checks
-    // autopay_log, while receipt SMS uses claimManualReceiptDelivery so a crash
-    // between log and SMS still delivers once without double-sending on replays.
+    // autopay_log, while receipt SMS passes metadata.notificationEventKey so
+    // billing-text-leg-dedupe prevents duplicate texts across concurrent replays.
     if (!(await isManualChargeAlreadyLogged(lockOutcome, customerId, eventType))) {
       await logAutopay(customerId, eventType, {
         amountCents: Math.round(Number(payment?.amount) * 100),
@@ -647,9 +647,12 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           // provenance keeps the receipt on SMS (push routing stays out of
           // operator-triggered sends).
           operatorInitiated: true,
-          notificationEventKey: payment.id ? `admin_manual_charge_receipt:${payment.id}` : undefined,
           body: smsBody,
-          metadata: { source: 'admin_manual_charge', paymentId: payment.id || null },
+          metadata: {
+            source: 'admin_manual_charge',
+            paymentId: payment.id || null,
+            ...(payment.id ? { notificationEventKey: `admin_manual_charge_receipt:${payment.id}` } : {}),
+          },
         });
         if (!result?.sent) logger.warn(`[admin-billing] receipt SMS blocked: ${result?.code || 'unknown'}`);
       } catch (smsErr) {
