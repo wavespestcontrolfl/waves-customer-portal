@@ -289,6 +289,7 @@ function StatementRow({ payerId, statement, expanded, onToggle, onChanged, pendi
 function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
   const [lines, setLines] = useState(null);
   const [sequence, setSequence] = useState(null);
+  const [sequenceLoaded, setSequenceLoaded] = useState(false);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState(null); // { tone: 'ok'|'err', text }
   const [reconcileOpen, setReconcileOpen] = useState(false);
@@ -303,6 +304,7 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
     const reqId = ++detailReqRef.current;
     setLinesError("");
     setSequenceError("");
+    setSequenceLoaded(false);
     try {
       const d = await readJson(base, "Could not load statement visits.");
       if (reqId !== detailReqRef.current) return;
@@ -323,9 +325,11 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
         throw new Error("Could not load reminder status.");
       }
       setSequence(seq);
+      setSequenceLoaded(true);
     } catch (err) {
       if (reqId === detailReqRef.current) {
         setSequence(null);
+        setSequenceLoaded(false);
         setSequenceError(err.message || "Could not load reminder status.");
       }
     }
@@ -334,6 +338,7 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
   useEffect(() => {
     setLines(null);
     setSequence(null);
+    setSequenceLoaded(false);
     loadDetail();
     return () => {
       detailReqRef.current += 1;
@@ -461,6 +466,7 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
         <DunningControls
           base={base}
           sequence={sequence}
+          statusLoading={!sequenceLoaded && !sequenceError}
           statusUnavailable={Boolean(sequenceError)}
           busy={busy}
           act={act}
@@ -511,15 +517,18 @@ function ReconcileForm({ total, busy, onCancel, onSubmit }) {
   );
 }
 
-function DunningControls({ base, sequence, statusUnavailable = false, busy, act }) {
-  const st = statusUnavailable ? null : (sequence?.status || null);
-  const actionsDisabled = !!busy || statusUnavailable;
+function DunningControls({ base, sequence, statusLoading = false, statusUnavailable = false, busy, act }) {
+  const statusPending = statusLoading || statusUnavailable;
+  const st = statusPending ? null : (sequence?.status || null);
+  const actionsDisabled = !!busy || statusPending;
   return (
     <div className="mt-2 pt-2 border-t border-zinc-100">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-ui-caption text-ink-secondary">
           Reminders:{" "}
-          {statusUnavailable
+          {statusLoading
+            ? "loading…"
+            : statusUnavailable
             ? "status unavailable"
             : st === "paused"
             ? "paused"

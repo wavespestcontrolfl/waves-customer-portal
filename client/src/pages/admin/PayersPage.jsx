@@ -138,6 +138,8 @@ export default function PayersPage() {
 
   function openNew(event) {
     event.currentTarget.focus({ preventScroll: true });
+    detailVersion.current += 1;
+    setDetailError("");
     initialFormRef.current = EMPTY;
     setForm(EMPTY);
     setEditing({});
@@ -145,6 +147,8 @@ export default function PayersPage() {
   }
 
   function openEdit(p) {
+    detailVersion.current += 1;
+    setDetailError("");
     const initial = { ...EMPTY, ...p };
     initialFormRef.current = initial;
     setForm(initial);
@@ -245,6 +249,8 @@ export default function PayersPage() {
           { key: "ar", label: "AR aging", size: "sm", variant: "ghost", onClick: (event) => {
             arTriggerRef.current = event.currentTarget;
             event.currentTarget.focus({ preventScroll: true });
+            detailVersion.current += 1;
+            setDetailError("");
             setArOpen(true);
           } },
           { key: "new", label: "New payer", size: "sm", onClick: openNew },

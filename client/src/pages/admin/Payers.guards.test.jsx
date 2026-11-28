@@ -392,4 +392,73 @@ describe("PayersPage URL encoding, detail cancellation, and dirty edit modal gua
     expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
   });
+
+  it("keeps reminder actions disabled while /followups is loading and cancels deep-link fetch when opening another dialog", async () => {
+    const slowFollowups = deferred();
+    const payer = { id: "p-load", display_name: "Alpha Payer", active: true, payment_terms: "net30" };
+    const statement = {
+      id: "st-load",
+      number: "ST-2026-010",
+      period_start: "2026-05-01",
+      period_end: "2026-05-31",
+      status: "sent",
+      total: 100,
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const u = String(url);
+        if (u.endsWith("/statements")) return jsonRes({ statements: [statement] });
+        if (u.endsWith("/ar")) {
+          return jsonRes({ summary: { outstanding_total: 100, past_due_total: 0, statement_count: 1, buckets: {} } });
+        }
+        if (u.endsWith(`/statements/${statement.id}`)) return jsonRes({ lines: [] });
+        if (u.endsWith(`/statements/${statement.id}/followups`)) return slowFollowups.promise;
+        return jsonRes({});
+      }),
+    );
+
+    const { unmount } = render(<PayerDetailSheet payer={payer} onClose={vi.fn()} onEdit={vi.fn()} onChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByText("S-st-load"));
+
+    // While /followups is still in flight, status shows loading and actions stay disabled.
+    expect(await screen.findByText(/loading…/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send reminder now" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+
+    await act(async () => {
+      slowFollowups.resolve(jsonRes({ sequence: null }));
+      await slowFollowups.promise;
+    });
+    expect(await screen.findByText(/not started/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send reminder now" })).not.toBeDisabled();
+    unmount();
+
+    // Opening New payer cancels a slow deep-link detail fetch so a second dialog never pops over the form.
+    const slowDeepLink = deferred();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const u = String(url);
+        if (u.includes("/admin/payers?")) return jsonRes({ payers: [payer] });
+        if (u.includes("/admin/payers/slow-id")) return slowDeepLink.promise;
+        return jsonRes({});
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/admin/payers?payer=slow-id"]}>
+        <PayersPage />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "New payer" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+
+    await act(async () => {
+      slowDeepLink.resolve(jsonRes({ payer: { id: "slow-id", display_name: "Late Deep Link Payer", active: true } }));
+      await slowDeepLink.promise;
+    });
+    expect(screen.queryByRole("heading", { name: "Late Deep Link Payer" })).not.toBeInTheDocument();
+  });
 });
