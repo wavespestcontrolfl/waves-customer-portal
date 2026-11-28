@@ -1551,3 +1551,106 @@ describe('call_phone_yes card tap', () => {
     expect(screen.queryByText('Accepting needs an admin.')).toBeNull();
   });
 });
+
+describe('SMS property_role_confirm cards and load race guard', () => {
+  it('allows an admin to review, confirm common responsibility, and apply SMS additional properties', async () => {
+    const smsPropertyCard = {
+      ...ordinary,
+      id: 'sms-prop-1',
+      call_log_id: null,
+      sms_log_id: 'sms-log-1',
+      first_name: 'Taylor',
+      last_name: 'Owner',
+      reason_code: 'property_role_confirm',
+      updated_at: '2026-11-27T12:00:00.000Z',
+      payload: {
+        customer_id: 'cust-1',
+        sms_text: 'Please also treat my rental at 456 Oak Ave, Sarasota FL 34236',
+        sender_requires_review: false,
+        additional_property_proposals: [
+          {
+            quote: 'my rental at 456 Oak Ave, Sarasota FL 34236',
+            address_line1: '456 Oak Ave',
+            address_line2: '',
+            city: 'Sarasota',
+            state: 'FL',
+            zip: '34236',
+            occupancy_type: 'rental_investment',
+          },
+        ],
+      },
+    };
+    let applied = false;
+    adminFetch.mockImplementation(async (url, opts) => {
+      if (url === '/admin/triage/sms-prop-1/apply-property-roles' && opts?.method === 'POST') {
+        applied = true;
+        return { resolved: true, created: 1 };
+      }
+      if (url.startsWith('/admin/triage?')) {
+        return { items: applied ? [] : [smsPropertyCard], counts: { open: applied ? 0 : 1, resolved: applied ? 1 : 0, dismissed: 0 } };
+      }
+      return { success: true };
+    });
+
+    render(<TriageInboxTabV2 isAdmin />);
+    await screen.findByText('Taylor Owner');
+    // Call-only 1-click Apply roles button must not render for SMS cards.
+    expect(screen.queryByRole('button', { name: /Apply roles/i })).toBeNull();
+
+    const applyBtn = screen.getByRole('button', { name: /Apply properties/i });
+    expect(applyBtn).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText('Confirm common responsibility for sms-prop-1'));
+    expect(applyBtn).toBeEnabled();
+
+    fireEvent.click(applyBtn);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
+      '/admin/triage/sms-prop-1/apply-property-roles',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          expected_updated_at: smsPropertyCard.updated_at,
+          same_responsibility: true,
+          addresses: [
+            {
+              quote: 'my rental at 456 Oak Ave, Sarasota FL 34236',
+              address_line1: '456 Oak Ave',
+              address_line2: '',
+              city: 'Sarasota',
+              state: 'FL',
+              zip: '34236',
+              occupancy_type: 'rental_investment',
+            },
+          ],
+        }),
+      },
+    ));
+  });
+
+  it('discards stale earlier tab load responses when switching tabs quickly', async () => {
+    let resolveOpen;
+    adminFetch.mockImplementation((url) => {
+      if (url === '/admin/triage?status=open') {
+        return new Promise((resolve) => { resolveOpen = resolve; });
+      }
+      if (url === '/admin/triage?status=resolved') {
+        return Promise.resolve({
+          items: [{ ...ordinary, id: 'res-1', first_name: 'Resolved', last_name: 'Row', status: 'resolved' }],
+          counts: { open: 1, resolved: 1, dismissed: 0 },
+        });
+      }
+      return Promise.resolve({ items: [], counts: { open: 0, resolved: 0, dismissed: 0 } });
+    });
+
+    render(<TriageInboxTabV2 isAdmin />);
+    fireEvent.click(screen.getByRole('button', { name: /Resolved/i }));
+    expect(await screen.findByText('Resolved Row')).toBeInTheDocument();
+
+    resolveOpen({
+      items: [{ ...ordinary, id: 'open-stale', first_name: 'Stale', last_name: 'Open', status: 'open' }],
+      counts: { open: 9, resolved: 1, dismissed: 0 },
+    });
+    await waitFor(() => expect(screen.getByText('Resolved Row')).toBeInTheDocument());
+    expect(screen.queryByText('Stale Open')).not.toBeInTheDocument();
+  });
+});

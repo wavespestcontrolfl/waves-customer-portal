@@ -659,4 +659,27 @@ describe('admin SMS template routes', () => {
       expect(auditQuery.select).toHaveBeenCalledWith('id', 'metadata', 'created_at');
     });
   });
+
+  test('PUT /:id returns 404 when toggling is_active on a missing template row', async () => {
+    const updateQuery = chain({ result: 0 });
+    setDbQueues({
+      sms_templates: [updateQuery],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sms-templates/missing-id`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ is_active: false }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(404);
+      expect(body).toEqual({ error: 'Template not found' });
+      expect(updateQuery.update).toHaveBeenCalled();
+    });
+  });
 });

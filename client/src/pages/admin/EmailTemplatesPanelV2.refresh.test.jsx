@@ -84,3 +84,48 @@ it.each([
   expect(screen.getByText(newText)).toBeInTheDocument();
   expect(screen.queryByText(oldText)).not.toBeInTheDocument();
 });
+
+it("discards a stale template detail response when switching templates quickly", async () => {
+  let resolveFirst;
+  const tplA = { id: "t-a", template_key: "tpl_a", name: "Template A", mode: "service", status: "active" };
+  const tplB = { id: "t-b", template_key: "tpl_b", name: "Template B", mode: "service", status: "active" };
+  vi.stubGlobal("fetch", vi.fn((url) => {
+    const u = String(url);
+    if (u.endsWith("/admin/email-templates")) {
+      return Promise.resolve({ ok: true, json: async () => ({ templates: [tplA, tplB] }) });
+    }
+    if (u.endsWith("/preference-groups")) {
+      return Promise.resolve({ ok: true, json: async () => ({ groups: [] }) });
+    }
+    if (u.endsWith("/admin/email-templates/tpl_a")) {
+      return new Promise((resolve) => { resolveFirst = resolve; });
+    }
+    if (u.endsWith("/admin/email-templates/tpl_b")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          template: tplB,
+          versions: [{ id: "v-b", version_number: 1, status: "draft", subject: "Subject B", blocks: [] }],
+          fixtures: [],
+        }),
+      });
+    }
+    return Promise.resolve({ ok: true, json: async () => ({}) });
+  }));
+
+  render(<EmailTemplatesPanelV2 />);
+  fireEvent.click(await screen.findByText("Template B"));
+  expect(await screen.findByDisplayValue("Subject B")).toBeInTheDocument();
+
+  await act(async () => resolveFirst({
+    ok: true,
+    json: async () => ({
+      template: tplA,
+      versions: [{ id: "v-a", version_number: 1, status: "draft", subject: "Subject A", blocks: [] }],
+      fixtures: [],
+    }),
+  }));
+
+  expect(screen.getByDisplayValue("Subject B")).toBeInTheDocument();
+  expect(screen.queryByDisplayValue("Subject A")).not.toBeInTheDocument();
+});

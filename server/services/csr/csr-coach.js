@@ -516,6 +516,16 @@ function scoreInTipPeriod(score, { fromDate, toDate }) {
   const date = score?.call_started_at ? etDateString(new Date(score.call_started_at)) : dateOnlyString(score?.call_date);
   return Boolean(date) && date >= fromDate && date < toDate;
 }
+
+function resolveOverviewWindow(days, { periodStart = null, periodEnd = null } = {}) {
+  const since = periodStart || etDateString(addETDays(new Date(), -days));
+  const followUpSince = parseETDateTime(`${since}T00:00:00`);
+  const followUpBefore = periodEnd
+    ? parseETDateTime(`${etDateString(addETDays(parseETDateTime(`${periodEnd}T12:00`), 1))}T00:00:00`)
+    : null;
+  const period = periodStart && periodEnd ? `${periodStart}..${periodEnd}` : `${days}d`;
+  return { since, periodEnd, followUpSince, followUpBefore, period };
+}
 class CSRCoach {
 
   /**
@@ -834,10 +844,12 @@ Return JSON:
    * Get team overview stats for the CSR Coach dashboard.
    */
   // `withWeeklyCallOutcomes: false` skips the week's call aggregate for a caller that does not show it (the leaderboard).
-  async getTeamOverview(days = 30) {
-    const since = etDateString(addETDays(new Date(), -days));
+  async getTeamOverview(days = 30, range = {}) {
+    const win = resolveOverviewWindow(days, range);
 
-    const scores = await db('csr_call_scores').where('call_date', '>=', since);
+    let scoreQuery = db('csr_call_scores').where('call_date', '>=', win.since);
+    if (win.periodEnd) scoreQuery = scoreQuery.where('call_date', '<=', win.periodEnd);
+    const scores = await scoreQuery;
 
     // By CSR
     const byCSR = {};
@@ -854,7 +866,9 @@ Return JSON:
     }
 
     // Follow-up rates
-    const followUps = await db('ai_follow_up_tasks').where('created_at', '>=', since + 'T00:00:00');
+    let followUpQuery = db('ai_follow_up_tasks').where('created_at', '>=', win.followUpSince);
+    if (win.followUpBefore) followUpQuery = followUpQuery.where('created_at', '<', win.followUpBefore);
+    const followUps = await followUpQuery;
     const fuByCSR = {};
     for (const fu of followUps) {
       const name = fu.assigned_to || 'Unknown';
@@ -906,7 +920,7 @@ Return JSON:
       })).sort((a, b) => b.count - a.count),
       fixableRevenue: Math.round(fixableRevenue),
       fixableLossCount: fixableLosses.length,
-      period: `${days}d`,
+      period: win.period,
     };
   }
 
@@ -996,15 +1010,14 @@ Return JSON:
   /**
    * Get the current bonus period leaderboard.
    */
-  async getLeaderboard() {
-    const now = new Date();
+  async getLeaderboard(now = new Date()) {
     const { year, month, day } = etParts(now);
     const ym = `${year}-${String(month).padStart(2, '0')}`;
     const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
     const periodStart = day <= 15 ? `${ym}-01` : `${ym}-16`;
     const periodEnd = day <= 15 ? `${ym}-15` : `${ym}-${String(lastDay).padStart(2, '0')}`;
 
-    const overview = await this.getTeamOverview(15);
+    const overview = await this.getTeamOverview(15, { periodStart, periodEnd });
 
     // Determine winners
     const csrs = overview.csrStats;

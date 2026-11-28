@@ -307,7 +307,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     if (trigger_event_key !== undefined) {
       updates.trigger_event_key = trigger_event_key ? String(trigger_event_key).trim() || null : null;
     }
-    await db('sms_templates').where({ id: req.params.id }).update(updates);
+    const updated = await db('sms_templates').where({ id: req.params.id }).update(updates);
+    if (!updated) return res.status(404).json({ error: 'Template not found' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
