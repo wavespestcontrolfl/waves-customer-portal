@@ -1956,6 +1956,23 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
 // customer_health_alerts.customer_id"; Codex #6431 r1).
 const HEALTH_ALERT_UNIQUE_RULE_TYPES = ['score_drop', 'critical_risk', 'service_gap', 'payment_issue',
   'low_engagement', 'satisfaction_drop', 'new_customer_risk'];
+async function repointMultiHomeFamilyMembers(trx, table, column, winnerId, loserId) {
+  const affectedFamilyRows = await trx(table)
+    .whereIn(column, [winnerId, loserId])
+    .select('family_id');
+  const familyIds = [...new Set(affectedFamilyRows.map((r) => r.family_id).filter(Boolean))];
+  const summary = await repointRowwiseDropCollisions(trx, table, column, winnerId, loserId);
+  let dissolved = 0;
+  for (const familyId of familyIds) {
+    const members = await trx(table).where({ family_id: familyId }).forUpdate().select('id');
+    if (members.length === 1) {
+      await trx(table).where({ id: members[0].id }).del();
+      dissolved += 1;
+    }
+  }
+  return dissolved > 0 ? `${summary}; dissolved ${dissolved} single-member orphan family row(s)` : summary;
+}
+
 const HEALTH_ALERT_OPEN_STATUSES = ['new', 'acknowledged'];
 
 // Registered for customer_health_alerts only, whose one customer FK is
@@ -2357,10 +2374,9 @@ const UNIQUE_COLLISION_HANDLERS = {
   collections_flags: repointFlagsReleaseCollisions,
   customer_health_alerts: repointHealthAlertsDismissCollisions,
   // UNIQUE(customer_id): both duplicate profiles linked as "Same family" — the
-  // winner's membership is kept, the loser's copy drops (a family left with
-  // one profile no longer counts for the discount; familyMultiHomeEligible
-  // requires 2+ live members).
-  multi_home_family_members: repointRowwiseDropCollisions,
+  // winner's membership is kept, the loser's copy drops, and any resulting
+  // 1-member orphan family row is dissolved so future family links never 409.
+  multi_home_family_members: repointMultiHomeFamilyMembers,
   // UNIQUE(customer_id): both duplicate profiles holding an "About this home" note — typed staff text, never dropped:
   // the two are joined into the kept customer's one row (mergeHomeNotes).
   home_notes: mergeHomeNotes,

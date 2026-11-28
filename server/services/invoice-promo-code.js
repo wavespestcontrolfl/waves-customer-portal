@@ -26,8 +26,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { round2 } = require('./customer-credit');
+const { round2, computeApplication } = require('./customer-credit');
 const { invoiceAmountDue, assertInvoiceCollectible } = require('./invoice-helpers');
+const { invoicePayerOwnership } = require('./invoice-payer-ownership');
 const Promo = require('./estimate-promo-code');
 
 const gateOn = () => isEnabled('payPromoCode');
@@ -53,7 +54,59 @@ function invoiceTakesPromoCode(invoice) {
   return invoiceAmountDue(invoice) > 0;
 }
 
-const appliedView = (row) => ({ code: row.code, creditAmount: round2(row.credit_amount), credited: row.status === 'redeemed' });
+function effectivePromoCreditAmount(row, invoice) {
+  const face = round2(row.credit_amount);
+  if (!invoice || row.status === 'redeemed') return face;
+  const due = invoiceAmountDue(invoice);
+  if (!(due > 0)) return face;
+  const { applyAmt } = computeApplication({ total: due, creditApplied: 0, balance: face });
+  return applyAmt > 0 ? applyAmt : face;
+}
+
+const appliedView = (row, invoice = null) => ({
+  code: row.code,
+  creditAmount: effectivePromoCreditAmount(row, invoice),
+  credited: row.status === 'redeemed',
+});
+
+async function hasActivePaymentPlan(invoiceId, conn) {
+  if (!invoiceId) return false;
+  const plan = await conn('payment_plans').where({ invoice_id: invoiceId, status: 'active' }).first('id');
+  return Boolean(plan);
+}
+
+async function hasPendingSavedCardAttempt(invoiceId, conn) {
+  if (!invoiceId) return false;
+  try {
+    const attempt = await conn('invoice_charge_attempts')
+      .where({ invoice_id: invoiceId })
+      .whereIn('status', ['claimed', 'ambiguous', 'reconciliation_required'])
+      .first('id');
+    return Boolean(attempt);
+  } catch {
+    return false;
+  }
+}
+
+async function isRenewalUnpayableForPromo(invoice, conn) {
+  if (!invoice?.annual_prepay_term_id) return false;
+  try {
+    const verdict = await require('./termite-annual-renewal-charge').renewalInvoicePayability(invoice, { database: conn });
+    return verdict && verdict.payable === false;
+  } catch {
+    return false;
+  }
+}
+
+async function invoiceEligibleForPromoEntry(invoice, conn) {
+  if (!invoiceTakesPromoCode(invoice)) return false;
+  const owner = await invoicePayerOwnership(invoice, conn);
+  if (owner !== null) return false;
+  if (await hasActivePaymentPlan(invoice.id, conn)) return false;
+  if (await hasPendingSavedCardAttempt(invoice.id, conn)) return false;
+  if (await isRenewalUnpayableForPromo(invoice, conn)) return false;
+  return true;
+}
 
 /**
  * What the pay page shows: the code on this invoice, or that one may be
@@ -61,11 +114,13 @@ const appliedView = (row) => ({ code: row.code, creditAmount: round2(row.credit_
  * `saveRequired`: the invoice must save a payment method first (the route's
  * own verdict); no code is offered there.
  */
-async function promoCodeViewForInvoice(invoice, { saveRequired = false, conn = db } = {}) {
+async function promoCodeViewForInvoice(invoice, { saveRequired = false, payerOwnedLive = false, conn = db } = {}) {
   if (!gateOn() || !invoice?.id) return null;
+  if (payerOwnedLive) return null;
   const row = await conn('invoice_promo_codes').where({ invoice_id: invoice.id }).first();
-  if (row) return row.status === 'void' ? null : { canEnter: false, applied: appliedView(row) };
-  return !saveRequired && invoiceTakesPromoCode(invoice) ? { canEnter: true, applied: null } : null;
+  if (row) return row.status === 'void' ? null : { canEnter: false, applied: appliedView(row, invoice) };
+  if (saveRequired || !(await invoiceEligibleForPromoEntry(invoice, conn))) return null;
+  return { canEnter: true, applied: null };
 }
 
 /**
@@ -109,6 +164,24 @@ async function pendingPromoCredit(invoice, conn = db) {
 }
 
 /**
+ * Fence existing PaymentIntent flows (/quote, /finalize, /update-amount,
+ * /confirm) whenever an unredeemed promo code is waiting on this invoice:
+ * refuses with 409 staleBalance so the page re-runs /setup to redeem the promo
+ * and mint a reduced PaymentIntent instead of charging the undiscounted total.
+ */
+async function assertNoPendingPromoCode(invoice, conn = db) {
+  if (!invoice) return;
+  const pending = await pendingPromoCredit(invoice, conn);
+  if (pending > 0) {
+    const err = new Error('A promo code was applied to this invoice — refreshing your total.');
+    err.statusCode = 409;
+    err.staleBalance = true;
+    err.code = 'PENDING_PROMO_REQUIRES_SETUP';
+    throw err;
+  }
+}
+
+/**
  * Record `rawCode` on an invoice. The caller owns the gate and the token, and
  * passes its transaction holding the invoice row lock as `conn`.
  * Returns { ok: true, applied } or { ok: false, reason }:
@@ -121,10 +194,10 @@ async function enterPromoCodeOnInvoice({ invoice, rawCode }, conn = db) {
   const existing = await conn('invoice_promo_codes').where({ invoice_id: invoice.id }).first();
   if (existing) {
     return existing.code === code && existing.status !== 'void'
-      ? { ok: true, applied: appliedView(existing) }
+      ? { ok: true, applied: appliedView(existing, invoice) }
       : { ok: false, reason: 'code_already_entered' };
   }
-  if (!invoiceTakesPromoCode(invoice)) return { ok: false, reason: 'invalid_code' };
+  if (!(await invoiceEligibleForPromoEntry(invoice, conn))) return { ok: false, reason: 'invalid_code' };
 
   // The discount row is locked through the insert, as on the estimate page.
   const discount = await conn('discounts').where({ promo_code: code, is_active: true }).forUpdate().first();
@@ -144,7 +217,7 @@ async function enterPromoCodeOnInvoice({ invoice, rawCode }, conn = db) {
     description: `Customer entered promo code ${code} on an invoice's pay page ($${creditAmount.toFixed(2)} account credit toward it).`,
     metadata: JSON.stringify({ code, discountId: discount.id, creditAmount, invoiceId: invoice.id }),
   });
-  return { ok: true, applied: appliedView(row) };
+  return { ok: true, applied: appliedView(row, invoice) };
 }
 
 async function voidRow(trx, row, reason) {
@@ -163,13 +236,17 @@ async function redeemRow(trx, row, invoice) {
   // Locked: an estimate redeeming the same code takes this lock too, so the
   // once-per-customer check sees it whichever commits first.
   const discount = await trx('discounts').where({ id: row.discount_id }).forUpdate().first();
-  if (!discount || discount.is_active !== true) return voidRow(trx, row, 'code_inactive');
+  if (!Promo.isRedeemableDiscount(discount, row.code)) return voidRow(trx, row, 'code_inactive');
   if (await Promo.customerBlocked(trx, invoice.customer_id, discount, { exceptVisit: exceptVisitOf(invoice) })) {
     return voidRow(trx, row, 'customer_not_eligible');
   }
   const amount = round2(row.credit_amount);
   const entry = await Promo.mintPromoCredit(trx, {
-    discountId: discount.id, customerId: invoice.customer_id, amount, note: `Promo code ${row.code} (invoice ${invoice.id})`,
+    discountId: discount.id,
+    customerId: invoice.customer_id,
+    amount,
+    note: `Promo code ${row.code} (invoice ${invoice.id})`,
+    createdBy: APPLIED_BY,
   });
   if (!entry) return voidRow(trx, row, 'uses_exhausted');
   await trx('invoice_promo_codes').where({ id: row.id }).update({
@@ -190,11 +267,11 @@ async function redeemRow(trx, row, invoice) {
  * invoice and not redeemed yet is redeemed (the credit posts, one use is
  * counted) AND that amount is drawn against the invoice, as one step in a
  * savepoint: if the invoice takes none of it (an active payment plan, a
- * payment attached after all), nothing is posted and the code stays entered,
- * so a code is never spent on an invoice it did not lower. Only the promo
- * amount is drawn, whatever the customer's automatic-credit choice. Never
- * throws: the payment is then set up at the amount due as it stands.
- * Returns the amount applied to the invoice, or 0.
+ * payment attached after all, or third-party payer ownership), nothing is
+ * posted and the code stays entered, so a code is never spent on an invoice it
+ * did not lower. Only the promo amount is drawn, whatever the customer's
+ * automatic-credit choice. Never throws: the payment is then set up at the
+ * amount due as it stands. Returns the amount applied to the invoice, or 0.
  */
 async function redeemAndApplyPromoCode(trx, invoice) {
   try {
@@ -204,11 +281,21 @@ async function redeemAndApplyPromoCode(trx, invoice) {
     return await trx.transaction(async (savepoint) => {
       const row = await savepoint('invoice_promo_codes').where({ invoice_id: invoice.id, status: 'entered' }).first();
       if (!row) return 0;
+      // Verify live third-party payer ownership inside the lock before
+      // spending the homeowner's one-time promo code on a payer-owned invoice.
+      const liveOwner = await invoicePayerOwnership(invoice, savepoint);
+      if (liveOwner !== null) {
+        throw Object.assign(new Error('promo credit blocked for payer-owned invoice'), { promoNotApplied: 'payer_owned' });
+      }
       const posted = await redeemRow(savepoint, row, invoice);
       // Voided (switched off, used up, not eligible): that verdict is kept.
       if (!(posted > 0)) return 0;
       const drawn = await require('./customer-credit').applyAccountCreditToInvoice({
-        invoiceId: invoice.id, customerRequested: true, applyAtMost: posted, createdBy: APPLIED_BY,
+        invoiceId: invoice.id,
+        customerRequested: true,
+        applyAtMost: posted,
+        createdBy: APPLIED_BY,
+        ...(invoice.scheduled_service_id ? { requireSelfPayScheduledServiceId: invoice.scheduled_service_id } : {}),
       }, savepoint);
       if (!(drawn?.applied > 0)) {
         throw Object.assign(new Error('promo credit not applied'), { promoNotApplied: drawn?.skipped || 'nothing_applied' });
@@ -228,6 +315,7 @@ async function redeemAndApplyPromoCode(trx, invoice) {
 module.exports = {
   promoCodeVerdictAfterSetup,
   pendingPromoCredit,
+  assertNoPendingPromoCode,
   promoCodeViewForInvoice,
   enterPromoCodeOnInvoice,
   redeemAndApplyPromoCode,

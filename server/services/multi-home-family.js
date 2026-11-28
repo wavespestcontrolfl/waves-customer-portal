@@ -161,14 +161,24 @@ function planLink(mineRow, otherRow, customerId, otherCustomerId) {
   return { familyId: randomUUID(), add: [customerId, otherCustomerId] };
 }
 
+async function pruneSingleMemberOrphan(trx, row) {
+  if (!row) return null;
+  const members = await trx(TABLE).where({ family_id: row.family_id }).forUpdate().select('id');
+  if (members.length === 1) {
+    await trx(TABLE).where({ id: members[0].id }).del();
+    return null;
+  }
+  return row;
+}
+
 async function linkInTransaction(trx, { customerId, otherCustomerId, actorId }) {
   await lockFamilyChanges(trx);
   await lockCustomers(trx, [customerId, otherCustomerId]);
   await loadLinkable(trx, customerId, 'first');
   await loadLinkable(trx, otherCustomerId, 'other');
-  const rows = await trx(TABLE).whereIn('customer_id', [customerId, otherCustomerId]).forUpdate().select('customer_id', 'family_id');
-  const mineRow = rows.find((row) => row.customer_id === customerId);
-  const otherRow = rows.find((row) => row.customer_id === otherCustomerId);
+  const rows = await trx(TABLE).whereIn('customer_id', [customerId, otherCustomerId]).forUpdate().select('id', 'customer_id', 'family_id');
+  const mineRow = await pruneSingleMemberOrphan(trx, rows.find((row) => row.customer_id === customerId));
+  const otherRow = await pruneSingleMemberOrphan(trx, rows.find((row) => row.customer_id === otherCustomerId));
   const plan = planLink(mineRow, otherRow, customerId, otherCustomerId);
   if (plan.add && plan.add.length) await insertMembers(trx, plan.familyId, plan.add, actorId);
 }

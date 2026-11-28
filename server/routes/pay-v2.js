@@ -648,7 +648,7 @@ router.get('/:token', async (req, res, next) => {
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
     // A read failure hides the block and never fails the page.
     const promoCode = await require('../services/invoice-promo-code')
-      .promoCodeViewForInvoice(data, { saveRequired: getSaveRequired })
+      .promoCodeViewForInvoice(data, { saveRequired: getSaveRequired, payerOwnedLive })
       .catch((err) => {
         logger.warn(`[pay-v2] promo code block suppressed for invoice ${data.id}: ${err.code || err.message}`);
         return null;
@@ -1250,6 +1250,22 @@ router.post('/:token/update-amount', async (req, res, next) => {
   }
 });
 
+function respondPayPhaseError(req, res, { invoice, phase, methodCategory, paymentIntentId, err }) {
+  if (err && err.statusCode === 409 && err.staleBalance) {
+    return res.status(409).json({ error: err.message, staleBalance: true });
+  }
+  logger.error(`[pay-v2] ${phase === 'quote' ? 'Quote' : 'Confirm'} error: ${err.message}`);
+  reportBillPaymentError(req, {
+    invoice,
+    phase,
+    methodCategory,
+    paymentIntentId,
+    error: err,
+    statusCode: 400,
+  });
+  return res.status(400).json({ error: err.message });
+}
+
 // =========================================================================
 // POST /api/pay/:token/quote — Get surcharge quote for a specific PM
 // =========================================================================
@@ -1276,16 +1292,13 @@ router.post('/:token/quote', async (req, res, next) => {
     const result = await StripeService.quoteInvoiceSurcharge(invoice.id, paymentMethodId);
     res.json(result);
   } catch (err) {
-    logger.error(`[pay-v2] Quote error: ${err.message}`);
-    reportBillPaymentError(req, {
+    respondPayPhaseError(req, res, {
       invoice,
       phase: 'quote',
       methodCategory: 'card',
       paymentIntentId: invoice?.stripe_payment_intent_id,
-      error: err,
-      statusCode: 400,
+      err,
     });
-    res.status(400).json({ error: err.message });
   }
 });
 
@@ -1449,16 +1462,13 @@ router.post('/:token/confirm', async (req, res, next) => {
       },
     });
   } catch (err) {
-    logger.error(`[pay-v2] Confirm error: ${err.message}`);
-    reportBillPaymentError(req, {
+    respondPayPhaseError(req, res, {
       invoice,
       phase: 'confirm',
       methodCategory: req.body?.methodCategory || invoice?.payment_method,
       paymentIntentId: req.body?.paymentIntentId,
-      error: err,
-      statusCode: 400,
+      err,
     });
-    res.status(400).json({ error: err.message });
   }
 });
 

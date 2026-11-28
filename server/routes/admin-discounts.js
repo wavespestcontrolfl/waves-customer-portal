@@ -8,6 +8,7 @@ const { parseETDateTime } = require('../utils/datetime-et');
 const { attachDiscountCatalogClassification } = require('../services/discount-catalog-classifier');
 const { auditDiscountCatalogChange, ipFromReq, uaFromReq } = require('../services/audit-log');
 const { discountStackingLive } = require('../config/feature-gates');
+const { normalizeCode: normalizePromoCode } = require('../services/estimate-promo-code');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -164,7 +165,7 @@ router.post('/:id/assign', requireAdmin, async (req, res, next) => {
       customer_id: customerId,
       discount_id: req.params.id,
       applied_reason: reason || null,
-      applied_by: req.admin?.name || 'admin',
+      applied_by: req.technician?.name || req.admin?.name || 'admin',
     }).returning('*');
     res.status(201).json(row);
   } catch (err) {
@@ -184,7 +185,7 @@ router.delete('/:id/assign/:customerId', requireAdmin, async (req, res, next) =>
 });
 
 // POST /api/admin/discounts/calculate — preview discounts for a customer
-router.post('/calculate', async (req, res, next) => {
+router.post('/calculate', requireAdmin, async (req, res, next) => {
   try {
     const { customerId, subtotal, serviceKey, serviceCategory } = req.body;
     const result = await DiscountEngine.calculateDiscounts(customerId, { subtotal, serviceKey, serviceCategory, isEstimate: false });
@@ -197,14 +198,17 @@ router.post('/calculate', async (req, res, next) => {
 router.post('/promo-validate', requireAdmin, async (req, res, next) => {
   try {
     const { customerId, code } = req.body;
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!code) return res.status(400).json({ error: 'code required' });
-    const result = await DiscountEngine.applyPromoCode(customerId, code);
+    const result = await DiscountEngine.applyPromoCode(customerId, code, {
+      appliedBy: req.technician?.name || req.admin?.name || 'promo',
+    });
     res.json(result);
   } catch (err) { next(err); }
 });
 
 // GET /api/admin/discounts/stats — usage statistics
-router.get('/stats', async (req, res, next) => {
+router.get('/stats', requireAdmin, async (req, res, next) => {
   try {
     const discounts = await db('discounts')
       .select('id', 'name', 'discount_key', 'times_applied', 'total_discount_given', 'is_active')
@@ -275,6 +279,14 @@ function normalizeBoolean(value, field) {
   throw validationError(`${field} must be a boolean`);
 }
 
+function normalizePromoCodeField(raw) {
+  const normalizedPromo = normalizePromoCode(raw);
+  if (!normalizedPromo) {
+    throw validationError('Promo code must be 3–50 characters, start with a letter or number, and contain only letters, numbers, underscores, or hyphens');
+  }
+  return normalizedPromo;
+}
+
 function buildDiscountData(body, { generateKey = false } = {}) {
   const fields = [
     'discount_key', 'name', 'description', 'discount_type', 'amount', 'max_discount_dollars',
@@ -302,7 +314,7 @@ function buildDiscountData(body, { generateKey = false } = {}) {
     if (data[f] !== undefined) data[f] = normalizeNullableString(data[f]);
   }
   if (data.service_key_filter) data.service_key_filter = normalizeKey(data.service_key_filter);
-  if (data.promo_code) data.promo_code = data.promo_code.toUpperCase();
+  if (data.promo_code) data.promo_code = normalizePromoCodeField(data.promo_code);
   for (const f of NUMERIC_FIELDS) {
     if (data[f] !== undefined) data[f] = normalizeNumber(data[f], f);
   }

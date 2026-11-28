@@ -11755,18 +11755,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         let prepayQuoteOfferContribution = 0;
         if (quoteCustomerId && require('../config/feature-gates').gates.autoApplyAccountCredit) {
           try {
-            const { getBalance, computeApplication } = require('../services/customer-credit');
-            const balance = await getBalance(quoteCustomerId);
-            const offerAmount = await require('../services/inspection-credit').projectRedeemableOfferAmount(quoteCustomerId);
-            const projection = computeApplication({ total: prepayProjectedDue, creditApplied: 0, balance: (balance || 0) + (offerAmount || 0) });
-            const appliedCredit = projection.newCreditApplied || 0;
-            // The slice of the projection the UNREDEEMED offer is carrying
-            // (beyond the live balance): when > 0, the acknowledged total is
-            // only correct if the post-commit redemption actually lands —
-            // the charge block defers to the sweep when it can't confirm
-            // that (Codex r9 P0).
-            prepayQuoteOfferContribution = Math.max(0, Math.round((appliedCredit - (balance || 0)) * 100) / 100);
-            prepayProjectedDue = Math.max(0, Math.round((prepayProjectedDue - appliedCredit) * 100) / 100);
+            const creditProj = await projectPrepayAcceptCredits(estimate, quoteCustomerId, prepayProjectedDue);
+            prepayQuoteOfferContribution = creditProj.offerContribution;
+            prepayProjectedDue = creditProj.projectedDue;
           } catch (creditErr) {
             // FAIL CLOSED (Codex r10 P0): "quote without credit" would price
             // the gross amount while a promised credit may exist — if the
@@ -13889,6 +13880,11 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               logger.warn(`[estimate-accept] in-trx inspection-credit redemption failed for estimate ${estimate.id} — deferring to the post-commit path: ${redeemErr.message}`);
             }
           }
+          // 1b) Redeem any entered estimate promo code IN THIS TRANSACTION
+          //     (savepoint-isolated, never aborts accept) BEFORE applying
+          //     account credit to the prepay invoice so the customer is not
+          //     auto-charged the full undiscounted annual total.
+          await require('../services/estimate-promo-code').redeemPromoCodeInAcceptTransaction(trx, estimate.id);
           // 2) APPLY the (now offer-inclusive) balance to the just-minted
           //    prepay invoice (r16): consumed atomically with acceptance,
           //    so a competing invoice waiting on the customer lock cannot
@@ -19358,7 +19354,8 @@ async function enterEstimateCode(trx, estimate, rawCode) {
   const promoOn = featureGates.isEnabled('estimatePromoCode');
   const referralOn = featureGates.isEnabled('estimateReferralCode');
   const promoOnEstimate = await trx('estimate_promo_codes').where({ estimate_id: estimate.id }).first('id');
-  if (promoOnEstimate || (promoOn && (!referralOn || await Promo.isPromoCode(trx, rawCode)))) {
+  if (!promoOn && promoOnEstimate) return { ok: false, reason: 'code_already_entered' };
+  if (promoOn && (promoOnEstimate || !referralOn || await Promo.isPromoCode(trx, rawCode))) {
     return Promo.enterPromoCode(entry, trx);
   }
   return referralOn ? Referral.enterReferralCode(entry, trx) : { ok: false, reason: 'invalid_code' };
@@ -34179,4 +34176,25 @@ module.exports.resolveAcceptedFirstVisit = resolveAcceptedFirstVisit;
 module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
 module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
 module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;
+async function projectPrepayAcceptCredits(estimate, customerId, projectedDue) {
+  const { getBalance, computeApplication } = require('../services/customer-credit');
+  const balance = (await getBalance(customerId)) || 0;
+  const offerAmount = (await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId)) || 0;
+  const promoAmount = (await require('../services/estimate-promo-code').projectPendingEstimatePromoAmount(estimate, customerId)) || 0;
+  const projection = computeApplication({ total: projectedDue, creditApplied: 0, balance: balance + offerAmount + promoAmount });
+  const appliedCredit = projection.newCreditApplied || 0;
+  // Promo codes redeem synchronously inside the accept tx (verified by step 4
+  // before commit), so only the unredeemed inspection-credit offer slice rides
+  // offerContribution for the post-commit offer defer guard (Codex r9 P0).
+  const offerContribution = Math.max(
+    0,
+    Math.min(offerAmount, Math.round((appliedCredit - balance - promoAmount) * 100) / 100),
+  );
+  return {
+    offerContribution,
+    projectedDue: Math.max(0, Math.round((projectedDue - appliedCredit) * 100) / 100),
+  };
+}
+
 module.exports.oneTimeChoiceClassificationItems = oneTimeChoiceClassificationItems;
+module.exports.projectPrepayAcceptCredits = projectPrepayAcceptCredits;

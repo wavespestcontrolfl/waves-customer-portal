@@ -493,21 +493,30 @@ function routeFor(home, customer, payers) {
 }
 
 // Groups the homes by paying address. A home with no usable address is returned in `noAddress`.
+// Resolve routing before applying homeowner email opt-outs: a third-party payer's
+// AP email is never suppressed by a homeowner's portal opt-out, while any self-pay
+// member opting out suppresses the entire shared self-pay inbox group so we never
+// send a partial family list to an opted-out address.
 async function groupByPayingAddress(dbh, homes, { customers, payers, optedOut }) {
   const groups = new Map();
+  const optedOutSelfPayKeys = new Set();
   const noAddress = [];
   for (const home of homes) {
-    if (optedOut.has(home.customerId)) continue;
     const customer = customers.get(home.customerId);
     if (!customer) continue;
     const { payer, address, key } = routeFor(home, customer, payers);
+    if (!payer && optedOut.has(home.customerId)) {
+      if (isEmailLike(address)) optedOutSelfPayKeys.add(key);
+      continue;
+    }
     if (!isEmailLike(address)) { noAddress.push(home); continue; }
     if (!groups.has(key)) groups.set(key, { key, address, payer: null, homes: [] });
     const group = groups.get(key);
     if (payer && !group.payer) group.payer = payer;
     group.homes.push({ ...home, payment: await paymentCell(dbh, customer, payer) });
   }
-  return { groups: [...groups.values()], noAddress };
+  const filteredGroups = [...groups.values()].filter((g) => g.payer || !optedOutSelfPayKeys.has(g.key));
+  return { groups: filteredGroups, noAddress };
 }
 
 function greetingFor(group, customers) {

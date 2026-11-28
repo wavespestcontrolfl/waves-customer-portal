@@ -117,17 +117,24 @@ const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
 // set authority can mirror the pay page's own preview predicate; `database`
 // lets a caller holding a transaction read through it.
 async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
-  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
+  const gates = require('../config/feature-gates');
+  const autoOn = gates.gates.autoApplyAccountCredit;
+  const promoOn = gates.isEnabled('payPromoCode');
+  if (!autoOn && !promoOn) return false;
   if (!invoice?.customer_id || invoice?.payer_id) return false;
-  // Mirrors createInvoicePaymentIntent's availableCredit gate exactly,
-  // including the customer's opt-in (customers.auto_apply_account_credit,
-  // owner ruling 2026-08-28): an opted-out balance reads as zero there, so
-  // it must read as zero here too — otherwise the capture step / combined
-  // preview would show a coverage the setup path will never apply.
-  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return false;
-  const credit = Number(row?.account_credits) || 0;
-  return credit > 0 && credit >= invoiceAmountDue(invoice);
+  let autoCredit = 0;
+  if (autoOn) {
+    // Mirrors createInvoicePaymentIntent's availableCredit gate exactly,
+    // including the customer's opt-in (customers.auto_apply_account_credit,
+    // owner ruling 2026-08-28).
+    const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+    if (row?.auto_apply_account_credit === true) autoCredit = Number(row?.account_credits) || 0;
+  }
+  const promoCredit = promoOn
+    ? await require('./invoice-promo-code').pendingPromoCredit(invoice, database)
+    : 0;
+  const available = autoCredit + promoCredit;
+  return available > 0 && available >= invoiceAmountDue(invoice);
 }
 
 // Why combinedEligibleSiblings returned null (the optional onDegrade
