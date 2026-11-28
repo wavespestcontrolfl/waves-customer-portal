@@ -11827,6 +11827,8 @@ function buildComplaintCallAlert({ call, customerId, name = null, v2Extraction =
 // bell. A failure is logged by code and never fails the call. Sends nothing to the customer.
 async function keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction, procGeneration, now = new Date() }) {
   if (written !== true || disposition !== 'complaint_escalated') return null;
+  if (isOutboundCall(call)) return null;
+  if (require('./call-hygiene-guards').isCompetitorOrNonWavesComplaint(v2Extraction)) return null;
   try {
     const id = customerId || call.customer_id;
     if (!id || require('./internal-test-customers').isInternalTestCustomerId(id)) return null;
@@ -13143,11 +13145,13 @@ const CallRecordingProcessor = {
       // Token-fenced: a zombie pass whose claim was reclaimed must neither
       // burn the peer's retry budget nor knock its live 'processing' status
       // to a terminal one. 0 rows -> the peer owns the row; leave it alone.
+      const { buildSanitizedExtractionErrorPayload, maybeAlertExtractionOutage } = require('./call-hygiene-guards');
       const [failedRow] = await db('call_log').where({ id: call.id })
         .where('processing_token', procToken)
         .update({
           processing_status: 'extraction_failed',
           extraction_attempts: db.raw('COALESCE(extraction_attempts, 0) + 1'),
+          metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{last_extraction_error}', ?::jsonb, true)", [buildSanitizedExtractionErrorPayload(err)]),
           processing_token: null,
           updated_at: new Date(),
         }).returning(['extraction_attempts']);
@@ -13155,6 +13159,7 @@ const CallRecordingProcessor = {
         claimReleased = true;
         const attempts = Number(failedRow?.extraction_attempts) || 0;
         await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
+        await maybeAlertExtractionOutage({ db, err });
       } else {
         logger.warn(`[call-proc] extraction_failed release skipped for ${maskSid(callSid)} — ownership lost to a reclaiming peer`);
         // Ownership loss, not an extraction failure: this pass wrote nothing
@@ -13668,7 +13673,8 @@ const CallRecordingProcessor = {
       if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
     }
 
-    // Skip spam and non-workable voicemail
+    // Skip spam and non-workable voicemail (never terminal-spam an active linked customer)
+    require('./call-hygiene-guards').clearSpamForActiveCustomer({ extracted, knownCaller, knownCallerLookupFailed, call });
     if (extracted.is_spam || (voicemailChannel && !voicemailLeadPath)) {
       // A retry newly classified spam/non-workable must first unlink any
       // earlier attempt's lead stamp AND restore that lead's prior summary

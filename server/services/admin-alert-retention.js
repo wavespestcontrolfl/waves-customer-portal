@@ -170,6 +170,8 @@ const RERING = [
     decision: 'expire: only a new first-visit request from the customer on the estimate page raises it again (one open row per estimate; the settle pass closes it once the estimate is no longer open)' },
   { emitter: 'portal-message', files: ['services/portal-messages.js'], prefixes: ['portal-message:'], kind: 'event',
     decision: 'expire: only a new message the customer writes in their portal thread raises it again (one open row per thread)' },
+  { emitter: 'call-extraction-outage', files: ['services/call-hygiene-guards.js'], prefixes: ['call-extraction-outage:'], kind: 'event',
+    decision: 'expire: only a new burst of 3+ call extraction failures in 60 minutes raises it again' },
 ];
 
 const parseMeta = (metadata) => {
