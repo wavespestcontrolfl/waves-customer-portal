@@ -248,16 +248,17 @@ async function bindingQuote({ vendorSku, quantity, since = null, countedAt = nul
   const get = lookupReader({ fetchImpl, now });
   const page = await get(`/api/orders?limit=${PAGE_MAX}`);
   const orders = listOf(page, 'orders');
-  // Newest first is the documented order. It is verified, because the walk stops at the first
-  // match: an undated order, or one out of order, means the latest cannot be told apart.
+  // Newest first is the documented order. It is verified before choosing a binding price: an
+  // undated or out-of-order list withholds any price match, while still scanning for outstanding
+  // orders so an open or uncounted delivery is never missed.
   const stamps = orders.map(placedMs);
-  if (stamps.some((t, i) => !t || (i > 0 && t > stamps[i - 1]))) return null;
+  const ordered = !stamps.some((t, i) => !t || (i > 0 && t > stamps[i - 1]));
   const readOrders = new Map();
   const read = async (listed) => {
     if (!readOrders.has(listed?.number)) readOrders.set(listed?.number, await readListedOrder(listed, get));
     return readOrders.get(listed?.number);
   };
-  const last = resolvedLast(await latestIdentical(orders, { vendorSku, qty, read }), page, stamps);
+  const last = ordered ? resolvedLast(await latestIdentical(orders, { vendorSku, qty, read }), page, stamps) : null;
   // An order of this item that may already cover the request is returned whatever the price match
   // found (cents null when none binds): the dispatcher parks it, never buys, and its alert names it.
   const outstanding = await outstandingOrder(page, orders, { vendorSku, since, counted: { countedAt, receivedOrders }, read });
@@ -276,7 +277,23 @@ async function bindingQuote({ vendorSku, quantity, since = null, countedAt = nul
 // manual hand-off if a gate later closes. A list that cannot be read throws.
 // Only the documented shape is read: { orders: [...] } with an object for every entry. Anything else
 // (no orders array, a null or non-object entry) cannot show there is no new order: refused.
-async function refuseOnNewOrder(since, vendorSku, { fetchImpl, now = Date.now }) {
+function isCountedPostRequestDelivery(listed, detail, counted) {
+  const agreed = listed.state === detail.state
+    && listed.shipmentState === detail.shipmentState
+    && listed.paymentState === detail.paymentState;
+  return agreed && !mayBeComing(listed) && !mayBeComing(detail) && countedDelivery(listed, detail, counted);
+}
+
+function newOrderBlocker(o, detail, { vendorSku, counted }) {
+  const lines = orderLines(detail);
+  if (!lines) return { why: 'unreadable' };
+  if (CLOSED_STATES.has(o.state) && CLOSED_STATES.has(detail.state) && o.state === detail.state) return null;
+  if (!hasItem(lines, vendorSku)) return null;
+  if (isCountedPostRequestDelivery(o, detail, counted)) return null;
+  return { why: 'since' };
+}
+
+async function refuseOnNewOrder(since, vendorSku, { counted = {}, fetchImpl, now = Date.now }) {
   const refuseWith = (message, outstandingOrder) => {
     const err = new RefusedError('vendor_order_new', message);
     err.evidence = { outstandingOrder };
@@ -284,27 +301,18 @@ async function refuseOnNewOrder(since, vendorSku, { fetchImpl, now = Date.now })
   };
   const sinceMs = Date.parse(since || '');
   if (!Number.isFinite(sinceMs)) throw refuseWith('the restock request has no start time to check new Sticker Mule orders against, so nothing was sent', { number: null, why: 'unreadable' });
-  // One deadline for the list and every order read (lookupReader): past it nothing more is read, the
-  // lookup throws, and nothing is sent.
   const get = lookupReader({ fetchImpl, now });
   const payload = await get(`/api/orders?limit=${PAGE_MAX}`);
   const orders = Array.isArray(payload?.orders) ? payload.orders : null;
   if (!orders || orders.some((o) => !o || typeof o !== 'object')) throw refuseWith('the Sticker Mule order list could not be read before the order, so nothing was sent', { number: null, why: 'unreadable' });
-  // Only a complete list shows there is no new order: more to load past this page refuses.
-  // Persist the same unchecked marker used by bindingQuote so the sweep keeps the account-check warning.
   if (payload.canLoadMore !== false) throw refuseWith('Sticker Mule has more orders than the newest 50 the robot reads, so a new one could not be ruled out before the order; nothing was sent', { number: null, why: 'unchecked' });
-  // Each order placed since (or undated) is read in full: one that holds this item, or cannot be
-  // read as one order with its item lines, refuses. One of other items only (the robot's own order
-  // of another item in the same run), or one canceled in both its list entry and its detail, does not.
   for (const o of orders.filter((x) => !placedMs(x) || placedMs(x) >= sinceMs)) {
     const detail = o.number ? await readOrder(o.number, get).catch(() => null) : null;
-    const lines = orderLines(detail);
-    // Canceled (or an unclaimed gift) in the list AND the detail: it will never come. Skipped.
-    if (lines && CLOSED_STATES.has(o.state) && CLOSED_STATES.has(detail.state) && o.state === detail.state) continue;
-    if (!lines || hasItem(lines, vendorSku)) {
+    const blocker = newOrderBlocker(o, detail, { vendorSku, counted });
+    if (blocker) {
       throw refuseWith(
         `Sticker Mule order ${o.number || '(no number)'} was placed after this request was raised and holds item ${vendorSku}, or could not be read in full; it may be one placed by hand for this need, so nothing was sent`,
-        { number: o.number ? String(o.number) : null, why: lines ? 'since' : 'unreadable' }
+        { number: o.number ? String(o.number) : null, why: blocker.why }
       );
     }
   }
@@ -399,7 +407,7 @@ async function submitOrder(request, { fetchImpl }) {
   return { response, number: String(number) };
 }
 
-async function place({ vendorSku, quantity, beforeSubmit = null, since }, { fetchImpl = fetch, now = Date.now } = {}) {
+async function place({ vendorSku, quantity, beforeSubmit = null, since, countedAt = null, receivedOrders = [] }, { fetchImpl = fetch, now = Date.now } = {}) {
   if (!configured()) throw new RefusedError('no_api_key', 'STICKERMULE_API_KEY is not set');
   const qty = Math.round(Number(quantity));
   if (!Number.isFinite(qty) || qty <= 0) throw new RefusedError('bad_quantity', `quantity ${quantity} is not a positive count`);
@@ -407,12 +415,16 @@ async function place({ vendorSku, quantity, beforeSubmit = null, since }, { fetc
   refuseUnorderable(item, qty);
   // The last vendor read before the POST. Only a caller that passes `since` gets it (the dispatcher
   // always does for a history-total order).
-  if (since !== undefined) await refuseOnNewOrder(since, vendorSku, { fetchImpl, now });
+  if (since !== undefined) await refuseOnNewOrder(since, vendorSku, { counted: { countedAt, receivedOrders }, fetchImpl, now });
   // The dispatcher's last check (history-total orders: its approval and its claim), after every vendor
   // read and right before the POST: refused = nothing is sent.
   if (beforeSubmit) {
     const verdict = await beforeSubmit();
-    if (!verdict || verdict.ok !== true) throw new RefusedError(verdict?.reason || 'claim_lost', verdict?.message || 'the order claim is no longer placing');
+    if (!verdict || verdict.ok !== true) {
+      const err = new RefusedError(verdict?.reason || 'claim_lost', verdict?.message || 'the order claim is no longer placing');
+      if (verdict?.evidence) err.evidence = verdict.evidence;
+      throw err;
+    }
   }
   const { response, number } = await submitOrder({ items: [{ id: item.id, quantity: qty }], addressId: address.id, paymentId: payment.id }, { fetchImpl });
   // The order exists and this is all place() knows of it. The charge is NOT read here: the
