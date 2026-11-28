@@ -455,7 +455,10 @@ function isEligibleImplicitPriceContext(v2Extraction, catalogRow = null) {
     && !sr.waveguard_tier_mentioned;
 }
 
+const PRICE_RANGE_EVIDENCE_RE = /(?:\$\s*\d[\d,]*(?:\.\d{1,2})?\s*(?:-|–|—|to)\s*\$?\s*\d|\b\d[\d,]*(?:\.\d{1,2})?\s*(?:-|–|—|to)\s*\$?\s*\d[\d,]*(?:\.\d{1,2})?\s*(?:dollars?|bucks)\b|\bbetween\s+\$?\d[\d,]*(?:\.\d{1,2})?\s+and\s+\$?\d)/i;
+
 function evidenceSupportsImplicitAmount(quote, amount) {
+  if (PRICE_RANGE_EVIDENCE_RE.test(quote)) return false;
   const numericMatches = [
     ...quote.matchAll(/\$\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)/g),
     ...quote.matchAll(/\b(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:dollars?|bucks)\b/gi),
@@ -821,11 +824,11 @@ function isAgentWdoOfferBody(body) {
   ));
 }
 
-function updateAgentWdoOffer(prevOffered, turn) {
+function isAgentWdoOffer(turn) {
   if (!turn || turn.speaker !== 'other' || !WDO_AGENT_SPEAKER_RE.test(turn.label)) return false;
   const body = String(turn.text || '').replace(/^\s*[^:\n]+:\s*/, '').replace(/[‘’]/g, "'");
   if (!body || WDO_CLAUSE_REFUSAL_RE.test(body) || WDO_ALTERNATIVE_OPTION_RE.test(body)) return false;
-  return isAgentWdoOfferBody(body) ? true : prevOffered;
+  return isAgentWdoOfferBody(body);
 }
 
 function isWdoOfferAcceptance(callerBody) {
@@ -843,7 +846,7 @@ function hasExplicitWdoRefusal({ extracted = {}, v2Extraction = null, transcript
   let agentOfferedWdo = false;
   for (const turn of turns) {
     if (turn.speaker !== 'caller') {
-      agentOfferedWdo = updateAgentWdoOffer(agentOfferedWdo, turn);
+      agentOfferedWdo = isAgentWdoOffer(turn);
       continue;
     }
     const body = turn.text.replace(/^\s*(?:caller|customer)\s*:\s*/i, '');
@@ -867,15 +870,20 @@ function hasExplicitOneTimeOnlyIntent({ extracted = {}, v2Extraction = null, tra
   return !recurringIntentEvidence(transcription || combined);
 }
 
-function followUpDateScheduled(extracted = {}, v2Extraction = null) {
-  if (v2Extraction?.scheduling?.follow_up_start_at) return true;
-  return Boolean(extracted?.follow_up_date_time && dateOnlyString(String(extracted.follow_up_date_time).trim()));
+function followUpDateScheduled(extracted = {}, v2Extraction = null, parentDate = null) {
+  const rawFollowUp = v2Extraction?.scheduling?.follow_up_start_at || extracted?.follow_up_date_time;
+  const followUpDate = rawFollowUp ? dateOnlyString(String(rawFollowUp).trim()) : null;
+  if (!followUpDate || !isValidCalendarDate(followUpDate)) return false;
+  const rawParent = parentDate || v2Extraction?.scheduling?.confirmed_start_at || extracted?.preferred_date_time;
+  const baseDate = rawParent ? dateOnlyString(String(rawParent).trim()) : null;
+  if (baseDate && isValidCalendarDate(baseDate) && followUpDate <= baseDate) return false;
+  return true;
 }
 
-function followUpExplicitlyDiscussed(extracted = {}, v2Extraction = null) {
+function followUpExplicitlyDiscussed(extracted = {}, v2Extraction = null, parentDate = null) {
   if (extracted?.follow_up_visit_mentioned === true) return true;
   if (v2Extraction?.scheduling?.follow_up_mentioned === true) return true;
-  return followUpDateScheduled(extracted, v2Extraction);
+  return followUpDateScheduled(extracted, v2Extraction, parentDate);
 }
 
 function lastRegexMatchIndex(re, text) {
@@ -911,8 +919,8 @@ function resolvePackageVisitCountChoice(combined) {
   return finalChoice;
 }
 
-function hasExplicitFollowUpRefusal({ extracted = {}, v2Extraction = null, transcription = '' } = {}) {
-  if (followUpDateScheduled(extracted, v2Extraction)) return false;
+function hasExplicitFollowUpRefusal({ extracted = {}, v2Extraction = null, transcription = '', parentDate = null } = {}) {
+  if (followUpDateScheduled(extracted, v2Extraction, parentDate)) return false;
   const callerText = transcription ? callerOnlyText(transcription) : '';
   const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
   if (!combined) return false;
@@ -921,13 +929,13 @@ function hasExplicitFollowUpRefusal({ extracted = {}, v2Extraction = null, trans
 }
 
 function isDiscountedSinglePackageTreatment({
-  catalogRow, extracted = {}, v2Extraction = null, transcription = '', resolvedPrice = null,
+  catalogRow, extracted = {}, v2Extraction = null, transcription = '', resolvedPrice = null, parentDate = null,
 } = {}) {
   const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
   if (!isPackageFollowUpServiceKey(catalogRow?.service_key)) return false;
-  if (followUpDateScheduled(extracted, v2Extraction)) return false;
-  if (hasExplicitFollowUpRefusal({ extracted, v2Extraction, transcription })) return true;
-  if (followUpExplicitlyDiscussed(extracted, v2Extraction)) return false;
+  if (followUpDateScheduled(extracted, v2Extraction, parentDate)) return false;
+  if (hasExplicitFollowUpRefusal({ extracted, v2Extraction, transcription, parentDate })) return true;
+  if (followUpExplicitlyDiscussed(extracted, v2Extraction, parentDate)) return false;
   const callerText = transcription ? callerOnlyText(transcription) : '';
   const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
   if (resolvePackageVisitCountChoice(combined) !== 'single') return false;
@@ -1013,9 +1021,9 @@ function hasWdoMissingAssessmentHold({ callBookingCatalogRow, bookableCallServic
 }
 
 function applyCatalogSelectionGuard({
-  callBookingCatalogRow, bookableCallServices = [], extracted = {}, v2ApprovedExtraction = null, v2CanonicalExtraction = null, transcription = '', genericBookingUnbookable = false,
+  callBookingCatalogRow, bookableCallServices = [], extracted = {}, v2Extraction = null, v2ApprovedExtraction = null, transcription = '', genericBookingUnbookable = false,
 } = {}) {
-  const effectiveV2 = v2ApprovedExtraction || v2CanonicalExtraction;
+  const effectiveV2 = v2Extraction || v2ApprovedExtraction;
   const row = resolveWdoDeclinedCatalogFallback({
     callBookingCatalogRow, bookableCallServices, extracted, v2Extraction: effectiveV2, transcription,
   });
@@ -1309,7 +1317,7 @@ function parseStatedFollowUp(rawValue, parentDate) {
   return { futureDate: null, futureWindow: null, nonFutureDate: true };
 }
 
-function followUpEligibility(extracted, catalogRow, stated, v2Extraction, transcription = '', resolvedPrice = null) {
+function followUpEligibility(extracted, catalogRow, stated, v2Extraction, transcription = '', resolvedPrice = null, parentDate = null) {
   const isExistingServiceFollowUp = EXISTING_SERVICE_FOLLOWUP_INTENTS.has(
     String(v2Extraction?.service_request?.service_intent || ''),
   );
@@ -1318,9 +1326,9 @@ function followUpEligibility(extracted, catalogRow, stated, v2Extraction, transc
   const { packageFollowupAutobookLive } = require('../config/feature-gates');
   const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
   const discountedSingle = isDiscountedSinglePackageTreatment({
-    catalogRow, extracted, v2Extraction, transcription, resolvedPrice,
+    catalogRow, extracted, v2Extraction, transcription, resolvedPrice, parentDate,
   });
-  const explicitlyRefused = hasExplicitFollowUpRefusal({ extracted, v2Extraction, transcription });
+  const explicitlyRefused = hasExplicitFollowUpRefusal({ extracted, v2Extraction, transcription, parentDate });
   const packageRow = !suppressForExistingFollowUp
     && !discountedSingle
     && !explicitlyRefused
@@ -1340,7 +1348,7 @@ function resolveCallFollowUpPlan({
 
   const stated = parseStatedFollowUp(extracted.follow_up_date_time, parentDate);
   const { discussed, packageRow } = followUpEligibility(
-    extracted, catalogRow, stated, v2Extraction, transcription, resolvedPrice,
+    extracted, catalogRow, stated, v2Extraction, transcription, resolvedPrice, parentDate,
   );
   if (!discussed && !packageRow) return null;
 

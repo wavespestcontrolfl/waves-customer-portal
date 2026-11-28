@@ -151,6 +151,7 @@ function requestedMatchesVisitExactly(requestedName, visitRow, catalogRows = [])
 }
 
 const SEPARATE_FROM_PRIOR_VISIT_RE = /\b(?:separate\s+from|not\s+(?:for|part\s+of|including)|different\s+from|in\s+addition\s+to|aside\s+from|other\s+than|unrelated\s+to)\b[^.!?\n]{0,40}\b(?:price|quote|rate|total|cost|visit|appointment|booking|service)\b|\b(?:want|need|book(?:ing)?|schedul(?:e|ing)|quote|asking\s+for|looking\s+for)\s+(?:a\s+|an\s+)?(?:separate|different|additional|another|new)\s+(?:treatment|job|visit|appointment|service|booking)\b/i;
+const PRIOR_VISIT_UNCHANGED_RE = /\b(?:stays?|remains?|is|was|are|keep(?:s|ing)?)\s+(?:unchanged|the\s+same|as\s+is)\b|\b(?:no\s+change|not\s+changing|won['’]?t\s+change|doesn['’]?t\s+change|does\s+not\s+change|unchanged)\b/i;
 const QUESTION_CLAUSE_RE = /\?$|^(?:(?:agent|caller)\s*:\s*)?(?:are|is|was|were|do|did|does|would|could|can)\s+you\b/i;
 
 function hasExplicitPriorVisitLink(v2Extraction, transcription) {
@@ -165,9 +166,13 @@ function hasExplicitPriorVisitLink(v2Extraction, transcription) {
   // Any explicit separation / separate-job statement in the call blocks retroactive pricing on the earlier visit.
   if (SEPARATE_FROM_PRIOR_VISIT_RE.test(contextText)) return false;
   // Preserve `?` so unanswered or rejected questions ("Are you calling about the price for the earlier visit?")
-  // cannot satisfy affirmative prior-visit linkage.
+  // and unchanged statements ("The price for the booked visit stays unchanged") cannot satisfy affirmative linkage.
   const clauses = contextText.split(/(?<=\?)|[.!\n;]+/).map((s) => s.trim()).filter(Boolean);
-  return clauses.some((clause) => !QUESTION_CLAUSE_RE.test(clause) && EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE.test(clause));
+  return clauses.some((clause) => (
+    !QUESTION_CLAUSE_RE.test(clause)
+    && !PRIOR_VISIT_UNCHANGED_RE.test(clause)
+    && EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE.test(clause)
+  ));
 }
 
 function callbackMatchesVisitService(v2Extraction, visitRow, transcription = '', { customer = null, catalogRows = [] } = {}) {

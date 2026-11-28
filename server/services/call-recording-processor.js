@@ -20211,7 +20211,6 @@ const CallRecordingProcessor = {
       bookableCallServices,
       extracted,
       v2ApprovedExtraction,
-      v2CanonicalExtraction,
       transcription,
       genericBookingUnbookable,
     }));

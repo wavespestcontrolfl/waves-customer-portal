@@ -145,6 +145,25 @@ describe('PR A1: package Visit 2 & single-treatment guards (call 819d3d1f)', () 
       transcription: transcript,
       v2Extraction: { scheduling: { follow_up_mentioned: false }, service_request: {} },
     })).toBe(true);
+
+    // A copied same-day follow_up_start_at (equal to primary date) must NOT override explicit Visit 2 refusal
+    const sameDayFollowUpV2 = {
+      scheduling: {
+        status: 'confirmed',
+        confirmed_start_at: '2026-11-28T16:00:00-05:00',
+        follow_up_start_at: '2026-11-28T16:00:00-05:00',
+        follow_up_mentioned: false,
+      },
+      service_request: { specific_service_name: 'Cockroach Treatment Service' },
+    };
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_date_time: '2026-11-28T16:00:00-05:00' },
+      catalogRow: SERVICES[0],
+      parentDate: '2026-11-28',
+      parentWindowStart: '16:00',
+      v2Extraction: sameDayFollowUpV2,
+      transcription: transcript,
+    })).toBeNull();
   });
 });
 
@@ -180,12 +199,25 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       callBookingCatalogRow: resolvedNull,
       bookableCallServices: servicesNoAssess,
       extracted: { specific_service_name: 'WDO Inspection Service' },
-      v2CanonicalExtraction: v2,
+      v2ApprovedExtraction: v2,
       transcription: transcript,
       genericBookingUnbookable: false,
     });
     expect(noAssessGuard.callBookingCatalogRow).toBeNull();
     expect(noAssessGuard.genericBookingUnbookable).toBe(true);
+
+    // Shadow-only V2 (v2ApprovedExtraction: null) must NOT replace a live WDO booking from shadow summary alone
+    const shadowGuard = applyCatalogSelectionGuard({
+      callBookingCatalogRow: SERVICES.find((s) => s.service_key === 'wdo_inspection'),
+      bookableCallServices: SERVICES,
+      extracted: { specific_service_name: 'WDO Inspection Service' },
+      v2ApprovedExtraction: null,
+      v2CanonicalExtraction: v2,
+      transcription: 'Caller: Please book our closing inspection.',
+      genericBookingUnbookable: false,
+    });
+    expect(shadowGuard.callBookingCatalogRow?.service_key).toBe('wdo_inspection');
+    expect(shadowGuard.genericBookingUnbookable).toBe(false);
   });
 
   test('unrelated negation before comma ("No treatment, we need the official WDO report") keeps WDO Inspection Service', () => {
@@ -259,6 +291,15 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       'Caller: Yes, go ahead.',
     ].join('\n');
     expect(hasExplicitWdoRefusal({ transcription: dualChoice })).toBe(true);
+
+    // Unanswered WDO offer followed by a different agent question ("Is Tuesday convenient?") expires the offer
+    const changedQuestion = [
+      'Caller: I do not need a WDO inspection.',
+      'Agent: Would you like us to book the WDO inspection for $250?',
+      'Agent: Is Tuesday convenient for the visit?',
+      'Caller: Yes, sounds good.',
+    ].join('\n');
+    expect(hasExplicitWdoRefusal({ transcription: changedQuestion })).toBe(true);
   });
 
   test('preserves caller-only boundary on unidentified raw diarization ("Speaker 1:"/"Speaker 2:")', () => {
@@ -409,6 +450,16 @@ describe('PR A1: final implicit confirmed agent price & STT decimal price recove
     const priced = resolveCallBookingPrice({ quotedPrice: null, catalogRow: SERVICES[2], v2Extraction: beeWaspV2 });
     expect(priced).toEqual({ price: 250, source: 'transcript' });
     expect(callBookingInvoiceOnComplete({ price: priced.price, catalogRow: SERVICES[2] })).toBe(true);
+
+    // Range evidence ("$150-250" or "$150 to 250") must NEVER become an implicit firm invoice amount even if amount_max_usd was omitted
+    const rangeV2 = {
+      ...beeWaspV2,
+      service_request: {
+        ...beeWaspV2.service_request,
+        price: { ...beeWaspV2.service_request.price, amount_usd: 150, evidence_quote: 'Bee removal is $150–250.' },
+      },
+    };
+    expect(implicitConfirmedAgentPrice(rangeV2, SERVICES[2])).toBeNull();
   });
 
   test('STT decimal mishear ($2.50) recovers only on FIXED catalog rows with corroborated quote; variable-price rows stay null', () => {
@@ -779,6 +830,25 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
         service_request: {
           specific_service_name: 'One-Time Pest',
           service_intent: 'follow_up_existing_service',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
+
+    // Statement that the booked visit's price stays unchanged must NOT bind a different quote onto the earlier visit
+    selectChain.select.mockResolvedValueOnce([pestVisit]);
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-unchanged', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      transcription: 'Agent: The price for the booked visit stays unchanged. Another spray is $199.\nCaller: Sounds good.',
+      v2Extraction: {
+        scheduling: { status: 'none' },
+        service_request: {
+          specific_service_name: 'One-Time Pest',
           price_is_final: true,
           price_accepted_by_caller: true,
           price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
