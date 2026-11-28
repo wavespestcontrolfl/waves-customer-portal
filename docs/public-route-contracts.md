@@ -888,9 +888,13 @@ refuse such an invoice through the shared collectibility gate, and `/consent`,
 `409 { error, code: 'invoice_withdrawn_from_customer' }`, while
 `/consent`, `/capture-setup`, and `/setup-complete` also refuse
 chemical-review-held invoices with
-`409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`, and `/consent`
+`409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`, `/consent`
 refuses unreadable/malformed combined-payment allocation metadata on the
-PI with `409 { error, code: 'COMBINED_ALLOCATION_UNREADABLE' }`. What that refusal
+PI with `409 { error, code: 'COMBINED_ALLOCATION_UNREADABLE' }`, and
+`/consent` and `/setup-complete` refuse lock contention when another
+transaction holds the customer row with
+`409 { error, code: 'INVOICE_BUSY_RETRY' }` (retryable; no consent is
+recorded and no Auto Pay enrollment happens). What that refusal
 guarantees, precisely: no consent is recorded and no Auto Pay enrollment
 happens for a withdrawn invoice — the authorization row and the ownership
 judgement commit in ONE transaction, and the enrollment re-judges ownership
