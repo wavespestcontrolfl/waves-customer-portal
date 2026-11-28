@@ -188,6 +188,7 @@ router.get('/live', requireAdmin, async (req, res, next) => {
     // the row's own conference_path (null off the conference ring and before a press 1). No query, no Twilio request.
     const callHold = require('../services/call-hold');
     const holdOn = callHold.isEnabled();
+    const { buildLiveCallCopilot } = require('../services/live-call-copilot');
     const since = new Date(Date.now() - LIVE_CALL_WINDOW_MS);
     const ended = [...TERMINAL_CALL_STATUSES];
     const rows = await db('call_log')
@@ -213,17 +214,31 @@ router.get('/live', requireAdmin, async (req, res, next) => {
         void liveAssist.refreshAssistIfDue(row, { customerId: customer?.id || null })
           .catch((err) => logger.warn(`[call-recordings] live assist refresh rejected: ${err?.code || err?.name || 'error'}`));
       }
+      const assist = liveAssist ? liveAssist.assistForPanel(meta) : null;
+      const lines = utterances.reverse().map((u) => ({ speaker: u.speaker, text: u.text || '', at: u.spoken_at }));
+      const customerView = customer
+        ? { id: customer.id, name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() }
+        : null;
+      const copilot = await buildLiveCallCopilot({
+        call: row,
+        customer: customerView,
+        meta,
+        lines,
+        assist,
+      }).catch((err) => {
+        logger.warn(`[call-recordings] live copilot failed: ${err?.code || err?.name || 'error'}`);
+        return null;
+      });
       return {
         id: row.id,
         started_at: meta.live_transcription?.live_at || null,
         caller_phone: row.from_phone || null,
-        customer: customer
-          ? { id: customer.id, name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() }
-          : null,
+        customer: customerView,
         answered_by: String(meta.forward_acceptance?.csr_name || '').trim() || null,
-        assist: liveAssist ? liveAssist.assistForPanel(meta) : null,
+        assist,
+        ...(copilot ? { copilot } : {}),
         hold: holdOn ? callHold.holdForPanel(meta.conference_path) : null,
-        lines: utterances.reverse().map((u) => ({ speaker: u.speaker, text: u.text || '', at: u.spoken_at })),
+        lines,
       };
     }));
     res.json(forStaffRole(req, { enabled: true, calls }));

@@ -11,6 +11,8 @@ const mockGates = { isEnabled: jest.fn(() => true) };
 jest.mock('../config/feature-gates', () => mockGates);
 const mockHold = { isEnabled: jest.fn(() => false), holdForPanel: jest.fn(() => null), requestHold: jest.fn() };
 jest.mock('../services/call-hold', () => mockHold);
+const mockCopilot = { buildLiveCallCopilot: jest.fn(() => Promise.resolve(null)) };
+jest.mock('../services/live-call-copilot', () => mockCopilot);
 
 let mockRole = 'admin';
 jest.mock('../middleware/admin-auth', () => ({
@@ -84,6 +86,7 @@ beforeEach(() => {
   mockHold.isEnabled.mockReset().mockReturnValue(false);
   mockHold.holdForPanel.mockReset().mockReturnValue(null);
   mockHold.requestHold.mockReset();
+  mockCopilot.buildLiveCallCopilot.mockReset().mockResolvedValue(null);
 });
 
 describe('the Hold button (GATE_CALL_HOLD)', () => {
@@ -313,6 +316,29 @@ describe('GET /admin/call-recordings/live', () => {
     await withServer(async (base) => {
       expect(await (await fetch(`${base}/admin/call-recordings/live`)).json()).toEqual({ enabled: true, calls: [] });
     });
+  });
+
+  test('attaches Co-Pilot 2.0 payload when available and fails soft without logging PII on error', async () => {
+    const sample = { brief: { stage: 'active_customer' }, catalog_prices: [], route_slots: ['Tue Dec 1 at 9 AM'], checklist: [] };
+    mockCopilot.buildLiveCallCopilot.mockResolvedValueOnce(sample);
+    mockDb({ calls: [row(1)], utterances: { [SID_A]: [utt(1)] } });
+    await withServer(async (base) => {
+      const { calls } = await (await fetch(`${base}/admin/call-recordings/live`)).json();
+      expect(calls[0].copilot).toEqual(sample);
+    });
+
+    mockCopilot.buildLiveCallCopilot.mockRejectedValueOnce(Object.assign(new Error(`secret ${SID_A} Casey`), { code: 'ECOPILOT' }));
+    mockDb({ calls: [row(1)], utterances: { [SID_A]: [utt(1)] } });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/live`);
+      expect(res.status).toBe(200);
+      const { calls } = await res.json();
+      expect(calls[0].copilot).toBeUndefined();
+    });
+    const logged = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('ECOPILOT');
+    expect(logged).not.toContain(SID_A);
+    expect(logged).not.toContain('Casey');
   });
 
   test('a database error answers 500 through the router error path', async () => {

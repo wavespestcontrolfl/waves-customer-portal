@@ -189,6 +189,43 @@ describe("LiveCallPanelV2", () => {
     });
   });
 
+  it("renders Co-Pilot 2.0 brief, catalog prices, best route slots, and missing-info checklist when present", async () => {
+    const withCopilot = {
+      ...call(lines(2)),
+      copilot: {
+        brief: {
+          stage: "active_customer",
+          tier: "Gold",
+          address: "123 Maplewood Rd, Bradenton, 34202",
+          home_sqft: 2400,
+          next_visit: { date: "2026-12-01", service: "Quarterly Pest Control", window: "9-11 AM" },
+          open_estimates: [{ service: "Mosquito Control", status: "sent", amount: 85 }],
+          recent_48h: { calls: 1, texts: 2 },
+          property_notes: ["Pets: Dog inside"],
+        },
+        catalog_prices: [{ name: "Bee/Wasp Removal", price: 250, billing_type: "one_time" }],
+        route_slots: ["Tue Dec 1 at 9 AM", "Wed Dec 2 at 11 AM"],
+        checklist: [
+          { key: "name", label: "Name", ok: true },
+          { key: "price_quoted", label: "Price Quoted", ok: false },
+        ],
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => answer([withCopilot])));
+    render(<LiveCallPanelV2 />);
+    await flush();
+    expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("active customer · WaveGuard Gold");
+    expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("123 Maplewood Rd, Bradenton, 34202");
+    expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("Next visit: 2026-12-01 Quarterly Pest Control (9-11 AM)");
+    expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("Open estimate: Mosquito Control ($85) [sent]");
+    expect(screen.getByTestId("live-call-catalog-prices")).toHaveTextContent("Bee/Wasp Removal: $250");
+    expect(screen.getByTestId("live-call-route-slots")).toHaveTextContent("Tue Dec 1 at 9 AM · Wed Dec 2 at 11 AM");
+    expect(screen.getByTestId("live-call-checklist")).toHaveTextContent("✓ Name");
+    expect(screen.getByTestId("live-call-checklist")).toHaveTextContent("○ Price Quoted");
+    // Transcript lines list remains cleanly isolated.
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  });
+
   it("formats the running time as m:ss", () => {
     expect(elapsedLabel("2026-11-17T15:00:00.000Z", Date.parse("2026-11-17T15:57:05.000Z"))).toBe("57:05");
     expect(elapsedLabel("2026-11-17T15:03:00.000Z", NOW.getTime())).toBe("0:00");
