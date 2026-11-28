@@ -1602,6 +1602,13 @@ async function acquireApplyLock(moveId) {
 async function closeAppliedMove(plan, { actorId, summary, now }) {
   const submittedAt = (row) => new Date(row.submitted_at).getTime();
   await db.transaction(async (trx) => {
+    // Lock customer BEFORE customer_moves (matches submit/archive lock order)
+    // so inserting activity_log (FK -> customers) cannot deadlock against a
+    // concurrent resubmit or customer archive (PR #8786 Codex P2).
+    const customerId = plan.move?.customer_id || plan.customer?.id || null;
+    if (customerId) {
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    }
     const locked = await trx('customer_moves').where({ id: plan.move.id }).forUpdate().first();
     if (!locked || locked.status !== 'submitted' || !sameId(locked.estimate_id, plan.estimate.id)
       || submittedAt(locked) !== submittedAt(plan.move)) {
@@ -2388,6 +2395,13 @@ async function endPause(moveId, { today, now }) {
   }
   try {
     const ended = await db.transaction(async (trx) => {
+      // Lock customer BEFORE customer_moves (matches submit/archive lock order)
+      // so inserting activity_log (FK -> customers) cannot deadlock against a
+      // concurrent resubmit or customer archive.
+      const owner = await trx('customer_moves').where({ id: moveId }).first('customer_id');
+      if (owner?.customer_id) {
+        await trx('customers').where({ id: owner.customer_id }).forUpdate().first('id');
+      }
       const locked = await trx('customer_moves').where({ id: moveId }).forUpdate().first();
       if (!locked || locked.status !== 'submitted' || locked.normalized_address || locked.pause_state !== 'paused'
         || !(dateOnlyString(locked.pause_ends_on) < today)) return null;
