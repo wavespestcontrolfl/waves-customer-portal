@@ -3,7 +3,7 @@
 // address, checks it, gives move-out and move-in dates, and sees a fixed
 // receipt. Nothing here shows a price. Every sentence comes from this file or
 // from the server; no model writes any of it.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { WavesShell, CustomerColumn, PublicStateCard, BrandButton } from '../components/brand';
 import AddressAutocomplete from '../components/AddressAutocomplete';
@@ -226,7 +226,7 @@ function formFlags(f, busy, view) {
   const addressPending = !f.noAddress && f.address.trim().length > 0 && !f.confirmed;
   return {
     addressPending,
-    canSubmit: !busy && !addressPending && (f.confirmed || hasOut || !!view.addressOnFile),
+    canSubmit: !busy && !addressPending && (f.confirmed || hasOut || (!f.noAddress && !!view.addressOnFile)),
     canCheck: !busy && !f.noAddress && f.address.trim().length >= 5,
   };
 }
@@ -248,14 +248,20 @@ function MoveForm({ token, view, onDone }) {
   };
 
   const submit = async () => {
+    const submitToken = token;
     setBusy('submit'); setError('');
     try {
-      onDone(await postJson(`${base}/submit`, {
-        // The check the customer confirmed; none keeps the saved address.
+      const done = await postJson(`${base}/submit`, {
+        // The check the customer confirmed; none keeps the saved address unless
+        // the customer explicitly ticked "Not sure yet" to clear a prior one.
         checkId: f.confirmed ? f.check.checkId : undefined,
+        ...(f.noAddress && view.addressOnFile
+          ? { clearAddress: true, expectedAddressVersion: view.addressVersion || null }
+          : {}),
         moveOutDate: f.outUnsure ? '' : f.moveOut,
         moveInDate: f.inUnsure ? '' : f.moveIn,
-      }));
+      });
+      onDone(done, submitToken);
     } catch (e) {
       setError(e.message);
       // 409: another window checked a different address since; check again.
@@ -295,14 +301,14 @@ function MoveForm({ token, view, onDone }) {
   );
 }
 
-export default function MovingPage() {
-  useGlassSurface(true);
-  const { token } = useParams();
+function MovingPageInner({ token }) {
   const [view, setView] = useState(null);
   const [state, setState] = useState('loading');
   const [attempt, setAttempt] = useState(0);
   const [receipt, setReceipt] = useState(null);
   const [editing, setEditing] = useState(false);
+  const activeTokenRef = useRef(token);
+  activeTokenRef.current = token;
 
   useEffect(() => {
     let cancelled = false;
@@ -322,7 +328,8 @@ export default function MovingPage() {
     return () => { cancelled = true; };
   }, [token, attempt]);
 
-  const onDone = useCallback((data) => {
+  const onDone = useCallback((data, fromToken) => {
+    if (fromToken && activeTokenRef.current !== fromToken) return;
     setReceipt(data.receipt || []);
     setView(data.view);
     setEditing(false);
@@ -363,4 +370,10 @@ export default function MovingPage() {
       </WavesShell>
     </>
   );
+}
+
+export default function MovingPage() {
+  useGlassSurface(true);
+  const { token } = useParams();
+  return <MovingPageInner key={token} token={token} />;
 }

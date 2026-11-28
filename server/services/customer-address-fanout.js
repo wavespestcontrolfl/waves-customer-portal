@@ -201,6 +201,45 @@ function snapshotMatchesLine1(snapshot, line1) {
 // (mergeSingletonPrefRow), and clears a moved-whole loser row's record itself with a
 // journaled before-image (executeMerge / revertMerge), the sod record and the
 // timer each under its own journal entry.
+// Old-house access codes, entry notes, and HOA notes on property_preferences
+// describe the home just left: clearing them inside the move guard stops old
+// entry codes from showing on new-home visits or being mirrored onto the new
+// property and filed into the new neighborhood's shared gate directory (P1-M1).
+const MOVED_HOME_ACCESS_COLUMNS = Object.freeze([
+  'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
+  'access_notes', 'side_gate_access', 'parking_notes', 'special_instructions',
+  'hoa_name', 'hoa_restrictions',
+  'hoa_company', 'hoa_phone', 'hoa_email', 'hoa_lawn_height',
+  'hoa_signage_rules', 'hoa_timing_restrictions', 'hoa_inspection_period',
+]);
+
+function clearedMovedHomeAccess() {
+  return Object.fromEntries(MOVED_HOME_ACCESS_COLUMNS.map((col) => [col, null]));
+}
+
+async function clearMovedHomeAccessDetails(customerId, conn = db, { retirePrimaryProperty = true, onlyIfMoved = true } = {}) {
+  if (!customerId || !onlyIfMoved) return;
+  try {
+    await conn('property_preferences').where({ customer_id: customerId }).update(clearedMovedHomeAccess());
+  } catch (err) {
+    logger.warn(`[address-fanout] property_preferences access clear skipped for ${customerId}: ${err.code || err.name || 'error'}`);
+  }
+  try {
+    await conn('customers').where({ id: customerId }).update({ gate_code: null, access_notes: null });
+  } catch (err) {
+    logger.warn(`[address-fanout] legacy customer access clear skipped for ${customerId}: ${err.code || err.name || 'error'}`);
+  }
+  try {
+    await conn('customer_access_codes')
+      .where({ customer_id: customerId, status: 'active', life: 'standing' })
+      .whereNull('property_id')
+      .update({ status: 'retired', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[address-fanout] unstamped access code retire skipped for ${customerId}: ${err.code || err.name || 'error'}`);
+  }
+  if (retirePrimaryProperty) await retirePrimaryPropertyAccessCodesOnEdit(customerId, conn);
+}
+
 async function markSprinklerSettingsMoved(customerId, conn = db, { clearNewSod = true } = {}) {
   if (!customerId) return 0;
   // Same customer-scoped lock the prefs PUT serializes on: an autosave begun
@@ -210,10 +249,9 @@ async function markSprinklerSettingsMoved(customerId, conn = db, { clearNewSod =
     'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     ['property-preferences', String(customerId)],
   );
-  // The new-sod record (sod_laid_on, covers, area, rooted day) is a fact about the home that was
-  // just left: it survives an address edit, a merge and a primary promotion on the customer-level
-  // row, so the SAME stamp clears all of it in the same transaction. The next visit at the new
-  // home runs the program with no sod holds.
+  // The new-sod record and sprinkler timer are facts about the home that was
+  // just left: clear them in the same transaction on a real move, while
+  // preserving them on merge (clearNewSod:false).
   const stamp = {
     irrigation_home_changed_at: new Date(),
     irrigation_confirmed_fields: JSON.stringify([]),
@@ -240,43 +278,70 @@ function premiseFields(row) {
   return { ...row, address_line1: split.line1, address_line2: row.address_line2 || split.line2, city: split.city, zip: split.zip };
 }
 
-// Two customer rows describe DIFFERENT homes (normalized street, unit, zip,
-// city) — the premise test the sprinkler-settings move guard uses, shared
-// with the customer merge (a duplicate pair can be the old and new home).
-function homesDiffer(rowA, rowB) {
+function premiseParts(row) {
+  const inline = splitStreetLineUnit(row?.address_line1 || '');
+  const embedded = unitKey(inline.unit || '');
+  const line2 = unitKey(row?.address_line2 || '');
+  return {
+    street: addressMatchKey(normalizeStreetLine(inline.unit ? inline.street : (row?.address_line1 || ''))),
+    unit: embedded && line2 && embedded !== line2 ? `${embedded}${line2}` : (embedded || line2),
+  };
+}
+
+function homesCompare(rowA, rowB) {
   const a = premiseFields(rowA);
   const b = premiseFields(rowB);
   const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
-  // Street + unit resolved the way snapshotMatchesContact does: an inline
-  // unit on line 1 ("123 Main St Apt 4") is the same premise as line 1 +
-  // line 2 ("123 Main St" / "Apt 4") — a cleanup is never a move. Both unit
-  // sources count, as in addressKey: "Apt 4" + "Building A" is not "Apt 5" +
-  // "Building A"; the same unit given twice counts once. Suffix-normalized
-  // ("Main Street" == "Main St") like every street compare here.
-  const premise = (row) => {
-    const inline = splitStreetLineUnit(row?.address_line1 || '');
-    const embedded = unitKey(inline.unit || '');
-    const line2 = unitKey(row?.address_line2 || '');
-    return {
-      street: addressMatchKey(normalizeStreetLine(inline.unit ? inline.street : (row?.address_line1 || ''))),
-      unit: embedded && line2 && embedded !== line2 ? `${embedded}${line2}` : (embedded || line2),
-    };
-  };
-  const pa = premise(a);
-  const pb = premise(b);
+  const pa = premiseParts(a);
+  const pb = premiseParts(b);
   const za = zip5(a?.zip);
   const zb = zip5(b?.zip);
   const ca = addressMatchKey(a?.city);
   const cb = addressMatchKey(b?.city);
-  // ZIP is authoritative when both sides have one (postal city names alias —
-  // Bradenton / Lakewood Ranch share 34211, same rule as placeCorroborates);
-  // city decides only when both sides have a city and no ZIP compare is
-  // possible. Missing place evidence on either side is never contradictory
-  // evidence — completing a blank city/ZIP is not a move (codex gh-r29/r30).
   const placeDiffers = (za && zb) ? za !== zb : ((ca && cb) ? ca !== cb : false);
+  return { pa, pb, placeDiffers };
+}
+
+// Two customer rows describe DIFFERENT homes (normalized street, unit, zip,
+// city) — the premise test the sprinkler-settings move guard uses, shared
+// with the customer merge (a duplicate pair can be the old and new home).
+function homesDiffer(rowA, rowB) {
+  const { pa, pb, placeDiffers } = homesCompare(rowA, rowB);
   return pa.street !== pb.street
     || pa.unit !== pb.unit
     || placeDiffers;
+}
+
+// Affirmative move evidence for destructive cleanup (clearing access codes,
+// entry notes, HOA rules): adding a previously missing unit/apt on the same
+// street & place completes an existing address and must preserve access info,
+// whereas changing street, place, or replacing one real unit with another
+// clears the old home's access details.
+function homeMovedDestructively(rowA, rowB) {
+  const { pa, pb, placeDiffers } = homesCompare(rowA, rowB);
+  return pa.street !== pb.street
+    || placeDiffers
+    || (Boolean(pa.unit) && Boolean(pb.unit) && pa.unit !== pb.unit);
+}
+
+async function clearMovedHomeAccessOnAddressChange(customerId, before, after, conn) {
+  if (!addressMatchKey(after && after.address_line1) || homeMovedDestructively(before, after)) {
+    await clearMovedHomeAccessDetails(customerId, conn, { retirePrimaryProperty: true });
+  }
+}
+
+async function retirePrimaryPropertyAccessCodesOnEdit(customerId, conn) {
+  try {
+    const primary = await conn('customer_properties')
+      .where({ customer_id: customerId, is_primary: true, active: true })
+      .first('id');
+    if (!primary?.id) return;
+    await conn('customer_access_codes')
+      .where({ customer_id: customerId, property_id: primary.id, status: 'active', life: 'standing' })
+      .update({ status: 'retired', updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[address-fanout] primary property access code retire skipped for ${customerId}: ${err.code || err.name || 'error'}`);
+  }
 }
 
 async function propagateCustomerAddressChange({ before, after }, conn = db) {
@@ -287,9 +352,11 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // would destroy the only remaining record of where service was requested.
   // The sprinkler-settings move guard still applies: the settings described
   // the home that was just cleared (hook P1 on a40e19f53).
+  const hadPriorStreet = Boolean(before && addressMatchKey(before.address_line1));
   if (!addressMatchKey(after && after.address_line1)) {
-    if (addressMatchKey(before && before.address_line1)) {
+    if (hadPriorStreet) {
       counts.property_preferences = await markSprinklerSettingsMoved(customerId, conn);
+      await clearMovedHomeAccessOnAddressChange(customerId, before, after, conn);
     }
     return counts;
   }
@@ -298,18 +365,13 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     snapshotMatchesContact(snapshot, before) || snapshotMatchesContact(snapshot, after);
 
   const now = new Date();
-  // The primary HOME moved (street, city or zip): the customer's sprinkler
-  // settings on property_preferences describe the former property's system.
-  // Stamp the move so the weekly watering plan withholds exact controller
-  // minutes until the settings are re-saved for the new home (codex #3565
-  // gh-r19). Only the stamp is written — the settings themselves stay for
-  // the customer to reconfirm or edit.
-  // A unit is a distinct premise (the report's plan binding treats it so):
-  // moving between units in one building is a move too — hook P1 on
-  // 75b90bf11. Normalized keys, so a formatting correction never counts.
-  const homeMoved = !!before && homesDiffer(before, after);
+  // The primary HOME moved (street, city or zip): require evidence of a real
+  // prior street address so entering a customer's FIRST address never clears
+  // pre-entered gate codes, access notes, HOA details, or sprinkler info.
+  const homeMoved = hadPriorStreet && homesDiffer(before, after);
   if (homeMoved) {
     counts.property_preferences = await markSprinklerSettingsMoved(customerId, conn);
+    await clearMovedHomeAccessOnAddressChange(customerId, before, after, conn);
   }
   const addressParts = {
     line1: after.address_line1, line2: after.address_line2, city: after.city, state: after.state, zip: after.zip,
@@ -539,6 +601,10 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
 module.exports = {
   addressMatchKey,
   homesDiffer,
+  homeMovedDestructively,
+  MOVED_HOME_ACCESS_COLUMNS,
+  clearedMovedHomeAccess,
+  clearMovedHomeAccessDetails,
   markSprinklerSettingsMoved,
   formatAddressBounded,
   snapshotMatchesContact,

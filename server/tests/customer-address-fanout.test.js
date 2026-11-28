@@ -50,9 +50,10 @@ function makeConn(rowsByTable) {
   conn.__updates = updates;
   return conn;
 }
-// The lead/estimate fan-out statements only — the irrigation home-moved stamp
-// (property_preferences, gh-r19) is asserted by its own tests below.
-const fanout = (conn) => conn.__updates.filter((u) => u.table !== 'property_preferences');
+// The lead/estimate fan-out statements only — the irrigation & access move
+// cleanup (property_preferences, legacy customers, unstamped customer_access_codes)
+// is asserted by its own tests below.
+const fanout = (conn) => conn.__updates.filter((u) => !['property_preferences', 'customers', 'customer_access_codes'].includes(u.table));
 
 const BEFORE = {
   id: 'cust-1',
@@ -563,7 +564,8 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
   test('a primary-address move stamps property_preferences.irrigation_home_changed_at', async () => {
     const conn = makeConn({ leads: [], estimates: [] });
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
-    const stamp = conn.__updates.find((u) => u.table === 'property_preferences');
+    const prefUpdates = conn.__updates.filter((u) => u.table === 'property_preferences');
+    const stamp = prefUpdates[0];
     expect(stamp).toBeTruthy();
     expect(stamp.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
     // The move stamp + a reset of the per-field confirmation set — never the settings themselves.
@@ -573,6 +575,12 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     for (const column of CONTROLLER_TIMER_FIELDS) expect(stamp.patch[column]).toBeNull();
     expect(stamp.patch.irrigation_confirmed_fields).toBe('[]');
     for (const column of NEW_SOD_COLUMNS) expect(stamp.patch[column]).toBeNull();
+    // Moved-home access codes, entry notes, and HOA rules clear in their own update.
+    const { MOVED_HOME_ACCESS_COLUMNS } = require('../services/customer-address-fanout');
+    const accessClear = prefUpdates.find((u) => Object.prototype.hasOwnProperty.call(u.patch, 'neighborhood_gate_code'));
+    expect(accessClear).toBeTruthy();
+    expect(Object.keys(accessClear.patch)).toEqual([...MOVED_HOME_ACCESS_COLUMNS]);
+    for (const column of MOVED_HOME_ACCESS_COLUMNS) expect(accessClear.patch[column]).toBeNull();
     expect(counts.property_preferences).toBe(1); // mock: no prefs row → the guard is upserted
   });
   test('clearing the primary address stamps the move (no lead/estimate propagation, as before)', async () => {
@@ -589,6 +597,45 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Unit 4' }, after: { ...BEFORE, address_line2: 'Unit 7' } }, conn);
     expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeTruthy();
   });
+  test('entering a customer\'s FIRST address does not clear existing access codes, notes, or sprinkler settings', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    await propagateCustomerAddressChange({ before: { ...BEFORE, address_line1: '', city: '', zip: '' }, after: AFTER }, conn);
+    expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeUndefined();
+    expect(conn.__updates.find((u) => u.table === 'customer_access_codes')).toBeUndefined();
+  });
+  test('adding a previously missing unit on the same street preserves gate codes, HOA rules, and access notes', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    await propagateCustomerAddressChange(
+      { before: { ...BEFORE, address_line2: '' }, after: { ...BEFORE, address_line2: 'Apt 4' } },
+      conn,
+    );
+    expect(conn.__updates.find((u) => u.table === 'customer_access_codes')).toBeUndefined();
+    const prefUpdate = conn.__updates.find((u) => u.table === 'property_preferences' && u.patch?.hoa_timing_restrictions === null);
+    expect(prefUpdate).toBeUndefined();
+  });
+  test('editing an existing primary address in place retires standing codes bound to the primary property id as well as unstamped codes', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    const wrapped = (table) => {
+      const qb = conn(table);
+      if (table === 'customer_properties') qb.first = () => Promise.resolve({ id: 'prop-primary-1' });
+      return qb;
+    };
+    wrapped.raw = conn.raw;
+    await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, wrapped);
+    const codeRetires = conn.__updates.filter((u) => u.table === 'customer_access_codes' && u.patch?.status === 'retired');
+    expect(codeRetires).toHaveLength(2);
+    const prefUpdate = conn.__updates.find((u) => u.table === 'property_preferences' && u.patch?.hoa_timing_restrictions === null);
+    expect(prefUpdate.patch).toMatchObject({
+      neighborhood_gate_code: null,
+      property_gate_code: null,
+      garage_code: null,
+      lockbox_code: null,
+      hoa_name: null,
+      hoa_restrictions: null,
+      hoa_timing_restrictions: null,
+      hoa_signage_rules: null,
+    });
+  });
   test('markSprinklerSettingsMoved is the ONE writer of the move guard — fan-out, merge and the primary-residence promotion all use it (gh-r26)', async () => {
     const { markSprinklerSettingsMoved } = require('../services/customer-address-fanout');
     const conn = makeConn({});
@@ -604,7 +651,7 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(Object.keys(up.row).sort()).toEqual(['customer_id', 'irrigation_confirmed_fields', 'irrigation_home_changed_at', ...NEW_SOD_COLUMNS, ...CONTROLLER_TIMER_FIELDS].sort());
     const fs = require('fs');
     const path = require('path');
-    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/if \(!sameHomeFlip\) await require\('\.\/customer-address-fanout'\)\.markSprinklerSettingsMoved\(customerId, trx\);/);
+    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
     expect(fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8')).toMatch(/fanout\.markSprinklerSettingsMoved\(winnerId, sp, \{ clearNewSod: false \}\)/);
     const src = fs.readFileSync(path.join(__dirname, '../services/customer-address-fanout.js'), 'utf8');
     expect(src.match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);

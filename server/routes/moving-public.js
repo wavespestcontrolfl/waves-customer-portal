@@ -37,10 +37,12 @@ const PRIVACY_HEADERS = {
 
 const NOT_FOUND = { error: 'Not found' };
 
-router.use((req, res, next) => {
+function stampMovingPrivacyHeaders(_req, res, next) {
   res.set(PRIVACY_HEADERS);
   return next();
-});
+}
+
+router.use(stampMovingPrivacyHeaders);
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -123,6 +125,8 @@ router.post('/:token/submit', submitLimiter, async (req, res) => {
     const body = req.body || {};
     const saved = await Moves.submitMove(move, {
       checkId: typeof body.checkId === 'string' && body.checkId ? body.checkId : null,
+      clearAddress: body.clearAddress === true,
+      expectedAddressVersion: typeof body.expectedAddressVersion === 'string' && body.expectedAddressVersion ? body.expectedAddressVersion : null,
       moveOutDate: body.moveOutDate,
       moveInDate: body.moveInDate,
     });
@@ -132,4 +136,5 @@ router.post('/:token/submit', submitLimiter, async (req, res) => {
   }
 });
 
+router.stampMovingPrivacyHeaders = stampMovingPrivacyHeaders;
 module.exports = router;

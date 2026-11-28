@@ -54,6 +54,9 @@ export function moveStatusText(move) {
   if (move.status === "closed" && move.closed_reason === "pause_expired") {
     return `Pause ended${move.closed_at ? ` ${shortDate(move.closed_at)}` : ""}: no new address in 60 days`;
   }
+  if (move.status === "closed") {
+    return `Move closed${move.closed_at ? ` ${shortDate(move.closed_at)}` : ""}`;
+  }
   if (move.status === "submitted") {
     const normalized = parseAddress(move.normalized_address);
     const where = move.typed_address
@@ -274,13 +277,16 @@ export default function CustomerMovingCardV2({ customerId }) {
   const [note, setNote] = useState("");
   const [manualUrl, setManualUrl] = useState("");
   const manualRef = useRef(null);
+  const activeCustomerRef = useRef(customerId);
+  activeCustomerRef.current = customerId;
 
   const load = useCallback(async (signal) => {
+    const targetId = customerId;
     try {
-      const res = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/moves`, { signal });
+      const res = await adminFetch(`/admin/customers/${encodeURIComponent(targetId)}/moves`, { signal });
       if (!res.ok) return;
       const data = await res.json().catch(() => null);
-      if (signal?.aborted) return;
+      if (signal?.aborted || activeCustomerRef.current !== targetId) return;
       // An unreadable answer leaves the card hidden, never an empty move history.
       if (!data || !Array.isArray(data.moves)) return;
       setLoaded(true);
@@ -293,16 +299,21 @@ export default function CustomerMovingCardV2({ customerId }) {
   }, [customerId]);
 
   useEffect(() => {
-    if (!customerId) return undefined;
+    activeCustomerRef.current = customerId || null;
+    if (!customerId) return () => { activeCustomerRef.current = null; };
     setLoaded(false);
     setMoves([]);
     setText(null);
     setEstimateEnabled(false);
+    setBusy("");
     setNote("");
     setManualUrl("");
     const ac = new AbortController();
     load(ac.signal);
-    return () => ac.abort();
+    return () => {
+      activeCustomerRef.current = null;
+      ac.abort();
+    };
   }, [customerId, load]);
 
   useEffect(() => {
@@ -310,38 +321,46 @@ export default function CustomerMovingCardV2({ customerId }) {
   }, [manualUrl]);
 
   const emailLink = async () => {
+    const targetId = customerId;
     setBusy("email"); setNote(""); setManualUrl("");
     try {
-      const res = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/moving-email`, { method: "POST", body: "{}" });
+      const res = await adminFetch(`/admin/customers/${encodeURIComponent(targetId)}/moving-email`, { method: "POST", body: "{}" });
       const data = await res.json().catch(() => ({}));
+      if (activeCustomerRef.current !== targetId) return;
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setNote(data.sent ? "Moving link emailed." : `Email not sent. ${EMAIL_REASONS[data.reason] || "It could not be sent."}`);
       await load();
     } catch (e) {
+      if (activeCustomerRef.current !== targetId) return;
       setNote(e?.message || "Could not send the email.");
     } finally {
-      setBusy("");
+      if (activeCustomerRef.current === targetId) setBusy("");
     }
   };
 
   const copyLink = async () => {
+    const targetId = customerId;
     setBusy("copy"); setNote(""); setManualUrl("");
     try {
-      const res = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/moving-link`, { method: "POST", body: "{}" });
+      const res = await adminFetch(`/admin/customers/${encodeURIComponent(targetId)}/moving-link`, { method: "POST", body: "{}" });
       const data = await res.json().catch(() => ({}));
+      if (activeCustomerRef.current !== targetId) return;
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       try {
         await navigator.clipboard.writeText(data.url);
+        if (activeCustomerRef.current !== targetId) return;
         setNote("Moving link copied.");
       } catch {
+        if (activeCustomerRef.current !== targetId) return;
         setManualUrl(data.url);
         setNote("Copy the link below.");
       }
       await load();
     } catch (e) {
+      if (activeCustomerRef.current !== targetId) return;
       setNote(e?.message || "Could not make the link.");
     } finally {
-      setBusy("");
+      if (activeCustomerRef.current === targetId) setBusy("");
     }
   };
 

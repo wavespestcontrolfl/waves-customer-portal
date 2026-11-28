@@ -5939,8 +5939,15 @@ async function customerArchiveHandler(req, res, next) {
           throw err;
         }
         // Billing was just wound down by churnGuardForRow on this same
-        // transaction — only deleted_at is left to stamp here.
-        await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
+        // transaction — stamp deleted_at and close any live moving links so
+        // an archived customer cannot keep opening /moving/:token or burning
+        // paid Google Address Validation checks (P2-M2).
+        const archiveNow = new Date();
+        await trx('customers').where({ id: req.params.id }).update({ deleted_at: archiveNow });
+        await trx('customer_moves')
+          .where({ customer_id: req.params.id })
+          .whereIn('status', ['open', 'submitted'])
+          .update({ status: 'closed', closed_reason: 'cancelled', closed_at: archiveNow, updated_at: archiveNow });
         const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
         await auditCustomerMutation(req, 'customer.archive', req.params.id, {
           previousDeletedAt: customer.deleted_at || null,

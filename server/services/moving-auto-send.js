@@ -332,7 +332,8 @@ async function sendMorningText(row, { now, sender }) {
 // customer cannot open. A first send rings the office; a morning text gives
 // the customer the emailed estimate back (giveLinkBack).
 async function settleStale(estimate, now) {
-  const auto = parseJson(estimate.estimate_data)?.automation?.moveAutoSend || {};
+  const data = parseJson(estimate.estimate_data);
+  const auto = data?.automation?.moveAutoSend || {};
   const text = !!auto.textClaimedAt && !auto.textAttemptedAt;
   const done = text ? 'textAttemptedAt' : 'attemptedAt';
   return db.transaction(async (trx) => {
@@ -340,6 +341,12 @@ async function settleStale(estimate, now) {
       .whereRaw(`estimate_data->'automation'->'moveAutoSend'->>'${done}' IS NULL`)
       .update({ estimate_data: merged(trx, text ? { textAttemptedAt: now.toISOString(), textResult: 'stale' } : { attemptedAt: now.toISOString(), result: 'stale' }) });
     if (!marked) return 'skipped';
+    const moveBlock = await require('./customer-moves').moveLinkBlock(trx, data);
+    if (moveBlock) {
+      await trx('estimates').where({ id: estimate.id, status: 'sending' })
+        .update({ status: 'send_failed', last_send_error: String(moveBlock), updated_at: trx.fn.now() });
+      return 'skipped';
+    }
     if (text) return giveLinkBack(trx, estimate);
     await officeItem(trx, estimate, 'stale', { step: 'send' });
     return 'office';
@@ -360,10 +367,17 @@ async function runMoveAutoSendJob({ now = new Date(), sendEstimateNow = null } =
       logger.error(`[moving-auto-send] ${step} for estimate ${row.id} failed (${String(err?.code || err?.name || 'error')})`);
     }
   };
-  // Through the move (a small table), never a scan of every estimate.
+  // Through customer_moves (a small table), including superseded move estimates
+  // whose move already replaced estimate_id while an earlier claim was in 'sending'.
   const cutoff = new Date(now.getTime() - STALE_CLAIM_MS).toISOString();
   const stale = await db('estimates as e')
-    .join('customer_moves as m', 'm.estimate_id', 'e.id')
+    .whereExists(function linkedToMove() {
+      this.select(db.raw('1')).from('customer_moves as m')
+        .where(function sameMove() {
+          this.whereRaw('m.estimate_id = e.id')
+            .orWhereRaw("e.estimate_data->'move'->>'moveId' = m.id::text");
+        });
+    })
     .whereRaw(`(((e.estimate_data->'automation'->'moveAutoSend'->>'claimedAt')::timestamptz < ?::timestamptz
         AND e.estimate_data->'automation'->'moveAutoSend'->>'attemptedAt' IS NULL)
       OR ((e.estimate_data->'automation'->'moveAutoSend'->>'textClaimedAt')::timestamptz < ?::timestamptz

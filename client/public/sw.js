@@ -891,8 +891,9 @@ function isOfferLinkPath(pathname) {
     text = next;
   }
   const lower = text.toLowerCase();
-  // The new-home postcard page (/h/<token>): its path is that home's bearer link (address and price).
-  return lower.includes('careers/offer/') || /^\/+h\//.test(lower);
+  // The new-home postcard page (/h/<token>) and moving page (/moving/<token>):
+  // each path is a customer's private bearer link and must never be cached.
+  return lower.includes('careers/offer/') || /^\/+h\//.test(lower) || /^\/+moving\//.test(lower);
 }
 
 // The storage rule. A stored response keeps the URL it came from, and a

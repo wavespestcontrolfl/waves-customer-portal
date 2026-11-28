@@ -204,4 +204,29 @@ describe('MovingPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check address' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('We have checked that address a few times today.'));
   });
+
+  it('clearing a previously saved address via Not sure yet posts clearAddress: true', async () => {
+    const calls = renderPage([
+      [`/public/moving/${TOKEN}`, () => jsonResponse({
+        ...OPEN_VIEW, status: 'submitted', newCity: 'Parrish', verdict: 'in_area', addressOnFile: true, addressVersion: '2026-11-10T12:00:00.000Z', moveOutDate: '2026-11-15',
+      })],
+      [`/public/moving/${TOKEN}/submit`, () => jsonResponse({
+        ok: true,
+        receipt: ['Thanks, Pat. We have your move dates.'],
+        view: { ...OPEN_VIEW, status: 'submitted', addressOnFile: false, addressVersion: '2026-11-11T12:00:00.000Z', moveOutDate: '2026-11-15' },
+      })],
+    ]);
+    await screen.findByRole('heading', { level: 1, name: 'We have your move, Pat.' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add or change details' }));
+    fireEvent.click(screen.getAllByLabelText('Not sure yet')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Send my move' }));
+    await screen.findByRole('heading', { level: 1, name: 'Got it' });
+    const submit = calls.find((c) => c.url.endsWith('/submit'));
+    expect(submit.body).toEqual({
+      clearAddress: true,
+      expectedAddressVersion: '2026-11-10T12:00:00.000Z',
+      moveOutDate: '2026-11-15',
+      moveInDate: '',
+    });
+  });
 });

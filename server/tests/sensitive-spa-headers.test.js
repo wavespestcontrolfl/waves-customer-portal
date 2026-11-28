@@ -13,6 +13,7 @@ const {
   isCareersInterviewPath,
   isCareersOfferPath,
   isInspectionPath,
+  isMovingPath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -334,5 +335,26 @@ describe('contract signing shell (/contract/<token>)', () => {
     expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
     expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
     expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
+
+  test('protects /moving/:token across case, percent-encoding, and trailing slashes', () => {
+    const MOVE_TOKEN = 'ab'.repeat(24);
+    for (const path of [
+      `/moving/${MOVE_TOKEN}`,
+      `/Moving/${MOVE_TOKEN}/`,
+      `/MOVING/${MOVE_TOKEN.toUpperCase()}//`,
+      `/%6Doving/${MOVE_TOKEN}`,
+      '/moving/not-a-token',
+    ]) {
+      expect(isMovingPath(path)).toBe(true);
+      const res = mockResponse();
+      applySensitiveSpaHeaders(path, res);
+      expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+      expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    }
+    expect(isMovingPath('/moving/')).toBe(false);
+    expect(isMovingPath('/moving/a/b')).toBe(false);
+    expect(isMovingPath(`/api/public/moving/${MOVE_TOKEN}`)).toBe(false);
   });
 });

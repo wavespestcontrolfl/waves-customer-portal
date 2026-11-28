@@ -55,6 +55,8 @@ describe('moveStatusText', () => {
     expect(moveStatusText({ status: 'closed', closed_reason: 'applied', applied_at: '2026-11-21T15:00:00Z' })).toBe('Move applied Nov 21');
     expect(moveStatusText({ status: 'closed', closed_reason: 'pause_expired', closed_at: '2027-01-15T15:20:00Z' }))
       .toBe('Pause ended Jan 15: no new address in 60 days');
+    expect(moveStatusText({ status: 'closed', closed_reason: 'cancelled', closed_at: '2026-11-28T15:00:00Z' }))
+      .toBe('Move closed Nov 28');
   });
 });
 
@@ -248,6 +250,26 @@ describe('CustomerMovingCardV2', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Copy moving link' }));
     expect(await screen.findByLabelText('Moving link')).toHaveValue('https://wvs.example/m/abc');
     expect(adminFetch).toHaveBeenCalledWith(`/admin/customers/${CUSTOMER}/moving-link`, { method: 'POST', body: '{}' });
+  });
+
+  it('Copy moving link does not write to the clipboard if the card unmounts before the request resolves', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    let resolveLink;
+    const origImpl = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((url, opts) => {
+      if (url === `/admin/customers/${CUSTOMER}/moving-link`) {
+        return new Promise((resolve) => { resolveLink = resolve; });
+      }
+      return origImpl(url, opts);
+    });
+    const { unmount } = render(<CustomerMovingCardV2 customerId={CUSTOMER} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy moving link' }));
+    unmount();
+    resolveLink({ ok: true, status: 200, json: async () => ({ url: 'https://wvs.example/m/late' }) });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writeText).not.toHaveBeenCalled();
   });
 
   const applyMove = { id: 'move-apply', status: 'submitted', typed_address: '40 Sample Road', move_out_date: '2026-11-20', submitted_at: '2026-11-03T15:00:00Z' };

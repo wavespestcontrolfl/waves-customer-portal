@@ -5634,6 +5634,18 @@ function recordEstimateLinePick(database, visit) {
   });
 }
 
+function assertMoveEstimateNotAnnualPrepay(billingTerm, estimateData) {
+  if (billingTerm !== 'prepay_annual' || !estimateData?.move?.moveId) return;
+  const err = new Error(
+    'Annual prepay is not supported for moving new-home estimates — convert this estimate as per-application billing.'
+  );
+  err.code = 'ANNUAL_PREPAY_MOVE_ESTIMATE_UNSUPPORTED';
+  err.isOperational = true;
+  err.status = 422;
+  err.statusCode = 422;
+  throw err;
+}
+
 const EstimateConverter = {
   /**
    * Convert an accepted estimate into an active customer with scheduled services.
@@ -5896,6 +5908,8 @@ const EstimateConverter = {
     // primary name — the combined "…+ Termite Bond Service" service_type
     // can't be stamped, so its completions would bill again on top of the
     // prepaid amount. Route bond + annual-prepay to manual conversion.
+    // FAIL-CLOSED: moving new-home estimates never convert as annual prepay.
+    assertMoveEstimateNotAnnualPrepay(billingTerm, estimateData);
     if (billingTerm === 'prepay_annual' && hasTermiteBondLine) {
       const err = new Error(
         'Annual prepay isn\'t supported with a termite bond rider yet — convert this estimate as per-application billing, or bill the prepay manually.'

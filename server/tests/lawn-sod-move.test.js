@@ -8,7 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const fs = require('fs');
 const path = require('path');
-const { propagateCustomerAddressChange, markSprinklerSettingsMoved } = require('../services/customer-address-fanout');
+const { propagateCustomerAddressChange, markSprinklerSettingsMoved, MOVED_HOME_ACCESS_COLUMNS } = require('../services/customer-address-fanout');
 const { NEW_SOD_COLUMNS } = require('../services/lawn-sod-holds');
 
 // A stateful fake: ONE preference row that the move writer updates, so the test proves the
@@ -85,6 +85,27 @@ describe('a move clears the whole new-sod record', () => {
     const merged = makeStore({ ...record(), ...timer });
     await markSprinklerSettingsMoved('cust-1', merged.db, { clearNewSod: false });
     expect(timerOf(merged.prefs)).toEqual(timer);
+  });
+
+  test('a real move clears old-home entry codes, access notes, and HOA rules while formatting edits and merges keep them', async () => {
+    const access = {
+      neighborhood_gate_code: '#1234', property_gate_code: '5678', garage_code: '9999', lockbox_code: '0000',
+      access_notes: 'Left side gate', side_gate_access: 'Unlocked', parking_notes: 'Driveway',
+      special_instructions: 'Ring bell', hoa_name: 'Palm HOA', hoa_restrictions: 'No Fridays',
+    };
+    const accessOf = (prefs) => Object.fromEntries(MOVED_HOME_ACCESS_COLUMNS.map((c) => [c, prefs[c]]));
+    const moved = makeStore({ ...record(), ...access, pet_details: '2 dogs' });
+    await propagateCustomerAddressChange({ before: HOME, after: NEW_HOME }, moved.db);
+    expect(accessOf(moved.prefs)).toEqual(Object.fromEntries(MOVED_HOME_ACCESS_COLUMNS.map((c) => [c, null])));
+    expect(moved.prefs.pet_details).toBe('2 dogs');
+
+    const sameHome = makeStore({ ...record(), ...access });
+    await propagateCustomerAddressChange({ before: HOME, after: { ...HOME, address_line1: '100 EXAMPLE CT.' } }, sameHome.db);
+    expect(accessOf(sameHome.prefs)).toEqual(access);
+
+    const merged = makeStore({ ...record(), ...access });
+    await markSprinklerSettingsMoved('cust-1', merged.db, { clearNewSod: false });
+    expect(accessOf(merged.prefs)).toEqual(access);
   });
 
   test('the merge path stamps the move WITHOUT clearing the record, so an undo returns the row with it', async () => {

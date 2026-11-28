@@ -115,6 +115,18 @@ async function primaryPropertyId(customerId, conn = db) {
   return row ? row.id : null;
 }
 
+async function ensurePrimaryPropertyId(customerId, conn = db) {
+  const existing = await primaryPropertyId(customerId, conn);
+  if (existing) return existing;
+  try {
+    const ensured = await require('./customer-properties').ensurePrimaryProperty(customerId, conn && conn.isTransaction ? { conn } : {});
+    if (ensured && ensured.propertyId) return ensured.propertyId;
+  } catch (err) {
+    logger.warn(`[customer-moves] primary property backfill failed for customer ${customerId} (${errCode(err)})`);
+  }
+  return primaryPropertyId(customerId, conn);
+}
+
 async function liveMoveFor(customerId, conn = db) {
   return conn('customer_moves')
     .where({ customer_id: customerId })
@@ -130,7 +142,7 @@ async function openMoveForCustomer(customerId, { actorId = null } = {}) {
   if (!customerId) throw new MoveError('no_customer', 'Customer is required', 400);
   const existing = await liveMoveFor(customerId);
   if (existing) return existing;
-  const fromPropertyId = await primaryPropertyId(customerId);
+  const fromPropertyId = await ensurePrimaryPropertyId(customerId);
   try {
     const [row] = await db('customer_moves').insert({
       customer_id: customerId,
@@ -172,7 +184,11 @@ async function movingLinkFor(move) {
 
 async function loadMoveByToken(token) {
   if (!TOKEN_RE.test(String(token || ''))) return null;
-  const row = await db('customer_moves').where({ token }).first();
+  const row = await db('customer_moves as m')
+    .join('customers as c', 'c.id', 'm.customer_id')
+    .where('m.token', token)
+    .whereNull('c.deleted_at')
+    .first('m.*');
   if (!row || row.status === 'closed') return null;
   return row;
 }
@@ -270,21 +286,60 @@ async function checkMoveAddress(move, rawAddress, { now = new Date() } = {}) {
 
 // ── Public view ─────────────────────────────────────────────────────────────
 
-async function planServiceNames(customerId, conn = db) {
-  const rows = await conn('scheduled_services')
-    .where({ customer_id: customerId, recurring_ongoing: true })
-    .where(function notCallback() { this.whereNull('is_callback').orWhere('is_callback', false); })
-    .whereNotNull('service_type')
-    .distinct('service_type')
-    .orderBy('service_type');
-  return rows.map((r) => String(r.service_type || '').trim()).filter(Boolean);
+async function pausedPlanRowsForMove(move, conn = db) {
+  if (!move || !(move.pause_state === 'paused' || move.paused_at)) return [];
+  const recovered = [];
+  const seen = new Set();
+  const pushRow = (serviceType, recurringPattern) => {
+    const type = String(serviceType || '').trim();
+    if (!type) return;
+    const pat = recurringPattern || null;
+    const key = `${type.toLowerCase()}::${pat || ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    recovered.push({ service_type: type, recurring_pattern: pat });
+  };
+  try {
+    const logRow = await conn('activity_log')
+      .where({ customer_id: move.customer_id, action: 'moving_paused' })
+      .whereRaw("metadata->>'move_id' = ?", [String(move.id)])
+      .orderBy('created_at', 'desc')
+      .first('metadata');
+    const meta = parseJson(logRow?.metadata);
+    for (const s of Array.isArray(meta?.stopped_series) ? meta.stopped_series : []) {
+      pushRow(s?.serviceType || s?.service_type, s?.recurringPattern || s?.recurring_pattern);
+    }
+  } catch { /* fall through to status history */ }
+  const notes = [pauseVisitNote(move.id), firstPauseVisitNote(move.id)];
+  const historyRows = await conn('scheduled_services as ss')
+    .where({ 'ss.customer_id': move.customer_id })
+    .where(function notCallback() { this.whereNull('ss.is_callback').orWhere('ss.is_callback', false); })
+    .whereNotNull('ss.service_type')
+    .where((q) => q.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_pattern'))
+    .where((q) => q.whereNull('ss.recurring_pattern').orWhereNot('ss.recurring_pattern', ONE_TIME_PATTERN))
+    .whereExists(function cancelledByMovePause() {
+      this.select(conn.raw('1')).from('job_status_history as h')
+        .whereRaw('h.job_id = ss.id')
+        .where('h.to_status', 'cancelled')
+        .whereIn('h.notes', notes);
+    })
+    .distinct('ss.service_type', 'ss.recurring_pattern')
+    .orderBy('ss.service_type')
+    .catch(() => []);
+  for (const r of historyRows || []) pushRow(r.service_type, r.recurring_pattern);
+  return recovered;
+}
+
+async function planServiceNames(customerId, conn = db, { move = null } = {}) {
+  const rows = await planServicesFor(customerId, conn, { move });
+  return [...new Set(rows.map((r) => r.name).filter(Boolean))].sort();
 }
 
 /** The public page's payload. Nothing but the fields below leaves this function. */
 async function publicMoveView(move) {
   const customer = await db('customers').where({ id: move.customer_id }).first('first_name');
   const firstName = String((customer && customer.first_name) || '').trim().split(/\s+/)[0] || 'there';
-  const services = await planServiceNames(move.customer_id);
+  const services = await planServiceNames(move.customer_id, db, { move });
   const normalized = parseJson(move.normalized_address);
   return {
     firstName,
@@ -298,6 +353,7 @@ async function publicMoveView(move) {
     newCity: (normalized && normalized.city) || null,
     verdict: move.address_verdict || null,
     addressOnFile: !!normalized,
+    addressVersion: move.submitted_at ? new Date(move.submitted_at).toISOString() : null,
   };
 }
 
@@ -356,7 +412,7 @@ const CHECK_ID_RE = /^[a-f0-9]{16}$/;
 // checkId = "use the address check I confirmed". It must be the check the
 // server holds now; one replaced since (another tab or device) is refused,
 // never swapped in. No checkId keeps the address already saved.
-function addressForSubmit(move, checkId) {
+function addressForSubmit(move, checkId, { clearAddress = false, expectedAddressVersion = null } = {}) {
   if (checkId) {
     const last = parseJson(move.last_check);
     if (!CHECK_ID_RE.test(String(checkId)) || !last || !last.result || !last.result.typed) {
@@ -366,6 +422,13 @@ function addressForSubmit(move, checkId) {
       throw new MoveError('stale_check', 'That address changed in another window. Check it again, then confirm it.', 409);
     }
     return { typed: last.result.typed, normalized: last.result.normalized, verdict: last.result.verdict };
+  }
+  if (clearAddress) {
+    const currentVersion = move.submitted_at ? new Date(move.submitted_at).toISOString() : null;
+    if (move.typed_address && currentVersion && expectedAddressVersion !== currentVersion) {
+      throw new MoveError('stale_address', 'Your move details changed in another window. Reload the page and try again.', 409);
+    }
+    return { typed: null, normalized: null, verdict: null };
   }
   return {
     typed: move.typed_address || null,
@@ -467,46 +530,47 @@ function checkSubmitInput({ typed, moveOut }) {
   }
 }
 
-async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = null, now }) {
+function buildSubmitNotes(locked, { description, address, moveOut }) {
+  const estimateSuperseded = !!locked.estimate_id
+    && !addressMatchesMove(addressLine(parseJson(locked.normalized_address)), { normalized_address: address.normalized });
+  const autoEstimateReset = !!(locked.auto_estimate_state || locked.auto_estimate_at)
+    && (addressLine(parseJson(locked.normalized_address)) || '') !== (addressLine(address.normalized) || '');
+  const oldMoveOut = dateOnlyString(locked.move_out_date) || null;
+  const pauseNote = locked.pause_state === 'paused' && oldMoveOut !== moveOut
+    ? `The customer changed the move-out date to ${prettyDate(moveOut) || 'not known yet'} after the pause stopped the old-house visits after ${prettyDate(oldMoveOut)}. Check those visits against the new date.`
+    : null;
+  const fullDescription = [estimateSuperseded
+    ? `${description}\nThe new address is not the one the new-home estimate was made for, so the customer can no longer open or accept that estimate. Make a new estimate from the Moving card.`
+    : description, pauseNote].filter(Boolean).join('\n');
+  return { autoEstimateReset, pauseNote, fullDescription };
+}
+
+async function saveSubmit(move, { checkId, clearAddress = false, expectedAddressVersion = null, moveOut, moveIn, services, billing = null, now }) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [MOVE_FENCE_NS, String(move.id)]);
+    // Lock customer BEFORE customer_moves so concurrent archive + submit take
+    // row locks in the same order (customers -> customer_moves) and never deadlock.
+    const customer = await trx('customers').where({ id: move.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'first_name', 'last_name');
+    if (!customer) throw new MoveError('closed', 'This link is no longer open.', 404);
     const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
     if (!locked || locked.status === 'closed') throw new MoveError('closed', 'This link is no longer open.', 404);
-    // Read the checked address from the LOCKED row, never from the copy loaded
-    // at the start of the request: a check that landed in between is the one
-    // the customer just confirmed.
-    const address = addressForSubmit(locked, checkId);
+    const address = addressForSubmit(locked, checkId, { clearAddress, expectedAddressVersion });
     checkSubmitInput({ typed: address.typed, moveOut });
-    const customer = await trx('customers').where({ id: locked.customer_id }).first('id', 'first_name', 'last_name');
     const hasAddress = !!address.typed;
     const description = requestDescription({ ...address, moveOut, moveIn, services, billing });
     const subject = requestSubject(address.normalized, hasAddress);
-    // Moving PR B1: a new-home estimate was priced for the address on file. A
-    // resubmitted address that is not that house takes the estimate off the
-    // customer's surfaces (moveLinkBlock) and frees the card for a new one.
-    const estimateSuperseded = !!locked.estimate_id
-      && !addressMatchesMove(addressLine(parseJson(locked.normalized_address)), { normalized_address: address.normalized });
-    // Moving PR 2b: the pause already stopped the old-house visits after the
-    // old move-out date. A new date leaves those visits to the office to
-    // check, and the job never ends this move on the old date's deadline.
-    // The app-made new-home estimate (GATE_MOVING_AUTO_ESTIMATE) tries the
-    // address on file once: an attempt for another address, finished or still
-    // running, is cleared, so the new address gets its own. A running attempt
-    // then finds its claim gone and ends without marking the move.
-    const autoEstimateReset = !!(locked.auto_estimate_state || locked.auto_estimate_at)
-      && (addressLine(parseJson(locked.normalized_address)) || '') !== (addressLine(address.normalized) || '');
-    const oldMoveOut = dateOnlyString(locked.move_out_date) || null;
-    const pauseNote = locked.pause_state === 'paused' && oldMoveOut !== moveOut
-      ? `The customer changed the move-out date to ${prettyDate(moveOut) || 'not known yet'} after the pause stopped the old-house visits after ${prettyDate(oldMoveOut)}. Check those visits against the new date.`
-      : null;
+    const { autoEstimateReset, pauseNote, fullDescription } = buildSubmitNotes(locked, { description, address, moveOut });
     const request = await writeOfficeItem(trx, {
       move: locked,
       subject,
-      description: [estimateSuperseded
-        ? `${description}\nThe new address is not the one the new-home estimate was made for, so the customer can no longer open or accept that estimate. Make a new estimate from the Moving card.`
-        : description, pauseNote].filter(Boolean).join('\n'),
+      description: fullDescription,
       now,
     });
+    const backfilledFromId = locked.from_property_id
+      ? null
+      : (await trx('customer_properties')
+        .where({ customer_id: locked.customer_id, is_primary: true, active: true })
+        .first('id'))?.id || null;
     const [updated] = await trx('customer_moves').where({ id: locked.id }).update({
       typed_address: address.typed,
       normalized_address: address.normalized ? JSON.stringify(address.normalized) : null,
@@ -517,6 +581,7 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = 
       status: 'submitted',
       submitted_at: now,
       updated_at: now,
+      ...(backfilledFromId ? { from_property_id: backfilledFromId } : {}),
       ...(pauseNote ? { pause_state: 'office', pause_note: pauseNote.slice(0, 300) } : {}),
       ...(autoEstimateReset ? { auto_estimate_at: null, auto_estimate_state: null, auto_estimate_note: null } : {}),
     }).returning('*');
@@ -526,7 +591,7 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = 
       description: `Customer sent their move: ${subject.replace(/^Moving: /, '')}`,
       metadata: JSON.stringify({ move_id: locked.id, service_request_id: request.id, address_verdict: address.verdict || null }),
     });
-    return { updated, request, customer, description: pauseNote ? `${description}\n${pauseNote}` : description, address };
+    return { updated, request, customer, description: fullDescription, address };
   });
 }
 
@@ -535,16 +600,16 @@ async function saveSubmit(move, { checkId, moveOut, moveIn, services, billing = 
  * confirmed (the /check answer); the browser never sends an address or a
  * verdict. Returns { move, request, view }.
  */
-async function submitMove(move, { checkId = null, moveOutDate, moveInDate } = {}, { now = new Date() } = {}) {
+async function submitMove(move, { checkId = null, clearAddress = false, expectedAddressVersion = null, moveOutDate, moveInDate } = {}, { now = new Date() } = {}) {
   const moveOut = cleanDate(moveOutDate, 'move-out date', now);
   const moveIn = cleanDate(moveInDate, 'move-in date', now);
-  const services = await planServiceNames(move.customer_id);
+  const services = await planServiceNames(move.customer_id, db, { move });
   // A failed read leaves the line out; it never blocks the customer's submit.
   const billing = await billingLine(db, move.customer_id, now).catch((err) => {
     logger.warn(`[customer-moves] billing line read failed for move ${move.id} (${errCode(err)})`);
     return null;
   });
-  const saved = await saveSubmit(move, { checkId: checkId || null, moveOut, moveIn, services, billing, now });
+  const saved = await saveSubmit(move, { checkId: checkId || null, clearAddress: clearAddress === true, expectedAddressVersion: expectedAddressVersion || null, moveOut, moveIn, services, billing, now });
   try {
     await raiseMoveAlert({
       move: saved.updated,
@@ -749,7 +814,7 @@ async function newHomeBlock(move, conn = db) {
 
 // Why this customer's billing is not one the moving flow handles yet (a
 // NEW_HOME_REFUSALS code), or null for a customer billed per visit.
-async function billingBlock(conn, customerId) {
+async function billingBlock(conn, customerId, { excludePropertyId = null } = {}) {
   const customer = await conn('customers')
     .where({ id: customerId })
     .whereNull('deleted_at')
@@ -763,11 +828,16 @@ async function billingBlock(conn, customerId) {
   if (mode === 'one_time') return 'no_plan';
   if (!NEW_HOME_BILLING_MODES.has(mode)) return 'billing';
   // A prepaid visit still on the books is a live prepay term, whatever the mode says.
-  const prepaid = await conn('scheduled_services')
+  const prepaidQuery = conn('scheduled_services')
     .where({ customer_id: customerId })
     .whereNotNull('annual_prepay_term_id')
-    .whereIn('status', LIVE_VISIT_STATUSES)
-    .first('id');
+    .whereIn('status', LIVE_VISIT_STATUSES);
+  if (excludePropertyId) {
+    prepaidQuery.where(function notExcludedHome() {
+      this.whereNull('property_id').orWhereNot('property_id', excludePropertyId);
+    });
+  }
+  const prepaid = await prepaidQuery.first('id');
   return prepaid ? 'prepay' : null;
 }
 
@@ -838,20 +908,30 @@ async function sourceEstimateFor(move, conn = db) {
   return pick ? { estimateId: pick.row.id, inputs: pick.inputs } : null;
 }
 
-// Today's live recurring plan, one line per service and cadence.
-async function planServicesFor(customerId, conn = db) {
+// Today's live recurring plan, one line per service and cadence. When a move
+// pause or old-house stop already paused the old house's plans, include those
+// paused series too so the public page and new-home estimate keep showing the
+// customer's plan and non-transferable service warnings (P2-M4).
+async function planServicesFor(customerId, conn = db, { move = null } = {}) {
   const rows = await conn('scheduled_services')
     .where({ customer_id: customerId, recurring_ongoing: true })
     .where(function notCallback() { this.whereNull('is_callback').orWhere('is_callback', false); })
     .whereNotNull('service_type')
     .distinct('service_type', 'recurring_pattern')
     .orderBy('service_type');
-  return rows
-    .map((r) => ({
-      name: String(r.service_type || '').trim(),
-      frequency: String(r.recurring_pattern || '').replace(/_/g, ' ').trim() || null,
-    }))
-    .filter((r) => r.name);
+  const paused = move ? await pausedPlanRowsForMove(move, conn) : [];
+  const seen = new Set();
+  const merged = [];
+  for (const r of [...rows, ...paused]) {
+    const name = String(r.service_type || '').trim();
+    if (!name) continue;
+    const frequency = String(r.recurring_pattern || '').replace(/_/g, ' ').trim() || null;
+    const key = `${name.toLowerCase()}|${(frequency || '').toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ name, frequency });
+  }
+  return merged.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -876,7 +956,7 @@ async function moveEstimateSource(customerId, moveId, conn = db) {
   const [customer, source, planServices, recurring] = await Promise.all([
     conn('customers').where({ id: customerId }).first('id', 'first_name', 'last_name', 'phone', 'email'),
     sourceEstimateFor(move, conn),
-    planServicesFor(customerId, conn),
+    planServicesFor(customerId, conn, { move }),
     isActivePlanCustomer(conn, customerId).catch(() => false),
   ]);
   const leftOut = [];
@@ -937,7 +1017,7 @@ async function lockMoveForEstimate(trx, { moveId, customerId, address }) {
     err.estimateId = existing.id;
     throw err;
   }
-  const primaryId = await primaryPropertyId(move.customer_id, trx);
+  const primaryId = await ensurePrimaryPropertyId(move.customer_id, trx);
   if (primaryId && String(primaryId) !== String(move.from_property_id || '')) {
     await trx('customer_moves').where({ id: move.id }).update({ from_property_id: primaryId, updated_at: trx.fn.now() });
     move.from_property_id = primaryId;
@@ -1190,7 +1270,7 @@ async function activeProperty(conn, customerId, id) {
 // move-out stop, but only from today on: an open visit dated between a past
 // move-out and today may have been done and not closed out, so it is listed
 // for the office and never cancelled here.
-async function applyMoveRow(conn, customerId, moveId) {
+async function applyMoveRow(conn, customerId, moveId, { now = new Date() } = {}) {
   if (!UUID_RE.test(String(moveId || ''))) throw applyError('not_found', 404);
   const move = await conn('customer_moves').where({ id: moveId, customer_id: customerId }).first();
   if (!move) throw applyError('not_found', 404);
@@ -1199,7 +1279,7 @@ async function applyMoveRow(conn, customerId, moveId) {
   if (block) throw applyError(block);
   const moveOut = dateOnlyString(move.move_out_date);
   if (!moveOut) throw applyError('no_move_out');
-  const today = etDateString();
+  const today = etDateString(now);
   const cutFrom = nextDay(moveOut);
   return { move, moveOut, today, cutFrom, cancelFrom: cutFrom > today ? cutFrom : today };
 }
@@ -1409,8 +1489,8 @@ async function stopHousePlan(stop, { customerId, cancelFrom, note, actorId, sour
  * What Apply move would do for this move, read-only, or a MoveError saying why
  * it cannot run. `version` binds the office's confirm to these facts.
  */
-async function applyPlan(customerId, moveId, conn = db) {
-  const ctx = await applyMoveRow(conn, customerId, moveId);
+async function applyPlan(customerId, moveId, conn = db, { now = new Date() } = {}) {
+  const ctx = await applyMoveRow(conn, customerId, moveId, { now });
   Object.assign(ctx, await applyHouses(conn, customerId, ctx.move));
   const newHome = await newHomePlan(conn, customerId, ctx);
   const old = await oldHousePlans(conn, customerId, ctx, newHome.rootIds);
@@ -1453,8 +1533,8 @@ function applyPreviewFacts(plan) {
 }
 
 /** The Apply move preview for the Moving card, or a MoveError. */
-async function applyMovePreview(customerId, moveId) {
-  const plan = await applyPlan(customerId, moveId);
+async function applyMovePreview(customerId, moveId, { now = new Date() } = {}) {
+  const plan = await applyPlan(customerId, moveId, db, { now });
   return { ...applyPreviewFacts(plan), version: plan.version };
 }
 
@@ -1558,7 +1638,8 @@ async function applyMove(customerId, moveId, opts = {}) {
     }
   };
   try {
-    const plan = await applyPlan(customerId, moveId);
+    const applyNow = opts.now || new Date();
+    const plan = await applyPlan(customerId, moveId, db, { now: applyNow });
     if (String(opts.version || '') !== plan.version) throw applyError('apply_changed');
 
     if (!plan.flipped) {
@@ -1755,7 +1836,7 @@ async function autoApplyMove(moveId, { now }) {
   const move = await db('customer_moves').where({ id: moveId }).first('id', 'customer_id', 'status', 'estimate_id');
   if (!move || move.status !== 'submitted' || !move.estimate_id) return 'waiting';
   try {
-    const preview = await applyMovePreview(move.customer_id, move.id);
+    const preview = await applyMovePreview(move.customer_id, move.id, { now });
     const left = [...(preview.oneOffs || []), ...(preview.pastOpen || [])];
     // No item, no apply this run: the office hears before the move closes.
     if (left.length) await raiseAutoApplyLeftBooked(move, preview, left);
@@ -2073,7 +2154,7 @@ async function claimPause(move, today, now) {
 // Ends a started pause under the move's row lock, only if the move still has
 // the status, move-out date and address the run acted on, with its office
 // items in the same transaction.
-async function settlePause(move, facts, { state, note = null, summary = null, why = null, left = [], house = null, now }) {
+async function settlePause(move, facts, { state, note = null, summary = null, why = null, left = [], house = null, stoppedSeries = [], now }) {
   return db.transaction(async (trx) => {
     const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
     if (!pauseStarted(locked) || locked.status !== facts.status
@@ -2085,7 +2166,11 @@ async function settlePause(move, facts, { state, note = null, summary = null, wh
       customer_id: move.customer_id,
       action: state === 'paused' ? 'moving_paused' : 'moving_pause_office',
       description: summary || `Move pause left to the office: ${note}`,
-      metadata: JSON.stringify({ move_id: move.id, move_out_date: facts.moveOut }),
+      metadata: JSON.stringify({
+        move_id: move.id,
+        move_out_date: facts.moveOut,
+        ...(stoppedSeries.length ? { stopped_series: stoppedSeries } : {}),
+      }),
     });
     if (state === 'office' && why) await raisePauseAlert(trx, locked, 'office', officeItem(locked, note, why));
     if (left.length) {
@@ -2195,7 +2280,12 @@ async function finishPause(move, { today, now }) {
       : `Customer moved out with no new address: plans at ${propertyLine(plan.from)} paused after ${prettyDate(plan.moveOut)} ${counts}, held until ${prettyDate(dateOnlyString(move.pause_ends_on))}.`,
     progress.stationTask ? 'Termite station pickup task opened.' : '',
   ].join(' ').trim();
-  return settlePause(move, facts, { state: 'paused', summary, left: [...plan.oneOffs, ...plan.pastOpen], house: plan.from, now });
+  const stoppedSeries = (plan.stops || []).map((s) => ({
+    rootId: s.rootId || null,
+    serviceType: s.serviceType || s.name || null,
+    recurringPattern: s.recurringPattern || s.frequency || null,
+  })).filter((s) => s.serviceType);
+  return settlePause(move, facts, { state: 'paused', summary, left: [...plan.oneOffs, ...plan.pastOpen], house: plan.from, stoppedSeries, now });
 }
 
 /**

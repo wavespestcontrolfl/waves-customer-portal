@@ -668,6 +668,28 @@ function assertShareLinkPresent(estimate, requireShareLink) {
   throw err;
 }
 
+async function moveBlockReasonForEstimateData(conn, data) {
+  if (!data?.move?.moveId) return null;
+  return require('../services/customer-moves').moveLinkBlock(conn, data);
+}
+
+async function estimateLinkageBlockReason(conn, data, opts) {
+  return (await staleCallLinkageReason(conn, data, opts))
+    || (await moveBlockReasonForEstimateData(conn, data));
+}
+
+async function assertMoveEstimateSendable(conn, estimate) {
+  const data = parseEstimateData(estimate?.estimate_data);
+  const block = await moveBlockReasonForEstimateData(conn, data);
+  if (block) {
+    const err = new Error('This moving estimate is no longer current because the move changed or closed. Make a new estimate from the Moving card.');
+    err.statusCode = 409;
+    err.code = 'MOVE_ESTIMATE_STALE';
+    err.reason = block;
+    throw err;
+  }
+}
+
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, requireShareLink = true, ...palmCountGate } = {}) {
   assertBidSendDate(estimate);
   if (estimate.archived_at) {
@@ -1751,6 +1773,7 @@ async function sendPreviewHandler(req, res, next) {
     const preview = await buildEstimateSendPreview(estimate);
     try {
       assertEstimateSendable(estimate, { palmCountCleared: true });
+      await assertMoveEstimateSendable(db, estimate);
     } catch (err) {
       preview.blockReason = err.message;
       preview.requiresEngineReview = err.code === 'ENGINE_REVIEW_REQUIRED';
@@ -1812,6 +1835,7 @@ async function sendEstimateHandler(req, res, next) {
       reviewedMessages = preview.messages;
     }
     assertEstimateSendable(estimate, { engineReviewAcknowledged, confirmedPalmCount });
+    await assertMoveEstimateSendable(db, estimate);
     // A typed satellite palm count passed on this pre-read row (it equals
     // confirmedPalmCount). Pin it (pre-push audit P1): the claims below check
     // it against the row they claim, and a schedule records it for the cron
@@ -2764,7 +2788,7 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
   // A bedroom re-price in flight (estimate-clarify-asks): the draft's
   // dollars are about to be replaced — not sendable meanwhile.
   if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) return true;
-  if (await staleCallLinkageReason(db, data, { estimateStatus: row.status })) return true;
+  if (await estimateLinkageBlockReason(db, data, { estimateStatus: row.status })) return true;
   // Short-link, template and PDF preparation can carry an immediate send
   // past midnight after the preflight deadline check (GH codex P2 r4 on
   // #4309): re-read every property's fixed hold right before the provider
@@ -3013,6 +3037,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     ...palmCountGateFor(estimate, options.confirmedPalmCount),
   };
   assertEstimateSendable(estimate, sendGateOptions);
+  await assertMoveEstimateSendable(db, estimate);
 
   // Send-time lead-with-one-service (GATE_ESTIMATE_LEAD_SERVICE_SEND): parks
   // the non-lead recurring lines as staff opt-out events BEFORE any delivery
@@ -3033,6 +3058,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     let shapedSendable = true;
     try {
       assertEstimateSendable(estimate, sendGateOptions);
+  await assertMoveEstimateSendable(db, estimate);
       let shapedData = {};
       try { shapedData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {}); } catch { shapedData = {}; }
       const lines = Array.isArray(shapedData?.engineResult?.lineItems) ? shapedData.engineResult.lineItems : [];
@@ -3183,7 +3209,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // BEFORE its reconcile archives this draft — the marker check alone
       // misses that window, and stamping the claim below would then defer
       // the very reconcile meant to stop this send.
-      const staleLinkage = await staleCallLinkageReason(trx, data, { estimateStatus: verdictRow.status });
+      const staleLinkage = await estimateLinkageBlockReason(trx, data, { estimateStatus: verdictRow.status });
       if (staleLinkage) return staleLinkage;
       // Unparseable estimate_data: verdict passes (matches the prior
       // read-only behavior) but no claim is stamped — a blind rewrite
@@ -6130,6 +6156,7 @@ async function followUpRefusal(estimate) {
   if (smsProblem) return { status: 400, body: { error: smsProblem, code: 'INVALID_SMS_PHONE' } };
   if (estimate.status === 'accepted') return { status: 400, body: { error: 'Already accepted' } };
   assertEstimateSendable(estimate);
+  await assertMoveEstimateSendable(db, estimate);
   // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
   // this text carries the estimate link, and the link renders every
   // viewable sibling — a SERVER anchor beside an unverified sibling is

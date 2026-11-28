@@ -9,6 +9,7 @@ const NOT_FOUND = {
   '/api/estimates': { error: 'Estimate not found' },
   '/api/pay': { error: 'Invoice not found' },
   '/api/public/secure-card': { error: 'Not found' }, // its privacy headers are stamped by the mount just above this one
+  '/api/public/moving': { error: 'Not found' }, // its privacy headers are stamped by the mount just above this one
 };
 
 // The one generic header pair an undecodable-path answer carries on every mount, whichever guard answers it (this one or a

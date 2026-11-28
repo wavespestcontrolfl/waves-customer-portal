@@ -123,9 +123,11 @@ test('submit passes a checkId only as a non-empty string and answers the receipt
   // The pause lane picks the receipt sentence and never reaches the page.
   expect(res.body).toEqual({ ok: true, receipt: ['Thanks, Chris. We have your move.'], view: { firstName: 'Chris', status: 'submitted' } });
   expect(Moves.receiptFor).toHaveBeenCalledWith({ firstName: 'Chris', status: 'submitted' }, 'auto');
-  expect(Moves.submitMove).toHaveBeenCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-15', moveInDate: '' });
+  expect(Moves.submitMove).toHaveBeenCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-15', moveInDate: '', clearAddress: false });
   await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ checkId: 'abcdef0123456789' });
-  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: 'abcdef0123456789', moveOutDate: undefined, moveInDate: undefined });
+  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: 'abcdef0123456789', moveOutDate: undefined, moveInDate: undefined, clearAddress: false });
+  await request(app()).post(`/api/public/moving/${TOKEN}/submit`).send({ clearAddress: true, moveOutDate: '2026-11-20' });
+  expect(Moves.submitMove).toHaveBeenLastCalledWith(MOVE, { checkId: null, moveOutDate: '2026-11-20', moveInDate: undefined, clearAddress: true });
 });
 
 test('a stale check is a 409 with plain words', async () => {

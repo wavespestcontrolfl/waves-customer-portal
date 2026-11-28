@@ -651,11 +651,15 @@ app.use('/api/estimates', estimatePublicRoutes.firstVisitRequestPreGuard);
 // Dark estimate routes whose gate is read in the handler (referral-link, measurement-review, extension-request, service-opt-out,
 // change-request, promo-code, the service-details and warranty-comparison PDFs): same reason, one table in estimate-public.js.
 app.use('/api/estimates', estimatePublicRoutes.darkEstimateRoutePreGuard);
+// Public moving page (/api/public/moving/:token): privacy headers land BEFORE
+// rejectUndecodablePath (404) and the global /api/ limiter (429), matching
+// secure-card so bearer tokens are never cached or leaked via Referer.
+app.use('/api/public/moving', require('./routes/moving-public').stampMovingPrivacyHeaders);
 // A token path segment that does not percent-decode answers the mount's generic unknown-token 404 here, before the global limiter,
 // instead of Express's param-decode error (the error handler logs the raw segment and answers 500). After the estimate header
-// guards above (they match the raw path and never decode), so that 404 carries their headers; the secure-card privacy headers
-// are stamped by the secure-card mount further up.
-app.use(['/api/estimates', '/api/pay', '/api/public/secure-card', '/api/public/careers/interview', '/api/public/careers/offer'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
+// guards above (they match the raw path and never decode), so that 404 carries their headers; the secure-card and moving privacy
+// headers are stamped by their mounts just above.
+app.use(['/api/estimates', '/api/pay', '/api/public/secure-card', '/api/public/careers/interview', '/api/public/careers/offer', '/api/public/moving'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
 
 // Invoice pay page promo code (GATE_PAY_PROMO_CODE) and plan choice (GATE_PAY_PLAN_CHOICE): the dark 404 lands before the global limiter.
 app.use('/api/pay', require('./routes/pay-v2').darkRoutePreGuard);
