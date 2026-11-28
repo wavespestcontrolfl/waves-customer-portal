@@ -59,17 +59,26 @@ jest.mock('../services/estimate-deposits', () => ({
   acquireEstimateDepositLedgerLock: jest.fn(async () => {}),
   pendingDepositCredit: jest.fn(async () => mockDeposit),
 }));
+let mockLeadTargets = { leadIds: [] };
+jest.mock('../services/lead-estimate-link', () => ({
+  invoiceSentConversionTargets: jest.fn(async () => mockLeadTargets),
+}));
+const mockNotifUpdates = [];
 const mockTable = (table) => {
   if (table === 'scheduled_service_addons') return { where: () => ({ first: async () => mockAddon }) };
   if (table === 'retention_offers') return { where: () => ({ first: async () => mockRetention }) };
   const q = {
-    where: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q), orderBy: jest.fn(() => q), forUpdate: jest.fn(() => q),
+    where: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q),
+    orderBy: jest.fn(() => q), forUpdate: jest.fn(() => q), noWait: jest.fn(() => q),
     select: jest.fn(async () => mockLive),
+    update: jest.fn(async (payload) => { if (table === 'notifications') mockNotifUpdates.push(payload); return 1; }),
     first: jest.fn(async () => ({ scheduled_services: mockVisit, notifications: mockRow, invoices: mockInvoice, customers: mockCustomer, notification_prefs: mockPrefs, messaging_suppression: mockSuppressed })[table]),
   };
   return q;
 };
-jest.mock('../models/db', () => jest.fn((table) => mockTable(table)));
+jest.mock('../models/db', () => Object.assign(jest.fn((table) => mockTable(table)), {
+  raw: jest.fn((sql, params) => ({ __raw: sql, params })),
+}));
 
 const Create = require('../services/intelligence-bar/create-invoice-tools');
 const Send = require('../services/intelligence-bar/invoice-action-tools');
@@ -134,6 +143,8 @@ beforeEach(() => {
   mockDiscountLines = false;
   mockBreakdown = null;
   mockSuppressed = null;
+  mockLeadTargets = { leadIds: [] };
+  mockNotifUpdates.length = 0;
 });
 
 afterAll(() => { delete process.env.GATE_SETUP_FEE_BILL_BUTTON; });
@@ -198,7 +209,7 @@ test('the send refuses when another invoice now bills the visit or the fee (a $0
   const verify = Send.commitInvoiceSend.mock.calls[0][0]._callerVerify;
   const database = (table) => mockTable(table);
   database.transaction = async (fn) => fn(database);
-  database.raw = async () => {};
+  database.raw = async () => ({ rows: [{ acquired: true }] });
   mockLive = [{ id: 'other', line_items: [{ description: FEE_LINE, amount: 99 }] }];
   expect(await verify({ id: INV, customer_id: CUST }, database)).toMatch(/now bills this visit or the setup fee/);
   mockLive = [{ id: 'waiver', line_items: [{ description: 'Membership setup fee (waived)', amount: 0 }] }];
@@ -325,7 +336,7 @@ test('the check inside the create transaction refuses any coverage that landed s
   await expect(recheck(trx)).rejects.toThrow(/visit changed/);
 });
 
-test('the create takes the customer row FOR UPDATE before the card\'s own locks', async () => {
+test('the create takes setup_fee_account advisory lock, then customer FOR UPDATE, then invoices FOR UPDATE (global lock order, B-17)', async () => {
   await tap();
   const { _callerPreLock: preLock } = Create.commitDraftInvoice.mock.calls[0][0];
   const order = [];
@@ -333,13 +344,19 @@ test('the create takes the customer row FOR UPDATE before the card\'s own locks'
   const chain = { whereNotIn: () => chain, orderBy: () => chain, forUpdate };
   const where = jest.fn(() => ({ ...chain, forUpdate }));
   const trx = jest.fn((table) => { order.push(table); return { where }; });
-  trx.raw = jest.fn(async () => {});
+  trx.raw = jest.fn(async (sql) => { if (sql.includes('pg_advisory_xact_lock')) order.push('setup_fee_account'); });
   await preLock(trx);
-  // The customer row first (as an invoice send takes it), then its live invoices; both waits bounded.
-  expect(order).toEqual(['customers', 'invoices']);
-  expect(trx.raw.mock.calls.map((c) => c[0])).toEqual(["SET LOCAL lock_timeout = '3s'", 'SET LOCAL lock_timeout TO DEFAULT']);
-  // Contention refuses retryably.
+  // Global lock order: setup_fee_account advisory lock BEFORE customers FOR UPDATE and invoices FOR UPDATE.
+  expect(order).toEqual(['setup_fee_account', 'customers', 'invoices']);
+  expect(trx.raw.mock.calls.map((c) => c[0])).toEqual([
+    "SET LOCAL lock_timeout = '3s'",
+    'SELECT pg_advisory_xact_lock(hashtext(?))',
+    'SET LOCAL lock_timeout TO DEFAULT',
+  ]);
+  // Contention (55P03) and deadlocks (40P01) refuse retryably.
   forUpdate.mockImplementationOnce(() => ({ first: async () => { throw Object.assign(new Error('lock timeout'), { code: '55P03' }); } }));
+  await expect(preLock(trx)).rejects.toMatchObject({ statusCode: 409 });
+  forUpdate.mockImplementationOnce(() => ({ first: async () => { throw Object.assign(new Error('deadlock detected'), { code: '40P01' }); } }));
   await expect(preLock(trx)).rejects.toMatchObject({ statusCode: 409 });
   expect(where).toHaveBeenCalledWith({ id: CUST });
   expect(forUpdate).toHaveBeenCalled();
@@ -375,7 +392,7 @@ test('the send carries a credit check that runs under its claim', async () => {
   mockWouldDraw = true;
   const database = (t) => mockTable(t);
   database.transaction = async (fn) => fn(database);
-  database.raw = async () => {};
+  database.raw = async () => ({ rows: [{ acquired: true }] });
   expect(await verify({ id: INV, customer_id: CUST }, database)).toMatch(/Account credit would apply/);
   mockWouldDraw = false;
   // Visit-side coverage that landed after the create: dues for the visit's month, a prepayment.
@@ -418,7 +435,7 @@ test('a send plan that would mark a lead won is not sent; the ordinary informati
 test('a send refused because coverage changed says to reconcile, never to send it by hand', async () => {
   Send.commitInvoiceSend.mockImplementationOnce(async (input) => {
     mockDues = true;
-    const why = await input._callerVerify({ id: INV, customer_id: CUST }, Object.assign((t) => mockTable(t), { raw: async () => {}, transaction: async (fn) => fn(Object.assign((t) => mockTable(t), { raw: async () => {} })) }));
+    const why = await input._callerVerify({ id: INV, customer_id: CUST }, Object.assign((t) => mockTable(t), { raw: async () => ({ rows: [{ acquired: true }] }), transaction: async (fn) => fn(Object.assign((t) => mockTable(t), { raw: async () => ({ rows: [{ acquired: true }] }) })) }));
     return { error: why };
   });
   const out = await tap();

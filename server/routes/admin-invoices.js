@@ -1047,6 +1047,10 @@ function isFirstDeliveryRow(row) {
 
 // POST / — create invoice manually
 // Named so the Intelligence Bar's create_invoice card (createInvoiceFromBar, below) runs this very handler.
+function shouldReconcileSetupFeeAfterCreate(stampedEstimateId, ibApproved) {
+  return Boolean(stampedEstimateId) && ibApproved?.deferSetupFeeReconcile !== true;
+}
+
 const invoiceCreateHandler = async (req, res, next) => {
   try {
     // req.ibApprovedCreate is set only by createInvoiceFromBar (never an HTTP field): the scope the card was approved under
@@ -1112,7 +1116,7 @@ const invoiceCreateHandler = async (req, res, next) => {
         return created;
       })
       : await InvoiceService.create(createArgs);
-    if (stampedEstimateId) {
+    if (shouldReconcileSetupFeeAfterCreate(stampedEstimateId, ibApproved)) {
       // Post-commit retirement: the new coverage rewrites/resolves the
       // parked alert now, not on the next completion. Best-effort — the
       // invoice exists either way, and completion reconciles again.

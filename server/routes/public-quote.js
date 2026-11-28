@@ -485,11 +485,11 @@ function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQ
 // A member's or a queued fee's waiver is settled first from facts already read, so the visit history is never
 // read for it and a failed history read cannot undo it. A failed read of the history keeps the fee
 // (loadReturningVisitHistoryInSavepoint: a savepoint of the draft write's transaction, null on failure).
-async function resolveSetupFeeQuoteWithReturningRule(basis, facts, { q, customerId, recurringLines }) {
+async function resolveSetupFeeQuoteWithReturningRule(basis, facts, { q, customerId, recurringLines, address }) {
   const settled = resolveSetupFeeQuoteDecision(basis, facts);
   if (settled.waived || basis.kind !== 'waveguard_membership') return settled;
   const Returning = require('../services/returning-setup-fee-waiver');
-  const history = await Returning.loadReturningVisitHistoryInSavepoint(q, { customerId }, '[public-quote]');
+  const history = await Returning.loadReturningVisitHistoryInSavepoint(q, { customerId, address }, '[public-quote]');
   return Returning.decideReturningSetupFeeWaiverForPlan(recurringLines, history)
     ? resolveSetupFeeQuoteDecision(basis, { ...facts, returningWaives: true })
     : settled;
@@ -3354,7 +3354,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         return await resolveSetupFeeQuoteWithReturningRule(
           setupFeeBasis,
           { activeMember, feeAlreadyQueued, queuedForThisDraft },
-          { q, customerId, recurringLines: recurringQuoteLines(estimate) },
+          { q, customerId, recurringLines: recurringQuoteLines(estimate), address: quoteFullAddress },
         );
       } catch (memberErr) {
         // FAIL CLOSED toward the engine-priced line (codex #3591 r43 local

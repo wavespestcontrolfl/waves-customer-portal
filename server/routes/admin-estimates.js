@@ -1451,8 +1451,9 @@ router.post('/', async (req, res, next) => {
       body: req.body,
       technicianId: req.technicianId,
       technician: req.technician,
-      // Moving PR B1: only an admin may start a new-home estimate (body.moveId).
+      // Moving PR B1 / B-42: only an admin may start a new-home estimate or waive setup fees.
       moveAllowed: req.techRole === 'admin',
+      waiveSetupFeeAllowed: req.techRole === 'admin',
     });
     notifyPricingFallbackAfterCommit(estimate, pricingFallbackReason);
     res.status(reused ? 200 : 201).json({
@@ -1501,6 +1502,7 @@ router.put('/:id', async (req, res, next) => {
       body: req.body,
       technicianId: req.technicianId,
       technician: req.technician,
+      waiveSetupFeeAllowed: req.techRole === 'admin',
       dryRun,
     });
     if (!dryRun) {

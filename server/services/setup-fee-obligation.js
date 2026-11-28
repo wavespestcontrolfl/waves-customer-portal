@@ -440,8 +440,201 @@ async function parkSetupFeeStampForOffice(trx, { parentId, rawAmount, customerId
 const SETUP_FEE_SETTLED_PREPAY_WINDOW_MS = 400 * 24 * 60 * 60 * 1000;
 
 // An invoice the customer is still asked to pay, which turns 'paid' when they do —
-// never a draft (it may never be sent) or a 'prepaid' one (it never turns paid).
+// never a draft (it may never be sent) or a 'prepaid' one (which is already settled).
 const OPEN_FEE_INVOICE_STATUSES = new Set(['scheduled', 'sent', 'viewed', 'overdue', 'partially_paid']);
+// Collected / settled invoice statuses: credit-settled ('prepaid') counts identically to 'paid'.
+const SETTLED_FEE_INVOICE_STATUSES = new Set(['paid', 'prepaid']);
+
+function earlierTimestamp(a, b) {
+  const ta = a ? new Date(a).getTime() : NaN;
+  const tb = b ? new Date(b).getTime() : NaN;
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta <= tb ? a : b;
+  if (Number.isFinite(ta)) return a;
+  if (Number.isFinite(tb)) return b;
+  return null;
+}
+
+function etDayOf(value) {
+  if (!value) return null;
+  if (typeof value === 'string' && require('../utils/date-only').validDateOnly(value.trim())) return value.trim();
+  const dt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dt.getTime())) return null;
+  return require('../utils/datetime-et').etDateString(dt);
+}
+
+function invoiceStreetKeyFromSnapshot(snapshot) {
+  if (!snapshot) return null;
+  let obj = snapshot;
+  if (typeof obj === 'string') {
+    try { obj = JSON.parse(obj); } catch { return null; }
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  const { normalizedStampedStreet, normalizedEstimateStreet } = require('./estimate-property-linkage');
+  const stamped = normalizedStampedStreet(obj.address_line1, obj.address_line2, obj.city, obj.zip);
+  if (stamped) return stamped;
+  return obj.address ? normalizedEstimateStreet(obj.address) : null;
+}
+
+async function loadEstimateScopeRow(conn, sourceEstimateId) {
+  if (!sourceEstimateId) return null;
+  try {
+    return await conn('estimates')
+      .where({ id: sourceEstimateId })
+      .first('id', 'created_at', 'accepted_at', 'property_id', 'address');
+  } catch { return null; }
+}
+
+async function resolveScopeStreetKey(conn, resolvedAddress, resolvedPropertyId) {
+  const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+  if (resolvedAddress) return normalizedEstimateStreet(resolvedAddress);
+  if (!resolvedPropertyId) return null;
+  try {
+    const prop = await conn('customer_properties')
+      .where({ id: resolvedPropertyId })
+      .first('address_line1', 'address_line2', 'city', 'zip');
+    return prop ? normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip) : null;
+  } catch { return null; }
+}
+
+async function resolveSettlementScope(conn, { sourceEstimateId, sinceDate, propertyId, serviceAddress }) {
+  const needsEst = Boolean(sourceEstimateId) && (!sinceDate || (!propertyId && !serviceAddress));
+  const est = needsEst ? await loadEstimateScopeRow(conn, sourceEstimateId) : null;
+  const resolvedPropertyId = propertyId || est?.property_id || null;
+  const resolvedAddress = serviceAddress || est?.address || null;
+  const streetKey = await resolveScopeStreetKey(conn, resolvedAddress, resolvedPropertyId);
+  const sinceDay = etDayOf(sinceDate || earlierTimestamp(est?.created_at, est?.accepted_at));
+  return {
+    sinceDay,
+    propertyId: resolvedPropertyId ? String(resolvedPropertyId) : null,
+    streetKey: streetKey || null,
+  };
+}
+
+function invoicePassesDateLowerBound(row, sinceDay) {
+  if (!sinceDay || !row?.created_at) return true;
+  const invDay = etDayOf(row.created_at);
+  return !invDay || invDay >= sinceDay;
+}
+
+async function resolveVisitScope(conn, visitId, cache) {
+  const key = String(visitId);
+  if (cache.visits.has(key)) return cache.visits.get(key);
+  let ss = null;
+  try {
+    ss = await conn('scheduled_services')
+      .where({ id: visitId })
+      .first('id', 'property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+  } catch { ss = null; }
+  const { normalizedStampedStreet } = require('./estimate-property-linkage');
+  let streetKey = ss
+    ? normalizedStampedStreet(ss.service_address_line1, ss.service_address_line2, ss.service_address_city, ss.service_address_zip)
+    : null;
+  if (!streetKey && ss?.property_id) {
+    const pKey = String(ss.property_id);
+    if (!cache.props.has(pKey)) {
+      try {
+        const prop = await conn('customer_properties')
+          .where({ id: ss.property_id })
+          .first('address_line1', 'address_line2', 'city', 'zip');
+        cache.props.set(pKey, prop ? normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip) : null);
+      } catch { cache.props.set(pKey, null); }
+    }
+    streetKey = cache.props.get(pKey) || null;
+  }
+  const result = { propertyId: ss?.property_id ? String(ss.property_id) : null, streetKey };
+  cache.visits.set(key, result);
+  return result;
+}
+
+async function invoiceMatchesPropertyScope(conn, row, scope, cache) {
+  if (!scope.propertyId && !scope.streetKey) return true;
+  const { sameScopeKey } = require('./estimate-property-linkage');
+  if (row.scheduled_service_id) {
+    const visitScope = await resolveVisitScope(conn, row.scheduled_service_id, cache);
+    if (scope.propertyId && visitScope.propertyId) {
+      return visitScope.propertyId === scope.propertyId;
+    }
+    if (scope.streetKey && visitScope.streetKey) {
+      return sameScopeKey(visitScope.streetKey, scope.streetKey);
+    }
+  }
+  const snapKey = invoiceStreetKeyFromSnapshot(row.customer_address_snapshot);
+  if (scope.streetKey && snapKey) {
+    return sameScopeKey(snapKey, scope.streetKey);
+  }
+  return true;
+}
+
+function paymentMatchesInvoice(payment, row) {
+  if (row.stripe_payment_intent_id && payment.stripe_payment_intent_id
+    && String(payment.stripe_payment_intent_id) === String(row.stripe_payment_intent_id)) return true;
+  if (row.stripe_charge_id && payment.stripe_charge_id
+    && String(payment.stripe_charge_id) === String(row.stripe_charge_id)) return true;
+  let meta = payment.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  if (meta?.invoice_id && String(meta.invoice_id) === String(row.id)) return true;
+  if (Array.isArray(meta?.invoice_ids) && meta.invoice_ids.map(String).includes(String(row.id))) return true;
+  return false;
+}
+
+async function loadPartiallyRefundedInvoiceIds(conn, customerId, candidateRows) {
+  const result = new Set();
+  const paidRows = candidateRows.filter((r) => {
+    const st = String(r.status || '').toLowerCase();
+    if (st === 'partially_refunded') result.add(String(r.id));
+    return st === 'paid';
+  });
+  if (!paidRows.length) return result;
+  let refundPayments = [];
+  try {
+    refundPayments = await conn('payments')
+      .where({ customer_id: customerId })
+      .whereRaw("(COALESCE(refund_amount, 0) > 0 OR refund_status IN ('partial', 'full'))")
+      .select('id', 'stripe_payment_intent_id', 'stripe_charge_id', 'refund_amount', 'refund_status', 'metadata');
+  } catch { return result; }
+  if (!Array.isArray(refundPayments) || !refundPayments.length) return result;
+  for (const row of paidRows) {
+    if (refundPayments.some((p) => paymentMatchesInvoice(p, row))) {
+      result.add(String(row.id));
+    }
+  }
+  return result;
+}
+
+async function termMatchesPropertyScope(conn, term, scope, sourceEstimateId) {
+  if (!term) return false;
+  if (!scope.propertyId && !scope.streetKey) return true;
+  if (!term.source_estimate_id) return true;
+  if (sourceEstimateId && String(term.source_estimate_id).toLowerCase() === String(sourceEstimateId).toLowerCase()) return true;
+  let termEst = null;
+  try {
+    termEst = await conn('estimates').where({ id: term.source_estimate_id }).first('property_id', 'address');
+  } catch { return true; }
+  if (!termEst) return true;
+  if (scope.propertyId && termEst.property_id) return String(termEst.property_id) === scope.propertyId;
+  const { normalizedEstimateStreet, sameScopeKey } = require('./estimate-property-linkage');
+  const termStreet = termEst.address ? normalizedEstimateStreet(termEst.address) : null;
+  if (scope.streetKey && termStreet) return sameScopeKey(termStreet, scope.streetKey);
+  return true;
+}
+
+const INACTIVE_TERM_STATUSES = new Set(['cancelled', 'canceled', 'refunded', 'superseded', 'void']);
+
+async function findMatchingCoveredPrepayTerm(conn, { customerId, visitDate, scope, sourceEstimateId }) {
+  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+  const baseQ = AnnualPrepayRenewals.coveredTermsAsOf(conn, visitDate || require('../utils/datetime-et').etDateString(new Date()))
+    .where('t.customer_id', customerId)
+    .whereNull('t.annual_plan_version'); // a termite annual plan never waives the WaveGuard fee
+  if (!scope.propertyId && !scope.streetKey) {
+    return baseQ.first('t.id', 't.source_estimate_id');
+  }
+  const terms = await baseQ.select('t.id', 't.source_estimate_id', 't.status');
+  for (const term of terms || []) {
+    if (INACTIVE_TERM_STATUSES.has(String(term.status || '').toLowerCase())) continue;
+    if (await termMatchesPropertyScope(conn, term, scope, sourceEstimateId)) return term;
+  }
+  return null;
+}
 
 // Other services' own one-time fees (the rodent "Bait Station Setup — one-time
 // setup fee", a termite install) are not the WaveGuard fee and never settle it.
@@ -487,58 +680,72 @@ function invoiceLineItems(row) {
   } catch { return []; }
 }
 
-// What one invoice line proves about the WaveGuard fee: { kind: 'waived' },
-// { kind: 'annual_prepay' }, { kind: 'paid', cents } or null. A REFUNDED invoice
-// keeps its fee-line evidence (never instruct a re-bill of money that was
-// collected and deliberately refunded), but a refunded waived or prepay bundle
-// settles nothing; a waived line riding a positive amount needs the invoice PAID.
-function feeLineEvidence(li, status, createdAt) {
-  const cents = settledLineCents(li);
-  if (cents === null || !waveguardFeeLine(li)) return null;
-  const desc = String(li?.description || '');
-  if (/(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0)) {
-    return status !== 'refunded' && (cents === 0 || status === 'paid') ? { kind: 'waived' } : null;
-  }
-  if (cents <= 0) return null;
-  const recent = createdAt && Date.now() - new Date(createdAt).getTime() <= SETUP_FEE_SETTLED_PREPAY_WINDOW_MS;
-  if (status === 'paid' && recent && /annual prepay/i.test(String(li?.category || ''))) return { kind: 'annual_prepay' };
-  return ['paid', 'refunded'].includes(status) && settledFeeLineName(li) ? { kind: 'paid', cents } : null;
+function isWaivedFeeLine(desc, cents) {
+  return /(?:setup|membership) fee/i.test(desc) && (/waiv/i.test(desc) || cents === 0);
 }
 
-async function setupFeeSettledElsewhere(conn, {
-  customerId, expectedFeeCents = 0, visitDate, lock,
-} = {}) {
-  if (!customerId) return { settled: false };
-  let query = conn('invoices')
-    .where({ customer_id: customerId })
-    .whereRaw(`(line_items::text ILIKE '%fee%' OR line_items::text ILIKE '%membership%' OR line_items::text ILIKE '%prepay%' OR line_items::text ILIKE '%prepaid%')`);
-  if (lock) query = query.forUpdate();
-  const rows = await query.select('id', 'invoice_number', 'status', 'line_items', 'created_at');
-  const dead = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void', 'draft']);
-  dead.delete('refunded');
-  const paidByInvoice = new Map();
-  for (const row of rows) {
-    const status = String(row.status || '').toLowerCase();
-    if (dead.has(status)) continue;
-    for (const li of invoiceLineItems(row)) {
-      const evidence = feeLineEvidence(li, status, row.created_at);
-      if (evidence && evidence.kind !== 'paid') return { settled: true, reason: evidence.kind, invoiceId: row.id };
-      if (evidence) paidByInvoice.set(String(row.id), (paidByInvoice.get(String(row.id)) || 0) + evidence.cents);
+function isRecentAnnualPrepayLine(li, createdAt) {
+  if (!createdAt || !/annual prepay/i.test(String(li?.category || ''))) return false;
+  return Date.now() - new Date(createdAt).getTime() <= SETUP_FEE_SETTLED_PREPAY_WINDOW_MS;
+}
+
+const REFUNDED_FEE_INVOICE_STATUSES = new Set(['refunded', 'partially_refunded']);
+
+// What one invoice line proves about the WaveGuard fee: { kind: 'waived' },
+// { kind: 'annual_prepay' }, { kind: 'paid', cents, partiallyRefunded? } or null.
+// Both 'paid' and credit-settled 'prepaid' count as settled. Every waived line
+// ($0 or positive) and annual-prepay line requires a settled, non-refunded
+// invoice; a positive setup-fee line collected and later refunded (full or
+// partial) stays recognized so we never instruct a duplicate re-bill.
+function feeLineEvidence(li, status, createdAt, { hasRefund = false } = {}) {
+  const cents = settledLineCents(li);
+  if (cents === null || !waveguardFeeLine(li)) return null;
+  const isSettled = SETTLED_FEE_INVOICE_STATUSES.has(status);
+  const isRefunded = REFUNDED_FEE_INVOICE_STATUSES.has(status) || hasRefund;
+  if (isWaivedFeeLine(String(li?.description || ''), cents)) {
+    return isSettled && !isRefunded ? { kind: 'waived' } : null;
+  }
+  if (cents <= 0) return null;
+  if (isSettled && !isRefunded && isRecentAnnualPrepayLine(li, createdAt)) return { kind: 'annual_prepay' };
+  const collected = isSettled || REFUNDED_FEE_INVOICE_STATUSES.has(status);
+  if (!collected || !settledFeeLineName(li)) return null;
+  return { kind: 'paid', cents, partiallyRefunded: status !== 'refunded' && isRefunded };
+}
+
+function evaluateCandidateFeeRow(row, hasRefund) {
+  const status = String(row.status || '').toLowerCase();
+  if (row.setup_fee_waived === true && SETTLED_FEE_INVOICE_STATUSES.has(status) && !hasRefund) {
+    return { settledNow: { settled: true, reason: 'waived', invoiceId: row.id } };
+  }
+  let cents = 0;
+  let partiallyRefunded = false;
+  for (const li of invoiceLineItems(row)) {
+    const evidence = feeLineEvidence(li, status, row.created_at, { hasRefund });
+    if (evidence && evidence.kind !== 'paid') return { settledNow: { settled: true, reason: evidence.kind, invoiceId: row.id } };
+    if (evidence) {
+      cents += evidence.cents;
+      if (evidence.partiallyRefunded) partiallyRefunded = true;
     }
   }
-  const paidFeeCents = [...paidByInvoice.values()].reduce((a, b) => a + b, 0);
-  if (paidFeeCents > 0 && paidFeeCents >= expectedFeeCents) {
-    return { settled: true, reason: 'paid_fee', invoiceId: [...paidByInvoice.keys()][0] };
+  return { cents, partiallyRefunded };
+}
+
+async function filterLiveInvoicesInScope(conn, rows, scope) {
+  const dead = new Set([...require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES, 'void', 'draft']);
+  dead.delete('refunded');
+  const scopeCache = { visits: new Map(), props: new Map() };
+  const kept = [];
+  for (const row of rows) {
+    if (dead.has(String(row.status || '').toLowerCase())) continue;
+    if (!invoicePassesDateLowerBound(row, scope.sinceDay)) continue;
+    if (!(await invoiceMatchesPropertyScope(conn, row, scope, scopeCache))) continue;
+    kept.push(row);
   }
-  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-  const term = await AnnualPrepayRenewals.coveredTermsAsOf(conn, visitDate || require('../utils/datetime-et').etDateString(new Date()))
-    .where('t.customer_id', customerId)
-    .whereNull('t.annual_plan_version') // a termite annual plan never waives the WaveGuard fee
-    .first('t.id');
-  if (term) return { settled: true, reason: 'annual_prepay_term', termId: term.id };
-  // Each open invoice with the fee cents its lines become once it is paid (only a
-  // 'paid' result carries cents; a waived or prepay line settles nothing here).
-  const open = rows
+  return kept;
+}
+
+function collectOpenFeeInvoices(liveInScope) {
+  return liveInScope
     .filter((row) => OPEN_FEE_INVOICE_STATUSES.has(String(row.status || '').toLowerCase()))
     .map((row) => ({
       id: String(row.id),
@@ -546,12 +753,50 @@ async function setupFeeSettledElsewhere(conn, {
       cents: invoiceLineItems(row).reduce((sum, li) => sum + (feeLineEvidence(li, 'paid', row.created_at)?.cents || 0), 0),
     }))
     .filter((invoice) => invoice.cents > 0);
-  // Not settled, but fee money found elsewhere still counts toward the fee:
-  // the callers subtract it so only the remainder is instructed.
+}
+
+async function setupFeeSettledElsewhere(conn, {
+  customerId, expectedFeeCents = 0, visitDate, lock,
+  sourceEstimateId = null, sinceDate = null, propertyId = null, serviceAddress = null,
+} = {}) {
+  if (!customerId) return { settled: false };
+  const scope = await resolveSettlementScope(conn, { sourceEstimateId, sinceDate, propertyId, serviceAddress });
+  let query = conn('invoices')
+    .where({ customer_id: customerId })
+    .whereRaw(`(setup_fee_waived = true OR line_items::text ILIKE '%fee%' OR line_items::text ILIKE '%membership%' OR line_items::text ILIKE '%prepay%' OR line_items::text ILIKE '%prepaid%')`);
+  if (lock) query = query.forUpdate();
+  const rows = await query.select(
+    'id', 'invoice_number', 'status', 'line_items', 'created_at',
+    'setup_fee_waived', 'scheduled_service_id', 'customer_address_snapshot',
+    'stripe_payment_intent_id', 'stripe_charge_id',
+  );
+  const liveInScope = await filterLiveInvoicesInScope(conn, rows, scope);
+  const partiallyRefundedIds = await loadPartiallyRefundedInvoiceIds(conn, customerId, liveInScope);
+  const paidByInvoice = new Map();
+  let anyPartiallyRefunded = false;
+  for (const row of liveInScope) {
+    const evaluated = evaluateCandidateFeeRow(row, partiallyRefundedIds.has(String(row.id)));
+    if (evaluated.settledNow) return evaluated.settledNow;
+    if (evaluated.cents > 0) {
+      paidByInvoice.set(String(row.id), (paidByInvoice.get(String(row.id)) || 0) + evaluated.cents);
+      if (evaluated.partiallyRefunded) anyPartiallyRefunded = true;
+    }
+  }
+  const paidFeeCents = [...paidByInvoice.values()].reduce((a, b) => a + b, 0);
+  if (paidFeeCents > 0 && paidFeeCents >= expectedFeeCents) {
+    return {
+      settled: true,
+      reason: 'paid_fee',
+      invoiceId: [...paidByInvoice.keys()][0],
+      ...(anyPartiallyRefunded ? { partiallyRefunded: true } : {}),
+    };
+  }
+  const term = await findMatchingCoveredPrepayTerm(conn, { customerId, visitDate, scope, sourceEstimateId });
+  if (term) return { settled: true, reason: 'annual_prepay_term', termId: term.id };
   return {
     settled: false,
     ...(paidByInvoice.size ? { partial: [...paidByInvoice].map(([id, cents]) => ({ id, cents })) } : {}),
-    open,
+    open: collectOpenFeeInvoices(liveInScope),
   };
 }
 
@@ -729,6 +974,10 @@ async function findUnmintedSetupFeeObligation({
     customerId: estimate.customer_id,
     expectedFeeCents,
     visitDate: await settledVisitDate(conn, excludeScheduledServiceId),
+    sourceEstimateId: estimate.id,
+    sinceDate: earlierTimestamp(estimate.created_at, estimate.accepted_at),
+    propertyId: estimate.property_id,
+    serviceAddress: estimate.address,
   });
   if (settledElsewhere.settled) return { owed: false, settledElsewhere };
   // Partial fee money paid elsewhere (not already counted by the stamped scan)

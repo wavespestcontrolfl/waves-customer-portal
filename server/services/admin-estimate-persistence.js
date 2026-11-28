@@ -1446,20 +1446,17 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const Returning = require('./returning-setup-fee-waiver');
     const storedReturning = Returning.returningSetupFeeWaiverOf(estimateData);
     const operatorSetupFeeWaived = !storedReturning && !!(opAdj && typeof opAdj === 'object' && opAdj.waiveSetupFee === true);
-    if (operatorSetupFeeWaived && Array.isArray(v1?.lineItems)) {
-      for (const li of v1.lineItems) {
-        if (li && Number(li.initialFee) > 0) li.initialFee = 0;
-      }
+    if (operatorSetupFeeWaived) {
+      Returning.waiveSetupFeeOnEngineResult(v1);
     }
     // A write that re-prices passes the customer's visit history (deps.returningVisitHistory; it dropped the
     // stored answer first) and the rule decides here, on the server-priced plan. A read-only replay (the public
     // page, a reconcile, an offered option) carries the stored answer instead: it marks the engine result again
     // only for the plan family it names, so the mapped totals match the save's, mosquito included, and another
     // mix never borrows it. A staff or move waiver already covers the fee, and a verified member's fee is the
-    // existing-member waiver's (membershipSnapshot), so the rule decides nothing beside either: the history is
-    // null for an active member (loadReturningVisitHistory verifies it for the save and the preview alike), and
-    // a caller that verified the member itself (deps.recurringCustomer) is held to the same answer here.
-    const ruleDecides = !operatorSetupFeeWaived && deps.recurringCustomer !== true;
+    // existing-member waiver's (membershipSnapshot), so the rule decides nothing beside either — except when a
+    // property-scoped history check explicitly verified the quoted property has no active plan of its own.
+    const ruleDecides = !operatorSetupFeeWaived && (deps.recurringCustomer !== true || deps.returningVisitHistory?.propertyScoped === true);
     const { mapped: serverResult, waiver: returningSetupFeeWaiver } = Returning.mapWithReturningWaiver(v1, mapResult, {
       history: ruleDecides ? deps.returningVisitHistory : null, stored: storedReturning,
     });
@@ -2412,6 +2409,39 @@ function assertLiveTermiteBondRates(estimateData) {
   }
 }
 
+function hasNonEmptyReason(adj) {
+  return typeof adj?.internalReason === 'string' && adj.internalReason.trim().length > 0;
+}
+
+function storedEstimateHasNonReturningSetupWaiver(storedEstimateData) {
+  const storedAdj = storedEstimateData?.operatorPriceAdjustment;
+  if (!storedAdj || typeof storedAdj !== 'object' || storedAdj.waiveSetupFee !== true) return false;
+  return !require('./returning-setup-fee-waiver').returningSetupFeeWaiverOf(storedEstimateData);
+}
+
+// setupFeeQuote is exclusively server-owned (website wizard, restart, mail offers) —
+// never accept a browser-supplied copy on admin create/revise. operatorPriceAdjustment.waiveSetupFee
+// is admin-only (with an explicit internalReason) or preserved from an already-stored non-returning
+// staff/move waiver on revise; unprivileged technicians or browser payloads cannot forge a waiver.
+function sanitizeClientSetupFeeWaivers(trustedEstimateData, { storedEstimateData, technician, moveAllowed, waiveSetupFeeAllowed }) {
+  if (!trustedEstimateData || typeof trustedEstimateData !== 'object') return;
+  delete trustedEstimateData.setupFeeQuote;
+  const adj = trustedEstimateData.operatorPriceAdjustment;
+  if (!adj || typeof adj !== 'object' || adj.waiveSetupFee !== true) return;
+  const isAdmin = waiveSetupFeeAllowed === true
+    || moveAllowed === true
+    || String(technician?.role || '').toLowerCase() === 'admin';
+  if (isAdmin && hasNonEmptyReason(adj)) return;
+  if (storedEstimateHasNonReturningSetupWaiver(storedEstimateData)) {
+    const storedAdj = storedEstimateData.operatorPriceAdjustment;
+    if (!hasNonEmptyReason(adj) && hasNonEmptyReason(storedAdj)) adj.internalReason = storedAdj.internalReason;
+    return;
+  }
+  const { waiveSetupFee: _dropped, ...rest } = adj;
+  if (Number(rest.value) > 0) trustedEstimateData.operatorPriceAdjustment = rest;
+  else delete trustedEstimateData.operatorPriceAdjustment;
+}
+
 async function resolveEstimateWritePayload({
   database = db,
   body,
@@ -2426,6 +2456,7 @@ async function resolveEstimateWritePayload({
   requireLivePricing = false,
   priorPhone = null, // revise only: the ROW's customer_phone, so an unchanged echo is not re-judged
   moveAllowed = false, // create only: the saver is an admin, so body.moveId may start a new-home estimate
+  waiveSetupFeeAllowed, // explicit admin permission for operatorPriceAdjustment.waiveSetupFee
 }) {
   // A US-shaped phone that can never be texted (area code or exchange starting
   // 0/1, Twilio 21211) is refused at save, not first at Send (codex #6028 P2).
@@ -2469,6 +2500,7 @@ async function resolveEstimateWritePayload({
   const Returning = require('./returning-setup-fee-waiver');
   const returningAnswerHeld = Returning.holdsReturningSetupWaiver(storedEstimateData, trustedEstimateData);
   Returning.dropReturningSetupWaiver(trustedEstimateData);
+  sanitizeClientSetupFeeWaivers(trustedEstimateData, { storedEstimateData, technician, moveAllowed, waiveSetupFeeAllowed });
   // Moving PR B1 (GATE_MOVING_ESTIMATE): estimate_data.move and its setup-fee
   // waiver are server-owned. A create naming a move (body.moveId) takes them
   // from the verified move; a revise carries the stored row's; a browser copy
@@ -2580,7 +2612,12 @@ async function resolveEstimateWritePayload({
     // off). A failed read refuses the save, like the existing-services read above: pricing without it would
     // charge a $99 the estimate tool's preview showed as waived.
     try {
-      returningVisitHistory = await Returning.loadReturningVisitHistory(database, { customerId: body.customerId, now: now() });
+      returningVisitHistory = await Returning.loadReturningVisitHistory(database, {
+        customerId: body.customerId,
+        now: now(),
+        address: body.address,
+        propertyId: body.propertyId,
+      });
     } catch (err) {
       logger.warn(`[admin-estimate] visit history lookup failed — refusing save: ${err.message}`);
       throw errorWithStatus('Could not confirm this customer\'s visit history. Retry the save.', 503);
@@ -2851,6 +2888,7 @@ async function createOrReuseAdminEstimate({
   expectedEngineResultDigest = null,
   requireLivePricing = false,
   moveAllowed = false,
+  waiveSetupFeeAllowed,
 }) {
   // Moving PR B1: a new-home estimate's id is fixed before pricing so its
   // move stamp can name it (an admin's builder draft id, else a fresh one).
@@ -2875,6 +2913,7 @@ async function createOrReuseAdminEstimate({
     pricingOut,
     requireLivePricing,
     moveAllowed,
+    waiveSetupFeeAllowed,
   });
   const expiresAt = estimateExpiresAt(now);
   const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
@@ -3687,6 +3726,7 @@ async function reviseAdminEstimate({
   dryRun = false,
   expectedEngineResultDigest = null,
   requireLivePricing = false,
+  waiveSetupFeeAllowed,
 }) {
   const estimate = await database('estimates').where({ id: estimateId }).first();
   // The clarify re-price marker this revision OBSERVES before recomputing —
@@ -3780,6 +3820,7 @@ async function reviseAdminEstimate({
     recompute,
     pricingOut,
     requireLivePricing,
+    waiveSetupFeeAllowed,
   });
   // Moving PR B1: early answer for the dry-run preflight; the LOCKED pass below repeats it.
   await assertMoveEstimateBinding(database, estimate, writeFields);

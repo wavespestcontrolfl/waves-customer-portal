@@ -101,6 +101,24 @@ test('a new-home estimate previews without the $99 and says so', async () => {
   expect(moving.payload.totals.year2).toBe(plain.payload.totals.year2);
 });
 
+test('B-20: a solo mosquito new-home estimate previews without the $99 setup fee', async () => {
+  const mosquitoQuote = (options = {}) => ({
+    profile: { homeSqFt: 2000, lotSqFt: 8000, stories: 1, propertyType: 'Single Family' },
+    selectedServices: ['MOSQUITO'],
+    options: { address: '40 Sample Road, Venice, FL 34285', mosquitoTier: 'monthly', existingCustomerId: 'cust-1', ...options },
+  });
+  const plain = await invoke(mosquitoQuote());
+  expect(plain.status).toBe(200);
+  expect(plain.payload.oneTime.membershipFee).toBe(99);
+
+  const moving = await invoke(mosquitoQuote({ moveId: 'move-1' }));
+  expect(moving.status).toBe(200);
+  expect(moving.payload.moveSetupFeeWaived).toBe(true);
+  expect(moving.payload.oneTime.membershipFee).toBe(0);
+  expect(moving.payload.oneTime.total).toBe(plain.payload.oneTime.total - 99);
+  expect(moving.payload.totals.year1).toBe(plain.payload.totals.year1 - 99);
+});
+
 // Returning-customer rule: the preview prices through the decision the save makes, so the two agree. Regressions
 // this would show: staff see a $99 the save drops (or the reverse), a technician is shown a visit date, a failed
 // history read prices as "no history".
@@ -109,7 +127,7 @@ test('a returning customer inside the window previews without the $99, and the t
   const plain = await invoke(quote());
   Returning.loadReturningVisitHistory.mockResolvedValueOnce(backAfter95Days);
   const back = await invoke(quote());
-  expect(Returning.loadReturningVisitHistory).toHaveBeenLastCalledWith(db, { customerId: 'cust-1' });
+  expect(Returning.loadReturningVisitHistory).toHaveBeenLastCalledWith(db, { customerId: 'cust-1', address: '40 Sample Road, Venice, FL 34285' });
   expect(back.payload.returningSetupFeeWaiver).toEqual(expect.objectContaining({ lastCompletedVisitDate: '2026-08-21', gapDays: 95, windowDays: 121 }));
   expect(back.payload.oneTime.membershipFee).toBe(0);
   expect(back.payload.oneTime.total).toBe(plain.payload.oneTime.total - 99);

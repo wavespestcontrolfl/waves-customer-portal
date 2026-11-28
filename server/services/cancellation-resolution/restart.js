@@ -1078,6 +1078,11 @@ function buildEstimateData(mint, propertyContext, premisesStamp) {
 // residual set — normally empty for a cancelled customer, so the engine prices at
 // today's list; a family they somehow still hold prices the restart at
 // the combined tier instead of standalone. Already family-canonical.
+function restartQuotedAddress(mint) {
+  const fn = mint?.mintDeps?.pricingAi?.addressForCustomer;
+  return typeof fn === 'function' && mint?.fresh ? fn(mint.fresh) : null;
+}
+
 async function recomputeOffer(mint, estimateData, propertySeed) {
   const {
     toPrice, ownedFamilies, logTag, mintDeps: { persistence },
@@ -1089,7 +1094,11 @@ async function recomputeOffer(mint, estimateData, propertySeed) {
   // (loadReturningVisitHistoryInSavepoint).
   const Returning = require('../returning-setup-fee-waiver');
   const returningVisitHistory = mint.source === SOURCE
-    ? await Returning.loadReturningVisitHistoryInSavepoint(mint.trx, { customerId: mint.fresh.id, now: mint.nowDate }, logTag)
+    ? await Returning.loadReturningVisitHistoryInSavepoint(
+      mint.trx,
+      { customerId: mint.fresh.id, now: mint.nowDate, address: restartQuotedAddress(mint) },
+      logTag,
+    )
     : null;
   const recomputed = await persistence.serverRecomputeFromEstimateData(estimateData, {
     priorQualifyingServices,

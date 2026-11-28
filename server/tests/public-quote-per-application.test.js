@@ -660,7 +660,7 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(Returning.decideReturningSetupFeeWaiverForPlan(lines({ pest: { frequency: 'quarterly' }, mosquito: {} }), history)).toBeNull();
     // The decision runs inside the draft write's transaction, with the matched customer, on the quote's own lines (source contract).
     const publicQuote = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
-    expect(publicQuote).toMatch(/resolveSetupFeeQuoteWithReturningRule\(\s+setupFeeBasis,\s+\{ activeMember, feeAlreadyQueued, queuedForThisDraft \},\s+\{ q, customerId, recurringLines: recurringQuoteLines\(estimate\) \},/);
+    expect(publicQuote).toMatch(/resolveSetupFeeQuoteWithReturningRule\(\s+setupFeeBasis,\s+\{ activeMember, feeAlreadyQueued, queuedForThisDraft \},\s+\{ q, customerId, recurringLines: recurringQuoteLines\(estimate\), address: quoteFullAddress \},/);
   });
 
   // The rule is the last reason, asked only about a membership fee still owed. Regressions: a failed history read

@@ -1604,6 +1604,45 @@ function verifyAgentEvidenceQuotes(evidence, context) {
 // needs the raw engine lines for the membership snapshot) — it rides the
 // second ARGUMENT, never the model-visible input, so the model can't request
 // the raw payload.
+// B-41: returning-customer $99 setup fee waiver parity for Intelligence Bar quote tools
+// (GATE_RETURNING_SETUP_FEE_GAP). Evaluates on the server-priced engine result for the
+// linked customer & quoted property; a staff waiver already waives the fee, and an active
+// plan at the quoted property defers to the existing-member rule. Fail-soft on lookup error.
+async function applyAgentReturningSetupWaiver(engineResult, { accountPricing, operatorAdjustment, address }) {
+  if (!engineResult || operatorAdjustment?.waiveSetupFee === true) return null;
+  const Returning = require('../returning-setup-fee-waiver');
+  if (!Returning.returningSetupFeeGapLive()) return null;
+  const customerId = accountPricing?.customerId || accountPricing?.leadCustomerId || null;
+  if (!customerId) return null;
+  let history = null;
+  try {
+    history = await Returning.loadReturningVisitHistory(db, {
+      customerId,
+      address: address || accountPricing?.evidenceContext?.lead?.address || null,
+    });
+  } catch (err) {
+    logger.warn(`[intelligence-bar:estimate-tools] returning setup fee lookup skipped: ${err.message}`);
+    return null;
+  }
+  if (!history) return null;
+  const { mapV1ToLegacyShape } = require('../pricing-engine/v1-legacy-mapper');
+  const { waiver } = Returning.mapWithReturningWaiver(engineResult, mapV1ToLegacyShape, { history });
+  return waiver || null;
+}
+
+function mergePersistedOperatorAdjustment(operatorAdjustment, returningWaiver) {
+  if (!returningWaiver) return operatorAdjustment || null;
+  return require('../returning-setup-fee-waiver').withReturningSetupWaiver(operatorAdjustment, returningWaiver);
+}
+
+function optionalReturningWaiverField(returningWaiver) {
+  return returningWaiver ? { returning_setup_fee_waiver: returningWaiver } : {};
+}
+
+function optionalOperatorAdjustmentField(adjustment) {
+  return adjustment ? { operatorPriceAdjustment: adjustment } : {};
+}
+
 async function computeEstimate(rawInput, { includeRawEngineResult = false } = {}) {
   // The sanctioned operator adjustment rides its own param — pull it out
   // BEFORE the forbidden-input scan so the discount wall on engine inputs
@@ -1715,6 +1754,9 @@ async function computeEstimate(rawInput, { includeRawEngineResult = false } = {}
   pricingEngineInput = await require('../pricing-engine/trusted-catalog-pricing')
     .withTrustedCatalogPricing(pricingEngineInput, { database: db });
   const estimate = generateEstimate(pricingEngineInput);
+  const returningWaiver = await applyAgentReturningSetupWaiver(estimate, {
+    accountPricing, operatorAdjustment, address: input.address,
+  });
 
   const summary = estimate?.summary || {};
   const monthlyTotal = Number(summary.recurringMonthlyAfterDiscount || 0);
@@ -1787,6 +1829,7 @@ async function computeEstimate(rawInput, { includeRawEngineResult = false } = {}
       below_target_services: belowTargetLines.map((line) => line.service),
     },
     full_summary: summary,
+    ...optionalReturningWaiverField(returningWaiver),
     ...(includeRawEngineResult ? { raw_engine_result: estimate } : {}),
   };
 }
@@ -2117,10 +2160,10 @@ async function createPendingEstimate(input) {
     engineResult: priced.raw_engine_result,
     agentDraft: true,
     ...(leadId ? { lead_id: leadId } : {}),
-    // Operator-stated adjustment spec — the public replay re-injects it as
-    // manualDiscount (extractEngineInputs), same pattern as
-    // priorQualifyingServices; it is deliberately NOT inside engineInputs.
-    ...(operatorAdjustment ? { operatorPriceAdjustment: operatorAdjustment } : {}),
+    // Operator-stated adjustment spec (and any returning-customer waiver) — the
+    // public replay re-injects it as manualDiscount (extractEngineInputs), same
+    // pattern as priorQualifyingServices; deliberately NOT inside engineInputs.
+    ...optionalOperatorAdjustmentField(mergePersistedOperatorAdjustment(operatorAdjustment, priced.returning_setup_fee_waiver)),
     // The account context the reprice used: extractEngineInputs re-injects
     // priorQualifyingServices on every public recompute, and the membership
     // snapshot drives existing-customer treatment (waived setup fee, no
@@ -2406,6 +2449,9 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   pricingEngineInputs = await require('../pricing-engine/trusted-catalog-pricing')
     .withTrustedCatalogPricing(pricingEngineInputs, { database: db });
   const engineResult = generateEstimate(pricingEngineInputs);
+  const returningWaiver = await applyAgentReturningSetupWaiver(engineResult, {
+    accountPricing, operatorAdjustment, address: input.address,
+  });
   const totals = deriveTotals(engineResult);
   if (!totals.monthly && !totals.annual && !totals.oneTime) {
     return { error: 'Pricing engine returned zero — keep this as a manual quote instead of drafting' };
@@ -2926,6 +2972,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     customer_account: accountPricing.customerAccount,
     presentation: presentationForServices(input.engineInputs.services, engineResult),
     operator_price_adjustment: operatorAdjustmentDisclosure,
+    ...optionalReturningWaiverField(returningWaiver),
   };
 }
 
@@ -2950,7 +2997,10 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
   // Persist the NORMALIZED adjustment spec (not the raw model input) — the
   // public replay re-injects it as manualDiscount, and it lives outside
   // engineInputs so revision round-trips never trip the forbidden-input wall.
-  const persistedAdjustment = validateOperatorPriceAdjustment(input.operatorPriceAdjustment).adjustment || null;
+  const persistedAdjustment = mergePersistedOperatorAdjustment(
+    validateOperatorPriceAdjustment(input.operatorPriceAdjustment).adjustment || null,
+    preview.returning_setup_fee_waiver,
+  );
 
   // Same replay-stamp contract as the compact builder: unstamped saved pest
   // inputs read as legacy v1 on replay (codex #2966 r3 P1).
@@ -2972,7 +3022,7 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
       ...(accountPricing.priorQualifyingServices.length
         ? { priorQualifyingServices: accountPricing.priorQualifyingServices }
         : {}),
-      ...(persistedAdjustment ? { operatorPriceAdjustment: persistedAdjustment } : {}),
+      ...optionalOperatorAdjustmentField(persistedAdjustment),
       estimatorEngine: {
         version: 3,
         origin: 'manual_agent',

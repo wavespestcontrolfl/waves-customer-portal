@@ -3132,7 +3132,7 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // the draft — amount 0 means the quote DISCLOSED no fee (active member at
   // quote time), and conversion must not re-add one the customer never saw.
   const frozenQuote = normalizeEstimateData(estimateData)?.setupFeeQuote;
-  if (frozenQuote && !(Number(frozenQuote.amount) > 0)) return false;
+  if (frozenQuote && frozenQuote.kind !== 'rodent_bait_setup' && !(Number(frozenQuote.amount) > 0)) return false;
   // Existing customers never pay the WaveGuard setup again — mirrors the
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
