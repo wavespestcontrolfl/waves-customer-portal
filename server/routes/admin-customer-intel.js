@@ -1,4 +1,5 @@
 const express = require('express');
+const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
@@ -248,19 +249,33 @@ router.put('/retention/:id/skip', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const RETENTION_OUTCOME_SCHEMA = Joi.object({
+  outcome: Joi.string().valid('retained', 'cancelled', 'no_response', 'completed', 'other').required(),
+  customerResponse: Joi.string().trim().max(2000).allow('', null),
+  revenueSaved: Joi.number().min(0).max(1000000).allow(null),
+});
+
+const UPSELL_STATUS_SCHEMA = Joi.object({
+  status: Joi.string().valid('pending', 'pitched', 'accepted', 'declined', 'deferred', 'dismissed').required(),
+  pitchedBy: Joi.string().trim().max(100).allow('', null),
+});
+
 // PUT /api/admin/customers/intelligence/retention/:id/outcome — record outcome
 router.put('/retention/:id/outcome', async (req, res, next) => {
   try {
-    const { outcome, customerResponse, revenueSaved } = req.body;
+    const { error, value } = RETENTION_OUTCOME_SCHEMA.validate(req.body || {}, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0]?.message || 'Invalid retention outcome payload' });
+    const { outcome, customerResponse, revenueSaved } = value;
     const updates = {
       outcome,
-      customer_response: customerResponse,
+      customer_response: customerResponse ?? null,
       status: outcome === 'retained' ? 'save_successful' : outcome === 'cancelled' ? 'save_failed' : 'completed',
       updated_at: new Date(),
     };
-    if (revenueSaved) updates.revenue_saved = revenueSaved;
+    if (revenueSaved != null && Number(revenueSaved) > 0) updates.revenue_saved = Number(revenueSaved);
 
     const [updated] = await db('retention_outreach').where('id', req.params.id).update(updates).returning('*');
+    if (!updated) return res.status(404).json({ error: 'Outreach not found' });
     res.json({ outreach: updated });
   } catch (err) { next(err); }
 });
@@ -268,12 +283,15 @@ router.put('/retention/:id/outcome', async (req, res, next) => {
 // PUT /api/admin/customers/intelligence/upsells/:id — update upsell status
 router.put('/upsells/:id', async (req, res, next) => {
   try {
-    const { status, pitchedBy } = req.body;
+    const { error, value } = UPSELL_STATUS_SCHEMA.validate(req.body || {}, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0]?.message || 'Invalid upsell status payload' });
+    const { status, pitchedBy } = value;
     const updates = { status, updated_at: new Date() };
     if (status === 'pitched') { updates.pitched_at = new Date(); updates.pitched_by = pitchedBy || 'admin'; }
     if (['accepted', 'declined', 'deferred'].includes(status)) updates.outcome_at = new Date();
 
     const [updated] = await db('upsell_opportunities').where('id', req.params.id).update(updates).returning('*');
+    if (!updated) return res.status(404).json({ error: 'Upsell opportunity not found' });
     res.json({ upsell: updated });
   } catch (err) { next(err); }
 });

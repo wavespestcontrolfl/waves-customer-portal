@@ -4533,13 +4533,25 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   // difference. Preview-only read — the authoritative ledger read re-runs
   // inside the mint transaction.
   const [depositCredit, setDepositCredit] = useState(null);
+  const [depositCreditError, setDepositCreditError] = useState("");
   const [applyCredit, setApplyCredit] = useState(true);
   useEffect(() => {
     if (!customer?.id) return undefined;
     let cancelled = false;
+    setDepositCreditError("");
     adminFetch(`/admin/customers/${customer.id}/deposit-credit`)
-      .then((r) => { if (!cancelled) setDepositCredit(r?.credit || null); })
-      .catch(() => {});
+      .then((r) => {
+        if (!cancelled) {
+          setDepositCredit(r?.credit || null);
+          setDepositCreditError("");
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setDepositCredit(null);
+          setDepositCreditError(err?.message || "Could not check deposit credit");
+        }
+      });
     return () => { cancelled = true; };
   }, [customer?.id]);
 
@@ -4789,6 +4801,11 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           {activeTermEnd && (
             <div className="sm:col-span-2 text-ui-label text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
+            </div>
+          )}
+          {depositCreditError && (
+            <div className="sm:col-span-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm p-2.5">
+              {depositCreditError}
             </div>
           )}
           {depositCredit && depositCredit.payerBilled && (
@@ -8156,7 +8173,9 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
       // A refusal is an answer (nothing saved). Anything else (a lost response, a 5xx) leaves the timer unknown: it
       // may have landed.
       if (sendsTimer) {
-        timerTriedRef.current = Array.isArray(e?.body?.rejected) ? [] : [...new Set([...timerTriedRef.current, timerKey(draft)])];
+        const timerRejected = Array.isArray(e?.body?.rejected)
+          && e.body.rejected.some((r) => ACCESS_PREFS_TIMER_KEYS.includes(r.field));
+        timerTriedRef.current = timerRejected ? [] : [...new Set([...timerTriedRef.current, timerKey(draft)])];
       }
       throw e;
     }
@@ -9468,6 +9487,7 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
     payerSaving,
     handlePayerSelect,
     payers,
+    payersError,
     showNewPayer,
     newPayer,
     setNewPayer,
@@ -9483,6 +9503,9 @@ function CustomerPayerEditor({ c, isAdmin, payer }) {
       <div className="text-ui-caption ui-label text-ink-tertiary mb-1">
         Default Bill-To (third-party payer)
       </div>
+      {payersError && (
+        <div className="text-14 text-alert-fg mb-2">{payersError}</div>
+      )}
       <div className="flex items-center gap-2 flex-wrap">
         <Select
           aria-label="Default bill-to"
@@ -10669,6 +10692,7 @@ function useCustomerPayer({
   isAdmin,
 }) {
   const [payers, setPayers] = useState([]);
+  const [payersError, setPayersError] = useState("");
   const [payerSaving, setPayerSaving] = useState(false);
   // Inline "New payer" quick-add for the default Bill-To select.
   const [showNewPayer, setShowNewPayer] = useState(false);
@@ -10684,9 +10708,16 @@ function useCustomerPayer({
   useEffect(() => {
     // /admin/payers is requireAdmin: a non-admin's request is always refused.
     if (!isAdmin) return;
+    setPayersError("");
     adminFetch("/admin/payers")
-      .then((r) => setPayers(Array.isArray(r?.payers) ? r.payers : []))
-      .catch(() => setPayers([]));
+      .then((r) => {
+        setPayers(Array.isArray(r?.payers) ? r.payers : []);
+        setPayersError("");
+      })
+      .catch((err) => {
+        setPayers([]);
+        setPayersError(err?.message || "Could not load Bill-To payers");
+      });
   }, [isAdmin]);
   const savePayer = async (payerId) => {
     setPayerSaving(true);

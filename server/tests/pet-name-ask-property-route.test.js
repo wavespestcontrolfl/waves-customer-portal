@@ -24,6 +24,10 @@ jest.mock('../services/irrigation-app-plan', () => ({ appPlanEnabled: jest.fn(()
 jest.mock('../models/db', () => {
   const state = { row: null };
   const dbFn = jest.fn((table) => {
+    if (table === 'customers') {
+      const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), forShare: jest.fn(() => q), first: jest.fn(async () => ({ id: 'cust-1' })) };
+      return q;
+    }
     if (table !== 'property_preferences') throw new Error(`Unexpected table ${table}`);
     const q = {};
     q.where = jest.fn(() => q);

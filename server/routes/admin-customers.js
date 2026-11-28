@@ -1542,14 +1542,12 @@ function applyCustomerListFilters(query, filters, healthColumns) {
     });
   }
   if (hasBalance === 'true' || hasBalance === true) {
+    const { applyOpenSelfPayPredicates } = require('../services/open-balance');
     query = query.whereExists(function () {
-      this.select('customer_id').from('invoices')
-        .whereRaw('invoices.customer_id = customers.id')
-        .whereIn('status', ['sent', 'viewed', 'overdue'])
-        .groupBy('customer_id')
-        // Net due, the same expression as the row's balance_owed: an open-status
-        // invoice fully covered by payments or credits is not a balance.
-        .havingRaw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) > 0');
+      applyOpenSelfPayPredicates(
+        this.select('invoices.customer_id').from('invoices')
+          .whereRaw('invoices.customer_id = customers.id'),
+      );
     });
   }
   if (lastVisited && lastVisited !== 'all') {
@@ -2773,10 +2771,9 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COUNT(DISTINCT service_type) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND status NOT IN ('cancelled')) as service_type_count"),
       // rating column may not exist — use satisfaction_rating from treatment_outcomes or skip
       db.raw("(SELECT NULL) as last_rating"),
-      db.raw("(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
-      // Invoice exception only, including third-party bills on the record.
-      // This is not an assertion that the homeowner owes a self-pay balance.
-      db.raw("(SELECT COUNT(*) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue') AND GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0 AND ?) as overdue_invoice_count", [invoiceOverdueSql(db)]),
+      db.raw(`(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND ${require('../services/open-balance').OPEN_SELF_PAY_SQL}) as balance_owed`),
+      // Open self-pay overdue invoices only (excludes third-party payer/statement bills).
+      db.raw(`(SELECT COUNT(*) FROM invoices WHERE invoices.customer_id = customers.id AND ${require('../services/open-balance').OPEN_SELF_PAY_SQL} AND GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0 AND ?) as overdue_invoice_count`, [invoiceOverdueSql(db)]),
       db.raw('? as health_score', [latestHealthValueRaw(healthColumns, 'score')]),
       db.raw('? as health_grade', [latestHealthValueRaw(healthColumns, 'grade')]),
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
@@ -4307,21 +4304,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
 
     if (impliedLaneStamp) {
-      // The stamp changed nothing about how the customer bills — the
-      // resolver already inferred this lane — but a hand-created monthly
-      // member is exactly the shape a mis-keyed duplicate takes, so the
-      // owner eyeballs each one before the next dues run (fire-and-forget;
-      // never blocks the create).
       try {
-        const NotificationService = require('../services/notification-service');
-        void NotificationService.notifyAdmin(
-          'billing_lane_review',
-          `Billing lane stamped: ${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
-          `Created with WaveGuard ${normalized.tier} and $${Number(normalized.monthlyRate).toFixed(2)}/mo but no explicit billing lane — stamped monthly_membership (the lane this combination already inferred). Verify before the next dues run; if they actually bill per application, change the lane in the profile.`,
-          { icon: '\u{1F4B3}', link: `/admin/customers?customerId=${customer.id}`, bell: true, metadata: { customerId: customer.id, stamped: impliedLaneStamp, source: 'admin_customer_create' } },
-        ).catch((err) => logger.warn(`[customers] billing-lane review notify failed for ${customer.id}: ${err.message}`));
+        const { raiseAdminAlert } = require('../services/admin-alert-compose');
+        const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim().slice(0, 28) || 'New customer';
+        void raiseAdminAlert('billing', {
+          area: 'Billing',
+          severity: 'needs-you',
+          who: 'person',
+          subject: { type: 'customer', id: String(customer.id) },
+          doneWhen: 'billing_lane_reviewed',
+          action: 'Review billing lane on new customer',
+          why: `${name} was stamped monthly without an explicit lane.`,
+          link: `/admin/customers?customerId=${customer.id}`,
+        }, {
+          bell: true,
+          dedupeKey: `billing-lane-review:create:${customer.id}`,
+          dedupeOpenOnly: true,
+          detail: `Tier: ${normalized.tier || 'none'}, Monthly rate: $${Number(normalized.monthlyRate).toFixed(2)}. Verify before the next dues run whether this customer bills monthly or per visit.`,
+          metadata: { customerId: customer.id, stamped: impliedLaneStamp, source: 'admin_customer_create' },
+        }).catch((err) => logger.warn(`[customers] billing-lane review alert failed for ${customer.id}: ${err.message}`));
       } catch (err) {
-        logger.warn(`[customers] billing-lane review notify setup failed for ${customer.id}: ${err.message}`);
+        logger.warn(`[customers] billing-lane review alert setup failed for ${customer.id}: ${err.message}`);
       }
     }
 
@@ -4969,18 +4972,27 @@ const customerUpdateHandler = async (req, res, next) => {
         }, true);
       }
       if (impliedLaneStamp) {
-        // Post-commit review card for the auto-stamped lane (see the stamp
-        // block above) — fire-and-forget, never blocks the save.
         try {
-          const NotificationService = require('../services/notification-service');
-          void NotificationService.notifyAdmin(
-            'billing_lane_review',
-            `Billing lane stamped: ${before.first_name || ''} ${before.last_name || ''}`.trim(),
-            `A profile edit left this customer with a WaveGuard tier and a positive monthly rate but no explicit billing lane — stamped monthly_membership (the lane this combination already inferred). Verify before the next dues run; if they actually bill per application, change the lane in the profile.`,
-            { icon: '\u{1F4B3}', link: `/admin/customers?customerId=${req.params.id}`, bell: true, metadata: { customerId: req.params.id, stamped: impliedLaneStamp, source: 'admin_customer_update' } },
-          ).catch((err) => logger.warn(`[customers] billing-lane review notify failed for ${req.params.id}: ${err.message}`));
+          const { raiseAdminAlert } = require('../services/admin-alert-compose');
+          const name = [before.first_name, before.last_name].filter(Boolean).join(' ').trim().slice(0, 28) || 'Customer';
+          void raiseAdminAlert('billing', {
+            area: 'Billing',
+            severity: 'needs-you',
+            who: 'person',
+            subject: { type: 'customer', id: String(req.params.id) },
+            doneWhen: 'billing_lane_reviewed',
+            action: 'Review billing lane on edited customer',
+            why: `${name} was stamped monthly after a profile edit.`,
+            link: `/admin/customers?customerId=${req.params.id}`,
+          }, {
+            bell: true,
+            dedupeKey: `billing-lane-review:update:${req.params.id}`,
+            dedupeOpenOnly: true,
+            detail: 'Profile edit left a WaveGuard tier and positive monthly rate with no explicit billing lane — stamped monthly_membership. Verify before the next dues run whether they bill per visit.',
+            metadata: { customerId: req.params.id, stamped: impliedLaneStamp, source: 'admin_customer_update' },
+          }).catch((err) => logger.warn(`[customers] billing-lane review alert failed for ${req.params.id}: ${err.message}`));
         } catch (err) {
-          logger.warn(`[customers] billing-lane review notify setup failed for ${req.params.id}: ${err.message}`);
+          logger.warn(`[customers] billing-lane review alert setup failed for ${req.params.id}: ${err.message}`);
         }
       }
       // EFFECTIVE membership for lifecycle emails: an auto-derived tier
@@ -7043,18 +7055,19 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
       if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
         return res.status(400).json({ error: 'Refund amount must be greater than 0' });
       }
-      if (refundAmount > parseFloat(payment.amount || 0)) {
-        return res.status(400).json({ error: 'Refund amount cannot exceed payment amount' });
+      const remainingRefundable = Math.round((parseFloat(payment.amount || 0) - parseFloat(payment.refund_amount || 0)) * 100) / 100;
+      if (refundAmount > remainingRefundable) {
+        return res.status(400).json({ error: 'Refund amount cannot exceed remaining refundable amount' });
       }
     }
 
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.refund(paymentId, { amount, reason: reason || 'requested_by_customer' });
     await auditCustomerMutation(req, 'customer.payment.refund', req.params.id, {
       paymentId,
       amount: amount || null,
       reason: reason || 'requested_by_customer',
     }, true);
-    const StripeService = require('../services/stripe');
-    const result = await StripeService.refund(paymentId, { amount, reason: reason || 'requested_by_customer' });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -7075,12 +7088,12 @@ router.get('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
 router.post('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
   try {
     const CustomerOffboarding = require('../services/customer-offboarding');
-    await auditCustomerMutation(req, 'customer.cancel_signup', req.params.id, {
-      reason: cleanOptionalText(req.body?.reason) || 'requested_by_customer',
-    }, true);
     const result = await CustomerOffboarding.cancelSignupAndRefundDeposit(req.params.id, {
       actorId: req.technicianId || null,
     });
+    await auditCustomerMutation(req, 'customer.cancel_signup', req.params.id, {
+      reason: cleanOptionalText(req.body?.reason) || 'requested_by_customer',
+    }, true);
     res.json({ success: true, ...result });
   } catch (err) {
     if (err.blockers) return res.status(409).json({ error: err.message, blockers: err.blockers });
