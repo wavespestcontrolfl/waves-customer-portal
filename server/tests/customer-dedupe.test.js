@@ -38,6 +38,7 @@ function makeChain(table, route) {
   for (const m of methods) {
     q[m] = jest.fn((...args) => { q._calls.push([m, args]); return q; });
   }
+  q.modify = jest.fn((cb) => { if (typeof cb === 'function') cb(q); return q; });
   q.called = (m) => q._calls.some(([name]) => name === m);
   q.args = (m) => q._calls.find(([name]) => name === m)?.[1];
   q.then = (resolve, reject) => Promise.resolve().then(() => {
@@ -1272,7 +1273,8 @@ describe('executeMerge', () => {
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true }))
       .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
     const lockCall = trx.raw.mock.calls.find(([sql, bindings]) => /pg_advisory_xact_lock\(hashtext\(\?\)\)/.test(String(sql))
-      && !String(bindings?.[0]).startsWith('customer-dunning:'));
+      && !String(bindings?.[0]).startsWith('customer-dunning:')
+      && bindings?.[0] !== 'multi_home_family_members:changes');
     expect(lockCall).toBeTruthy();
     expect(lockCall[1]).toEqual([`customer-duplicate-pair:${[WINNER, LOSER].sort().join(':')}`]);
   });
@@ -1475,13 +1477,19 @@ describe('executeMerge', () => {
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
     const { trx } = buildTrx({ winner, loser, fkRows: [{ table_name: 'invoices', column_name: 'customer_id' }] });
     db.transaction.mockImplementation(async (fn) => fn(trx));
-    // The first savepoint is the loser's pin-suggestion retire (stubbed to succeed); every later one is the FK sweep's.
     const pins = jest.spyOn(require('../services/customer-pin-suggestions'), 'retireOnMerge').mockResolvedValue(0);
-    let savepoints = 0;
     trx.transaction = jest.fn(async (fn) => {
-      savepoints += 1;
-      if (savepoints === 1) return fn(trx);
-      const e = new Error('boom'); e.code = '23505'; throw e;
+      const wrappedSp = (table, ...rest) => {
+        const q = trx(table, ...rest);
+        if (table === 'invoices' && q && typeof q.update === 'function') {
+          q.update = async () => {
+            const e = new Error('boom'); e.code = '23505'; throw e;
+          };
+        }
+        return q;
+      };
+      Object.assign(wrappedSp, trx);
+      return fn(wrappedSp);
     });
     try {
       await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
@@ -1509,7 +1517,7 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
-  it('registers multi_home_family_members with the family merge handler (merges distinct families cleanly without dropping)', () => {
+  it('registers multi_home_family_members with repointMultiHomeFamilyMembers (writes audit_log and cleans 1-member orphan)', () => {
     const { UNIQUE_COLLISION_HANDLERS, repointMultiHomeFamilyMembers } = dedupe._test;
     expect(UNIQUE_COLLISION_HANDLERS.multi_home_family_members).toBe(repointMultiHomeFamilyMembers);
   });

@@ -458,39 +458,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/equipment/equipment/:id/calibration` | admin-equipment |
 | POST | `/api/admin/equipment/equipment/:id/maintenance` | admin-equipment |
 | POST | `/api/admin/equipment/tank-mixes/:id/recalculate` | admin-equipment |
-| GET | `/api/admin/estimates` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| DELETE | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| PATCH | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| PUT | `/api/admin/estimates/:id` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/acceptance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/archive` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/call-outcome` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/edit-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/extend` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/follow-up` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/follow-up-draft` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/group` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/mark-accepted` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/pricing-audit` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/proposal` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| PUT | `/api/admin/estimates/:id/proposal` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/proposal.pdf` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/proposal/bid-form.pdf` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/proposal/generated` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/schedule-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/send` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/send-booking-link` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/send-preview` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/:id/slot-debug` | admin-estimate-slots |
-| PUT | `/api/admin/estimates/:id/sold-by` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/estimates/:id/unarchive` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/actuals-variance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/customer-spend/:customerId` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/lead-auto-send/preview` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/sold-by/options` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/source-performance` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/estimates/win-loss-slices` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimator/calculate-estimate` | property-lookup-v2 |
 | POST | `/api/admin/estimator/property-lookup` | property-lookup-v2 |
 | GET | `/api/admin/estimator/property-lookup/provider-accuracy` | property-lookup-v2 |
