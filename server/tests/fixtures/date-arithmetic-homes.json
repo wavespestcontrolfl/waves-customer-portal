@@ -45,7 +45,6 @@
     "routes/admin-schedule.js": 6,
     "routes/admin-social-media.js": 1,
     "routes/appointment-public.js": 1,
-    "routes/booking.js": 1,
     "routes/estimate-public.js": 1,
     "routes/promotions.js": 1,
     "routes/stripe-webhook.js": 1,
