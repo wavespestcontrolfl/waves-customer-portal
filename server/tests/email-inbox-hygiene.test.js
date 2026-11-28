@@ -314,6 +314,9 @@ describe('collectUnansweredNudges', () => {
     const sql = db.raw.mock.calls[0][0];
     expect(sql).toContain('DISTINCT ON (gmail_thread_id)');
     expect(sql).toContain('received_at DESC');
+    // Skipped automated senders (e.g. Google LSA call receipts) stay out of
+    // unanswered digest nudges, evaluated on the outer latest_per_thread row.
+    expect(sql).toMatch(/SELECT DISTINCT ON \(gmail_thread_id\)[\s\S]*auto_action[\s\S]*\) latest_per_thread[\s\S]*COALESCE\(auto_action, ''\) <> 'lead_skipped_automated_sender'/);
   });
 
   test('returns threads with no SENT message after the inbound mail; skips answered ones', async () => {
@@ -328,6 +331,37 @@ describe('collectUnansweredNudges', () => {
       : { messages: [{ labelIds: ['INBOX'], internalDate: String(new Date('2026-07-24T12:00:00Z').getTime()) }] }));
     const nudges = await collectUnansweredNudges(new Date('2026-07-28T12:00:00Z'));
     expect(nudges.map((n) => n.id)).toEqual(['e-b']);
+  });
+
+  test('excludes previously processed Google LSA call receipts from unanswered nudges without calling Gmail', async () => {
+    setupDb({}, {
+      __raw: [[
+        {
+          id: 'e-lsa-old',
+          gmail_thread_id: 't-lsa',
+          from_address: 'localservices-noreply@google.com',
+          subject: 'New call from a potential customer',
+          auto_action: 'lead_created',
+          received_at: '2026-07-24T12:00:00Z',
+        },
+        {
+          id: 'e-real',
+          gmail_thread_id: 't-real',
+          from_address: 'prospect@example.com',
+          subject: 'Need pest control quote',
+          auto_action: 'lead_created',
+          received_at: '2026-07-24T12:00:00Z',
+        },
+      ]],
+    });
+    gmailClient.getThread.mockResolvedValue({ messages: [{ labelIds: ['INBOX'], internalDate: '0' }] });
+    const nudges = await collectUnansweredNudges(new Date('2026-07-28T12:00:00Z'));
+    expect(nudges.map((n) => n.id)).toEqual(['e-real']);
+    expect(gmailClient.getThread).toHaveBeenCalledTimes(1);
+    expect(gmailClient.getThread).toHaveBeenCalledWith('t-real');
+    expect(db.raw.mock.calls[0][0]).toContain("LOWER(from_address) = 'localservices-noreply@google.com'");
+    expect(db.raw.mock.calls[0][0]).toContain('potential\\s+customer\\M');
+    expect(db.raw.mock.calls[0][0]).not.toContain('potential\\s+customer\\b');
   });
 });
 
@@ -985,6 +1019,87 @@ describe('reply drafts honor Reply-To', () => {
       't-relay',
       '<relay-123@forms-relay.example>'
     );
+  });
+
+  test('skips drafting when the resolved reply recipient is a no-reply mailbox', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb();
+    const result = await draftReplyForEmail({
+      id: 'e-lsa-noreply',
+      gmail_id: 'g-lsa-noreply',
+      gmail_thread_id: 't-lsa-noreply',
+      from_address: 'localservices-noreply@google.com',
+      from_name: 'Local Services by Google',
+      subject: 'New call from a potential customer',
+      body_text: 'A potential customer called you.',
+      label_ids: JSON.stringify(['INBOX']),
+      message_id: '<lsa-123@google.com>',
+      reply_to: 'localservices-noreply@google.com',
+      received_at: '2026-11-27T17:44:20Z',
+      draft_gmail_id: null,
+    });
+    expect(result).toBeNull();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
+
+  test('preserves reply drafts for reply-enabled ticketing notification addresses', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb();
+    gmailClient.getThread.mockResolvedValue({ messages: [] });
+    const result = await draftReplyForEmail({
+      id: 'e-ticket-notif',
+      gmail_id: 'g-ticket-notif',
+      gmail_thread_id: 't-ticket-notif',
+      from_address: 'no-reply@helpdesk.example',
+      from_name: 'Customer Support Portal',
+      subject: 'Ticket #123: reschedule request',
+      body_text: 'Please move Friday service to Monday.',
+      label_ids: JSON.stringify(['INBOX']),
+      message_id: '<ticket-123@helpdesk.example>',
+      reply_to: 'notifications+ticket123@helpdesk.example',
+      received_at: '2026-11-27T17:44:20Z',
+      draft_gmail_id: null,
+    });
+    expect(result).toBe('draft-1');
+    expect(gmailClient.createDraft).toHaveBeenCalledWith(
+      'notifications+ticket123@helpdesk.example',
+      expect.any(String),
+      expect.any(String),
+      't-ticket-notif',
+      '<ticket-123@helpdesk.example>'
+    );
+  });
+
+  test('skips drafting for Google LSA call receipts even with a distinct Reply-To, and refuses Reply-To pointing at internal Waves addresses', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb();
+    const lsaResult = await draftReplyForEmail({
+      id: 'e-lsa-stale',
+      gmail_id: 'g-lsa-stale',
+      gmail_thread_id: 't-lsa-stale',
+      from_address: 'localservices-noreply@google.com',
+      subject: 'New call from a potential customer',
+      body_text: 'A potential customer called you.',
+      label_ids: JSON.stringify(['INBOX']),
+      reply_to: 'reply-token@google.com',
+      received_at: '2026-11-27T17:44:20Z',
+      draft_gmail_id: 'pending',
+    });
+    const internalReplyResult = await draftReplyForEmail({
+      id: 'e-internal-reply',
+      gmail_id: 'g-internal-reply',
+      gmail_thread_id: 't-internal-reply',
+      from_address: 'relay@forms.example',
+      subject: 'Forwarded inquiry',
+      body_text: 'Please check this.',
+      label_ids: JSON.stringify(['INBOX']),
+      reply_to: 'events@wavespestcontrol.com',
+      received_at: '2026-11-27T17:44:20Z',
+      draft_gmail_id: null,
+    });
+    expect(lsaResult).toBeNull();
+    expect(internalReplyResult).toBeNull();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
   });
 });
 
