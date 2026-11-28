@@ -570,9 +570,12 @@ export default function BillingRecoveryPage() {
   }, [isCurrentRead]);
 
   const refreshAll = useCallback(async () => {
-    if (!readScopeRef.current.feedbackEnabled) return loadLegacy();
-    await Promise.all([loadLeaks(), loadAging(), loadAtRisk()]);
-  }, [loadAging, loadAtRisk, loadLeaks, loadLegacy]);
+    if (!readScopeRef.current.feedbackEnabled) {
+      await Promise.all([loadLegacy(), loadDrafts()]);
+      return;
+    }
+    await Promise.all([loadLeaks(), loadAging(), loadAtRisk(), loadDrafts()]);
+  }, [loadAging, loadAtRisk, loadDrafts, loadLeaks, loadLegacy]);
 
   useEffect(() => { void loadDrafts(); }, [days, feedbackEnabled, loadDrafts]);
 

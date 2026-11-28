@@ -99,41 +99,58 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const [openStmtId, setOpenStmtId] = useState(null);
+  const statementsReqRef = useRef(0);
+  const arReqRef = useRef(0);
 
   const loadStatements = useCallback(async () => {
+    const reqId = ++statementsReqRef.current;
     setLoading(true);
     setStatementsError("");
     try {
-      const r = await adminFetch(`/admin/payers/${payer.id}/statements`);
+      const r = await adminFetch(`/admin/payers/${encodeURIComponent(payer.id)}/statements`);
       const d = await r.json().catch(() => null);
+      if (reqId !== statementsReqRef.current) return;
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       setStatements(Array.isArray(d?.statements) ? d.statements : []);
     } catch (err) {
-      setStatementsError(err.message || "Could not load this payer's statements.");
+      if (reqId === statementsReqRef.current) {
+        setStatementsError(err.message || "Could not load this payer's statements.");
+      }
     } finally {
-      setLoading(false);
+      if (reqId === statementsReqRef.current) setLoading(false);
     }
   }, [payer.id]);
 
   const loadAr = useCallback(async () => {
+    const reqId = ++arReqRef.current;
     setArLoading(true);
     setArError("");
     try {
-      const r = await adminFetch(`/admin/payers/${payer.id}/ar`);
+      const r = await adminFetch(`/admin/payers/${encodeURIComponent(payer.id)}/ar`);
       const d = await r.json().catch(() => null);
+      if (reqId !== arReqRef.current) return;
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       if (!d?.summary) throw new Error("Could not load this payer's balance.");
       setAr(d);
     } catch (err) {
-      setArError(err.message || "Could not load this payer's balance.");
+      if (reqId === arReqRef.current) {
+        setArError(err.message || "Could not load this payer's balance.");
+      }
     } finally {
-      setArLoading(false);
+      if (reqId === arReqRef.current) setArLoading(false);
     }
   }, [payer.id]);
 
   useEffect(() => {
+    setStatements([]);
+    setAr(null);
+    setOpenStmtId(null);
     loadStatements();
     loadAr();
+    return () => {
+      statementsReqRef.current += 1;
+      arReqRef.current += 1;
+    };
   }, [loadStatements, loadAr]);
 
   const refresh = useCallback(async () => {
@@ -275,31 +292,43 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
   const [linesError, setLinesError] = useState("");
   const [sequenceError, setSequenceError] = useState("");
 
-  const base = `/admin/payers/${payerId}/statements/${statement.id}`;
+  const detailReqRef = useRef(0);
+  const base = `/admin/payers/${encodeURIComponent(payerId)}/statements/${encodeURIComponent(statement.id)}`;
 
   const loadDetail = useCallback(async () => {
+    const reqId = ++detailReqRef.current;
     setLinesError("");
     setSequenceError("");
     try {
       const r = await adminFetch(base);
       const d = await r.json().catch(() => null);
+      if (reqId !== detailReqRef.current) return;
       if (!r.ok) throw new Error(d?.error || "Could not load statement visits.");
       setLines(Array.isArray(d?.lines) ? d.lines : []);
     } catch (err) {
+      if (reqId !== detailReqRef.current) return;
       setLinesError(err.message || "Could not load statement visits.");
     }
     try {
       const r2 = await adminFetch(`${base}/followups`);
-      const d2 = await r2.json();
+      const d2 = await r2.json().catch(() => null);
+      if (reqId !== detailReqRef.current) return;
       if (!r2.ok) throw new Error(d2?.error || "Could not load reminder status.");
       setSequence(d2?.sequence ?? null);
     } catch (err) {
-      setSequenceError(err.message || "Could not load reminder status.");
+      if (reqId === detailReqRef.current) {
+        setSequenceError(err.message || "Could not load reminder status.");
+      }
     }
   }, [base]);
 
   useEffect(() => {
+    setLines(null);
+    setSequence(null);
     loadDetail();
+    return () => {
+      detailReqRef.current += 1;
+    };
   }, [loadDetail]);
 
   async function act(label, path, body) {

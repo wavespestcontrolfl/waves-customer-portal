@@ -4,7 +4,8 @@ const {
   WAVES_WEBSITE_HOST,
   WAVES_SUPPORT_PHONE_DISPLAY,
 } = require('../../constants/business');
-const { formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
+const { dateOnlyString, formatDateOnly, formatDisplayDate } = require('../../utils/date-only');
+const { etDateString } = require('../../utils/datetime-et');
 
 // Unified document tokens — print twin of the web document palette (see
 // pdf-tokens.js for provenance). Navy is the canonical customer ink
@@ -379,11 +380,24 @@ function invoiceBreakdownRows(invoice, customer = null) {
   ].filter(Boolean).map(([label, value]) => `${label}: ${value}`);
 }
 
-// totalsBlock prints each totals row this tall. A grouped table reserves the block's usual height; a receipt's surcharge row
-// and every discount row past the first are extra.
+// totalsBlock prints each totals row at least this tall (wrapping long labels
+// onto extra lines when needed). A grouped table reserves the block's usual
+// height; a receipt's surcharge row and any wrapped or extra discount rows
+// reserve their measured height so TOTAL never runs off the page.
 const TOTALS_ROW_HEIGHT = 14;
-function extraDiscountRowsHeight(invoice, customer) {
-  return Math.max(0, invoiceTotalsFacts(invoice, customer).discountRows.length - 1) * TOTALS_ROW_HEIGHT;
+const TOTALS_LABEL_WIDTH = 160;
+function totalsRowHeightFor(doc, label) {
+  const labelHeight = doc.heightOfString(String(label || ''), { width: TOTALS_LABEL_WIDTH });
+  return Math.max(TOTALS_ROW_HEIGHT, Math.ceil(labelHeight) + 4);
+}
+function extraDiscountRowsHeight(doc, invoice, customer) {
+  const { discountRows } = invoiceTotalsFacts(invoice, customer);
+  if (!discountRows.length) return 0;
+  doc.save();
+  doc.fontSize(PDF_TYPE.body).font('Helvetica');
+  const totalHeight = discountRows.reduce((sum, r) => sum + totalsRowHeightFor(doc, r.label), 0);
+  doc.restore();
+  return Math.max(0, totalHeight - TOTALS_ROW_HEIGHT);
 }
 
 // A receipt's credit card surcharge row (Visa Core Rules: shown separately on the front of the receipt, same type and size as the
@@ -442,9 +456,10 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
 
   const row = (label, value, color = BODY, bold = false) => {
     doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color);
-    doc.text(label, labelX, y, { width: 160, align: 'right' });
+    const rowHeight = totalsRowHeightFor(doc, label);
+    doc.text(label, labelX, y, { width: TOTALS_LABEL_WIDTH, align: 'right' });
     doc.text(value, valueX, y, { width: 70, align: 'right' });
-    y += TOTALS_ROW_HEIGHT;
+    y += rowHeight;
   };
 
   for (const [label, value] of totalsRowsAboveTotal(facts, opts.surcharge)) row(label, value);
@@ -595,9 +610,8 @@ function generateInvoicePDF(invoice, res) {
   const isPrepaid = invoice.status === 'prepaid';
   const isPaid = invoice.status === 'paid';
   const isSettled = isPaid || isPrepaid;
-  const isOverdue = !isSettled
-    && invoice.due_date
-    && new Date(invoice.due_date).getTime() < Date.now();
+  const dueYmd = dateOnlyString(invoice.due_date);
+  const isOverdue = !isSettled && !!dueYmd && dueYmd < etDateString();
 
   const statusLabel = isPaid ? 'Paid' : isPrepaid ? 'Prepaid' : isOverdue ? 'Overdue' : 'Due';
   const statusColor = isSettled ? GREEN : isOverdue ? RED : WAVES_BLUE;
@@ -611,7 +625,7 @@ function generateInvoicePDF(invoice, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);
-  y = lineItemsTable(doc, invoice.line_items, L, y, W, extraDiscountRowsHeight(invoice, customer));
+  y = lineItemsTable(doc, invoice.line_items, L, y, W, extraDiscountRowsHeight(doc, invoice, customer));
   y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer, partPayments: true });
   if (!isSettled) y = previousBalanceBlock(doc, invoice.previous_balance, L, y, W);
 
@@ -659,8 +673,15 @@ function generateReceiptPDF(invoice, payment, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   const surcharge = receiptSurchargeFacts(payment);
+  let surchargeHeight = 0;
+  if (surcharge) {
+    doc.save();
+    doc.fontSize(PDF_TYPE.body).font('Helvetica');
+    surchargeHeight = totalsRowHeightFor(doc, surcharge.label);
+    doc.restore();
+  }
   y = lineItemsTable(doc, invoice.line_items, L, y, W,
-    (surcharge ? TOTALS_ROW_HEIGHT : 0) + extraDiscountRowsHeight(invoice, customer));
+    surchargeHeight + extraDiscountRowsHeight(doc, invoice, customer));
   y = totalsBlock(doc, invoiceWithSurchargedTotal(invoice, surcharge), L, y + 8, W, {
     highlightTotal: true,
     paidStamp: !refundAmount,

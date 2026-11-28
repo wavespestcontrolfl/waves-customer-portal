@@ -97,8 +97,8 @@ function setupResponse() {
   return { clientSecret: 'cs_1', paymentIntentId: 'pi_1', amount: 150, baseAmount: 150, publishableKey: 'pk_test_1', status: 'requires_payment_method', version: 1, cardSurchargeRate: 0.029 };
 }
 
-function stubPayFetch(quote) {
-  const body = payload({ stripe: { available: true, publishableKey: 'pk_test_1' }, payFaq: true });
+function stubPayFetch(quote, payloadExtra = {}) {
+  const body = payload({ stripe: { available: true, publishableKey: 'pk_test_1' }, payFaq: true, ...payloadExtra });
   const fetchMock = vi.fn(async (url, init) => {
     if (!init || !init.method || init.method === 'GET') return response(200, body);
     if (String(url).endsWith('/setup')) return response(200, setupResponse());
@@ -118,17 +118,17 @@ afterEach(() => {
   elementCalls.length = 0;
 });
 
-async function mountForm(quote) {
+async function mountForm(quote, payloadExtra = {}) {
   const { getStripe } = await import('../lib/stripeLoader');
   getStripe.mockResolvedValue(fakeStripe());
-  stubPayFetch(quote);
+  stubPayFetch(quote, payloadExtra);
   renderPage();
   await screen.findByRole('group', { name: 'Payment method' });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Continue to review' })).not.toBeDisabled());
 }
 
 describe('pay page — bank first (owner 2026-11-01)', () => {
-  it('lists the Bank account tile before Card or wallet and keeps card selected', async () => {
+  it('lists the Bank account tile before Card or wallet and orders Payment Element bank-first', async () => {
     await mountForm({ base: 150, surcharge: 4.35, total: 154.35, funding: 'credit', rateBps: 290 });
     const tiles = screen.getByRole('group', { name: 'Payment method' }).querySelectorAll('button');
     expect(tiles).toHaveLength(2);
@@ -136,9 +136,22 @@ describe('pay page — bank first (owner 2026-11-01)', () => {
     expect(tiles[1]).toHaveTextContent('Card or wallet');
     expect(tiles[0]).toHaveAttribute('aria-pressed', 'false');
     expect(tiles[1]).toHaveAttribute('aria-pressed', 'true');
-    // The Payment Element order is unchanged: the intent is minted card-locked.
     const payment = elementCalls.find((c) => c.type === 'payment');
-    expect(payment.opts.paymentMethodOrder).toEqual(['card', 'us_bank_account']);
+    expect(payment.opts.paymentMethodOrder).toEqual(['us_bank_account', 'card']);
+  });
+
+  it('shows an always-visible pre-entry surcharge disclosure on card entry, including for third-party payers', async () => {
+    await mountForm(
+      { base: 150, surcharge: 4.35, total: 154.35, funding: 'credit', rateBps: 290 },
+      { payer: { name: 'Acme Property Mgmt', email: 'ap@example.com' } },
+    );
+    const disclosure = screen.getByTestId('card-surcharge-pre-disclosure');
+    expect(disclosure).toHaveTextContent(
+      'Up to 2.9% credit card surcharge — no fee for debit, prepaid, or bank account.',
+    );
+    // Hides when switching to Bank account.
+    fireEvent.click(screen.getByRole('button', { name: /Bank account/ }));
+    await waitFor(() => expect(screen.queryByTestId('card-surcharge-pre-disclosure')).toBeNull());
   });
 
   it('shows the notice under the surcharge line once a surcharge above zero is quoted', async () => {
