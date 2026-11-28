@@ -388,7 +388,7 @@ function PayoutsTab() {
                   {p.reconciled ? (
                     <span
                       style={{
-                        color: "#18181B",
+                        color: "var(--text-primary, #18181B)",
                         fontSize: 16,
                       }}
                     >
@@ -1032,7 +1032,7 @@ function ReconciliationTab() {
                   style={{
                     fontSize: 14,
                     fontWeight: 500,
-                    color: "#09090B",
+                    color: "var(--text-primary, #09090B)",
                   }}
                 >
                   {fmtDay(item.arrival_date)}
@@ -1040,14 +1040,14 @@ function ReconciliationTab() {
                 <div
                   style={{
                     fontSize: 14,
-                    color: "#71717A",
+                    color: "var(--text-tertiary, #71717A)",
                     marginTop: 2,
                   }}
                 >
                   Expected:{" "}
                   <span className="u-nums"
                     style={{
-                      color: "#27272A",
+                      color: "var(--text-primary, #27272A)",
                     }}
                   >
                     {fmtM(item.expected_amount || item.amount)}
@@ -1064,7 +1064,7 @@ function ReconciliationTab() {
                 >
                   <span
                     style={{
-                      color: "#18181B",
+                      color: "var(--text-primary, #18181B)",
                       fontSize: 16,
                     }}
                   >
@@ -1073,14 +1073,14 @@ function ReconciliationTab() {
                   <div
                     style={{
                       fontSize: 14,
-                      color: "#71717A",
+                      color: "var(--text-tertiary, #71717A)",
                     }}
                   >
                     <div>
                       Actual:{" "}
                       <span className="u-nums"
                         style={{
-                          color: "#18181B",
+                          color: "var(--text-primary, #18181B)",
                         }}
                       >
                         {fmtM(item.actual_amount)}
@@ -1300,7 +1300,7 @@ function ExportsTab() {
           style={{
             fontSize: 14,
             fontWeight: 500,
-            color: "#09090B",
+            color: "var(--text-primary, #09090B)",
             marginBottom: 14,
           }}
         >
@@ -1458,7 +1458,7 @@ function ExportsTab() {
             style={{
               fontSize: 14,
               fontWeight: 500,
-              color: "#09090B",
+              color: "var(--text-primary, #09090B)",
               marginBottom: 10,
             }}
           >
@@ -2147,7 +2147,7 @@ export default function BankingPage() {
           style={{
             fontSize: 32,
             fontWeight: 500,
-            color: "#09090B",
+            color: cashInk,
             lineHeight: 1.1,
           }}
         >
@@ -2157,7 +2157,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#C8312F" || "#dc2626",
+              color: "var(--status-red, #C8312F)",
               marginTop: 6,
             }}
           >
@@ -2179,7 +2179,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               marginTop: 6,
             }}
           >
@@ -2246,7 +2246,7 @@ export default function BankingPage() {
         >
           <div
             style={{
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               fontSize: 14,
               marginBottom: 6,
             }}
@@ -2257,7 +2257,7 @@ export default function BankingPage() {
             style={{
               fontSize: 22,
               fontWeight: 500,
-              color: "#52525B",
+              color: "var(--text-secondary, #52525B)",
             }}
           >
             {!balance || balanceError ? "—" : fmtM(pending)}
@@ -2265,7 +2265,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               marginTop: 4,
             }}
           >
@@ -2279,7 +2279,7 @@ export default function BankingPage() {
         >
           <div
             style={{
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               fontSize: 14,
               marginBottom: 6,
             }}
@@ -2290,7 +2290,7 @@ export default function BankingPage() {
             style={{
               fontSize: 22,
               fontWeight: 500,
-              color: "#09090B",
+              color: cashInk,
             }}
           >
             {!balance || balanceError
@@ -2300,7 +2300,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               marginTop: 4,
             }}
           >
@@ -2318,7 +2318,7 @@ export default function BankingPage() {
         >
           <div
             style={{
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               fontSize: 14,
               marginBottom: 6,
             }}
@@ -2329,7 +2329,7 @@ export default function BankingPage() {
             style={{
               fontSize: 22,
               fontWeight: 500,
-              color: "#09090B",
+              color: cashInk,
             }}
           >
             {!stats || statsError ? "—" : fmtM(stats?.mtd_deposited)}
@@ -2337,7 +2337,7 @@ export default function BankingPage() {
           <div
             style={{
               fontSize: 14,
-              color: "#71717A",
+              color: "var(--text-tertiary, #71717A)",
               marginTop: 4,
             }}
           >
