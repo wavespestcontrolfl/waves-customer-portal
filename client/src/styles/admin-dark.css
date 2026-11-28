@@ -103,6 +103,7 @@
   }
   html.admin-app[data-admin-theme="dark"] .\!bg-zinc-700\/10,
   html.admin-app[data-admin-theme="dark"] .\!bg-zinc-600\/10,
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-600\/15,
   html.admin-app[data-admin-theme="dark"] .\!bg-zinc-400\/10 {
     background-color: rgba(180, 186, 196, 0.14) !important;
   }
@@ -126,32 +127,47 @@
   html.admin-app[data-admin-theme="dark"] .\!text-zinc-400 {
     color: #9ba3b0 !important;
   }
-  html.admin-app[data-admin-theme="dark"] .\!bg-alert-bg {
+  html.admin-app[data-admin-theme="dark"] :is(.\!bg-alert-bg, .\!bg-red-100) {
     background-color: rgba(200, 49, 47, 0.2) !important;
   }
-  html.admin-app[data-admin-theme="dark"] .\!text-alert-fg {
+  html.admin-app[data-admin-theme="dark"] :is(.\!text-alert-fg, .\!text-red-800) {
     color: #f87171 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-amber-100 {
+    background-color: rgba(217, 119, 6, 0.2) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-amber-700 {
+    color: #fcd34d !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-green-100 {
+    background-color: rgba(4, 120, 87, 0.22) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-green-700 {
+    color: #6ee7b7 !important;
   }
 
   /* Primary dark controls & strong badges (after text ramp so .text-white wins on light fill) */
-  html.admin-app[data-admin-theme="dark"] .bg-zinc-900 {
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) {
     background-color: #f4f5f6;
     border-color: #f4f5f6;
     color: #111315;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-900.text-white, .bg-zinc-900 .text-white) {
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-900:not([class*="!bg-"]).text-white, .bg-zinc-900:not([class*="!bg-"]) .text-white:not([class*="bg-"])) {
     color: #111315;
   }
-  html.admin-app[data-admin-theme="dark"] .bg-zinc-900 :is(.text-white\/70, .text-zinc-200, .text-zinc-300, .text-zinc-400) {
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) :is(.text-white\/70, .text-zinc-200, .text-zinc-300, .text-zinc-400) {
     color: #3f3f46;
   }
-  html.admin-app[data-admin-theme="dark"] .bg-zinc-900 .text-red-200 {
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) .text-red-200 {
     color: #b91c1c;
   }
-  html.admin-app[data-admin-theme="dark"] .bg-zinc-900.hover\:bg-zinc-800:hover {
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900 :is(.bg-zinc-700, .bg-zinc-800, .bg-zinc-950, .bg-alert-fg).text-white {
+    color: #ffffff;
+  }
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]).hover\:bg-zinc-800:hover {
     background-color: #e2e5e9;
   }
-  html.admin-app[data-admin-theme="dark"] .bg-zinc-900.active\:bg-zinc-950:active {
+  html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]).active\:bg-zinc-950:active {
     background-color: #d1d6de;
   }
 

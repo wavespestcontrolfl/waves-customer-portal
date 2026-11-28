@@ -36,7 +36,8 @@
 
 @media not print {
   html.admin-app[data-admin-theme="dark"],
-  html.admin-app[data-admin-theme="dark"] .admin-shell-v2 {
+  html.admin-app[data-admin-theme="dark"] .admin-shell-v2,
+  html.admin-app[data-admin-theme="dark"] .tech-field {
     color-scheme: dark;
 
     /* Surfaces — calm obsidian neutrals */
