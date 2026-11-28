@@ -291,11 +291,6 @@ async function deterministicVisitFacts(svc, dbh = db, opts = {}) {
   const customerAsked = opts.customerAsked
     ? await require('./visit-customer-asked').customerAskedFacts(svc, dbh).catch(() => null)
     : null;
-  // addon_prompt: zero-price Pest <-> Lawn cross-sell prompt for the technician's Visit Brief
-  // (owner 2026-11-27 "ok go"). Fail-closed on any ownership lookup error.
-  const addonPrompt = opts.addonPrompt
-    ? await require('./tech-addon-prompt').techAddonPromptFacts(svc, dbh).catch(() => null)
-    : null;
   // history_unavailable: the service-history read failed, so a null last_visit
   // means "unknown", never "no earlier visit" (readers must not claim one).
   // past_visits is additive and absent on a read failure (readers fall back to last_visit).
@@ -306,7 +301,6 @@ async function deterministicVisitFacts(svc, dbh = db, opts = {}) {
     ...(history.available ? {} : { history_unavailable: true }),
     ...(customerFlagged ? { customerFlagged } : {}),
     ...(customerAsked ? { customer_asked: customerAsked } : {}),
-    ...(addonPrompt ? { addon_prompt: addonPrompt } : {}),
     ...(animalWarnings.length ? { labelAnimalWarnings: animalWarnings } : {}),
   };
 }

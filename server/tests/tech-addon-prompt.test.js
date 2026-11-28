@@ -1,99 +1,186 @@
 'use strict';
 
-/**
- * Unit tests for server/services/tech-addon-prompt.js (owner 2026-11-27 "ok go").
- * Verifies Pest <-> Lawn only ladder (owner 2026-11-21), fail-closed ownership,
- * commercial exclusion, and zero dollar amounts (owner 2026-11-04 tech visibility).
- */
+const {
+  PILLAR_PROMPTS,
+  pickTechAddonPrompt,
+  techAddonPromptFacts,
+} = require('../services/tech-addon-prompt');
 
-const { pickTechAddonPrompt, techAddonPromptFacts } = require('../services/tech-addon-prompt');
+const REAL_CUSTOMER_COLUMNS = new Set([
+  'id', 'property_type', 'active', 'waveguard_tier',
+  'address_line1', 'address_line2', 'city', 'zip', 'has_multi_home',
+]);
 
-function mockDb(customerRow, { throwOnCustomer = false } = {}) {
-  return jest.fn((table) => {
-    if (table !== 'customers') throw new Error(`unexpected table ${table}`);
-    return {
-      where: jest.fn(() => ({
-        first: jest.fn(async () => {
-          if (throwOnCustomer) throw new Error('db down');
+function makeFakeDb({ customerRow = null, throwOnCustomer = false } = {}) {
+  return (table) => ({
+    where: () => ({
+      first: async (...cols) => {
+        if (throwOnCustomer) throw new Error('db timeout');
+        if (table === 'customers') {
+          for (const col of cols) {
+            if (!REAL_CUSTOMER_COLUMNS.has(col)) {
+              throw new Error(`column "${col}" does not exist on customers`);
+            }
+          }
           return customerRow;
-        }),
-      })),
-    };
+        }
+        return null;
+      },
+    }),
   });
 }
 
-describe('tech-addon-prompt', () => {
-  test('pest-only recurring customer prompts Lawn Care with zero dollar figures', () => {
+const RESIDENTIAL_CUSTOMER = {
+  id: 'cust-1',
+  property_type: 'single_family',
+  active: true,
+  waveguard_tier: 'Bronze',
+  address_line1: '100 Main St',
+  address_line2: null,
+  city: 'Sarasota',
+  zip: '34231',
+  has_multi_home: false,
+};
+
+const STAMPED_VISIT = {
+  id: 'svc-1',
+  customer_id: 'cust-1',
+  service_type: 'Quarterly Pest Control',
+  service_address_line1: '100 Main St',
+  service_address_city: 'Sarasota',
+  service_address_zip: '34231',
+};
+
+describe('pickTechAddonPrompt', () => {
+  test('recommends Lawn Care when customer owns only pest_control', () => {
     const prompt = pickTechAddonPrompt(['pest_control']);
     expect(prompt).toMatchObject({
       targetFamily: 'lawn_care',
       targetLabel: 'Lawn Care',
       fieldLeadServiceType: 'Lawn',
     });
-    expect(JSON.stringify(prompt)).not.toMatch(/\$|\b\d{2,}\b/);
   });
 
-  test('lawn-only recurring customer prompts Pest Control with zero dollar figures', () => {
+  test('recommends Pest Control when customer owns only lawn_care', () => {
     const prompt = pickTechAddonPrompt(['lawn_care']);
     expect(prompt).toMatchObject({
       targetFamily: 'pest_control',
       targetLabel: 'Pest Control',
       fieldLeadServiceType: 'Pest',
     });
-    expect(JSON.stringify(prompt)).not.toMatch(/\$|\b\d{2,}\b/);
   });
 
-  test('customer owning both pest and lawn gets null (never pushes Tree & Shrub or Termite)', () => {
+  test('suppresses prompt when customer already owns both Pest and Lawn', () => {
     expect(pickTechAddonPrompt(['pest_control', 'lawn_care'])).toBeNull();
   });
 
-  test('customer with neither pillar (e.g., mosquito or termite only) gets null', () => {
+  test('suppresses prompt when plan-rate ledger already bills the target family', () => {
+    expect(pickTechAddonPrompt(['pest_control'], { planRateFamilies: ['lawn_care'] })).toBeNull();
+    expect(pickTechAddonPrompt(['lawn_care'], { planRateFamilies: ['pest_control'] })).toBeNull();
+  });
+
+  test('suppresses prompt for non-recurring/neither-pillar and commercial accounts', () => {
     expect(pickTechAddonPrompt([])).toBeNull();
-    expect(pickTechAddonPrompt(['mosquito', 'termite_bait'])).toBeNull();
+    expect(pickTechAddonPrompt(['mosquito'])).toBeNull();
+    expect(pickTechAddonPrompt(['pest_control'], { isCommercial: true })).toBeNull();
   });
 
-  test('pest + mosquito still prompts Lawn Care (single pillar owned)', () => {
-    const prompt = pickTechAddonPrompt(['pest_control', 'mosquito']);
+  test('carries ZERO dollar prices, margins, or discount percentages (owner 2026-11-04)', () => {
+    for (const p of Object.values(PILLAR_PROMPTS)) {
+      const text = `${p.headline} ${p.detail}`;
+      expect(text).not.toMatch(/\$|\d+%|discount|margin/i);
+      expect(text).not.toMatch(/tree|shrub|termite/i);
+    }
+  });
+});
+
+describe('techAddonPromptFacts', () => {
+  test('returns Lawn Care prompt with premises streetScope for single-pillar residential visit', async () => {
+    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+    const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
+    const loadPlanComponents = jest.fn(async () => [{ family_key: 'pest_control', monthly_rate: 39 }]);
+
+    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadOwnedRecurringServiceKeys,
+      loadPlanComponents,
+    });
+
     expect(prompt?.targetFamily).toBe('lawn_care');
+    expect(loadOwnedRecurringServiceKeys).toHaveBeenCalledWith(dbh, 'cust-1', {
+      streetScope: {
+        estimateStreet: '100mainstreet|sarasota|34231',
+        customerPrimaryStreet: '100mainstreet|sarasota|34231',
+        requireSharedLocality: true,
+      },
+    });
   });
 
-  test('commercial customer or commercial service type returns null', async () => {
-    const loadOwned = jest.fn(async () => ['pest_control']);
-    expect(
-      await techAddonPromptFacts(
-        { customer_id: 'c1', service_type: 'Quarterly Pest Control' },
-        mockDb({ id: 'c1', is_commercial: true, active: true }),
-        { loadOwnedRecurringServiceKeys: loadOwned },
-      ),
-    ).toBeNull();
-    expect(
-      await techAddonPromptFacts(
-        { customer_id: 'c2', service_type: 'Commercial Pest Control' },
-        mockDb({ id: 'c2', is_commercial: false, active: true }),
-        { loadOwnedRecurringServiceKeys: loadOwned },
-      ),
-    ).toBeNull();
-    expect(loadOwned).not.toHaveBeenCalled();
+  test('suppresses prompt when customer has a commercial property_type', async () => {
+    const dbh = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, property_type: 'commercial' } });
+    const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
+    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadOwnedRecurringServiceKeys,
+      loadPlanComponents: async () => [],
+    });
+    expect(prompt).toBeNull();
+    expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
   });
 
-  test('fail-closed: ownership lookup error returns null instead of guessing', async () => {
-    const loadOwned = jest.fn(async () => { throw new Error('catalog join failed'); });
-    const res = await techAddonPromptFacts(
-      { customer_id: 'c1', service_type: 'Quarterly Pest Control' },
-      mockDb({ id: 'c1', is_commercial: false, active: true }),
-      { loadOwnedRecurringServiceKeys: loadOwned },
-    );
-    expect(res).toBeNull();
+  test('suppresses prompt when customer already has a positive plan-rate component for target family', async () => {
+    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadOwnedRecurringServiceKeys: async () => ['pest_control'],
+      loadPlanComponents: async () => [
+        { family_key: 'pest_control', monthly_rate: 39 },
+        { family_key: 'lawn_care', monthly_rate: 79 },
+      ],
+    });
+    expect(prompt).toBeNull();
   });
 
-  test('returns Lawn Care prompt for active residential pest-only customer', async () => {
-    const loadOwned = jest.fn(async () => ['pest_control']);
-    const res = await techAddonPromptFacts(
-      { customer_id: 'c1', service_type: 'Quarterly Pest Control' },
-      mockDb({ id: 'c1', is_commercial: false, active: true, waveguard_tier: 'Bronze' }),
-      { loadOwnedRecurringServiceKeys: loadOwned },
-    );
-    expect(res?.targetFamily).toBe('lawn_care');
-    expect(res?.fieldLeadServiceType).toBe('Lawn');
+  test('fails closed when plan-rate ledger lookup throws', async () => {
+    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadOwnedRecurringServiceKeys: async () => ['pest_control'],
+      loadPlanComponents: async () => { throw new Error('ledger unavailable'); },
+    });
+    expect(prompt).toBeNull();
+  });
+
+  test('suppresses prompt when visit premises cannot be proven (multi-home unstamped visit)', async () => {
+    const dbh = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, has_multi_home: true } });
+    const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
+    const unstampedVisit = { id: 'svc-2', customer_id: 'cust-1', service_type: 'Quarterly Pest Control' };
+
+    const prompt = await techAddonPromptFacts(unstampedVisit, dbh, {
+      loadOwnedRecurringServiceKeys,
+      loadPlanComponents: async () => [],
+      resolveVisitPropertyScope: async () => ({ key: null, hasEvidence: false }),
+      customerHasOnlyPrimaryPremises: async () => false,
+    });
+    expect(prompt).toBeNull();
+    expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+  });
+
+  test('suppresses prompt when visit has stamped street without locality (unprovable premises)', async () => {
+    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+    const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
+    const partialVisit = { id: 'svc-3', customer_id: 'cust-1', service_type: 'Quarterly Pest Control', service_address_line1: '100 Main St' };
+
+    const prompt = await techAddonPromptFacts(partialVisit, dbh, {
+      loadOwnedRecurringServiceKeys,
+      loadPlanComponents: async () => [],
+    });
+    expect(prompt).toBeNull();
+    expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+  });
+
+  test('fails closed on ownership lookup error (never throws)', async () => {
+    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadOwnedRecurringServiceKeys: async () => { throw new Error('catalog unavailable'); },
+      loadPlanComponents: async () => [],
+    });
+    expect(prompt).toBeNull();
   });
 });

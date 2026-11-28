@@ -1257,6 +1257,38 @@ function SetTextsSection({ line, service, visitIds, request, onBusyChange }) {
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
 const CALL_LOCK_MS = 45000;
 
+function firstAddonPrompt(memberBits) {
+  return memberBits.map((m) => m.facts?.addon_prompt).find(Boolean) || null;
+}
+
+function AddonPromptBanner({ prompt, service, onLead }) {
+  if (!prompt) return null;
+  return (
+    <div
+      data-testid="visit-brief-addon-prompt"
+      style={{
+        marginTop: 12, padding: 12, borderRadius: 6,
+        border: `1px solid ${DARK.border}`, background: DARK.bg,
+      }}
+    >
+      <div style={{ fontSize: 14, fontWeight: 600, color: DARK.text }}>
+        Add-on opportunity · {prompt.headline}
+      </div>
+      <p style={{ ...factMutedStyle, margin: '4px 0 8px' }}>{prompt.detail}</p>
+      {onLead && (
+        <button
+          type="button"
+          className="tf-button"
+          onClick={() => onLead(service, prompt.fieldLeadServiceType)}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+        >
+          <Flag aria-hidden="true" size={14} /> Flag {prompt.targetLabel} Lead
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, onEstimate = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
   const service = stop.primary;
   const estimateService = stop.services.find((member) => !DEAD_ASSIGNMENT_STATUSES.has(member.status));
@@ -1369,7 +1401,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const customerFlaggedMember = memberBits.find((m) => m.facts?.customerFlagged?.length) || null;
   const customerFlagged = customerFlaggedMember?.facts?.customerFlagged || null;
   // Zero-price Pest <-> Lawn cross-sell prompt (owner 2026-11-27 "ok go").
-  const addonPrompt = memberBits.map((m) => m.facts?.addon_prompt).find(Boolean) || null;
+  const addonPrompt = firstAddonPrompt(memberBits);
   // Estimates dedupe by id: siblings booked from ONE estimate render it
   // once; separately-quoted siblings each render their own.
   const estimates = [];
@@ -1506,30 +1538,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         </div>
       )}
 
-      {addonPrompt && (
-        <div
-          data-testid="visit-brief-addon-prompt"
-          style={{
-            marginTop: 12, padding: 12, borderRadius: 6,
-            border: `1px solid ${DARK.border}`, background: DARK.bg,
-          }}
-        >
-          <div style={{ fontSize: 14, fontWeight: 600, color: DARK.text }}>
-            Add-on opportunity · {addonPrompt.headline}
-          </div>
-          <p style={{ ...factMutedStyle, margin: '4px 0 8px' }}>{addonPrompt.detail}</p>
-          {onLead && (
-            <button
-              type="button"
-              className="tf-button"
-              onClick={() => onLead(service, addonPrompt.fieldLeadServiceType)}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
-            >
-              <Flag aria-hidden="true" size={14} /> Flag {addonPrompt.targetLabel} Lead
-            </button>
-          )}
-        </div>
-      )}
+      <AddonPromptBanner prompt={addonPrompt} service={service} onLead={onLead} />
 
       <SectionLabel>Actions</SectionLabel>
       {stop.services.map((s) => (
