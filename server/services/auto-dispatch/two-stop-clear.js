@@ -14,7 +14,7 @@
  * Safety invariants (zero shortcuts):
  *   - Only standalone, non-conflict, Pass-1-eligible visits that are the ONLY
  *     2 live rows on `(technician_id, date)` (no unassigned stops, holds,
- *     completed/in-progress/one-time/locked stops on that date).
+ *     completed/in-progress/locked stops on that date).
  *   - Distinct customers only (never splits a legacy co-visit or same-customer
  *     pair across days).
  *   - Enforces every HARD filter via findValidCandidateSlots (flex window,
@@ -36,7 +36,6 @@ const logger = require('../logger');
 const { autoDispatchSharedModelLive, multiTechConfirmLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { currentOrder } = require('../route-reorder-window-fit');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
-const { OVERLAP_EXCLUDED_STATUSES } = require('./overlap-predicate');
 const { bookedVisitOrLiveHold } = require('../scheduling/reservation-occupancy');
 const { loadArrivalRouteContext, evaluateArrivalPlacement, hasInsertionIncompatibleRow } = require('../scheduling/arrival-route');
 const { loadTechShifts, shiftBounds } = require('../technician-eligibility');
@@ -265,6 +264,7 @@ function jointDestinationMetrics({
     ...(useRouteOrder ? { routeOrderIds: bRouteOrderIds } : {}),
   };
   const costBoth = routeCost(rawDestWithA, bUnit, destHome);
+  if (costBoth.routeTimeWithMinutes > 480) return null;
   const combinedWorkload = workloadScoreFor({ route_minutes: costBoth.routeTimeWithMinutes }, destStops.length + 2);
   const minWorkload = Math.max(Number(currentScoreA.workload_score) || 0, Number(currentScoreB.workload_score) || 0);
   if (combinedWorkload < minWorkload) return null;
@@ -321,40 +321,33 @@ function livePairRowsValid(rows, a, b, techId, expectedOrder) {
   return { routeOrderA, routeOrderB };
 }
 
+function coordKey(geo) {
+  return geo && Number.isFinite(geo.lat) && Number.isFinite(geo.lng)
+    ? `${geo.lat.toFixed(5)},${geo.lng.toFixed(5)}`
+    : '';
+}
+
 function routeSignatureOf(rows) {
   return (rows || [])
-    .map((r) => `${String(r.id)}:${r.route_order ?? ''}:${String(r.window_start || '').slice(0, 5)}`)
+    .map((r) => [
+      String(r.id),
+      r.route_order ?? '',
+      String(r.window_start || '').slice(0, 5),
+      String(r.window_end || '').slice(0, 5),
+      r.estimated_duration_minutes ?? '',
+      coordKey(r.geo || resolveGeo(r)),
+    ].join(':'))
     .sort()
     .join('|');
 }
 
 async function loadLiveDaySignature(dbc, techId, date, excludeIds) {
-  const query = require('../visit-hold').excludeHeld(dbc('scheduled_services')
-    .where({ scheduled_date: date })
-    .where((q) => (techId ? q.where('technician_id', techId).orWhereNull('technician_id') : q.whereNull('technician_id')))
-    .whereNotIn('status', [...OVERLAP_EXCLUDED_STATUSES])
-    .where(bookedVisitOrLiveHold)
-    .whereNotNull('window_start'), 'scheduled_services');
-  const excluded = [...(excludeIds || [])];
-  if (excluded.length) query.whereNotIn('id', excluded);
-  const rows = await query.select('id', 'route_order', 'window_start');
+  const rows = await loadDayStopRows(dbc, {
+    technicianIds: techId ? [techId] : [],
+    dates: [date],
+    excludeIds,
+  });
   return { count: rows.length, signature: routeSignatureOf(rows) };
-}
-
-async function resolveDestExpected(pair, excludeIds) {
-  if (pair.destExpected) return pair.destExpected;
-  const { slotA, slotB } = pair;
-  const [sigA, sigB] = await Promise.all([
-    loadLiveDaySignature(db, slotA.technician_id, slotA.date, excludeIds),
-    loadLiveDaySignature(db, slotB.technician_id, slotB.date, excludeIds),
-  ]);
-  const wantA = Math.max(0, (Number(slotA.stops_that_day) || 1) - 1);
-  const wantB = Math.max(0, (Number(slotB.stops_that_day) || 1) - 1);
-  if (sigA.count !== wantA || sigB.count !== wantB) return null;
-  return [
-    { techId: slotA.technician_id, date: slotA.date, signature: sigA.signature },
-    { techId: slotB.technician_id, date: slotB.date, signature: sigB.signature },
-  ];
 }
 
 async function verifyDestinationSignatures(dbc, destExpected, excludeIds) {
@@ -512,15 +505,14 @@ async function evaluatePairCombinations({
   const geoA = resolveGeo(a);
   const geoB = resolveGeo(b);
   const sameDates = sharedDatesOf(topA, topB);
-  const sameTechs = [...new Set(topA.map((r) => r.cand.technician_id).filter(Boolean))];
+  const allDestDates = [...new Set([...topA, ...topB].map((r) => r.cand.date).filter(Boolean))];
+  const allDestTechs = [...new Set([...topA, ...topB].map((r) => r.cand.technician_id).filter(Boolean))];
   const excludeIds = new Set([String(a.id), String(b.id)]);
-  const [occupiedByDate, dayStopRows] = sameDates.length
-    ? await Promise.all([
-      loadOccupiedSpansByDate(db, sameDates, excludeIds),
-      loadDayStopRows(db, { technicianIds: sameTechs, dates: sameDates, excludeIds }),
-    ])
-    : [new Map(), []];
-  await loadStartPoints(entryA.ctx, sameTechs);
+  const [occupiedByDate, dayStopRows] = await Promise.all([
+    sameDates.length ? loadOccupiedSpansByDate(db, sameDates, excludeIds) : Promise.resolve(new Map()),
+    allDestDates.length ? loadDayStopRows(db, { technicianIds: allDestTechs, dates: allDestDates, excludeIds }) : Promise.resolve([]),
+  ]);
+  await loadStartPoints(entryA.ctx, allDestTechs);
   const destCache = new Map();
   const aStop = serviceToRouteStop(a, geoA, hhmmToMin(a.window_start), [], null, false, null);
   const bStop = serviceToRouteStop(b, geoB, hhmmToMin(b.window_start), [], null, false, null);
@@ -536,6 +528,9 @@ async function evaluatePairCombinations({
       if (pairNeedsOverlapCheck(aRow.cand, bRow.cand, sameDest)
         && !occupiedOverlapCheck(a, b, aRow.cand, bRow.cand, occupiedByDate)) continue;
       if (!sameDest) {
+        const destStopsA = stopsForTechDay(dayStopRows, aRow.cand.technician_id, aRow.cand.date);
+        const destStopsB = stopsForTechDay(dayStopRows, bRow.cand.technician_id, bRow.cand.date);
+        if (!destStopsA.length || !destStopsB.length) continue;
         const addedDrive = round2(aRow.detour + bRow.detour);
         pairs.push({
           sameDest: false,
@@ -549,6 +544,10 @@ async function evaluatePairCombinations({
           addedDrive,
           saving: round2(sourceInfo.driveMinutes - addedDrive),
           sameDestRoadSpec: null,
+          destExpected: [
+            { techId: aRow.cand.technician_id, date: aRow.cand.date, signature: routeSignatureOf(destStopsA) },
+            { techId: bRow.cand.technician_id, date: bRow.cand.date, signature: routeSignatureOf(destStopsB) },
+          ],
           index: idx,
         });
         continue;
@@ -703,12 +702,9 @@ async function findConfirmedPair(entryA, entryB, verified, run) {
   const confirmed = await roadCheck.confirmPairOnRoads(qualifying, {
     sourceLegs: sourceInfo.roadLegs, floor, config, travel: run.roadTravel,
   });
-  if (!confirmed) return null;
-  const excludeIds = new Set([String(entryA.service.id), String(entryB.service.id)]);
-  const destExpected = await resolveDestExpected(confirmed.pair, excludeIds);
-  if (!destExpected) return null;
+  if (!confirmed || !confirmed.pair.destExpected) return null;
   return {
-    ...confirmed, floor, ctxA, ctxB, curA: resA.current, curB: resB.current, currentScoreA, currentScoreB, destExpected,
+    ...confirmed, floor, ctxA, ctxB, curA: resA.current, curB: resB.current, currentScoreA, currentScoreB, destExpected: confirmed.pair.destExpected,
   };
 }
 

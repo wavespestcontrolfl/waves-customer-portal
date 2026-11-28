@@ -175,7 +175,7 @@ describe('two-stop-clear pure rules', () => {
     expect(jointDestinationMetrics({
       destStops: [], destHome: HQ, aStop, bStop, aCand, bCand, bRouteOrderIds: null, currentScoreA: curScore, currentScoreB: curScore,
     })).toBeNull();
-    // Overloaded destination day (combined route_minutes > 480) is rejected, including grouped member work preserved.
+    // Overloaded destination day (combined route_minutes > 480) is rejected even when source workload scores are already low.
     const heavyGroupedDest = [
       { id: 'g1a', visit_id: 'vis1', geo: MID, startMin: 480, window_start: '08:00', window_end: '10:00', route_order: 1, estimated_duration_minutes: 120 },
       { id: 'g1b', visit_id: 'vis1', geo: MID, startMin: 480, window_start: '08:00', window_end: '10:00', route_order: 2, estimated_duration_minutes: 180 },
@@ -187,7 +187,7 @@ describe('two-stop-clear pure rules', () => {
       bStop: { ...bStop, window_end: '17:00', estimated_duration_minutes: 60 },
       aCand: { date: '2026-12-22', start_time: '14:00', end_time: '15:00', route_order_ids: ['g1a', 'g1b', 'd3', '__candidate__'] },
       bCand: { date: '2026-12-22', start_time: '15:00', end_time: '16:00' },
-      bRouteOrderIds: ['g1a', 'g1b', 'd3', 'a', '__candidate__'], currentScoreA: curScore, currentScoreB: curScore,
+      bRouteOrderIds: ['g1a', 'g1b', 'd3', 'a', '__candidate__'], currentScoreA: { workload_score: 0 }, currentScoreB: { workload_score: 0 },
     })).toBeNull();
   });
 
@@ -426,9 +426,25 @@ describe('runTwoStopClearPass orchestration safety', () => {
 
   function makeChain(rows) {
     const c = {};
-    ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'orWhereNull', 'whereRaw'].forEach((m) => { c[m] = () => c; });
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'whereNull', 'orWhereNull', 'whereRaw', 'leftJoin'].forEach((m) => { c[m] = () => c; });
     c.select = async () => rows;
     return c;
+  }
+
+  function mockPairDb(svcA, svcB) {
+    const sourceRows = [
+      { id: svcA.id, technician_id: 'tech-1', customer_id: 'cust-a', route_order: 1, status: 'pending', visit_id: null, window_start: '10:00:00' },
+      { id: svcB.id, technician_id: 'tech-1', customer_id: 'cust-b', route_order: 2, status: 'pending', visit_id: null, window_start: '12:00:00' },
+    ];
+    const destRows = [
+      { id: 'dest-a1', technician_id: 'tech-1', scheduled_date: '2026-12-22', status: 'pending', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, route_order: 1, svc_lat: NORTH_EXIST.lat, svc_lng: NORTH_EXIST.lng },
+      { id: 'dest-b1', technician_id: 'tech-1', scheduled_date: '2026-12-23', status: 'pending', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, route_order: 1, svc_lat: NORTH_EXIST.lat, svc_lng: NORTH_EXIST.lng },
+    ];
+    let calls = 0;
+    db.mockImplementation(() => {
+      calls += 1;
+      return makeChain(calls === 1 ? sourceRows : destRows);
+    });
   }
 
   function makeFixture(mode = 'apply', maxChangesPerRun = 10) {
@@ -481,10 +497,7 @@ describe('runTwoStopClearPass orchestration safety', () => {
 
   test('does not commit A when proofreader holds B', async () => {
     const { svcA, svcB, run, slotA, slotB } = makeFixture('apply', 10);
-    db.mockImplementation(() => makeChain([
-      { id: svcA.id, technician_id: 'tech-1', customer_id: 'cust-a', route_order: 1, status: 'pending', visit_id: null, window_start: '10:00:00' },
-      { id: svcB.id, technician_id: 'tech-1', customer_id: 'cust-b', route_order: 2, status: 'pending', visit_id: null, window_start: '12:00:00' },
-    ]));
+    mockPairDb(svcA, svcB);
     jest.spyOn(candidateSlots, 'findValidCandidateSlots')
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '10:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotA] })
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '12:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotB] });
@@ -528,10 +541,7 @@ describe('runTwoStopClearPass orchestration safety', () => {
 
   test('commits both A and B atomically when road check and proofreader allow both', async () => {
     const { svcA, svcB, run, slotA, slotB } = makeFixture('apply', 10);
-    db.mockImplementation(() => makeChain([
-      { id: svcA.id, technician_id: 'tech-1', customer_id: 'cust-a', route_order: 1, status: 'pending', visit_id: null, window_start: '10:00:00' },
-      { id: svcB.id, technician_id: 'tech-1', customer_id: 'cust-b', route_order: 2, status: 'pending', visit_id: null, window_start: '12:00:00' },
-    ]));
+    mockPairDb(svcA, svcB);
     jest.spyOn(candidateSlots, 'findValidCandidateSlots')
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '10:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotA] })
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '12:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotB] });
@@ -561,10 +571,7 @@ describe('runTwoStopClearPass orchestration safety', () => {
 
   test('rechecks BOTH customers preferences before commit even when proofreader is off', async () => {
     const { svcA, svcB, run, slotA, slotB } = makeFixture('apply', 10);
-    db.mockImplementation(() => makeChain([
-      { id: svcA.id, technician_id: 'tech-1', customer_id: 'cust-a', route_order: 1, status: 'pending', visit_id: null, window_start: '10:00:00' },
-      { id: svcB.id, technician_id: 'tech-1', customer_id: 'cust-b', route_order: 2, status: 'pending', visit_id: null, window_start: '12:00:00' },
-    ]));
+    mockPairDb(svcA, svcB);
     jest.spyOn(candidateSlots, 'findValidCandidateSlots')
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '10:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotA] })
       .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '12:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotB] });
