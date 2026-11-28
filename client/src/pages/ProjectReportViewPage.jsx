@@ -541,6 +541,10 @@ export default function ProjectReportViewPage() {
             backdrop-filter: none !important;
             -webkit-backdrop-filter: none !important;
           }
+          .project-report-page [data-glass-accent],
+          html[data-glass-theme] .project-report-page [data-glass-accent] {
+            color: #1B2C5B !important;
+          }
           .glass-scene-orbs,
           .glass-scene-grain,
           html[data-glass-theme] .glass-scene-orbs,

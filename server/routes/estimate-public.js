@@ -9269,8 +9269,8 @@ function renderEstimatePageHtml(token, estimate, estData, membership, opts = {})
 }
 
 function sendEstimatePageHtml(res, html, status = 200) {
-  res
-    .status(status)
+  const target = typeof res.status === 'function' ? res.status(status) : res;
+  target
     .set('Cache-Control', 'no-cache, no-store, must-revalidate')
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
