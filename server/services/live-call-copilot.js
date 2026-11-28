@@ -30,6 +30,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { loadBookableCallServices } = require('./call-booking-catalog');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { excludeHeld } = require('./visit-hold');
 
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 const BRIEF_TTL_MS = 60 * 1000;
@@ -232,12 +233,12 @@ async function loadCustomerBundle(customerId, callId, conn, now) {
       .where({ customer_id: customerId, active: true })
       .limit(2)
       .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'latitude', 'longitude'), null),
-    safeRead('next_visit', () => conn('scheduled_services')
+    safeRead('next_visit', () => excludeHeld(conn('scheduled_services')
       .where({ customer_id: customerId })
       .whereIn('status', LIVE_VISIT_STATUSES)
       .where('scheduled_date', '>=', today)
       .orderBy('scheduled_date', 'asc')
-      .orderBy('window_start', 'asc')
+      .orderBy('window_start', 'asc'))
       .first('scheduled_date', 'window_start', 'window_display', 'service_type', 'status'), null),
     safeRead('last_visit', () => conn('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
@@ -298,18 +299,19 @@ function stripNegatedAndHistorical(text, termPattern) {
 }
 
 const CATALOG_CUES = Object.freeze([
-  { term: 'wdo|wood[\\s-]+destroying|real[\\s-]+estate\\s+inspection|closing\\s+inspection|termite\\s+letter', keys: ['wdo_inspection', 'lawn_inspection'], nameRe: /\b(?:wdo|assessment)\b/i },
-  { term: 'german\\s+(?:cock)?roach(?:es)?|cockroach(?:es)?|roach(?:es)?', stripPalmetto: true, keys: ['cockroach_control', 'one_time_pest'], nameRe: /\b(?:cockroach|one[- ]time\s+pest)\b/i },
-  { term: 'wasp(?:s|\\s*nest)?|hornets?|yellow\\s*jackets?|bee\\s*nest|beehives?|stinging\\s+insects?', keys: ['bee_wasp_nest_removal', 'stinging_insect'], nameRe: /\b(?:wasp|bee|hornet|nest)\b/i },
-  { term: 'bed\\s*bugs?', keys: ['bed_bug_treatment', 'bed_bug'], nameRe: /\bbed\s*bug/i },
-  { term: 'fleas?|ticks?', keys: ['flea_treatment', 'flea_tick'], nameRe: /\bflea/i },
-  { term: 'rats?|mice|mouse|rodents?|trapping|attic\\s+(?:droppings?|noise|rats?|mice)', keys: ['rodent_trapping', 'rodent_control', 'rodent_exclusion'], nameRe: /\brodent/i },
-  { term: 'termites?|sentricon|swarmers?|mud\\s*tubes?|frass', keys: ['termite_bait', 'sentricon', 'lawn_inspection'], nameRe: /\b(?:termite|sentricon|assessment)\b/i },
-  { term: 'mosquito(?:es)?|no[- ]?see[- ]?ums?|misting', keys: ['mosquito_control', 'mosquito'], nameRe: /\bmosquito/i },
-  { term: 'fire\\s*ants?|ant\\s*mounds?', keys: ['fire_ant_treatment', 'fire_ant'], nameRe: /\bfire\s*ant/i },
-  { term: 'lawn|turf|weeds?|fertiliz\\w*|chinch\\s*bugs?|mole\\s*crickets?|st\\.?\\s*augustine|zoysia|sod|fungus', keys: ['lawn_care', 'lawn_fertilization', 'lawn_pest_knockdown'], nameRe: /\blawn\b/i },
-  { term: 'trees?|shrubs?|palms?|ornamentals?|whitefl(?:y|ies)|spiraling', keys: ['tree_shrub', 'palm_injection'], nameRe: /\b(?:tree|shrub|palm)\b/i },
-  { term: 'one[- ]?time|single\\s+treatment|just\\s+once|ghost\\s*ants?|sugar\\s*ants?|ants?|spiders?|palmetto\\s+bugs?|silverfish|earwigs?|general\\s+pest|pest\\s+control', keys: ['one_time_pest', 'pest_control', 'quarterly_pest'], nameRe: /\b(?:one[- ]time\s+pest|pest\s+control)\b/i },
+  { term: 'wdo|wood[\\s-]+destroying|real[\\s-]+estate\\s+inspection|closing\\s+inspection|termite\\s+letter', keys: ['wdo_inspection', 'lawn_inspection'], nameRe: /\b(?:wdo|assessment)\b/i, funnelKey: 'termite', serviceLine: 'termite' },
+  { term: 'german\\s+(?:cock)?roach(?:es)?|cockroach(?:es)?|roach(?:es)?', stripPalmetto: true, keys: ['cockroach_control', 'one_time_pest'], nameRe: /\b(?:cockroach|one[- ]time\s+pest)\b/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
+  { term: 'wasp(?:s|\\s*nest)?|hornets?|yellow\\s*jackets?|bee\\s*nest|beehives?|stinging\\s+insects?', keys: ['bee_wasp_nest_removal', 'stinging_insect'], nameRe: /\b(?:wasp|bee|hornet|nest)\b/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
+  { term: 'bed\\s*bugs?', keys: ['bed_bug_treatment', 'bed_bug'], nameRe: /\bbed\s*bug/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
+  { term: 'fleas?|ticks?', keys: ['flea_treatment', 'flea_tick'], nameRe: /\bflea/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
+  { term: 'rats?|mice|mouse|rodents?|trapping|attic\\s+(?:droppings?|noise|rats?|mice)', keys: ['rodent_trapping', 'rodent_control', 'rodent_exclusion'], nameRe: /\brodent/i, funnelKey: 'rodent', serviceLine: 'exclusion' },
+  { term: 'bora[\\s-]?care', keys: ['bora_care'], nameRe: /\bbora[\s-]?care\b/i, funnelKey: 'bora_care', serviceLine: 'termite', minDuration: 90 },
+  { term: 'termites?|sentricon|swarmers?|mud\\s*tubes?|frass', keys: ['termite_bait', 'sentricon', 'lawn_inspection'], nameRe: /\b(?:termite|sentricon|assessment)\b/i, funnelKey: 'termite', serviceLine: 'termite', minDuration: 90 },
+  { term: 'mosquito(?:es)?|no[- ]?see[- ]?ums?|misting', keys: ['mosquito_control', 'mosquito'], nameRe: /\bmosquito/i, funnelKey: 'mosquito', serviceLine: 'mosquito' },
+  { term: 'fire\\s*ants?|ant\\s*mounds?', keys: ['fire_ant_treatment', 'fire_ant'], nameRe: /\bfire\s*ant/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
+  { term: 'lawn|turf|weeds?|fertiliz\\w*|chinch\\s*bugs?|mole\\s*crickets?|st\\.?\\s*augustine|zoysia|sod|fungus', keys: ['lawn_care', 'lawn_fertilization', 'lawn_pest_knockdown'], nameRe: /\blawn\b/i, funnelKey: 'lawn_care', serviceLine: 'lawn_care' },
+  { term: 'trees?|shrubs?|palms?|ornamentals?|whitefl(?:y|ies)|spiraling', keys: ['tree_shrub', 'palm_injection'], nameRe: /\b(?:tree|shrub|palm)\b/i, funnelKey: 'tree_shrub', serviceLine: 'tree_shrub' },
+  { term: 'one[- ]?time|single\\s+treatment|just\\s+once|ghost\\s*ants?|sugar\\s*ants?|ants?|spiders?|palmetto\\s+bugs?|silverfish|earwigs?|general\\s+pest|pest\\s+control', keys: ['one_time_pest', 'pest_control', 'quarterly_pest'], nameRe: /\b(?:one[- ]time\s+pest|pest\s+control)\b/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
 ]);
 
 async function loadCachedCatalog(conn, now) {
@@ -355,24 +357,61 @@ function matchingRowsForCue(catalogRows, cue) {
   return ordered;
 }
 
-function matchCatalogPrices(text, catalogRows) {
+function matchCatalogCues(text) {
   const raw = String(text || '').trim();
-  if (!raw || !Array.isArray(catalogRows) || !catalogRows.length) return [];
+  if (!raw) return [];
   const noPalmetto = raw.replace(PALMETTO_RE, ' ');
-  const out = [];
+  return CATALOG_CUES.filter((cue) => {
+    const cleaned = stripNegatedAndHistorical(cue.stripPalmetto ? noPalmetto : raw, cue.term);
+    return new RegExp(`\\b(?:${cue.term})\\b`, 'i').test(cleaned);
+  });
+}
+
+function matchCatalogMatches(text, catalogRows) {
+  const cues = matchCatalogCues(text);
+  if (!cues.length || !Array.isArray(catalogRows) || !catalogRows.length) return { cues, rows: [] };
+  const rows = [];
   const seen = new Set();
-  for (const cue of CATALOG_CUES) {
-    const baseSample = cue.stripPalmetto ? noPalmetto : raw;
-    const cleaned = stripNegatedAndHistorical(baseSample, cue.term);
-    if (!new RegExp(`\\b(?:${cue.term})\\b`, 'i').test(cleaned)) continue;
+  for (const cue of cues) {
     for (const row of matchingRowsForCue(catalogRows, cue)) {
-      if (out.length >= MAX_CATALOG_MATCHES) return out;
+      if (rows.length >= MAX_CATALOG_MATCHES) return { cues, rows };
       if (!row || seen.has(row.id)) continue;
       seen.add(row.id);
-      out.push(formatCatalogPriceRow(row));
+      rows.push({ row, cue });
     }
   }
-  return out;
+  return { cues, rows };
+}
+
+function matchCatalogPrices(text, catalogRows) {
+  return matchCatalogMatches(text, catalogRows).rows.map(({ row }) => formatCatalogPriceRow(row));
+}
+
+function resolveSlotServiceContext(matches) {
+  const cues = matches?.cues || [];
+  const primary = matches?.rows?.[0] || null;
+  if (!cues.length && !primary) {
+    return { serviceKey: '', serviceIdentity: null, serviceLines: undefined, durationOverride: null, cacheKey: 'default' };
+  }
+  const uniqueFunnelKeys = [...new Set(cues.map((c) => c.funnelKey).filter(Boolean))];
+  const serviceKey = uniqueFunnelKeys.join('+');
+  const serviceLines = [...new Set(cues.map((c) => c.serviceLine).filter(Boolean))];
+  const rowDuration = Number(primary?.row?.default_duration_minutes) > 0 ? Number(primary.row.default_duration_minutes) : 0;
+  const cueMinDuration = cues.reduce((max, c) => Math.max(max, Number(c.minDuration) || 0), 0);
+  const durationOverride = Math.max(rowDuration, cueMinDuration) || null;
+  const usePrimaryIdentity = Boolean(primary?.row) && !(cueMinDuration >= 90 && primary.row.service_key === 'lawn_inspection');
+  const serviceIdentity = usePrimaryIdentity
+    ? { catalogServiceKey: primary.row.service_key || null, serviceType: primary.row.name || null }
+    : null;
+  const identityKey = (usePrimaryIdentity && primary?.row?.service_key) || serviceKey || 'default';
+  const linesKey = serviceLines.join('+') || 'any';
+  return {
+    serviceKey,
+    serviceIdentity,
+    serviceLines: serviceLines.length ? serviceLines : undefined,
+    durationOverride,
+    cacheKey: `${identityKey}:${linesKey}:${durationOverride || 'cfg'}`,
+  };
 }
 
 // ── 3. Two Best Route Slots ($0, ZERO paid lookups, single-property resolved) ─
@@ -399,7 +438,7 @@ function resolveSinglePropertyPin(account, properties, assistFacts, callerSpeech
   return { lat: Number(target.latitude), lng: Number(target.longitude), cacheTarget: properties.length === 1 ? `prop:${target.id}` : `cust:${account.id}` };
 }
 
-async function resolveRouteSlots({ account, properties, assist, assistFacts, callerSpeech, now, deps }) {
+async function resolveRouteSlots({ account, properties, assist, assistFacts, callerSpeech, slotService, now, deps }) {
   const fromAssist = slotsFromAssist(assist);
   if (fromAssist.length) return fromAssist;
 
@@ -410,7 +449,8 @@ async function resolveRouteSlots({ account, properties, assist, assistFacts, cal
   if (!pin) return [];
 
   const todayDay = etDateString(now);
-  const cacheKey = `${pin.cacheTarget}|${todayDay}`;
+  const svc = slotService || { serviceKey: '', serviceIdentity: null, serviceLines: undefined, durationOverride: null, cacheKey: 'default' };
+  const cacheKey = `${pin.cacheTarget}|${todayDay}|${svc.cacheKey}`;
   const hit = slotsCache.get(cacheKey);
   if (hit && now.getTime() - hit.at < SLOTS_TTL_MS && now.getTime() >= hit.at) {
     return hit.slots;
@@ -422,10 +462,14 @@ async function resolveRouteSlots({ account, properties, assist, assistFacts, cal
     const config = await booking.loadBookingConfig();
     const minDays = config.advance_days_min ?? 1;
     const maxDays = Math.min(config.advance_days_max ?? 14, 14);
+    const defaultDuration = config.slot_duration_minutes || config.default_duration_minutes || 60;
     const availability = await booking.buildBookingAvailability({
       lat: pin.lat,
       lng: pin.lng,
-      duration: config.slot_duration_minutes || config.default_duration_minutes || 60,
+      duration: svc.durationOverride || defaultDuration,
+      ...(svc.serviceKey ? { serviceKey: svc.serviceKey } : {}),
+      ...(svc.serviceIdentity ? { serviceIdentity: svc.serviceIdentity } : {}),
+      ...(svc.serviceLines ? { serviceLines: svc.serviceLines } : {}),
       rangeFrom: etDateString(addETDays(now, minDays)),
       rangeTo: etDateString(addETDays(now, maxDays)),
       config,
@@ -553,9 +597,11 @@ async function buildLiveCallCopilot(input, deps) {
     const intent = String(Object(opts.assist).intent || '');
     // Match catalog prices from CALLER speech and confirmed assist intent only (never staff screening questions).
     const callerSpeech = joinSpeakerLines(evidenceLines, (l) => l?.speaker !== 'staff');
-    const catalogPrices = matchCatalogPrices(`${intent}\n${callerSpeech}`, catalogRows);
+    const serviceMatches = matchCatalogMatches(`${intent}\n${callerSpeech}`, catalogRows);
+    const catalogPrices = serviceMatches.rows.map(({ row }) => formatCatalogPriceRow(row));
+    const slotService = resolveSlotServiceContext(serviceMatches);
     const routeSlots = await resolveRouteSlots({
-      account: bundle.account, properties: bundle.properties, assist: opts.assist, assistFacts, callerSpeech, now, deps: cfg,
+      account: bundle.account, properties: bundle.properties, assist: opts.assist, assistFacts, callerSpeech, slotService, now, deps: cfg,
     });
     const checklist = buildCallChecklist({
       customer: opts.customer, account: bundle.account, prefs: bundle.prefs, assist: opts.assist, assistFacts, lines: evidenceLines, catalogPrices,

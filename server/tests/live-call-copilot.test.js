@@ -429,4 +429,92 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
     expect(byKey.email).toBe(true);
     expect(byKey.price_quoted).toBe(true);
   });
+
+  test('excludes held visits from next-visit brief when GATE_VISIT_HOLD is enabled', async () => {
+    const priorGate = process.env.GATE_VISIT_HOLD;
+    process.env.GATE_VISIT_HOLD = 'true';
+    try {
+      const whereNullCalls = [];
+      const baseDb = makeFakeDb({
+        account: { id: 'cust-hold', first_name: 'Sam', last_name: 'Hold', pipeline_stage: 'active_customer' },
+        nextVisit: { scheduled_date: '2026-12-03', window_start: '09:00', service_type: 'Quarterly Pest' },
+      });
+      const spyDb = jest.fn((table) => {
+        const chain = baseDb(table);
+        const origWhereNull = chain.whereNull;
+        chain.whereNull = (col) => {
+          whereNullCalls.push({ table, col });
+          return origWhereNull(col);
+        };
+        return chain;
+      });
+      await buildLiveCallCopilot({
+        call: { id: 'call-hold', customer_id: 'cust-hold' },
+        customer: { id: 'cust-hold', name: 'Sam Hold' },
+        meta: {},
+        lines: [],
+        assist: null,
+      }, { db: spyDb, isEnabled: () => false });
+      expect(whereNullCalls).toContainEqual({ table: 'scheduled_services', col: 'scheduled_services.held_at' });
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_VISIT_HOLD;
+      else process.env.GATE_VISIT_HOLD = priorGate;
+    }
+  });
+
+  test('computes route slots with requested service duration/key/lines and recomputes when scope changes', async () => {
+    const account = {
+      id: 'cust-termite', first_name: 'Alex', last_name: 'Termite',
+      address_line1: '100 Oak Dr', city: 'Bradenton', zip: '34202',
+      latitude: 27.4989, longitude: -82.5748,
+    };
+    const prop = { id: 'prop-termite', address_line1: '100 Oak Dr', city: 'Bradenton', zip: '34202', latitude: 27.4989, longitude: -82.5748 };
+    const buildBookingAvailability = jest.fn()
+      .mockResolvedValueOnce({ slots: [{ date: '2026-12-01', window_start: '09:00', window_end: '10:00' }] })
+      .mockResolvedValueOnce({ slots: [{ date: '2026-12-02', window_start: '13:00', window_end: '14:30' }] });
+    const deps = {
+      db: makeFakeDb({ account, properties: [prop] }),
+      isEnabled: () => true,
+      now: '2026-11-28T15:00:00Z',
+      booking: {
+        loadBookingConfig: jest.fn().mockResolvedValue({ advance_days_min: 1, advance_days_max: 7, slot_duration_minutes: 60 }),
+        buildBookingAvailability,
+      },
+      formatSlots: (slots) => slots.map((s) => `${s.date} ${s.window_start}-${s.window_end}`).join('; '),
+    };
+
+    // Poll 1: caller has not named a service yet -> 60-min default
+    const first = await buildLiveCallCopilot({
+      call: { id: 'call-scope-1', customer_id: 'cust-termite' },
+      customer: { id: 'cust-termite', name: 'Alex Termite' },
+      meta: {},
+      lines: [{ speaker: 'caller', text: 'Hi, I have a question.' }],
+      assist: null,
+    }, deps);
+    expect(first.route_slots).toEqual(['2026-12-01 09:00-10:00']);
+    expect(buildBookingAvailability).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      duration: 60,
+      paidLookups: false,
+    }));
+
+    // Poll 2: caller now asks about termites -> recomputes with 90-min termite duration & termite service line (cache key changes)
+    const second = await buildLiveCallCopilot({
+      call: { id: 'call-scope-1', customer_id: 'cust-termite' },
+      customer: { id: 'cust-termite', name: 'Alex Termite' },
+      meta: {},
+      lines: [
+        { speaker: 'caller', text: 'Hi, I have a question.' },
+        { speaker: 'caller', text: 'We found termite mud tubes near the garage.' },
+      ],
+      assist: null,
+    }, deps);
+    expect(second.route_slots).toEqual(['2026-12-02 13:00-14:30']);
+    expect(buildBookingAvailability).toHaveBeenCalledTimes(2);
+    expect(buildBookingAvailability).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      duration: 90,
+      serviceKey: 'termite',
+      serviceLines: ['termite'],
+      paidLookups: false,
+    }));
+  });
 });
