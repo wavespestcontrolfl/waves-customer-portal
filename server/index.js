@@ -452,16 +452,9 @@ const limiter = rateLimit({
 });
 // The disabled payer-statement-pay surface must ALWAYS look like Not Found —
 // even ahead of the global /api/ limiter — so an IP that already exhausted the
-// app-wide limit can't observe the surface via a 429 (contract: 404 when
-// GATE_PAYER_STATEMENTS is off). Runs before the limiter; the route's own
-// gate + per-route limiter still apply when the feature is enabled.
-app.use('/api/pay/statement', (req, res, next) => {
-   
-  if (!require('./config/feature-gates').isEnabled('payerStatements')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  next();
-});
+// app-wide limit can't observe the surface via a 429 (contract: 404 + noStore/noindex
+// when GATE_PAYER_STATEMENTS is off, B-55).
+app.use('/api/pay/statement', require('./routes/pay-statement').statementDarkPreGuard);
 // Dark photo-assessment funnels carry the same unobservable-when-dark
 // contract: while the gate is off the surface must read 404 even for an IP
 // that already exhausted the global /api/ limiter (a 429 would reveal it).
@@ -657,8 +650,6 @@ app.use('/api/estimates', estimatePublicRoutes.darkEstimateRoutePreGuard);
 // are stamped by the secure-card mount further up.
 app.use(['/api/estimates', '/api/pay', '/api/public/secure-card', '/api/public/careers/interview', '/api/public/careers/offer'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
 
-// Payer statement pay (GATE_PAYER_STATEMENTS): the dark 404 + noStore/noindex headers land before the global limiter (B-55).
-app.use('/api/pay/statement', require('./routes/pay-statement').statementDarkPreGuard);
 // Invoice pay page promo code (GATE_PAY_PROMO_CODE) and plan choice (GATE_PAY_PLAN_CHOICE): the dark 404 lands before the global limiter.
 app.use('/api/pay', require('./routes/pay-v2').darkRoutePreGuard);
 // Dark Hermes worker lanes (GATE_HERMES_COMMITMENTS, GATE_HERMES_WATCHDOG): the lane's own 404 lands before the global limiter.

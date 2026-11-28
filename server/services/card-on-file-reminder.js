@@ -178,7 +178,7 @@ const VISIT_PAGES = 16;
 
 const NEXT_VISIT_COLUMNS = [
   'id', 'customer_id', 'property_id', 'source_estimate_id', 'service_type',
-  'annual_prepay_term_id', 'prepaid_method', 'scheduled_date',
+  'annual_prepay_term_id', 'prepaid_method', 'prepaid_amount', 'scheduled_date',
   'is_recurring', 'recurring_parent_id', 'recurring_pattern',
   'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
 ];
@@ -186,11 +186,10 @@ const NEXT_VISIT_COLUMNS = [
 async function visitCoveredByPrepay(visit, customerId) {
   const {
     annualPrepayCoversVisit,
-    annualPrepayTableExists,
     coveredTermsAsOf,
     coverageRowsForTerm,
   } = require('./annual-prepay-renewals');
-  if (!(db?.schema?.hasTable && await annualPrepayTableExists())) return { covered: false, hasTerms: false };
+  if (!(db?.schema?.hasTable && await db.schema.hasTable('annual_prepay_terms'))) return { covered: false, hasTerms: false };
   if (visit.annual_prepay_term_id && await annualPrepayCoversVisit(visit, db, { throwOnError: true })) {
     return { covered: true, hasTerms: true };
   }

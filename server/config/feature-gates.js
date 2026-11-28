@@ -9278,3 +9278,12 @@ function cardDetailsSyncLive() {
   return isTest ? process.env.GATE_CARD_DETAILS_SYNC !== 'false' : process.env.GATE_CARD_DETAILS_SYNC === 'true';
 }
 module.exports.cardDetailsSyncLive = cardDetailsSyncLive;
+
+// GATE_ZELLE_BANK_RECONCILE read at CALL time (dark in prod and dev; test-open unless 'false').
+function zelleBankReconcileLive(env = process.env) {
+  const val = env.GATE_ZELLE_BANK_RECONCILE !== undefined
+    ? env.GATE_ZELLE_BANK_RECONCILE
+    : process.env.GATE_ZELLE_BANK_RECONCILE;
+  return env.NODE_ENV === 'test' ? val !== 'false' : val === 'true';
+}
+module.exports.zelleBankReconcileLive = zelleBankReconcileLive;

@@ -81,7 +81,7 @@ router.get('/:token', async (req, res, next) => {
     // Public payload: serviced ADDRESS + visit metadata only — NEVER the
     // homeowner name (AGENTS public-route contract). loadStatementLines is the
     // admin/PDF shape; whitelist fields here.
-    const lines = (await loadStatementLines(statement.id)).map((l) => ({
+    const lines = (await loadStatementLines(statement.id, undefined, { status: statement.status })).map((l) => ({
       invoice_number: l.invoice_number,
       service_date: l.service_date,
       service_type: l.service_type,

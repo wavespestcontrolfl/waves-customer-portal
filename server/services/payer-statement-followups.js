@@ -256,9 +256,18 @@ async function runPending({ now = new Date() } = {}) {
 
   let sent = 0, skipped = 0;
   for (const row of rows) {
-    // Timed pauses auto-resume once paused_until elapses (B-55).
+    // Timed pauses auto-resume once paused_until elapses (B-55), atomically
+    // so an admin stop or pause-extension racing in skips this row.
     if (row.f_status === 'paused' && row.f_paused_until && new Date(row.f_paused_until) <= now) {
-      await resumeSequence(row.id);
+      const resumed = await db('payer_statement_followups')
+        .where({ statement_id: row.id, status: 'paused' })
+        .whereNotNull('paused_until')
+        .where('paused_until', '<=', now)
+        .update({ status: 'active', paused_until: null, updated_at: db.fn.now() });
+      if (!resumed) {
+        skipped++;
+        continue;
+      }
     } else if (['paused', 'stopped', 'completed'].includes(row.f_status)) {
       skipped++;
       continue;

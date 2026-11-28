@@ -214,11 +214,21 @@ async function syncNearExpiryCards({ now = new Date(), database } = {}) {
     .where({ processor: 'stripe' })
     .whereNotNull('stripe_payment_method_id')
     .select('id', 'method_type', 'stripe_payment_method_id', 'exp_month', 'exp_year');
-  const ids = new Set();
+  const eligibleSet = new Set();
   for (const row of rows) {
-    if (ids.size >= MAX_DAILY_SYNC_CARDS) break;
     if (!isBankMethodType(row.method_type) && inRefreshWindow(row, now)) {
-      ids.add(row.stripe_payment_method_id);
+      eligibleSet.add(row.stripe_payment_method_id);
+    }
+  }
+  const eligible = [...eligibleSet].sort();
+  const ids = [];
+  if (eligible.length > 0) {
+    const [yr, mo, dy] = etDateString(now).split('-').map(Number);
+    const dayIndex = Math.floor(Date.UTC(yr, mo - 1, dy) / 86400000);
+    const count = Math.min(MAX_DAILY_SYNC_CARDS, eligible.length);
+    const offset = (dayIndex * MAX_DAILY_SYNC_CARDS) % eligible.length;
+    for (let i = 0; i < count; i += 1) {
+      ids.push(eligible[(offset + i) % eligible.length]);
     }
   }
   const totals = { checked: 0, updated: 0, detached: 0, errors: 0 };

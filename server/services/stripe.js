@@ -5707,6 +5707,10 @@ const StripeService = {
         const locked = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
         if (!locked) throw new Error('Statement not found');
         assertPayable(locked.status);
+        const Settle = require('./payer-statement-settle');
+        if (typeof Settle.assertStatementChildrenPayable === 'function') {
+          await Settle.assertStatementChildrenPayable(statementId, trx);
+        }
 
         baseAmount = parseFloat(locked.total);
         const baseCents = Math.round(baseAmount * 100);
@@ -5946,6 +5950,10 @@ const StripeService = {
     if (!statement) throw new Error('Statement not found');
     if (!isPayableStatementStatus(statement.status)) throw new Error('This statement is not payable');
     if (!statement.stripe_payment_intent_id) throw new Error('Statement has no active PaymentIntent');
+    const Settle = require('./payer-statement-settle');
+    if (typeof Settle.assertStatementChildrenPayable === 'function') {
+      await Settle.assertStatementChildrenPayable(statementId, db);
+    }
 
     const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
     const funding = pm.card?.funding || null;

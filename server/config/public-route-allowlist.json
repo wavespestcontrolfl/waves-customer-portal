@@ -36,7 +36,6 @@
         "USE /api/integrations/commitments-worker (commitmentsDarkGuard#fc9288cf)",
         "USE /api/pay (darkRoutePreGuard#3364a5c1)",
         "USE /api/pay (rejectUndecodablePath#852dcb49)",
-        "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/pay/statement (statementDarkPreGuard#bc009b2c)",
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/appointment (inline function#e6220f30)",

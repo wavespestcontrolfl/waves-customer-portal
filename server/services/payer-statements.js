@@ -184,6 +184,20 @@ async function finalizeStatement(statementId, { database = db, date = new Date()
     return database('payer_statements').where({ id: statementId }).first();
   }
 
+  // Detach any non-void non-collectible children (held for chemical add-on review
+  // or already paid/prepaid/refunded/canceled/disputed/processing) before freezing
+  // so they can never stay attached to a finalized statement.
+  const detachQ = database('invoices')
+    .where({ payer_statement_id: statementId })
+    .whereNot('status', 'void');
+  if (typeof detachQ.where === 'function' && typeof detachQ.update === 'function') {
+    detachQ.where(function nonCollectibleChild() {
+      if (typeof this.whereIn === 'function') this.whereIn('status', EXCLUDED_STATEMENT_INVOICE_STATUSES);
+      if (typeof this.orWhereRaw === 'function') this.orWhereRaw("scheduled_send_error LIKE 'chemical_addon_review:%'");
+    });
+    await detachQ.update({ payer_statement_id: null, updated_at: database.fn.now() });
+  }
+
   // Final rollup from attached non-void invoices while still open.
   await rollupStatement(statementId, database);
   const fresh = await database('payer_statements').where({ id: statementId }).first();
@@ -223,11 +237,24 @@ async function finalizeStatement(statementId, { database = db, date = new Date()
  * with the homeowner (service address) for the consolidated PDF / email.
  * Ordered by service date so the statement reads as a chronological ledger.
  */
-async function loadStatementLines(statementId, database = db) {
+async function loadStatementLines(statementId, database = db, { status } = {}) {
+  let resolvedStatus = status;
+  if (resolvedStatus == null) {
+    try {
+      const head = await database('payer_statements').where({ id: statementId }).first('status');
+      resolvedStatus = head?.status || null;
+    } catch (_) {
+      resolvedStatus = null;
+    }
+  }
   const q = database('invoices as i')
     .leftJoin('customers as c', 'c.id', 'i.customer_id')
     .where('i.payer_statement_id', statementId);
-  applyCollectibleStatementChildFilter(q, 'i');
+  if (resolvedStatus === 'open') {
+    applyCollectibleStatementChildFilter(q, 'i');
+  } else {
+    q.whereNot('i.status', 'void');
+  }
   return q
     .orderBy([{ column: 'i.service_date', order: 'asc' }, { column: 'i.id', order: 'asc' }])
     .select(
