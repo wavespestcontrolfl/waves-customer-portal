@@ -1346,6 +1346,11 @@ function projectArchivedFeeValues(project) {
       values.push(snap && typeof snap === 'object' && snap.inspection_fee != null
         ? snap.inspection_fee
         : '');
+      if (Array.isArray(filing?.fee_values)) {
+        for (const v of filing.fee_values) {
+          if (v != null && v !== '') values.push(String(v));
+        }
+      }
     }
   }
   return values;
