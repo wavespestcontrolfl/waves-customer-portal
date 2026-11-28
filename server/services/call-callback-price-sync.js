@@ -37,22 +37,39 @@ const { statesNewAddress } = require('./call-triage-flags');
 const CALLBACK_PRICE_WINDOW_MS = 60 * 60 * 1000;
 const CALL_BOOKED_SOURCE_ACTIONS = new Set(['ai_call_pipeline', 'ai_call_pipeline_followup']);
 const BOOKING_ATTEMPT_STATUSES = new Set(['confirmed', 'requested', 'offered', 'reschedule_requested', 'ambiguous']);
-const EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE = /\b(?:price|quote|rate|total|cost|payment)\s+(?:for|on|of)\s+(?:the|that|my|our|earlier|this)\s+(?:visit|appointment|booking|service)\b|\bconfirm(?:ing)?\s+(?:the\s+)?(?:\$?\d[\d,.]*\s+)?(?:price|quote|total)\s+(?:for|on|of)\s+(?:that|the|today'?s|earlier)\s+(?:visit|appointment|booking|service)\b|\b(?:price|quote|rate|total|cost|payment|confirm(?:ing)?|agreed|pay(?:ing)?)\b[^.!?\n]{0,35}\bearlier\s+(?:visit|appointment|booking|service)\b|\bearlier\s+(?:visit|appointment|booking|service)\b[^.!?\n]{0,35}\b(?:price|quote|rate|total|cost|payment|confirm(?:ing)?|agreed)\b/i;
+const EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE = /\b(?:price|quote|rate|total|cost|payment)\s+(?:for|on|of)\s+(?:the|that|my|our|earlier|this|today'?s|upcoming|booked|scheduled)\s+(?:visit|appointment|booking)\b|\b(?:price|quote|rate|total|cost|payment)\s+(?:for|on|of)\s+(?:that|the|our|my)\s+(?:earlier|upcoming|booked|scheduled)\s+service\b|\bconfirm(?:ing)?\s+(?:the\s+)?(?:\$?\d[\d,.]*\s+)?(?:price|quote|total)\s+(?:for|on|of)\s+(?:that|the|today'?s|earlier|upcoming|booked|scheduled)\s+(?:visit|appointment|booking)\b|\b(?:price|quote|rate|total|cost|payment|confirm(?:ing)?|agreed|pay(?:ing)?)\b[^.!?\n]{0,35}\b(?:earlier|upcoming|booked|scheduled)\s+(?:visit|appointment|booking|service)\b|\b(?:earlier|upcoming|booked|scheduled)\s+(?:visit|appointment|booking|service)\b[^.!?\n]{0,35}\b(?:price|quote|rate|total|cost|payment|confirm(?:ing)?|agreed)\b/i;
 
-const CATEGORY_KEY_PATTERNS = {
-  pest_general: /pest|cockroach|ant|spider|silverfish/i,
-  general_pest: /pest|cockroach|ant|spider|silverfish/i,
-  rodent: /rodent|rat|mice|mouse/i,
-  wdo: /wdo|wood_destroying/i,
-  termite: /termite/i,
-  mosquito: /mosquito/i,
-  stinging_insect: /bee|wasp|hornet|yellow\s*jacket|stinging/i,
-  bed_bug: /bed[\s_-]?bug/i,
-  palm_injection: /palm/i,
-  exclusion: /exclusion/i,
-  lawn_care: /lawn|turf|ornamental|tree/i,
-  lawn: /lawn|turf|ornamental|tree/i,
-  wildlife: /wildlife|trapping|exclusion/i,
+const PEST_GENERAL_KEYS = new Set([
+  'one_time_pest_control',
+  'pest_one_time',
+  'cockroach_control',
+  'ant_control',
+  'spider_control',
+  'silverfish_control',
+  'flea_tick_control',
+  'general_pest_control',
+]);
+const PEST_GENERAL_CATEGORIES = new Set(['pest_control', 'pest', 'general_pest']);
+const LAWN_CATEGORIES = new Set(['lawn_care', 'lawn', 'ornamental']);
+
+function isLawnRow(cat, key) {
+  return LAWN_CATEGORIES.has(cat) || /^lawn(?:_|$)/i.test(key);
+}
+
+const CATEGORY_FAMILY_MATCHERS = {
+  pest_general: (cat, key) => !isLawnRow(cat, key) && (PEST_GENERAL_CATEGORIES.has(cat) || PEST_GENERAL_KEYS.has(key)),
+  general_pest: (cat, key) => !isLawnRow(cat, key) && (PEST_GENERAL_CATEGORIES.has(cat) || PEST_GENERAL_KEYS.has(key)),
+  rodent: (cat, key) => !isLawnRow(cat, key) && (cat === 'rodent' || /rodent|rat|mice|mouse/i.test(key)),
+  wdo: (cat, key) => cat === 'wdo' || /wdo|wood_destroying/i.test(key),
+  termite: (cat, key) => cat === 'termite' || /termite/i.test(key),
+  mosquito: (cat, key) => cat === 'mosquito' || /mosquito/i.test(key),
+  stinging_insect: (cat, key) => cat === 'stinging_insect' || /bee|wasp|hornet|yellow_?jacket|stinging/i.test(key),
+  bed_bug: (cat, key) => cat === 'bed_bug' || /bed_?bug/i.test(key),
+  palm_injection: (cat, key) => cat === 'palm_injection' || /palm/i.test(key),
+  exclusion: (cat, key) => cat === 'exclusion' || /exclusion/i.test(key),
+  lawn_care: (cat, key) => isLawnRow(cat, key),
+  lawn: (cat, key) => isLawnRow(cat, key),
+  wildlife: (cat, key) => cat === 'wildlife' || /wildlife|trapping/i.test(key),
 };
 
 function isSingleAcceptedStaffOneTimeEntry(v2Extraction) {
@@ -113,10 +130,12 @@ function hasCompetingPropertyOrMultiWork(v2Extraction, visitRow, customer) {
 function categoryCompatibleWithVisit(category, visitRow) {
   const cat = String(category || '').trim().toLowerCase();
   if (!cat || cat === 'other' || cat === 'unknown') return false;
-  const re = CATEGORY_KEY_PATTERNS[cat];
-  if (!re) return false;
-  const visitText = [visitRow.svc_key, visitRow.svc_name, visitRow.service_type].filter(Boolean).join(' ');
-  return re.test(visitText);
+  const matcher = CATEGORY_FAMILY_MATCHERS[cat];
+  if (!matcher) return false;
+  const svcCategory = String(visitRow?.svc_category || '').trim().toLowerCase();
+  const svcKey = String(visitRow?.svc_key || '').trim().toLowerCase();
+  if (!svcCategory && !svcKey) return false;
+  return matcher(svcCategory, svcKey);
 }
 
 function requestedMatchesVisitExactly(requestedName, visitRow, catalogRows = []) {
@@ -132,7 +151,6 @@ function requestedMatchesVisitExactly(requestedName, visitRow, catalogRows = [])
 
 function hasExplicitPriorVisitLink(v2Extraction, transcription) {
   const sr = v2Extraction?.service_request || {};
-  if (sr.service_intent === 'follow_up_existing_service') return true;
   const contextText = [
     sr.price?.evidence_quote,
     v2Extraction?.meta?.call_summary,
@@ -178,7 +196,7 @@ function isBookingAttemptCall(v2Extraction, appointmentResult, extracted = {}) {
 
 async function loadLockedVisitDetails(trx, lockedRow) {
   const lockedSvc = lockedRow.service_id
-    ? (await trx('services').where({ id: lockedRow.service_id }).first('id', 'service_key', 'name', 'billing_type')) || {}
+    ? (await trx('services').where({ id: lockedRow.service_id }).first('id', 'service_key', 'name', 'category', 'billing_type')) || {}
     : {};
   const lockedProp = lockedRow.property_id
     ? (await trx('customer_properties').where({ id: lockedRow.property_id }).first('address_line1', 'address_line2', 'city', 'state', 'zip').catch(() => null)) || {}
@@ -187,6 +205,7 @@ async function loadLockedVisitDetails(trx, lockedRow) {
     ...lockedRow,
     svc_key: lockedSvc.service_key || null,
     svc_name: lockedSvc.name || null,
+    svc_category: lockedSvc.category || null,
     svc_billing_type: lockedSvc.billing_type || null,
     prop_line1: lockedProp.address_line1 || null,
     prop_line2: lockedProp.address_line2 || null,
@@ -276,7 +295,7 @@ async function propagateCallbackPriceToRecentVisit({
         'ss.estimated_price', 'ss.is_callback', 'ss.followup_included', 'ss.is_recurring', 'ss.recurring_parent_id',
         'ss.property_id', 'ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip',
         'cp.address_line1 as prop_line1', 'cp.address_line2 as prop_line2', 'cp.city as prop_city', 'cp.state as prop_state', 'cp.zip as prop_zip',
-        's.service_key as svc_key', 's.name as svc_name', 's.billing_type as svc_billing_type');
+        's.service_key as svc_key', 's.name as svc_name', 's.category as svc_category', 's.billing_type as svc_billing_type');
 
     const serviceMatched = (candidates || []).filter((r) =>
       callbackMatchesVisitService(v2Extraction, r, transcription, { customer, catalogRows }),

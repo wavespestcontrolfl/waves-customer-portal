@@ -445,13 +445,28 @@ function isEligibleImplicitPriceContext(v2Extraction, catalogRow = null) {
     && !sr.waveguard_tier_mentioned;
 }
 
+function evidenceSupportsImplicitAmount(quote, amount) {
+  const numericMatches = [
+    ...quote.matchAll(/\$\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)/g),
+    ...quote.matchAll(/\b(\d+(?:,\d{3})*(?:\.\d{1,2})?)\s*(?:dollars?|bucks)\b/gi),
+  ];
+  const rawNums = numericMatches.length > 0
+    ? numericMatches.map((m) => Number(String(m[1]).replace(/,/g, '')))
+    : [...quote.matchAll(/\b(\d{2,5}(?:\.\d{1,2})?)\b/g)].map((m) => Number(m[1]));
+  const finiteNums = rawNums.filter((n) => Number.isFinite(n));
+  if (finiteNums.length === 0) return false;
+  return finiteNums.every((n) => Math.abs(n - amount) < 0.01);
+}
+
 function isUnhedgedNoResponseAgentQuote(entry) {
   if (!entry || entry.stated_by !== 'agent' || entry.unit === 'per_application' || isPlanRateV2Price(entry)) {
     return false;
   }
   if (entry.amount_max_usd != null || entry.caller_response !== 'no_response') return false;
+  const amount = sanitizeQuotedCallPrice(entry.amount_usd);
+  if (amount === null) return false;
   const quote = String(entry.evidence_quote || '').trim();
-  return quote.length > 0 && !PRICE_HEDGE_OR_ADDON_RE.test(quote);
+  return quote.length > 0 && !PRICE_HEDGE_OR_ADDON_RE.test(quote) && evidenceSupportsImplicitAmount(quote, amount);
 }
 
 // When the agent quotes ONE firm, final, unhedged dollar amount tied to the
@@ -799,11 +814,15 @@ function hasExplicitOneTimeOnlyIntent({ extracted = {}, v2Extraction = null, tra
   return !recurringIntentEvidence(transcription || combined);
 }
 
+function followUpDateScheduled(extracted = {}, v2Extraction = null) {
+  if (v2Extraction?.scheduling?.follow_up_start_at) return true;
+  return Boolean(extracted?.follow_up_date_time && /^\d{4}-\d{2}-\d{2}/.test(String(extracted.follow_up_date_time).trim()));
+}
+
 function followUpExplicitlyDiscussed(extracted = {}, v2Extraction = null) {
   if (extracted?.follow_up_visit_mentioned === true) return true;
   if (v2Extraction?.scheduling?.follow_up_mentioned === true) return true;
-  if (v2Extraction?.scheduling?.follow_up_start_at) return true;
-  return Boolean(extracted?.follow_up_date_time && /^\d{4}-\d{2}-\d{2}/.test(String(extracted.follow_up_date_time).trim()));
+  return followUpDateScheduled(extracted, v2Extraction);
 }
 
 function lastRegexMatchIndex(re, text) {
@@ -838,13 +857,14 @@ function isDiscountedSinglePackageTreatment({
 } = {}) {
   const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
   if (!isPackageFollowUpServiceKey(catalogRow?.service_key)) return false;
-  if (followUpExplicitlyDiscussed(extracted, v2Extraction)) return false;
+  if (followUpDateScheduled(extracted, v2Extraction)) return false;
   const callerText = transcription ? callerOnlyText(transcription) : '';
   const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
   if (NEGATED_SINGLE_TREATMENT_RE.test(combined)) return false;
   const choice = resolvePackageVisitCountChoice(combined);
   if (choice !== 'single') return false;
   if (FOLLOWUP_OMITTED_RE.test(combined)) return true;
+  if (followUpExplicitlyDiscussed(extracted, v2Extraction)) return false;
   const listPrice = Number(catalogRow?.base_price);
   const price = resolvedPrice != null ? Number(resolvedPrice) : agreedOneTimeVisitPrice(extracted, v2Extraction);
   return Number.isFinite(listPrice) && listPrice > 0 && Number.isFinite(price) && price > 0
@@ -873,18 +893,28 @@ const GENERAL_PEST_RECURRING_KEYS = new Set([
   'general_pest_control',
 ]);
 
+function isGeneralLawnRecurringRow(selected) {
+  const cat = String(selected?.category || '').trim().toLowerCase();
+  const key = String(selected?.service_key || '').trim().toLowerCase();
+  const name = String(selected?.name || '');
+  const isLawnCategory = cat === 'lawn' || cat === 'lawn_care' || /^lawn_care_/i.test(key);
+  return isLawnCategory
+    && /\blawn\s+care\b/i.test(name)
+    && !/\b(?:termite|rodent|bait|monitoring|mosquito|shrub|tree|irrigation)\b/i.test(name);
+}
+
 function isSupportedGeneralRecurringFamily(selected) {
   if (!selected) return false;
   if (GENERAL_PEST_RECURRING_KEYS.has(selected.service_key)) return true;
   if (/^(?:monthly|bi[- ]?monthly|quarterly|semi[- ]?annual)\s+pest\b/i.test(String(selected.name || ''))) return true;
-  return selected.category === 'lawn'
-    && /\blawn\s+care\b/i.test(String(selected.name || ''))
-    && !/\b(?:termite|rodent|bait|monitoring|mosquito|shrub|tree|irrigation)\b/i.test(String(selected.name || ''));
+  return isGeneralLawnRecurringRow(selected);
 }
 
 function downgradeRecurringToOneTime(selected, services) {
   if (!isSupportedGeneralRecurringFamily(selected)) return null;
-  const isLawn = selected.category === 'lawn' || /\blawn\b/i.test(String(selected.name || ''));
+  const cat = String(selected?.category || '').trim().toLowerCase();
+  const key = String(selected?.service_key || '').trim().toLowerCase();
+  const isLawn = cat === 'lawn' || cat === 'lawn_care' || /^lawn_care_/i.test(key) || /\blawn\b/i.test(String(selected.name || ''));
   const targetKey = isLawn ? 'lawn_care_one_time' : 'one_time_pest_control';
   return services.find((s) => s.service_key === targetKey) || null;
 }
@@ -1031,7 +1061,7 @@ function withinCatalogHundredRange(scaled, catalogRow, evidence = '') {
   if (scaled < 100 || scaled > 1999) return false;
   const base = Number(catalogRow?.base_price);
   if (!Number.isFinite(base) || base < 100) return false;
-  if (Math.abs(scaled - base) <= 1) return true;
+  if (Math.abs(scaled - base) < 0.005) return true;
   return /\bhundred\b/i.test(String(evidence || '')) && Math.abs(scaled - base) <= base * 0.30;
 }
 

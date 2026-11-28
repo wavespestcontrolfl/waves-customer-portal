@@ -38,7 +38,8 @@ const SERVICES = [
   { id: 'svc-rodent-excl', service_key: 'rodent_exclusion', name: 'Rodent Exclusion Service', short_name: 'Rodent Excl', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60, requires_follow_up: false, follow_up_interval_days: null },
   { id: 'svc-monthly', service_key: 'pest_general_monthly', name: 'Monthly Pest Control Service', short_name: 'Monthly Pest', billing_type: 'recurring', pricing_type: 'variable', base_price: null, default_duration_minutes: 45, requires_follow_up: false, follow_up_interval_days: null },
   { id: 'svc-rodent-bait', service_key: 'rodent_bait_station_program', name: 'Rodent Bait Station Program', short_name: 'Rodent Bait', billing_type: 'recurring', pricing_type: 'variable', base_price: null, default_duration_minutes: 45, requires_follow_up: false, follow_up_interval_days: null },
-  { id: 'svc-lawn-ot', service_key: 'lawn_care_one_time', name: 'One-Time Lawn Care Service', short_name: 'One-Time Lawn', billing_type: 'one_time', pricing_type: 'fixed', base_price: '125.00', default_duration_minutes: 45, requires_follow_up: false, follow_up_interval_days: null },
+  { id: 'svc-lawn-ot', service_key: 'lawn_care_one_time', name: 'One-Time Lawn Care Service', short_name: 'One-Time Lawn', category: 'lawn_care', billing_type: 'one_time', pricing_type: 'fixed', base_price: '125.00', default_duration_minutes: 45, requires_follow_up: false, follow_up_interval_days: null },
+  { id: 'svc-lawn-6w', service_key: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care', short_name: '6-Week Lawn', category: 'lawn_care', billing_type: 'recurring', pricing_type: 'variable', base_price: null, default_duration_minutes: 45, requires_follow_up: false, follow_up_interval_days: null },
 ];
 
 describe('PR A1: package Visit 2 & single-treatment guards (call 819d3d1f)', () => {
@@ -221,12 +222,28 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       transcription: transcript,
     });
     expect(missingGeneralOneTime).toBeNull();
-    expect(applyCatalogSelectionGuard({
+    const missingOneTimeGuardOut = applyCatalogSelectionGuard({
       callBookingCatalogRow: missingGeneralOneTime,
       bookableCallServices: servicesWithoutOneTime,
       extracted: { specific_service_name: 'Monthly Pest Control Service' },
       transcription: transcript,
-    }).genericBookingUnbookable).toBe(true);
+    });
+    expect(missingOneTimeGuardOut.genericBookingUnbookable).toBe(true);
+
+    // Every 6 Weeks Lawn Care (category: 'lawn_care') downgrades cleanly to lawn_care_one_time
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Every 6 Weeks Lawn Care' },
+      services: SERVICES,
+      transcription: 'Caller: I do not want recurring lawn service, just a one-time lawn treatment.',
+    })?.service_key).toBe('lawn_care_one_time');
+
+    // Explicit caller refusal of Visit 2 still suppresses Visit 2 even after staff mentioned follow-up
+    expect(isDiscountedSinglePackageTreatment({
+      catalogRow: SERVICES[0],
+      extracted: { follow_up_visit_mentioned: true },
+      v2Extraction: { scheduling: { status: 'confirmed', follow_up_mentioned: true, follow_up_start_at: null } },
+      transcription: 'Agent: Normally it includes a second visit in two weeks.\nCaller: No second visit, just do the one treatment.',
+    })).toBe(true);
   });
 
   test('competitor monthly service ("monthly with them") never converts One-Time Pest, while pivot or separate-sentence monthly request promotes', () => {
@@ -254,6 +271,14 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       SERVICES.map((s) => s.name),
       false,
     ).specific_service_name).toBe('Monthly Pest Control Service');
+
+    const competitorPlanTranscript = 'Caller: I have a monthly plan with Orkin. I want one one-time treatment.';
+    expect(processorTest.applyRecurringIntentDefault(
+      { is_lead: true, matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' },
+      competitorPlanTranscript,
+      SERVICES.map((s) => s.name),
+      false,
+    ).specific_service_name).toBe('One-Time Pest Control Service');
 
     const ownMonthlyTranscript = 'Caller: I already have ants. I want monthly service.';
     const outOwn = processorTest.applyRecurringIntentDefault(
@@ -314,6 +339,33 @@ describe('PR A1: final implicit confirmed agent price & STT decimal price recove
         },
       },
     })).toBeNull();
+
+    // $2.51 vs $250 fixed catalog price without spoken "hundred" wording must NOT fabricate $251
+    expect(recoverSttDecimalCallPrice({
+      quotedPrice: 2.51,
+      catalogRow: SERVICES[1],
+      v2Extraction: {
+        ...acceptedSttV2,
+        service_request: {
+          ...acceptedSttV2.service_request,
+          quoted_price_usd: 2.51,
+          price: { amount_usd: 2.51, amount_max_usd: null, stated_by: 'agent', caller_response: 'accepted', accepted: true, evidence_quote: 'That comes to $2.51.' },
+        },
+      },
+    })).toBeNull();
+
+    // Contradictory implicit quote evidence ("$150" vs amount_usd: 250) must NOT bill $250
+    expect(implicitConfirmedAgentPrice({
+      scheduling: { status: 'confirmed' },
+      service_request: {
+        specific_service_name: 'Bee / Wasp Nest Removal Service',
+        price_is_final: true,
+        price_offered_by_staff: true,
+        price_accepted_by_caller: false,
+        price: { amount_usd: 250, unit: 'one_time', stated_by: 'agent', caller_response: 'no_response', accepted: false, evidence_quote: 'Bee removal is $150.' },
+        prices: [],
+      },
+    }, SERVICES[2])).toBeNull();
 
     // per_application unit must not stamp an implicit one-time price without caller acceptance
     expect(implicitConfirmedAgentPrice({
@@ -458,6 +510,7 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
       call: { id: 'call-staff-sib', created_at: new Date('2026-11-28T15:30:00Z') },
       procToken: 'tok-1',
       customerId: 'cust-1',
+      transcription: 'Caller: Confirming the price for the earlier visit is $199.',
       v2Extraction: {
         scheduling: { status: 'unscheduled' },
         service_request: {
@@ -469,6 +522,53 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
         },
       },
     })).toEqual({ updated: false, reason: 'ambiguous_multiple_visits' });
+
+    // follow_up_existing_service WITHOUT explicit prior-visit wording is rejected
+    selectChain.select.mockResolvedValueOnce([pestVisit]);
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-intent-only', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      transcription: 'Caller: How much is an extra ant spray? Agent: $199. Caller: Great.',
+      v2Extraction: {
+        scheduling: { status: 'unscheduled' },
+        service_request: {
+          specific_service_name: 'One-Time Pest',
+          service_intent: 'follow_up_existing_service',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
+
+    // Unnamed pest_general quote must NOT match a Lawn Pest Knockdown visit
+    selectChain.select.mockResolvedValueOnce([{
+      ...pestVisit,
+      id: 'visit-lawn-pest',
+      service_type: 'Lawn Pest Knockdown',
+      svc_key: 'lawn_pest_knockdown',
+      svc_name: 'Lawn Pest Knockdown',
+      svc_category: 'lawn_care',
+    }]);
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-lawn-mismatch', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      transcription: 'Caller: Confirming the price for the earlier visit is $199.',
+      v2Extraction: {
+        scheduling: { status: 'none' },
+        service_request: {
+          specific_service_name: null,
+          primary_service_category: 'pest_general',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
 
     // Exact matching street + city + ZIP restatement succeeds (addressCity/addressZip shape)!
     const matchingLocalityVisit = {

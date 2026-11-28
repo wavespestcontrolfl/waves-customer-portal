@@ -97,7 +97,8 @@ function nonNegatedMatch(re, text) {
   let m;
   while ((m = scan.exec(text))) {
     const before = clauseSliceBefore(text, m.index);
-    if (!NEGATED_CADENCE_BEFORE_RE.test(before)) return true;
+    const after = clauseSliceAfter(text, m.index + m[0].length);
+    if (!NEGATED_CADENCE_BEFORE_RE.test(before) && !hasOtherProviderContext(before, after)) return true;
     if (scan.lastIndex === m.index) scan.lastIndex++;
   }
   return false;
