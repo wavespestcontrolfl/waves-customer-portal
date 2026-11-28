@@ -98,8 +98,8 @@ async function prepareSettleableStatementChildren(database, statementId, { lock 
   };
 }
 
-async function assertStatementChildrenPayable(statementId, database = db) {
-  await prepareSettleableStatementChildren(database, statementId);
+async function assertStatementChildrenPayable(statementId, database = db, opts = {}) {
+  await prepareSettleableStatementChildren(database, statementId, opts);
 }
 
 async function upsertStatementPaymentRecord(database, {

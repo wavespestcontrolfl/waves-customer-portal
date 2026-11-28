@@ -763,6 +763,29 @@ const SETUP_RECOVERABLE_PI_STATUSES = new Set(
   [...REPLACEABLE_PI_STATUSES].filter(status => status !== 'requires_capture')
 );
 
+async function assertStatementChildrenPayableIfPresent(statementId, conn, opts) {
+  const Settle = require('./payer-statement-settle');
+  if (typeof Settle.assertStatementChildrenPayable === 'function') {
+    await Settle.assertStatementChildrenPayable(statementId, conn, opts);
+  }
+}
+
+async function confirmStatementPaymentUnderLock(stripe, statementId, piId, isPayableStatementStatus) {
+  const Settle = require('./payer-statement-settle');
+  const confirm = () => stripe.paymentIntents.confirm(piId, {}, { apiVersion: SURCHARGE_API_VERSION });
+  if (typeof Settle.withStatementMoneyLock !== 'function' || typeof Settle.assertStatementChildrenPayable !== 'function') {
+    return confirm();
+  }
+  return Settle.withStatementMoneyLock(statementId, async (trx) => {
+    const locked = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
+    if (!locked || !isPayableStatementStatus(locked.status)) {
+      throw new Error('This statement is not payable');
+    }
+    await Settle.assertStatementChildrenPayable(statementId, trx, { lock: true });
+    return confirm();
+  });
+}
+
 const StripeService = {
   // =========================================================================
   // AVAILABILITY
@@ -5707,10 +5730,7 @@ const StripeService = {
         const locked = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
         if (!locked) throw new Error('Statement not found');
         assertPayable(locked.status);
-        const Settle = require('./payer-statement-settle');
-        if (typeof Settle.assertStatementChildrenPayable === 'function') {
-          await Settle.assertStatementChildrenPayable(statementId, trx);
-        }
+        await assertStatementChildrenPayableIfPresent(statementId, trx, { lock: true });
 
         baseAmount = parseFloat(locked.total);
         const baseCents = Math.round(baseAmount * 100);
@@ -5950,10 +5970,7 @@ const StripeService = {
     if (!statement) throw new Error('Statement not found');
     if (!isPayableStatementStatus(statement.status)) throw new Error('This statement is not payable');
     if (!statement.stripe_payment_intent_id) throw new Error('Statement has no active PaymentIntent');
-    const Settle = require('./payer-statement-settle');
-    if (typeof Settle.assertStatementChildrenPayable === 'function') {
-      await Settle.assertStatementChildrenPayable(statementId, db);
-    }
+    await assertStatementChildrenPayableIfPresent(statementId, db);
 
     const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
     const funding = pm.card?.funding || null;
@@ -6004,7 +6021,7 @@ const StripeService = {
           throw new Error('A previous card attempt left a pending card fee on this payment — please call or text us and we will clear it.');
         }
       }
-      const confirmed = await stripe.paymentIntents.confirm(statement.stripe_payment_intent_id, {}, { apiVersion: SURCHARGE_API_VERSION });
+      const confirmed = await confirmStatementPaymentUnderLock(stripe, statementId, statement.stripe_payment_intent_id, isPayableStatementStatus);
       logger.info(`[stripe] Finalized statement S-${statementId}: funding=${funding} surcharge=${surchargeCents}c total=${totalCents}c PI=${confirmed.id} status=${confirmed.status}`);
       return {
         paymentIntentId: confirmed.id,

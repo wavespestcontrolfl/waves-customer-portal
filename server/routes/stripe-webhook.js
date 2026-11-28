@@ -1123,7 +1123,9 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     // an idempotent already-paid) — every anomaly path returns false so the
     // post-txn dunning-stop never fires on a still-unpaid statement.
     let settledPacketInvoiceIds = [];
-    const settledNow = await db.transaction(async (trx) => {
+    let settledNow = false;
+    try {
+      settledNow = await db.transaction(async (trx) => {
       // Same per-statement money lock as disputes/refunds — serialize settlement
       // against any concurrent/out-of-order clawback on this statement.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
@@ -1181,40 +1183,39 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         return false;
       }
 
-      let settleResult;
-      try {
-        settleResult = await Settle.settleStatementPaid(statementId, {
-          paymentMethod,
-          processor: 'stripe',
-          stripePaymentIntentId: piId,
-          stripeChargeId: paymentIntent.latest_charge || null,
-          amountCents: actualTotalCents,
-          baseAmountCents: baseCents,
-          surchargeAmountCents: surchargeCents,
-          surchargeRateBps: rateBps,
-          surchargePolicyVersion: policyVersion,
-          cardFunding: funding,
-          // Stripe's event timestamp — the settlement moment. The payment row's
-          // payment_date buckets P&L revenue; stamping webhook delivery time
-          // let a delayed/retried event move statement cash across a period
-          // boundary.
-          settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
-          source: 'stripe_webhook',
-        }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
-      } catch (err) {
-        if (err?.statementChildBlocked) {
-          await recordStatementPaymentIssue(paymentIntent, statementId, err.message);
-          logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} blocked child prevented settlement — quarantined: ${err.message}`);
-          return false;
-        }
-        throw err;
-      }
+      const settleResult = await Settle.settleStatementPaid(statementId, {
+        paymentMethod,
+        processor: 'stripe',
+        stripePaymentIntentId: piId,
+        stripeChargeId: paymentIntent.latest_charge || null,
+        amountCents: actualTotalCents,
+        baseAmountCents: baseCents,
+        surchargeAmountCents: surchargeCents,
+        surchargeRateBps: rateBps,
+        surchargePolicyVersion: policyVersion,
+        cardFunding: funding,
+        // Stripe's event timestamp — the settlement moment. The payment row's
+        // payment_date buckets P&L revenue; stamping webhook delivery time
+        // let a delayed/retried event move statement cash across a period
+        // boundary.
+        settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
+        source: 'stripe_webhook',
+      }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
       settledPacketInvoiceIds = settleResult?.packetInvoiceIds || [];
       // An already-paid statement still reports its packet children, so a
       // redelivery re-runs the post-commit enrollment (idempotent) instead of
       // finishing with nothing to do.
       return true;
-    });
+      });
+    } catch (err) {
+      if (err?.statementChildBlocked) {
+        await recordStatementPaymentIssue(paymentIntent, statementId, err.message);
+        logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} blocked child prevented settlement — rolled back and quarantined: ${err.message}`);
+        settledNow = false;
+      } else {
+        throw err;
+      }
+    }
     // Only when this PI actually left the statement paid — never on an anomaly
     // path (orphan/stale PI, unverified funding, surcharge quarantine), which all
     // leave the statement sent/viewed + unpaid (dunning must keep collecting).
