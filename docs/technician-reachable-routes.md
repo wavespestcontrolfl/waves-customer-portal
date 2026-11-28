@@ -279,7 +279,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/sms-templates` | admin-sms-templates |
 | GET | `/api/admin/sms-templates/:id` | admin-sms-templates |
 | GET | `/api/admin/sms-templates/:templateKey/variants` | admin-sms-templates |
-| GET | `/api/admin/sms-templates/issues` | admin-sms-templates |
 | GET | `/api/admin/technicians` | index.js |
 | GET | `/api/admin/timetracking` | admin-timetracking |
 | GET | `/api/admin/timetracking/technicians` | admin-timetracking |
@@ -394,16 +393,9 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | Method | Path | Router |
 |---|---|---|
 | GET | `/api/admin/assessment-analytics/tech-context/:customerId` | admin-assessment-analytics |
-| POST | `/api/admin/communications/call` | admin-communications |
-| GET | `/api/admin/communications/collections-voice-status` | admin-communications |
-| GET | `/api/admin/communications/compliance-export` | admin-communications |
-| POST | `/api/admin/communications/contact-compliance-checks` | admin-communications |
 | POST | `/api/admin/communications/messages/:id/like` | admin-communications |
 | POST | `/api/admin/communications/messages/read-all` | admin-communications |
 | POST | `/api/admin/communications/schedule-sms` | admin-communications |
-| GET | `/api/admin/communications/scheduled` | admin-communications |
-| DELETE | `/api/admin/communications/scheduled/:id` | admin-communications |
-| GET | `/api/admin/communications/template-performance` | admin-communications |
 | GET | `/api/admin/dashboard-ops/field-leads` | admin-dashboard-ops |
 | GET | `/api/admin/dashboard-ops/inbox` | admin-dashboard-ops |
 | POST | `/api/admin/dashboard-ops/inbox/:id/read` | admin-dashboard-ops |
@@ -581,31 +573,12 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/lookup/satellite-ai` | admin-property-lookup |
 | GET | `/api/admin/needs-me` | admin-needs-me |
 | GET | `/api/admin/notification-events` | admin-notification-events |
-| GET | `/api/admin/requests` | admin-requests |
-| PATCH | `/api/admin/requests/:id` | admin-requests |
-| GET | `/api/admin/requests/:id/photos` | admin-requests |
 | GET | `/api/admin/review-requests` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/stats` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/tech-voice-drafts` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/sms-templates/preview` | admin-sms-templates |
-| GET | `/api/admin/triage` | admin-triage |
-| POST | `/api/admin/triage/:id/apply-property-roles` | admin-triage |
-| POST | `/api/admin/triage/:id/attach-contact` | admin-triage |
-| POST | `/api/admin/triage/:id/confirm-email` | admin-triage |
-| PUT | `/api/admin/triage/:id/dismiss` | admin-triage |
-| POST | `/api/admin/triage/:id/new-customer` | admin-triage |
-| PUT | `/api/admin/triage/:id/resolve` | admin-triage |
-| POST | `/api/admin/triage/:id/save-contact-note` | admin-triage |
-| POST | `/api/admin/triage/:id/verdict` | admin-triage |
-| GET | `/api/admin/triage/auto-routed` | admin-triage |
-| POST | `/api/admin/triage/auto-routed/:callLogId/verdict` | admin-triage |
 | PATCH | `/api/admin/turf-height/:id/resolve` | admin-turf-height |
 | GET | `/api/admin/turf-height/review` | admin-turf-height |
-| GET | `/api/ai/admin/conversations` | ai-assistant |
-| GET | `/api/ai/admin/conversations/:id/messages` | ai-assistant |
-| POST | `/api/ai/admin/conversations/:id/reply` | ai-assistant |
-| GET | `/api/ai/admin/escalations` | ai-assistant |
-| PUT | `/api/ai/admin/escalations/:id` | ai-assistant |
 | GET | `/api/ai/admin/stats` | ai-assistant |
 | GET | `/api/badges/admin/customer/:customerId` | badges |
 | GET | `/api/badges/admin/definitions` | badges |
