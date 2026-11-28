@@ -1918,6 +1918,16 @@ describe('DB-backed history-total auto-order policy (Sticker Mule)', () => {
     const vendorOut = await run(historyAdapter({ bindingQuote: jest.fn(async () => ({ cents: 31400, outstanding: { number: 'SM-A-1', why: 'coming' } })) }));
     expect(vendorOut).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
 
+    // 2c) Vendor reports an outstanding order AND duplicate SKU mapping exists (no live ledger) -> preserves BOTH blockers.
+    mockState.liveSkuOrder = null;
+    mockState.otherVendorProducts = [{ id: 'prod-other', name: 'Duplicate Sticker' }];
+    const vendorOutDup = await run(historyAdapter({ bindingQuote: jest.fn(async () => ({ cents: 31400, outstanding: { number: 'SM-VEND-9', why: 'coming' } })) }));
+    expect(vendorOutDup).toMatchObject({ status: 'needs_review', reason: 'duplicate_sku_mapping' });
+    expect(JSON.parse(lastLedgerPatch().evidence)).toMatchObject({
+      outstandingOrder: { number: 'SM-VEND-9', why: 'coming' },
+      duplicateSkuProducts: [{ productId: 'prod-other', name: 'Duplicate Sticker' }],
+    });
+
     // 3) Duplicate mapping with monthly cap exceeded -> duplicate_sku_mapping, not over_monthly_cap.
     mockState.liveSkuOrder = null;
     mockState.monthly = 40000;

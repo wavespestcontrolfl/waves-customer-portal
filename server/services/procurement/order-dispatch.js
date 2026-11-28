@@ -491,10 +491,11 @@ async function hasLiveSkuOrderForRequest(conn, requestId, requestRow = null) {
   const adapterKey = adapterKeyFor(vendor);
   if (adapterKey !== 'stickermule') return false;
   const pricing = await require('./auto-reorder').vendorPricingFor(conn, req.product_id, vendor.id);
-  const vendorSku = String(pricing?.vendor_sku || m.vendorSku || '').trim();
-  if (!vendorSku) return false;
-  const live = await liveSkuOrderRefusal(conn, { adapterKey, vendorSku, vendorName: vendor.name, excludeLedgerId: null });
-  return !!live;
+  const skus = [...new Set([pricing?.vendor_sku, m.vendorSku].map((s) => String(s || '').trim()).filter(Boolean))];
+  for (const vendorSku of skus) {
+    if (await liveSkuOrderRefusal(conn, { adapterKey, vendorSku, vendorName: vendor.name, excludeLedgerId: null })) return true;
+  }
+  return false;
 }
 
 async function settleRequestLedgerBells(trx, requestId, { preserveOutstanding = false } = {}) {
@@ -509,6 +510,7 @@ async function settleRequestLedgerBells(trx, requestId, { preserveOutstanding = 
   const ev = meta(row.evidence);
   const preserved = preserveOutstanding ? await preservedPreSubmitWarning(trx, row, ev) : null;
   if (preserved) return { preserved };
+  if (preserveOutstanding && await hasLiveSkuOrderForRequest(trx, requestId)) return { preserved: 'vendor_sku_order_live' };
   if (capAlert(ev)) {
     await rewriteCapAlertOnReceipt(trx, { row, requestId, ev });
     return { preserved: 'cap_alert' };
@@ -1288,14 +1290,15 @@ async function historySkuConflictRefusal(trx, { ctx, vendor, vendorSku }) {
   return duplicateSkuMappingRefusal(trx, { product: ctx.product, vendor, vendorSku });
 }
 
-async function parkHistoryConflict(conn, { adapter, ctx, vendor, vendorSku }) {
+async function parkHistoryConflict(conn, { adapter, ctx, vendor, vendorSku, extraEvidence = null }) {
   if (!noTotalBeforeOrder(adapter)) return null;
   const conflict = await conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CAPS_LOCK_KEY]);
     return historySkuConflictRefusal(trx, { ctx, vendor, vendorSku });
   });
   if (!conflict) return null;
-  return { parked: await park(conn, { ...ctx, reason: conflict.reason, message: conflict.message, evidence: conflict.evidence }) };
+  const evidence = extraEvidence ? { ...extraEvidence, ...(conflict.evidence || {}) } : conflict.evidence;
+  return { parked: await park(conn, { ...ctx, reason: conflict.reason, message: conflict.message, evidence }) };
 }
 
 function capRefusalParkArgs(cap, { vendor, bq, holdCents, quoteCents }) {
@@ -1329,7 +1332,8 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
     };
   }
   if (bq?.outstanding) {
-    const conflict = await parkHistoryConflict(conn, { adapter, ctx, vendor, vendorSku });
+    const outstandingEvidence = { outstandingOrder: { number: bq.outstanding.number ?? null, why: bq.outstanding.why } };
+    const conflict = await parkHistoryConflict(conn, { adapter, ctx, vendor, vendorSku, extraEvidence: outstandingEvidence });
     if (conflict) return conflict;
     return {
       parked: await park(conn, {
@@ -1337,7 +1341,7 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
         reason: 'vendor_order_outstanding',
         message: outstandingMessage(vendor.name, vendorSku, bq.outstanding),
         amountCents: positiveCents(bq.cents),
-        evidence: { outstandingOrder: { number: bq.outstanding.number ?? null, why: bq.outstanding.why } },
+        evidence: outstandingEvidence,
       }),
     };
   }
@@ -2181,6 +2185,7 @@ module.exports = {
   retireRequestBell,
   cancelAtClaim,
   findLiveAutoOrder,
+  hasLiveSkuOrderForRequest,
   maybePlacedSql,
   liveOrderSql,
   isMaybePlaced,
