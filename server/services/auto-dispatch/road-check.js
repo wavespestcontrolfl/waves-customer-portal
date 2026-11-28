@@ -314,18 +314,34 @@ async function lookupGoogleLegs(legs, travel) {
   return mins.some((m) => m == null) ? null : mins;
 }
 
+async function lookupOneGoogleLeg(leg, travel) {
+  const mins = await lookupGoogleLegs([leg], travel);
+  return mins ? mins[0] : null;
+}
+
 // Real-road drive of a 2-stop source day: home -> first -> second -> home,
-// each leg priced at its own expected departure minute (outbound, post-stop-1, post-stop-2).
+// propagating actual Google travel, window waiting, and service durations so
+// each leg is priced at its real departure minute.
 async function sourceDayRoadDrive(sourceLegs, travel) {
   if (!sourceLegs || !sourceLegs.date) return null;
-  const { date, firstDepMin, interStopDepMin, returnDepMin, home, first, second } = sourceLegs;
-  const dep1 = Number.isFinite(firstDepMin) ? firstDepMin : sourceLegs.firstStartMin;
-  const dep2 = Number.isFinite(interStopDepMin) ? interStopDepMin : (sourceLegs.secondStartMin ?? dep1);
-  const dep3 = Number.isFinite(returnDepMin) ? returnDepMin : dep2;
-  if (!Number.isFinite(dep1) || !Number.isFinite(dep2) || !Number.isFinite(dep3)) return null;
+  const { date, home, first, second } = sourceLegs;
+  const dep1 = Number.isFinite(sourceLegs.firstDepMin) ? sourceLegs.firstDepMin : sourceLegs.firstStartMin;
+  if (!Number.isFinite(dep1)) return null;
   const leg = (from, to, departureMin) => ({ date, from, to, departureMin });
-  const mins = await lookupGoogleLegs([leg(home, first, dep1), leg(first, second, dep2), leg(second, home, dep3)], travel);
-  return mins ? round2(mins[0] + mins[1] + mins[2]) : null;
+  const t1 = await lookupOneGoogleLeg(leg(home, first, dep1), travel);
+  if (t1 == null) return null;
+  const start1 = Math.max(dep1 + t1, Number.isFinite(sourceLegs.firstStartMin) ? sourceLegs.firstStartMin : dep1 + t1);
+  const dep2 = Number.isFinite(sourceLegs.firstDurationMin)
+    ? Math.round(start1 + sourceLegs.firstDurationMin)
+    : (Number.isFinite(sourceLegs.interStopDepMin) ? sourceLegs.interStopDepMin : Math.round(start1));
+  const t2 = await lookupOneGoogleLeg(leg(first, second, dep2), travel);
+  if (t2 == null) return null;
+  const start2 = Math.max(dep2 + t2, Number.isFinite(sourceLegs.secondStartMin) ? sourceLegs.secondStartMin : dep2 + t2);
+  const dep3 = Number.isFinite(sourceLegs.secondDurationMin)
+    ? Math.round(start2 + sourceLegs.secondDurationMin)
+    : (Number.isFinite(sourceLegs.returnDepMin) ? sourceLegs.returnDepMin : Math.round(start2));
+  const t3 = await lookupOneGoogleLeg(leg(second, home, dep3), travel);
+  return t3 == null ? null : round2(t1 + t2 + t3);
 }
 
 // Real-road added detour for a pair landing on the same destination day:

@@ -39,9 +39,9 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { bookedVisitOrLiveHold } = require('../scheduling/reservation-occupancy');
 const { loadArrivalRouteContext, evaluateArrivalPlacement, hasInsertionIncompatibleRow } = require('../scheduling/arrival-route');
 const { loadTechShifts, shiftBounds } = require('../technician-eligibility');
-const { SHIFT } = require('../scheduling/policy');
+const { SHIFT, capacityEnabled } = require('../scheduling/policy');
 const { toDateStr } = require('./dates');
-const { HQ, resolveGeo } = require('./geo');
+const { HQ, resolveGeo, driveMin } = require('./geo');
 const { scoreAppointmentPlacement, _internals: { workloadScoreFor, hhmmToMin } } = require('./scoring');
 const moveRules = require('./move-rules');
 const { isBounceBackDate } = require('./bounce-guard');
@@ -90,7 +90,10 @@ function techDayKey(techId, date) {
 }
 
 // Pure source-day drive for two standalone stops on one tech-day.
-function pairSourceDrive(stopA, stopB, home = HQ, sourceDate = null) {
+// Outbound departure leaves home at or after the technician's shift departure
+// time (in time for stop 1), and road-check propagates actual leg travel,
+// waiting, and service durations across home -> stop 1 -> stop 2 -> home.
+function pairSourceDrive(stopA, stopB, home = HQ, sourceDate = null, vanDepartureMin = SHIFT.startMinutes) {
   if (!stopA || !stopB) return null;
   if (stopA.customer_id && stopB.customer_id && String(stopA.customer_id) === String(stopB.customer_id)) return null;
   const date = sourceDate ? toDateStr(sourceDate) : toDateStr(stopA.scheduled_date || stopB.scheduled_date);
@@ -99,17 +102,23 @@ function pairSourceDrive(stopA, stopB, home = HQ, sourceDate = null) {
   if (seq.length !== 2) return null;
   if (!seq[0].geo || !seq[1].geo) return null;
   const driveMinutes = round2(chainDriveMinutes([seq[0].geo, seq[1].geo], home));
-  const firstDepMin = seq[0].startMin;
-  const interStopDepMin = firstDepMin + (seq[0].minutes || stopPlanningMinutes(seq[0]));
-  const returnDepMin = Math.max(interStopDepMin, seq[1].startMin) + (seq[1].minutes || stopPlanningMinutes(seq[1]));
+  const shiftStart = Number.isFinite(vanDepartureMin) ? vanDepartureMin : SHIFT.startMinutes;
+  const estOut = Math.round(driveMin(home, seq[0].geo));
+  const firstDepMin = seq[0].startMin >= shiftStart
+    ? Math.max(shiftStart, seq[0].startMin - estOut)
+    : Math.max(0, seq[0].startMin - estOut);
+  const firstDurationMin = seq[0].minutes || stopPlanningMinutes(seq[0]);
+  const secondDurationMin = seq[1].minutes || stopPlanningMinutes(seq[1]);
   return {
     driveMinutes,
     chain: seq,
     roadLegs: {
       date,
       firstDepMin,
-      interStopDepMin,
-      returnDepMin,
+      firstStartMin: seq[0].startMin,
+      firstDurationMin,
+      secondStartMin: seq[1].startMin,
+      secondDurationMin,
       home,
       first: seq[0].geo,
       second: seq[1].geo,
@@ -171,7 +180,8 @@ function sameDestRoadSpecFor(finalChain, idA, idB, { date, startMinA, startMinB,
 
 // Build the destination day's raw stop rows AFTER A lands (preserving every
 // grouped member row so physicalStops/routeCost/routeOrderCovers keep full
-// sibling durations and member IDs without double-collapsing).
+// sibling durations and member IDs without double-collapsing). If A carries
+// a certified insertion order that no longer covers destStops, reject (null).
 function buildRawDestWithA(destStops, aStop, aCand) {
   const placedA = {
     ...aStop,
@@ -180,7 +190,8 @@ function buildRawDestWithA(destStops, aStop, aCand) {
     window_end: aCand.end_time || null,
     route_order: null,
   };
-  if (Array.isArray(aCand.route_order_ids) && routeOrderCovers(destStops, aCand.route_order_ids)) {
+  if (Array.isArray(aCand.route_order_ids)) {
+    if (!routeOrderCovers(destStops, aCand.route_order_ids)) return null;
     const rank = new Map();
     aCand.route_order_ids.forEach((raw, idx) => {
       const id = raw === '__candidate__' ? String(placedA.id) : String(raw);
@@ -198,7 +209,9 @@ function jointDestinationMetrics({
 }) {
   if (!Array.isArray(destStops) || destStops.length === 0) return null;
   const rawDestWithA = buildRawDestWithA(destStops, aStop, aCand);
-  const useRouteOrder = Array.isArray(bRouteOrderIds) && routeOrderCovers(rawDestWithA, bRouteOrderIds);
+  if (!rawDestWithA) return null;
+  const useRouteOrder = Array.isArray(bRouteOrderIds);
+  if (useRouteOrder && !routeOrderCovers(rawDestWithA, bRouteOrderIds)) return null;
   const bUnit = {
     ...bStop,
     startMin: hhmmToMin(bCand.start_time),
@@ -315,7 +328,7 @@ function syntheticRowFor(service, geo, cand, { planningExempt = false } = {}) {
   };
 }
 
-async function loadSameDestContext(destCache, { destTech, destDate, serviceB, geoB, run }) {
+async function loadSameDestContext(destCache, { destTech, destDate, serviceB, geoB, run, arrivalMode }) {
   const key = techDayKey(destTech, destDate);
   if (destCache.has(key)) return destCache.get(key);
   const durB = serviceB.estimated_duration_minutes || 60;
@@ -323,10 +336,10 @@ async function loadSameDestContext(destCache, { destTech, destDate, serviceB, ge
     date: destDate,
     technicianId: destTech,
     now: run.nowDate,
-    preserveCapacity: true,
-    planningMinutes: schedulingPlanMinutesOnly(),
-    startPoints: true,
-    vanDepartureMin: run.config.departureMinutes,
+    preserveCapacity: arrivalMode,
+    planningMinutes: !arrivalMode || schedulingPlanMinutesOnly(),
+    startPoints: arrivalMode,
+    vanDepartureMin: arrivalMode ? run.config.departureMinutes : undefined,
     prospective: {
       lat: geoB.lat,
       lng: geoB.lng,
@@ -344,15 +357,20 @@ async function loadSameDestContext(destCache, { destTech, destDate, serviceB, ge
   return entry;
 }
 
+function usesArrivalRouting(config) {
+  return Boolean(capacityEnabled() || (config && config.arrivalSearch === 'true'));
+}
+
 async function checkSameDestArrival({ destCache, serviceA, geoA, serviceB, geoB, aCand, bCand, run }) {
-  if (run.config.arrivalSearch !== 'true') return { ok: true, bRouteOrderIds: null };
+  if (!usesArrivalRouting(run.config)) return { ok: true, bRouteOrderIds: null };
+  const arrivalMode = run.config.arrivalSearch === 'true';
   const { context, shiftEndMin } = await loadSameDestContext(destCache, {
-    destTech: aCand.technician_id, destDate: aCand.date, serviceB, geoB, run,
+    destTech: aCand.technician_id, destDate: aCand.date, serviceB, geoB, run, arrivalMode,
   });
   if (!context) return { ok: false, bRouteOrderIds: null };
-  const synA = syntheticRowFor(serviceA, geoA, aCand, { planningExempt: !schedulingPlanMinutesOnly() });
+  const synA = syntheticRowFor(serviceA, geoA, aCand, { planningExempt: arrivalMode && !schedulingPlanMinutesOnly() });
   const contextWithA = { ...context, rows: stampRouteOrderWithA(context.rows, synA, aCand.route_order_ids) };
-  const canInsert = canPlaceInRoute([]) && !hasInsertionIncompatibleRow(contextWithA);
+  const canInsert = arrivalMode && canPlaceInRoute([]) && !hasInsertionIncompatibleRow(contextWithA);
   const fit = evaluateArrivalPlacement(contextWithA, {
     windowStart: bCand.start_time,
     windowEnd: bCand.end_time,
@@ -489,7 +507,17 @@ async function proofreadBoth(entryA, entryB, slotA, slotB, meta, run, helpers) {
   if (checkedA && !checkedA.ok) return { ok: false };
   const checkedB = await helpers.checkProofreader(entryB, slotB, meta.auditB, run);
   if (checkedB && !checkedB.ok) return { ok: false };
-  if (checkedA && await helpers.preferencesChanged(entryA)) return { ok: false };
+  const [changedA, changedB] = await Promise.all([
+    helpers.preferencesChanged(entryA),
+    helpers.preferencesChanged(entryB),
+  ]);
+  if (changedA || changedB) {
+    if (typeof helpers.logPairSuperseded === 'function') {
+      if (changedA) await helpers.logPairSuperseded(entryA, meta.auditA, checkedA ? checkedA.checked : null, run);
+      if (changedB) await helpers.logPairSuperseded(entryB, meta.auditB, checkedB ? checkedB.checked : null, run);
+    }
+    return { ok: false };
+  }
   return { ok: true, checkedA: checkedA ? checkedA.checked : null, checkedB: checkedB ? checkedB.checked : null };
 }
 
@@ -544,6 +572,7 @@ async function findConfirmedPair(entryA, entryB, verified, run) {
     serviceToRouteStop(entryB.service, resolveGeo(entryB.service), hhmmToMin(entryB.service.window_start), [], entryB.service.route_order, false, null),
     sourceHome,
     verified.sourceDate,
+    config.departureMinutes,
   );
   if (!sourceInfo) return null;
 
@@ -651,7 +680,11 @@ async function runTwoStopClearPass(run, helpers) {
     try {
       if (await tryClearOneTwoStopDay(entryA, entryB, run, helpers)) cleared += 1;
     } catch (err) {
-      logger.warn(`[auto-dispatch] two-stop pair clear skipped for ${toDateStr(entryA.service.scheduled_date)}: ${err.message}`);
+      run.guardReadDegraded = true;
+      logger.error(`[auto-dispatch] two-stop pair clear failed for ${toDateStr(entryA.service.scheduled_date)}: ${err.message}`);
+      if (typeof helpers.recordPairError === 'function') {
+        await helpers.recordPairError(entryA, entryB, err, run);
+      }
     }
   }
   return cleared;
@@ -671,6 +704,7 @@ module.exports = {
     rankPairs,
     sameDateSouthCompatible,
     pairNeedsOverlapCheck,
+    usesArrivalRouting,
     stampRouteOrderWithA,
     groupCandidateBuckets,
   },

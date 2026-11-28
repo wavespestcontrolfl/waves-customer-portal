@@ -20,6 +20,7 @@ const {
     rankPairs,
     sameDateSouthCompatible,
     pairNeedsOverlapCheck,
+    usesArrivalRouting,
     stampRouteOrderWithA,
     groupCandidateBuckets,
   },
@@ -71,11 +72,13 @@ describe('two-stop-clear pure rules', () => {
     // Together, clearing the 2-stop day recovers the entire HQ round trip (works with production serviceToRouteStop shape).
     const prodA = serviceToRouteStop(stopA, NORTH_A, 600, [], null, false, null);
     const prodB = serviceToRouteStop(stopB, NORTH_B, 720, [], null, false, null);
-    const src = pairSourceDrive(prodA, prodB, HQ, '2026-12-21');
+    const src = pairSourceDrive(prodA, prodB, HQ, '2026-12-21', 480);
     expect(src).not.toBeNull();
     expect(src.driveMinutes).toBeGreaterThan(25);
+    expect(src.roadLegs.firstDepMin).toBeLessThan(600);
+    expect(src.roadLegs.firstDepMin).toBeGreaterThanOrEqual(480);
     expect(src.roadLegs).toMatchObject({
-      date: '2026-12-21', firstDepMin: 600, interStopDepMin: 660, returnDepMin: 780, home: HQ, first: NORTH_A, second: NORTH_B,
+      date: '2026-12-21', firstStartMin: 600, firstDurationMin: 60, secondStartMin: 720, secondDurationMin: 60, home: HQ, first: NORTH_A, second: NORTH_B,
     });
     // Without an explicit or embedded sourceDate, fails closed (null).
     expect(pairSourceDrive(prodA, prodB, HQ)).toBeNull();
@@ -154,6 +157,17 @@ describe('two-stop-clear pure rules', () => {
     expect(uncertified.sameDestRoadSpec.adjacent).toMatchObject({
       prev: MID, first: NORTH_A, second: NORTH_B, next: HQ,
     });
+    // Certified mid-route insertion whose route_order_ids no longer match rawDestWithA is REJECTED (never falls back to append).
+    expect(jointDestinationMetrics({
+      destStops, destHome: HQ, aStop, bStop, aCand, bCand,
+      bRouteOrderIds: ['d1', 'stale-id', '__candidate__', 'd2'],
+      currentScoreA: curScore, currentScoreB: curScore,
+    })).toBeNull();
+    expect(jointDestinationMetrics({
+      destStops, destHome: HQ, aStop, bStop,
+      aCand: { date: '2026-12-22', start_time: '10:00', route_order_ids: ['stale-id', '__candidate__'] },
+      bCand, bRouteOrderIds: null, currentScoreA: curScore, currentScoreB: curScore,
+    })).toBeNull();
     // Empty destination day is rejected (never shift a 2-stop day onto an empty day).
     expect(jointDestinationMetrics({
       destStops: [], destHome: HQ, aStop, bStop, aCand, bCand, bRouteOrderIds: null, currentScoreA: curScore, currentScoreB: curScore,
@@ -244,6 +258,20 @@ describe('two-stop-clear pure rules', () => {
     const buckets = groupCandidateBuckets(eligible, new Set(['q1']));
     expect(buckets.map(([k]) => k)).toEqual(['t1|2026-12-21']);
   });
+
+  test('usesArrivalRouting activates under GATE_SCHEDULING_CAPACITY even when arrivalSearch is off', () => {
+    const prevCap = process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      expect(usesArrivalRouting({ arrivalSearch: 'false' })).toBe(false);
+      expect(usesArrivalRouting({ arrivalSearch: 'true' })).toBe(true);
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      expect(usesArrivalRouting({ arrivalSearch: 'false' })).toBe(true);
+    } finally {
+      if (prevCap === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = prevCap;
+    }
+  });
 });
 
 describe('road-check confirmPairOnRoads', () => {
@@ -256,18 +284,24 @@ describe('road-check confirmPairOnRoads', () => {
       return m == null ? { minutes: 10, source: 'conservative_model' } : { minutes: m, source: 'google_traffic' };
     },
   });
-  const sourceLegs = { date: '2026-12-21', firstDepMin: 540, interStopDepMin: 600, returnDepMin: 900, home: P('H'), first: P('A'), second: P('B') };
+  const sourceLegs = {
+    date: '2026-12-21', firstDepMin: 525, firstStartMin: 540, firstDurationMin: 60,
+    secondStartMin: 600, secondDurationMin: 60, home: P('H'), first: P('A'), second: P('B'),
+  };
   const baseConfig = { roadCheckEnabled: true };
 
-  test('confirms different-day pair on real Google roads at each leg departure time and fails closed when disabled or unavailable', async () => {
+  test('confirms different-day pair on real Google roads propagating travel, wait, and service times and fails closed when unavailable', async () => {
     const slotA = { [ROAD_LEGS]: { prev: P('P1'), stop: P('A'), next: P('N1'), date: '2026-12-22', startMin: 600 } };
     const slotB = { [ROAD_LEGS]: { prev: P('P2'), stop: P('B'), next: P('N2'), date: '2026-12-23', startMin: 660 } };
     const pair = { sameDest: false, slotA, slotB, saving: 25 };
     const asked = [];
-    // Source day: H->A (18 at 540) + A->B (2 at 600) + B->H (18 at 900) = 38 min.
-    // Dest A detour: 8 + 8 - 12 = 4 min. Dest B detour: 9 + 9 - 12 = 6 min. Total added = 10 min -> saving = 28 >= 20.
+    // Source day propagation:
+    //   H->A leaves at 525, takes 20 min -> arrives 545 (> 540), finishes stop 1 at 605.
+    //   A->B leaves at 605, takes 15 min -> arrives 620 (> 600, ran into stop 2!), finishes stop 2 at 680.
+    //   B->H leaves at 680, takes 18 min -> total source drive = 53 min.
+    // Dest A detour: 8 + 8 - 12 = 4 min. Dest B detour: 9 + 9 - 12 = 6 min. Total added = 10 min -> saving = 43 >= 20.
     const map = {
-      'H->A': 18, 'A->B': 2, 'B->H': 18,
+      'H->A': 20, 'A->B': 15, 'B->H': 18,
       'P1->A': 8, 'A->N1': 8, 'P1->N1': 12,
       'P2->B': 9, 'B->N2': 9, 'P2->N2': 12,
     };
@@ -278,10 +312,10 @@ describe('road-check confirmPairOnRoads', () => {
     const res = await confirmPairOnRoads([pair], { sourceLegs, floor: 20, config: baseConfig, travel });
     expect(res).toMatchObject({
       pair,
-      road: { source_drive_minutes: 38, added_drive_minutes: 10, saving_minutes: 28, source: 'google' },
+      road: { source_drive_minutes: 53, added_drive_minutes: 10, saving_minutes: 43, source: 'google' },
     });
-    // Source legs priced at firstDepMin (540), interStopDepMin (600), and returnDepMin (900).
-    expect(asked.slice(0, 3).map((l) => l.departureMin)).toEqual([540, 600, 900]);
+    // Source legs priced sequentially at propagated departure minutes: 525, 605, 680.
+    expect(asked.slice(0, 3).map((l) => l.departureMin)).toEqual([525, 605, 680]);
     // Missing Google answer fails closed (null, never commits on straight-line estimate).
     const miss = await confirmPairOnRoads([pair], { sourceLegs, floor: 20, config: baseConfig, travel: travelFor({ 'H->A': 18 }) });
     expect(miss).toBeNull();
@@ -385,6 +419,7 @@ describe('runTwoStopClearPass orchestration safety', () => {
       pairEligible: new Map([['svc-a', entryA], ['svc-b', entryB]]),
       claimedPairIds: new Set(),
       quarantinedIds: new Set(),
+      conflicts: new Map(),
       roadTravel: {},
     };
     const slotA = {
@@ -478,6 +513,86 @@ describe('runTwoStopClearPass orchestration safety', () => {
     const cleared = await runTwoStopClearPass(run, helpers);
     expect(cleared).toBe(1);
     expect(commitAtomicPair).toHaveBeenCalledTimes(1);
+    expect(helpers.preferencesChanged).toHaveBeenCalledTimes(2);
     expect([...run.claimedPairIds]).toEqual(['svc-a', 'svc-b']);
+  });
+
+  test('rechecks BOTH customers preferences before commit even when proofreader is off', async () => {
+    const { svcA, svcB, run, slotA, slotB } = makeFixture('apply', 10);
+    db.mockImplementation(() => makeChain([
+      { id: svcA.id, technician_id: 'tech-1', status: 'pending', visit_id: null, window_start: '10:00:00' },
+      { id: svcB.id, technician_id: 'tech-1', status: 'pending', visit_id: null, window_start: '12:00:00' },
+    ]));
+    jest.spyOn(candidateSlots, 'findValidCandidateSlots')
+      .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '10:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotA] })
+      .mockResolvedValueOnce({ current: { is_current: true, date: '2026-12-21', start_time: '12:00', technician_id: 'tech-1', detour_minutes: 4, stops_that_day: 2, route_minutes: 180, capability_level: 'qualified' }, candidates: [slotB] });
+    jest.spyOn(southDayKept, 'ruleFor').mockResolvedValue(null);
+    jest.spyOn(roadCheck, 'confirmPairOnRoads').mockImplementation(async (pairs) => ({ pair: pairs[0], road: { source_drive_minutes: 38, added_drive_minutes: 8, saving_minutes: 30, source: 'google' } }));
+
+    const logPairSuperseded = jest.fn(async () => {});
+    const commitAtomicPair = jest.fn();
+    const helpers = {
+      recheckPairEntry: jest.fn(async () => true),
+      checkProofreader: jest.fn(async () => ({ ok: true, checked: null })),
+      preferencesChanged: jest.fn(async (entry) => entry.service.id === 'svc-b'),
+      logPairSuperseded,
+      buildPlacementAudit: jest.fn(() => ({ improvement: 5, newPlacement: {}, scores: {}, routeMetrics: {}, constraints: {} })),
+      commitAtomicPair,
+      logDryRunPair: jest.fn(),
+    };
+
+    const cleared = await runTwoStopClearPass(run, helpers);
+    expect(cleared).toBe(0);
+    expect(commitAtomicPair).not.toHaveBeenCalled();
+    expect(logPairSuperseded).toHaveBeenCalledTimes(1);
+    expect(logPairSuperseded.mock.calls[0][0].service.id).toBe('svc-b');
+  });
+
+  test('marks run degraded and records pair evaluation error when an evaluation throws', async () => {
+    const { run } = makeFixture('apply', 10);
+    db.mockImplementation(() => { throw new Error('db connection lost'); });
+    const recordPairError = jest.fn(async (a, b, err, r) => {
+      r.totals.failed += 1;
+      r.claimedPairIds.add(a.service.id);
+      r.claimedPairIds.add(b.service.id);
+    });
+    const helpers = {
+      recheckPairEntry: jest.fn(),
+      checkProofreader: jest.fn(),
+      preferencesChanged: jest.fn(),
+      recordPairError,
+      buildPlacementAudit: jest.fn(),
+      commitAtomicPair: jest.fn(),
+      logDryRunPair: jest.fn(),
+    };
+
+    const cleared = await runTwoStopClearPass(run, helpers);
+    expect(cleared).toBe(0);
+    expect(run.guardReadDegraded).toBe(true);
+    expect(recordPairError).toHaveBeenCalledTimes(1);
+    expect(run.totals.failed).toBe(1);
+    expect([...run.claimedPairIds]).toEqual(['svc-a', 'svc-b']);
+  });
+
+  test('attributes a B-triggered pair rollback to B and logs rollback for both visits', async () => {
+    const audit = require('../services/auto-dispatch/audit');
+    const logSpy = jest.spyOn(audit, 'logDecision').mockResolvedValue();
+    const { _internals: { recordPairCommitFailure } } = require('../services/auto-dispatch/index');
+    const { svcA, svcB, run } = makeFixture('apply', 10);
+    const evalA = { audit: { constraints: {} } };
+    const evalB = { audit: { constraints: {} } };
+    const err = Object.assign(new Error('Slot taken for B'), { code: 'SLOT_TAKEN', failedServiceId: 'svc-b' });
+
+    await recordPairCommitFailure({
+      entryA: { service: svcA }, evalA, checkedA: null,
+      entryB: { service: svcB }, evalB, checkedB: null,
+      applyErr: err, run,
+    });
+
+    expect([...run.claimedPairIds]).toEqual(['svc-a', 'svc-b']);
+    expect(logSpy).toHaveBeenCalledTimes(2);
+    expect(logSpy.mock.calls[0][1]).toMatchObject({ action: 'no_change', service: svcB, reason_code: 'SLOT_TAKEN', reason_description: 'Slot taken for B' });
+    expect(logSpy.mock.calls[1][1]).toMatchObject({ action: 'no_change', service: svcA, reason_code: 'SLOT_TAKEN' });
+    expect(logSpy.mock.calls[1][1].reason_description).toContain('svc-b');
   });
 });

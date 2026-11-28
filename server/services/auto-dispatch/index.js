@@ -1911,6 +1911,62 @@ async function logCommittedPairLeg(entry, evalResult, checked, result, run) {
   });
 }
 
+async function logPairSuperseded(entry, evalAudit, checked, run) {
+  run.claimedPairIds.add(String(entry.service.id));
+  noteUnmoved(run, entry.service, 'SUPERSEDED_DURING_RUN');
+  await audit.logDecision(run.runId, {
+    action: 'no_change', service: entry.service, reason_code: 'SUPERSEDED_DURING_RUN',
+    reason_description: 'The customer\'s scheduling preferences changed while the pair move was checked',
+    ...evalAudit, constraints: checked ? { ...evalAudit.constraints, proofreader: checked.audit } : evalAudit.constraints,
+  });
+}
+
+async function recordPairError(entryA, entryB, err, run) {
+  run.guardReadDegraded = true;
+  run.totals.failed += 1;
+  for (const entry of [entryA, entryB]) {
+    const id = String(entry.service.id);
+    if (run.claimedPairIds.has(id)) continue;
+    run.claimedPairIds.add(id);
+    noteUnmoved(run, entry.service, 'ERROR');
+    try {
+      await audit.logDecision(run.runId, {
+        action: 'failed',
+        service: entry.service,
+        reason_code: 'ERROR',
+        reason_description: `Two-stop pair evaluation failed: ${err.message}`,
+        ...entry.evalResult.audit,
+        error: err.message,
+      });
+    } catch { /* swallow */ }
+  }
+}
+
+async function recordPairCommitFailure({ entryA, evalA, checkedA, entryB, evalB, checkedB, applyErr, run }) {
+  run.claimedPairIds.add(String(entryA.service.id));
+  run.claimedPairIds.add(String(entryB.service.id));
+  const failedId = applyErr && applyErr.failedServiceId != null ? String(applyErr.failedServiceId) : null;
+  const legA = { entry: entryA, evalResult: evalA, checked: checkedA };
+  const legB = { entry: entryB, evalResult: evalB, checked: checkedB };
+  const [primary, partner] = failedId === String(entryB.service.id) ? [legB, legA] : [legA, legB];
+  const primaryAttempt = { fresh: primary.evalResult, checked: primary.checked };
+  const partnerAttempt = { fresh: partner.evalResult, checked: partner.checked };
+  const notAFailure = pairMoveRefusal(primaryAttempt, applyErr);
+  if (notAFailure) {
+    await logOrdinaryRefusal(primary.entry, primaryAttempt, run, notAFailure);
+    const partnerReason = failedId
+      ? { reason_code: notAFailure.reason_code, reason_description: `Pair commit rolled back because partner visit ${primary.entry.service.id} could not move (${notAFailure.reason_description})` }
+      : notAFailure;
+    await logOrdinaryRefusal(partner.entry, partnerAttempt, run, partnerReason);
+    return;
+  }
+  await recordApplyFailure(primary.entry, primary.evalResult, applyErr, run);
+  await logOrdinaryRefusal(partner.entry, partnerAttempt, run, {
+    reason_code: 'PAIR_COMMIT_ROLLED_BACK',
+    reason_description: `Pair commit rolled back because partner visit ${primary.entry.service.id} failed to apply (${applyErr.message})`,
+  });
+}
+
 async function commitAtomicPair({ entryA, evalA, checkedA, entryB, evalB, checkedB, sourceTechId, sourceDate, verifySourceInTrx, run }) {
   const { runId, totals } = run;
   try {
@@ -1928,15 +1984,7 @@ async function commitAtomicPair({ entryA, evalA, checkedA, entryB, evalB, checke
     await logCommittedPairLeg(entryB, evalB, checkedB, resultB, run);
     return true;
   } catch (applyErr) {
-    const attemptA = { fresh: evalA, checked: checkedA };
-    const notAFailure = pairMoveRefusal(attemptA, applyErr);
-    if (notAFailure) {
-      run.claimedPairIds.add(String(entryA.service.id));
-      await logOrdinaryRefusal(entryA, attemptA, run, notAFailure);
-    } else {
-      run.claimedPairIds.add(String(entryA.service.id));
-      await recordApplyFailure(entryA, evalA, applyErr, run);
-    }
+    await recordPairCommitFailure({ entryA, evalA, checkedA, entryB, evalB, checkedB, applyErr, run });
     return false;
   }
 }
@@ -1946,6 +1994,8 @@ function pairClearHelpers() {
     recheckPairEntry,
     checkProofreader: checkPairProofreader,
     preferencesChanged,
+    logPairSuperseded,
+    recordPairError,
     buildPlacementAudit,
     commitAtomicPair,
     logDryRunPair: (service, evalResult, pair, road, run) => logDryRunRecommendation(
@@ -2124,4 +2174,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, freezeReadArgs, conflictsToSettle, unloadedLiveVisitIds } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, freezeReadArgs, conflictsToSettle, unloadedLiveVisitIds, recordPairCommitFailure, recordPairError } };

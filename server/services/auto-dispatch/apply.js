@@ -1079,6 +1079,17 @@ async function lockPairSchedulingDays(trx, { sourceTechId, sourceDate, bestA, be
   await lockTechDays(trx, techDays);
 }
 
+async function reschedulePairLeg(pair, spec, trx) {
+  try {
+    return (await SmartRebooker.reschedule(
+      pair.service.id, pair.best.date, spec.newWindow, 'auto_dispatch', 'auto_dispatch', { ...spec.options, trx },
+    )) || {};
+  } catch (err) {
+    if (err && typeof err === 'object') err.failedServiceId = String(pair.service.id);
+    throw err;
+  }
+}
+
 /**
  * Commit both visits of a 2-stop light-day clearing move atomically inside ONE
  * transaction. Locks all affected dates/tech-days in canonical order, rechecks
@@ -1090,22 +1101,18 @@ async function applyAutoDispatchPairMove(pairA, pairB, runId, { sourceTechId, so
     revalidatePlacement(pairA.service),
     revalidatePlacement(pairB.service),
   ]);
-  if (!liveA.ok) throw Object.assign(new Error(liveA.reason), { code: liveA.code });
-  if (!liveB.ok) throw Object.assign(new Error(liveB.reason), { code: liveB.code });
+  if (!liveA.ok) throw Object.assign(new Error(liveA.reason), { code: liveA.code, failedServiceId: String(pairA.service.id) });
+  if (!liveB.ok) throw Object.assign(new Error(liveB.reason), { code: liveB.code, failedServiceId: String(pairB.service.id) });
   const specA = buildSingleMoveSpec(pairA.service, pairA.best, liveA.fresh, pairA.config);
   const specB = buildSingleMoveSpec(pairB.service, pairB.best, liveB.fresh, pairB.config);
 
   const { moveResultA, moveResultB } = await db.transaction(async (trx) => {
     await lockPairSchedulingDays(trx, { sourceTechId, sourceDate, bestA: pairA.best, bestB: pairB.best });
     if (typeof verifySourceInTrx === 'function' && !(await verifySourceInTrx(trx))) {
-      throw Object.assign(new Error('Source 2-stop day changed before commit'), { statusCode: 409, code: 'ROUTE_ORDER_CHANGED' });
+      throw Object.assign(new Error('Source 2-stop day changed before commit'), { statusCode: 409, code: 'ROUTE_ORDER_CHANGED', failedServiceId: null });
     }
-    const resA = (await SmartRebooker.reschedule(
-      pairA.service.id, pairA.best.date, specA.newWindow, 'auto_dispatch', 'auto_dispatch', { ...specA.options, trx },
-    )) || {};
-    const resB = (await SmartRebooker.reschedule(
-      pairB.service.id, pairB.best.date, specB.newWindow, 'auto_dispatch', 'auto_dispatch', { ...specB.options, trx },
-    )) || {};
+    const resA = await reschedulePairLeg(pairA, specA, trx);
+    const resB = await reschedulePairLeg(pairB, specB, trx);
     return { moveResultA: resA, moveResultB: resB };
   });
 
