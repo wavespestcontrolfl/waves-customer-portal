@@ -182,6 +182,14 @@ describe('PR A2: complaint alert guard, active-customer spam guard, and outage m
       meta: { call_summary: 'Orkin overcharged me. I want a refund from Waves.' },
       sentiment_and_lead: { objections_raised: ['Orkin overcharged me', 'Refund requested'] },
     })).toBe(false);
+    expect(isCompetitorOrNonWavesComplaint({
+      meta: { call_summary: 'Orkin overcharged the caller last year. Waves canceled today\'s appointment without notice, and the caller wants an explanation.' },
+      sentiment_and_lead: { objections_raised: [] },
+    })).toBe(false);
+    expect(isCompetitorOrNonWavesComplaint({
+      meta: { call_summary: 'Orkin overcharged the caller last year. The technician never showed up today.' },
+      sentiment_and_lead: { objections_raised: [] },
+    })).toBe(false);
 
     expect(isCompetitorOrNonWavesComplaint({
       meta: { call_summary: 'Caller complained Waves technician missed the back lanai.' },

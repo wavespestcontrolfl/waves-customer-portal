@@ -10,13 +10,16 @@
 const logger = require('./logger');
 
 const COMPETITOR_ENTITY = '(?:terminix|orkin|truly\\s*nolen|massey|aptive|home\\s*team|eco\\s*shield|bulwark|previous\\s+(?:pest\\s+)?company|other\\s+(?:pest\\s+)?company|former\\s+(?:pest\\s+)?company|old\\s+(?:pest\\s+)?company)';
+const COMPETITOR_ENTITY_RE = new RegExp(`\\b${COMPETITOR_ENTITY}\\b`, 'i');
 const COMPETITOR_CAUSED_RE = new RegExp(
   `\\b(?:(?:frustrated|unhappy|upset|mad|angry|dissatisfied|disappointed|issues?|problems?|trouble|complaints?)\\s+(?:with|about|against)\\s+${COMPETITOR_ENTITY}`
   + `|${COMPETITOR_ENTITY}\\s+(?:never\\s+showed|missed|skipped|failed|didn'?t|did\\s+not|overcharged|raised|ignored|damaged|ruined|dropped|cancelled|canceled|was\\s+(?:late|rude|terrible|awful|bad)))\\b`,
   'i',
 );
 const SWITCHING_TO_COMPETITOR_RE = new RegExp(`\\b(?:switch(?:ing)?|mov(?:e|ing)|go(?:ing)?|call(?:ing)?)\\s+(?:to|with)\\s+${COMPETITOR_ENTITY}\\b`, 'i');
-const WAVES_FAULT_RE = /\b(?:your\s+(?:tech|technician|office|billing|invoice|charge|service|driver|company|team|crew)|waves\b[^.!?\n]{0,30}\b(?:tech|technician|office|billing|invoice|missed|skipped|failed|never|didn'?t|did\s+not|overcharged|charged|billed|damaged|ruined|late|rude|bad|awful|terrible|wrong|no[- ]?show|problem|issue|complaint|upset|frustrated|unhappy)|(?:refund|credit|reimburse|reimbursement)\b[^.!?\n]{0,25}\b(?:from\s+waves|waves)?|cancel(?:ing|ling)?\s+(?:my\s+|our\s+)?(?:waves|account|service|membership|plan)|billed\s+us|charged\s+us|you\s+guys)\b/i;
+const WAVES_PROSPECT_SWITCH_RE = /\b(?:(?:wants?|wanted|wanting|looking|plans?|planning|called|calling|hopes?|hoping)\s+(?:to\s+)?(?:switch(?:ing)?|move|moving|come|coming|try|use|hire|book)\s+(?:over\s+)?(?:to\s+)?waves|wants?\s+waves\s+instead|switch(?:ing)?\s+(?:over\s+)?to\s+waves)\b/gi;
+const WAVES_OR_DIRECT_FAULT_RE = /\b(?:waves|your\s+(?:tech|technician|office|billing|invoice|charge|service|driver|company|team|crew)|billed\s+us|charged\s+us|you\s+guys|refund|credit|reimburse|reimbursement)\b/i;
+const GENERIC_COMPLAINT_CUE_RE = /\b(?:cancel(?:ed|led|ing|ling|ation)?|missed|skipped|never\s+showed|no[- ]?show|late|overcharged|damaged|ruined|rude|terrible|awful|unhappy|upset|frustrated|angry|complaint|complained|explanation|problem|issue|wrong|failed|ignored)\b/i;
 
 const OUTAGE_WINDOW_MS = 60 * 60 * 1000;
 const OUTAGE_MIN_FAILURES = 3;
@@ -34,17 +37,28 @@ const ERROR_CATEGORY_RULES = [
   ['invalid_response', (_s, code, name, msg) => /SyntaxError/i.test(name) || /\b(?:json|empty response|invalid schema|malformed)\b/i.test(`${code} ${msg}`)],
 ];
 
+function sentenceIsSafeCompetitorOnly(sentence) {
+  if (SWITCHING_TO_COMPETITOR_RE.test(sentence)) return false;
+  const withoutProspectSwitch = sentence.replace(WAVES_PROSPECT_SWITCH_RE, ' ');
+  if (WAVES_OR_DIRECT_FAULT_RE.test(withoutProspectSwitch)) return false;
+  if (GENERIC_COMPLAINT_CUE_RE.test(withoutProspectSwitch) && !COMPETITOR_ENTITY_RE.test(withoutProspectSwitch)) {
+    return false;
+  }
+  return true;
+}
+
 function isCompetitorOrNonWavesComplaint(v2Extraction = null) {
   if (!v2Extraction || typeof v2Extraction !== 'object') return false;
   const objections = (Array.isArray(v2Extraction?.sentiment_and_lead?.objections_raised)
     ? v2Extraction.sentiment_and_lead.objections_raised
     : []).map((o) => String(o || '').trim()).filter(Boolean);
   const summary = String(v2Extraction?.meta?.call_summary || '').trim();
-  const text = [...objections, summary].filter(Boolean).join('\n');
-  if (!text) return false;
-  if (SWITCHING_TO_COMPETITOR_RE.test(text) || WAVES_FAULT_RE.test(text)) return false;
+  const sentences = summary.split(/[.!?\n]+/).map((s) => s.trim()).filter(Boolean);
+  const allParts = [...objections, ...sentences];
+  if (!allParts.length) return false;
+  if (!allParts.every(sentenceIsSafeCompetitorOnly)) return false;
   if (objections.length && !objections.every((o) => COMPETITOR_CAUSED_RE.test(o))) return false;
-  return COMPETITOR_CAUSED_RE.test(text);
+  return allParts.some((part) => COMPETITOR_CAUSED_RE.test(part));
 }
 
 function isActiveKnownCustomerCall({ knownCaller = null, knownCallerLookupFailed = false, call = null } = {}) {
