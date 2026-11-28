@@ -1124,6 +1124,8 @@ async function runStatementSettleTransaction({ Settle, paymentIntent, statementI
       }
       const settleResult = await Settle.settleStatementPaid(statementId, {
         ...settleOpts.baseSettlement,
+        stripeChargeId: paymentIntent.latest_charge || null,
+        settledAt: settleOpts.eventCreated ? new Date(settleOpts.eventCreated * 1000) : null,
         amountCents: settleOpts.actualTotalCents,
         baseAmountCents: baseCents,
         surchargeAmountCents: surchargeCents,
@@ -1186,13 +1188,12 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         methodType,
         funding,
         actualTotalCents,
+        eventCreated,
         baseSettlement: {
           paymentMethod,
           processor: 'stripe',
           stripePaymentIntentId: piId,
-          stripeChargeId: paymentIntent.latest_charge || null,
           cardFunding: funding,
-          settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
           source: 'stripe_webhook',
         },
       },
