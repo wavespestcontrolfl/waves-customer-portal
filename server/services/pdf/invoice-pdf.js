@@ -628,14 +628,31 @@ function footerBar(doc, tagline) {
   });
 }
 
+function splitLongWord(doc, word, maxWidth) {
+  if (doc.widthOfString(word) <= maxWidth) return [word];
+  const parts = [];
+  let chunk = '';
+  for (const ch of word) {
+    if (chunk && doc.widthOfString(chunk + ch) > maxWidth) {
+      parts.push(chunk);
+      chunk = ch;
+    } else {
+      chunk += ch;
+    }
+  }
+  if (chunk) parts.push(chunk);
+  return parts;
+}
+
 function wrapTextLines(doc, text, maxWidth) {
   const lines = [];
   for (const para of String(text || '').split(/\r?\n/)) {
-    const words = para.split(/\s+/).filter(Boolean);
-    if (!words.length) {
+    const rawWords = para.split(/\s+/).filter(Boolean);
+    if (!rawWords.length) {
       lines.push('');
       continue;
     }
+    const words = rawWords.flatMap((w) => splitLongWord(doc, w, maxWidth));
     let current = words[0];
     for (let i = 1; i < words.length; i += 1) {
       const candidate = `${current} ${words[i]}`;
@@ -656,16 +673,19 @@ function drawPaginatedNotes(doc, customerNotes, x, y, width) {
   const lines = wrapTextLines(doc, customerNotes, width);
   if (!lines.length) return y;
   const lineH = Math.ceil(doc.currentLineHeight(true)) + 3;
+  const firstH = lines[0] ? Math.max(lineH, Math.ceil(doc.heightOfString(lines[0], { width })) + 3) : lineH;
   // Keep NOTES heading together with at least its first line.
-  y = ensureRoom(doc, y + 10, 12 + lineH);
+  y = ensureRoom(doc, y + 10, 12 + firstH);
   doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(MUTED)
     .text('NOTES', x, y, { characterSpacing: 1.2 });
   y += 12;
   for (const line of lines) {
-    y = ensureRoom(doc, y, lineH);
+    doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY);
+    const renderedH = line ? Math.max(lineH, Math.ceil(doc.heightOfString(line, { width })) + 3) : lineH;
+    y = ensureRoom(doc, y, renderedH);
     doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY);
     if (line) doc.text(line, x, y, { width });
-    y += lineH;
+    y += renderedH;
   }
   return y;
 }

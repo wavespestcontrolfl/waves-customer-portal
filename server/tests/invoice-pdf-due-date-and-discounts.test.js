@@ -453,4 +453,17 @@ describe('invoice PDF wrapped discount labels in totalsBlock (B-39)', () => {
     expect(lastLine.y).toBeLessThanOrEqual(730);
     expect(continuation).toBeDefined();
   });
+
+  test('splits and reserves full height for long unbroken URLs in customer notes without overlap', async () => {
+    const longUrl = `https://portal.wavespestcontrol.com/documents/${'a'.repeat(180)}/report`;
+    const calls = await captureCalls(() => buildInvoicePDFBuffer(invoice({
+      notes: `${longUrl}\nFollow-up note after URL`,
+    })));
+    const urlCalls = calls.filter((c) => c.text.includes('https://portal.wavespestcontrol.com/') || c.text.includes('aaaa') || c.text.includes('/report'));
+    const afterUrl = calls.find((c) => c.text === 'Follow-up note after URL');
+    expect(urlCalls.length).toBeGreaterThan(1);
+    expect(afterUrl).toBeDefined();
+    const lastUrlCall = urlCalls[urlCalls.length - 1];
+    expect(afterUrl.y).toBeGreaterThan(lastUrlCall.y);
+  });
 });
