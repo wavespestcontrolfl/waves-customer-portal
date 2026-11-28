@@ -3,20 +3,14 @@ import { mixTable } from "../../lib/protocol-mix-amounts";
 
 function productMatchForRow(row, products) {
   if (row?.productId) {
-    const byId = products.find((p) => String(p?.id) === String(row.productId));
-    if (byId) return byId;
+    return products.find((p) => String(p?.id) === String(row.productId)) || null;
   }
   const target = String(row?.product || "").trim().toLowerCase();
-  if (target.length < 4) return null;
-  const normalized = (p) => String(p?.name || "").trim().toLowerCase();
-  return (
-    products.find((p) => normalized(p) === target) ||
-    products.find((p) => {
-      const name = normalized(p);
-      return name.length >= 4 && (name.includes(target) || target.includes(name));
-    }) ||
-    null
+  if (!target) return null;
+  const exactMatches = products.filter(
+    (p) => String(p?.name || "").trim().toLowerCase() === target,
   );
+  return exactMatches.length === 1 ? exactMatches[0] : null;
 }
 
 function rowWarningInfo(row, products) {

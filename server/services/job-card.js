@@ -1484,20 +1484,40 @@ function mistingSafetyField(program, effectiveProgramKey) {
   return { safety: program.safety_rules.map((rule) => String(rule)) };
 }
 
-function matchMixRateProduct(name, catalog) {
+function matchMixRateProduct(row, catalog) {
+  const name = String(row?.product || '').trim();
   if (!name || !Array.isArray(catalog) || !catalog.length) return null;
-  return resolveCatalogProductForName(name, catalog)
-    || matchCatalogProduct({ raw: name, catalogProductHints: [name] }, catalog)
-    || null;
+  const epa = String(row?.epa || '').trim().toLowerCase();
+  const pool = epa
+    ? catalog.filter((p) => {
+      const rowEpa = String(p?.epa_reg_number || '').trim().toLowerCase();
+      return !rowEpa || rowEpa === epa;
+    })
+    : catalog;
+  return resolveCatalogProductForName(name, pool) || null;
 }
 
-function procedureMixRatesField(visit, catalog) {
+function mixRowLabelWarning(row, matched, lines) {
+  const hasAmount = Boolean(row?.perGallon || row?.dose);
+  if (!matched || !hasAmount) return null;
+  if (!matched.label_verified_at) return 'Label rate not yet verified';
+  if (!row?.perGallon?.amount || !row?.perGallon?.unit) return null;
+  const catalogLabel = perGallonRate(matched);
+  if (!catalogLabel) return 'Protocol rate only — verify against container label.';
+  const lo = Number(row.perGallon.amount);
+  const hi = Number(row.perGallon.amountMax > lo ? row.perGallon.amountMax : lo);
+  const unit = String(row.perGallon.unit).trim().toLowerCase().replace(/\s+/g, '_');
+  const labelUse = Boolean(lines?.some((l) => l.product?.id === matched.id && l.labelUseRate && l.declaredRate?.lo === lo && l.declaredRate?.hi === hi && l.declaredRate?.unit === unit));
+  const protoLine = { rate: { lo, hi, unit }, declared: true, ...(labelUse ? { labelUse: true } : {}) };
+  return protocolBand(catalogLabel, protoLine) ? null : 'Protocol dilution exceeds verified catalog label rate — confirm label before mixing.';
+}
+
+function procedureMixRatesField(visit, catalog, lines) {
   if (!Array.isArray(visit.mixRates) || !visit.mixRates.length) return {};
   return {
     mixRates: visit.mixRates.map((row) => {
-      const matched = matchMixRateProduct(String(row?.product || '').trim(), catalog);
-      const hasAmount = Boolean(row?.perGallon || row?.dose);
-      const labelWarning = matched && hasAmount && !matched.label_verified_at ? 'Label rate not yet verified' : null;
+      const matched = matchMixRateProduct(row, catalog);
+      const labelWarning = mixRowLabelWarning(row, matched, lines);
       return {
         ...row,
         ...(matched ? { productId: matched.id } : {}),
@@ -1530,7 +1550,7 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   return { visit, lines, procedure: {
     name: program.name,
     ...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),
-    ...(fieldGuide ? {} : procedureMixRatesField(visit, catalog)),
+    ...(fieldGuide ? {} : procedureMixRatesField(visit, catalog, lines)),
     // The misting program has no field guide, so its weather-shutdown, nozzle-placement and exposure-response rules ride the generic
     // procedure as a Safety section (the SOP and its text download). Keyed to the misting program on purpose: other programs that
     // declare safety_rules without a field guide get it only when SAFETY_ON_CARD_PROGRAMS lists them.

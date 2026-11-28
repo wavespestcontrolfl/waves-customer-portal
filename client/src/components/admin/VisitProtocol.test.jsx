@@ -124,7 +124,7 @@ it('keeps mix amounts visible and shows matching spray check warnings for primar
         ...mosquitoProc,
         mixRates: [
           ...mosquitoProc.mixRates,
-          { product: 'Taurus SC', where: 'Foundation', perGallon: { amount: 0.4, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
+          { product: 'Suspend Polyzone', productId: 'p-missing-id', where: 'Absent ID check', perGallon: { amount: 0.4, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
         ],
       },
       addons: [{

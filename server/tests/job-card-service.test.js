@@ -3518,7 +3518,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect([combinedFollow.visit.visit, combinedFollow.lines]).toEqual([4, []]);
   });
 
-  test('procedure.mixRates resolves catalog productId and attaches labelWarning when label_verified_at is missing', async () => {
+  test('procedure.mixRates resolves unique catalog productId (with EPA disambiguation) and checks label verification and catalog band', async () => {
     const proto = {
       mosquito: {
         name: 'Mosquito Control Protocol',
@@ -3530,15 +3530,30 @@ describe('rodent trap work: steps only, with the safety rules', () => {
           secondary: '',
           notes: '',
           mixRates: [
-            { product: 'Suspend Polyzone', where: 'Shaded foliage', perGallon: { amount: 1.1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'] },
-            { product: 'Tekko Pro IGR', where: 'Same tank', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'] },
+            { product: 'Suspend Polyzone', where: 'Shaded foliage', perGallon: { amount: 1.1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'], epa: '101563-143' },
+            { product: 'Tekko Pro IGR', where: 'Same tank', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['flowzone_4_gal'], epa: '53883-335' },
+            { product: 'Demand CS', where: 'Over ceiling', perGallon: { amount: 1.5, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
+            { product: 'Duplicate Item', where: 'Ambiguous', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
+            { product: 'Tekko Pro IGR', where: 'Roach label rate', perGallon: { amount: 2, unit: 'fl oz' }, sprayers: ['bg_1_gal'], epa: '53883-335' },
           ],
+          lineMeta: {
+            'Apply growth regulator at 2 fl oz/gal': {
+              scope: 'interior',
+              treatmentApplied: true,
+              catalogProductHints: ['Tekko Pro IGR'],
+              labelRatePerGallon: { amount: 2, unit: 'fl_oz', use: 'cockroaches', epa: '53883-335', carrierGalPer1000: 1 },
+            },
+          },
         }],
       },
     };
     const catalog = [
-      { id: 'cat-poly', name: 'Suspend PolyZone', label_verified_at: null },
-      { id: 'cat-tekko', name: 'Tekko Pro IGR', label_verified_at: '2026-08-01T00:00:00Z' },
+      { id: 'cat-poly', name: 'Suspend PolyZone', label_verified_at: null, epa_reg_number: '101563-143' },
+      { id: 'cat-tekko', name: 'Tekko Pro IGR', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '1', default_unit: 'fl_oz/gal', epa_reg_number: '53883-335' },
+      { id: 'cat-tekko-other', name: 'Tekko Pro IGR', label_verified_at: null, epa_reg_number: '99999-1' },
+      { id: 'cat-demand', name: 'Demand CS', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
+      { id: 'cat-dup-1', name: 'Duplicate Item', label_verified_at: '2026-08-01T00:00:00Z' },
+      { id: 'cat-dup-2', name: 'Duplicate Item', label_verified_at: '2026-08-01T00:00:00Z' },
     ];
     const out = await jobCard.resolveVisitProducts({
       facts: { isLawn: false, serviceType: 'Mosquito Treatment - IGR', scheduledDate: '2026-09-04' },
@@ -3549,7 +3564,12 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(out.procedure.mixRates).toEqual([
       expect.objectContaining({ product: 'Suspend Polyzone', productId: 'cat-poly', labelWarning: 'Label rate not yet verified' }),
       expect.objectContaining({ product: 'Tekko Pro IGR', productId: 'cat-tekko' }),
+      expect.objectContaining({ product: 'Demand CS', productId: 'cat-demand', labelWarning: 'Protocol dilution exceeds verified catalog label rate — confirm label before mixing.' }),
+      expect.objectContaining({ product: 'Duplicate Item' }),
+      expect.objectContaining({ product: 'Tekko Pro IGR', productId: 'cat-tekko' }),
     ]);
     expect(out.procedure.mixRates[1].labelWarning).toBeUndefined();
+    expect(out.procedure.mixRates[3].productId).toBeUndefined();
+    expect(out.procedure.mixRates[4].labelWarning).toBeUndefined();
   });
 });
