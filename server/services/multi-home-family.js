@@ -16,9 +16,35 @@ const TABLE = 'multi_home_family_members';
 const AUDIT_LINK = 'multi_home_family_link';
 const AUDIT_UNLINK = 'multi_home_family_unlink';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Decision 3 (owner 2026-11-27): only live customer stages qualify for Same
+// family links and Multi-Home eligibility; leads/lost/churned and internal
+// test accounts are excluded, and two profiles at the same address cannot link.
+const LIVE_FAMILY_STAGES = Object.freeze(['active_customer', 'won', 'at_risk']);
+const DEAD_VISIT_STATUSES = ['cancelled', 'canceled', 'completed', 'skipped', 'no_show'];
 
 function familyError(message, statusCode) {
   return Object.assign(new Error(message), { statusCode, status: statusCode, isOperational: true, code: 'multi_home_family' });
+}
+
+function isEligibleFamilyCustomer(row) {
+  if (!row || row.deleted_at || row.active !== true) return false;
+  if (!LIVE_FAMILY_STAGES.includes(String(row.pipeline_stage || ''))) return false;
+  const { isInternalTestContact } = require('./internal-test-customers');
+  return !isInternalTestContact({
+    customerId: row.id,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    email: row.email,
+    phone: row.phone,
+  });
+}
+
+function sameHomeAddress(a, b) {
+  const { addressMatchKey, homesDiffer } = require('./customer-address-fanout');
+  const keyA = addressMatchKey(a?.address_line1);
+  const keyB = addressMatchKey(b?.address_line1);
+  if (!keyA || !keyB) return false;
+  return !homesDiffer(a, b);
 }
 
 function isUuid(value) {
@@ -54,8 +80,9 @@ async function familyMembers(conn, rawCustomerId) {
     .where(`${TABLE}.family_id`, own.family_id)
     .whereNull('customers.deleted_at')
     .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.company_name',
+      'customers.email', 'customers.phone',
       'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
-      'customers.active')
+      'customers.active', 'customers.pipeline_stage', 'customers.deleted_at')
     .orderBy([{ column: 'customers.last_name' }, { column: 'customers.first_name' }, { column: 'customers.id' }]);
   return {
     familyId: own.family_id,
@@ -64,27 +91,42 @@ async function familyMembers(conn, rawCustomerId) {
       name: displayName(row),
       address: displayAddress(row),
       active: row.active === true,
+      pipelineStage: row.pipeline_stage || null,
+      qualifies: isEligibleFamilyCustomer(row),
       isSelf: row.id === customerId,
     })),
   };
 }
 
+function countDistinctHomes(rows) {
+  const unique = [];
+  for (const row of rows) {
+    if (!unique.some((existing) => sameHomeAddress(existing, row))) unique.push(row);
+  }
+  return unique.length;
+}
+
 /**
- * True only when the customer is in a family with 2+ member profiles that are
- * both active and not soft-deleted. Fails closed: any error (including a
- * missing table before the migration ran) answers false.
+ * True only when the customer is in a family with 2+ live qualifying customer
+ * profiles at distinct addresses (active, not soft-deleted, live customer stage,
+ * not an internal test account). Fails closed: any error answers false.
  */
 async function liveFamilySize(conn, customerId) {
-  const own = await conn(TABLE).where({ customer_id: customerId }).first('family_id');
+  const mine = normalizeId(customerId);
+  const own = await conn(TABLE).where({ customer_id: mine }).first('family_id');
   if (!own) return 0;
-  const row = await conn(TABLE)
+  const rows = await conn(TABLE)
     .join('customers', 'customers.id', `${TABLE}.customer_id`)
     .where(`${TABLE}.family_id`, own.family_id)
     .where('customers.active', true)
+    .whereIn('customers.pipeline_stage', LIVE_FAMILY_STAGES)
     .whereNull('customers.deleted_at')
-    .count('* as cnt')
-    .first();
-  return Number(row?.cnt || 0);
+    .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.email', 'customers.phone',
+      'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
+      'customers.active', 'customers.pipeline_stage', 'customers.deleted_at');
+  const qualifying = (rows || []).filter(isEligibleFamilyCustomer);
+  if (!qualifying.some((r) => normalizeId(r.id) === mine)) return 0;
+  return countDistinctHomes(qualifying);
 }
 
 async function familyMultiHomeEligible(conn, customerId) {
@@ -106,9 +148,26 @@ async function familyMultiHomeEligible(conn, customerId) {
 }
 
 async function loadLinkable(trx, customerId, label) {
-  const row = await trx('customers').where({ id: customerId }).first('id', 'active', 'deleted_at');
+  const row = await trx('customers').where({ id: customerId }).first(
+    'id', 'first_name', 'last_name', 'email', 'phone',
+    'address_line1', 'address_line2', 'city', 'state', 'zip',
+    'active', 'deleted_at', 'pipeline_stage',
+  );
   if (!row || row.deleted_at) throw familyError(`The ${label} profile was not found.`, 409);
   if (row.active !== true) throw familyError(`The ${label} profile is not active. Only active profiles can be linked.`, 409);
+  if (!LIVE_FAMILY_STAGES.includes(String(row.pipeline_stage || ''))) {
+    throw familyError(`The ${label} profile is not an active customer. Only active customers can be linked as Same family.`, 409);
+  }
+  const { isInternalTestContact } = require('./internal-test-customers');
+  if (isInternalTestContact({
+    customerId: row.id,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    email: row.email,
+    phone: row.phone,
+  })) {
+    throw familyError(`The ${label} profile is an internal test account and cannot be linked.`, 409);
+  }
   return row;
 }
 
@@ -161,16 +220,39 @@ function planLink(mineRow, otherRow, customerId, otherCustomerId) {
   return { familyId: randomUUID(), add: [customerId, otherCustomerId] };
 }
 
+async function loadFamilyAddresses(trx, familyIds) {
+  const ids = [...new Set((familyIds || []).filter(Boolean))];
+  if (!ids.length) return [];
+  return trx(TABLE)
+    .join('customers', 'customers.id', `${TABLE}.customer_id`)
+    .whereIn(`${TABLE}.family_id`, ids)
+    .whereNull('customers.deleted_at')
+    .select('customers.id', 'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip');
+}
+
 async function linkInTransaction(trx, { customerId, otherCustomerId, actorId }) {
   await lockFamilyChanges(trx);
   await lockCustomers(trx, [customerId, otherCustomerId]);
-  await loadLinkable(trx, customerId, 'first');
-  await loadLinkable(trx, otherCustomerId, 'other');
+  const mineProfile = await loadLinkable(trx, customerId, 'first');
+  const otherProfile = await loadLinkable(trx, otherCustomerId, 'other');
+  if (sameHomeAddress(mineProfile, otherProfile)) {
+    throw familyError('Both profiles share the same service address. Link distinct homes as Same family, or merge duplicate profiles instead.', 409);
+  }
   const rows = await trx(TABLE).whereIn('customer_id', [customerId, otherCustomerId]).forUpdate().select('customer_id', 'family_id');
   const mineRow = rows.find((row) => row.customer_id === customerId);
   const otherRow = rows.find((row) => row.customer_id === otherCustomerId);
   const plan = planLink(mineRow, otherRow, customerId, otherCustomerId);
-  if (plan.add && plan.add.length) await insertMembers(trx, plan.familyId, plan.add, actorId);
+  if (plan.add && plan.add.length) {
+    const familyIds = [mineRow?.family_id, otherRow?.family_id].filter(Boolean);
+    if (familyIds.length) {
+      const members = await loadFamilyAddresses(trx, familyIds);
+      const joiner = plan.add.includes(otherCustomerId) ? otherProfile : mineProfile;
+      if ((members || []).some((m) => normalizeId(m.id) !== normalizeId(joiner.id) && sameHomeAddress(joiner, m))) {
+        throw familyError('A profile at this service address is already in that family. Link distinct homes as Same family, or merge duplicate profiles instead.', 409);
+      }
+    }
+    await insertMembers(trx, plan.familyId, plan.add, actorId);
+  }
 }
 
 /**
@@ -191,29 +273,127 @@ async function linkFamily(conn, { customerId, otherCustomerId, actorId = null } 
   return familyMembers(conn, mine);
 }
 
-async function unlinkInTransaction(trx, { customerId, actorId }) {
-  await lockFamilyChanges(trx);
-  await lockCustomers(trx, [customerId]);
-  const own = await trx(TABLE).where({ customer_id: customerId }).forUpdate().first('id', 'family_id');
-  if (!own) return false;
+// Runs inside a transaction that ALREADY holds lockFamilyChanges(trx) and the
+// customer row lock. Removes customerId from its family and dissolves a
+// one-member orphan, returning surviving formerMemberIds for post-commit review
+// alerts (Decision 2).
+async function unlinkMemberInExistingTx(trx, customerId, actorId = null, { reason = null } = {}) {
+  const mine = normalizeId(customerId);
+  const own = await trx(TABLE).where({ customer_id: mine }).forUpdate().first('id', 'family_id');
+  if (!own) return { removed: false, familyId: null, formerMemberIds: [] };
   const familyId = own.family_id;
-  const removed = [own.id];
   await trx(TABLE).where({ id: own.id }).del();
   await recordAuditEvent({
     actor_type: 'admin', actor_id: actorId || null, action: AUDIT_UNLINK, resource_type: 'customer',
-    resource_id: customerId, metadata: { familyId }, trx, critical: true,
+    resource_id: mine, metadata: { familyId, ...(reason ? { reason } : {}) }, trx, critical: true,
   });
   // A one-profile family means nothing: drop the last member too.
   const left = await trx(TABLE).where({ family_id: familyId }).forUpdate().select('id', 'customer_id');
+  const formerMemberIds = (left || []).map((r) => normalizeId(r.customer_id));
   if (left.length === 1) {
     await trx(TABLE).where({ id: left[0].id }).del();
-    removed.push(left[0].id);
     await recordAuditEvent({
       actor_type: 'admin', actor_id: actorId || null, action: AUDIT_UNLINK, resource_type: 'customer',
       resource_id: left[0].customer_id, metadata: { familyId, reason: 'last_member' }, trx, critical: true,
     });
   }
-  return removed.length > 0;
+  return { removed: true, familyId, formerMemberIds };
+}
+
+async function unlinkInTransaction(trx, { customerId, actorId }) {
+  await lockFamilyChanges(trx);
+  await lockCustomers(trx, [customerId]);
+  return unlinkMemberInExistingTx(trx, customerId, actorId);
+}
+
+const DROP_REASON_LABELS = {
+  unlinked: 'family unlinked',
+  archived: 'linked profile archived',
+  cancelled: 'linked profile cancelled',
+};
+
+async function countUpcomingMultiHomeDiscountedVisits(conn, customerId) {
+  const { etDateString } = require('../utils/datetime-et');
+  const today = etDateString();
+  const preset = await conn('discounts').where({ discount_key: 'multi_home' }).first('id');
+  if (!preset?.id) return 0;
+  const row = await conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .where('scheduled_date', '>=', today)
+    .whereNotIn('status', DEAD_VISIT_STATUSES)
+    .where((q) => {
+      q.where('discount_id', preset.id)
+        .orWhere('line_discount_id', preset.id)
+        .orWhereExists(function addonMultiHome() {
+          this.select(1)
+            .from('scheduled_service_addons as ssa')
+            .whereRaw('ssa.scheduled_service_id = scheduled_services.id')
+            .andWhere('ssa.discount_id', preset.id);
+        });
+    })
+    .count('* as cnt')
+    .first();
+  return Number(row?.cnt || 0);
+}
+
+// Decision 2 (owner 2026-11-27): when a Same-Family group drops below 2 live
+// homes (unlink, archive, or cancellation) while a surviving member still
+// carries an active Multi-Home discount on upcoming visits, raise an office
+// review alert. Never auto-changes prices and never texts/emails customers.
+async function alertFamilyDropBelowTwo(conn, { formerMemberIds = [], departedCustomerId = null, reason = 'unlinked' } = {}) {
+  const ids = [...new Set((formerMemberIds || []).map((id) => normalizeId(id)).filter((id) => id && id !== normalizeId(departedCustomerId || '')))];
+  if (!ids.length) return 0;
+  let alerted = 0;
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  const reasonLabel = DROP_REASON_LABELS[reason] || 'family changed';
+  for (const memberId of ids) {
+    try {
+      const member = await conn('customers')
+        .where({ id: memberId })
+        .whereNull('deleted_at')
+        .first('id', 'first_name', 'last_name', 'company_name', 'active', 'has_multi_home', 'pipeline_stage');
+      if (!member || member.active !== true || member.has_multi_home === true) continue;
+      if (await familyMultiHomeEligible(conn, memberId)) continue;
+      const upcomingCount = await countUpcomingMultiHomeDiscountedVisits(conn, memberId);
+      if (upcomingCount <= 0) continue;
+      const name = displayName(member).slice(0, 28);
+      const visitWord = upcomingCount === 1 ? 'visit' : 'visits';
+      await raiseAdminAlert('billing', {
+        area: 'Billing',
+        severity: 'needs-you',
+        who: 'person',
+        subject: { type: 'customer', id: memberId },
+        doneWhen: 'multi_home_discount_reviewed',
+        action: 'Review Multi-Home Discount after family change',
+        why: `${name} now has under 2 active family homes (${reasonLabel}) with ${upcomingCount} discounted upcoming ${visitWord}.`,
+        link: `/admin/customers/${memberId}`,
+      }, {
+        dedupeKey: `family-drop-below-two:${memberId}:${departedCustomerId || reason}`,
+        dedupeOpenOnly: true,
+      });
+      alerted += 1;
+    } catch (err) {
+      logger.warn(`[multi-home-family] drop-below-two review alert skipped for ${memberId}: ${err.message}`);
+    }
+  }
+  return alerted;
+}
+
+async function alertFamilyDropForDepartedMember(conn, { customerId, reason = 'cancelled', scoped = false, churned = true } = {}) {
+  if (scoped || !churned || !customerId) return 0;
+  try {
+    const family = await familyMembers(conn, customerId);
+    const survivors = (family?.members || []).filter((m) => !m.isSelf).map((m) => m.id);
+    if (!survivors.length) return 0;
+    return await alertFamilyDropBelowTwo(conn, {
+      formerMemberIds: survivors,
+      departedCustomerId: customerId,
+      reason,
+    });
+  } catch (err) {
+    logger.warn(`[multi-home-family] departed-member drop check skipped for ${customerId}: ${err.message}`);
+    return 0;
+  }
 }
 
 /**
@@ -223,17 +403,26 @@ async function unlinkInTransaction(trx, { customerId, actorId }) {
 async function unlinkFamily(conn, { customerId, actorId = null } = {}) {
   if (!isUuid(customerId)) throw familyError('The profile id must be valid.', 400);
   const mine = normalizeId(customerId);
-  await conn.transaction((trx) => unlinkInTransaction(trx, { customerId: mine, actorId }));
+  const res = await conn.transaction((trx) => unlinkInTransaction(trx, { customerId: mine, actorId }));
+  if (!conn.isTransaction && res?.removed && res.formerMemberIds?.length) {
+    await alertFamilyDropBelowTwo(conn, { formerMemberIds: res.formerMemberIds, departedCustomerId: mine, reason: 'unlinked' });
+  }
   return familyMembers(conn, mine);
 }
 
 module.exports = {
+  LIVE_FAMILY_STAGES,
+  isEligibleFamilyCustomer,
+  sameHomeAddress,
   familyMembers,
   familyMultiHomeEligible,
   linkFamily,
   unlinkFamily,
+  unlinkMemberInExistingTx,
+  alertFamilyDropBelowTwo,
+  alertFamilyDropForDepartedMember,
   isUuid,
   lockFamilyChanges,
   lockFamilyChangesShared,
-  _test: { AUDIT_LINK, AUDIT_UNLINK, FAMILY_CHANGES_LOCK_KEY },
+  _test: { AUDIT_LINK, AUDIT_UNLINK, FAMILY_CHANGES_LOCK_KEY, LIVE_FAMILY_STAGES, countUpcomingMultiHomeDiscountedVisits },
 };

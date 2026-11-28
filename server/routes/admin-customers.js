@@ -5907,9 +5907,13 @@ async function customerArchiveHandler(req, res, next) {
     // the rest, the ordering every termite writer follows) — no separate
     // lock session that could be lost while deleted_at commits.
     const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+    const Family = require('../services/multi-home-family');
     let relink;
     try {
       relink = await withCustomerDeletionGate(req.params.id, async (trx) => {
+        // Take the family-changes advisory lock BEFORE customers FOR UPDATE so
+        // archive and link/unlink follow the same global lock order.
+        await Family.lockFamilyChanges(trx);
         if (req.archiveAlsoLock) {
           // A caller that also depends on a second customer row (the bar's
           // duplicate delete reads its retained twin) locks both rows in ONE
@@ -5939,14 +5943,16 @@ async function customerArchiveHandler(req, res, next) {
           throw err;
         }
         // Billing was just wound down by churnGuardForRow on this same
-        // transaction — only deleted_at is left to stamp here.
+        // transaction — stamp deleted_at and unlink any Same-Family membership
+        // (cleaning up a 1-member orphan so surviving homes are not stranded).
         await trx('customers').where({ id: req.params.id }).update({ deleted_at: new Date() });
+        const familyUnlink = await Family.unlinkMemberInExistingTx(trx, req.params.id, req.technicianId, { reason: 'customer_archived' });
         const result = await relinkSubscribersFromArchivedCustomer(trx, req.params.id);
         await auditCustomerMutation(req, 'customer.archive', req.params.id, {
           previousDeletedAt: customer.deleted_at || null,
           newsletterRelinked: result.relinked,
         }, true, trx);
-        return result;
+        return { ...result, familyUnlink };
       });
     } catch (e) {
       if (e && e.churnBlocked) return res.status(409).json(e.payload);
@@ -5957,6 +5963,13 @@ async function customerArchiveHandler(req, res, next) {
         });
       }
       throw e;
+    }
+    if (relink.familyUnlink?.removed && relink.familyUnlink.formerMemberIds?.length) {
+      await Family.alertFamilyDropBelowTwo(db, {
+        formerMemberIds: relink.familyUnlink.formerMemberIds,
+        departedCustomerId: req.params.id,
+        reason: 'archived',
+      });
     }
     logger.info(`[customers] Soft-deleted customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
     res.json({ success: true });
