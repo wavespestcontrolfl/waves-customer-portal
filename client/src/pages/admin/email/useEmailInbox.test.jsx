@@ -193,6 +193,42 @@ describe("useEmailInbox opening a linked email", () => {
     const posts = adminFetch.mock.calls.filter(([path, options]) => path === "/api/admin/email/message/m1/read" && options?.method === "POST");
     expect(result.current.selectedEmail?.id).toBe("m1");
     expect(posts).toHaveLength(readPosts);
+    if (readPosts > 0) expect(JSON.parse(posts[0][1].body)).toEqual({ is_read: true });
     expect(result.current.actionFeedback).toEqual(isRead ? null : { error: true, message: "The email could not be marked as read.", source: "read" });
+  });
+
+  it("C2-05: syncs GET /message/:id read state into the inbox list so clicking the row never flips it back", async () => {
+    adminFetch.mockImplementation((path) => {
+      if (path.startsWith("/api/admin/email/oauth/status")) return json({ connected: true });
+      if (path.startsWith("/api/admin/email/inbox")) return json({ emails: [{ id: "m1", gmail_thread_id: "t1", is_read: false }], total: 1 });
+      if (path === "/api/admin/email/message/m1") return json({ id: "m1", gmail_thread_id: "t1", is_read: true });
+      return json({ thread: [] });
+    });
+    const wrapper = ({ children }) => <MemoryRouter initialEntries={["/admin/communications?id=m1"]}>{children}</MemoryRouter>;
+    const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
+    await flush();
+    expect(result.current.visibleEmails.find((e) => e.id === "m1")?.is_read).toBe(true);
+  });
+
+  it("C2-28: syncs updated email fields, stats, and digest after reclassify", async () => {
+    adminFetch.mockImplementation((path) => {
+      if (path.startsWith("/api/admin/email/oauth/status")) return json({ connected: true });
+      if (path.startsWith("/api/admin/email/inbox")) return json({ emails: [{ id: "m1", classification: "spam", auto_action: "spam_quarantined", is_starred: false, is_read: true }], total: 1 });
+      if (path === "/api/admin/email/message/m1/reclassify") {
+        return json({
+          classification: { category: "complaint", confidence: 1 },
+          email: { id: "m1", classification: "complaint", auto_action: "complaint_flagged", is_starred: true, is_read: true },
+        });
+      }
+      return json({});
+    });
+    const wrapper = ({ children }) => <MemoryRouter initialEntries={["/admin/communications"]}>{children}</MemoryRouter>;
+    const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
+    await flush();
+    const statsBefore = adminFetch.mock.calls.filter(([p]) => p === "/api/admin/email/stats").length;
+    await act(async () => { await result.current.handleReclassify("m1", "complaint"); });
+    const updated = result.current.visibleEmails.find((e) => e.id === "m1");
+    expect(updated).toMatchObject({ classification: "complaint", auto_action: "complaint_flagged", is_starred: true });
+    expect(adminFetch.mock.calls.filter(([p]) => p === "/api/admin/email/stats").length).toBeGreaterThan(statsBefore);
   });
 });

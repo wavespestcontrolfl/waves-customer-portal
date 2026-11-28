@@ -97,6 +97,12 @@ function emailDetails(email) {
   catch { return null; }
 }
 
+function scalarText(value) {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "";
+}
+
 function EmailMessageRow({ email, mailbox, editor, onOpen, conversationOpen }) {
   const { selectedEmail, handleStar, pendingAction } = mailbox;
   const isSelected = selectedEmail?.id === email.id;
@@ -169,14 +175,26 @@ function EmailConversation({ active, mailbox, editor, onBack }) {
           </Select>
         </div>}
       </div>
-      {extractedData && <div className="flex flex-wrap gap-x-4 gap-y-2 rounded-md border-hairline border-zinc-200 bg-white p-4 text-ui-body">
-        <span className="text-ink-secondary">AI classification:</span><span className="font-medium">{categoryLabel || category}</span>
-        {[
-          { key: "urgency", value: extractedData.urgency, prefix: "Urgency: ", alert: extractedData.urgency === "high" },
-          { key: "person", value: extractedData.person_name }, { key: "phone", value: extractedData.phone },
-          { key: "service", value: extractedData.service_interest }, { key: "invoice", value: extractedData.invoice_amount, prefix: "$" },
-        ].filter((detail) => detail.value).map((detail) => <span key={detail.key} className={cn("break-words", detail.alert && "text-alert-fg")}>{detail.prefix}{detail.value}</span>)}
-      </div>}
+      {extractedData && (() => {
+        const extracted = extractedData.extracted && typeof extractedData.extracted === "object" && !Array.isArray(extractedData.extracted) ? extractedData.extracted : {};
+        const urgencyValue = extractedData.is_urgent === true
+          ? (scalarText(extracted.urgency_reason) || "High")
+          : scalarText(extractedData.urgency);
+        const isUrgent = extractedData.is_urgent === true || urgencyValue.toLowerCase() === "high";
+        const personName = scalarText(extracted.person_name) || scalarText(extractedData.person_name);
+        const phone = scalarText(extracted.phone) || scalarText(extractedData.phone);
+        const serviceInterest = scalarText(extracted.service_interest) || scalarText(extractedData.service_interest);
+        const invoiceAmount = scalarText(extracted.invoice_amount) || scalarText(extractedData.invoice_amount);
+        const invoicePrefix = invoiceAmount && invoiceAmount.startsWith("$") ? "" : "$";
+        return <div className="flex flex-wrap gap-x-4 gap-y-2 rounded-md border-hairline border-zinc-200 bg-white p-4 text-ui-body">
+          <span className="text-ink-secondary">AI classification:</span><span className="font-medium">{categoryLabel || category}</span>
+          {[
+            { key: "urgency", value: urgencyValue, prefix: "Urgency: ", alert: isUrgent },
+            { key: "person", value: personName }, { key: "phone", value: phone },
+            { key: "service", value: serviceInterest }, { key: "invoice", value: invoiceAmount, prefix: invoicePrefix },
+          ].filter((detail) => detail.value).map((detail) => <span key={detail.key} className={cn("break-words", detail.alert && "text-alert-fg")}>{detail.prefix}{detail.value}</span>)}
+        </div>;
+      })()}
       {threadState.loading && <p className="m-0 min-h-32 text-ink-secondary" role="status">Loading conversation…</p>}
       {threadState.error && <ActionFeedback error onRetry={() => loadThread(email)}>The email conversation is unavailable.</ActionFeedback>}
       <div ref={historyRef} role="region" aria-label="Email history" tabIndex={0}
