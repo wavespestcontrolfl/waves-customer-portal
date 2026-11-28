@@ -2153,11 +2153,12 @@ function weatherIssue(sprayCheck, isToday, names = new Map()) {
   return null;
 }
 
-function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now }) {
+function dispatchReadiness({ facts, lines, products = [], blocks, sprayCheck, tank, isToday, now }) {
   const issues = [];
-  if (!lines.length) issues.push({ kind: 'protocol', status: 'unknown', label: 'No products resolved' });
+  const weatherProducts = products.length ? products : lines.map((l) => l.product);
+  if (!weatherProducts.length) issues.push({ kind: 'protocol', status: 'unknown', label: 'No products resolved' });
   else {
-    const weather = weatherIssue(sprayCheck, isToday, new Map(lines.map((l) => [l.product.id, l.product.name])));
+    const weather = weatherIssue(sprayCheck, isToday, new Map(weatherProducts.map((p) => [p.id, p.name])));
     if (weather) issues.push(weather);
   }
 
@@ -2265,7 +2266,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const rainRules = rainRulesFor(products, (p) => sprayServicesForProduct(p, lines, procedureEntries, facts));
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
   attachMixSprayVerdicts(procedureEntries, sprayCheck.verdicts);
-  if (isToday && lines.length) {
+  if (isToday && products.length) {
     const shadow = sprayCheck;
     const names = new Map(products.map((p) => [p.id, p.name]));
     Promise.resolve()
@@ -2277,7 +2278,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
       .catch((err) => logger.warn(`[job-card] rain rule shadow not recorded: ${err.message}`));
   }
   if (readinessOnly) {
-    const readiness = dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
+    const readiness = dispatchReadiness({ facts, lines, products, blocks, sprayCheck, tank, isToday, now });
     // Truck kit (docs/tool-inventory-tracker-scope.md PR 2): a required tool
     // the assigned truck lacks is a hold like stock or weather (add-ons and
     // the never-fatal read live in truck-kit.js).
@@ -3048,10 +3049,18 @@ function directDoseNotes(directRows) {
   }).filter(Boolean);
 }
 
+function unrepresentedSprayVolume(row) {
+  const text = String(row?.sprayVolume || '').trim();
+  if (!text) return null;
+  return parseSprayVolumeSpecs(text).exact ? null : text;
+}
+
 function mixedMethodUseNotes(tankRow, directRows) {
   if (!tankRow || !directRows.length) return [];
+  const sprayVol = unrepresentedSprayVolume(tankRow);
   const notes = [
     tankRow.where ? `Tank amount is for: ${tankRow.where}` : null,
+    sprayVol ? `Spray volume: ${sprayVol}` : null,
     tankRow.limit ? `Tank limit: ${tankRow.limit}` : null,
   ].filter(Boolean);
   return [...notes, ...directDoseNotes(directRows)];
@@ -3060,10 +3069,31 @@ function mixedMethodUseNotes(tankRow, directRows) {
 function mixRowRestrictionNotes(row, hit) {
   if (!row) return [];
   const covered = hit?.selected === false ? String(hit.raw || '').toLowerCase() : '';
-  const parts = [row.where, row.limit]
+  const parts = [row.where, unrepresentedSprayVolume(row), row.limit]
     .map((part) => String(part || '').trim())
     .filter((part) => part && (!covered || !covered.includes(part.toLowerCase())));
   return parts.length ? [`Protocol use: ${parts.join(' — ')}`] : [];
+}
+
+function mergedServiceUseNotes(hits) {
+  const seen = new Set();
+  const notes = [];
+  for (const h of hits) {
+    for (const note of h.doseUseNotes || []) {
+      const text = `${h.c.name}: ${note}`;
+      if (!seen.has(text)) {
+        seen.add(text);
+        notes.push(text);
+      }
+    }
+  }
+  return notes;
+}
+
+function sharedServiceLineExtras(decisive, hasConflict) {
+  if (hasConflict || decisive.length < 2) return {};
+  const notes = mergedServiceUseNotes(decisive);
+  return notes.length ? { doseUseNotes: notes } : {};
 }
 
 function candidateDoseUseNotes(row, hit, directRows, directDoseOnly) {
@@ -3214,7 +3244,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
   const held = [...selectedHits, lead].find((h) => h.hit.labelHold)?.hit.labelHold;
   const governed = Boolean(lead.hit.governed);
-  return found({ addon: lead.c.addon, selected: lead.hit.selected !== false, ...lineOf(lead), governed, ...(governed ? { governedRate: governedRows[0] } : {}), governedRows, ...(held ? { labelHold: held } : {}), ...ratesDisagree }, owners);
+  return found({ addon: lead.c.addon, selected: lead.hit.selected !== false, ...lineOf(lead), ...sharedServiceLineExtras(decisive, Boolean(ratesDisagree.conflictLines)), governed, ...(governed ? { governedRate: governedRows[0] } : {}), governedRows, ...(held ? { labelHold: held } : {}), ...ratesDisagree }, owners);
 }
 
 // The booked add-on's own rate (protocols.json area_addon labelFacts: per 1,000 sq ft, in its unit) for a governed line, with the

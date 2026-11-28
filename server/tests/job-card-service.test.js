@@ -4046,6 +4046,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     });
     const taurusCalc = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc6', dbh: pestDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(taurusCalc).toMatchObject({ rateSource: 'protocol', amount: 1.6, amountMax: null, unit: 'fl_oz' });
+    expect(taurusCalc.warnings.join(' ')).toContain('2 qt per 160 linear ft');
 
     // Multi-use products keep spray-volume limits scoped to each use: DiPel's shrub-and-bed 50 gal/acre minimum does not warn on its foliar tree dilution,
     // and TriStar's three labeled uses render separately so only Whitefly/soft scale enforces the 3.5 gal/1,000 max.
@@ -4257,6 +4258,43 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       expect.objectContaining({ service: 'Quarterly Pest Control', amount: 0.4, fromCard: true }),
     ]);
     expect(directFirstCalc.warnings.join(' ')).toContain('Tree & Shrub Care: Soil drench: 0.1 to 0.2 fl oz per inch');
+
+    // Home + vehicle cockroach visits share Tekko Pro's rate and carrier; both services keep their own placement/limit warnings beside the shared amount.
+    const tekko = { id: 'tekko', name: 'Tekko Pro IGR', epa_reg_number: '53883-335', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const sharedRoachDb = dbFor({
+      scheduled_services: [{ id: 'svc20', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'German Cockroach Cleanout', service_category: 'cockroach', service_key: 'cockroach_initial', first_name: 'A', last_name: 'B' }],
+      products_catalog: [tekko],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Vehicle Cockroach Cleanout', category: 'cockroach', service_key: 'cockroach_vehicle_initial' }],
+    });
+    const sharedRoachCalc = await jobCard.mixForProduct('tekko', 1, { serviceId: 'svc20', dbh: sharedRoachDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(sharedRoachCalc.amount).toBe(2);
+    expect(sharedRoachCalc.warnings.join(' ')).toContain('German Cockroach Cleanout: Protocol use: Inside: cracks, crevices and spots');
+    expect(sharedRoachCalc.warnings.join(' ')).toContain('Vehicle Cockroach Cleanout: Protocol use: Vehicle: cracks and spots, light application — Do not wet carpet; keep off electrical parts');
+
+    // Dispatch readiness uses products resolved via mixRates for weather checks instead of reporting "No products resolved".
+    const windyTaurus = { ...taurus, max_wind_mph: 10 };
+    const readinessDb = dbFor({
+      scheduled_services: [{ id: 'svc21', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [windyTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const readiness = await jobCard.buildJobCard('svc21', {
+      dbh: readinessDb,
+      readinessOnly: true,
+      deps: { getHourly: async () => [{ time: '2028-03-10T15:00:00Z', tempF: 75, windMph: 18, rainProb: 0 }] },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(readiness.issues.some((i) => i.kind === 'protocol')).toBe(false);
+    expect(readiness.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'weather', status: 'caution', label: expect.stringContaining('Taurus SC') }),
+    ]));
 
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
