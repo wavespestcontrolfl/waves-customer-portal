@@ -1097,6 +1097,25 @@ describe('expiry bells close when the item no longer needs renewing', () => {
     expect(res.status).toBe(200);
     expect(res.body.item.expires_on).toBe('2999-09-30');
   });
+
+  test('a failing activity log after commit never fails create, patch, attest, or archive', async () => {
+    store.logActivity.mockRejectedValueOnce(new Error('audit down'));
+    const created = await call('POST', '/api/admin/bid-kit', { kind: 'fact', item_key: 'phone', value: '941-555-0100' });
+    expect(created.status).toBe(201);
+    const id = created.body.item.id;
+
+    store.logActivity.mockRejectedValueOnce(new Error('audit down'));
+    const patched = await call('PATCH', `/api/admin/bid-kit/${id}`, { value: '941-555-0199', expected_updated_at: created.body.item.updated_at });
+    expect(patched.status).toBe(200);
+
+    store.logActivity.mockRejectedValueOnce(new Error('audit down'));
+    const attested = await call('POST', `/api/admin/bid-kit/${id}/attest`, { expected_updated_at: patched.body.item.updated_at });
+    expect(attested.status).toBe(200);
+
+    store.logActivity.mockRejectedValueOnce(new Error('audit down'));
+    const archived = await archive(id, attested.body.item.updated_at);
+    expect(archived.status).toBe(200);
+  });
 });
 
 describe('facts sheet', () => {

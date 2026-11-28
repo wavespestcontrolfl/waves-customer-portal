@@ -33,3 +33,71 @@
   --kbd-border: #e7e5e4;
   --kbd-fg: #78716c;
 }
+
+@media not print {
+  html.admin-app[data-admin-theme="dark"],
+  html.admin-app[data-admin-theme="dark"] .admin-shell-v2,
+  html.admin-app[data-admin-theme="dark"] .tech-field,
+  html.admin-app[data-admin-theme="dark"] .tech-visit-surface {
+    color-scheme: dark;
+
+    /* Surfaces — calm obsidian neutrals */
+    --surface-page: #111315;
+    --surface-primary: #181b1f;
+    --surface-hover: #22262c;
+    --surface-active: #2b3038;
+
+    /* Borders */
+    --border-subtle: #22262c;
+    --border-default: #2c313a;
+    --border-strong: #3d4450;
+
+    /* Text — high-contrast daylight-calibrated neutrals on dark ground */
+    --text-primary: #f4f5f6;
+    --text-secondary: #b4bac4;
+    --text-tertiary: #9aa2af;
+    --text-quaternary: #949ca8;
+
+    /* Keyboard hint chip */
+    --kbd-bg: #22262c;
+    --kbd-border: #323842;
+    --kbd-fg: #b4bac4;
+
+    /* Field workspace (/admin/today) & body-portaled .tech-field-portal tokens */
+    --tf-ink: #f4f5f6;
+    --tf-muted: #b4bac4;
+    --tf-faint: #9aa2af;
+    --tf-line: #2c313a;
+    --tf-line-strong: #3d4450;
+    --tf-surface: #181b1f;
+    --tf-subtle: #22262c;
+    --tf-on-ink: #111315;
+    --tfx-bg: #111315;
+    --tfx-card: #181b1f;
+    --tfx-border: #3d4450;
+    --tfx-accent: #f4f5f6;
+    --tfx-on-accent: #111315;
+    --tfx-text: #f4f5f6;
+    --tfx-muted: #b4bac4;
+    --tfx-ok: #6ee7b7;
+    --tfx-amber: #fcd34d;
+    --tfx-red: #f87171;
+    --tfx-red-bg: rgba(200, 49, 47, 0.2);
+    --tfx-accent-tint: rgba(244, 245, 246, 0.12);
+    --tfx-ok-tint: rgba(4, 120, 87, 0.22);
+    --tfx-amber-tint: rgba(217, 119, 6, 0.2);
+    --tfx-red-tint: rgba(200, 49, 47, 0.2);
+    --tech-warn-bg: rgba(217, 119, 6, 0.2);
+    --tech-warn-line: rgba(252, 211, 77, 0.45);
+    --tech-warn-text: #fcd34d;
+    --tech-error-text: #f87171;
+    --status-green: #6ee7b7;
+    --status-green-bg: rgba(4, 120, 87, 0.22);
+    --status-amber: #fcd34d;
+    --status-amber-bg: rgba(217, 119, 6, 0.2);
+    --status-red: #f87171;
+    --status-red-bg: rgba(200, 49, 47, 0.2);
+    --status-blue: #60a5fa;
+    --status-blue-bg: rgba(10, 126, 194, 0.2);
+  }
+}

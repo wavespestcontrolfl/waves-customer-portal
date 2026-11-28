@@ -218,6 +218,10 @@ function ongoingScenario({
       if (op === 'await') return blackoutRows.map((date) => ({ date }));
       return [];
     }
+    if (table === 'customers') {
+      if (op === 'first') return { id: parent.customer_id || 5, active: true, deleted_at: null, service_paused_at: null, service_pause_reason: null, pipeline_stage: 'customer' };
+      return [];
+    }
     return null;
   };
   return { conn: makeConn(handler), inserted, alertInserts, reminderWrites, addonInserts, parent };
@@ -535,6 +539,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
         if (op === 'insert') { inserted.push(data); return [1]; }
       }
       if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+      if (table === 'customers') { if (op === 'first') return { id: 5, active: true, deleted_at: null, service_paused_at: null, service_pause_reason: null, pipeline_stage: 'customer' }; return []; }
     // Series-child eligibility read (technician-eligibility.js): the parent's tech is assignable.
     if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
       if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
@@ -597,6 +602,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
         if (op === 'insert') { inserted.push(data); return [1]; }
       }
       if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+      if (table === 'customers') { if (op === 'first') return { id: 5, active: true, deleted_at: null, service_paused_at: null, service_pause_reason: null, pipeline_stage: 'customer' }; return []; }
       if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
       if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
       return null;
@@ -662,6 +668,7 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
         if (op === 'insert') { inserted.push(data); return [1]; }
       }
       if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+      if (table === 'customers') { if (op === 'first') return { id: 5, active: true, deleted_at: null, service_paused_at: null, service_pause_reason: null, pipeline_stage: 'customer' }; return []; }
       if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
       if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
       return null;
@@ -770,6 +777,7 @@ function concurrentScenario() {
       if (op === 'insert') { inserted.push(data); return [1]; }
     }
     if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+    if (table === 'customers') { if (op === 'first') return { id: 5, active: true, deleted_at: null, service_paused_at: null, service_pause_reason: null, pipeline_stage: 'customer' }; return []; }
     // Series-child eligibility read (technician-eligibility.js): the parent's tech is assignable.
     if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
     if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }

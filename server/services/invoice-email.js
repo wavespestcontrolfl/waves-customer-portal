@@ -237,6 +237,25 @@ async function textPayerAfterAcceptedEmail(invoiceId, options, emailResult) {
   }
 }
 
+function invoiceEmailHoldRefusal(invoice, options) {
+  if (invoice.payer_statement_id) {
+    return { ok: false, error: 'Invoice is billed on the payer’s monthly statement; not sent individually.' };
+  }
+  if (!options.recipientOverride && require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice)) {
+    logger.warn(`[invoice-email] Invoice ${invoice.invoice_number} was withdrawn to a third-party payer — not emailing the customer.`);
+    return { ok: false, error: 'Invoice is billed to a third-party payer; not sent to the customer.' };
+  }
+  if (require('./invoice-helpers').invoiceHeldForChemicalReview(invoice)) {
+    logger.warn(`[invoice-email] Invoice ${invoice.invoice_number} is held for chemical add-on review — not emailing.`);
+    return {
+      ok: false,
+      error: 'Invoice is held for office billing review of a chemical area add-on; not sent.',
+      code: 'INVOICE_CHEMICAL_ADDON_HOLD',
+    };
+  }
+  return null;
+}
+
 async function sendInvoiceEmailCore(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
@@ -251,27 +270,10 @@ async function sendInvoiceEmailCore(invoiceId, options = {}) {
   } catch (err) {
     return { ok: false, error: err.message, code: err.code };
   }
-  // Phase 2: an accrued invoice (attached to a payer statement) is NEVER sent
-  // individually — it is delivered as one line on the consolidated monthly
-  // statement. This is the email chokepoint; fail closed.
-  if (invoice.payer_statement_id) {
-    return { ok: false, error: 'Invoice is billed on the payer’s monthly statement; not sent individually.' };
-  }
-  // A WITHDRAWN combined-visit invoice is payer-owned on a row whose payer_id
-  // stays NULL (Codex #4311 r45 P1): the send fence only recognises `sending`,
-  // and sendViaSMSAndEmail flips the invoice to `sent` on the text leg — so a
-  // Bill-To edit landing between the legs would reach this one, and the
-  // payer_id checks below would let the homeowner receive the PDF and pay
-  // link for debt that now belongs to AP. This is the email chokepoint; fail
-  // closed here as the statement guard above does.
-  // An explicit recipientOverride is an operator naming the recipient (the
-  // AP re-bill), so it is allowed through; the default homeowner delivery is
-  // not (local audit on r46 — the same distinction the provider-boundary
-  // guard below draws).
-  if (!options.recipientOverride && require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice)) {
-    logger.warn(`[invoice-email] Invoice ${invoice.invoice_number} was withdrawn to a third-party payer — not emailing the customer.`);
-    return { ok: false, error: 'Invoice is billed to a third-party payer; not sent to the customer.' };
-  }
+  // Statement accrual, third-party withdrawal, and chemical add-on review holds
+  // all fail closed at this email chokepoint.
+  const holdRefusal = invoiceEmailHoldRefusal(invoice, options);
+  if (holdRefusal) return holdRefusal;
   // Amount the customer pays = total − applied account credit (what Stripe charges).
   const amountDue = invoiceAmountDue(invoice);
   const emailContext = await loadInvoiceEmailContext(invoice, options);
@@ -551,6 +553,25 @@ async function sendInvoiceEmailCore(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
+  const invoiceDispatchOwnershipRefusal = async (trx, current) => {
+    // Re-check chemical add-on review hold under the invoice lock for EVERY
+    // recipient (including explicit recipientOverride) in case a hold landed
+    // while the PDF or template was rendering.
+    const helpers = require('./invoice-helpers');
+    if (helpers.invoiceHeldForChemicalReview(current)) {
+      boundaryRefusal = {
+        code: 'INVOICE_CHEMICAL_ADDON_HOLD',
+        reason: 'Invoice is held for office billing review of a chemical area add-on; not sent.',
+      };
+      return { ok: false, ...boundaryRefusal };
+    }
+    if (!effectiveOverride) {
+      const ownership = await helpers.selfPayAtDispatch(invoice.id, trx)();
+      if (ownership.ok !== true) return ownership;
+    }
+    return null;
+  };
+
   let boundaryRefusal = null;
   const invoiceAtDispatch = async (dispatch) => {
     let providerStarted = false;
@@ -588,10 +609,8 @@ async function sendInvoiceEmailCore(invoiceId, options = {}) {
             || !isDeepStrictEqual(current.line_items || [], invoice.line_items || [])) {
             return { ok: false, reason: 'Invoice balance changed while preparing email; retry delivery' };
           }
-          if (!effectiveOverride) {
-            const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
-            if (ownership.ok !== true) return ownership;
-          }
+          const ownershipRefusal = await invoiceDispatchOwnershipRefusal(trx, current);
+          if (ownershipRefusal) return ownershipRefusal;
           // The bar's live check (who owes it, annual plan, delivery choice, totals, a scheduled send), on the locked
           // handle right before the provider call, as the text leg runs it. Fail closed: a verifier that throws refuses.
           if (options.verifyOwner) {

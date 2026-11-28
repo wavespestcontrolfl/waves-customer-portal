@@ -493,13 +493,16 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
       report.checks.pushSubscriptions = { ok: false, error: err.message };
     }
 
-    // 5. notification_preferences — rows with bell/push disabled silently suppress
+    // 5. notification_preferences — rows with bell/push disabled silently suppress.
+    // Exclude 'category:*' bell-policy keys written by PushSettingsV2 (which default
+    // bell_enabled=false for opt-in bell categories and are not trigger mute rows).
     try {
       const prefs = await db('notification_preferences').where({ admin_user_id: userId });
-      const disabled = prefs.filter((p) => !p.bell_enabled || !p.push_enabled);
+      const triggerPrefs = prefs.filter((p) => !(typeof p?.trigger_key === 'string' && p.trigger_key.startsWith('category:')));
+      const disabled = triggerPrefs.filter((p) => !p.bell_enabled || !p.push_enabled);
       report.checks.preferences = {
         ok: disabled.length === 0,
-        totalRows: prefs.length,
+        totalRows: triggerPrefs.length,
         disabledTriggers: disabled.map((p) => ({
           trigger_key: p.trigger_key,
           bell_enabled: p.bell_enabled,

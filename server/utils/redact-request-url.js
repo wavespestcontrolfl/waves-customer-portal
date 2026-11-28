@@ -86,11 +86,11 @@ const LEGACY_ESTIMATE_SLUG = /^[a-z0-9][a-z0-9-]*-[a-f0-9]{8}$/i;
 const SECURE_CARD_BEARER_PARENTS = new Set(['secure', 'secure-card']);
 const SECURE_CARD_SHORT_TOKEN = /^[A-Za-z0-9_-]{22}$/;
 
-// The consultation page's lead bearer (Codex #4737 r5 P1) —
-// `<leadId>.<exp>[.<channel>].<sig>` under /inspection/ (SPA) and
-// /api/public/inspection/ (API). Its dotted shape matches none of the
-// generic rules below, so any segment under that parent is redacted.
-const CONSULTATION_TOKEN_PARENTS = new Set(['inspection']);
+// Token-bearing path segments immediately following these public route parents:
+// consultation (`<leadId>.<exp>[.<channel>].<sig>` under /inspection/ or
+// /api/public/inspection/) plus /reschedule/:token and /reservice/:token
+// (SPA and /api/public/*). Redact any segment under these parents in logs.
+const CONSULTATION_TOKEN_PARENTS = new Set(['inspection', 'reschedule', 'reservice']);
 
 
 function isTokenLikePathSegment(segment, previousSegment) {

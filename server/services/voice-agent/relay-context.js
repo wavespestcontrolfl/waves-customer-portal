@@ -1597,9 +1597,7 @@ async function pricingText(input = {}, { practiceLine = false } = {}) {
   const missing = [];
   if (!homeSqFt) missing.push('the home\'s approximate square footage (home_sqft)');
   if (pestAboveTable && !stories) missing.push('how many stories the home has (stories)');
-  // Pest above the table needs the lot too. With none given the engine gets a stand-in lot of 4 x the home size, which is above
-  // its 20,000 sq ft lot review for every home this size: the caller would answer the story question and still get no price.
-  if (!lotSqFt && (pestAboveTable || (['lawn_care', 'mosquito', 'tree_shrub'].includes(service) && !(service === 'lawn_care' && lawnSqFt)))) {
+  if (!lotSqFt && ['lawn_care', 'mosquito', 'tree_shrub'].includes(service) && !(service === 'lawn_care' && lawnSqFt)) {
     missing.push('the approximate lot size in square feet (lot_sqft)');
   }
   if (missing.length) {

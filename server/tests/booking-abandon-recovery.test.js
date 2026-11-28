@@ -660,8 +660,13 @@ describe('B11 backstop — contact-linked wizard draft linked to an ESTABLISHED 
     enqueue('booking_intents', { rows: [linked()] });
     enqueue('messages', { first: null });
     enqueue('estimates', { first: { customer_id: 'cust-lead' } });
-    enqueue('customers', { first: { pipeline_stage: 'new_lead' } });
+    enqueue('customers', { first: { id: 'cust-lead', pipeline_stage: 'new_lead' } });
+    enqueue('customers', { rows: [] });
     enqueue('booking_intents', { update: 1 });
+    // Post-claim last look re-checks blockedByContactLinkedHandoff before sending.
+    enqueue('estimates', { first: { customer_id: 'cust-lead' } });
+    enqueue('customers', { first: { id: 'cust-lead', pipeline_stage: 'new_lead' } });
+    enqueue('customers', { rows: [] });
     enqueue('booking_intents', { update: 1 });
 
     expect(await _internals.runSmsStage(NOW, new Set())).toBe(1);

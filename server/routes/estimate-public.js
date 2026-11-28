@@ -20798,7 +20798,7 @@ function savedFloorReplayOverrides(estData) {
   // estimate tool prices today's bottle. An estimate that kept only its engine inputs has no stored row, so no pin: it prices
   // today's bottle, as the termite station, misting and tree and shrub pins above do without their stored rows. On 2026-11-19 no
   // open sent or viewed estimate held a slab or trench service (migration 20261119020000).
-  Object.assign(overrides, { preSlabTermiticidePricingKnobs: undefined, trenchingTermiticidePricingKnobs: undefined },
+  Object.assign(overrides, { preSlabTermiticidePricingKnobs: undefined, trenchingTermiticidePricingKnobs: undefined, boraCarePricingKnobs: undefined },
     require('../services/estimate-tree-shrub-knob-replay').termiticideReplayOverrides(estData));
   // Whole-home exclusion quote-time minimum and renewal price (GATE_EXCLUSION_WHOLE_HOME): set even when EMPTY
   // (undefined), like the pins below, so a value stored inside the browser-controlled inputs is neutralized.

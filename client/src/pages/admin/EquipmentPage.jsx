@@ -65,14 +65,22 @@ function normalizeJobCostSummary(summary) {
     }) => [serviceType, stats]))
   };
 }
+const EQ = {
+  ink: "var(--text-primary, #09090B)",
+  strong: "var(--text-primary, #18181B)",
+  secondary: "var(--text-secondary, #52525B)",
+  muted: "var(--text-tertiary, #71717A)",
+  border: "var(--border-default, #E4E4E7)",
+  red: "var(--status-red, #C8312F)"
+};
 const STATUS_COLORS = {
-  active: "#18181B",
-  maintenance: "#52525B",
-  retired: "#71717A",
-  sold: "#71717A",
-  lost: "#C8312F",
-  in_service: "#18181B",
-  pending: "#18181B"
+  active: EQ.strong,
+  maintenance: EQ.secondary,
+  retired: EQ.muted,
+  sold: EQ.muted,
+  lost: EQ.red,
+  in_service: EQ.strong,
+  pending: EQ.strong
 };
 const CAT_ICONS = {
   sprayer: "",
@@ -275,13 +283,13 @@ const ASSET_DETAIL_CELLS = [{
   label: "Hours:",
   show: e => e.current_hours > 0,
   value: e => e.current_hours,
-  color: "#09090B"
+  color: EQ.ink
 }, {
   label: "Cost:",
   money: true,
   show: e => e.purchase_price > 0,
   value: e => fmt(e.purchase_price),
-  color: "#18181B"
+  color: EQ.strong
 }, {
   label: "Book:",
   money: true,
@@ -452,7 +460,7 @@ function EquipmentTab({
     }
   };
   if (loading && !items.length) return <div style={{
-    color: "#71717A",
+    color: EQ.muted,
     padding: 40,
     textAlign: "center"
   }}>
@@ -486,7 +494,7 @@ function EquipmentTab({
         const needsService = hoursLeft !== null && hoursLeft <= 10;
         return <Card key={e.id} style={{
           marginBottom: 0,
-          borderLeft: `3px solid ${STATUS_COLORS[e.status] || "#71717A"}`
+          borderLeft: `3px solid ${STATUS_COLORS[e.status] || EQ.muted}`
         }} className="min-w-0 [overflow-wrap:anywhere] p-4 mb-3">
               {" "}
               <div style={{
@@ -505,19 +513,19 @@ function EquipmentTab({
                   <div style={{
                 fontSize: 14,
                 fontWeight: 500,
-                color: "#09090B"
+                color: EQ.ink
               }}>
                     {CAT_ICONS[e.category] || ""} {e.name}
                   </div>{" "}
                   <div style={{
                 fontSize: 14,
-                color: "#71717A"
+                color: EQ.muted
               }}>
                     {[e.make, e.model].filter(Boolean).join(" ")}
                   </div>{" "}
                   {custodyLine(e) && <div style={{
                 fontSize: 14,
-                color: "#52525B"
+                color: EQ.secondary
               }}>
                       {custodyLine(e)}
                     </div>}{" "}
@@ -529,7 +537,7 @@ function EquipmentTab({
               flexShrink: 0
             }}>
                   {" "}
-                  <Badge tone={STATUS_COLORS[e.status] === "#C8312F" ? "alert" : "neutral"}>
+                  <Badge tone={STATUS_COLORS[e.status] === EQ.red ? "alert" : "neutral"}>
                     {e.status}
                   </Badge>{" "}
                   {canEdit && <Button onClick={event => {
@@ -550,7 +558,7 @@ function EquipmentTab({
           }}>
                 {ASSET_DETAIL_CELLS.filter(cell => (canEdit || !cell.money) && cell.show(e)).map(cell => <div key={cell.label}>
                     <span style={{
-                color: "#71717A"
+                color: EQ.muted
               }}>
                       {cell.label}
                     </span>{" "}
@@ -574,7 +582,7 @@ function EquipmentTab({
               {needsService && <div style={{
             marginTop: 8,
             fontSize: 14,
-            color: "#52525B",
+            color: EQ.secondary,
             fontWeight: 500
           }}>
                   Service due in {Math.round(hoursLeft)} hours —{" "}
@@ -767,7 +775,7 @@ function TankMixTab({
     }
   };
   if (loading && mixes.length === 0) return <div style={{
-    color: "#71717A",
+    color: EQ.muted,
     padding: 40,
     textAlign: "center"
   }}>
@@ -778,7 +786,7 @@ function TankMixTab({
           {actionError}
         </ActionFeedback>}
       {loadError && <Card role="alert" style={{
-      color: "#C8312F",
+      color: EQ.red,
       fontSize: 14
     }} className="p-4 mb-3">
           Could not load tank mixes.
@@ -790,14 +798,14 @@ function TankMixTab({
           </Button>
         </Card>}
       {loading && <div role="status" style={{
-      color: "#71717A"
+      color: EQ.muted
     }}>
           Refreshing tank mixes...
         </div>}
       {mixes.length === 0 ? !loadError && <Card style={{
       textAlign: "center",
       padding: 40,
-      color: "#71717A"
+      color: EQ.muted
     }} className="p-4 mb-3">
               No tank mixes configured yet. Add your standard mixes to track
               costs per application.
@@ -817,13 +825,13 @@ function TankMixTab({
                     <div style={{
               fontSize: 15,
               fontWeight: 500,
-              color: "#09090B"
+              color: EQ.ink
             }}>
                       {m.name}
                     </div>{" "}
                     <div style={{
               fontSize: 14,
-              color: "#71717A"
+              color: EQ.muted
             }}>
                       {m.service_type} · {m.tank_size_gal}gal tank · covers{" "}
                       {(m.coverage_sqft || 0).toLocaleString()} sqft
@@ -842,19 +850,19 @@ function TankMixTab({
                       <div style={{
                 fontSize: 18,
                 fontWeight: 500,
-                color: m.cost_incomplete ? "#52525B" : "#18181B"
+                color: m.cost_incomplete ? EQ.secondary : EQ.strong
               }} className="u-nums">
                         {fmt(m.cost_per_tank)}/tank
                       </div>{" "}
                       <div style={{
                 fontSize: 14,
-                color: "#71717A"
+                color: EQ.muted
               }} className="u-nums">
                         {fmt(m.cost_per_1000sf)}/1000sf
                       </div>{" "}
                       {m.cost_incomplete && <div style={{
                 fontSize: 14,
-                color: "#52525B"
+                color: EQ.secondary
               }}>
                           incomplete — unpriced component excluded
                         </div>}{" "}
@@ -875,7 +883,7 @@ function TankMixTab({
                     <THead>
                       <TR>
                         {["Product", "Rate/1000sf", "Oz/Tank", ...(canEdit ? ["Cost"] : [])].map(h => <TH key={h} style={{
-                  color: "#71717A",
+                  color: EQ.muted,
                   textAlign: "left"
                 }}>
                               {h}
@@ -885,7 +893,7 @@ function TankMixTab({
                     <TBody>
                       {products.map((p, i) => <TR key={i}>
                           <TD style={{
-                  color: "#09090B"
+                  color: EQ.ink
                 }}>
                             {p.product_name}
                           </TD>
@@ -894,7 +902,7 @@ function TankMixTab({
                           </TD>
                           <TD nums>{p.oz_per_tank}</TD>
                           {canEdit && <TD style={{
-                  color: "#18181B"
+                  color: EQ.strong
                 }} nums>
                             {fmt(p.cost)}
                           </TD>}
@@ -946,7 +954,7 @@ function JobCostTab() {
         Could not load job costs: {readError}
       </ActionFeedback>;
   if (loading) return <div style={{
-    color: "#71717A",
+    color: EQ.muted,
     padding: 40,
     textAlign: "center"
   }}>
@@ -965,19 +973,19 @@ function JobCostTab() {
           {[{
         label: "Avg Margin",
         value: summary.avgMargin != null ? `${summary.avgMargin.toFixed(1)}%` : "—",
-        color: summary.avgMargin == null || summary.avgMargin >= 50 ? "#18181B" : "#52525B"
+        color: summary.avgMargin == null || summary.avgMargin >= 50 ? EQ.strong : EQ.secondary
       }, {
         label: "Avg Revenue/Job",
         value: fmt(summary.avgRevenue),
-        color: "#18181B"
+        color: EQ.strong
       }, {
         label: "Avg Cost/Job",
         value: fmt(summary.avgCost),
-        color: "#52525B"
+        color: EQ.secondary
       }, {
         label: "Total Jobs Costed",
         value: summary.totalJobs || 0,
-        color: "#09090B"
+        color: EQ.ink
       }].map(s => <Card key={s.label} style={{
         flex: isMobile ? "1 1 calc(50% - 6px)" : "1 1 140px",
         minWidth: isMobile ? 0 : 140,
@@ -994,7 +1002,7 @@ function JobCostTab() {
               </div>{" "}
               <div style={{
           fontSize: 14,
-          color: "#71717A",
+          color: EQ.muted,
           marginTop: 2
         }}>
                 {s.label}
@@ -1008,7 +1016,7 @@ function JobCostTab() {
           <div style={{
         fontSize: 15,
         fontWeight: 500,
-        color: "#09090B",
+        color: EQ.ink,
         marginBottom: 12
       }}>
             Margins by Service Type
@@ -1017,12 +1025,12 @@ function JobCostTab() {
         display: "flex",
         justifyContent: "space-between",
         padding: "8px 0",
-        borderBottom: `1px solid ${"#E4E4E7"}22`,
+        borderBottom: `1px solid ${EQ.border}`,
         fontSize: 14
       }}>
               {" "}
               <span style={{
-          color: "#09090B",
+          color: EQ.ink,
           fontWeight: 500
         }}>
                 {svc}
@@ -1033,22 +1041,22 @@ function JobCostTab() {
         }}>
                 {" "}
                 <span style={{
-            color: "#71717A"
+            color: EQ.muted
           }} className="u-nums">
                   {stats.count} jobs
                 </span>{" "}
                 <span style={{
-            color: "#18181B"
+            color: EQ.strong
           }} className="u-nums">
                   Rev: {fmt(stats.avgRevenue)}
                 </span>{" "}
                 <span style={{
-            color: "#52525B"
+            color: EQ.secondary
           }} className="u-nums">
                   Cost: {fmt(stats.avgCost)}
                 </span>{" "}
                 <span style={{
-            color: stats.avgMargin >= 50 ? "#18181B" : "#52525B",
+            color: stats.avgMargin >= 50 ? EQ.strong : EQ.secondary,
             fontWeight: 500
           }} className="u-nums">
                   {stats.avgMargin?.toFixed(1)}%
@@ -1063,7 +1071,7 @@ function JobCostTab() {
       {!listError && costs.length === 0 && <Card style={{
       textAlign: "center",
       padding: 40,
-      color: "#71717A"
+      color: EQ.muted
     }} className="p-4 mb-3">
           No job costs recorded yet
         </Card>}
@@ -1088,7 +1096,7 @@ function MaintenanceTab({
     }).catch(() => setLoading(false));
   }, []);
   if (loading) return <div style={{
-    color: "#71717A",
+    color: EQ.muted,
     padding: 40,
     textAlign: "center"
   }}>
@@ -1099,7 +1107,7 @@ function MaintenanceTab({
       <div style={{
       fontSize: 15,
       fontWeight: 500,
-      color: "#09090B",
+      color: EQ.ink,
       marginBottom: 12
     }}>
         Upcoming Maintenance
@@ -1107,13 +1115,13 @@ function MaintenanceTab({
       {equipment.length === 0 ? <Card style={{
       textAlign: "center",
       padding: 40,
-      color: "#71717A"
+      color: EQ.muted
     }} className="p-4 mb-3">
           No equipment needs service soon
         </Card> : equipment.map(e => {
       const hoursLeft = e.next_service_hours - (e.current_hours || 0);
       return <Card key={e.id} style={{
-        borderLeft: `3px solid ${hoursLeft <= 10 ? "#C8312F" : "#52525B"}`
+        borderLeft: `3px solid ${hoursLeft <= 10 ? EQ.red : EQ.secondary}`
       }} className="p-4 mb-3">
               {" "}
               <div style={{
@@ -1127,13 +1135,13 @@ function MaintenanceTab({
                   <div style={{
               fontSize: 14,
               fontWeight: 500,
-              color: "#09090B"
+              color: EQ.ink
             }}>
                     {e.name}
                   </div>{" "}
                   <div style={{
               fontSize: 14,
-              color: "#71717A"
+              color: EQ.muted
             }}>
                     {e.next_service_type} — in {Math.round(hoursLeft)} hours
                   </div>{" "}

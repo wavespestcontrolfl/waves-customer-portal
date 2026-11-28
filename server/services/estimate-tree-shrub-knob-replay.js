@@ -380,13 +380,139 @@ function trenchingKnobSignalForReplay(estData = {}) {
   return null;
 }
 
-// Both termiticide pins as engine-input overrides: only the ones the stored rows carry, so Object.assign adds nothing else.
+// Bora-Care quote-time knobs (owner 2026-11-27): wiring the DB's snake_case
+// Bora-Care settings (`bc_gal`, `bc_cov`, `bc_equip`, `margin_divisor`,
+// `min_job_price`, `surface_labor_sqft_per_hr`) changes live Bora-Care prices.
+// Stamped quotes replay verbatim; unstamped Bora-Care rows predate the fix and
+// replay the exact pre-fix in-code defaults so adding another service or
+// revising an existing quote never shifts its quoted Bora-Care base price.
+const PRE_SNAKE_CASE_BORACARE_KNOBS = Object.freeze({
+  galCost: 91.98,
+  coverage: 275,
+  equipCost: 17.50,
+  marginDivisor: 0.45,
+  minJobPrice: 150,
+  surfaceLaborSqFtPerHour: 640,
+  laborRate: 35,
+});
+
+const positiveOrNull = (v) => {
+  const n = storedFigure(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+function firstFiniteVal(...values) {
+  for (const v of values) if (v !== undefined && v !== null) return v;
+  return undefined;
+}
+
+const plainRecord = (value) => (value && typeof value === 'object' ? value : {});
+
+function translateStoredV2Request(estData) {
+  const req = estData?.engineRequest;
+  if (!req || typeof req !== 'object' || !req.profile) return null;
+  try {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const selected = Array.isArray(req.selectedServices) ? req.selectedServices : [];
+    const withBoraCare = selected.includes('BORACARE') ? selected : [...selected, 'BORACARE'];
+    return translateV2CallToV1Input(req.profile, withBoraCare, req.options || {});
+  } catch {
+    return null;
+  }
+}
+
+function boraCareStoredInputs(estData) {
+  const translated = !estData?.engineInputs ? translateStoredV2Request(estData) : null;
+  const primary = estData?.engineInputs || translated || estData?.engineRequest || estData?.inputs;
+  if (!primary || typeof primary !== 'object') return null;
+  const raw = plainRecord(estData?.inputs);
+  const reqOpts = plainRecord(estData?.engineRequest?.options);
+  const svc = primary.services?.boraCare || primary.services?.bora_care || reqOpts.boraCare || reqOpts.bora_care;
+  return { primary, raw, reqOpts, opts: plainRecord(svc) };
+}
+
+function boraCareScopeFromInputs(primary, opts, extra = {}) {
+  const { resolveBoraCareSqFt, resolveBoraCareSurfaceSqFt } = require('./pricing-engine/service-pricing');
+  const attic = resolveBoraCareSqFt(primary, opts);
+  const surface = resolveBoraCareSurfaceSqFt(primary, {
+    ...opts,
+    surfaceLinearFt: firstFiniteVal(
+      opts.surfaceLinearFt, opts.wallLinearFt,
+      extra.boracareSurfaceLinearFt, extra.boraCareSurfaceLinearFt, extra.surfaceLinearFt,
+      primary.boraCareSurfaceLinearFt, primary.boracareSurfaceLinearFt, primary.boraCareWallLinearFt,
+    ),
+    surfaceHeightFt: firstFiniteVal(
+      opts.surfaceHeightFt, opts.wallHeightFt,
+      extra.boracareSurfaceHeightFt, extra.boraCareSurfaceHeightFt, extra.surfaceHeightFt,
+      primary.boraCareSurfaceHeightFt, primary.boracareSurfaceHeightFt, primary.boraCareWallHeightFt,
+    ),
+  });
+  const legacyBcSqFt = positiveOrNull(firstFiniteVal(
+    primary.boracareSqft, primary.boraCareSqft, primary.bcSqft, primary.bcSqFt,
+    extra.boracareSqft, extra.boraCareSqft, extra.bcSqft,
+    opts.boracareSqft, opts.bcSqft, opts.bcSqFt,
+  ));
+  return {
+    pinnedAtticSqFt: attic.value !== null ? attic.value : legacyBcSqFt,
+    pinnedSurfaceSqFt: surface.surfaceSqFt > 0 ? surface.surfaceSqFt : null,
+  };
+}
+
+function boraCareStoredScope(row, estData) {
+  if (row.atticSqFt !== undefined || row.surfaceSqFt !== undefined) {
+    return {
+      pinnedAtticSqFt: positiveOrNull(row.atticSqFt),
+      pinnedSurfaceSqFt: positiveOrNull(row.surfaceSqFt),
+    };
+  }
+  const stored = boraCareStoredInputs(estData);
+  if (!stored) return {};
+  const scope = boraCareScopeFromInputs(stored.primary, stored.opts, { ...stored.raw, ...stored.reqOpts });
+  return scope.pinnedAtticSqFt !== null || scope.pinnedSurfaceSqFt !== null ? scope : {};
+}
+
+function stampedBoraCareKnobs(rows) {
+  for (const row of rows) {
+    const k = row.pricingKnobs;
+    if (!k || typeof k !== 'object' || Array.isArray(k)) continue;
+    if (positiveOrNull(k.galCost) && positiveOrNull(k.coverage) && positiveOrNull(k.marginDivisor)) {
+      return { ...PRE_SNAKE_CASE_BORACARE_KNOBS, ...k };
+    }
+  }
+  return null;
+}
+
+function pinnedBoraCareKnobs(rows, estData) {
+  for (const row of rows) {
+    if (row.quoteRequired || row.requiresCustomQuote) continue;
+    const pinnedPrice = positiveOrNull(row.priceBeforeDiscount) || positiveOrNull(row.price);
+    if (pinnedPrice !== null) {
+      return {
+        ...PRE_SNAKE_CASE_BORACARE_KNOBS,
+        pinnedPrice: Math.round(pinnedPrice * 100) / 100,
+        ...boraCareStoredScope(row, estData),
+      };
+    }
+  }
+  return null;
+}
+
+function boraCareKnobSignalForReplay(estData = {}) {
+  const { storedBoraCareRows } = require('./estimate-result-container');
+  const rows = storedBoraCareRows(estData);
+  if (!rows.length) return null;
+  return stampedBoraCareKnobs(rows) || pinnedBoraCareKnobs(rows, estData) || { ...PRE_SNAKE_CASE_BORACARE_KNOBS };
+}
+
+// Termiticide and wood-treatment pins as engine-input overrides: only the ones the stored rows carry, so Object.assign adds nothing else.
 function termiticideReplayOverrides(estData = {}) {
   const preSlab = preSlabTermiticideKnobSignalForReplay(estData);
   const trenching = trenchingKnobSignalForReplay(estData);
+  const boraCare = boraCareKnobSignalForReplay(estData);
   return {
     ...(preSlab ? { preSlabTermiticidePricingKnobs: preSlab } : {}),
     ...(trenching ? { trenchingTermiticidePricingKnobs: trenching } : {}),
+    ...(boraCare ? { boraCarePricingKnobs: boraCare } : {}),
   };
 }
 
@@ -486,12 +612,101 @@ function applyTreeShrubPalmReplay(v1Input, estData = {}) {
   return v1Input;
 }
 
+const lowerToken = (v) => String(v || '').trim().toLowerCase();
+const matchesOptionalToken = (stored, next) => !stored || !next || stored === next;
+const matchesOptionalNumber = (stored, next) => !Number.isFinite(stored) || next === stored;
+
+function storedMistingLayout(row) {
+  const knobs = plainRecord(row.pricingKnobs);
+  const mist = plainRecord(row.misting);
+  const refill = plainRecord(row.refill || mist.refill);
+  return {
+    nozzles: positiveOrNull(firstFiniteVal(row.nozzles, mist.nozzles)),
+    tier: lowerToken(row.tier || mist.tier || knobs.tier),
+    sol: lowerToken(row.solution || mist.solution || refill.solution || knobs.refillSolution),
+    risers: storedFigure(firstFiniteVal(row.risers, mist.risers)),
+    refills: storedFigure(firstFiniteVal(refill.refillsPerYear, row.refillsPerYear, mist.refillsPerYear)),
+  };
+}
+
+function mistingRowMatchesInput(row, rawInputOpt) {
+  if (!row || !rawInputOpt) return false;
+  if (rawInputOpt !== true && typeof rawInputOpt !== 'object') return false;
+  const stored = storedMistingLayout(row);
+  if (stored.nozzles === null) return false;
+  const inputOpt = rawInputOpt === true ? {} : rawInputOpt;
+  const M = require('./pricing-engine/constants').MOSQUITO_MISTING;
+  const nextTier = lowerToken(inputOpt.tier || M.defaultTier);
+  const nextSol = lowerToken(inputOpt.solution || M.defaultSolution);
+  const defaultNozzles = M.tiers[nextTier]?.includedNozzles ?? stored.nozzles;
+  const nextNozzles = inputOpt.nozzles == null ? defaultNozzles : positiveOrNull(inputOpt.nozzles);
+  const nextRisers = inputOpt.risers == null ? 0 : storedFigure(inputOpt.risers);
+  const nextRefills = inputOpt.refillsPerYear == null ? M.defaultRefillsPerYear : storedFigure(inputOpt.refillsPerYear);
+  return [
+    matchesOptionalToken(stored.tier, nextTier),
+    matchesOptionalToken(stored.sol, nextSol),
+    nextNozzles === stored.nozzles,
+    matchesOptionalNumber(stored.risers, nextRisers),
+    matchesOptionalNumber(stored.refills, nextRefills),
+  ].every(Boolean);
+}
+
+function boraCareScopeMatchesInput(row, v1Input, boraCareInput, storedEstimateData) {
+  const prior = boraCareStoredScope(row, storedEstimateData);
+  if (prior.pinnedAtticSqFt === undefined && prior.pinnedSurfaceSqFt === undefined) return false;
+  const next = boraCareScopeFromInputs(v1Input, plainRecord(boraCareInput));
+  return prior.pinnedAtticSqFt === next.pinnedAtticSqFt && prior.pinnedSurfaceSqFt === next.pinnedSurfaceSqFt;
+}
+
+function storedRowTrustedForRevisionReuse(storedRow) {
+  if (!storedRow || typeof storedRow !== 'object') return true;
+  if (storedRow.sent_at || ['sent', 'viewed', 'accepted'].includes(String(storedRow.status || '').toLowerCase())) {
+    return true;
+  }
+  return String(storedRow.pricing_authority || '').toUpperCase() === 'SERVER';
+}
+
+// Staff revisions reprice changed services on live config, but MUST preserve
+// unchanged Bora-Care, mosquito misting, and termite trenching lines from the
+// trusted stored estimate on both revision preview and save.
+function applyUnchangedRevisionPricingKnobs(v1Input, storedEstimateData, storedEstimateRow = null) {
+  if (!v1Input || typeof v1Input !== 'object' || !storedEstimateData) return v1Input;
+  if (!storedRowTrustedForRevisionReuse(storedEstimateRow)) return v1Input;
+  const services = v1Input.services || {};
+  const { storedMistingRows, storedBoraCareRows } = require('./estimate-result-container');
+  const mistingInput = services.mosquitoMisting || services.mosquito_misting;
+  if (mistingInput && !v1Input.mistingPricingKnobs) {
+    // Compare layout ONLY against misting plan rows carrying structured nozzles/risers.
+    const mRows = storedMistingRows(storedEstimateData).filter((r) => r.service === 'mosquito_misting');
+    const mKnobs = mistingKnobSignalForReplay(storedEstimateData);
+    if (mKnobs && mRows.some((row) => mistingRowMatchesInput(row, mistingInput))) {
+      v1Input.mistingPricingKnobs = mKnobs;
+    }
+  }
+  const boraCareInput = services.boraCare || services.bora_care;
+  if (boraCareInput && !v1Input.boraCarePricingKnobs) {
+    const bcRows = storedBoraCareRows(storedEstimateData);
+    const bcKnobs = boraCareKnobSignalForReplay(storedEstimateData);
+    if (bcKnobs && bcRows.some((row) => boraCareScopeMatchesInput(row, v1Input, boraCareInput, storedEstimateData))) {
+      v1Input.boraCarePricingKnobs = bcKnobs;
+    }
+  }
+  if (services.trenching && !v1Input.trenchingTermiticidePricingKnobs) {
+    // Engine already gates trenching surcharge replay on exact (productKey, applicationRate, productOz) match.
+    const trKnobs = trenchingKnobSignalForReplay(storedEstimateData);
+    if (trKnobs) v1Input.trenchingTermiticidePricingKnobs = trKnobs;
+  }
+  return v1Input;
+}
+
 module.exports = {
   termiteKnobSignalForReplay,
   mistingKnobSignalForReplay,
   preSlabTermiticideKnobSignalForReplay,
   trenchingKnobSignalForReplay,
+  boraCareKnobSignalForReplay,
   termiticideReplayOverrides,
+  applyUnchangedRevisionPricingKnobs,
   PRE_STAMP_TERMITE_STATION_COST,
   treeShrubKnobSignalForReplay,
   NEUTRAL_TREE_SHRUB_KNOBS,

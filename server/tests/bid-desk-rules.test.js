@@ -150,7 +150,7 @@ describe('notification copy follows the admin notification rule', () => {
     const confirmed = { ...dated, due_confirmed: true, needs_date_confirmation: true };
     for (const { spec } of [addendumSpec(confirmed, email), reminderSpec(confirmed, '7d'), reminderSpec(confirmed, '2d')]) {
       expect(() => composeAdminAlert(spec)).not.toThrow();
-      expect(spec.link).toBe(`/admin/bid-desk?bid=${confirmed.id}`);
+      expect(spec.link).toBe(`/admin/bids?bid=${confirmed.id}`);
       expect(spec.severity).toBe('needs-you');
     }
     expect(addendumSpec(confirmed, email).detail).toBe('Addendum on Sample Ridge Residences: confirm the due date');
