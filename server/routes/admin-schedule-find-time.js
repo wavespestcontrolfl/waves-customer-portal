@@ -228,6 +228,30 @@ async function resolveFindTimeTarget({ serviceId, propertyId, customerId, addres
   };
 }
 
+function firstTrimmed(obj, keys) {
+  for (const key of keys) {
+    const val = obj[key];
+    if (typeof val === 'string' && val.trim()) return val.trim();
+    if (val != null && typeof val !== 'string' && String(val).trim()) return String(val).trim();
+  }
+  return '';
+}
+
+function normalizeServiceEntry(addon) {
+  if (!addon) return null;
+  if (typeof addon === 'string') return addon.trim() ? { service_type: addon.trim() } : null;
+  if (typeof addon !== 'object') return null;
+  const service_type = firstTrimmed(addon, ['service_type', 'serviceType', 'service_name', 'serviceName', 'name']);
+  const service_key = firstTrimmed(addon, ['service_key', 'serviceKey', 'service_key_snapshot']);
+  const service_id = firstTrimmed(addon, ['service_id', 'serviceId']);
+  if (!service_type && !service_key && !service_id) return null;
+  return {
+    ...(service_type ? { service_type } : {}),
+    ...(service_key ? { service_key } : {}),
+    ...(service_id ? { service_id } : {}),
+  };
+}
+
 // The technicians among `techIds` who cannot perform one of the booking's
 // services (including catalog service_key and add-on services). A list row
 // books its technician explicitly, past the auto matcher's capability check,
@@ -236,12 +260,18 @@ async function techsLackingServices(techIds, { serviceType, serviceTypes, servic
   const entries = [];
   const seenTypes = new Set();
   const seenKeys = new Set();
-  const addEntry = (entry) => {
-    const typeKey = entry.service_type ? String(entry.service_type).toLowerCase() : '';
-    const keyVal = entry.service_key ? String(entry.service_key) : '';
+  const seenIds = new Set();
+  const addEntry = (rawEntry) => {
+    const entry = normalizeServiceEntry(rawEntry);
+    if (!entry) return;
+    const typeKey = entry.service_type ? entry.service_type.toLowerCase() : '';
+    const keyVal = entry.service_key || '';
+    const idVal = entry.service_id || '';
     if (keyVal && seenKeys.has(keyVal)) return;
-    if (!keyVal && typeKey && seenTypes.has(typeKey)) return;
+    if (!keyVal && idVal && seenIds.has(idVal)) return;
+    if (!keyVal && !idVal && typeKey && seenTypes.has(typeKey)) return;
     if (keyVal) seenKeys.add(keyVal);
+    if (idVal) seenIds.add(idVal);
     if (typeKey) seenTypes.add(typeKey);
     entries.push(entry);
   };
@@ -259,11 +289,7 @@ async function techsLackingServices(techIds, { serviceType, serviceTypes, servic
     });
   }
   if (Array.isArray(serviceAddons)) {
-    for (const addon of serviceAddons) {
-      if (!addon) continue;
-      if (typeof addon === 'string' && addon.trim()) addEntry({ service_type: addon.trim() });
-      else if (typeof addon === 'object') addEntry(addon);
-    }
+    for (const addon of serviceAddons) addEntry(addon);
   }
   const ids = [...new Set(techIds.filter(Boolean).map(String))];
   if (!entries.length || !ids.length) return new Set();

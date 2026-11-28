@@ -662,4 +662,74 @@ describe('P1-14: find-time records tech_absent in rejections_by_date', () => {
       expect(result.searched_dates).toEqual([]);
     });
   });
+
+  test('categoriesForServices normalizes camelCase add-on shapes & summarizeHintDays treats mixed tech_absent + route_unverified as unverified', async () => {
+    await jest.isolateModulesAsync(async () => {
+      jest.dontMock('../services/technician-capabilities');
+      const { categoriesForServices } = require('../services/technician-capabilities');
+      const { summarizeHintDays } = require('../services/scheduling/find-time-hints');
+      const cats = await categoriesForServices(jest.fn(), [
+        { serviceId: 'not-a-uuid', serviceName: 'Lawn Fertilization' },
+        { serviceType: 'Mosquito Barrier' },
+      ]);
+      expect(cats).toEqual(['lawn', 'mosquito']);
+      expect(summarizeHintDays([], {
+        from: '2026-12-03',
+        to: '2026-12-03',
+        rejectionsByDate: { '2026-12-03': { tech_absent: 1, tech_capability: 1, route_unverified: 1 } },
+      })[0].status).toBe('unverified');
+      expect(summarizeHintDays([], {
+        from: '2026-12-03',
+        to: '2026-12-03',
+        rejectionsByDate: { '2026-12-03': { tech_absent: 2 } },
+      })[0].status).toBe('full');
+    });
+  });
+
+  test('findRescheduleOptions withholds options when absentTechDays fails & arrival check includes whole-stop memberIds add-ons', async () => {
+    await jest.isolateModulesAsync(async () => {
+      jest.dontMock('../services/rebooker');
+      jest.dontMock('../services/technician-capabilities');
+      jest.dontMock('../services/scheduling/find-time');
+      process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+      const mkChain = (rows) => {
+        const self = {};
+        ['where', 'whereIn', 'whereNotIn', 'whereNull', 'leftJoin', 'select', 'orderBy'].forEach((m) => { self[m] = jest.fn(() => self); });
+        self.first = jest.fn().mockResolvedValue(rows[0] ?? null);
+        self.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+        return self;
+      };
+      const whereInArgs = [];
+      const fakeDb = jest.fn((table) => {
+        if (table === 'scheduled_services') return mkChain([{ id: 'svc-1', technician_id: 'tech-1', scheduled_date: '2026-12-01', window_start: '09:00', window_end: '10:00', service_type: 'General Pest' }]);
+        if (table === 'scheduled_service_addons') {
+          const self = mkChain([{ service_type: 'Lawn', service_id: null }]);
+          self.whereIn = jest.fn((_col, ids) => { whereInArgs.push(ids); return self; });
+          return self;
+        }
+        return mkChain([]);
+      });
+      fakeDb.raw = jest.fn(() => ({ rows: [] }));
+      jest.doMock('../models/db', () => fakeDb);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/technician-eligibility', () => ({
+        isOffDay: () => false,
+        absentTechDays: jest.fn().mockRejectedValue(new Error('absences db error')),
+        loadTechShifts: jest.fn().mockResolvedValue(() => null),
+        shiftBounds: jest.fn((_s, o, c) => ({ openMin: o, closeMin: c })),
+      }));
+      jest.doMock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn().mockResolvedValue(new Set()) }));
+
+      const { _internals } = require('../services/scheduling/find-time');
+      await _internals.arrivalTargetServicesForCapabilityCheck(
+        [{ service_type: 'Pest' }],
+        { arrivalWindow: { serviceId: 'svc-1', alone: false } },
+        { memberIds: ['svc-1', 'svc-2'] },
+      );
+      expect(whereInArgs[0]).toEqual(['svc-1', 'svc-2']);
+
+      const SmartRebooker = require('../services/rebooker');
+      await expect(SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain')).resolves.toEqual([]);
+    });
+  });
 });

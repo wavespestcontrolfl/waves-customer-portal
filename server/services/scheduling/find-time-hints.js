@@ -462,8 +462,9 @@ function summaryRangeEnd(from, to, maxDays = SUMMARY_MAX_DAYS) {
 function emptyDayStatus(reasons) {
   const keys = Object.keys(reasons || {}).filter((key) => reasons[key] > 0);
   if (!keys.length) return 'full';
-  if (keys.every((key) => key === 'route_unverified')) return 'unverified';
-  if (keys.includes('day_overcommitted')) return 'overcommitted';
+  const checkedKeys = keys.filter((key) => key !== 'tech_absent' && key !== 'tech_capability');
+  if (checkedKeys.length && checkedKeys.every((key) => key === 'route_unverified')) return 'unverified';
+  if (checkedKeys.includes('day_overcommitted')) return 'overcommitted';
   return 'full';
 }
 

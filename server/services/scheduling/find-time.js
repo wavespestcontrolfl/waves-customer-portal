@@ -229,7 +229,7 @@ async function resolveCapacityRequestedServices(opts) {
   return requested;
 }
 
-async function arrivalTargetServicesForCapabilityCheck(baseServices, opts) {
+async function arrivalTargetServicesForCapabilityCheck(baseServices, opts, target) {
   const services = [...baseServices];
   if (Array.isArray(opts.serviceAddons) && opts.serviceAddons.length) {
     services.push(...opts.serviceAddons.filter(Boolean));
@@ -237,9 +237,11 @@ async function arrivalTargetServicesForCapabilityCheck(baseServices, opts) {
   }
   if (Array.isArray(opts.serviceAddons)) return services;
   if (!require('../../config/feature-gates').techJobTypeChecksLive?.()) return services;
+  const wholeStopIds = opts.arrivalWindow?.alone === true ? [] : (Array.isArray(target?.memberIds) ? target.memberIds : []);
   const serviceIds = [
     ...new Set([
       opts.arrivalWindow?.serviceId,
+      ...wholeStopIds,
       ...services.map((s) => s?.id || s?.scheduled_service_id),
     ].filter(Boolean)),
   ];
@@ -317,7 +319,7 @@ async function findArrivalWindowSlots(opts) {
       // A whole visit: the technician must be able to do every service on it
       // (the capacity path below applies the same filter).
       if (context.target.memberServices && (await require('../technician-capabilities')
-        .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
+        .inactiveCapabilitiesForServices(db, [tech.id], await arrivalTargetServicesForCapabilityCheck(context.target.memberServices, opts, context.target))).length) continue;
       const shift = shiftOf(tech.id, date);
       const day = shiftBounds(shift, DAY_START_HOUR * 60, ADMIN_DAY_END_MINUTES);
       const floor = Math.max(day.openMin, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
@@ -470,7 +472,7 @@ async function findCapacitySlots(opts) {
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
         // A whole visit carries every member's service plus add-ons: the technician
         // must be able to do all of them.
-        .inactiveCapabilitiesForServices(db, [tech.id], await arrivalTargetServicesForCapabilityCheck(context.target.memberServices || [context.target], opts))).length) continue;
+        .inactiveCapabilitiesForServices(db, [tech.id], await arrivalTargetServicesForCapabilityCheck(context.target.memberServices || [context.target], opts, context.target))).length) continue;
       // This technician's own hours inside the shared shift (shiftBounds): no
       // set hours = the shared shift, and the loop below admits what it did.
       const shift = shiftOf(tech.id, date);
@@ -1682,5 +1684,6 @@ module.exports = {
     capacityNeighbourEntity,
     // The road days' Google purchase, near each route's best.
     preloadBandLegs,
+    arrivalTargetServicesForCapabilityCheck,
   },
 };

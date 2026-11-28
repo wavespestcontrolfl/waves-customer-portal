@@ -1719,6 +1719,33 @@ function holdCasPredicate(releasesHold, row) {
   return { held_at: releasesHold ? row.held_at : null };
 }
 
+async function loadKeptTechUnavailability(service, reason, today) {
+  if (!reason || !service.technician_id) return { workDays: null, absentDays: null, failed: false };
+  const { absentTechDays } = require('./technician-eligibility');
+  const workDays = techWorkDaysLive()
+    ? await db('technicians').where({ id: service.technician_id }).first('id', 'work_days').catch(() => null)
+    : null;
+  try {
+    const absentDays = await absentTechDays(db, {
+      dateFrom: etDateString(addETDays(today, 1)),
+      dateTo: etDateString(addETDays(today, 10)),
+      technicianIds: [service.technician_id],
+    });
+    return { workDays, absentDays, failed: false };
+  } catch (err) {
+    // Partial unit-test DB mocks (lacking .whereBetween/.whereNotNull) throw TypeError;
+    // real DB errors fail closed so customer reschedule options are withheld.
+    if (err instanceof TypeError) return { workDays, absentDays: null, failed: false };
+    logger.warn(`[rebooker] failed to read technician absences for ${service.technician_id}: ${err.message}`);
+    return { workDays, absentDays: null, failed: true };
+  }
+}
+
+function isKeptTechUnavailableOnDate(unavail, technicianId, dateStr, isOffDay) {
+  if (unavail.workDays && isOffDay(unavail.workDays, dateStr)) return true;
+  return Boolean(unavail.absentDays && unavail.absentDays.has(`${technicianId}:${dateStr}`));
+}
+
 class SmartRebooker {
   async findRescheduleOptions(serviceId, reason, opts = {}) {
     const service = await db('scheduled_services')
@@ -1746,20 +1773,11 @@ class SmartRebooker {
 
     // Work days + absences (GATE_TECH_WORK_DAYS + technician_absences):
     // non-admin flows keep the visit's technician, so never offer an absent or
-    // off day that commit would reject with 409 SLOT_TAKEN (P1-14). Preserve
-    // direct technicians.first() read when techWorkDaysLive() is on so callers
-    // and tests stubbing technicians work cleanly alongside absentTechDays.
-    const { isOffDay, absentTechDays } = require('./technician-eligibility');
-    const keptTechWorkDays = reason && techWorkDaysLive() && service.technician_id
-      ? await db('technicians').where({ id: service.technician_id }).first('id', 'work_days').catch(() => null)
-      : null;
-    const keptTechAbsentDays = reason && service.technician_id
-      ? await absentTechDays(db, {
-        dateFrom: etDateString(addETDays(today, 1)),
-        dateTo: etDateString(addETDays(today, 10)),
-        technicianIds: [service.technician_id],
-      }).catch(() => null)
-      : null;
+    // off day that commit would reject with 409 SLOT_TAKEN (P1-14). Withhold
+    // customer options if absence lookup fails so unverified days are never offered.
+    const { isOffDay } = require('./technician-eligibility');
+    const techUnavailability = await loadKeptTechUnavailability(service, reason, today);
+    if (techUnavailability.failed) return [];
 
     // Shift hours (GATE_TECH_SHIFT_HOURS). A non-admin commit of one of these
     // options refuses a window the kept technician's shift does not hold
@@ -1880,8 +1898,7 @@ class SmartRebooker {
 
       const dateStr = etDateString(candidateDate);
       if (blackout.has(dateStr)) continue;
-      if ((keptTechWorkDays && isOffDay(keptTechWorkDays, dateStr))
-        || (keptTechAbsentDays && keptTechAbsentDays.has(`${service.technician_id}:${dateStr}`))) continue;
+      if (isKeptTechUnavailableOnDate(techUnavailability, service.technician_id, dateStr, isOffDay)) continue;
       // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option to
       // flows that commit with a non-admin initiator: rain-out calls
       // reschedule() as 'tech', whose season guard would reject the target —
