@@ -4,6 +4,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const migration = require('../models/migrations/20261128030000_message_drafts_post_visit_revision');
+const rollbackGuardMigration = require('../models/migrations/20261128030500_message_drafts_post_visit_revision_rollback_guard');
 const { smsPostVisitRedraftLive } = require('../config/feature-gates');
 const {
   POST_VISIT_TRIGGER,
@@ -18,7 +19,7 @@ const {
 
 function chain({ first = null, result = [] } = {}) {
   const q = {};
-  ['where', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereNotIn', 'orderBy', 'offset', 'limit', 'select']
+  ['where', 'whereNot', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereNotIn', 'orderBy', 'offset', 'limit', 'select']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
@@ -105,6 +106,20 @@ describe('migration 20261128030000_message_drafts_post_visit_revision', () => {
     await migration.down(knex);
     expect(raws[1]).toContain('DROP INDEX IF EXISTS message_drafts_post_visit_revision_uniq');
     expect(dropped).toEqual(['supersedes_draft_id', 'draft_trigger']);
+  });
+
+  test('rollback guard refuses down() when post_visit_closeout revisions exist and allows when none exist', async () => {
+    const mkKnex = (existingRow) => {
+      const fn = jest.fn(() => chain({ first: existingRow }));
+      fn.schema = {
+        hasTable: jest.fn(async () => true),
+        hasColumn: jest.fn(async () => true),
+      };
+      return fn;
+    };
+    await expect(rollbackGuardMigration.up()).resolves.toBeUndefined();
+    await expect(rollbackGuardMigration.down(mkKnex({ id: 'rev-1' }))).rejects.toThrow(/post_visit_closeout/i);
+    await expect(rollbackGuardMigration.down(mkKnex(null))).resolves.toBeUndefined();
   });
 });
 
@@ -276,14 +291,15 @@ describe('draftPostVisitRevisionIfEligible', () => {
     expect(draftFn).not.toHaveBeenCalled();
   });
 
-  test('claims per-message lock with recordHealth:false before drafting and forwards safeguards', async () => {
+  test('claims per-message lock with recordHealth:false, rechecks thread inside lock, passes liveEta:false, and forwards safeguards', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: null }), chain({ first: null }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
       customers: [chain({ first: { id: 'cust-2', first_name: 'Sam', city: 'Sarasota' } })],
     });
     const draftFn = jest.fn(async () => 'draft-rev-2');
     const lockFn = jest.fn(async (_name, fn) => fn());
+    const liveAnswerFn = jest.fn(async () => null);
 
     const res = await draftPostVisitRevisionIfEligible({
       customerId: 'cust-2',
@@ -294,10 +310,11 @@ describe('draftPostVisitRevisionIfEligible', () => {
       gates: { smsPostVisitRedraftLive: () => true },
       draftFn,
       lockFn,
-      threadHasLiveAnswerFn: async () => null,
+      threadHasLiveAnswerFn: liveAnswerFn,
     });
 
     expect(lockFn).toHaveBeenCalledWith('sms-post-visit-redraft:sms-in-2', expect.any(Function), { recordHealth: false });
+    expect(liveAnswerFn).toHaveBeenCalledTimes(2);
     expect(res).toEqual({ drafted: true, draftId: 'draft-rev-2', supersedesDraftId: 'draft-orig-2' });
     expect(draftFn).toHaveBeenCalledWith(expect.objectContaining({
       smsLogId: 'sms-in-2',
@@ -307,8 +324,33 @@ describe('draftPostVisitRevisionIfEligible', () => {
       draftTrigger: POST_VISIT_TRIGGER,
       supersedesDraftId: 'draft-orig-2',
       serviceRecordId: 'rec-focus-2',
+      liveEta: false,
       skipAutoSend: true,
     }));
+  });
+
+  test('skips paid draft when staff answers the thread before the advisory lock is acquired', async () => {
+    const dbh = makeDb({
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
+      message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
+      customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
+    });
+    const draftFn = jest.fn();
+    const liveAnswerFn = jest.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('human_answered');
+    const res = await draftPostVisitRevisionIfEligible({
+      customerId: 'cust-2',
+      completedAt: new Date('2026-11-27T17:00:00Z'),
+      visitDateET: '2026-11-27',
+      dbh,
+      gates: { smsPostVisitRedraftLive: () => true },
+      draftFn,
+      lockFn: async (_name, fn) => fn(),
+      threadHasLiveAnswerFn: liveAnswerFn,
+    });
+    expect(res).toEqual({ skipped: 'answered_before_lock' });
+    expect(draftFn).not.toHaveBeenCalled();
   });
 
   test('skips paid draft when another closeout already holds the per-inbound advisory lock', async () => {
@@ -337,7 +379,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
 
   test('retries bounded capacity skips (no_connection) before succeeding or reporting lock_unavailable', async () => {
     const dbh = makeDb({
-      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: null }), chain({ first: null }), chain({ first: null })],
       message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
       customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
     });

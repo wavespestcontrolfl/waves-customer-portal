@@ -225,11 +225,58 @@ async function findPostVisitRedraftCandidates(dbh, { visitDateET, limit = 25, pa
   return candidates;
 }
 
-async function generateClaimedRevision({ dbh, customer, eligible, serviceRecordId, draftFn }) {
+async function threadHasNewerInbound(dbh, { threadLast10, customerId, inboundSmsLogId, inboundCreatedAt }) {
+  const after = inboundSmsLogId && typeof dbh.raw === 'function'
+    ? dbh.raw('(SELECT created_at FROM sms_log WHERE id = ?)', [inboundSmsLogId])
+    : inboundCreatedAt;
+  const row = await dbh('sms_log')
+    .where({ customer_id: customerId, direction: 'inbound' })
+    .whereNot({ id: inboundSmsLogId })
+    .where((w) => {
+      if (threadLast10) {
+        w.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);
+      }
+    })
+    .where((w) => w.whereNull('message_type').orWhereNotIn('message_type', IGNORED_INBOUND_TYPES))
+    .whereRaw("COALESCE(message_type, '') NOT LIKE 'job\\_%'")
+    .whereRaw("TRIM(COALESCE(message_body, '')) <> ''")
+    .where('created_at', '>', after)
+    .first('id');
+  return Boolean(row);
+}
+
+async function generateClaimedRevision({ dbh, customer, eligible, serviceRecordId, draftFn, checkLiveAnswer }) {
   const already = await dbh('message_drafts')
     .where({ sms_log_id: eligible.smsLogId, draft_trigger: POST_VISIT_TRIGGER })
     .first('id');
   if (already) return { skipped: 'already_revised' };
+
+  const threadLast10 = lastTenPhone(eligible.fromPhone);
+  const liveChecker = checkLiveAnswer || threadHasLiveAnswer;
+  if (await liveChecker(dbh, {
+    threadLast10,
+    customerId: customer.id,
+    inboundCreatedAt: eligible.inboundAt,
+    inboundSmsLogId: eligible.smsLogId,
+  })) {
+    return { skipped: 'answered_before_lock' };
+  }
+  if (await threadHasAutomatedAnswer(dbh, {
+    threadLast10,
+    customerId: customer.id,
+    inboundSmsLogId: eligible.smsLogId,
+    inboundCreatedAt: eligible.inboundAt,
+  })) {
+    return { skipped: 'answered_before_lock' };
+  }
+  if (await threadHasNewerInbound(dbh, {
+    threadLast10,
+    customerId: customer.id,
+    inboundSmsLogId: eligible.smsLogId,
+    inboundCreatedAt: eligible.inboundAt,
+  })) {
+    return { skipped: 'superseded_by_newer_inbound' };
+  }
 
   const drafter = draftFn || ((args) => require('./sms-shadow-drafter').draftShadowReply(args));
   const draftId = await drafter({
@@ -243,6 +290,7 @@ async function generateClaimedRevision({ dbh, customer, eligible, serviceRecordI
     draftTrigger: POST_VISIT_TRIGGER,
     supersedesDraftId: eligible.priorDraftId,
     serviceRecordId: serviceRecordId || null,
+    liveEta: false,
     skipAutoSend: true,
   });
   return { drafted: Boolean(draftId), draftId: draftId || null, supersedesDraftId: eligible.priorDraftId };
@@ -296,6 +344,7 @@ async function draftPostVisitRevisionIfEligible(opts = {}) {
         eligible: resolved.eligible,
         serviceRecordId,
         draftFn,
+        checkLiveAnswer: threadHasLiveAnswerFn,
       }),
       { sleepFn },
     );
