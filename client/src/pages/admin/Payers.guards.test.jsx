@@ -134,6 +134,110 @@ describe("PayerDetailSheet cancellation guards and JSON resilience (B-56c)", () 
     });
     expect(screen.queryByText(/Stale Visit/)).not.toBeInTheDocument();
   });
+
+  it("shows a retry error instead of 'Reminders: not started' when HTTP 200 /followups returns invalid JSON or omits sequence, and allows explicit null", async () => {
+    let followupCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const u = String(url);
+        if (u.endsWith("/admin/payers/p1/statements")) {
+          return jsonRes({
+            statements: [
+              { id: "s1", status: "sent", total: 100, period_start: "2026-07-01", period_end: "2026-07-31", invoice_count: 1 },
+            ],
+          });
+        }
+        if (u.endsWith("/admin/payers/p1/ar")) {
+          return jsonRes({ summary: { outstanding_total: 100, past_due_total: 0, statement_count: 1, buckets: {} } });
+        }
+        if (u.endsWith("/statements/s1")) {
+          return jsonRes({ lines: [{ service_date: "2026-07-10", service_type: "Pest Control", total: 100 }] });
+        }
+        if (u.endsWith("/statements/s1/followups")) {
+          followupCalls += 1;
+          if (followupCalls === 1) {
+            // HTTP 200 with malformed JSON body.
+            return { ok: true, status: 200, json: async () => { throw new SyntaxError("Unexpected token '<'"); } };
+          }
+          if (followupCalls === 2) {
+            // HTTP 200 missing the sequence field.
+            return jsonRes({});
+          }
+          return jsonRes({ sequence: null });
+        }
+        return jsonRes({});
+      }),
+    );
+
+    render(<PayerDetailSheet payer={{ id: "p1", display_name: "Acme HOA" }} onClose={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: /S-s1/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load reminder status.");
+    expect(screen.queryByText(/Reminders:\s*not started/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Reminders:\s*status unavailable/)).toBeInTheDocument();
+
+    // Retry #1 returns HTTP 200 without a sequence field — still an error, never "not started".
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(followupCalls).toBe(2));
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load reminder status.");
+    expect(screen.queryByText(/Reminders:\s*not started/)).not.toBeInTheDocument();
+
+    // Retry #2 returns explicit { sequence: null } — valid empty state renders "not started".
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(followupCalls).toBe(3));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText(/Reminders:\s*not started/)).toBeInTheDocument();
+  });
+
+  it("rejects HTTP 200 malformed JSON on statements, statement lines, and payers list instead of rendering empty states", async () => {
+    const badJsonOk = () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("Unexpected end of JSON"); } });
+
+    // PayerDetailSheet statements + lines
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const u = String(url);
+        if (u.endsWith("/admin/payers/p1/statements")) return badJsonOk();
+        if (u.endsWith("/admin/payers/p1/ar")) return jsonRes({ summary: { outstanding_total: 0, past_due_total: 0, statement_count: 0, buckets: {} } });
+        return jsonRes({});
+      }),
+    );
+    render(<PayerDetailSheet payer={{ id: "p1", display_name: "Acme HOA" }} onClose={() => {}} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load this payer's statements.");
+    expect(screen.queryByText(/No statements yet/)).not.toBeInTheDocument();
+
+    // StatementDetail lines
+    cleanup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const u = String(url);
+        if (u.endsWith("/admin/payers/p1/statements")) {
+          return jsonRes({ statements: [{ id: "s1", status: "sent", total: 50, period_start: "2026-07-01", period_end: "2026-07-31", invoice_count: 1 }] });
+        }
+        if (u.endsWith("/admin/payers/p1/ar")) return jsonRes({ summary: { outstanding_total: 50, past_due_total: 0, statement_count: 1, buckets: {} } });
+        if (u.endsWith("/statements/s1")) return badJsonOk();
+        if (u.endsWith("/statements/s1/followups")) return jsonRes({ sequence: null });
+        return jsonRes({});
+      }),
+    );
+    render(<PayerDetailSheet payer={{ id: "p1", display_name: "Acme HOA" }} onClose={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: /S-s1/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load statement visits.");
+    expect(screen.queryByText(/No visits on this statement/)).not.toBeInTheDocument();
+
+    // PayersPage list
+    cleanup();
+    vi.stubGlobal("fetch", vi.fn(async () => badJsonOk()));
+    render(
+      <MemoryRouter initialEntries={["/admin/payers"]}>
+        <PayersPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load payers.");
+    expect(screen.queryByText(/No payers yet/)).not.toBeInTheDocument();
+  });
 });
 
 describe("PayersPage URL encoding, detail cancellation, and dirty edit modal guard (B-56c)", () => {

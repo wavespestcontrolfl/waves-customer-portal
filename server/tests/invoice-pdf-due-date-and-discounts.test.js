@@ -9,7 +9,7 @@
  */
 
 const PDFDocument = require('pdfkit');
-const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
+const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('../services/pdf/invoice-pdf');
 const { PDF_TYPE } = require('../services/pdf/pdf-tokens');
 
 function invoice(overrides = {}) {
@@ -180,6 +180,74 @@ describe('invoice PDF wrapped discount labels in totalsBlock (B-39)', () => {
     expect(firstDiscount).toBeDefined();
     expect(totalRow).toBeDefined();
     expect(firstDiscount.page).toBe(totalRow.page);
+    expect(totalRow.y).toBeLessThanOrEqual(730);
+  });
+
+  test('reserves wrapped discount height on flat (single-property) invoices with 24 rows so TOTAL stays within PAGE_BOTTOM', async () => {
+    const wrappedDiscount = 'WaveGuard Platinum Multi-Service Loyalty Promotional Discount Applied (15%)';
+    const lines = Array.from({ length: 24 }, (_, i) => ({
+      description: `Quarterly Pest Service Row ${i + 1}`,
+      quantity: 1,
+      unit_price: 10,
+      amount: 10,
+    }));
+    lines.push({ _kind: 'discount', description: wrappedDiscount, quantity: 1, unit_price: -36, amount: -36 });
+
+    const calls = await captureCalls(() => buildInvoicePDFBuffer(invoice({
+      subtotal: 240,
+      discount_amount: 36,
+      discount_label: wrappedDiscount,
+      total: 204,
+      line_items: lines,
+    })));
+    const subtotalRow = calls.find((c) => c.text === 'Subtotal');
+    const discountRow = calls.find((c) => c.text === wrappedDiscount);
+    const totalRow = calls.find((c) => c.text === 'TOTAL');
+    expect(subtotalRow).toBeDefined();
+    expect(discountRow).toBeDefined();
+    expect(totalRow).toBeDefined();
+    expect(subtotalRow.page).toBe(totalRow.page);
+    expect(discountRow.page).toBe(totalRow.page);
+    expect(totalRow.page).toBeGreaterThan(1);
+    expect(totalRow.y).toBeLessThanOrEqual(730);
+  });
+
+  test('reserves totals height on flat (single-property) receipts with 24 rows, wrapped discount, and surcharge', async () => {
+    const wrappedDiscount = 'WaveGuard Platinum Multi-Service Loyalty Promotional Discount Applied (15%)';
+    const lines = Array.from({ length: 24 }, (_, i) => ({
+      description: `Quarterly Pest Service Row ${i + 1}`,
+      quantity: 1,
+      unit_price: 10,
+      amount: 10,
+    }));
+    lines.push({ _kind: 'discount', description: wrappedDiscount, quantity: 1, unit_price: -36, amount: -36 });
+
+    const calls = await captureCalls(() => buildReceiptPDFBuffer(
+      invoice({
+        status: 'paid',
+        paid_at: new Date('2026-07-19T15:00:00Z'),
+        subtotal: 240,
+        discount_amount: 36,
+        discount_label: wrappedDiscount,
+        total: 209.92,
+        line_items: lines,
+      }),
+      {
+        amount: 209.92,
+        refund_amount: 0,
+        card_brand: 'visa',
+        card_last_four: '4242',
+        surcharge_amount_cents: 592,
+        surcharge_rate_bps: 290,
+        metadata: { invoice_id: 'inv-1' },
+      },
+    ));
+    const surchargeRow = calls.find((c) => c.text === 'Credit card surcharge (2.9%)');
+    const totalRow = calls.find((c) => c.text === 'TOTAL');
+    expect(surchargeRow).toBeDefined();
+    expect(totalRow).toBeDefined();
+    expect(surchargeRow.page).toBe(totalRow.page);
+    expect(totalRow.page).toBeGreaterThan(1);
     expect(totalRow.y).toBeLessThanOrEqual(730);
   });
 });

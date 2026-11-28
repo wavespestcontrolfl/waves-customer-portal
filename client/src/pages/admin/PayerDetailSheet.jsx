@@ -88,6 +88,13 @@ const parseCurrencyInput = (value) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+async function readJson(path, fallbackError) {
+  const r = await adminFetch(path);
+  const d = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(d?.error || fallbackError || `HTTP ${r.status}`);
+  return d;
+}
+
 export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const [tab, setTab] = useState("statements");
   const [statements, setStatements] = useState([]);
@@ -107,11 +114,10 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
     setLoading(true);
     setStatementsError("");
     try {
-      const r = await adminFetch(`/admin/payers/${encodeURIComponent(payer.id)}/statements`);
-      const d = await r.json().catch(() => null);
+      const d = await readJson(`/admin/payers/${encodeURIComponent(payer.id)}/statements`);
       if (reqId !== statementsReqRef.current) return;
-      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
-      setStatements(Array.isArray(d?.statements) ? d.statements : []);
+      if (!Array.isArray(d?.statements)) throw new Error("Could not load this payer's statements.");
+      setStatements(d.statements);
     } catch (err) {
       if (reqId === statementsReqRef.current) {
         setStatementsError(err.message || "Could not load this payer's statements.");
@@ -126,10 +132,8 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
     setArLoading(true);
     setArError("");
     try {
-      const r = await adminFetch(`/admin/payers/${encodeURIComponent(payer.id)}/ar`);
-      const d = await r.json().catch(() => null);
+      const d = await readJson(`/admin/payers/${encodeURIComponent(payer.id)}/ar`);
       if (reqId !== arReqRef.current) return;
-      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
       if (!d?.summary) throw new Error("Could not load this payer's balance.");
       setAr(d);
     } catch (err) {
@@ -300,21 +304,25 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
     setLinesError("");
     setSequenceError("");
     try {
-      const r = await adminFetch(base);
-      const d = await r.json().catch(() => null);
+      const d = await readJson(base, "Could not load statement visits.");
       if (reqId !== detailReqRef.current) return;
-      if (!r.ok) throw new Error(d?.error || "Could not load statement visits.");
-      setLines(Array.isArray(d?.lines) ? d.lines : []);
+      if (!Array.isArray(d?.lines)) throw new Error("Could not load statement visits.");
+      setLines(d.lines);
     } catch (err) {
       if (reqId !== detailReqRef.current) return;
       setLinesError(err.message || "Could not load statement visits.");
     }
     try {
-      const r2 = await adminFetch(`${base}/followups`);
-      const d2 = await r2.json().catch(() => null);
+      const d2 = await readJson(`${base}/followups`, "Could not load reminder status.");
       if (reqId !== detailReqRef.current) return;
-      if (!r2.ok) throw new Error(d2?.error || "Could not load reminder status.");
-      setSequence(d2?.sequence ?? null);
+      if (!d2 || typeof d2 !== "object" || !Object.prototype.hasOwnProperty.call(d2, "sequence")) {
+        throw new Error("Could not load reminder status.");
+      }
+      const seq = d2.sequence;
+      if (seq !== null && (typeof seq !== "object" || Array.isArray(seq))) {
+        throw new Error("Could not load reminder status.");
+      }
+      setSequence(seq);
     } catch (err) {
       if (reqId === detailReqRef.current) {
         setSequenceError(err.message || "Could not load reminder status.");
@@ -449,7 +457,13 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
 
       {sequenceError && <ActionFeedback error onRetry={loadDetail} className="mt-3">{sequenceError}</ActionFeedback>}
       {showDunning && (
-        <DunningControls base={base} sequence={sequence} busy={busy} act={act} />
+        <DunningControls
+          base={base}
+          sequence={sequence}
+          statusUnavailable={Boolean(sequenceError && !sequence)}
+          busy={busy}
+          act={act}
+        />
       )}
 
       {notice && (
@@ -496,14 +510,16 @@ function ReconcileForm({ total, busy, onCancel, onSubmit }) {
   );
 }
 
-function DunningControls({ base, sequence, busy, act }) {
+function DunningControls({ base, sequence, statusUnavailable = false, busy, act }) {
   const st = sequence?.status || null;
   return (
     <div className="mt-2 pt-2 border-t border-zinc-100">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-ui-caption text-ink-secondary">
           Reminders:{" "}
-          {st === "paused"
+          {statusUnavailable
+            ? "status unavailable"
+            : st === "paused"
             ? "paused"
             : st === "stopped"
             ? "stopped"

@@ -117,9 +117,10 @@ export default function PayersPage() {
       if (includeInactive) params.set("includeInactive", "true");
       const r = await adminFetch(`/admin/payers?${params.toString()}`);
       const data = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
       if (version !== loadVersion.current) return;
-      setPayers(Array.isArray(data?.payers) ? data.payers : []);
+      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+      if (!Array.isArray(data?.payers)) throw new Error("Could not load payers.");
+      setPayers(data.payers);
     } catch (err) {
       if (version === loadVersion.current) setLoadError(err.message || "Could not load payers.");
     } finally {

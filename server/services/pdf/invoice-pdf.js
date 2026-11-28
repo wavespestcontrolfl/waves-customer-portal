@@ -311,13 +311,14 @@ function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
   doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(INK);
   if (propertyGroups) {
     y = groupedLineItemsTable(doc, propertyGroups, x, y, width);
-    // The totals block that follows advances the same absolute y: reserve its
-    // height (plus a receipt's surcharge row) so a long grouped table never
-    // leaves TOTAL below the page.
-    y = ensureRoom(doc, y, 170 + extraTotalsHeight);
   } else {
     for (const item of visibleLineItems) y = drawLineItemRow(doc, item, x, y, width);
   }
+  // The totals block that follows advances the same absolute y: reserve its
+  // height (plus a receipt's surcharge row and any wrapped/extra discount
+  // rows) so neither a long flat table nor a grouped table leaves TOTAL
+  // below the page.
+  y = ensureRoom(doc, y, 170 + extraTotalsHeight);
   doc.restore();
   return y;
 }
