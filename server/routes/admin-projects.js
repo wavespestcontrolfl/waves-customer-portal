@@ -3391,7 +3391,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
   // drafts (there's no DB uniqueness backstop on projects.invoice_id). A FOR UPDATE
   // lock makes the loser block until the winner commits the link, then re-read it
   // and reuse the same invoice. The lock is released on commit.
-  return db.transaction(async (trx) => {
+  const resolved = await db.transaction(async (trx) => {
     const locked = await lockProjectForInvoiceResolve(trx, project);
     const linkedInvoiceId = locked.invoice_id || project.invoice_id;
 
@@ -3409,7 +3409,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       const prior = await trx('invoices').where({ id: linkedInvoiceId, customer_id: project.customer_id }).first();
       if (isReusableInvoice(prior)) {
         project.invoice_id = linkedInvoiceId;
-        return { invoice: await maybeRepriceWdoDraft(prior, project, { database: trx }), created: false };
+        return { invoice: prior, created: false, needsReprice: true };
       }
     }
 
@@ -3427,7 +3427,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .first();
       if (linked) {
         await persistProjectInvoiceLink(project, linked.id, trx);
-        return { invoice: await maybeRepriceWdoDraft(linked, project, { database: trx }), created: false };
+        return { invoice: linked, created: false, needsReprice: true };
       }
     }
 
@@ -3655,6 +3655,13 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     await persistProjectInvoiceLink(project, builtInvoice.id, trx);
     return { invoice: builtInvoice, created: true };
   });
+  // Reprice reused WDO drafts AFTER releasing the project lock so InvoiceService.update
+  // never takes invoices FOR UPDATE while this transaction holds projects FOR UPDATE
+  // (preserving canonical invoices -> projects lock order with voidInvoice).
+  if (resolved?.needsReprice) {
+    return { invoice: await maybeRepriceWdoDraft(resolved.invoice, project), created: false };
+  }
+  return resolved;
 }
 
 // Normalize an invoice's line_items into an array for PDF rendering — the
