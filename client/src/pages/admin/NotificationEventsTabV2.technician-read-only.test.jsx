@@ -6,7 +6,7 @@
 // switches disabled, fields disabled, no Save / Delete. An admin keeps every control.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import NotificationEventsTabV2 from "./NotificationEventsTabV2";
 
@@ -44,4 +44,21 @@ it("control: an admin keeps Save and enabled switches and fields on the SMS card
   expect(screen.getAllByRole("button", { name: /Save/ })).toHaveLength(1);
   expect(screen.getByLabelText("Disable Reminder text")).not.toBeDisabled();
   expect(screen.getByDisplayValue("See you tomorrow")).not.toBeDisabled();
+});
+
+it("preserves unsaved SMS draft edits when save fails", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url, opts = {}) => {
+    if (opts.method === "PUT") {
+      return { ok: false, status: 400, json: async () => ({ error: "Missing required placeholder" }) };
+    }
+    return { ok: true, json: async () => EVENTS };
+  }));
+
+  render(<NotificationEventsTabV2 isAdminRole />);
+  const textarea = await screen.findByDisplayValue("See you tomorrow");
+  fireEvent.change(textarea, { target: { value: "Edited draft body" } });
+  fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+
+  expect(await screen.findByText(/SMS save failed: Missing required placeholder/)).toBeInTheDocument();
+  expect(screen.getByDisplayValue("Edited draft body")).toBeInTheDocument();
 });

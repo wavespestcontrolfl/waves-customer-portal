@@ -367,3 +367,98 @@ describe("CSR Coach task actions", () => {
     expect(countCalls(calls, "/api/admin/csr/follow-up-tasks")).toBe(3);
   });
 });
+
+describe("SMS templates residual C06 guards", () => {
+  it("survives malformed variables JSON without crashing", async () => {
+    stubFetch(({ path }) => {
+      if (path === "/api/admin/sms-templates") {
+        return json({
+          templates: [
+            { ...template, id: 10, name: "Broken vars", variables: "{not-valid-json" },
+            { ...template, id: 11, name: "Valid vars", variables: '["first_name"]' },
+          ],
+        });
+      }
+      return json({ issues: [] });
+    });
+
+    render(<SmsTemplatesTabV2 />);
+    expect(await screen.findByText("Broken vars")).toBeInTheDocument();
+    expect(screen.getByText("Valid vars")).toBeInTheDocument();
+    expect(screen.getByText("{first_name}")).toBeInTheDocument();
+  });
+
+  it("tracks concurrent toggles per template id without a scalar race", async () => {
+    let releaseA;
+    let releaseB;
+    const gateA = new Promise((r) => { releaseA = r; });
+    const gateB = new Promise((r) => { releaseB = r; });
+    stubFetch(({ path, method }) => {
+      if (path === "/api/admin/sms-templates" && method === "GET") {
+        return json({
+          templates: [
+            { ...template, id: 1, name: "Template A", is_active: true },
+            { ...template, id: 2, name: "Template B", is_active: true },
+          ],
+        });
+      }
+      if (path === "/api/admin/sms-templates/1" && method === "PUT") return gateA.then(() => json({ success: true }));
+      if (path === "/api/admin/sms-templates/2" && method === "PUT") return gateB.then(() => json({ success: true }));
+      return json({ issues: [] });
+    });
+
+    render(<SmsTemplatesTabV2 />);
+    const toggleA = await screen.findByRole("switch", { name: "Disable Template A" });
+    const toggleB = screen.getByRole("switch", { name: "Disable Template B" });
+
+    fireEvent.click(toggleA);
+    fireEvent.click(toggleB);
+    await waitFor(() => {
+      expect(toggleA).toBeDisabled();
+      expect(toggleB).toBeDisabled();
+    });
+
+    await act(async () => { releaseA(); });
+    await waitFor(() => expect(toggleA).toBeEnabled());
+    // B must remain disabled while its own PUT is still in flight.
+    expect(toggleB).toBeDisabled();
+
+    await act(async () => { releaseB(); });
+    await waitFor(() => expect(toggleB).toBeEnabled());
+  });
+
+  it("URL-encodes templateKey and variantKey when loading and saving variants", async () => {
+    const rawUrls = [];
+    global.fetch = vi.fn((url, options = {}) => {
+      rawUrls.push({ url: String(url), method: options.method || "GET" });
+      if (String(url).endsWith("/api/admin/sms-templates")) {
+        return Promise.resolve(json({
+          templates: [{ ...template, id: 20, template_key: "key/with spaces", name: "Encoded Key" }],
+        }));
+      }
+      if (String(url).includes("/variants")) {
+        if (options.method === "PUT") {
+          return Promise.resolve(json({
+            variant: { id: 1, variant_key: "v/1?x", name: "V1", body: "Updated", status: "active", weight: 1 },
+          }));
+        }
+        return Promise.resolve(json({
+          variants: [{ id: 1, variant_key: "v/1?x", name: "V1", body: "Body", status: "active", weight: 1 }],
+        }));
+      }
+      return Promise.resolve(json({ issues: [] }));
+    });
+
+    render(<SmsTemplatesTabV2 />);
+    await screen.findByText("Encoded Key");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByText("V1");
+    expect(rawUrls.some((c) => c.url.includes("/api/admin/sms-templates/key%2Fwith%20spaces/variants"))).toBe(true);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Save Variant" }));
+    await waitFor(() => expect(
+      rawUrls.some((c) => c.method === "PUT" && c.url.includes("/api/admin/sms-templates/key%2Fwith%20spaces/variants/v%2F1%3Fx")),
+    ).toBe(true));
+  });
+});

@@ -236,14 +236,104 @@ function validateSaveInput(input, expectedRevision) {
   return { enabled, approvedItems, maxPerOrderCents, maxMonthlyCents };
 }
 
+function parseJsonObj(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
+/**
+ * Lists history-total auto-orders that have ALREADY passed their final pre-POST
+ * authorization inside CAPS_LOCK_KEY (`evidence.postAuthorizedAt` set) and are
+ * still `status = 'placing'`. Called inside saveHistoryOrderPolicy's lock so
+ * turning the switch off immediately reports any already-authorized submission
+ * that staff must wait for on the Restock tab before ordering by hand.
+ */
+async function listInFlightHistoryOrders(conn = db) {
+  const adapters = Object.keys(ALLOWED_ADAPTERS);
+  const rows = await conn('vendor_orders as vo')
+    .leftJoin('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
+    .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
+    .where('vo.status', 'placing')
+    .whereIn('vo.adapter', adapters)
+    .whereRaw("NULLIF(vo.evidence->>'postAuthorizedAt', '') IS NOT NULL")
+    .select('vo.id', 'vo.restock_request_id', 'vo.adapter', 'vo.amount_cents', 'vo.request_payload', 'vo.created_at', 'vo.evidence', 'pc.name as product_name');
+  return (rows || []).map((r) => {
+    const payload = parseJsonObj(r.request_payload);
+    const ev = parseJsonObj(r.evidence);
+    return {
+      ledgerId: r.id,
+      requestId: r.restock_request_id || null,
+      adapter: r.adapter,
+      productName: r.product_name || null,
+      vendorSku: payload.vendorSku || null,
+      amountCents: r.amount_cents == null ? null : Number(r.amount_cents),
+      postAuthorizedAt: ev.postAuthorizedAt || null,
+      createdAt: r.created_at ? new Date(r.created_at).toISOString() : null,
+    };
+  });
+}
+
+/**
+ * Finds any OTHER active auto-reorder product assigned to the same vendor whose
+ * winning eligible vendor_pricing row maps to the exact same vendorSku.
+ * Used inside CAPS_LOCK_KEY by authorizeHistoryOrder so a second product mapped
+ * to an already-approved Sticker Mule SKU can never spend against it.
+ */
+async function findDuplicateSkuProducts(conn = db, { vendorId, vendorSku, excludeProductId, now = new Date() }) {
+  const sku = String(vendorSku || '').trim();
+  if (!vendorId || !sku) return [];
+  const others = await conn('products_catalog')
+    .where({ active: true, auto_reorder_enabled: true, auto_reorder_vendor_id: vendorId })
+    .whereNot('id', excludeProductId)
+    .select('id', 'name')
+    .orderBy('name', 'asc');
+  const conflicts = [];
+  for (const other of others || []) {
+    const pricing = await vendorPricingFor(conn, other.id, vendorId, now);
+    const otherSku = pricing?.vendor_sku ? String(pricing.vendor_sku).trim() : null;
+    if (otherSku === sku) conflicts.push({ productId: other.id, name: other.name });
+  }
+  return conflicts;
+}
+
+async function assertApprovedItemsEligible(trx, approvedItems, now) {
+  const eligible = await listEligibleHistoryItems(trx, { now });
+  const eligibleKeys = new Set();
+  const activeAutoCounts = new Map();
+  for (const item of eligible) {
+    if (!item.itemKey) continue;
+    if (item.eligible) eligibleKeys.add(item.itemKey);
+    if (item.autoReorderEnabled) activeAutoCounts.set(item.itemKey, (activeAutoCounts.get(item.itemKey) || 0) + 1);
+  }
+  const bad = approvedItems.filter((k) => !eligibleKeys.has(k));
+  if (bad.length > 0) {
+    throw policyError(
+      `Cannot enable auto-reorder for ineligible item(s): ${bad.join(', ')} (each item must be active, have Reorder when low enabled, and have an active approved Sticker Mule price row)`,
+      400,
+      'ineligible_item',
+      { ineligibleItems: bad }
+    );
+  }
+  const dup = approvedItems.filter((k) => (activeAutoCounts.get(k) || 0) > 1);
+  if (dup.length > 0) {
+    throw policyError(
+      `Cannot enable auto-reorder for SKU(s) mapped to multiple active auto-reorder products: ${dup.join(', ')} (each approved Sticker Mule SKU may belong to only one auto-reorder product)`,
+      400,
+      'duplicate_sku_mapping',
+      { duplicateItems: dup }
+    );
+  }
+}
+
 /**
  * Atomically updates the DB-backed history-total auto-order policy.
  *
  * Lock order matches order-dispatch.js:
  *   1. pg_advisory_xact_lock(hashtext(CAPS_LOCK_KEY))
  *   2. system_settings row FOR UPDATE
- *   3. (when enabling) catalog/pricing eligibility reads
- *   4. upsert system_settings + critical audit_log insert
+ *   3. (when enabling) catalog/pricing eligibility & single-SKU checks
+ *   4. upsert system_settings + critical audit_log insert + in-flight check
  */
 async function saveHistoryOrderPolicy(
   conn = db,
@@ -266,19 +356,7 @@ async function saveHistoryOrderPolicy(
     }
 
     // Turning OFF is an emergency kill switch: never blocked by stale/expired catalog items.
-    if (validated.enabled) {
-      const eligible = await listEligibleHistoryItems(trx, { now });
-      const eligibleKeys = new Set(eligible.filter((i) => i.eligible && i.itemKey).map((i) => i.itemKey));
-      const bad = validated.approvedItems.filter((k) => !eligibleKeys.has(k));
-      if (bad.length > 0) {
-        throw policyError(
-          `Cannot enable auto-reorder for ineligible item(s): ${bad.join(', ')} (each item must be active, have Reorder when low enabled, and have an active approved Sticker Mule price row)`,
-          400,
-          'ineligible_item',
-          { ineligibleItems: bad }
-        );
-      }
-    }
+    if (validated.enabled) await assertApprovedItemsEligible(trx, validated.approvedItems, now);
 
     const next = {
       enabled: validated.enabled,
@@ -307,6 +385,8 @@ async function saveHistoryOrderPolicy(
       [key, JSON.stringify(stored), now, now]
     );
 
+    const inFlightOrders = await listInFlightHistoryOrders(trx);
+
     await auditHistoryOrderPolicyChange({
       actor_id: actorUuid,
       key,
@@ -317,7 +397,7 @@ async function saveHistoryOrderPolicy(
       trx,
     });
 
-    return { policy: next, previous: current };
+    return { policy: next, previous: current, inFlightOrders };
   });
 }
 
@@ -333,5 +413,7 @@ module.exports = {
   isItemApproved,
   readHistoryOrderPolicy,
   listEligibleHistoryItems,
+  listInFlightHistoryOrders,
+  findDuplicateSkuProducts,
   saveHistoryOrderPolicy,
 };

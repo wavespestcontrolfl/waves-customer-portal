@@ -24,7 +24,6 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { gsmSafeName, normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 const { countSegments } = require('./messaging/segment-counter');
 const { isEnabled } = require('../config/feature-gates');
-const { establishedContactLinkedDraft } = require('./booking-contact-linked-handoff');
 const { etDateString } = require('../utils/datetime-et');
 const Experiments = require('./experimentation/growthbook');
 
@@ -112,17 +111,54 @@ async function hasActiveBooking(intent) {
 // marked suppressed (best effort) and skipped; a LOOKUP ERROR fails closed
 // (skip this tick, retry next). Gate off → the flow still books, so nothing
 // here applies.
+async function suppressRecoveryIntent(intent, reason) {
+  logger.info(`[booking-recovery] skip ${intent.id}: ${reason}`);
+  await db('booking_intents').where({ id: intent.id }).update({ suppressed: true, updated_at: db.fn.now() }).catch(() => {});
+  return true;
+}
+
+function handoffRecipientMismatch(intent, draft, linkedRoot) {
+  const hasPhoneMeta = draft.customer_phone !== undefined || linkedRoot?.phone !== undefined;
+  const draftPhone10 = last10(draft.customer_phone || linkedRoot?.phone);
+  const intentPhone10 = last10(intent.phone);
+  if (draftPhone10 !== intentPhone10 && (hasPhoneMeta || (draftPhone10 && intentPhone10))) return true;
+  if (hasPhoneMeta && !draftPhone10) return true;
+  const intentEmail = String(intent.email || '').trim().toLowerCase();
+  const draftEmail = String(draft.customer_email || linkedRoot?.email || '').trim().toLowerCase();
+  return Boolean(intentEmail && draftEmail !== intentEmail && (hasPhoneMeta || draftEmail));
+}
+
 async function blockedByContactLinkedHandoff(intent) {
   if (!intent.pricing_estimate_id || !isEnabled('bookingCustomersOnly')) return false;
   try {
-    if (!(await establishedContactLinkedDraft(db, intent.pricing_estimate_id))) return false;
+    const draft = await db('estimates')
+      .where({ id: intent.pricing_estimate_id })
+      .first('customer_id', 'customer_phone', 'customer_email', 'source', 'status', 'archived_at', 'expires_at', 'estimate_data');
+    if (!draft) return suppressRecoveryIntent(intent, 'handoff draft missing');
+    const hasDraftMeta = draft.source !== undefined || draft.status !== undefined
+      || draft.archived_at !== undefined || draft.expires_at !== undefined;
+    const expired = Boolean(draft.expires_at && new Date(draft.expires_at) <= new Date());
+    const { wizardDraftSelfServeBookable } = require('./booking-pay-at-visit');
+    if (hasDraftMeta && (expired || !wizardDraftSelfServeBookable(draft))) {
+      return suppressRecoveryIntent(intent, 'handoff draft expired or ineligible');
+    }
+    let linkedRoot = null;
+    if (draft.customer_id) {
+      const { loadContactLinkedAccountRows, isBlockingLinkedRow } = require('./booking-contact-linked-handoff');
+      const { root, rows } = await loadContactLinkedAccountRows(db, draft.customer_id);
+      if (!root || rows.some(isBlockingLinkedRow)) {
+        return suppressRecoveryIntent(intent, 'handoff draft is contact-linked to an established customer');
+      }
+      linkedRoot = root;
+    }
+    if (handoffRecipientMismatch(intent, draft, linkedRoot)) {
+      return suppressRecoveryIntent(intent, 'handoff draft contact changed');
+    }
+    return false;
   } catch (e) {
     logger.warn(`[booking-recovery] contact-link check failed for intent ${intent.id} — skipping (fail closed): ${e.message}`);
     return true;
   }
-  logger.info(`[booking-recovery] skip ${intent.id}: handoff draft is contact-linked to an established customer`);
-  await db('booking_intents').where({ id: intent.id }).update({ suppressed: true, updated_at: db.fn.now() }).catch(() => {});
-  return true;
 }
 
 // A visitor who filed a /book "Can't find a time?" request asked the office to

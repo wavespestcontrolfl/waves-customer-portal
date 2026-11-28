@@ -3,11 +3,78 @@ import { createPortal } from "react-dom";
 import { ActionFeedback, Button, Checkbox, Field, Input, Radio, UiSurface } from "../ui";
 import useModalFocus from "../../hooks/useModalFocus";
 import { etDatetimeLocalToISO } from "../../lib/timezone";
+import { adminLoginUrl } from "../../utils/admin-fetch";
 
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const SendContext = createContext(null);
 const headers = () => ({ "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` });
 const CHANNEL_LABELS = { sms: "Text message", email: "Email", both: "Text message and email" };
 const palmsLabel = (count) => `${count} palm${count === 1 ? "" : "s"}`;
+
+async function parseJsonReceipt(response) {
+  try { return { ok: true, data: await response.json() }; } catch { return { ok: false, data: {} }; }
+}
+
+function isChannelDisabled(key, preview, allowedChannels) {
+  const allowed = Array.isArray(allowedChannels) && allowedChannels.length ? allowedChannels : null;
+  if (allowed) {
+    if (key === "both" && (!allowed.includes("sms") || !allowed.includes("email"))) return true;
+    if (key !== "both" && !allowed.includes(key)) return true;
+  }
+  return (key !== "email" && (!preview.customerPhone || !!preview.smsBlockReason))
+    || (key !== "sms" && !preview.customerEmail);
+}
+
+function isPreDispatchRejection(status, data) {
+  if (data?.channels) return false;
+  if (status === 400 || status === 422) return true;
+  return status === 409 && data?.code !== "SEND_OUTCOME_UNCERTAIN";
+}
+
+function classifySendResponse(response, parsed, isRetry) {
+  const { data } = parsed;
+  if (response.ok && !parsed.ok) {
+    return { kind: "throw", error: "The server returned an unreadable send receipt." };
+  }
+  if (!response.ok && !isRetry && parsed.ok && isPreDispatchRejection(response.status, data)) {
+    return { kind: "unlock", error: data.error || "Send could not be started. Review the details and try again." };
+  }
+  if (!response.ok && !data.channels) {
+    return { kind: "throw", error: data.error || "Send failed. Your saved estimate is retained." };
+  }
+  return {
+    kind: "outcome",
+    outcome: { ...data, status: response.status },
+    error: response.ok ? "" : (data.error || "No requested channel reached a provider."),
+  };
+}
+
+function validateSendInputs({ scheduledAt, preview, palmCount, hasAttempt }) {
+  let scheduled = null;
+  if (scheduledAt && !hasAttempt) {
+    // The portal is Eastern-only. An offset supplied by the selected date's
+    // ET calendar avoids interpreting a datetime-local value in another zone.
+    const when = new Date(etDatetimeLocalToISO(scheduledAt));
+    if (!Number.isFinite(when.getTime()) || when <= new Date()) {
+      return { error: "Choose a future send time in Eastern time." };
+    }
+    scheduled = when.toISOString();
+  }
+  const palmsToCount = preview.satellitePalmCount;
+  let confirmedPalmCount = null;
+  if (palmsToCount != null && !hasAttempt) {
+    if (!palmCount) {
+      return { error: "Type the number of palms you counted on the aerial photo." };
+    }
+    confirmedPalmCount = Number(palmCount);
+    if (confirmedPalmCount !== palmsToCount) {
+      return {
+        error: `You counted ${palmsLabel(confirmedPalmCount)}, but this quote priced ${palmsToCount}. Rebuild the quote with ${palmsLabel(confirmedPalmCount)} in the estimate builder, then send it.`,
+      };
+    }
+  }
+  return { scheduled, confirmedPalmCount };
+}
 
 export function useEstimateSend() {
   return useContext(SendContext);
@@ -50,15 +117,21 @@ export default function EstimateSendDialog({ request, onClose }) {
   const inFlight = useRef(false);
   const attempt = useRef(null);
   const sendingLabel = useRef("");
-  const dialogRef = useModalFocus(true, () => { if (!inFlight.current) onClose(outcome); });
+  const closeResult = () => outcome || (attempt.current ? { uncertain: true } : null);
+  const dialogRef = useModalFocus(true, () => { if (!inFlight.current) onClose(closeResult()); });
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/admin/estimates/${request.id}/send-preview`, { headers: headers(), signal: controller.signal })
+    fetch(`${API_BASE}/admin/estimates/${request.id}/send-preview`, { headers: headers(), signal: controller.signal })
       .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Could not load the saved estimate.");
-        if (!controller.signal.aborted) setPreview(data);
+        if (response.status === 401) {
+          window.location.href = adminLoginUrl(window.location);
+          throw new Error("Session expired");
+        }
+        const parsed = await parseJsonReceipt(response);
+        if (!response.ok) throw new Error(parsed.data.error || "Could not load the saved estimate.");
+        if (!parsed.ok) throw new Error("The server returned an unreadable estimate preview.");
+        if (!controller.signal.aborted) setPreview(parsed.data);
       })
       .catch((err) => { if (!controller.signal.aborted) setError(err.message); });
     return () => controller.abort();
@@ -66,27 +139,9 @@ export default function EstimateSendDialog({ request, onClose }) {
 
   async function send() {
     if (inFlight.current || !preview || !method || outcome) return;
-    let scheduled = null;
-    if (scheduledAt) {
-      // The portal is Eastern-only. An offset supplied by the selected date's
-      // ET calendar avoids interpreting a datetime-local value in another zone.
-      const when = new Date(etDatetimeLocalToISO(scheduledAt));
-      if (!Number.isFinite(when.getTime()) || when <= new Date()) { setError("Choose a future send time in Eastern time."); return; }
-      scheduled = when.toISOString();
-    }
-    // A satellite palm count is a suggestion until the admin types the real
-    // count. A different count means the quote is rebuilt first; it is
-    // refused here, before an attempt is recorded.
-    const palmsToCount = preview.satellitePalmCount;
-    let confirmedPalmCount = null;
-    if (palmsToCount != null && !attempt.current) {
-      if (!palmCount) { setError("Type the number of palms you counted on the aerial photo."); return; }
-      confirmedPalmCount = Number(palmCount);
-      if (confirmedPalmCount !== palmsToCount) {
-        setError(`You counted ${palmsLabel(confirmedPalmCount)}, but this quote priced ${palmsToCount}. Rebuild the quote with ${palmsLabel(confirmedPalmCount)} in the estimate builder, then send it.`);
-        return;
-      }
-    }
+    const isRetry = Boolean(attempt.current);
+    const validated = validateSendInputs({ scheduledAt, preview, palmCount, hasAttempt: isRetry });
+    if (validated.error) { setError(validated.error); return; }
     inFlight.current = true;
     sendingLabel.current = submitLabel;
     setBusy(true);
@@ -94,21 +149,34 @@ export default function EstimateSendDialog({ request, onClose }) {
     // Keep the exact body/key after a transport failure. Only a new dialog is
     // a deliberate new attempt; the server returns completed attempt receipts.
     attempt.current ||= {
-      sendMethod: method, scheduledAt: scheduled,
+      sendMethod: method, scheduledAt: validated.scheduled,
       expectedEditVersion: preview.editVersion, messageVersion: preview.messageVersion,
       groupVersions: preview.groupVersions,
       idempotencyKey: crypto.randomUUID(), acknowledgeEngineReview: acknowledged,
       acknowledgeUncertainSend: acknowledged,
-      ...(confirmedPalmCount != null ? { confirmedPalmCount } : {}),
+      ...(validated.confirmedPalmCount != null ? { confirmedPalmCount: validated.confirmedPalmCount } : {}),
     };
     try {
-      const response = await fetch(`/api/admin/estimates/${request.id}/send`, {
+      const response = await fetch(`${API_BASE}/admin/estimates/${request.id}/send`, {
         method: "POST", headers: headers(), body: JSON.stringify(attempt.current),
       });
-      const data = await response.json();
-      if (!response.ok && !data.channels) throw new Error(data.error || "Send failed. Your saved estimate is retained.");
-      setOutcome({ ...data, status: response.status });
-      if (!response.ok) setError(data.error || "No requested channel reached a provider.");
+      if (response.status === 401) {
+        if (!isRetry) attempt.current = null;
+        window.location.href = adminLoginUrl(window.location);
+        setError("Session expired. Sign in again to send.");
+        return;
+      }
+      const verdict = classifySendResponse(response, await parseJsonReceipt(response), isRetry);
+      if (verdict.kind === "throw") throw new Error(verdict.error);
+      if (verdict.kind === "unlock") {
+        // Server rejected the original request before any provider dispatch — release
+        // the attempt lock so the operator can adjust inputs and retry cleanly.
+        attempt.current = null;
+        setError(verdict.error);
+        return;
+      }
+      setOutcome(verdict.outcome);
+      if (verdict.error) setError(verdict.error);
     } catch (err) {
       setError(`${err.message} The saved estimate is retained. Retrying checks the same attempt.`);
     } finally {
@@ -131,7 +199,7 @@ export default function EstimateSendDialog({ request, onClose }) {
       <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="estimate-send-title" className="w-full max-w-2xl max-h-full overflow-y-auto bg-white text-ink-primary rounded-sm shadow-xl p-5 sm:p-6 text-16">
         <div className="flex items-start justify-between gap-4">
           <div><h2 id="estimate-send-title" className="text-22 font-medium">Review and send</h2><p className="text-14 text-ink-secondary mt-1">The saved estimate is the offer being sent.</p></div>
-          <Button variant="ghost" disabled={busy} onClick={() => onClose(outcome)}>Close</Button>
+          <Button variant="ghost" disabled={busy} onClick={() => onClose(closeResult())}>Close</Button>
         </div>
         {!preview && !error && <ActionFeedback className="py-6">Loading saved recipient and message…</ActionFeedback>}
         {error && <ActionFeedback error className="my-4">{error}</ActionFeedback>}
@@ -148,7 +216,7 @@ export default function EstimateSendDialog({ request, onClose }) {
           <fieldset disabled={locked} className="border-0 p-0 min-w-0">
             <legend className="font-medium mb-2">Choose delivery channel</legend>
             {Object.entries(CHANNEL_LABELS).map(([key, label]) => <label key={key} className="ui-choice-label flex items-center gap-3">
-              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={(key !== "email" && (!preview.customerPhone || !!preview.smsBlockReason)) || (key !== "sms" && !preview.customerEmail)} />
+              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={isChannelDisabled(key, preview, request.allowedChannels)} />
               <span>{label}</span>
             </label>)}
             <p className="text-14 text-ink-secondary mt-2 break-words">Text: {preview.customerPhone || "No phone saved"}<br />Email: {preview.customerEmail || "No email saved"}</p>
@@ -171,7 +239,7 @@ export default function EstimateSendDialog({ request, onClose }) {
           <div className="ui-record-actions border-t border-zinc-200 pt-4">
             {!outcome && <Button loading={busy} disabled={!method || busy || blocked || stale || smsBlocked || (needsAcknowledgment && !acknowledged)} onClick={send}>{busy ? sendingLabel.current : submitLabel}</Button>}
             {preview.customerUrl && <Button variant="secondary" onClick={async () => { try { await navigator.clipboard.writeText(preview.customerUrl); setCopied(true); } catch { setError("Copy failed. Open the saved preview to access the link."); } }}>{copied ? "Link copied" : "Copy secure estimate link"}</Button>}
-            <Button variant="secondary" disabled={busy} onClick={() => onClose(outcome)}>{outcome ? "Done" : "Cancel"}</Button>
+            <Button variant="secondary" disabled={busy} onClick={() => onClose(closeResult())}>{outcome ? "Done" : "Cancel"}</Button>
           </div>
         </div>}
       </section>

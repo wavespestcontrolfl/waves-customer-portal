@@ -49,6 +49,10 @@ function heldSqlGuard(alias = 'ss') {
   return visitHoldLive() ? ` AND ${alias}.held_at IS NULL` : '';
 }
 
+function unheldPredicate() {
+  return visitHoldLive() ? { held_at: null } : {};
+}
+
 // In-memory twin for rows already loaded (SELECT * rows carry held_at; a row loaded with named columns that omit
 // held_at reads as not held, so a caller that filters in memory must select the column).
 function rowIsHeld(row) {
@@ -138,6 +142,20 @@ async function putVisitOnHold({ visitId, note, heldBy = null, scopeReq = null, n
       hold_released_at: null,
       updated_at: now,
     });
+    // Close open overdue & not-closed-out alerts inside this transaction so a
+    // held visit does not leave stale late/NCO cards in the Action Queue (P1-18).
+    await require('./dispatch-alerts').autoResolveOverdueAlertsForJob({
+      jobId: visitId,
+      resolvedBy: heldBy || null,
+      trx,
+      toStatus: 'cancelled',
+    });
+    await require('./not-closed-out').resolveForService({
+      serviceId: visitId,
+      resolution: 'held',
+      resolvedBy: heldBy || 'system',
+      trx,
+    });
     return { changed: true, visitId: row.id, heldAt: now, customerId: row.customer_id };
   });
 }
@@ -162,17 +180,25 @@ async function closeHoldBell(visitId, reason, { now = new Date(), conn = db } = 
  */
 async function releaseVisitHold({ visitId, now = new Date(), reason = 'released', conn = db } = {}) {
   if (!visitHoldLive()) throw holdError(404, 'visit_hold_off', 'Visit hold is not enabled');
-  const cols = ['id', 'held_at', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id'];
+  const cols = ['id', 'status', 'held_at', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'technician_id'];
   const pre = await conn('scheduled_services').where({ id: visitId }).first(...cols);
   if (!pre) throw holdError(404, 'not_found', 'Scheduled service not found');
   if (!pre.held_at) return { changed: false, visitId: pre.id };
   const dateStr = dateOnlyString(pre.scheduled_date);
+  const todayStr = etDateString(now);
+  const techDayPairs = dateStr && pre.technician_id ? [{ techId: pre.technician_id, date: dateStr }] : [];
   const result = await conn.transaction(async (trx) => {
     const occupancy = require('./scheduling/occupancy');
-    // Rung 1 (the booking day lock) before the row lock, the order every booking writer takes.
+    // Canonical lock order: Rung 1 (occupancy day lock) -> Rung 3 (tech-day lock) -> row lock.
     if (dateStr) await occupancy.acquireOccupancyLock(trx, dateStr);
+    await require('./scheduling/tech-day-lock').lockTechDays(trx, techDayPairs);
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate().first(...cols);
     if (!row || !row.held_at) return { changed: false, visitId };
+    // Refuse releasing a visit that is no longer holdable (cancelled/skipped/completed)
+    // or whose original date has already passed — reschedule it instead (P2).
+    if (!HOLDABLE_STATUSES.includes(String(row.status || '').toLowerCase())) {
+      throw holdError(409, 'not_releasable', `A ${row.status || 'non-active'} visit cannot be released from hold.`);
+    }
     // The day lock was taken for the unlocked read's date: a visit moved or held again since is not the one checked.
     const same = (a, b) => String(a ?? '') === String(b ?? '');
     if (new Date(row.held_at).getTime() !== new Date(pre.held_at).getTime() || dateOnlyString(row.scheduled_date) !== dateStr
@@ -180,8 +206,14 @@ async function releaseVisitHold({ visitId, now = new Date(), reason = 'released'
       || !same(row.estimated_duration_minutes, pre.estimated_duration_minutes) || !same(row.technician_id, pre.technician_id)) {
       throw holdError(409, 'hold_changed', 'The visit changed while the hold was being released. Try again.');
     }
+    if (dateStr && dateStr < todayStr) {
+      throw holdError(409, 'past_date', 'This held visit is for a past date. Reschedule it to a new date to release the hold.');
+    }
+    if (row.technician_id) {
+      await require('./technician-eligibility').assertAssignableTechnician(row.technician_id, { conn: trx, date: dateStr });
+    }
     // Same span booking gives the visit: a start with no end occupies its estimated duration.
-    if (dateStr >= etDateString(now) && row.window_start) {
+    if (dateStr >= todayStr && row.window_start) {
       let windowEnd;
       try {
         windowEnd = require('./rebooker').occupancyProbeEnd(row.window_start, row.window_end, row.estimated_duration_minutes);
@@ -440,6 +472,7 @@ module.exports = {
   isVisitHeld,
   heldVisitIds,
   heldColumn,
+  unheldPredicate,
   closeHoldBell,
   putVisitOnHold,
   releaseVisitHold,

@@ -139,7 +139,8 @@ postgres('r1-sched-series-2: clearing prepaid must not erase annual coverage evi
     const res = await del(`/${root.id}/prepaid`, { 'x-role': 'technician', 'x-tech-id': technicianId });
     { const after = await reload(root.id);
       console.log('[repro] after TECH DELETE', { status: res.status, body: res.body, prepaid_method: after.prepaid_method, prepaid_amount: after.prepaid_amount, annual_prepay_term_id: after.annual_prepay_term_id, coversVisit: await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx) }); }
-    expect([404, 409]).toContain(res.status);
+    // DELETE /:id/prepaid is admin-only (requireAdmin): technician tokens are rejected with 403.
+    expect(res.status).toBe(403);
     const after = await reload(root.id);
     expect(after.prepaid_method).toBe(ANNUAL);
     expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx)).toBe(true);

@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from "react";
+import { useId, useState, useSyncExternalStore } from "react";
 import { clearStaffDeviceData } from "../../lib/adminAuth";
 import { fieldViewReadiness, subscribeFieldViewReadiness, warmFieldViewLanding } from "../../lib/fieldView";
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
@@ -70,6 +70,33 @@ function FieldViewRow({ navigation }) {
   );
 }
 
+// Per-device Dark mode switch for all staff roles. Applies immediately in the
+// current session even when storage is blocked, and notes when not saved.
+function DarkModeRow({ navigation }) {
+  const labelId = useId();
+  const hintId = useId();
+  const darkMode = navigation.darkMode === true;
+  const [notSaved, setNotSaved] = useState(false);
+  const change = (on) => {
+    const saved = navigation.setDarkMode(on);
+    setNotSaved(saved === false);
+  };
+  return (
+    <section className="mt-2">
+      <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
+        <li className="flex items-center gap-3 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div id={labelId} className="text-14 text-zinc-900">Dark mode</div>
+            <div id={hintId} className="text-14 text-zinc-500">Dark colors across Waves Admin on this device.</div>
+            {notSaved && <div role="status" className="text-14 text-zinc-700">Applied for now, but this device&apos;s storage is full or blocked.</div>}
+          </div>
+          <Switch checked={darkMode} onChange={change} aria-labelledby={labelId} aria-describedby={hintId} />
+        </li>
+      </ul>
+    </section>
+  );
+}
+
 export default function MorePage() {
   const navigate = useNavigate();
   // The "More" menu is a mobile-only nav surface (its root is `md:hidden`, so
@@ -132,6 +159,7 @@ export default function MorePage() {
         }) : <WorkspaceGroup key={group.id} group={group} source="more" />))}
       </UiSurface>}
       {navigation && currentRole === "admin" && <FieldViewRow navigation={navigation} />}
+      {navigation && <DarkModeRow navigation={navigation} />}
       {visibleSettingsLeaves.length > 0 && (
         <section className="mt-2">
           {" "}

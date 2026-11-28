@@ -34,6 +34,7 @@ const { PROVIDER, MODEL_CATALOG } = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
 const agentContext = require('../agent-control/context');
 const { anthropicOnlyLane } = require('./max-plan-lanes');
+const circuitBreaker = require('./circuit-breaker');
 // Top-level (not lazy) so the ledger shares this module's agent-control
 // context instance; every use below is wrapped so it can never break a call.
 const metrics = require('../llm-dispatch-metrics');
@@ -951,6 +952,82 @@ function dispatchWithHardDeadline(route, routePayload, legMs) {
   return Promise.race([attempt, timedOut]).finally(() => clearTimeout(timer));
 }
 
+// Literal provider keys (never dereference PROVIDER.* at module load time —
+// tests that mock config/models without PROVIDER load this module via llm/deep).
+const PROVIDER_CAN_SERVE = {
+  openai: () => Boolean(circuitBreaker.providerCredential('openai')),
+  gemini: (p) => !p.documents?.length && Boolean(circuitBreaker.providerCredential('gemini')),
+  anthropic: (p) => Boolean(p.anthropicClient || (Anthropic && circuitBreaker.providerCredential('anthropic'))),
+  typesafe: (p) => Boolean(circuitBreaker.providerCredential('typesafe') && p.questions && typeof p.questions === 'object' && !p.images?.length),
+  cloudflare: (p) => Boolean(circuitBreaker.providerCredential('cloudflare') && p.questions && typeof p.questions === 'object'),
+};
+
+function credentialForPayload(provider, payload = {}) {
+  // Track injected Anthropic clients by instance identity so a failed client
+  // cools down on its own without suppressing unrelated clients or the env key.
+  if (provider === 'anthropic' && payload?.anthropicClient) return payload.anthropicClient;
+  return circuitBreaker.providerCredential(provider);
+}
+
+function modelSupportsPayload(route, payload) {
+  if (route.provider === 'typesafe' && !TYPESAFE_PINNED_MODEL_RE.test(route.model)) return false;
+  if (route.provider === 'cloudflare' && !workersAiDecisionModel(route.model)) return false;
+  // Require affirmative capability evidence from MODEL_CATALOG before short-circuiting
+  // an open primary onto a backup (ordinary fallback after a primary failure still runs).
+  const entry = MODEL_CATALOG?.[route.model];
+  if (!entry || (entry.provider && entry.provider !== route.provider)) return false;
+  const caps = Array.isArray(entry.caps) ? entry.caps : [];
+  if ((payload.images?.length || payload.documents?.length) && !caps.includes('vision')) return false;
+  return true;
+}
+
+function canRouteServePayload(route, payload = {}) {
+  if (!route?.provider || !route.model) return false;
+  if (payload.audio && route.provider !== 'gemini') return false;
+  if (payload.tools?.length && route.provider !== 'anthropic') return false;
+  if (!modelSupportsPayload(route, payload)) return false;
+  const check = PROVIDER_CAN_SERVE[route.provider];
+  return typeof check === 'function' ? check(payload) : false;
+}
+
+function takeReservedGate(reservationRef, provider) {
+  if (!reservationRef.current || !provider || reservationRef.current.provider !== provider) return null;
+  const { gate } = reservationRef.current;
+  reservationRef.current = null;
+  return gate;
+}
+
+// Execute one route inside runFallbackChain with optional hardDeadline and
+// sliding-window circuit breaker (GATE_LLM_CIRCUIT_BREAKER, dark by default).
+async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, backupProviders, reservationRef, signal }) {
+  const reservedGate = reservationRef ? takeReservedGate(reservationRef, route.provider) : null;
+  const gate = reservedGate || circuitBreaker.beforeAttempt(route.provider, { backupProviders });
+  if (!gate.allow) {
+    if (reservationRef && gate.backupReservation) reservationRef.current = gate.backupReservation;
+    return { ok: false, reason: gate.reason || 'circuit_open' };
+  }
+  const credential = credentialForPayload(route.provider, routePayload);
+  let result;
+  try {
+    result = hardDeadline ? await dispatchWithHardDeadline(route, routePayload, legMs) : await dispatch(route, routePayload);
+  } catch (err) {
+    logger.error(`[llm] ${route.provider} dispatch threw: ${err.message}`);
+    result = { ok: false, reason: 'error' };
+  }
+  circuitBreaker.afterAttempt(route.provider, {
+    ok: Boolean(result?.ok),
+    reason: result?.reason || null,
+    aborted: Boolean(signal?.aborted),
+    disabled: Boolean(gate.disabled),
+    probeId: gate.probeId,
+    generation: gate.generation,
+    legMs,
+    model: route.model,
+    credential,
+  });
+  return result;
+}
+
 async function runFallbackChain(policy, payload, { validate, reserveFallbackBudget = false, maxAttemptMs, hardDeadline = false } = {}) {
   // The Mac job's fact-check lanes ride the Max plan, which answers Anthropic only: a fallback to
   // another provider would bill a paid API, so those lanes keep the Anthropic route (max-plan-lanes.js).
@@ -979,62 +1056,69 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
   const timeoutBudgetMs = explicitBudget ? payload.timeoutMs : DEFAULT_FALLBACK_BUDGET_MS;
   const attemptCapMs = Number.isFinite(maxAttemptMs) && maxAttemptMs > 0 ? maxAttemptMs : Infinity;
   const deadline = Date.now() + timeoutBudgetMs;
-  for (let index = 0; index < routes.length; index += 1) {
-    if (payload.signal?.aborted) break;
-    const route = routes[index];
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) {
-      failures.push(legFailure(route, 'timeout_budget_exhausted'));
-      break;
-    }
-    const shareMs = explicitBudget && !reserveFallbackBudget
-      ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
-    const legMs = Math.min(shareMs, attemptCapMs);
-    const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
-    let result;
-    try {
-      result = hardDeadline ? await dispatchWithHardDeadline(route, routePayload, legMs) : await dispatch(route, routePayload);
-    } catch (err) {
-      logger.error(`[llm] ${route.provider} dispatch threw: ${err.message}`);
-      result = { ok: false, reason: 'error' };
-    }
-
-    if (!result.ok) {
-      failures.push(legFailure(route, result.reason || 'error', result));
-      continue;
-    }
-
-    // Empty text-mode answers fail in the adapters (`empty_text`), so an ok
-    // result here has content. The caller's validate hook owns its codes
-    // (`too_long`, `trade_name`, `missing_summary`…): a rejection from it is
-    // a model-quality failure, so the failure entry carries that provenance
-    // for classifyFailure.
-    let rejection = null;
-    if (typeof validate === 'function') {
-      try {
-        rejection = validate(result, route) || null;
-      } catch (err) {
-        rejection = `validator_error:${err.message}`;
+  const reservationRef = { current: null };
+  try {
+    for (let index = 0; index < routes.length; index += 1) {
+      if (payload.signal?.aborted) break;
+      const route = routes[index];
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        failures.push(legFailure(route, 'timeout_budget_exhausted'));
+        break;
       }
-    }
-    if (rejection) {
-      // A max_tokens-truncated Anthropic answer never reaches the validator:
-      // callAnthropic fails that leg as anthropic_incomplete first, so a
-      // rejection here is a judgement on a complete answer.
-      failures.push(legFailure(route, String(rejection), result, { validator: true }));
-      rejectLedgerCall(result, String(rejection), true);
-      continue;
-    }
+      const shareMs = explicitBudget && !reserveFallbackBudget
+        ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
+      const legMs = Math.min(shareMs, attemptCapMs);
+      const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
+      const backupProviders = routes.slice(index + 1)
+        .filter((backup) => canRouteServePayload(backup, payload))
+        .map((backup) => ({ provider: backup.provider, model: backup.model, credential: credentialForPayload(backup.provider, payload) }));
+      const result = await executeFallbackLeg(route, routePayload, legMs, {
+        hardDeadline,
+        backupProviders,
+        reservationRef,
+        signal: payload.signal,
+      });
 
-    const outcome = {
-      ...result,
-      provider: route.provider,
-      model: result.model || route.model,
-      fallbackUsed: index > 0,
-      failures,
-    };
-    recordDispatchOutcome(policy, outcome);
-    return outcome;
+      if (!result.ok) {
+        failures.push(legFailure(route, result.reason || 'error', result));
+        continue;
+      }
+
+      // Empty text-mode answers fail in the adapters (`empty_text`), so an ok
+      // result here has content. The caller's validate hook owns its codes
+      // (`too_long`, `trade_name`, `missing_summary`…): a rejection from it is
+      // a model-quality failure, so the failure entry carries that provenance
+      // for classifyFailure.
+      let rejection = null;
+      if (typeof validate === 'function') {
+        try {
+          rejection = validate(result, route) || null;
+        } catch (err) {
+          rejection = `validator_error:${err.message}`;
+        }
+      }
+      if (rejection) {
+        // A max_tokens-truncated Anthropic answer never reaches the validator:
+        // callAnthropic fails that leg as anthropic_incomplete first, so a
+        // rejection here is a judgement on a complete answer.
+        failures.push(legFailure(route, String(rejection), result, { validator: true }));
+        rejectLedgerCall(result, String(rejection), true);
+        continue;
+      }
+
+      const outcome = {
+        ...result,
+        provider: route.provider,
+        model: result.model || route.model,
+        fallbackUsed: index > 0,
+        failures,
+      };
+      recordDispatchOutcome(policy, outcome);
+      return outcome;
+    }
+  } finally {
+    circuitBreaker.releaseReservation(reservationRef.current);
   }
 
   const outcome = { ok: false, reason: 'all_providers_failed', failures };

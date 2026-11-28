@@ -2302,8 +2302,8 @@ function CostBarChart({
         const y = h - pct * (h - 20);
         return <g key={pct}>
               {" "}
-              <line x1={labelWidth} y1={y} x2={w} y2={y} stroke={"#E4E4E7"} strokeWidth={0.5} />{" "}
-              <text x={labelWidth - 12} y={y + 4} fill={"#71717A"} fontSize={14} textAnchor="end">
+              <line x1={labelWidth} y1={y} x2={w} y2={y} stroke="var(--border-default, #E4E4E7)" strokeWidth={0.5} />{" "}
+              <text x={labelWidth - 12} y={y + 4} fill="var(--text-tertiary, #71717A)" fontSize={14} textAnchor="end">
                 {fmt(maxCost * pct)}
               </text>{" "}
             </g>;
@@ -2315,11 +2315,11 @@ function CostBarChart({
         const y = h - barH;
         return <g key={d.month}>
               {" "}
-              <rect x={x} y={y} width={barW} height={barH} rx={4} fill={"#18181B"} opacity={0.8} />{" "}
-              <text x={x + barW / 2} y={h + 22} fill={"#71717A"} fontSize={14} textAnchor="middle">
+              <rect x={x} y={y} width={barW} height={barH} rx={4} fill="var(--text-primary, #18181B)" opacity={0.8} />{" "}
+              <text x={x + barW / 2} y={h + 22} fill="var(--text-tertiary, #71717A)" fontSize={14} textAnchor="middle">
                 {d.month.slice(5)}
               </text>{" "}
-              <text x={x + barW / 2} y={y - 4} fill={"#27272A"} fontSize={14} textAnchor="middle">
+              <text x={x + barW / 2} y={y - 4} fill="var(--text-primary, #27272A)" fontSize={14} textAnchor="middle">
                 {fmt(d.cost)}
               </text>{" "}
             </g>;

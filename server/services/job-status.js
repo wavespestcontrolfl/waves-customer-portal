@@ -140,6 +140,17 @@ const ADMIN_ROOM = 'dispatch:admins';
 const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
 const CUSTOMER_ETA_TIMEOUT_MS = 750;
 
+function enclosingCommitPromise(trx) {
+  const promises = [];
+  let cur = trx;
+  while (cur) {
+    if (cur.executionPromise) promises.push(cur.executionPromise);
+    cur = cur.parentTransaction;
+  }
+  if (!promises.length) return null;
+  return promises.length === 1 ? promises[0] : Promise.all(promises);
+}
+
 // Strictly-increasing claim timestamps within this process — the sweep
 // groups series claims by (customer, exact token), and two independent
 // same-millisecond cancels must not read as one series (codex #3233 r12;
@@ -487,9 +498,11 @@ async function transitionJobStatus({
     // (or fromStatus is wrong). Either way, we abort — the audit log
     // would otherwise record a transition that didn't happen on the
     // source table.
-    // GATE_VISIT_HOLD (owner 2026-11-27): a visit on hold is not worked, so the update itself fences held_at: a hold that
-    // commits between any earlier read and this write still stops the transition. Cancel and skip stay open.
-    const holdFence = ['en_route', 'on_site', 'completed'].includes(String(toStatus || '')) && require('./visit-hold').visitHoldLive();
+    // GATE_VISIT_HOLD (owner 2026-11-27): a visit on hold is not worked and
+    // cannot be marked no_show (P1-2), so the update itself fences held_at:
+    // a hold that commits between any earlier read and this write still stops
+    // the transition. Cancel and skip stay open.
+    const holdFence = ['en_route', 'on_site', 'completed', 'no_show'].includes(String(toStatus || '')) && require('./visit-hold').visitHoldLive();
     const statusUpdate = t('scheduled_services').where({ id: jobId, status: fromStatus });
     if (holdFence) statusUpdate.whereNull('held_at');
     const updated = await statusUpdate.update({ status: toStatus, updated_at: t.fn.now() });
@@ -1111,13 +1124,12 @@ async function transitionJobStatus({
   }
 
   if (trx) {
-    // Caller-owned trx. Do the writes; defer both emits until the
-    // caller's outer transaction resolves. trx.executionPromise is
-    // the promise returned by db.transaction(fn) — resolves on
-    // commit, rejects on rollback.
+    // Caller-owned trx. Do the writes; defer both emits until the enclosing
+    // transaction and savepoint settle (savepoint-safe via enclosingCommitPromise).
     const { customerId, customerPayload, adminPayload } = await doWrites(trx);
-    if (trx.executionPromise) {
-      trx.executionPromise
+    const commitPromise = enclosingCommitPromise(trx);
+    if (commitPromise) {
+      commitPromise
         .then(() => {
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();

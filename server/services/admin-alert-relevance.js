@@ -319,7 +319,7 @@ function askedAtOf(row, meta = parseMeta(row.metadata)) {
 
 const TEXT_NOTE_CLASS = 'text_note_checked';
 const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered', 'customer_quote_form']);
-// (portal_add_service_request has no contact witness; its estimate boundary is askedAtOf, in loadQuoteHandoffs.)
+// (portal_add_service_request has no contact witness; its estimate boundary is bellEventAt, in loadQuoteHandoffs.)
 
 // The classes that judge a text from a sender with no customer on file, and what each names (needs the text's sid).
 // The tracking-line row (new_lead) names the text it shows. Any other class gets nothing, so such a text is not judged.
@@ -418,9 +418,8 @@ async function loadQuoteHandoffs(rows, data, conn) {
     const meta = parseMeta(row.metadata);
     const customerId = isAddServiceChat(meta) || isBundleRequestBell(meta)
       ? uuidOrNull(meta.customerId) : uuidOrNull(repeatFormCustomerId(meta));
-    const asked = askedAtOf(row, meta);
-    const bellAt = asked ? new Date(asked) : null;
-    if (!customerId || !bellAt || Number.isNaN(bellAt.getTime())) continue;
+    const bellAt = bellEventAt(row);
+    if (!customerId || !bellAt) continue;
     if (await quoteAnswered(conn, { meta, customerId, bellAt })) data.quoteHandedOff.add(String(row.id));
   }
 }
