@@ -6940,7 +6940,7 @@ function isGratitudeDraftCandidate({ isRevision, source, hasMedia, schedulingInt
 async function draftShadowReply({
   inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false,
   source = null, hasMedia = false, asOf = null, liveEta,
-  draftTrigger, supersedesDraftId, skipAutoSend,
+  draftTrigger, supersedesDraftId, skipAutoSend, serviceRecordId = null,
 }) {
   const startedAt = Date.now();
   const isRevision = isPostVisitRevision(draftTrigger, supersedesDraftId);
@@ -6977,9 +6977,10 @@ async function draftShadowReply({
     // (texting AI gap 5) a text that names ONE service ("the lawn treatment") gets the prep guide of that service's upcoming visit
     const prepGuideFamily = labelFactsLib.namedServiceFamily(inboundMessage);
     const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true, smsPrepGuideFamily: prepGuideFamily } : {};
+    const focusRecordOpt = serviceRecordId ? { focusServiceRecordId: serviceRecordId } : {};
     const loadContext = (withLiveEta) => (customer
-      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
-      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...focusRecordOpt, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...focusRecordOpt, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
     // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
     // a fingerprint of this customer's facts that a delayed send re-derives
     // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE

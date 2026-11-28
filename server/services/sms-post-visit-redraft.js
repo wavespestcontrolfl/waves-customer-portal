@@ -13,7 +13,8 @@
  * Spend discipline: live Railway drafting is gated behind `GATE_SMS_POST_VISIT_REDRAFT`
  * (`smsPostVisitRedraftLive()`, strict `=== 'true'`, dark by default). While off,
  * `draftPostVisitRevisionIfEligible()` returns `{ skipped: 'gate_off' }` with zero DB reads
- * and $0 API cost, while `findPostVisitRedraftCandidates()` serves the free Mac Max-plan runner.
+ * and $0 API cost. `findPostVisitRedraftCandidates()` is a read-only discovery helper
+ * available for a future free Mac Max-plan runner (not yet wired into `sms-late-drafter.js`).
  */
 
 const db = require('../models/db');
@@ -122,45 +123,58 @@ async function evaluateInboundCandidate(dbh, inbound, { customerId, doneAt, chec
 }
 
 /**
- * Checks the newest same-ET-day inbound SMS per distinct phone thread on `customerId` so a
- * newer answered text from a second contact cannot hide an unanswered thread from the first.
+ * Paginates same-ET-day inbound SMS on `customerId` by `(created_at, id)` and checks the
+ * newest message per distinct phone thread so high volume on one answered thread can never
+ * hide an unanswered text from another contact on the account.
  */
 async function findEligibleInboundForPostVisitRedraft(dbh, { customerId, completedAt, visitDateET }, deps = {}) {
   if (!dbh || !customerId) return null;
   const doneAt = completedAt instanceof Date ? completedAt : new Date(completedAt || Date.now());
   if (Number.isNaN(doneAt.getTime())) return null;
   const { start, end } = etDayBounds(visitDateET);
-
-  const inbounds = await dbh('sms_log as s')
-    .where('s.customer_id', customerId)
-    .where('s.direction', 'inbound')
-    .where('s.created_at', '>=', start)
-    .where('s.created_at', '<', end)
-    .where('s.created_at', '<=', doneAt)
-    .where((w) => w.whereNull('s.message_type').orWhereNotIn('s.message_type', IGNORED_INBOUND_TYPES))
-    .whereRaw("COALESCE(s.message_type, '') NOT LIKE 'job\\_%'")
-    .whereRaw("TRIM(COALESCE(s.message_body, '')) <> ''")
-    .orderBy('s.created_at', 'desc')
-    .limit(20)
-    .select('s.id', 's.from_phone', 's.message_body', 's.created_at', 's.metadata');
-
-  if (!inbounds.length) return null;
-
+  const pageSize = Number(deps.pageSize) > 0 ? Math.min(200, Number(deps.pageSize)) : 50;
+  const maxPages = Number(deps.maxPages) > 0 ? Number(deps.maxPages) : 10;
   const checkLiveAnswer = deps.threadHasLiveAnswer || threadHasLiveAnswer;
   const seenThreads = new Set();
-  for (const inbound of inbounds) {
-    const threadKey = lastTenPhone(inbound.from_phone) || `row:${inbound.id}`;
-    if (seenThreads.has(threadKey)) continue;
-    seenThreads.add(threadKey);
-    const eligible = await evaluateInboundCandidate(dbh, inbound, { customerId, doneAt, checkLiveAnswer });
-    if (eligible) return eligible;
+  let cursor = null;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    let q = dbh('sms_log as s')
+      .where('s.customer_id', customerId)
+      .where('s.direction', 'inbound')
+      .where('s.created_at', '>=', start)
+      .where('s.created_at', '<', end)
+      .where('s.created_at', '<=', doneAt)
+      .where((w) => w.whereNull('s.message_type').orWhereNotIn('s.message_type', IGNORED_INBOUND_TYPES))
+      .whereRaw("COALESCE(s.message_type, '') NOT LIKE 'job\\_%'")
+      .whereRaw("TRIM(COALESCE(s.message_body, '')) <> ''")
+      .orderBy('s.created_at', 'desc')
+      .orderBy('s.id', 'desc')
+      .limit(pageSize);
+    if (cursor) {
+      q = q.whereRaw('(s.created_at, s.id) < (?, ?)', [cursor.created_at, cursor.id]);
+    }
+    const inbounds = await q.select('s.id', 's.from_phone', 's.message_body', 's.created_at', 's.metadata');
+    if (!inbounds.length) break;
+
+    for (const inbound of inbounds) {
+      const threadKey = lastTenPhone(inbound.from_phone) || `row:${inbound.id}`;
+      if (seenThreads.has(threadKey)) continue;
+      seenThreads.add(threadKey);
+      const eligible = await evaluateInboundCandidate(dbh, inbound, { customerId, doneAt, checkLiveAnswer });
+      if (eligible) return eligible;
+    }
+
+    if (inbounds.length < pageSize) break;
+    const last = inbounds[inbounds.length - 1];
+    cursor = { created_at: last.created_at, id: last.id };
   }
   return null;
 }
 
 /**
- * Read-only paginated batch candidate query for the Mac Max-plan late drafter ($0 API cost).
- * Excludes backfills and incomplete visits before pagination so candidates match the live hook.
+ * Read-only paginated candidate discovery helper (not yet wired into `sms-late-drafter.js`).
+ * Filters to completed, non-backfill, non-incomplete service records before pagination.
  */
 async function findPostVisitRedraftCandidates(dbh, { visitDateET, limit = 25, pageSize = null } = {}, deps = {}) {
   const { day, start, end } = etDayBounds(visitDateET);
@@ -174,6 +188,7 @@ async function findPostVisitRedraftCandidates(dbh, { visitDateET, limit = 25, pa
   while (candidates.length < limit) {
     const records = await dbh('service_records')
       .where('service_date', day)
+      .where('status', 'completed')
       .whereNotNull('customer_id')
       .whereRaw("COALESCE(structured_notes->>'backfill', 'false') <> 'true'")
       .whereRaw("COALESCE(structured_notes->>'visitOutcome', 'completed') <> 'incomplete'")
@@ -211,7 +226,7 @@ async function findPostVisitRedraftCandidates(dbh, { visitDateET, limit = 25, pa
   return candidates;
 }
 
-async function generateClaimedRevision({ dbh, customer, eligible, draftFn }) {
+async function generateClaimedRevision({ dbh, customer, eligible, serviceRecordId, draftFn }) {
   const already = await dbh('message_drafts')
     .where({ sms_log_id: eligible.smsLogId, draft_trigger: POST_VISIT_TRIGGER })
     .first('id');
@@ -228,6 +243,7 @@ async function generateClaimedRevision({ dbh, customer, eligible, draftFn }) {
     hasMedia: eligible.hasMedia,
     draftTrigger: POST_VISIT_TRIGGER,
     supersedesDraftId: eligible.priorDraftId,
+    serviceRecordId: serviceRecordId || null,
     skipAutoSend: true,
   });
   return { drafted: Boolean(draftId), draftId: draftId || null, supersedesDraftId: eligible.priorDraftId };
@@ -248,7 +264,7 @@ async function resolveRevisionInputs({ customerId, completedAt, visitDateET, dbh
  * lock (`recordHealth: false`) before generating so concurrent closeouts cannot duplicate spend.
  */
 async function draftPostVisitRevisionIfEligible(opts = {}) {
-  const { customerId, completedAt, visitDateET, dbh = db, gates, draftFn, lockFn, threadHasLiveAnswerFn } = opts;
+  const { customerId, serviceRecordId = null, completedAt, visitDateET, dbh = db, gates, draftFn, lockFn, threadHasLiveAnswerFn } = opts;
   if (!customerId) return { skipped: 'missing_customer' };
   const featureGates = gates || require('../config/feature-gates');
   if (featureGates.smsPostVisitRedraftLive?.() !== true) return { skipped: 'gate_off' };
@@ -260,7 +276,13 @@ async function draftPostVisitRevisionIfEligible(opts = {}) {
     const acquire = lockFn || runExclusive;
     const locked = await acquire(
       `sms-post-visit-redraft:${resolved.eligible.smsLogId}`,
-      () => generateClaimedRevision({ dbh, customer: resolved.customer, eligible: resolved.eligible, draftFn }),
+      () => generateClaimedRevision({
+        dbh,
+        customer: resolved.customer,
+        eligible: resolved.eligible,
+        serviceRecordId,
+        draftFn,
+      }),
       { recordHealth: false },
     );
     return wasLockSkipped(locked) ? { skipped: 'claim_in_flight' } : locked;
@@ -278,6 +300,7 @@ function triggerOnVisitComplete({ isBackfillCompletion, isIncompleteVisit, svc, 
   if (isBackfillCompletion || isIncompleteVisit || !svc?.customer_id || !record?.id) return;
   draftPostVisitRevisionIfEligible({
     customerId: svc.customer_id,
+    serviceRecordId: record.id,
     completedAt: record.created_at || new Date(),
     visitDateET: serviceDateOnly(record.service_date || svc.scheduled_date) || etDateString(),
   }).catch((err) => {

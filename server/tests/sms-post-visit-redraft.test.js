@@ -180,6 +180,36 @@ describe('findEligibleInboundForPostVisitRedraft', () => {
     expect(res?.hasMedia).toBe(false);
   });
 
+  test('paginates past a full first page of answered phone B messages to find unanswered phone A', async () => {
+    const page1 = chain({
+      result: [
+        { ...INBOUND, id: 'sms-b-2', from_phone: '+19415550222', created_at: new Date('2026-11-27T15:10:00Z') },
+        { ...INBOUND, id: 'sms-b-1', from_phone: '+19415550222', created_at: new Date('2026-11-27T15:00:00Z') },
+      ],
+    });
+    const page2 = chain({
+      result: [
+        { ...INBOUND, id: 'sms-a-1', from_phone: '+19415550111', created_at: new Date('2026-11-27T14:00:00Z'), metadata: { media: [] } },
+      ],
+    });
+    const dbh = makeDb({
+      sms_log: [page1, page2, chain({ first: null })],
+      message_drafts: [chain({ first: PRIOR_DRAFT }), chain({ first: null })],
+    });
+    const threadHasLiveAnswer = jest.fn(async (_dbh, { threadLast10 }) => (
+      threadLast10 === '9415550222' ? 'human_answered' : null
+    ));
+
+    const res = await findEligibleInboundForPostVisitRedraft(dbh, {
+      customerId: 'cust-1',
+      completedAt: new Date('2026-11-27T16:30:00Z'),
+      visitDateET: '2026-11-27',
+    }, { threadHasLiveAnswer, pageSize: 2 });
+
+    expect(page2.whereRaw).toHaveBeenCalledWith('(s.created_at, s.id) < (?, ?)', [new Date('2026-11-27T15:00:00Z'), 'sms-b-1']);
+    expect(res?.smsLogId).toBe('sms-a-1');
+  });
+
   test('returns null when an automated outbound reply already answered on that phone thread', async () => {
     const dbh = makeDb({
       sms_log: [chain({ result: [INBOUND] }), chain({ first: { id: 'sms-auto-1' } })],
@@ -237,6 +267,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
 
     const res = await draftPostVisitRevisionIfEligible({
       customerId: 'cust-2',
+      serviceRecordId: 'rec-focus-2',
       completedAt: new Date('2026-11-27T17:00:00Z'),
       visitDateET: '2026-11-27',
       dbh,
@@ -255,6 +286,7 @@ describe('draftPostVisitRevisionIfEligible', () => {
       hasMedia: false,
       draftTrigger: POST_VISIT_TRIGGER,
       supersedesDraftId: 'draft-orig-2',
+      serviceRecordId: 'rec-focus-2',
       skipAutoSend: true,
     }));
   });
@@ -327,6 +359,7 @@ describe('findPostVisitRedraftCandidates (Mac free runner pagination)', () => {
       { visitDateET: '2026-11-27', limit: 1, pageSize: 2 },
       { threadHasLiveAnswer: async () => null },
     );
+    expect(page1.where).toHaveBeenCalledWith('status', 'completed');
     expect(page1.whereRaw).toHaveBeenCalledWith("COALESCE(structured_notes->>'backfill', 'false') <> 'true'");
     expect(page1.whereRaw).toHaveBeenCalledWith("COALESCE(structured_notes->>'visitOutcome', 'completed') <> 'incomplete'");
     expect(list).toHaveLength(1);
