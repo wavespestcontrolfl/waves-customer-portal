@@ -41,6 +41,7 @@ const MAX_CACHE_ENTRIES = 50;
 const MAX_CATALOG_MATCHES = 3;
 const MAX_ROUTE_SLOTS = 2;
 const MAX_CALL_UTTERANCES = 120;
+const PALMETTO_RE = /\bpalmetto\s+(?:bugs?|(?:cock)?roach(?:es)?)\b/gi;
 const LIVE_VISIT_STATUSES = Object.freeze(['pending', 'confirmed', 'en_route', 'on_site']);
 const OPEN_ESTIMATE_STATUSES = Object.freeze(['draft', 'sent', 'viewed', 'pending']);
 
@@ -118,7 +119,8 @@ function spokenLocationDiffers(target, callerSpeech, addressMatcher) {
   const zips = [...speech.matchAll(SPOKEN_ZIP_RE)].map((m) => m[1]);
   if (targetZip && zips.some((z) => z !== targetZip)) return true;
   const targetCity = placeNorm(target.city);
-  const cities = [...speech.matchAll(SWFL_CITY_RE)].map((m) => placeNorm(m[1]));
+  const citySpeech = speech.replace(PALMETTO_RE, ' ');
+  const cities = [...citySpeech.matchAll(SWFL_CITY_RE)].map((m) => placeNorm(m[1]));
   if (targetCity && cities.some((c) => c !== targetCity)) return true;
   const streets = [...speech.matchAll(new RegExp(SPOKEN_STREET_RE.source, 'gi'))].map((m) => m[0]);
   if (!streets.length) return false;
@@ -284,7 +286,6 @@ async function loadCustomerBundle(customerId, callId, conn, now) {
 
 // ── 2. Full-Catalog Live Pricing Matcher ($0 affirmative-only deterministic) ─
 
-const PALMETTO_RE = /\bpalmetto\s+(?:bugs?|(?:cock)?roach(?:es)?)\b/gi;
 const NEGATION_LEAD = '(?:no|not|never|none|zero|without|free\\s+of|isn[\'’]?t|is\\s+not|aren[\'’]?t|are\\s+not|wasn[\'’]?t|was\\s+not|weren[\'’]?t|were\\s+not|don[\'’]?t|do\\s+not|doesn[\'’]?t|does\\s+not|didn[\'’]?t|did\\s+not|haven[\'’]?t|have\\s+not|hasn[\'’]?t|has\\s+not|hadn[\'’]?t|had\\s+not|ain[\'’]?t)';
 const HISTORICAL_LEAD = '(?:used\\s+to\\s+(?:have|get|see)|years?\\s+ago|months?\\s+ago|last\\s+(?:year|time|visit)|previously(?:\\s+had)?|before\\s+we\\s+moved|in\\s+the\\s+past|back\\s+in\\s+\\d{4})';
 const HISTORICAL_TAIL = '(?:years?\\s+ago|months?\\s+ago|last\\s+(?:year|time|visit)|in\\s+the\\s+past|before\\s+we\\s+moved|a\\s+long\\s+time\\s+ago)';
@@ -537,7 +538,7 @@ function hasSpokenCallerName(callerText) {
 
 const EMAIL_RE = /\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/i;
 const SPOKEN_EMAIL_RE = /\b(?:at|@)\s*(?:gmail|yahoo|icloud|outlook|hotmail|aol|comcast|verizon|me|live|msn|proton)\b/i;
-const PRICE_SPOKEN_RE = /\$\s*\d{2,4}\b|\b\d{2,4}\s*(?:dollars?|bucks?)\b|\b(?:it'?s|would be|is|quoted?|total|price|cost|runs?|starts?\s+at)\s+\d{2,4}\b/i;
+const PRICE_SPOKEN_RE = /\$\s*\d{2,4}(?:\.\d{2})?\b|\b\d{2,4}(?:\.\d{2})?\s*(?:dollars?|bucks?|a\s+month|per\s+month|\/\s*mo(?:nth)?|a\s+quarter|per\s+quarter|a\s+year|per\s+year|one[- ]?time)\b|\b(?:quoted?|quote|total|price|pricing|cost|costs|charge|fee|rate|runs?|starts?\s+at|comes?\s+to)\s+(?:is\s+|would\s+be\s+|of\s+|at\s+|around\s+)?\$?\s*\d{2,4}(?:\.\d{2})?\b/i;
 const DAY_CUE_RE = /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|next\s+week)\b/i;
 const TIME_CUE_RE = /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|morning|afternoon|noon|between\s+\d{1,2})\b/i;
 const ACCESS_CUE_RE = /\b(?:gate|code|lockbox|dogs?|pets?|cats?|fence|backyard|hoa|guard|knock|ring|call\s+(?:before|when|ahead))\b/i;

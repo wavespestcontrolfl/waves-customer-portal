@@ -403,6 +403,31 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
     }, { db: otherLocDb, isEnabled: () => true, addressMatchesCustomer: () => true, booking: { loadBookingConfig: jest.fn(), buildBookingAvailability } });
     expect(rentalRes.route_slots).toEqual([]);
     expect(buildBookingAvailability).not.toHaveBeenCalled();
+
+    // Mentioning "palmetto bugs" on a Bradenton account must NOT look like the city of Palmetto and withhold route slots.
+    resetCaches();
+    buildBookingAvailability.mockResolvedValueOnce({ slots: [{ date: '2026-12-04', window_start: '09:00', window_end: '10:00' }] });
+    const palmettoBugRes = await buildLiveCallCopilot({
+      call: { id: 'call-palmetto-bug', customer_id: 'cust-1' },
+      customer: { id: 'cust-1', name: 'Casey Sample' },
+      meta: {},
+      lines: [
+        { speaker: 'caller', text: 'Seeing a few palmetto bugs in the garage.' },
+        { speaker: 'staff', text: 'Your address is 410 Oakwood Lane, correct?' },
+      ],
+      assist: null,
+    }, {
+      db: otherLocDb,
+      isEnabled: () => true,
+      now: '2026-11-28T15:00:00Z',
+      addressMatchesCustomer: () => true,
+      booking: { loadBookingConfig: jest.fn().mockResolvedValue({ advance_days_min: 1, advance_days_max: 7, slot_duration_minutes: 60 }), buildBookingAvailability },
+      formatSlots: (slots) => slots.map((s) => `${s.date} ${s.window_start}-${s.window_end}`).join('; '),
+    });
+    expect(palmettoBugRes.route_slots).toEqual(['2026-12-04 09:00-10:00']);
+    // Staff confirming an address number ("Your address is 410 Oakwood Lane") must NOT mark Price Quoted complete.
+    const palmettoByKey = Object.fromEntries(palmettoBugRes.checklist.map((i) => [i.key, i.ok]));
+    expect(palmettoByKey.price_quoted).toBe(false);
   });
 
   test('preserves checklist evidence from earlier utterances on long calls (>15 lines)', async () => {
