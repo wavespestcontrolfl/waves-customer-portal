@@ -1140,7 +1140,7 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
     const fnAt = invoiceSource.indexOf('async markDeliverySent(');
     expect(fnAt).toBeGreaterThan(-1);
-    const fnBody = invoiceSource.slice(fnAt, fnAt + 4500);
+    const fnBody = invoiceSource.slice(fnAt, fnAt + 5000);
     // Codex pre-push P1 (round 1, complexity simplification): the early
     // claimToken-mismatch pre-check was removed as genuinely redundant —
     // the finalize UPDATE's own token predicate plus the post-update fresh
@@ -1361,7 +1361,8 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     expect(source).toContain("orderBy('id', 'asc')");
     expect(source).toContain('if (unrecordedChemicalAddOnHold && !recapReviewOnly) {');
     expect(source).toContain('guardOpenPaymentIntentForPrepaid(heldInv)');
-    expect(source).toContain('StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id)');
+    expect(source).toContain('StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id, {');
+    expect(source).toContain('allowChemicalReviewReconcile: true');
     // P2 (GitHub r2): resolved area add-on rows are exempt from transactional 400 area_sqft_required so warn-never-block holds end to end.
     expect(source).toContain('const isResolvedAreaAddOnRow = Boolean(addOnTags?.get?.(areaAddOnGovernedRate.productRowKey(p)));');
     expect(source).toContain('&& !isResolvedAreaAddOnRow');

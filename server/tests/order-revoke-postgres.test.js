@@ -18,7 +18,8 @@ maybeDescribe('order-revoke (live Postgres)', () => {
   let revoke;
   let queue;
   let dispatch;
-  const made = { products_catalog: [], product_restock_requests: [], vendor_orders: [], notifications: [], vendor_pricing: [] };
+  let policySvc;
+  const made = { products_catalog: [], product_restock_requests: [], vendor_orders: [], notifications: [], vendor_pricing: [], settingKeys: [] };
   const ACTOR = crypto.randomUUID();
 
   // A placed SiteOne order (its bell rung) for an ordered request.
@@ -71,8 +72,13 @@ maybeDescribe('order-revoke (live Postgres)', () => {
     revoke = require('../services/procurement/order-revoke');
     queue = require('../services/inventory-restock-queue');
     dispatch = require('../services/procurement/order-dispatch');
+    policySvc = require('../services/procurement/history-order-policy');
   });
   afterAll(async () => {
+    if (made.settingKeys.length) {
+      await db('audit_log').where({ resource_type: 'system_settings', action: 'procurement.history_order_policy.updated' }).whereRaw("metadata->>'key' = ANY(?)", [made.settingKeys]).del();
+      await db('system_settings').whereIn('key', made.settingKeys).del();
+    }
     if (made.vendor_orders.length) await db('audit_log').where({ resource_type: 'vendor_order' }).whereIn('resource_id', made.vendor_orders).del();
     if (made.notifications.length) await db('notifications').whereIn('id', made.notifications).del();
     if (made.product_restock_requests.length) {
@@ -271,6 +277,521 @@ maybeDescribe('order-revoke (live Postgres)', () => {
       expect(vo.evidence).not.toHaveProperty('reopenedFromCancelledAt');
       expect(await db('product_restock_requests').where({ id: fx.request.id }).first('status')).toEqual({ status: 'open' });
       expect(await dispatch.findLiveAutoOrder(db, fx.request.product_id)).toBeTruthy();
+    });
+  });
+
+  // Live Postgres coverage of history-order cap hold settlement, 35-day expiry, and DB-backed Sticker Mule dispatch.
+  describe('history-order cap hold settlement and DB policy dispatch (live Postgres)', () => {
+    const GATES = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true' };
+    let gatesBefore;
+    beforeAll(() => {
+      gatesBefore = Object.fromEntries(Object.keys(GATES).map((k) => [k, process.env[k]]));
+      Object.assign(process.env, GATES);
+    });
+    afterAll(() => {
+      for (const [k, v] of Object.entries(gatesBefore)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    });
+
+    const row = (fx) => db('vendor_orders').where({ id: fx.order.id }).first();
+    const received = { status: 'received', closed_at: new Date() };
+    const noBell = { bell: undefined, bellAt: undefined };
+    const checkBell = { title: 'Auto-order needs review: Fixture (Sticker Mule)', body: 'Sticker Mule order was placed with no paid total yet. Do NOT re-order.', v: 'v0' };
+    const heldOrder = (extra = {}) => ({
+      adapter: 'stickermule',
+      status: 'needs_review',
+      external_order_number: `SM-H-${crypto.randomUUID().slice(0, 8)}`,
+      amount_cents: 50000,
+      error: 'history_total_check: total could not be read back',
+      ...extra,
+    });
+    // Scope table scans to only rows created by this test file so concurrent DB rows never interfere.
+    const ownOrders = () => new Proxy(db, {
+      apply(target, thisArg, args) {
+        const q = target.apply(thisArg, args);
+        if (args[0] === 'vendor_orders as vo') return q.whereIn('vo.id', made.vendor_orders);
+        return q;
+      },
+    });
+    const ringOnly = (...only) => jest.fn(async (_cat, _h, _w, opts) => (only.some((f) => f.order.id === opts?.metadata?.vendorOrderId) ? { id: 'n-ok' } : null));
+    const rering = (notify) => dispatch.reringPendingBells({ conn: ownOrders(), notify });
+    const scan = (readCharge, now) => dispatch.settleHistoryHolds({ conn: ownOrders(), registry: { stickermule: { readCharge } }, now });
+    const settle = (charges, now) => scan(async (n) => (Object.prototype.hasOwnProperty.call(charges, n) ? charges[n] : null), now);
+
+    async function autoRequest() {
+      const vendor = await db('vendors').where({ code: 25 }).first();
+      const id = crypto.randomUUID();
+      const sku = `item-${id.slice(0, 8)}`;
+      const [product] = await db('products_catalog').insert({
+        id, name: `Fixture sticker ${id.slice(0, 8)}`, category: 'supplies', inventory_unit: 'each', inventory_on_hand: 40, low_stock_threshold: 100,
+        auto_reorder_enabled: true, auto_reorder_vendor_id: vendor.id, reorder_quantity: 500,
+      }).returning('*');
+      made.products_catalog.push(product.id);
+      const [price] = await db('vendor_pricing').insert({ product_id: product.id, vendor_id: vendor.id, price: 314, quantity: '500', unit: 'each', vendor_sku: sku, approval_status: 'approved', is_active: true }).returning('id');
+      made.vendor_pricing.push(price.id);
+      const [request] = await db('product_restock_requests').insert({
+        id: crypto.randomUUID(), product_id: product.id, status: 'open', priority: 'normal', requested_quantity: 500, unit: 'each', source: 'auto_reorder', metadata: JSON.stringify({ vendorId: vendor.id, vendorSku: sku }),
+      }).returning('*');
+      made.product_restock_requests.push(request.id);
+      return { sku, product, vendor, request, ledger: () => db('vendor_orders').where({ restock_request_id: request.id }).first() };
+    }
+
+    function newPolicyKey() {
+      const key = `test.hist_policy.${crypto.randomUUID().slice(0, 12)}`;
+      made.settingKeys.push(key);
+      return key;
+    }
+
+    async function savePolicy(key, { enabled = true, approvedItems = [], maxPerOrderCents = 50000, maxMonthlyCents = 10000000, expectedRevision = 0 } = {}) {
+      return policySvc.saveHistoryOrderPolicy(
+        db,
+        { enabled, approvedItems, maxPerOrderCents, maxMonthlyCents },
+        { actorId: ACTOR, expectedRevision, key }
+      );
+    }
+
+    const adapterCharging = (cents, seen = {}) => ({
+      key: 'stickermule',
+      preSubmitTotal: 'history',
+      packagedQuantity: false,
+      configured: () => true,
+      bindingQuote: async () => ({ cents: 31400, source: 'order SM-0' }),
+      place: jest.fn(async ({ beforeSubmit }) => {
+        seen.heldAtPost = (await seen.ledger()).amount_cents;
+        seen.lastCheck = await beforeSubmit();
+        if (!seen.lastCheck.ok) {
+          const err = new Error(seen.lastCheck.message);
+          err.refuse = seen.lastCheck.reason;
+          if (seen.lastCheck.evidence) err.evidence = seen.lastCheck.evidence;
+          throw err;
+        }
+        return { externalOrderNumber: `SM-P-${crypto.randomUUID().slice(0, 8)}`, amountCents: null, response: {}, evidence: { totalSource: 'none' } };
+      }),
+      readCharge: jest.fn(async () => { seen.atChargeRead = await seen.ledger(); return cents; }),
+    });
+
+    test('settleHistoryHolds replaces holds, preserves overHoldAt past receipt, and expires unconfirmed holds after 35 ET days', async () => {
+      const a = await fixture({ order: heldOrder(), evidence: { totalSource: 'none', bell: checkBell } });
+      const b = await fixture({ request: received, order: heldOrder(), evidence: { totalSource: 'none', ...noBell } });
+      const placedLongAgo = new Date(Date.now() - 36 * 24 * 60 * 60 * 1000);
+      const c = await fixture({ request: received, order: heldOrder({ placed_at: placedLongAgo }), evidence: { totalSource: 'none', ...noBell } });
+      const revoked = await fixture({ order: heldOrder({ placed_at: placedLongAgo }), evidence: { totalSource: 'none', revokedAt: new Date().toISOString() } });
+
+      const written = await settle({
+        [a.order.external_order_number]: 31400,
+        [b.order.external_order_number]: 62000,
+      });
+      expect(written).toEqual(expect.arrayContaining([a.order.id, b.order.id, c.order.id]));
+      expect(written).not.toContain(revoked.order.id);
+
+      const ra = await row(a);
+      expect(ra).toMatchObject({ amount_cents: 31400, status: 'needs_review' });
+      expect(ra.evidence).toMatchObject({ totalSource: 'vendor', holdSettledAt: expect.any(String) });
+      expect(ra.evidence).not.toHaveProperty('overHoldAt');
+
+      const rb = await row(b);
+      expect(rb.amount_cents).toBe(62000);
+      expect(rb.evidence).toMatchObject({ totalSource: 'vendor', overHoldAt: expect.any(String) });
+      expect(rb.evidence).not.toHaveProperty('bellAt');
+      expect((await rering(ringOnly(b))).rung).toContain(b.order.id);
+
+      const rc = await row(c);
+      expect(rc.amount_cents).toBe(50000);
+      expect(rc.evidence).toMatchObject({ totalSource: 'none', holdExpiredAt: expect.any(String) });
+      expect((await audits(c.order.id)).map((x) => x.action)).toContain('procurement.vendor_order.charge_unconfirmed');
+      // Receipt cleanup does not close an expired hold alert; re-ring delivers it on a received request.
+      await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, c.request.id));
+      expect((await rering(ringOnly(c))).rung).toContain(c.order.id);
+    });
+
+    test('DB-backed policy places silently at confirmed charge while holding DB per-order cap (ignoring empty Railway cap env)', async () => {
+      const key = newPolicyKey();
+      const fx = await autoRequest();
+      await savePolicy(key, { enabled: true, approvedItems: [`stickermule:${fx.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: 10000000 });
+      const seen = { ledger: fx.ledger };
+      const adapter = adapterCharging(31400, seen);
+      const notify = ringOnly();
+      const res = await dispatch.dispatchRestockOrder(fx.request.id, { conn: db, notify, adapters: { stickermule: adapter }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      expect(res).toMatchObject({ status: 'placed', amountCents: 31400 });
+      const vo = await fx.ledger();
+      made.vendor_orders.push(vo.id);
+      expect(seen.heldAtPost).toBe(50000);
+      expect(seen.atChargeRead).toMatchObject({ status: 'placing', external_order_number: vo.external_order_number, amount_cents: 50000, placed_at: null });
+      expect(vo).toMatchObject({ status: 'placed', amount_cents: 31400 });
+      expect(vo.evidence).toMatchObject({ historyCents: 31400, holdCents: 50000, totalSource: 'vendor' });
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    test('charge above DB cap hold at placement stamps overHoldAt and receipt rewrites alert wording to charge-review only', async () => {
+      const key = newPolicyKey();
+      const fx = await autoRequest();
+      await savePolicy(key, { enabled: true, approvedItems: [`stickermule:${fx.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: 10000000 });
+      const seen = { ledger: fx.ledger };
+      const adapter = adapterCharging(62000, seen);
+      const res = await dispatch.dispatchRestockOrder(fx.request.id, { conn: db, notify: ringOnly(), adapters: { stickermule: adapter }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      expect(res).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement', amountCents: 62000, bellPending: true });
+      let vo = await fx.ledger();
+      made.vendor_orders.push(vo.id);
+      expect(vo.evidence).toMatchObject({ overHoldAt: expect.any(String), historyCents: 31400, totalSource: 'vendor' });
+
+      await db('product_restock_requests').where({ id: fx.request.id }).update({ status: 'received', closed_at: new Date() });
+      await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, fx.request.id));
+      const kept = await fx.ledger();
+      expect(kept.evidence.bell.v).not.toBe(vo.evidence.bell.v);
+      expect(kept.evidence.bell.body).toMatch(/Do NOT re-order: the stock was received, so only the charge is left: check it on the Sticker Mule account \(order SM-P-.*\), then mark this alert done\./);
+      expect(kept.evidence.bell.body).not.toMatch(/receive the stock|Record vendor cancellation/);
+      const f = { order: { id: vo.id } };
+      expect((await rering(ringOnly(f))).rung).toContain(vo.id);
+      vo = await row(f);
+      expect(vo.evidence.bellAt).toEqual(expect.any(String));
+    });
+
+    test('turning the DB switch OFF or changing spend limits mid-flight stops placement before POST', async () => {
+      // 1) Owner flips DB switch OFF between bindingQuote and POST -> approval_withdrawn.
+      const keyOff = newPolicyKey();
+      const fxOff = await autoRequest();
+      await savePolicy(keyOff, { enabled: true, approvedItems: [`stickermule:${fxOff.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: 10000000 });
+      const adapterOff = {
+        ...adapterCharging(31400, { ledger: fxOff.ledger }),
+        place: jest.fn(async ({ beforeSubmit }) => {
+          await savePolicy(keyOff, { enabled: false, approvedItems: [], maxPerOrderCents: null, maxMonthlyCents: null, expectedRevision: 1 });
+          const verdict = await beforeSubmit();
+          const err = new Error(verdict.message); err.refuse = verdict.reason; throw err;
+        }),
+      };
+      const rOff = await dispatch.dispatchRestockOrder(fxOff.request.id, { conn: db, notify: ringOnly(), adapters: { stickermule: adapterOff }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: keyOff } });
+      expect(rOff).toMatchObject({ status: 'needs_review', reason: 'approval_withdrawn' });
+      const voOff = await fxOff.ledger();
+      made.vendor_orders.push(voOff.id);
+      expect(voOff).toMatchObject({ status: 'needs_review', amount_cents: 31400, placed_at: null, external_order_number: null });
+
+      // 2) Owner changes spend limits while still above quote -> claim released (approval_changed), request stays open.
+      const keyCaps = newPolicyKey();
+      const fxCaps = await autoRequest();
+      await savePolicy(keyCaps, { enabled: true, approvedItems: [`stickermule:${fxCaps.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: 10000000 });
+      const adapterCaps = {
+        ...adapterCharging(31400, { ledger: fxCaps.ledger }),
+        place: jest.fn(async ({ beforeSubmit }) => {
+          await savePolicy(keyCaps, { enabled: true, approvedItems: [`stickermule:${fxCaps.sku}`], maxPerOrderCents: 40000, maxMonthlyCents: 10000000, expectedRevision: 1 });
+          const verdict = await beforeSubmit();
+          const err = new Error(verdict.message); err.refuse = verdict.reason; throw err;
+        }),
+      };
+      const rCaps = await dispatch.dispatchRestockOrder(fxCaps.request.id, { conn: db, notify: ringOnly(), adapters: { stickermule: adapterCaps }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: keyCaps } });
+      expect(rCaps).toEqual({ requestId: fxCaps.request.id, skipped: 'approval_changed' });
+      expect(await fxCaps.ledger()).toBeUndefined();
+      expect(await db('product_restock_requests').where({ id: fxCaps.request.id }).first('status')).toEqual({ status: 'open' });
+    });
+
+    test('stopped worker during readCharge: stale recovery preserves order number and settleTakenClaim applies late charge', async () => {
+      const key = newPolicyKey();
+      const fx = await autoRequest();
+      await savePolicy(key, { enabled: true, approvedItems: [`stickermule:${fx.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: 10000000 });
+      let reached;
+      let resumeCharge;
+      const atRead = new Promise((resolve) => { reached = resolve; });
+      const adapter = {
+        ...adapterCharging(null, { ledger: fx.ledger }),
+        readCharge: jest.fn((number) => new Promise((resolve) => { resumeCharge = resolve; reached(number); })),
+      };
+      const pendingRun = dispatch.dispatchRestockOrder(fx.request.id, { conn: db, notify: ringOnly(), adapters: { stickermule: adapter }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      const number = await atRead;
+      let vo = await fx.ledger();
+      made.vendor_orders.push(vo.id);
+      expect(vo).toMatchObject({ status: 'placing', external_order_number: number, amount_cents: 50000, placed_at: null });
+
+      const recovered = await dispatch.recoverStalePlacing({ conn: ownOrders(), notify: ringOnly(), now: new Date(Date.now() + 31 * 60 * 1000) });
+      expect(recovered.recovered).toContain(vo.id);
+      vo = await fx.ledger();
+      expect(vo).toMatchObject({ status: 'needs_review', external_order_number: number, amount_cents: 50000 });
+      expect(vo.placed_at).not.toBeNull();
+      expect(await db('product_restock_requests').where({ id: fx.request.id }).first('status')).toEqual({ status: 'ordered' });
+
+      resumeCharge(62000);
+      expect(await pendingRun).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: number, amountCents: 62000, bellPending: true });
+      vo = await fx.ledger();
+      expect(vo).toMatchObject({ status: 'needs_review', amount_cents: 62000 });
+      expect(vo.evidence).toMatchObject({ totalSource: 'vendor', holdSettledAt: expect.any(String), overHoldAt: expect.any(String) });
+    });
+
+    test('deliveryEvidence excludes manually received parked requests, revoked orders, and landedAfterReceive orders', async () => {
+      const fx = await autoRequest();
+      const productId = fx.request.product_id;
+      const vendorId = fx.vendor.id;
+      const mkHist = async (orderPatch) => {
+        const [r] = await db('product_restock_requests').insert({ id: crypto.randomUUID(), product_id: productId, status: 'received', priority: 'normal', source: 'auto_reorder', requested_quantity: 500, unit: 'each', closed_at: new Date(), metadata: JSON.stringify({ vendorId }) }).returning('*');
+        made.product_restock_requests.push(r.id);
+        const [v] = await db('vendor_orders').insert({ restock_request_id: r.id, vendor_id: vendorId, adapter: 'stickermule', ...orderPatch }).returning('*');
+        made.vendor_orders.push(v.id);
+      };
+      await mkHist({ status: 'needs_review', placed_at: null, external_order_number: null, evidence: JSON.stringify({ outstandingOrder: { number: 'SM-PARK-99', why: 'coming' } }) });
+      await mkHist({ status: 'placed', placed_at: new Date(), external_order_number: 'SM-PORTAL-1', amount_cents: 31400, evidence: JSON.stringify({ totalSource: 'vendor' }) });
+      await mkHist({ status: 'needs_review', placed_at: new Date(), external_order_number: 'SM-REVOKED-3', amount_cents: 31400, evidence: JSON.stringify({ totalSource: 'vendor', revokedAt: new Date().toISOString() }) });
+      await mkHist({ status: 'needs_review', placed_at: new Date(), external_order_number: 'SM-LATE-2', amount_cents: 31400, evidence: JSON.stringify({ totalSource: 'vendor', landedAfterReceive: new Date().toISOString() }) });
+
+      const direct = await dispatch._internals.deliveryEvidence(db, { productId, vendorId });
+      expect(direct.receivedOrders).toContain('SM-PORTAL-1');
+      expect(direct.receivedOrders).not.toContain('SM-PARK-99');
+      expect(direct.receivedOrders).not.toContain('SM-REVOKED-3');
+      expect(direct.receivedOrders).not.toContain('SM-LATE-2');
+    });
+
+    test('disabling policy while an already-authorized order is mid-POST reports inFlightOrders atomically inside CAPS_LOCK_KEY', async () => {
+      const key = newPolicyKey();
+      const fx = await autoRequest();
+      await savePolicy(key, { enabled: true, approvedItems: [`stickermule:${fx.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: 10000000 });
+      let atPost;
+      let finishPost;
+      const reachedPost = new Promise((r) => { atPost = r; });
+      const adapter = {
+        key: 'stickermule',
+        preSubmitTotal: 'history',
+        packagedQuantity: false,
+        configured: () => true,
+        bindingQuote: async () => ({ cents: 31400, source: 'order SM-0' }),
+        place: jest.fn(async ({ beforeSubmit }) => {
+          const v = await beforeSubmit();
+          expect(v).toEqual({ ok: true });
+          atPost();
+          await new Promise((r) => { finishPost = r; });
+          return { externalOrderNumber: `SM-IF-${crypto.randomUUID().slice(0, 6)}`, amountCents: null, response: {}, evidence: { totalSource: 'none' } };
+        }),
+        readCharge: jest.fn(async () => 31400),
+      };
+      const pending = dispatch.dispatchRestockOrder(fx.request.id, { conn: db, notify: ringOnly(), adapters: { stickermule: adapter }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      await reachedPost;
+      const voMid = await fx.ledger();
+      made.vendor_orders.push(voMid.id);
+      expect(voMid.evidence.postAuthorizedAt).toEqual(expect.any(String));
+      // Owner disables the switch right after beforeSubmit committed: save succeeds immediately AND reports the in-flight order.
+      const disabled = await savePolicy(key, { enabled: false, approvedItems: [], maxPerOrderCents: null, maxMonthlyCents: null, expectedRevision: 1 });
+      expect(disabled.policy.enabled).toBe(false);
+      expect(disabled.inFlightOrders).toEqual(expect.arrayContaining([
+        expect.objectContaining({ ledgerId: voMid.id, requestId: fx.request.id, vendorSku: fx.sku }),
+      ]));
+      finishPost();
+      expect(await pending).toMatchObject({ status: 'placed', amountCents: 31400 });
+    });
+
+    test('two active catalog products mapped to the same Sticker Mule SKU are rejected on enable and serialized at submission', async () => {
+      const key = newPolicyKey();
+      const a = await autoRequest();
+      // Create a second active auto-reorder product mapped to the exact same Sticker Mule SKU.
+      const bId = crypto.randomUUID();
+      const [prodB] = await db('products_catalog').insert({
+        id: bId, name: `Fixture sticker B ${bId.slice(0, 8)}`, category: 'supplies', inventory_unit: 'each', inventory_on_hand: 10, low_stock_threshold: 100,
+        auto_reorder_enabled: true, auto_reorder_vendor_id: a.vendor.id, reorder_quantity: 500,
+      }).returning('*');
+      made.products_catalog.push(prodB.id);
+      const [priceB] = await db('vendor_pricing').insert({ product_id: prodB.id, vendor_id: a.vendor.id, price: 314, quantity: '500', unit: 'each', vendor_sku: a.sku, approval_status: 'approved', is_active: true }).returning('id');
+      made.vendor_pricing.push(priceB.id);
+
+      // 1) Policy save rejects enabling a SKU shared across multiple active auto-reorder products.
+      await expect(savePolicy(key, { enabled: true, approvedItems: [`stickermule:${a.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: 10000000 }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'duplicate_sku_mapping', duplicateItems: [`stickermule:${a.sku}`] });
+
+      // 2) Even if product B is enabled LATER (after policy was saved) with NO live order yet,
+      // authorizeHistoryOrder withholds purchase unsent via duplicate_sku_mapping and raises a fix-mapping alert.
+      await db('products_catalog').where({ id: prodB.id }).update({ auto_reorder_enabled: false });
+      await savePolicy(key, { enabled: true, approvedItems: [`stickermule:${a.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: 10000000 });
+      await db('products_catalog').where({ id: prodB.id }).update({ auto_reorder_enabled: true });
+      const [reqBDup] = await db('product_restock_requests').insert({
+        id: crypto.randomUUID(), product_id: prodB.id, status: 'open', priority: 'normal', requested_quantity: 500, unit: 'each', source: 'auto_reorder', metadata: JSON.stringify({ vendorId: a.vendor.id, vendorSku: a.sku }),
+      }).returning('*');
+      made.product_restock_requests.push(reqBDup.id);
+      const dupNotices = [];
+      const captureNotify = async (cat, title, message, opts) => { dupNotices.push({ title, message, opts }); return { id: 'n-cap' }; };
+      const resDup = await dispatch.dispatchRestockOrder(reqBDup.id, { conn: db, notify: captureNotify, adapters: { stickermule: adapterCharging(31400, { ledger: () => db('vendor_orders').where({ restock_request_id: reqBDup.id }).first() }) }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      expect(resDup).toMatchObject({ status: 'needs_review', reason: 'duplicate_sku_mapping' });
+      const voDup = await db('vendor_orders').where({ restock_request_id: reqBDup.id }).first();
+      made.vendor_orders.push(voDup.id);
+      expect(voDup.placed_at).toBeNull();
+      expect(dupNotices).toHaveLength(1);
+      expect(dupNotices[0].title).toMatch(/fix duplicate/i);
+      expect(dupNotices[0].title).not.toMatch(/order .* by hand/i);
+      expect(dupNotices[0].message).toMatch(/fix the mapping before buying/i);
+
+      // 2b) If the vendor gate closes while the duplicate mapping still exists, sweep handoff
+      // preserves the duplicate-SKU warning instead of retiring it and telling staff to buy by hand.
+      const keptDup = await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqBDup.id, { preserveOutstanding: true }));
+      expect(keptDup).toEqual({ preserved: 'duplicate_sku_mapping' });
+      expect((await db('vendor_orders').where({ id: voDup.id }).first('evidence')).evidence.bell).toBeTruthy();
+
+      // Once the duplicate mapping is resolved (Product B auto_reorder disabled), handoff retires it.
+      await db('products_catalog').where({ id: prodB.id }).update({ auto_reorder_enabled: false });
+      const resolvedDup = await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqBDup.id, { preserveOutstanding: true }));
+      expect(resolvedDup).toEqual({ settled: true });
+      expect((await db('vendor_orders').where({ id: voDup.id }).first('evidence')).evidence.bell).toBeUndefined();
+
+      // 3) Product A's authorized POST is in flight holding the remaining monthly budget; Product B
+      // requests the same SKU while Product A's POST hasn't finished yet -> Product B must park
+      // vendor_sku_order_live (wait-for-reconciliation), NEVER over_monthly_cap ("buy by hand").
+      const spentBefore = await dispatch.monthlySpentCents(db);
+      await savePolicy(key, { enabled: true, approvedItems: [`stickermule:${a.sku}`], maxPerOrderCents: 50000, maxMonthlyCents: spentBefore + 60000, expectedRevision: 1 });
+      let aAtPost;
+      let releaseA;
+      const aReachedPost = new Promise((r) => { aAtPost = r; });
+      const adapterAInFlight = {
+        ...adapterCharging(31400, { ledger: a.ledger }),
+        place: jest.fn(async ({ beforeSubmit }) => {
+          const v = await beforeSubmit();
+          expect(v).toEqual({ ok: true });
+          aAtPost();
+          await new Promise((r) => { releaseA = r; });
+          return { externalOrderNumber: `SM-IF-DUP-${crypto.randomUUID().slice(0, 6)}`, amountCents: null, response: {}, evidence: { totalSource: 'none' } };
+        }),
+      };
+      const pendingA = dispatch.dispatchRestockOrder(a.request.id, { conn: db, notify: ringOnly(), adapters: { stickermule: adapterAInFlight }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      await aReachedPost;
+      const voA = await a.ledger();
+      made.vendor_orders.push(voA.id);
+
+      await db('product_restock_requests').where({ id: reqBDup.id }).update({ status: 'cancelled', closed_at: new Date() });
+      await db('products_catalog').where({ id: prodB.id }).update({ auto_reorder_enabled: true });
+      const [reqB] = await db('product_restock_requests').insert({
+        id: crypto.randomUUID(), product_id: prodB.id, status: 'open', priority: 'normal', requested_quantity: 500, unit: 'each', source: 'auto_reorder', metadata: JSON.stringify({ vendorId: a.vendor.id, vendorSku: a.sku }),
+      }).returning('*');
+      made.product_restock_requests.push(reqB.id);
+      const liveNotices = [];
+      const captureLive = async (cat, title, message, opts) => { liveNotices.push({ title, message, opts }); return { id: 'n-live' }; };
+      const adapterB = adapterCharging(31400, { ledger: () => db('vendor_orders').where({ restock_request_id: reqB.id }).first() });
+      const resB = await dispatch.dispatchRestockOrder(reqB.id, { conn: db, notify: captureLive, adapters: { stickermule: adapterB }, env: { AUTO_ORDER_HISTORY_POLICY_KEY: key } });
+      releaseA();
+      expect(await pendingA).toMatchObject({ status: 'placed' });
+      expect(resB).toMatchObject({ status: 'needs_review', reason: 'vendor_sku_order_live' });
+      const voB = await db('vendor_orders').where({ restock_request_id: reqB.id }).first();
+      made.vendor_orders.push(voB.id);
+      expect(voB.placed_at).toBeNull();
+      expect(voB.evidence).toMatchObject({
+        outstandingOrder: { number: null, why: 'coming' },
+        competingOrder: { ledgerId: voA.id, requestId: a.request.id },
+      });
+      // vendor_sku_order_live must NEVER tell staff to buy by hand (headline, reason, or detail).
+      expect(liveNotices).toHaveLength(1);
+      expect(liveNotices[0].title).toMatch(/wait on/i);
+      expect(liveNotices[0].title).not.toMatch(/order .* by hand|buy/i);
+      expect(liveNotices[0].message).toMatch(/wait for it to settle before buying/i);
+      expect(voB.evidence.bell.body).toContain(a.request.id);
+      expect(voB.evidence.bell.body).toMatch(/Do NOT order by hand/i);
+      expect(voB.evidence.bell.body).not.toMatch(/order what is missing by hand|order manually/i);
+
+      // 4) Sweep handoff preserves reqB's competing-order warning while voA is live, preserves it
+      // while the duplicate mapping still exists after voA is received, and releases it once both clear.
+      expect(await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqB.id, { preserveOutstanding: true })))
+        .toEqual({ preserved: 'vendor_sku_order_live' });
+      await db('product_restock_requests').where({ id: a.request.id }).update({ status: 'received', closed_at: new Date() });
+      expect(await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqB.id, { preserveOutstanding: true })))
+        .toEqual({ preserved: 'duplicate_sku_mapping' });
+      await db('products_catalog').where({ id: prodB.id }).update({ auto_reorder_enabled: false });
+      expect(await db.transaction((trx) => dispatch.settleRequestLedgerBells(trx, reqB.id, { preserveOutstanding: true })))
+        .toEqual({ settled: true });
+      expect((await db('vendor_orders').where({ id: voB.id }).first('evidence')).evidence.bell).toBeUndefined();
+    });
+
+    test('immediate drift within hold stamps driftAlertAt and survives receipt; cancelled-mid-flight alert rewrites cleanly on receipt', async () => {
+      // 1) Immediate charge $350 vs $314 history within $400 hold -> stamps driftAlertAt on placement; bell delivery fails initially, stock is received, and reringPendingBells still delivers the rewritten charge-review alert.
+      const key = newPolicyKey();
+      const a = await autoRequest();
+      await savePolicy(key, { enabled: true, approvedItems: [`stickermule:${a.sku}`], maxPerOrderCents: 40000, maxMonthlyCents: 10000000 });
+      const failNotify = async () => null;
+      const res = await dispatch.dispatchRestockOrder(a.request.id, {
+        conn: db,
+        notify: failNotify,
+        adapters: { stickermule: adapterCharging(35000, { ledger: a.ledger }) },
+        env: { AUTO_ORDER_HISTORY_POLICY_KEY: key },
+      });
+      expect(res).toMatchObject({ status: 'needs_review', reason: 'history_total_check', bellPending: true });
+      const vo = await a.ledger();
+      made.vendor_orders.push(vo.id);
+      expect(vo.evidence).toMatchObject({ totalSource: 'vendor', driftAlertAt: expect.any(String) });
+      // Receive the request before the failed bell re-rings: driftAlertAt must keep the bell alive and rewrite its body.
+      await db.transaction(async (trx) => {
+        await trx('product_restock_requests').where({ id: a.request.id }).update({ status: 'received', updated_at: new Date() });
+        await dispatch.settleRequestLedgerBells(trx, a.request.id);
+      });
+      const afterRecv = await a.ledger();
+      expect(afterRecv.evidence.bell.body).toMatch(/Do NOT re-order: the stock was received, so only the charge is left/);
+      expect(afterRecv.evidence.bell.body).not.toMatch(/receive the stock|Record vendor cancellation/i);
+      expect((await rering(ringOnly({ order: vo }))).rung).toContain(vo.id);
+
+      // 2) Cancelled-mid-flight over-hold alert (without "again") that WAS ALREADY DELIVERED:
+      // receipt immediately retires the obsolete open notification row AND queues the rewritten charge-review bell.
+      const cancelMidFx = await fixture({
+        request: received,
+        order: heldOrder({ amount_cents: 62000, error: 'history_total_check: fixture' }),
+        evidence: {
+          totalSource: 'vendor',
+          overHoldAt: new Date().toISOString(),
+          bellAt: new Date().toISOString(),
+          bell: {
+            v: 'v-cancel-mid',
+            title: 'Auto-order placed on a cancelled request: Fixture',
+            body: 'Sticker Mule order SM-CM-1 ($620.00) landed after the restock request was marked cancelled. The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and then use Record vendor cancellation on the Restock tab. Also: Sticker Mule order SM-CM-1 was placed at $620.00; the last identical order was $314.00. That is MORE than was held against the caps.',
+          },
+        },
+      });
+      const oldDedupe = `auto-order:${cancelMidFx.order.id}:v-cancel-mid`;
+      const [oldNotif] = await db('notifications').insert({
+        recipient_type: 'admin',
+        category: 'system',
+        title: 'Inventory — reconcile order',
+        body: 'Stale pre-receipt instruction',
+        metadata: JSON.stringify({ dedupeKey: oldDedupe }),
+      }).returning('id');
+      made.notifications.push(oldNotif.id);
+      await db.transaction(async (trx) => dispatch.settleRequestLedgerBells(trx, cancelMidFx.request.id));
+      const retiredNotif = await db('notifications').where({ id: oldNotif.id }).first('done_at', 'resolution');
+      expect(retiredNotif.done_at).not.toBeNull();
+      expect(retiredNotif.resolution).toMatch(/Stock received/i);
+      const rcm = await row(cancelMidFx);
+      expect(rcm.evidence.bellAt).toBeUndefined();
+      expect(rcm.evidence.bell.v).not.toBe('v-cancel-mid');
+      expect(rcm.evidence.bell.body).toMatch(/Do NOT re-order: the stock was received, so only the charge is left/);
+      expect(rcm.evidence.bell.body).not.toMatch(/receive the stock when it arrives|Record vendor cancellation/i);
+    });
+
+    test('late price drift within the cap hold after stock receipt still raises and delivers a charge-review bell; second receipt rewrites late-receive cap alert', async () => {
+      // 1) Stock received before charge read-back (placement bell stripped), then read-back returns $420 (within $500 hold, >5% and >$2 above $314 history).
+      const driftedFx = await fixture({
+        request: received,
+        order: heldOrder(),
+        evidence: { totalSource: 'none', historyCents: 31400, holdCents: 50000, ...noBell },
+      });
+      expect(await settle({ [driftedFx.order.external_order_number]: 42000 })).toContain(driftedFx.order.id);
+      let rd = await row(driftedFx);
+      expect(rd.amount_cents).toBe(42000);
+      expect(rd.evidence).toMatchObject({ totalSource: 'vendor', driftAlertAt: expect.any(String), bell: { body: expect.stringMatching(/charged \$420\.00.*last identical order was \$314\.00.*stock was received, so only the charge is left/) } });
+      expect((await rering(ringOnly(driftedFx))).rung).toContain(driftedFx.order.id);
+      rd = await row(driftedFx);
+      expect(rd.evidence.bellAt).toEqual(expect.any(String));
+
+      // 2) Order landed after a receipt (landedAfterReceive + overHoldAt), then second receipt runs settleLandedAfterReceive + settleRequestLedgerBells.
+      const lateFx = await fixture({
+        request: received,
+        order: heldOrder({ amount_cents: 62000, error: 'placed_on_received_request: fixture' }),
+        evidence: {
+          totalSource: 'vendor',
+          overHoldAt: new Date().toISOString(),
+          landedAfterReceive: new Date().toISOString(),
+          bellAt: undefined,
+          bell: {
+            v: 'v-late',
+            title: 'Auto-order needs review: Fixture (Sticker Mule)',
+            body: 'Sticker Mule charged $620.00 for order SM-LATE-CAP, read back after placement: more than the $500.00 held against the caps. Do NOT re-order: the stock counted at the receipt was not this order: receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and then use Record vendor cancellation on the Restock tab.',
+          },
+        },
+      });
+      await db.transaction(async (trx) => {
+        await dispatch.settleLandedAfterReceive(trx, lateFx.request.id);
+        await dispatch.settleRequestLedgerBells(trx, lateFx.request.id);
+      });
+      const rl = await row(lateFx);
+      expect(rl.evidence).not.toHaveProperty('landedAfterReceive');
+      expect(rl.evidence.bell.v).not.toBe('v-late');
+      expect(rl.evidence.bell.body).toMatch(/Do NOT re-order: the stock was received, so only the charge is left: check it on the .+ account \(order SM-H-.*\), then mark this alert done\./);
+      expect(rl.evidence.bell.body).not.toMatch(/receive the request once more|Record vendor cancellation/i);
     });
   });
 });

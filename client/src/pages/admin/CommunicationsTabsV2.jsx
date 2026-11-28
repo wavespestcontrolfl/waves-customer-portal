@@ -142,7 +142,7 @@ export function SmsTemplatesTabV2() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [issuesError, setIssuesError] = useState(false);
   const [issuesAttempt, setIssuesAttempt] = useState(0);
-  const [togglingId, setTogglingId] = useState(null);
+  const [togglingIds, setTogglingIds] = useState({});
   const [toggleError, setToggleError] = useState("");
   const [variantLoadErrors, setVariantLoadErrors] = useState({});
   const hashApplied = useRef(false);
@@ -192,7 +192,7 @@ export function SmsTemplatesTabV2() {
     setSaving(true);
     setSaveError("");
     try {
-      await adminFetch(`/admin/sms-templates/${id}`, {
+      await adminFetch(`/admin/sms-templates/${encodeURIComponent(id)}`, {
         method: "PUT",
         body: JSON.stringify({ body: editBody }),
       });
@@ -212,7 +212,7 @@ export function SmsTemplatesTabV2() {
     if (!templateKey || (variantsByKey[templateKey] && !variantLoadErrors[templateKey])) return;
     setLoadingVariants(templateKey);
     try {
-      const data = await adminFetch(`/admin/sms-templates/${templateKey}/variants`);
+      const data = await adminFetch(`/admin/sms-templates/${encodeURIComponent(templateKey)}/variants`);
       setVariantsByKey((prev) => ({
         ...prev,
         [templateKey]: data.variants || [],
@@ -287,10 +287,11 @@ export function SmsTemplatesTabV2() {
         status: draft.status || "active",
         isControl: !!draft.isControl,
       };
+      const encodedTemplateKey = encodeURIComponent(templateKey);
       const data = await adminFetch(
         variantKey
-          ? `/admin/sms-templates/${templateKey}/variants/${variantKey}`
-          : `/admin/sms-templates/${templateKey}/variants`,
+          ? `/admin/sms-templates/${encodedTemplateKey}/variants/${encodeURIComponent(variantKey)}`
+          : `/admin/sms-templates/${encodedTemplateKey}/variants`,
         {
           method: variantKey ? "PUT" : "POST",
           body: JSON.stringify(payload),
@@ -322,9 +323,12 @@ export function SmsTemplatesTabV2() {
     const draftId = variantDraftId(templateKey, variantKey);
     setVariantSaving(draftId);
     try {
-      await adminFetch(`/admin/sms-templates/${templateKey}/variants/${variantKey}`, {
-        method: "DELETE",
-      });
+      await adminFetch(
+        `/admin/sms-templates/${encodeURIComponent(templateKey)}/variants/${encodeURIComponent(variantKey)}`,
+        {
+          method: "DELETE",
+        },
+      );
       setVariantsByKey((prev) => ({
         ...prev,
         [templateKey]: (prev[templateKey] || []).filter((v) => v.variant_key !== variantKey),
@@ -339,7 +343,7 @@ export function SmsTemplatesTabV2() {
     if (!window.confirm("Delete this SMS template? This can't be undone.")) return;
     setDeleting(id);
     try {
-      await adminFetch(`/admin/sms-templates/${id}`, { method: "DELETE" });
+      await adminFetch(`/admin/sms-templates/${encodeURIComponent(id)}`, { method: "DELETE" });
       setTemplates((prev) => prev.filter((t) => t.id !== id));
       if (editing === id) setEditing(null);
     } catch {
@@ -349,20 +353,26 @@ export function SmsTemplatesTabV2() {
   };
 
   const toggleActive = async (t) => {
-    setTogglingId(t.id);
+    if (togglingIds[t.id]) return;
+    setTogglingIds((prev) => ({ ...prev, [t.id]: true }));
     setToggleError("");
     try {
-      await adminFetch(`/admin/sms-templates/${t.id}`, {
+      await adminFetch(`/admin/sms-templates/${encodeURIComponent(t.id)}`, {
         method: "PUT",
         body: JSON.stringify({ is_active: !t.is_active }),
       });
       setTemplates((prev) =>
-        prev.map((x) => (x.id === t.id ? { ...x, is_active: !x.is_active } : x)),
+        prev.map((x) => (x.id === t.id ? { ...x, is_active: !t.is_active } : x)),
       );
     } catch (err) {
       setToggleError(`Could not update ${t.name}: ${err.message || "Request failed"}`);
+    } finally {
+      setTogglingIds((prev) => {
+        const next = { ...prev };
+        delete next[t.id];
+        return next;
+      });
     }
-    setTogglingId(null);
   };
 
   const retryTemplates = () => {
@@ -543,7 +553,7 @@ export function SmsTemplatesTabV2() {
                   <Switch
                     aria-label={`${t.is_active ? 'Disable' : 'Enable'} ${t.name}`}
                     checked={t.is_active}
-                    disabled={togglingId === t.id}
+                    disabled={!!togglingIds[t.id]}
                     onChange={() => toggleActive(t)}
                   />
                   {editing === t.id ? (
@@ -833,21 +843,31 @@ export function SmsTemplatesTabV2() {
                   {t.body}
                 </div>
               )}
-              {t.variables && (
-                <div className="mt-2 flex gap-1 flex-wrap">
-                  {(typeof t.variables === "string"
-                    ? JSON.parse(t.variables)
-                    : t.variables
-                  ).map((v) => (
-                    <span
-                      key={v}
-                      className="text-11 px-1.5 py-0.5 rounded-xs bg-zinc-50 text-ink-tertiary border-hairline font-mono"
-                    >
-                      {`{${v}}`}
-                    </span>
-                  ))}
-                </div>
-              )}
+              {(() => {
+                const vars = (() => {
+                  if (!t.variables) return [];
+                  if (Array.isArray(t.variables)) return t.variables;
+                  if (typeof t.variables !== "string") return [];
+                  try {
+                    const parsed = JSON.parse(t.variables);
+                    return Array.isArray(parsed) ? parsed : [];
+                  } catch {
+                    return [];
+                  }
+                })();
+                return vars.length > 0 ? (
+                  <div className="mt-2 flex gap-1 flex-wrap">
+                    {vars.map((v) => (
+                      <span
+                        key={v}
+                        className="text-11 px-1.5 py-0.5 rounded-xs bg-zinc-50 text-ink-tertiary border-hairline font-mono"
+                      >
+                        {`{${v}}`}
+                      </span>
+                    ))}
+                  </div>
+                ) : null;
+              })()}
             </CardBody>{" "}
           </Card>
         ))}

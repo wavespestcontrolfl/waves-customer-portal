@@ -6,12 +6,17 @@
 //   on the 16-point scale by its own maximum: a CSR with more older calls is
 //   not ranked down for a point those calls could not earn.
 const mockRows = [];
-jest.mock('../models/db', () => jest.fn((table) => ({
-  where: jest.fn(() => Promise.resolve(table === 'csr_call_scores' ? mockRows : [])),
-})));
+jest.mock('../models/db', () => jest.fn((table) => {
+  const rows = table === 'csr_call_scores' || table === 'csr_call_scores as s' ? mockRows : [];
+  const chain = {};
+  for (const method of ['where', 'joinRaw', 'select']) chain[method] = jest.fn(() => chain);
+  chain.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+  return chain;
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const CSRCoach = require('../services/csr/csr-coach');
+const { etDateString } = require('../utils/datetime-et');
 
 const OTHER_CORE = ['greeting', 'empathy', 'problem_capture', 'address', 'time_options', 'fee_confirmation', 'name_confirmation', 'callback_number', 'set_expectations', 'strong_close'];
 const RESCUE = ['objection_save', 'upsell_attempt', 'urgency_creation', 'referral_mention', 'follow_up_offer'];
@@ -69,7 +74,11 @@ describe('dashboard averages and the Best Script Score pick', () => {
   test('a CSR with only older calls is not ranked below an equal CSR with newer calls', async () => {
     // Blake comes first: on a tie the pick keeps the first CSR, so without the
     // scaling Blake (15 of 16) would tie Avery (15 of 15) and win.
-    setRows([{ ...newerPerfect('Blake'), total_score: 15, point_details: { ...newerPerfect('Blake').point_details, follow_up_offer: 0 } }, olderPerfect('Avery')]);
+    const today = etDateString(new Date());
+    setRows([
+      { ...newerPerfect('Blake'), call_date: today, total_score: 15, point_details: { ...newerPerfect('Blake').point_details, follow_up_offer: 0 } },
+      { ...olderPerfect('Avery'), call_date: today },
+    ]);
     const board = await CSRCoach.getLeaderboard();
     const best = board.categories.find((c) => c.category === 'Best Script Score');
     expect(best.winner).toBe('Avery');

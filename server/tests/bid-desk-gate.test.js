@@ -91,3 +91,145 @@ test('the scheduler runs the job under the cron lock', () => {
   expect(block).toContain("runExclusive('bid-desk-intake'");
   expect(block).toContain('runBidDeskTick');
 });
+
+describe('saveBidUpdate and checklist reorder hardening', () => {
+  const { saveBidUpdate } = require('../routes/admin-bid-desk');
+  const checklist = require('../services/bid-desk/checklist');
+
+  test('rejects archived estimates when linking estimateId', async () => {
+    const queries = [];
+    const trx = (table) => {
+      const state = { table, whereNulls: [], lockedShare: false };
+      queries.push(state);
+      const q = {
+        where: () => q,
+        whereNull: (col) => { state.whereNulls.push(col); return q; },
+        forUpdate: () => q,
+        forShare: () => { state.lockedShare = true; return q; },
+        first: async () => (table === 'bid_opportunities' ? { id: ID, status: 'new', updated_at: new Date('2026-10-02T12:00:00.000Z') } : undefined),
+      };
+      return q;
+    };
+    const out = await saveBidUpdate(trx, ID, { estimateId: '22222222-2222-4333-8444-555555555555' });
+    expect(out).toEqual({ status: 400, body: { error: 'That estimate does not exist or is archived' } });
+    expect(queries.find((q) => q.table === 'estimates')).toMatchObject({ whereNulls: ['archived_at'], lockedShare: true });
+  });
+
+  test('enforces expected_updated_at concurrency fence on non-date updates when supplied', async () => {
+    let fencedSql = null;
+    const trx = () => {
+      const q = {
+        where: () => q,
+        forUpdate: () => q,
+        first: async () => ({ id: ID, status: 'new', updated_at: new Date('2026-10-02T12:00:00.000Z') }),
+        modify: (fn) => { fn(q); return q; },
+        whereRaw: (sql, args) => { fencedSql = [sql, args]; return q; },
+        update: async () => 0,
+      };
+      return q;
+    };
+    trx.raw = (sql) => sql;
+    const out = await saveBidUpdate(trx, ID, { status: 'bid', expected_updated_at: '2026-10-02T12:00:00.000Z' });
+    expect(out).toEqual({ status: 409, body: { error: 'This bid changed since you opened it. Reload and check it again.' } });
+    expect(fencedSql).toEqual(["date_trunc('milliseconds', updated_at) = ?::timestamptz", ['2026-10-02T12:00:00.000Z']]);
+  });
+
+  test('saveBidUpdate returns 409 before buildPatch when expected_updated_at is stale even if job_walk_at was concurrently cleared', async () => {
+    const update = jest.fn(async () => 1);
+    const trx = () => {
+      const q = {
+        where: () => q,
+        forUpdate: () => q,
+        first: async () => ({ id: ID, status: 'new', job_walk_at: null, updated_at: new Date('2026-10-02T13:00:00.000Z') }),
+        modify: () => q,
+        whereRaw: () => q,
+        update,
+      };
+      return q;
+    };
+    trx.raw = (sql) => sql;
+    const out = await saveBidUpdate(trx, ID, { jobWalkConfirmed: true, expected_updated_at: '2026-10-02T12:00:00.000Z' });
+    expect(out).toEqual({ status: 409, body: { error: 'This bid changed since you opened it. Reload and check it again.' } });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('reorderItems updates positions in a single batched VALUES query', async () => {
+    const rawCalls = [];
+    const id1 = '11111111-1111-4111-8111-111111111111';
+    const id2 = '22222222-2222-4222-8222-222222222222';
+    const conn = () => {
+      const q = { where: () => q, whereNull: () => q, forUpdate: () => q, select: async () => [{ id: id1 }, { id: id2 }] };
+      return q;
+    };
+    conn.raw = jest.fn(async (sql, bindings) => { rawCalls.push({ sql, bindings }); });
+    const ok = await checklist.reorderItems(conn, ID, [id2, id1]);
+    expect(ok).toBe(true);
+    expect(rawCalls).toHaveLength(1);
+    expect(rawCalls[0].sql).toContain('FROM (VALUES (?::uuid, ?::int), (?::uuid, ?::int)) AS v(id, pos)');
+    expect(rawCalls[0].bindings).toEqual([id2, 1, id1, 2, ID]);
+  });
+
+  test('checklist start advances bid updated_at when changing solicitation_type so stale PATCH returns 409', async () => {
+    let bidRow = { id: ID, status: 'new', solicitation_type: null, updated_at: new Date('2026-10-02T12:00:00.000Z') };
+    const updates = [];
+    mockDb.mockReset();
+    mockDb.mockImplementation((fn) => {
+      if (typeof fn === 'function') {
+        const trx = (table) => {
+          const q = {
+            where: () => q,
+            whereNull: () => q,
+            whereNotNull: () => q,
+            forUpdate: () => q,
+            orderBy: () => q,
+            max: () => q,
+            modify: (cb) => { cb(q); return q; },
+            whereRaw: () => q,
+            first: async () => (table === 'bid_opportunities' ? bidRow : { top: 0 }),
+            select: async () => [],
+            insert: async () => [],
+            update: async (patch) => {
+              updates.push({ table, patch });
+              if (table === 'bid_opportunities' && patch.updated_at) {
+                bidRow = { ...bidRow, ...patch, updated_at: new Date('2026-10-02T13:00:00.000Z') };
+              }
+              return 1;
+            },
+          };
+          return q;
+        };
+        trx.raw = (sql) => sql;
+        return fn(trx);
+      }
+      return {};
+    });
+
+    const started = await call('POST', `/api/admin/bid-desk/${ID}/checklist/start`, { type: 'rfp' });
+    expect(started.status).toBe(201);
+    expect(updates).toContainEqual({
+      table: 'bid_opportunities',
+      patch: { solicitation_type: 'rfp', updated_at: 'clock_timestamp()' },
+    });
+
+    const stalePatch = await saveBidUpdate(
+      (() => {
+        const t = () => {
+          const q = {
+            where: () => q,
+            forUpdate: () => q,
+            first: async () => bidRow,
+            modify: (cb) => { cb(q); return q; },
+            whereRaw: (_sql, [expected]) => { q._matched = new Date(expected).getTime() === bidRow.updated_at.getTime(); return q; },
+            update: async () => (q._matched ? 1 : 0),
+          };
+          return q;
+        };
+        t.raw = (sql) => sql;
+        return t;
+      })(),
+      ID,
+      { status: 'bid', expected_updated_at: '2026-10-02T12:00:00.000Z' },
+    );
+    expect(stalePatch.status).toBe(409);
+  });
+});

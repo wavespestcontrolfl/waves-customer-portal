@@ -611,6 +611,8 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
 // Re-service photo uploads (GATE_RESERVICE_PHOTOS): same pre-parser 404 as
 // the appointment route's visitPrepPreParserGuard above.
 app.use('/api/public/reservice', require('./routes/reservice-public').reservicePhotosPreParserGuard);
+app.use('/api/public/reschedule', require('./middleware/no-store').noStore);
+app.use('/api/public/estimates', require('./middleware/no-store').noStore);
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 // Tap to Pay card save (GATE_TAP_SAVE_CARD): these three answers carry a
 // SetupIntent client secret, a terminal bearer token, a customer name or the
@@ -666,7 +668,7 @@ app.use('/api/public/moving', (req, res, next) => {
 // instead of Express's param-decode error (the error handler logs the raw segment and answers 500). After the estimate header
 // guards above (they match the raw path and never decode), so that 404 carries their headers; the secure-card and moving privacy
 // headers are stamped by their mounts just above.
-app.use(['/api/estimates', '/api/pay', '/api/public/secure-card', '/api/public/careers/interview', '/api/public/careers/offer', '/api/public/moving'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
+app.use(['/api/estimates', '/api/pay', '/api/public/secure-card', '/api/public/careers/interview', '/api/public/careers/offer', '/api/public/moving', '/api/public/estimates', '/api/public/reschedule', '/api/public/reservice'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
 
 // Invoice pay page promo code (GATE_PAY_PROMO_CODE) and plan choice (GATE_PAY_PLAN_CHOICE): the dark 404 lands before the global limiter.
 app.use('/api/pay', require('./routes/pay-v2').darkRoutePreGuard);

@@ -23,7 +23,6 @@ describe('call alerts open the call', () => {
   test.each([
     'customer_missed_call',
     'customer_voicemail_callback',
-    'repeat_caller',
     'promise_chaser',
     'sandy_transfer_no_context',
   ])('%s links the call by its call_log id, or the Calls tab without one', (key) => {

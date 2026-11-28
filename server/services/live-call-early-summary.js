@@ -35,7 +35,8 @@ const { anthropicText } = require('./llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { scrubPans } = require('../utils/pan-scrub');
 const { raiseAdminAlert } = require('./admin-alert-compose');
-const { staffAnswered, staffNameOf } = require('./live-call-upset-alert');
+const { staffAnswered, staffNameOf, transferTakenByOwner } = require('./live-call-upset-alert');
+const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -73,13 +74,20 @@ function mergeLiveState(patch) {
 // that module requires this one from its stopped-event hook.
 const notQuarantinedSql = () => `NOT ${require('./live-call-transcription').QUARANTINE_WHERE_SQL}`;
 
-// Claims the call's one run: of two stopped events, one UPDATE matches. A call the recording pipeline already
-// processed (ai_extraction set) is skipped: its own summary is there. A quarantined call is never claimed.
+// Claims the call's one run: of two stopped events, one UPDATE matches. Requires the call to be over
+// (terminal status or ended_at), skips spam, field tech_line calls, already-processed rows, and quarantined calls.
 async function claim(callSid, now) {
+  const endedStatuses = [...TERMINAL_CALL_STATUSES];
   const won = await db('call_log')
     .where('twilio_call_sid', callSid)
     .whereNull('ai_extraction')
+    .whereNull('call_summary')
+    .whereRaw("COALESCE(processing_status, '') NOT IN ('processed', 'spam')")
+    .whereRaw("COALESCE(call_outcome, '') <> 'spam'")
+    .whereRaw("COALESCE(metadata ->> 'numberType', '') <> 'tech_line'")
+    .whereRaw(`(status IN (${endedStatuses.map(() => '?').join(', ')}) OR (metadata ->> 'ended_at') IS NOT NULL)`, endedStatuses)
     .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
+    .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at') IS NOT NULL")
     .whereRaw(notQuarantinedSql())
     .whereRaw("(metadata -> 'live_transcription' ->> 'early_summary_claimed_at') IS NULL")
     .update({ metadata: mergeLiveState({ early_summary_claimed_at: now.toISOString() }) });
@@ -174,6 +182,7 @@ async function saveSummary(callSid, { summary, ...extras }, now) {
   const saved = await db('call_log')
     .where('twilio_call_sid', callSid)
     .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
+    .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at') IS NOT NULL")
     .whereRaw(notQuarantinedSql())
     .whereRaw('EXISTS (SELECT 1 FROM call_live_utterances WHERE call_sid = ?)', [callSid])
     .update({ metadata: mergeLiveState({ early_summary: { text: summary, ...extras, at: now.toISOString(), model: MODELS.LIVE_CALL } }) });
@@ -193,7 +202,7 @@ async function alertOfficeCall(callSid, reply) {
     const call = await db('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id', 'metadata', 'customer_id');
     let meta = call?.metadata;
     if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-    if (!call || !staffAnswered(meta?.forward_acceptance) || !(await bellSwitchOn())) return;
+    if (!call || transferTakenByOwner(meta) || !staffAnswered(meta?.forward_acceptance) || !(await bellSwitchOn())) return;
     const name = staffNameOf(meta.forward_acceptance) || 'the office';
     await raiseAdminAlert('live_call_next_step', {
       area: 'Comms',
