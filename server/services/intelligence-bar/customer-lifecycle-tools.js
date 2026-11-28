@@ -108,6 +108,9 @@ function collisionFoldsNote(folds) {
       const n = Array.isArray(detail.shared_redeemed_discounts) ? detail.shared_redeemed_discounts.length : 0;
       return `${table}: ${n} duplicate redeemed promo row(s) detached from the archived record`;
     }
+    if (table === 'review_sequences' && detail && typeof detail === 'object') {
+      return detail.summary || 'review_sequences: archived customer\'s active review drip is stopped';
+    }
     return `${table}: ${detail}`;
   });
   return ` Folds the undo cannot split apart: ${parts.join('; ')}.`;

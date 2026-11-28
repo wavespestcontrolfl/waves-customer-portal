@@ -551,6 +551,75 @@ describe('PR 3 merge & undo table coverage', () => {
       }),
     ).rejects.toMatchObject({ statusCode: 409, message: /moving record.*outside the journal/i });
   });
+
+  test('prepareCustomerMovesAndCardRequestsBeforeSweep locks live moves, expires pending standalone Auto Pay links, and aborts on completing', async () => {
+    const expiredIds = [];
+    const makeTrx = ({ moves = [], cardReqs = [], moveLocked = true } = {}) => {
+      const trx = (table) => {
+        let whereInIds = [];
+        const q = {
+          where() { return q; },
+          whereIn(_col, vals) { whereInIds = vals; return q; },
+          forUpdate() { return q; },
+          select: async () => (table === 'customer_moves' ? moves : cardReqs),
+          update: async (patch) => {
+            if (table === 'appointment_card_requests' && patch.status === 'expired') expiredIds.push(...whereInIds);
+            return whereInIds.length;
+          },
+        };
+        return q;
+      };
+      trx.fn = { now: () => 'NOW()' };
+      trx.raw = async () => ({ rows: [{ locked: moveLocked }] });
+      return trx;
+    };
+
+    await expect(
+      dedupe._test.prepareCustomerMovesAndCardRequestsBeforeSweep(
+        makeTrx({ moves: [{ id: 'mv-1' }], moveLocked: false }),
+        'lose-1',
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    await expect(
+      dedupe._test.prepareCustomerMovesAndCardRequestsBeforeSweep(
+        makeTrx({ cardReqs: [{ id: 'acr-c', status: 'completing' }] }),
+        'lose-1',
+      ),
+    ).rejects.toThrow(/in-flight standalone Auto Pay setup link/i);
+
+    await dedupe._test.prepareCustomerMovesAndCardRequestsBeforeSweep(
+      makeTrx({ moves: [{ id: 'mv-2' }], cardReqs: [{ id: 'acr-p', status: 'pending' }, { id: 'acr-done', status: 'completed' }] }),
+      'lose-1',
+    );
+    expect(expiredIds).toEqual(['acr-p']);
+  });
+
+  test('predictCollisionFolds surfaces active review_sequences overlap with deterministic ids', async () => {
+    const database = (table) => {
+      const q = {
+        where() { return q; },
+        whereIn() { return q; },
+        whereNotNull() { return q; },
+        select: async () => {
+          if (table === 'review_sequences') {
+            return [
+              { id: 'seq-w', customer_id: 'win-1', status: 'active' },
+              { id: 'seq-l', customer_id: 'lose-1', status: 'active' },
+            ];
+          }
+          return [];
+        },
+      };
+      return q;
+    };
+    const res = await dedupe._test.predictCollisionFolds(database, { id: 'win-1' }, { id: 'lose-1' });
+    expect(res.tables).toContain('review_sequences');
+    expect(res.details.review_sequences).toMatchObject({
+      surviving_sequence_ids: ['seq-w'],
+      archived_sequence_ids: ['seq-l'],
+    });
+  });
 });
 
 describe('Static CI ratchet: every customer_id table with a customer_id unique index or non-id PK is explicitly handled in customer-dedupe.js', () => {

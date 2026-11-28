@@ -2679,6 +2679,47 @@ async function voidOpenEmailChangeRequestsBeforeSweep(trx, loserId, winnerId = n
     .update({ consumed_at: trx.fn.now(), updated_at: trx.fn.now() });
 }
 
+// Acquire move advisory locks and settle standalone Auto Pay setup links BEFORE
+// the generic FK sweep runs: without this, a non-colliding merge transfers an
+// issued standalone Auto Pay token onto the survivor (exposing firstName), or
+// repoints a live move while applyMove is between steps.
+async function prepareCustomerMovesAndCardRequestsBeforeSweep(trx, loserId) {
+  try {
+    const liveMoves = await trx('customer_moves')
+      .where({ customer_id: loserId })
+      .whereIn('status', ['open', 'submitted'])
+      .select('id');
+    for (const mv of liveMoves) {
+      const lockRes = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['customer-move-apply', String(mv.id)]);
+      if (lockRes?.rows?.[0]?.locked === false) {
+        throw Object.assign(new Error('Duplicate customer move is currently being updated — retry merging in a moment'), {
+          statusCode: 409,
+          isOperational: true,
+        });
+      }
+    }
+  } catch (e) {
+    if (!(e && e.code === '42P01')) throw e;
+  }
+  try {
+    const cardReqs = await trx('appointment_card_requests')
+      .where({ customer_id: loserId, kind: 'customer' })
+      .forUpdate()
+      .select('id', 'status');
+    if (cardReqs.some((r) => r.status === 'completing')) {
+      throw new Error('Archived customer has an in-flight standalone Auto Pay setup link — wait for it to finish before merging');
+    }
+    const pendingIds = cardReqs.filter((r) => r.status === 'pending').map((r) => r.id);
+    if (pendingIds.length) {
+      await trx('appointment_card_requests')
+        .whereIn('id', pendingIds)
+        .update({ status: 'expired', updated_at: trx.fn.now() });
+    }
+  } catch (e) {
+    if (!(e && e.code === '42P01')) throw e;
+  }
+}
+
 async function reconcileMergedMoveFromProperty(trx, winnerId, repointed = null) {
   if (repointed && !repointed['customer_moves.customer_id']) return;
   let liveMove = null;
@@ -4393,6 +4434,8 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     await voidOpenEmailChangeRequestsBeforeSweep(trx, loser.id, winner.id);
     // The loser's open pin suggestion (and its bell) is retired, not moved: it names the retired profile.
     await retirePinSuggestionsBeforeSweep(trx, loser.id);
+    // Lock any live moves and expire pending standalone Auto Pay links before the sweep.
+    await prepareCustomerMovesAndCardRequestsBeforeSweep(trx, loser.id);
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -4406,14 +4449,19 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
           // Bounded prefetch (r35): the journal stores {count} beyond the
           // cap anyway — materializing every id first let a 10k+-row FK
           // table allocate an unbounded list inside the merge transaction.
-          rowIds = (await sp(table).where(column, loserId).select(pkColumn).limit(REPOINT_ID_CAP + 1)).map((r) => r[pkColumn]);
+          rowIds = (await sp(table).where(column, loserId)
+            .modify((q) => { if (table === 'appointment_card_requests') q.whereNot('kind', 'customer'); })
+            .select(pkColumn)
+            .limit(REPOINT_ID_CAP + 1)).map((r) => r[pkColumn]);
         });
       } catch {
         rowIds = null;
       }
       try {
         await trx.transaction(async (sp) => {
-          const count = await sp(table).where(column, loserId).update({ [column]: winnerId });
+          const count = await sp(table).where(column, loserId)
+            .modify((q) => { if (table === 'appointment_card_requests') q.whereNot('kind', 'customer'); })
+            .update({ [column]: winnerId });
           if (count) {
             repointed[`${table}.${column}`] = count;
             // Record ids only when the update provably covered exactly them
@@ -8364,6 +8412,47 @@ async function predictExtraTableCollisionFolds(database, read, winnerId, loserId
       .map((r) => String(r.discount_id)))].sort();
     if (sharedDiscounts.length) details[promoTable] = { shared_redeemed_discounts: sharedDiscounts };
   }
+  const activeReviewRows = (await read('review_sequences', ['id', 'customer_id', 'status']))
+    .filter((r) => r.status === 'active');
+  const winSeqIds = activeReviewRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => String(r.id)).sort();
+  const loseSeqIds = activeReviewRows.filter((r) => String(r.customer_id) === String(loserId)).map((r) => String(r.id)).sort();
+  if (winSeqIds.length && loseSeqIds.length) {
+    details.review_sequences = {
+      summary: 'both records have an active review drip: the archived record\'s sequence is stopped',
+      surviving_sequence_ids: winSeqIds,
+      archived_sequence_ids: loseSeqIds,
+    };
+  }
+}
+
+async function predictPropertyAndThreadFolds(read, winner, loser, details) {
+  const winnerId = winner.id;
+  const loserId = loser.id;
+  const propertyRows = await read('customer_properties', ['customer_id', 'is_primary', 'active']);
+  const winnerHasPrimary = propertyRows.some((row) => String(row.customer_id) === String(winnerId) && row.is_primary === true);
+  const winnerHasActivePrimary = propertyRows.some((row) => String(row.customer_id) === String(winnerId) && row.is_primary === true && row.active === true);
+  const winnerWillEstablishPrimary = !winnerHasPrimary
+    && !isEmptyValue(winner.address_line1)
+    && addressCompat(winner, loser).status !== 'match';
+  const loserHasPrimary = propertyRows.some((row) => String(row.customer_id) === String(loserId) && row.is_primary === true);
+  if (loserHasPrimary && (winnerHasActivePrimary || winnerWillEstablishPrimary)) {
+    details.customer_properties = 'the archived record\'s primary property will be demoted because the surviving account keeps its own primary address';
+  }
+  const tagRows = await read('customer_tags', ['customer_id', 'tag']);
+  const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
+  const sharedTags = [...new Set(tagRows.filter((r) => String(r.customer_id) === String(loserId) && winnerTags.has(r.tag)).map((r) => r.tag))].sort();
+  if (sharedTags.length) details.customer_tags = { shared: sharedTags };
+  const alertRows = (await read('customer_health_alerts', ['customer_id', 'alert_type', 'status']))
+    .filter((r) => HEALTH_ALERT_OPEN_STATUSES.includes(r.status) && HEALTH_ALERT_UNIQUE_RULE_TYPES.includes(r.alert_type));
+  const winnerAlerts = new Set(alertRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.alert_type));
+  const sharedAlerts = [...new Set(alertRows.filter((r) => String(r.customer_id) === String(loserId) && winnerAlerts.has(r.alert_type)).map((r) => r.alert_type))].sort();
+  if (sharedAlerts.length) details.customer_health_alerts = { shared_open_alerts: sharedAlerts };
+  const convRows = await read('conversations', ['customer_id', 'channel', 'our_endpoint_id']);
+  const key = (r) => `${r.channel}\u0000${r.our_endpoint_id}`;
+  const validConv = (r) => r.channel != null && r.our_endpoint_id != null;
+  const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && validConv(r)).map(key));
+  const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && validConv(r) && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
+  if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
 }
 
 async function predictCollisionFolds(database, winner, loser) {
@@ -8390,36 +8479,7 @@ async function predictCollisionFolds(database, winner, loser) {
     if (owners.has(String(winnerId)) && owners.has(String(loserId))) details[table] = text;
   }
   await predictFamilyCollisionFold(database, winnerId, loserId, details);
-  // executeMerge initializes an addressed winner's missing primary before the
-  // FK sweep. If the loser owns a primary, that deliberate collision invokes
-  // repointCustomerProperties (which demotes the moved row) and makes automatic
-  // undo unavailable. Predict only this newly deterministic collision; other
-  // active-address collisions retain the existing runtime/journal fallback.
-  const propertyRows = await read('customer_properties', ['customer_id', 'is_primary', 'active']);
-  const winnerRows = propertyRows.filter((row) => String(row.customer_id) === String(winnerId));
-  const winnerHasPrimary = winnerRows.some((row) => row.is_primary === true);
-  const winnerHasActivePrimary = winnerRows.some((row) => row.is_primary === true && row.active === true);
-  const winnerWillEstablishPrimary = !winnerHasPrimary
-    && !isEmptyValue(winner.address_line1)
-    && addressCompat(winner, loser).status !== 'match';
-  const loserHasPrimary = propertyRows.some((row) => String(row.customer_id) === String(loserId) && row.is_primary === true);
-  if (loserHasPrimary && (winnerHasActivePrimary || winnerWillEstablishPrimary)) {
-    details.customer_properties = 'the archived record\'s primary property will be demoted because the surviving account keeps its own primary address';
-  }
-  const tagRows = await read('customer_tags', ['customer_id', 'tag']);
-  const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
-  const sharedTags = [...new Set(tagRows.filter((r) => String(r.customer_id) === String(loserId) && winnerTags.has(r.tag)).map((r) => r.tag))].sort();
-  if (sharedTags.length) details.customer_tags = { shared: sharedTags };
-  const alertRows = (await read('customer_health_alerts', ['customer_id', 'alert_type', 'status']))
-    .filter((r) => HEALTH_ALERT_OPEN_STATUSES.includes(r.status) && HEALTH_ALERT_UNIQUE_RULE_TYPES.includes(r.alert_type));
-  const winnerAlerts = new Set(alertRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.alert_type));
-  const sharedAlerts = [...new Set(alertRows.filter((r) => String(r.customer_id) === String(loserId) && winnerAlerts.has(r.alert_type)).map((r) => r.alert_type))].sort();
-  if (sharedAlerts.length) details.customer_health_alerts = { shared_open_alerts: sharedAlerts };
-  const convRows = await read('conversations', ['customer_id', 'channel', 'our_endpoint_id']);
-  const key = (r) => `${r.channel}\u0000${r.our_endpoint_id}`;
-  const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
-  const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && r.channel != null && r.our_endpoint_id != null && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
-  if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
+  await predictPropertyAndThreadFolds(read, winner, loser, details);
   await predictExtraTableCollisionFolds(database, read, winnerId, loserId, details);
   return { tables: Object.keys(details).sort(), details };
 }
@@ -8623,11 +8683,13 @@ module.exports = {
     repointCustomerMoves,
     repointPromoCodesNullCollisions,
     voidOpenEmailChangeRequestsBeforeSweep,
+    retirePinSuggestionsBeforeSweep,
+    prepareCustomerMovesAndCardRequestsBeforeSweep,
+    predictCollisionFolds,
     reconcileMergedMoveFromProperty,
     verifyPostMergeFamilyAndDunningSafety,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
-    retirePinSuggestionsBeforeSweep,
     stableStringify,
     normalizeDisclosedTimestamps,
     resetFkCache: () => { fkColumnsCache = null; },
