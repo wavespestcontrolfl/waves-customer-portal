@@ -4,12 +4,18 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
+
 vi.mock('../../utils/admin-fetch', () => ({
   adminFetch: vi.fn(),
+  adminLoginUrl: vi.fn(() => '/admin/login'),
+}));
+vi.mock('../../hooks/useFeatureFlag', () => ({
+  useFeatureFlagReady: () => ({ enabled: true, ready: true }),
 }));
 
 import { adminFetch } from '../../utils/admin-fetch';
-import { CustomerAccountPanel, LearningPanel, answerSendGate } from './AgentEstimatePage';
+import AgentEstimatePage, { CustomerAccountPanel, LearningPanel } from './AgentEstimatePage';
 
 afterEach(() => {
   cleanup();
@@ -113,33 +119,188 @@ describe('LearningPanel memory review', () => {
   });
 });
 
-describe('send gates answered once (answerSendGate)', () => {
+describe('AgentEstimatePage canonical send flow and blocked Add photo', () => {
   afterEach(() => vi.unstubAllGlobals());
-  const gateError = (code, message) => Object.assign(new Error(message), { code });
 
-  it('asks the review acknowledgment, then the typed satellite palm count, and rethrows anything else', () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    const prompt = vi.fn(() => ' 12 ');
-    vi.stubGlobal('prompt', prompt);
-    const palms = gateError('PALM_COUNT_REQUIRED', 'This quote priced 14 palms from the satellite image.');
-    let answers = answerSendGate(gateError('ENGINE_REVIEW_REQUIRED', 'flagged'), {});
-    expect(answers).toEqual({ acknowledgeEngineReview: true });
-    answers = answerSendGate(palms, answers);
-    expect(answers).toEqual({ acknowledgeEngineReview: true, confirmedPalmCount: 12 });
-    expect(prompt.mock.calls[0][0]).toMatch(/a clump or a multi-trunk palm is one palm/);
-    // Each gate is asked once; a repeat or a mismatch goes back to the caller.
-    expect(() => answerSendGate(palms, answers)).toThrow(palms);
-    const mismatch = gateError('PALM_COUNT_MISMATCH', 'You counted 12 palms, but this quote priced 14.');
-    expect(() => answerSendGate(mismatch, answers)).toThrow(mismatch);
+  const mountPage = (leadId = 'lead-1') => render(
+    <MemoryRouter initialEntries={[`/admin/agent-estimate?leadId=${leadId}`]}>
+      <Routes>
+        <Route element={<Outlet context={{ user: { id: 'admin-1', role: 'admin' } }} />}>
+          <Route path="/admin/agent-estimate" element={<AgentEstimatePage />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+
+  it('routes draft sending through EstimateSendDialog review instead of direct POST /send', async () => {
+    const draft = {
+      id: 'est-1',
+      status: 'draft',
+      editable_here: true,
+      customer_phone: '+19415550100',
+      customer_email: 'qa@example.invalid',
+      address: '100 Main St',
+      monthly_total: 99,
+      annual_total: 1188,
+      onetime_total: 0,
+    };
+    adminFetch.mockImplementation(async (path) => {
+      if (path.startsWith('/admin/agent-estimate/lead/')) {
+        return {
+          context: {
+            lead: { id: 'lead-1', name: 'QA Lead', status: 'new', phone: '+19415550100', email: 'qa@example.invalid', address: '100 Main St' },
+            current_estimate: draft,
+          },
+        };
+      }
+      if (path === '/admin/agent-estimate/memory') return { memories: [] };
+      if (path.startsWith('/admin/leads')) return { leads: [] };
+      return {};
+    });
+    const fetchMock = vi.fn(async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).endsWith('/send-preview')
+        ? {
+          id: 'est-1',
+          status: 'draft',
+          editVersion: 'v1',
+          updatedAt: '2026-01-01T12:00:00Z',
+          customerName: 'QA Lead',
+          customerPhone: '+19415550100',
+          customerEmail: 'qa@example.invalid',
+          address: '100 Main St',
+          previewPath: '/estimate/tok?adminPreview=1',
+          messageVersion: 'msg-v1',
+          messages: { sms: 'Preview SMS text', email: { subject: 'Estimate', text: 'Preview email text' } },
+        }
+        : { sent: true, channels: { sms: { ok: true, real: true } } }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    mountPage();
+    const reviewBtn = await screen.findByRole('button', { name: /Review & send/i });
+    fireEvent.click(reviewBtn);
+
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/send-preview'))).toBe(true);
+    expect(fetchMock.mock.calls.some(([url, opts]) => String(url).endsWith('/send') && opts?.method === 'POST')).toBe(false);
+    expect(adminFetch.mock.calls.some(([path]) => String(path).endsWith('/send'))).toBe(false);
   });
 
-  it('a cancelled review or a blank or non-number palm answer cancels the send', () => {
-    vi.stubGlobal('confirm', vi.fn(() => false));
-    expect(() => answerSendGate(gateError('ENGINE_REVIEW_REQUIRED', 'flagged'), {})).toThrow(/review the flagged reasons/);
-    const palms = gateError('PALM_COUNT_REQUIRED', 'priced 14 palms');
-    for (const reply of ['twelve', '', null]) {
-      vi.stubGlobal('prompt', vi.fn(() => reply));
-      expect(() => answerSendGate(palms, {})).toThrow(/type the palm count/);
-    }
+  it('disables Add photo when the selected lead is closed', async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path.startsWith('/admin/agent-estimate/lead/')) {
+        return {
+          context: {
+            lead: { id: 'lead-closed', name: 'Closed Lead', status: 'won', phone: '+19415550100' },
+            current_estimate: null,
+          },
+        };
+      }
+      if (path === '/admin/agent-estimate/memory') return { memories: [] };
+      if (path.startsWith('/admin/leads')) return { leads: [] };
+      return {};
+    });
+
+    mountPage('lead-closed');
+    expect(await screen.findByText(/Agent Estimate drafting works on open leads only/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Add photo/i })).toBeDisabled();
+  });
+
+  it('distinguishes all-failed, partial-retry, and uncertain send outcomes without falsely reporting sent', async () => {
+    let currentDraft = {
+      id: 'est-2',
+      status: 'draft',
+      editable_here: true,
+      customer_phone: '+19415550100',
+      customer_email: 'qa@example.invalid',
+      address: '100 Main St',
+      monthly_total: 99,
+      annual_total: 1188,
+      onetime_total: 0,
+    };
+    const previewBody = {
+      id: 'est-2',
+      status: 'draft',
+      editVersion: 'v1',
+      updatedAt: '2026-01-01T12:00:00Z',
+      customerName: 'QA Lead',
+      customerPhone: '+19415550100',
+      customerEmail: 'qa@example.invalid',
+      address: '100 Main St',
+      previewPath: '/estimate/tok?adminPreview=1',
+      messageVersion: 'msg-v1',
+      messages: { sms: 'Preview SMS', email: { subject: 'Estimate', text: 'Preview email' } },
+    };
+    adminFetch.mockImplementation(async (path) => {
+      if (path.startsWith('/admin/agent-estimate/lead/')) {
+        return {
+          context: {
+            lead: { id: 'lead-2', name: 'QA Lead', status: 'new', phone: '+19415550100', email: 'qa@example.invalid', address: '100 Main St' },
+            current_estimate: currentDraft,
+          },
+        };
+      }
+      if (path === '/admin/agent-estimate/memory') return { memories: [] };
+      if (path.startsWith('/admin/leads')) return { leads: [] };
+      return {};
+    });
+
+    let sendResponder = async () => ({
+      ok: false,
+      status: 422,
+      json: async () => ({ sent: false, channels: { sms: { ok: false, real: false, error: 'SMS suppressed' } } }),
+    });
+    vi.stubGlobal('fetch', vi.fn(async (url, opts) => {
+      if (String(url).endsWith('/send-preview')) return { ok: true, status: 200, json: async () => previewBody };
+      if (opts?.method === 'POST') return sendResponder();
+      return { ok: true, status: 200, json: async () => ({}) };
+    }));
+
+    mountPage('lead-2');
+    // 1. All-failed 422 keeps status draft and reports failure, not "Estimate sent."
+    fireEvent.click(await screen.findByRole('button', { name: /Review & send/i }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Text message', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
+    await screen.findByText(/SMS suppressed/);
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByText(/Estimate send failed — sms: SMS suppressed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Estimate sent\.$/i)).not.toBeInTheDocument();
+
+    // 2. Partial failure marks sent and restricts retry dialog to only the failed channel (email).
+    sendResponder = async () => {
+      currentDraft = { ...currentDraft, status: 'sent', editable_here: false };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          sent: true,
+          channels: {
+            sms: { ok: true, real: true },
+            email: { ok: false, real: false, error: 'Email bounced' },
+          },
+        }),
+      };
+    };
+    fireEvent.click(screen.getByRole('button', { name: /Review & send/i }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Text message and email', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
+    await screen.findByText(/Email bounced/);
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByText(/Estimate sent with an issue — email: Email bounced/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Review & retry send/i }));
+    expect(await screen.findByRole('radio', { name: 'Text message', exact: true })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'Text message and email', exact: true })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'Email', exact: true })).not.toBeDisabled();
+
+    // 3. Closing after an uncertain transport failure surfaces an uncertain message.
+    sendResponder = async () => Promise.reject(new Error('Network down'));
+    fireEvent.click(screen.getByRole('radio', { name: 'Email', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
+    await screen.findByRole('alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByText(/Send outcome is uncertain/i)).toBeInTheDocument();
   });
 });
