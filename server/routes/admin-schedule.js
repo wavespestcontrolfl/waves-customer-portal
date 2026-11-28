@@ -25421,9 +25421,9 @@ router.get('/:id/estimate-source', async (req, res, next) => {
         monthlyTotal: Number(est.monthly_total || 0),
         annualTotal: Number(est.annual_total || 0),
         onetimeTotal: Number(est.onetime_total || 0),
-        deposit,
-        payment,
       }),
+      deposit,
+      payment,
       // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
       // customer sees on the public quote page, so the provenance card can
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.

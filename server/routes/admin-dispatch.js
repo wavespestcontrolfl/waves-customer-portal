@@ -7034,11 +7034,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         t.photo_s3_key,
         t.role,
         COALESCE(ts.status, 'idle')      AS status,
-        ts.lat,
-        ts.lng,
+        CASE WHEN ts.location_updated_at >= NOW() - INTERVAL '24 hours' THEN ts.lat END AS lat,
+        CASE WHEN ts.location_updated_at >= NOW() - INTERVAL '24 hours' THEN ts.lng END AS lng,
         ts.current_job_id,
         ts.updated_at,
-        ts.location_updated_at,
+        CASE WHEN ts.location_updated_at >= NOW() - INTERVAL '24 hours' THEN ts.location_updated_at END AS location_updated_at,
         COALESCE(today_agg.total, 0)     AS today_total,
         COALESCE(today_agg.completed, 0) AS today_completed,
         EXISTS (
@@ -7046,7 +7046,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
           WHERE a.technician_id = t.id AND a.absence_date = ? AND a.cleared_at IS NULL
         ) AS out_today
       FROM technicians t
-      LEFT JOIN tech_status ts ON ts.tech_id = t.id AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
+      LEFT JOIN tech_status ts ON ts.tech_id = t.id
       LEFT JOIN (
         SELECT
           technician_id,

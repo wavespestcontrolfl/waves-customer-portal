@@ -120,7 +120,8 @@ describe('P0-5, P1-9, P1-11, P1-17 & P2: admin-dispatch RBAC, board LEFT JOINs &
         expect(board.techs.map((t) => t.id)).toEqual(['t-nogps']);
         expect(board.jobs.map((j) => j.id)).toEqual(['j-nocust']);
         const techSql = rawSqls.find((s) => s.includes('FROM technicians t'));
-        expect(techSql).toContain('LEFT JOIN tech_status ts ON ts.tech_id = t.id AND ts.location_updated_at >= NOW() - INTERVAL');
+        expect(techSql).toContain('LEFT JOIN tech_status ts ON ts.tech_id = t.id');
+        expect(techSql).toContain("CASE WHEN ts.location_updated_at >= NOW() - INTERVAL '24 hours' THEN ts.lat END AS lat");
         const jobSql = rawSqls.find((s) => s.includes('FROM scheduled_services s'));
         expect(jobSql).toContain('LEFT JOIN customers');
         expect(jobSql).toContain('s.customer_id IS NOT NULL OR s.reservation_expires_at IS NULL');
