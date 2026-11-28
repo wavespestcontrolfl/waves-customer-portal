@@ -38,11 +38,18 @@ async function completeActivePlansLocked(invoiceId, conn) {
   // serializes this whole transition against the reopen's own row write:
   // either we complete both legs from a settled invoice before the reopen
   // commits, or we see the reopened status and touch nothing.
-  const invoice = await conn('invoices').where({ id: invoiceId }).forUpdate().first('status');
+  const invoice = await conn('invoices').where({ id: invoiceId }).forUpdate().first('status', 'customer_id', 'line_items', 'payer_id');
   if (!invoice || !['paid', 'prepaid'].includes(String(invoice.status || ''))) return 0;
   // The invoice is settled (locked read above): close the open payment_failed
   // bells about it. Best-effort in a savepoint; never fails the payment.
-  await require('./payment-failed-alert-close').closePaymentFailedAlertsForPaidInvoice(invoiceId, conn);
+  const alertClose = require('./payment-failed-alert-close');
+  await alertClose.closePaymentFailedAlertsForPaidInvoice(invoiceId, conn);
+  if (!invoice.payer_id && invoice.customer_id && invoice.line_items) {
+    const duesMonth = require('./billing-lane').duesMonthOfLineItems(invoice.line_items);
+    if (duesMonth) {
+      await alertClose.closePaymentFailedAlertsForMonthlyDues({ customerId: invoice.customer_id, billedMonth: duesMonth }, conn);
+    }
+  }
   // Settlement is re-verified IN the update statement (codex PR r4 P2): a
   // delayed post-commit caller can run after a dispute reopened the invoice
   // and an admin created a REPLACEMENT plan — completing that plan (and its

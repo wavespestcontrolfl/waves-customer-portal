@@ -164,7 +164,14 @@ describe('POST /customers/:id/charge-now fails closed off the monthly lane', () 
     await withServer(async (baseUrl) => {
       const res = await postChargeNow(baseUrl, customer.id, { amount: 40, description: 'One-off add-on' });
       expect(res.status).toBe(200);
-      expect(chargeOneTimeMock).toHaveBeenCalledWith(customer.id, 40, 'One-off add-on', null, { initiated_by: 'machine' }, { operatorOverride: true, overrideTrail: expect.objectContaining({ route: 'admin_charge_now' }) });
+      expect(chargeOneTimeMock).toHaveBeenCalledWith(
+        customer.id,
+        40,
+        'One-off add-on',
+        expect.stringMatching(new RegExp(`^admin_charge_one_time_${customer.id}_4000_`)),
+        { initiated_by: 'machine' },
+        { operatorOverride: true, overrideTrail: expect.objectContaining({ route: 'admin_charge_now' }) },
+      );
       expect(chargeMock).not.toHaveBeenCalled();
     });
   });

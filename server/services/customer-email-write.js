@@ -99,6 +99,9 @@ async function applyOperatorCustomerEmail(trx, { customerId, email, source = 'op
   const before = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
   if (!before) return { outcome: 'customer_not_found' };
   if (rowAllowed && !rowAllowed(before)) return { outcome: 'not_allowed' };
+  // Serialize email writes with any in-flight Stripe email sync for this customer
+  // (after customers FOR UPDATE — row lock first, advisory lock second).
+  await require('./stripe-email-sync').lockStripeEmailSync(trx, customerId);
   await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { email: newEmail });
   const conflict = await findCrossAccountEmailConflict(trx, {
     customerId, accountId: before.account_id || before.id, email: newEmail,

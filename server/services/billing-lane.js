@@ -1105,10 +1105,12 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date(), {
 // The paid / processing payment the cron (or Charge now / a retry rung)
 // collected for this ET month — billed_month stamp first, payment month +
 // the canonical "WaveGuard Monthly" description as the legacy fallback.
-async function findCollectedDuesPayment(dbConn, customerId, monthKey) {
+// Pass `{ statuses: ['paid'] }` when only settled cash counts (e.g., retiring
+// payment_failed alerts — an in-flight ACH can still bounce).
+async function findCollectedDuesPayment(dbConn, customerId, monthKey, { statuses = ['paid', 'processing'] } = {}) {
   return (await dbConn('payments')
     .where({ customer_id: customerId })
-    .whereIn('status', ['paid', 'processing'])
+    .whereIn('status', statuses)
     .where(function billedThisMonth() {
       this.whereRaw("metadata->>'billed_month' = ?", [monthKey])
         .orWhere(function legacyMarkerMatch() {
@@ -1125,12 +1127,14 @@ async function findCollectedDuesPayment(dbConn, customerId, monthKey) {
 // shares — completion, the monthly cron, the retry sweep's classifier — so a
 // month a stamped invoice already bills is never charged a second time.
 // `openInvoiceCovers: false` keeps only invoices that are paid / prepaid /
-// processing; `processingOnly` narrows that to processing (an ACH debit not yet settled).
+// processing; `processingOnly` narrows that to processing (an ACH debit not yet settled);
+// `settledOnly` narrows it to paid / prepaid (excluding processing ACH).
 async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   excludeScheduledServiceId = null,
   excludeInvoiceId = null,
   openInvoiceCovers = true,
   processingOnly = false,
+  settledOnly = false,
 } = {}) {
   // Lazy, like the status vocabulary below: invoice.js requires this module.
   const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
@@ -1143,7 +1147,9 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
   if (openInvoiceCovers) {
     invoiceQuery.whereRaw(`status NOT IN (${placeholders(CANCELLED_SERVICE_RESOLVED_STATUSES)})`, CANCELLED_SERVICE_RESOLVED_STATUSES);
   } else {
-    const paid = processingOnly ? ['processing'] : ['paid', 'prepaid', 'processing'];
+    const paid = processingOnly
+      ? ['processing']
+      : (settledOnly ? ['paid', 'prepaid'] : ['paid', 'prepaid', 'processing']);
     invoiceQuery.whereRaw(`status IN (${placeholders(paid)})`, paid);
   }
   // A PAYER-billed invoice is a third party's obligation, never the customer's
@@ -1168,6 +1174,18 @@ async function findLiveStampedDuesInvoice(dbConn, customerId, monthKey, {
 // FOR UPDATE NOWAIT (id order) and reads them again from the locked rows, so a
 // total or status moved by an invoice edit is seen as committed; a busy row
 // fails with Postgres 55P03 instead of waiting.
+// Read the stamped membership-dues month ('YYYY-MM') from an invoice's line_items,
+// or null when absent/unreadable. Shared across openStampedDuesInvoices, payment-plans
+// (closing monthly payment_failed bells when a dues invoice settles), and manual-payment undo.
+function duesMonthOfLineItems(raw) {
+  try {
+    const items = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const item = (Array.isArray(items) ? items : []).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
+    const rawMonth = item ? String(item[MEMBERSHIP_DUES_LINE_KEY]).trim() : '';
+    return /^\d{4}-(0[1-9]|1[0-2])$/.test(rawMonth) ? rawMonth : null;
+  } catch { return null; }
+}
+
 async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}) {
   const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
   const stamped = `CASE WHEN jsonb_typeof(line_items::jsonb) = 'array'
@@ -1182,16 +1200,8 @@ async function openStampedDuesInvoices(dbConn, customerId, { lock = false } = {}
   // amount_due is the collectible amount: invoice-helpers.js invoiceAmountDue, the charge base
   // every collection path prices from (total less credit_applied and amount_paid), not the gross total.
   const { invoiceAmountDue } = require('./invoice-helpers');
-  // dues_month: the month the stamp names, for wording ('YYYY-MM', null when unreadable).
-  const duesMonthOf = (raw) => {
-    try {
-      const items = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      const item = (Array.isArray(items) ? items : []).find((li) => li && li[MEMBERSHIP_DUES_LINE_KEY]);
-      return item ? String(item[MEMBERSHIP_DUES_LINE_KEY]) : null;
-    } catch { return null; }
-  };
   const shape = ({ id, total, status, credit_applied: creditApplied, amount_paid: amountPaid, line_items: lineItems }) => ({
-    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied, amount_paid: amountPaid }), dues_month: duesMonthOf(lineItems),
+    id, total, status, credit_applied: creditApplied, amount_due: invoiceAmountDue({ total, credit_applied: creditApplied, amount_paid: amountPaid }), dues_month: duesMonthOfLineItems(lineItems),
   });
   const rows = await open(dbConn('invoices')).orderBy('id', 'asc').select('id', 'total', 'status', 'credit_applied', 'amount_paid', 'line_items');
   if (!lock || !rows.length) return rows.map(shape);
@@ -1935,6 +1945,7 @@ module.exports = {
   isMembershipDuesShapedVisit,
   acquireMembershipDuesMonthLock,
   MEMBERSHIP_DUES_LINE_KEY,
+  duesMonthOfLineItems,
   predictCompletionBilling,
   monthlyDuesCollected,
   findLiveStampedDuesInvoice,

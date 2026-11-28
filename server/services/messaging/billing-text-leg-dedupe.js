@@ -401,7 +401,10 @@ async function claimOrResolve(trx, customerId, notificationEventKey, input) {
  */
 async function withBillingTextLegLock(input, send) {
   const metadata = input?.metadata || {};
-  if (metadata.billingDeliveryLeg !== 'sms' && !GUARDED_PURPOSES.includes(input?.purpose)) return send();
+  const guarded = metadata.billingDeliveryLeg === 'sms'
+    || GUARDED_PURPOSES.includes(input?.purpose)
+    || (input?.purpose === 'payment_receipt' && metadata.dedupePaymentReceipt === true);
+  if (!guarded) return send();
   const notificationEventKey = String(metadata.notificationEventKey || '').trim();
   const customerId = input?.customerId;
   if (!notificationEventKey || !customerId) return send();

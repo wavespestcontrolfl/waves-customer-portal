@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { triggerNotification } = require('./notification-triggers');
-const { isUuid, ledgerInvoiceId, isFailedAllocationSettled } = require('./payment-failed-allocation');
+const { isUuid, validBilledMonth, ledgerInvoiceId, rowBilledMonth, isFailedAllocationSettled } = require('./payment-failed-allocation');
 
 const TABLE = 'stripe_payment_notification_log';
 const SETTLED_STATUSES = ['paid', 'refunded', 'disputed'];
@@ -25,6 +25,7 @@ function queuedAllocation(metadata) {
 async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure, eventId) {
   const charge = paymentIntent.latest_charge;
   const attemptId = (typeof charge === 'object' ? charge?.id : charge) || eventId || 'no_charge';
+  const billedMonth = validBilledMonth(paymentIntent.metadata?.billed_month);
   // Only the durable insert belongs in the webhook: no recipient lookup or push.
   return db(TABLE).insert({
     payment_intent_id: paymentIntent.id,
@@ -42,6 +43,9 @@ async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure,
       // may leave no ledger row per invoice: keep the attempt's own allocation
       // so the alert only retires when every invoice in it is paid.
       ...queuedAllocation(paymentIntent.metadata),
+      // Invoice-less monthly Auto Pay dues: keep the month of obligation so
+      // delayed pushes suppress and open bells auto-close once the month settles.
+      ...(billedMonth ? { billedMonth } : {}),
       reason: friendlyFailure,
     },
   }).onConflict(['payment_intent_id', 'outcome', 'attempt_id']).ignore();
@@ -71,29 +75,41 @@ function allocationOf(payload) {
   return Array.isArray(payload?.allocationInvoiceIds) ? { allocationInvoiceIds: payload.allocationInvoiceIds } : {};
 }
 
+async function resolveAttemptContext(trx, piId, ledgerRow, payload) {
+  const invoice = await trx('invoices').where({ stripe_payment_intent_id: piId }).first() || {};
+  const invoiceId = await resolveAlertInvoiceId(trx, invoice, ledgerRow, payload?.invoiceId);
+  const customerId = [invoice.customer_id, ledgerRow.customer_id, payload?.customerId].find(Boolean) || null;
+  const billedMonth = validBilledMonth(payload?.billedMonth) || rowBilledMonth(ledgerRow);
+  const allocation = allocationOf(payload);
+  return {
+    invoiceId,
+    customerId,
+    billedMonth,
+    allocation,
+    attempt: { paymentIntentId: piId, invoiceId, customerId, billedMonth, ...allocation },
+  };
+}
+
 async function dispatchPendingNotification(trx, key) {
   const job = await trx(TABLE).where(key).whereNotNull('pending_payload')
     .forUpdate().skipLocked().first();
   if (!job) return 'skipped';
 
   const piId = job.payment_intent_id;
+  const payload = job.pending_payload;
   const ledgerRow = await trx('payments').where({ stripe_payment_intent_id: piId }).first() || {};
   let settled = SETTLED_STATUSES.includes(ledgerRow.status);
-  let invoice = {};
-  let alertInvoiceId = null;
+  let ctx = null;
   if (!settled) {
-    invoice = await trx('invoices').where({ stripe_payment_intent_id: piId }).first() || {};
-    alertInvoiceId = await resolveAlertInvoiceId(trx, invoice, ledgerRow, job.pending_payload?.invoiceId);
-    // The customer may have paid the whole allocation through a NEW
-    // PaymentIntent before this job ran (the closer found no bell then): the
-    // alert would be stale on arrival, so it is suppressed like a settled PI.
-    settled = await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId, ...allocationOf(job.pending_payload) });
+    ctx = await resolveAttemptContext(trx, piId, ledgerRow, payload);
+    // The customer may have paid the whole allocation (or recovered the monthly
+    // dues via retry / Charge Now / dues invoice) through a NEW PaymentIntent
+    // before this job ran: the alert would be stale on arrival, so suppress it.
+    settled = await isFailedAllocationSettled(trx, ctx.attempt);
   }
   if (!settled) {
-    const payload = job.pending_payload;
     const deliveredSubscriptionIds = payload.deliveredSubscriptionIds || [];
-    const customerId = [invoice.customer_id, ledgerRow.customer_id, payload.customerId].find(Boolean) || null;
-    const customer = (customerId ? await trx('customers').where({ id: customerId }).first() : null) || {};
+    const customer = (ctx.customerId ? await trx('customers').where({ id: ctx.customerId }).first() : null) || {};
     const customerName = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim()
       || customer.phone || 'customer';
     let recheckError = null;
@@ -103,7 +119,7 @@ async function dispatchPendingNotification(trx, key) {
         const settledRow = await trx('payments').where({ stripe_payment_intent_id: piId })
           .whereIn('status', SETTLED_STATUSES).first('id');
         settled = settled || Boolean(settledRow)
-          || await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId, ...allocationOf(payload) });
+          || await isFailedAllocationSettled(trx, ctx.attempt);
         return !settled && !recheckError;
       } catch (error) {
         // The trigger's beforePush error fallback is fail-open; return false
@@ -115,10 +131,11 @@ async function dispatchPendingNotification(trx, key) {
     const result = await triggerNotification('payment_failed', {
       amount: payload.amount,
       customerName,
-      customerId,
+      customerId: ctx.customerId,
       reason: payload.reason,
-      invoiceId: alertInvoiceId,
-      ...allocationOf(payload),
+      invoiceId: ctx.invoiceId,
+      ...ctx.allocation,
+      ...(!ctx.invoiceId && ctx.billedMonth ? { billedMonth: ctx.billedMonth } : {}),
       paymentIntentId: piId,
       attemptId: job.attempt_id,
     }, {

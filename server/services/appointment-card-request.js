@@ -2674,7 +2674,7 @@ async function loadSecureCardPageData(token, { consentTextVersion = null } = {})
   // accepted_amount above (a row pinned to the 0 sentinel never qualifies again). Otherwise
   // the typed save stays the only option. It echoes the fee NUMBER behind `cancelFeeNote` as
   // the amount the customer was shown. Neither key rides while the gate is dark.
-  const tapCapFrozen = visit?.is_recurring === true
+  const tapCapFrozen = isRecurringLineageVisit(visit)
     || (planContext != null && Number(planContext.perVisit) > 0
       && !(request.accepted_amount != null && Number(request.accepted_amount) === 0));
   if (visitPriced && tapCapFrozen && require('../config/feature-gates').isEnabled('tapSaveCard')) {
@@ -3636,12 +3636,12 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
     let svc;
     try {
       svc = await db('scheduled_services').where({ id: scheduledServiceId })
-        .first('id', 'customer_id', 'service_type', 'is_recurring', 'prepaid_amount');
+        .first('id', 'customer_id', 'service_type', 'is_recurring', 'recurring_parent_id', 'recurring_pattern', 'prepaid_amount');
     } catch (err) {
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: laneRow.customer_id, reason: 'visit_lookup_failed' });
       return { charged: false, reason: 'visit_lookup_failed' };
     }
-    if (!svc || svc.is_recurring === true) return { charged: false, reason: 'not_one_time' };
+    if (!svc || isRecurringLineageVisit(svc)) return { charged: false, reason: 'not_one_time' };
     // The consent row must belong to the visit's CURRENT customer (Codex
     // #3153 r19 P0): a reassigned visit must never ride a prior customer's
     // accepted_amount into automatic collection.

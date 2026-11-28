@@ -24,6 +24,7 @@
         "USE /api/admin/auth/login/mfa (inline function#6bca0a9b)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
         "USE /api/booking/preferred-time (inline function#7df2f03e)",
+        "USE /api/card (inline function#0ef72931)",
         "USE /api/estimates (commercialAgreementPreGuard#e5a34636)",
         "USE /api/estimates (commercialFirstVisitPreGuard#3bd1e63f)",
         "USE /api/estimates (contactPhonePreGuard#69762e2c)",
@@ -221,8 +222,9 @@
     {
       "router": "server/routes/card-public.js",
       "mount": "/api/card",
-      "reason": "Digital business card / vCard / wallet pass by unguessable token",
+      "reason": "Digital business card / vCard / wallet pass by unguessable token; the USE entry stamps private no-store privacy headers ahead of the rate limiter (always next())",
       "routes": [
+        "USE /api/card (inline function#0ef72931)",
         "GET /api/card/:token",
         "GET /api/card/:token/contact.vcf",
         "GET /api/card/:token/wallet.pkpass"

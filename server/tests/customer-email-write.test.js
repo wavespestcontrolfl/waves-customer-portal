@@ -61,7 +61,7 @@ describe('applyOperatorCustomerEmail', () => {
     const result = await applyOperatorCustomerEmail(trx, { customerId: 'c1', email: ' New@Example.com ', source: 'triage_confirm' });
     expect(result.outcome).toBe('changed');
     expect(result.emailSync).toEqual({ pendingConfirmation: { token: 't' } });
-    expect(order).toEqual(['row-lock', 'key:customer-email:new@example.com', 'email-write']);
+    expect(order).toEqual(['row-lock', 'key:stripe.email.sync', 'key:customer-email:new@example.com', 'email-write']);
     expect(rows[0].email).toBe('new@example.com');
     expect(mockPropagateCustomerEmailChange).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -98,7 +98,7 @@ describe('applyOperatorCustomerEmail', () => {
     ]);
     const result = await applyOperatorCustomerEmail(trx, { customerId: 'c1', email: 'taken@example.com' });
     expect(result).toEqual({ outcome: 'email_in_use', conflict: { id: 'c2', account_id: 'a2' } });
-    expect(order).toEqual(['row-lock', 'key:customer-email:taken@example.com']);
+    expect(order).toEqual(['row-lock', 'key:stripe.email.sync', 'key:customer-email:taken@example.com']);
     expect(rows[0].email).toBeNull();
     expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
   });
@@ -119,7 +119,7 @@ describe('applyOperatorCustomerEmail', () => {
     const result = await applyOperatorCustomerEmail(trx, { customerId: 'c1', email: 'same@example.com' });
     expect(result.outcome).toBe('unchanged');
     expect(result.emailSync).toBeNull();
-    expect(order).toEqual(['row-lock', 'key:customer-email:same@example.com']);
+    expect(order).toEqual(['row-lock', 'key:stripe.email.sync', 'key:customer-email:same@example.com']);
     expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
   });
 

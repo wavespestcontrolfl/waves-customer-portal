@@ -1359,7 +1359,7 @@
     },
     {
       "endpoint": "/admin/invoices/:id/credit-context",
-      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): the select adds amount_paid and amount_due comes from invoiceAmountDue (invoice-helpers.js, cents arithmetic only); response fields unchanged. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller. Re-reviewed 2026-11-18 (#7957 checkout receipt): only the feature-gates import line in admin-invoices.js gained checkoutTenderReceiptLive; the handler chain, signals and unresolved are unchanged.",
+      "reviewed": "Handler: one invoices select (id, customer_id, totals, credit_applied, number) plus CustomerCredit.getBalance (customers.account_credits) and round2; read end to end. Re-reviewed 2026-10-29 (partial payments PR 1a): the select adds amount_paid and amount_due comes from invoiceAmountDue (invoice-helpers.js, cents arithmetic only); response fields unchanged. Re-read 2026-11-04 (technician visibility H8/A10): only the router's staff exemption changed (a UUID-only single-invoice GET; the card-on-file POSTs behind GATE_TECH_CARD_ON_FILE); this route and its handler are unchanged for an admin, the bar's caller. Re-reviewed 2026-11-18 (#7957 checkout receipt): only the feature-gates import line in admin-invoices.js gained checkoutTenderReceiptLive; the handler chain, signals and unresolved are unchanged. Re-read 2026-11-28 (PR #8773): handler remains read-only JSON; only unrelated route-file helper imports in admin-invoices.js changed.",
       "scope": "invoice",
       "scopeParam": "id",
       "params": {
@@ -1367,7 +1367,7 @@
       },
       "signals": [],
       "unresolved": [],
-      "hash": "c2df787d07aa93cea89ee17a539b5e9d"
+      "hash": "9cc1ab1ec0ae483891c440cad3c3af71"
     },
     {
       "endpoint": "/admin/invoices/:id/receipt-address",

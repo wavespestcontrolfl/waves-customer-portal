@@ -360,6 +360,26 @@ async function redeemRow(trx, row, invoice) {
  * automatic-credit choice. Never throws: the payment is then set up at the
  * amount due as it stands. Returns the amount applied to the invoice, or 0.
  */
+// Prelock the discount row for an entered pay-page promo code BEFORE locking
+// customers FOR UPDATE so setup preserves the discount -> customer hierarchy
+// shared with estimate-promo-code.js and redeemAndApplyPromoCode.
+async function prelockPendingPromoDiscount(trx, invoice) {
+  if (!gateOn() || !invoiceTakesPromoCode(invoice) || typeof trx?.transaction !== 'function') return;
+  try {
+    await trx.transaction(async (savepoint) => {
+      const row = await savepoint('invoice_promo_codes')
+        .where({ invoice_id: invoice.id, status: 'entered' })
+        .first('discount_id');
+      if (row?.discount_id) {
+        const discLockQuery = savepoint('discounts').where({ id: row.discount_id });
+        if (typeof discLockQuery.forUpdate === 'function') await discLockQuery.forUpdate().first('id');
+      }
+    });
+  } catch (err) {
+    logger.warn(`[invoice-promo-code] invoice ${invoice?.id}: discount prelock skipped (${err?.code || err?.message})`);
+  }
+}
+
 async function redeemAndApplyPromoCode(trx, invoice) {
   try {
     if (!gateOn() || !invoiceTakesPromoCode(invoice)) return 0;
@@ -434,5 +454,6 @@ module.exports = {
   assertNoPendingPromoCode,
   promoCodeViewForInvoice,
   enterPromoCodeOnInvoice,
+  prelockPendingPromoDiscount,
   redeemAndApplyPromoCode,
 };

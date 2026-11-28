@@ -833,172 +833,184 @@ router.get('/balance', async (req, res, next) => {
 // =========================================================================
 // PUT /api/billing/cards/:id/default — Set a card as default
 // =========================================================================
+function validateDefaultCardCandidate(card, customer) {
+  if (isBankMethodType(card.method_type)) {
+    if (['pending_verification', 'verification_failed'].includes(card.ach_status)) {
+      return {
+        status: 400,
+        body: {
+          error: card.ach_status === 'verification_failed'
+            ? 'This bank account could not be verified. Remove it and add it again.'
+            : 'This bank account is still being verified. You can make it your default as soon as verification clears.',
+        },
+      };
+    }
+    if (customer?.ach_status && customer.ach_status !== 'active') {
+      return {
+        status: 400,
+        body: { error: 'Bank payments are unavailable on your account right now — keep a card as your default until that clears.' },
+      };
+    }
+    return null;
+  }
+  const rawYear = parseInt(card.exp_year, 10);
+  const normalizedCard = {
+    ...card,
+    exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : card.exp_year,
+  };
+  if (isExpiredCardMethod(normalizedCard)) {
+    return {
+      status: 400,
+      body: { error: 'That card has expired — update it or choose a current card before making it your default.' },
+    };
+  }
+  return null;
+}
+
+async function ensureDefaultAutopayConsent(trx, req, card) {
+  const ConsentService = require('../services/payment-method-consents');
+  const hasConsent = await ConsentService.hasEnrollmentScopedConsent(
+    req.customerId,
+    card.stripe_payment_method_id,
+    { dbh: trx },
+  );
+  if (hasConsent) return null;
+  if (req.body?.consent_accepted !== true) {
+    return {
+      status: 409,
+      body: {
+        error: 'Your default method is on Auto Pay, and this payment method has not been authorized for Auto Pay yet. Review and accept the authorization to continue.',
+        code: 'consent_required',
+        method_type: card.method_type || 'card',
+      },
+    };
+  }
+  if (!renderedConsentVersionIsCurrent(req.body?.consentTextVersion)) {
+    return { status: 409, body: consentVersionStaleResponse() };
+  }
+  await ConsentService.recordConsent({
+    customerId: req.customerId,
+    paymentMethodId: card.id,
+    stripePaymentMethodId: card.stripe_payment_method_id,
+    source: 'portal_set_default',
+    methodType: card.method_type || 'card',
+    ip: req.ip,
+    userAgent: req.get('user-agent') || null,
+    database: trx,
+  });
+  return null;
+}
+
+function resolveActiveAutopayIncumbent(customer, methods, currentDefault) {
+  const isActive = (m) => Boolean(m && m.autopay_enabled && m.processor === 'stripe' && m.stripe_payment_method_id);
+  const pointerMethod = customer?.autopay_payment_method_id
+    ? methods.find((m) => String(m.id) === String(customer.autopay_payment_method_id)) || null
+    : null;
+  // Resolve incumbent Auto Pay from the locked customer enrollment pointer
+  // and eligible default only (matching collection rules in autopay-eligibility):
+  // a stray autopay_enabled flag on an unreferenced non-default method must
+  // never be promoted into an active Auto Pay enrollment.
+  if (isActive(pointerMethod)) return pointerMethod;
+  return isActive(currentDefault) ? currentDefault : null;
+}
+
 router.put('/cards/:id/default', async (req, res, next) => {
   try {
-    const currentDefault = await db('payment_methods')
-      .where({ customer_id: req.customerId, is_default: true })
-      .first('id', 'autopay_enabled');
-
-    const card = await db('payment_methods')
-      .where({ id: req.params.id, customer_id: req.customerId })
-      .first();
-
-    if (!card) return res.status(404).json({ error: 'Payment method not found' });
-
-    // A bank account that isn't chargeable can't take the default role
-    // (portal ACH lane): this route CARRIES autopay onto the new default.
-    // Pending/failed verification would point collection at an account
-    // that can't be debited, and a customer-level ACH block (Codex r3)
-    // means customerOnAutopay/cron treat a bank default as inactive — a
-    // suspended customer clicking Set default on a bank would silently
-    // turn a chargeable card setup into one that never collects.
-    if (isBankMethodType(card.method_type) && ['pending_verification', 'verification_failed'].includes(card.ach_status)) {
-      return res.status(400).json({
-        error: card.ach_status === 'verification_failed'
-          ? 'This bank account could not be verified. Remove it and add it again.'
-          : 'This bank account is still being verified. You can make it your default as soon as verification clears.',
-      });
-    }
-    if (isBankMethodType(card.method_type)) {
-      const achCustomer = await db('customers').where({ id: req.customerId }).first('ach_status');
-      if (achCustomer?.ach_status && achCustomer.ach_status !== 'active') {
-        return res.status(400).json({ error: 'Bank payments are unavailable on your account right now — keep a card as your default until that clears.' });
-      }
-    }
-
-    // An expired card can't take the default role either: this route CARRIES
-    // Auto Pay onto the new default, and pointing collection at an expired
-    // card guarantees the next charge declines while the UI shows Active.
-    // Same ET-calendar predicate as collection (autopay-eligibility): the
-    // old inline UTC math flipped a card expired hours early at the ET month
-    // boundary and silently allowed malformed expiry values through. Legacy
-    // rows carry 2-digit years — normalize BEFORE the check so a valid
-    // '12/32' card isn't read as year 32 (isExpiredCardMethod fails closed
-    // on anything non-sensible).
-    if (!isBankMethodType(card.method_type)) {
-      const rawYear = parseInt(card.exp_year, 10);
-      const normalizedCard = {
-        ...card,
-        exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : card.exp_year,
-      };
-      if (isExpiredCardMethod(normalizedCard)) {
-        return res.status(400).json({ error: 'That card has expired — update it or choose a current card before making it your default.' });
-      }
-    }
-
-    // Auto Pay eligibility requires the DEFAULT method to carry
-    // autopay_enabled, so a bare default swap silently stopped charging
-    // while the AutopayCard still showed Active. Carry the flag to the new
-    // default when it's chargeable; otherwise disable autopay honestly.
-    const carriesAutopay = !!currentDefault?.autopay_enabled && currentDefault.id !== card.id;
-    const newCardChargeable = card.processor === 'stripe' && !!card.stripe_payment_method_id;
-
-    // Consent scope: carrying Auto Pay onto the new default puts it in
-    // charge of recurring billing — same v8+ enrollment gate as the autopay
-    // routes. A hold-only card (estimate_card_hold consent) or a pre-v8 save
-    // never authorized recurring charges; without this, "Set default" was a
-    // silent enrollment path around hasEnrollmentScopedConsent. The client
-    // shows the full authorization copy and re-submits with consent_accepted;
-    // the acceptance is recorded BEFORE any flag moves.
-    if (carriesAutopay && newCardChargeable) {
-      const ConsentService = require('../services/payment-method-consents');
-      const hasConsent = await ConsentService.hasEnrollmentScopedConsent(req.customerId, card.stripe_payment_method_id);
-      if (!hasConsent) {
-        if (req.body?.consent_accepted !== true) {
-          return res.status(409).json({
-            error: 'Your default method is on Auto Pay, and this payment method has not been authorized for Auto Pay yet. Review and accept the authorization to continue.',
-            code: 'consent_required',
-            method_type: card.method_type || 'card',
-          });
-        }
-        // The prompt's retry attests the consent version it rendered; a
-        // stale or absent one is refused before the row is written (codex
-        // #5434 r1 P1).
-        if (!renderedConsentVersionIsCurrent(req.body?.consentTextVersion)) {
-          return res.status(409).json(consentVersionStaleResponse());
-        }
-        await ConsentService.recordConsent({
-          customerId: req.customerId,
-          paymentMethodId: card.id,
-          stripePaymentMethodId: card.stripe_payment_method_id,
-          source: 'portal_set_default',
-          methodType: card.method_type || 'card',
-          ip: req.ip,
-          userAgent: req.get('user-agent') || null,
-        });
-      }
-    }
-
-    let targetGone = false;
-    await db.transaction(async (trx) => {
-      // Lock order = CUSTOMER first, then the method row — same order as
-      // DELETE /cards/:id, PUT /billing/autopay, enrollment and the
-      // detached webhook (pre-push r2 P1: no deadlock between removal and
-      // replacement).
-      await trx('customers').where({ id: req.customerId }).forUpdate().first('id');
-      // Re-verify under lock: a concurrent portal removal holds this row
-      // FOR UPDATE until its detach commits — if it is gone by the time we
-      // get the lock, carrying Auto Pay onto it would leave a dangling
-      // pointer (pre-push r1 P0 — shared protocol with DELETE /cards/:id).
-      const locked = await trx('payment_methods')
-        .where({ id: req.params.id, customer_id: req.customerId })
+    const outcome = await db.transaction(async (trx) => {
+      // Lock order = CUSTOMER first, then all of that customer's method rows
+      // in deterministic id order — same order as DELETE /cards/:id,
+      // PUT /billing/autopay, enrollment, and the detached webhook. Every
+      // eligibility, incumbent-autopay, and consent decision reads from these
+      // locked rows so a concurrent disable/enable/swap cannot race past checks
+      // or leave two autopay_enabled cards / split pointers.
+      const customer = await trx('customers')
+        .where({ id: req.customerId })
         .forUpdate()
-        .first('id');
-      if (!locked) { targetGone = true; return; }
+        .first('id', 'ach_status', 'autopay_enabled', 'autopay_payment_method_id');
 
-      await trx('payment_methods')
+      const methods = await trx('payment_methods')
         .where({ customer_id: req.customerId })
-        .update({ is_default: false });
+        .orderBy('id', 'asc')
+        .forUpdate()
+        .select('*');
 
-      await trx('payment_methods')
-        .where({ id: req.params.id })
-        .update({ is_default: true, ...(carriesAutopay && newCardChargeable ? { autopay_enabled: true } : {}) });
+      const card = methods.find((m) => String(m.id) === String(req.params.id));
+      if (!card) return { refusal: { status: 404, body: { error: 'Payment method not found' } } };
+
+      const candidateRefusal = validateDefaultCardCandidate(card, customer);
+      if (candidateRefusal) return { refusal: candidateRefusal };
+
+      const currentDefault = methods.find((m) => m.is_default) || null;
+      const priorAutopay = resolveActiveAutopayIncumbent(customer, methods, currentDefault);
+      const carriesAutopay = Boolean(priorAutopay && String(priorAutopay.id) !== String(card.id));
+      const newCardChargeable = card.processor === 'stripe' && Boolean(card.stripe_payment_method_id);
+
+      if (carriesAutopay && newCardChargeable) {
+        const consentRefusal = await ensureDefaultAutopayConsent(trx, req, card);
+        if (consentRefusal) return { refusal: consentRefusal };
+      }
 
       if (carriesAutopay) {
-        await trx('payment_methods').where({ id: currentDefault.id }).update({ autopay_enabled: false });
+        await trx('payment_methods')
+          .where({ customer_id: req.customerId })
+          .update({ is_default: false, autopay_enabled: false });
+        await trx('payment_methods')
+          .where({ id: card.id })
+          .update({ is_default: true, ...(newCardChargeable ? { autopay_enabled: true } : {}) });
         if (newCardChargeable) {
           await trx('customers').where({ id: req.customerId }).update({ autopay_payment_method_id: card.id });
         } else {
           await trx('customers').where({ id: req.customerId }).update({ autopay_enabled: false, autopay_payment_method_id: null });
-          // The opt-out EVENT commits with the opt-out STATE — this row is
-          // guard input for enrollConsentedMethod's
-          // opted_out_after_authorization check, so a post-commit
-          // best-effort write left a gap where a delayed enrollment could
-          // overwrite the disable.
           await logAutopay(req.customerId, 'autopay_disabled', {
             details: {
               source: 'set_default_card',
-              old_payment_method_id: currentDefault.id,
+              old_payment_method_id: priorAutopay.id,
               new_payment_method_id: null,
             },
             db: trx,
             required: true,
           });
         }
+      } else {
+        await trx('payment_methods')
+          .where({ customer_id: req.customerId })
+          .update({ is_default: false });
+        const preserveSelfAutopay = Boolean(priorAutopay && String(priorAutopay.id) === String(card.id));
+        await trx('payment_methods')
+          .where({ id: card.id })
+          .update({ is_default: true, ...(preserveSelfAutopay ? {} : { autopay_enabled: false }) });
       }
+
+      return {
+        carriesAutopay,
+        newCardChargeable,
+        oldDefaultId: currentDefault?.id || null,
+        oldAutopayId: priorAutopay?.id || null,
+        cardId: card.id,
+      };
     });
 
-    if (targetGone) {
-      return res.status(409).json({ code: 'payment_method_removed', error: 'That payment method was just removed. Refresh and choose another one.' });
+    if (outcome.refusal) {
+      return res.status(outcome.refusal.status).json(outcome.refusal.body);
     }
 
-    if (carriesAutopay && newCardChargeable) {
+    if (outcome.carriesAutopay && outcome.newCardChargeable) {
       logAutopay(req.customerId, 'autopay_method_changed', {
         details: {
           source: 'set_default_card',
-          old_payment_method_id: currentDefault.id,
-          new_payment_method_id: card.id,
+          old_payment_method_id: outcome.oldAutopayId,
+          new_payment_method_id: outcome.cardId,
         },
       }).catch((logErr) => {
         logger.warn(`[billing-v2] autopay log failed for customer ${req.customerId}: ${logErr.message}`);
       });
     }
 
-    if (currentDefault?.id !== card.id) {
+    if (outcome.oldDefaultId !== outcome.cardId) {
       PaymentLifecycleEmail.sendPaymentMethodUpdated({
         customerId: req.customerId,
-        oldPaymentMethodId: currentDefault?.id || null,
-        newPaymentMethodId: card.id,
+        oldPaymentMethodId: outcome.oldDefaultId,
+        newPaymentMethodId: outcome.cardId,
         updatedAt: new Date(),
       }).catch((emailErr) => {
         logger.warn(`[billing-v2] default payment method email failed for customer ${req.customerId}: ${emailErr.message}`);

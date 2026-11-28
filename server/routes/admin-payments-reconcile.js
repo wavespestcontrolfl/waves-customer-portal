@@ -6,7 +6,13 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { auditPaymentReconcile, ipFromReq, uaFromReq } = require('../services/audit-log');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
+const {
+  assertInvoiceCollectible,
+  INVOICE_UNCOLLECTIBLE_STATUSES,
+  invoiceAmountDue,
+  neverRanVisitStatus,
+  lockVisitForSettlement,
+} = require('../services/invoice-helpers');
 const { computeChargeAmount } = require('../services/stripe-pricing');
 
 const stripeKey = process.env.STRIPE_SECRET_KEY;
@@ -43,6 +49,8 @@ const recentChargesLimiter = rateLimit({
 // dead entries from crowding valid ones out of the 20-slot list.
 function chargeIsReconcilable(charge) {
   return charge.status === 'succeeded'
+    && charge.captured !== false
+    && !(charge.amount_captured != null && Number(charge.amount_captured) <= 0)
     && !charge.refunded
     && !(Number(charge.amount_refunded) > 0)
     && !charge.disputed
@@ -74,7 +82,7 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
       .slice(0, 20)
       .map(c => ({
         id: c.id,
-        amount: c.amount / 100,
+        amount: Number(c.amount_captured ?? c.amount) / 100,
         currency: c.currency,
         created: new Date(c.created * 1000).toISOString(),
         payment_method_type: c.payment_method_details?.type,
@@ -88,6 +96,262 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function payerRefusalForInvoice(invoice) {
+  if (invoice.payer_id) {
+    return 'Invoice is billed to a third-party payer — do not collect or reconcile it against the service recipient';
+  }
+  if (invoice.payer_statement_id) {
+    return 'Invoice is billed on the payer’s monthly statement — reconcile against the statement, not the individual invoice';
+  }
+  return null;
+}
+
+async function verifyChargeCustomerOwner(invoice, chargeDetails) {
+  const chargeWavesCustomerId = chargeDetails.metadata?.waves_customer_id;
+  if (chargeWavesCustomerId && String(chargeWavesCustomerId) !== String(invoice.customer_id)) {
+    return { status: 400, error: 'Charge belongs to a different customer than this invoice' };
+  }
+  const chargeStripeCustomer = typeof chargeDetails.customer === 'string'
+    ? chargeDetails.customer
+    : chargeDetails.customer?.id || null;
+  if (!chargeStripeCustomer) return null;
+  const owner = await db('customers').where({ stripe_customer_id: chargeStripeCustomer }).first('id');
+  if (!owner) {
+    return { status: 400, error: `Charge's Stripe customer (${chargeStripeCustomer}) is not linked to any portal customer — cannot verify ownership, so it cannot be reconciled` };
+  }
+  if (String(owner.id) !== String(invoice.customer_id)) {
+    return { status: 400, error: 'Charge belongs to a different customer than this invoice' };
+  }
+  return null;
+}
+
+async function verifyStripeChargeForReconcile(invoice, stripeChargeId) {
+  if (!stripe) return { refusal: { status: 503, error: 'Stripe not configured' } };
+  let chargeDetails;
+  try {
+    // balance_transaction is created when the charge SUCCEEDS — for async
+    // methods (ACH) that is settlement, not initiation, so its timestamp is
+    // the authoritative settlement moment billing-pause compares against.
+    chargeDetails = await stripe.charges.retrieve(stripeChargeId, { expand: ['balance_transaction'] });
+  } catch (e) {
+    return { refusal: { status: 400, error: `Stripe charge lookup failed: ${e.message}` } };
+  }
+  if (chargeDetails.status !== 'succeeded') {
+    return { refusal: { status: 400, error: `Charge is ${chargeDetails.status}, not succeeded` } };
+  }
+  if (chargeDetails.captured === false || (chargeDetails.amount_captured != null && Number(chargeDetails.amount_captured) <= 0)) {
+    return { refusal: { status: 400, error: 'Charge is authorized but not captured — capture the funds in Stripe before reconciling' } };
+  }
+  if (chargeDetails.refunded || Number(chargeDetails.amount_refunded) > 0 || chargeDetails.disputed) {
+    return { refusal: { status: 400, error: 'Charge has been refunded or disputed — it cannot be reconciled against an invoice' } };
+  }
+  if (String(chargeDetails.currency || '').toLowerCase() !== 'usd') {
+    return { refusal: { status: 400, error: `Charge currency is ${String(chargeDetails.currency || 'unknown').toUpperCase()} — only USD charges can be reconciled` } };
+  }
+
+  const chargeAmtCents = Math.round(Number(chargeDetails.amount_captured ?? chargeDetails.amount));
+  const amountDue = invoiceAmountDue(invoice);
+  const surcharged = computeChargeAmount(amountDue, 'card', { funding: 'credit' });
+  if (surcharged.surchargeCents > 0 && Math.abs(chargeAmtCents - surcharged.totalCents) <= 1) {
+    return {
+      refusal: {
+        status: 400,
+        error: `This charge includes a $${(surcharged.surchargeCents / 100).toFixed(2)} card surcharge. Surcharged charges are recorded through the normal payment flow with their surcharge breakdown — only non-surcharged charges can be reconciled here.`,
+      },
+    };
+  }
+  const chargeAmt = chargeAmtCents / 100;
+  const owedCents = Math.round(amountDue * 100);
+  const isPartialCapture = chargeDetails.amount_captured != null
+    && Number(chargeDetails.amount_captured) < Number(chargeDetails.amount);
+  const amountMatches = isPartialCapture
+    ? chargeAmtCents === owedCents
+    : Math.abs(chargeAmt - amountDue) <= 1;
+  if (!amountMatches) {
+    return {
+      refusal: {
+        status: 400,
+        error: `Amount mismatch — captured $${chargeAmt.toFixed(2)} but invoice amount due is $${amountDue.toFixed(2)}`,
+      },
+    };
+  }
+
+  const ownerRefusal = await verifyChargeCustomerOwner(invoice, chargeDetails);
+  if (ownerRefusal) return { refusal: ownerRefusal };
+  return { chargeDetails };
+}
+
+async function verifySelfPayAndVisitUnderLock(trx, lockedInvoice, lockedCust) {
+  // Caller already holds customers FOR UPDATE -> invoices FOR UPDATE (matching
+  // apply-credit lock order to avoid ABBA deadlocks). Lock visit -> payers next.
+  const visit = lockedInvoice.scheduled_service_id
+    ? await lockVisitForSettlement(trx, lockedInvoice.scheduled_service_id, ['id', 'status', 'payer_id'])
+    : null;
+  const neverRan = neverRanVisitStatus(visit?.status);
+  if (neverRan) {
+    return `This invoice's visit is ${neverRan.replace('_', '-')} — nothing was reconciled. Void or reissue the invoice first.`;
+  }
+  const payerIds = [...new Set([lockedCust?.payer_id, visit?.payer_id].filter(Boolean))];
+  if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id', 'asc').forUpdate().select('id');
+  const resolved = await require('../services/payer').resolveForInvoice({
+    database: trx,
+    customerId: lockedInvoice.customer_id,
+    customer: lockedCust || null,
+    scheduledServiceId: lockedInvoice.scheduled_service_id || null,
+    throwOnError: true,
+  });
+  if (resolved?.payerId) {
+    return 'Invoice is billed to a third-party payer — do not collect or reconcile it against the service recipient';
+  }
+  return null;
+}
+
+async function lockInvoiceOwnerCustomerFirst(trx, invoice) {
+  // Acquire customers FOR UPDATE BEFORE releaseCombinedSessionBeforeCollection
+  // (which may write invoices in clearPaymentIntentStamps) so reconcile matches
+  // apply-credit's customers -> invoices lock hierarchy.
+  let ownerId = invoice.customer_id ? String(invoice.customer_id) : null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (ownerId) {
+      await trx('customers').where({ id: ownerId }).forUpdate().first('id', 'payer_id');
+    }
+    const currentRow = await trx('invoices').where({ id: invoice.id }).first('customer_id');
+    const freshOwnerId = currentRow?.customer_id ? String(currentRow.customer_id) : null;
+    if (!freshOwnerId || freshOwnerId === ownerId) {
+      return freshOwnerId || ownerId;
+    }
+    ownerId = freshOwnerId;
+  }
+  const ownerErr = new Error('The invoice ownership kept changing — try again');
+  ownerErr.statusCode = 409;
+  throw ownerErr;
+}
+
+async function checkReconcileFencesInLock(trx, { invoiceId, invoice, triagedPiId, chargePiId }) {
+  // Acquire customers FOR UPDATE BEFORE invoices FOR UPDATE (matches apply-credit
+  // lock order so concurrent reconcile + apply-credit cannot ABBA deadlock).
+  const lockedCust = invoice.customer_id
+    ? await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id', 'payer_id')
+    : null;
+  const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+  if (!lockedInvoice) return { updated: 0 };
+  if (lockedInvoice.customer_id && String(lockedInvoice.customer_id) !== String(invoice.customer_id || '')) {
+    return { conflict: 'Invoice customer changed while reconciling — reload it and reconcile again' };
+  }
+
+  const lockedPiId = lockedInvoice.stripe_payment_intent_id || null;
+  if (lockedPiId && lockedPiId !== triagedPiId && lockedPiId !== chargePiId) {
+    return { conflict: 'A new payment session started for this invoice — retry reconciling the payment' };
+  }
+  const payerRefusal = payerRefusalForInvoice(lockedInvoice);
+  if (payerRefusal) return { conflict: payerRefusal };
+  try {
+    assertInvoiceCollectible(lockedInvoice);
+  } catch (e) {
+    return { conflict: e.message };
+  }
+  // Saved-card claim fence (mirrors recordManualPayment / apply-credit):
+  // refuse while an in-progress/ambiguous/orphan saved-card charge exists.
+  try {
+    await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, trx);
+  } catch (fenceErr) {
+    if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
+      return { conflict: `${fenceErr.message} — resolve it before reconciling` };
+    }
+    throw fenceErr;
+  }
+
+  const visitOrPayerConflict = await verifySelfPayAndVisitUnderLock(trx, lockedInvoice, lockedCust);
+  if (visitOrPayerConflict) return { conflict: visitOrPayerConflict };
+
+  const lockedOwedCents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
+  if (lockedOwedCents !== Math.round(invoiceAmountDue(invoice) * 100)) {
+    return { conflict: `The amount owed on this invoice changed to $${(lockedOwedCents / 100).toFixed(2)} while it was being reconciled. Reload it and reconcile again. Nothing was recorded.` };
+  }
+  return { lockedInvoice };
+}
+
+function buildReconcilePaymentRecord(invoice, { invoiceId, collectedVia, collectedAmount, stripeChargeId, chargeDetails }) {
+  const settledEpoch = stripeChargeId
+    ? (chargeDetails?.balance_transaction?.created || chargeDetails?.created || null)
+    : null;
+  return {
+    customer_id: invoice.customer_id,
+    amount: collectedAmount,
+    status: 'paid',
+    description: `Invoice ${invoice.invoice_number} — ${collectedVia}`,
+    payment_date: etDateString(),
+    stripe_charge_id: stripeChargeId || null,
+    processor: stripeChargeId ? 'stripe' : null,
+    metadata: JSON.stringify({
+      invoice_id: invoiceId,
+      source: 'admin_payment_reconcile',
+      ...(settledEpoch ? { settled_event_at: new Date(settledEpoch * 1000).toISOString() } : {}),
+      ...(invoice.payer_id ? { payer_id: invoice.payer_id } : {}),
+    }),
+  };
+}
+
+async function runPostReconcileSideEffects(invoice, { invoiceId, chargeDetails, technicianId }) {
+  try {
+    await require('../services/invoice-followups').stopOnPayment(invoiceId);
+  } catch (followUpErr) {
+    logger.warn(`[reconcile] stopOnPayment failed: ${followUpErr.message}`);
+  }
+
+  try {
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    await AnnualPrepayRenewals.syncTermForInvoicePayment({ id: invoiceId, status: 'paid', paid_at: new Date() });
+  } catch (e) {
+    logger.warn(`[reconcile] annual prepay activation skipped: ${e.message}`);
+  }
+
+  if (!invoice.payer_id) {
+    try {
+      const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+      const settledEpoch = chargeDetails?.balance_transaction?.created || chargeDetails?.created || null;
+      await maybeResumeBillingPauseOnPayment(invoice.customer_id, {
+        paymentIntentId: chargeDetails?.payment_intent || null,
+        source: 'admin_payment_reconcile',
+        settledAt: settledEpoch ? new Date(settledEpoch * 1000) : new Date(),
+      });
+    } catch (pauseErr) {
+      logger.warn(`[reconcile] billing-pause auto-clear failed: ${pauseErr.message}`);
+    }
+  }
+
+  const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+  await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: technicianId || null });
+
+  let reviewUnrecordedWarning = null;
+  try {
+    const settled = await db('invoices').where({ id: invoiceId }).first('id', 'invoice_number', 'customer_id', 'service_record_id', 'visit_completion_packet_id');
+    if (settled) {
+      const outcome = await require('../services/review-request').enrollForPaidInvoice(settled, { source: 'payments_reconcile' });
+      if (outcome && outcome.recorded === false) {
+        logger.error(`[reconcile] invoice ${settled.invoice_number || invoiceId} settled with an UNRECORDED review enrollment — the packet recovery sweep owns it`);
+        const alerted = await require('../services/dispatch-alerts').createAlert({
+          type: 'visit_closeout_review',
+          severity: 'warn',
+          payload: {
+            reason: 'review_enrollment_unrecorded',
+            source: 'payments_reconcile',
+            invoiceIds: [invoiceId],
+            detail: 'This settled invoice owes a review ask that could not be recorded — re-run the enrollment or ask manually.',
+          },
+        }).catch((alertErr) => {
+          logger.error(`[reconcile] could not raise the unrecorded-enrollment alert: ${alertErr.message}`);
+          return null;
+        });
+        if (!alerted) reviewUnrecordedWarning = invoiceId;
+      }
+    }
+  } catch (enrollErr) {
+    logger.error(`[reconcile] review enrollment failed for invoice ${invoiceId}: ${enrollErr.message}`);
+  }
+  return reviewUnrecordedWarning;
+}
+
 /**
  * POST /reconcile
  * Body: { invoiceId, stripeChargeId?, collectedVia, amount?, note? }
@@ -97,7 +361,6 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
  * manual reconciliation (cash/check/off-platform).
  */
 router.post('/reconcile', requireAdmin, async (req, res, next) => {
-  let reviewUnrecordedWarning = null;
   try {
     const { invoiceId, stripeChargeId, collectedVia, amount, note } = req.body || {};
     if (!invoiceId) return res.status(400).json({ error: 'invoiceId required' });
@@ -108,17 +371,8 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-    // Third-party Bill-To: a payer-billed invoice is owed by the payer's AP
-    // inbox, not the service recipient. Off-platform reconciliation (cash /
-    // check / Tap-to-Pay) settled from the homeowner would collect the wrong
-    // party's money and mark the AP invoice paid — reject it here, mirroring
-    // the Terminal-handoff payer guard.
-    if (invoice.payer_id) {
-      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — do not collect or reconcile it against the service recipient' });
-    }
-    // Uncollectible invoices (paid/processing/void/refunded/canceled) can't be
-    // reconciled — 'processing' especially: an ACH payment in flight will
-    // settle on its own, so a cash/check reconcile would double-collect.
+    const prePayerRefusal = payerRefusalForInvoice(invoice);
+    if (prePayerRefusal) return res.status(400).json({ error: prePayerRefusal });
     try {
       assertInvoiceCollectible(invoice);
     } catch (e) {
@@ -127,8 +381,6 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
 
     const updates = {
       status: 'paid',
-      // Money received earlier (a part payment) goes with the paid flip: collectedAmount below is what was still owed, and the paid invoice
-      // reads as the whole bill.
       amount_paid: 0,
       paid_at: new Date(),
       collected_via: collectedVia,
@@ -140,88 +392,9 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
 
     let chargeDetails = null;
     if (stripeChargeId) {
-      if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
-      try {
-        // balance_transaction is created when the charge SUCCEEDS — for
-        // async methods (ACH) that is settlement, not initiation, so its
-        // timestamp is the authoritative settlement moment the billing-pause
-        // machinery compares against.
-        chargeDetails = await stripe.charges.retrieve(stripeChargeId, { expand: ['balance_transaction'] });
-      } catch (e) {
-        return res.status(400).json({ error: `Stripe charge lookup failed: ${e.message}` });
-      }
-      if (chargeDetails.status !== 'succeeded') {
-        return res.status(400).json({ error: `Charge is ${chargeDetails.status}, not succeeded` });
-      }
-      // Refunded/disputed money isn't collectible — and Stripe keeps
-      // status 'succeeded' on refunded charges, so the check above doesn't
-      // catch them. Partial refunds are equally unreconcilable: this route
-      // books a FLAT collected amount, which would overstate what was kept.
-      if (chargeDetails.refunded || Number(chargeDetails.amount_refunded) > 0 || chargeDetails.disputed) {
-        return res.status(400).json({ error: 'Charge has been refunded or disputed — it cannot be reconciled against an invoice' });
-      }
-      // The amount agreement below compares bare numbers (charge minor units
-      // vs invoice USD); a same-value foreign-currency charge would pass it
-      // while settling for very different money.
-      if (String(chargeDetails.currency || '').toLowerCase() !== 'usd') {
-        return res.status(400).json({ error: `Charge currency is ${String(chargeDetails.currency || 'unknown').toUpperCase()} — only USD charges can be reconciled` });
-      }
-
-      // Amount agreement, keyed on the amount DUE (total − applied account credit),
-      // not the gross total. This route records a FLAT collected amount; it does NOT
-      // persist the surcharge breakdown (base/surcharge/rate/policy/funding) the way
-      // the Stripe + webhook charge paths do. So only NON-surcharged charges may be
-      // reconciled here.
-      //
-      // Detect a surcharge at CENTS precision BEFORE the broad $1 tax-rounding
-      // tolerance: a small surcharge (e.g. $0.58 on a $20 invoice — 2.9%) is under $1
-      // and would otherwise slip through and be booked flat with no breakdown,
-      // overstating revenue. Compare against the surcharge-inclusive total computed
-      // the credit-funded worst case (so it's caught even when the retrieved charge
-      // reports funding=null); a surcharged charge belongs to the normal flow.
-      const chargeAmtCents = Math.round(chargeDetails.amount);
-      const amountDue = invoiceAmountDue(invoice);
-      const surcharged = computeChargeAmount(amountDue, 'card', { funding: 'credit' });
-      if (surcharged.surchargeCents > 0 && Math.abs(chargeAmtCents - surcharged.totalCents) <= 1) {
-        return res.status(400).json({
-          error: `This charge includes a $${(surcharged.surchargeCents / 100).toFixed(2)} card surcharge. Surcharged charges are recorded through the normal payment flow with their surcharge breakdown — only non-surcharged charges can be reconciled here.`,
-        });
-      }
-      // Otherwise require the bare amount due within $1 (tax rounding).
-      const chargeAmt = chargeAmtCents / 100;
-      if (Math.abs(chargeAmt - amountDue) > 1) {
-        return res.status(400).json({
-          error: `Amount mismatch — charge is $${chargeAmt.toFixed(2)} but invoice amount due is $${amountDue.toFixed(2)}`,
-        });
-      }
-
-      // Verify the charge belongs to THIS invoice's customer when the charge
-      // carries an identity. Portal-created charges pin
-      // metadata.waves_customer_id and/or a Stripe customer id; Tap-to-Pay
-      // charges from the native Terminal app carry neither, so absence of
-      // both stays reconcilable (that is this route's whole purpose).
-      const chargeWavesCustomerId = chargeDetails.metadata?.waves_customer_id;
-      if (chargeWavesCustomerId && String(chargeWavesCustomerId) !== String(invoice.customer_id)) {
-        return res.status(400).json({ error: 'Charge belongs to a different customer than this invoice' });
-      }
-      const chargeStripeCustomer = typeof chargeDetails.customer === 'string'
-        ? chargeDetails.customer
-        : chargeDetails.customer?.id || null;
-      if (chargeStripeCustomer) {
-        const owner = await db('customers').where({ stripe_customer_id: chargeStripeCustomer }).first('id');
-        // Fail CLOSED on an identified-but-unmappable Stripe customer
-        // (legacy, deleted, or foreign account): we cannot verify whose
-        // money this is, so it must not be attachable to any invoice. Only
-        // charges carrying NO customer identity at all use the Terminal
-        // exception above.
-        if (!owner) {
-          return res.status(400).json({ error: `Charge's Stripe customer (${chargeStripeCustomer}) is not linked to any portal customer — cannot verify ownership, so it cannot be reconciled` });
-        }
-        if (String(owner.id) !== String(invoice.customer_id)) {
-          return res.status(400).json({ error: 'Charge belongs to a different customer than this invoice' });
-        }
-      }
-
+      const verified = await verifyStripeChargeForReconcile(invoice, stripeChargeId);
+      if (verified.refusal) return res.status(verified.refusal.status).json({ error: verified.refusal.error });
+      chargeDetails = verified.chargeDetails;
       updates.stripe_charge_id = stripeChargeId;
       updates.payment_method = chargeDetails.payment_method_details?.type || null;
       updates.card_brand = chargeDetails.payment_method_details?.card_present?.brand
@@ -230,11 +403,6 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         || chargeDetails.payment_method_details?.card?.last4 || null;
       updates.receipt_url = chargeDetails.receipt_url || null;
     } else if (amount != null) {
-      // Manual reconciliation — record the amount collected for audit.
-      // Mirror the Stripe path's $1 tolerance: marking an invoice paid while
-      // recording a materially different collected amount would silently
-      // drift revenue reports from the invoice ledger (e.g. a $1 typo on a
-      // $500 invoice). Edit the invoice first if the total really changed.
       const invoiceTotal = invoiceAmountDue(invoice);
       if (Math.abs(Number(amount) - invoiceTotal) > 1) {
         return res.status(400).json({
@@ -244,156 +412,85 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       updates.payment_method = collectedVia;
     }
 
-    // What was actually collected: Stripe reconciles record the verified
-    // charge amount (a caller-supplied amount must not override it); manual
-    // reconciles honor the operator-supplied amount, else the invoice total.
+    if (!stripeChargeId) {
+      updates.stripe_payment_intent_id = null;
+      updates.processor = null;
+    }
+
+    // Retire any standalone open pay-page PI before committing settlement
+    // (mirrors recordManualPayment / apply-credit) so an open browser tab
+    // cannot confirm it after cash/check/off-platform reconciliation.
+    const triagedPiId = invoice.stripe_payment_intent_id || null;
+    const chargePiId = chargeDetails?.payment_intent
+      ? (typeof chargeDetails.payment_intent === 'string' ? chargeDetails.payment_intent : chargeDetails.payment_intent.id || null)
+      : null;
+    if (triagedPiId && triagedPiId !== chargePiId) {
+      const { retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
+      const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'reconciling this payment' });
+      if (openPi) return res.status(openPi.status).json({ error: openPi.error });
+      updates.stripe_payment_intent_id = chargePiId;
+    }
+
     const collectedAmount = chargeDetails
-      ? chargeDetails.amount / 100
+      ? Number(chargeDetails.amount_captured ?? chargeDetails.amount) / 100
       : (amount != null ? Number(amount) : invoiceAmountDue(invoice));
 
-    // Conditional update closes the TOCTOU window: if the invoice became
-    // uncollectible (paid/processing/void/refunded/canceled) between our read
-    // and this write, the UPDATE matches 0 rows and we bail instead of
-    // double-marking it.
-    //
-    // The payments-ledger insert rides the SAME transaction as the status
-    // flip (mirroring record-payment in admin-invoices.js): the ledger row is
-    // load-bearing for every revenue rollup, and a best-effort insert after
-    // the flip left collected money permanently missing on a transient DB
-    // failure. Either both commit or the operator gets a retryable error and
-    // nothing changed.
     let txResult;
     try {
       txResult = await db.transaction(async (trx) => {
-      // Combined-session reservation INSIDE the collection transaction
-      // (codex #3427 r30 P0, serialized r31 P0): per-customer combined
-      // lock + fresh in-lock re-read + release, held through this commit
-      // so /setup cannot stamp a confirmable combined PI in the gap.
-      const reservation = await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'reconciling this payment' });
-      // Book against the FRESH locked row's owner (codex r33 P2): a merge
-      // committing between the route's read and this transaction repoints
-      // the invoice — the ledger row must credit the surviving customer,
-      // not the retired snapshot's.
-      if (reservation.invoice?.customer_id) invoice.customer_id = reservation.invoice.customer_id;
-      if (stripeChargeId) {
-        // Charge-scoped, transaction-scoped advisory lock. Two admins
-        // reconciling the SAME charge against different same-value invoices
-        // lock DIFFERENT invoice rows, so row locks alone don't serialize
-        // them, and payments.stripe_charge_id has no unique constraint —
-        // without this, both could pass the dedupe reads and the charge
-        // would be booked twice (two paid invoices from one payment). The
-        // lock serializes recheck+insert per charge id; the loser blocks
-        // here until the winner commits, then its rechecks below see the
-        // winner's rows and bail. Released automatically at commit/rollback.
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['reconcile.stripe_charge', stripeChargeId]
-        );
-        // Prevent double-linking — checked INSIDE the lock so the read
-        // can't go stale before the insert.
-        const linkedNow = await trx('invoices').where({ stripe_charge_id: stripeChargeId }).first();
-        if (linkedNow && linkedNow.id !== invoiceId) {
-          return { conflict: `Charge already linked to invoice ${linkedNow.invoice_number}` };
+        const initialOwnerId = await lockInvoiceOwnerCustomerFirst(trx, invoice);
+        if (initialOwnerId) invoice.customer_id = initialOwnerId;
+        const reservation = await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'reconciling this payment' });
+        if (reservation.invoice?.customer_id) invoice.customer_id = reservation.invoice.customer_id;
+        if (stripeChargeId) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['reconcile.stripe_charge', stripeChargeId],
+          );
+          const linkedNow = await trx('invoices').where({ stripe_charge_id: stripeChargeId }).first();
+          if (linkedNow && linkedNow.id !== invoiceId) {
+            return { conflict: `Charge already linked to invoice ${linkedNow.invoice_number}` };
+          }
+          const alreadyBooked = await trx('payments').where({ stripe_charge_id: stripeChargeId }).first();
+          if (alreadyBooked) {
+            return { conflict: 'Charge is already recorded in the payments ledger — it cannot be reconciled again' };
+          }
         }
-        // Also check the payments LEDGER, not just invoices.stripe_charge_id:
-        // on-platform charges (webhook, saved-card, pay page) book their own
-        // payments row, sometimes without stamping the invoice column —
-        // reconciling one of those here would record the same money twice.
-        const alreadyBooked = await trx('payments').where({ stripe_charge_id: stripeChargeId }).first();
-        if (alreadyBooked) {
-          return { conflict: 'Charge is already recorded in the payments ledger — it cannot be reconciled again' };
-        }
-      }
 
-      // The withdrawal check re-run on the LOCKED row (Codex #4311 r29 P1):
-      // a Bill-To assignment committing after the route's preflight leaves a
-      // sent/viewed/overdue invoice in the SAME status with a NULL payer_id
-      // and records the move only in `scheduled_send_error`, so neither the
-      // status predicate below nor the combined-session re-read (a projection
-      // without that column) can see it — and this route would attach cash,
-      // a check or a Stripe charge to debt that now belongs to AP.
-      const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
-      if (!lockedInvoice) return { updated: 0 };
-      if (lockedInvoice.payer_id) return { conflict: 'Invoice is billed to a third-party payer — do not collect or reconcile it against the service recipient' };
-      try {
-        assertInvoiceCollectible(lockedInvoice);
-      } catch (e) {
-        return { conflict: e.message };
-      }
-      // collectedAmount and the charge check above used the pre-lock amount owed. A part payment (or an edit) committing since then
-      // moves it, and booking the old figure while amount_paid is zeroed below would collect the part twice: refuse a stale request.
-      const lockedOwedCents = Math.round(invoiceAmountDue(lockedInvoice) * 100);
-      if (lockedOwedCents !== Math.round(invoiceAmountDue(invoice) * 100)) {
-        return { conflict: `The amount owed on this invoice changed to $${(lockedOwedCents / 100).toFixed(2)} while it was being reconciled. Reload it and reconcile again. Nothing was recorded.` };
-      }
-      const rows = await trx('invoices')
-        .where({ id: invoiceId })
-        .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
-        .update(updates);
-      if (!rows) return { updated: 0 };
+        const fence = await checkReconcileFencesInLock(trx, { invoiceId, invoice, triagedPiId, chargePiId });
+        if (fence.conflict || fence.updated === 0) return fence;
 
-      // The invoice is settled — complete any active payment plan on the
-      // SAME trx so it can't keep the paid invoice edit/credit-locked.
-      await require('../services/payment-plans').completeActivePlansForInvoice(invoiceId, trx);
+        const rows = await trx('invoices')
+          .where({ id: invoiceId })
+          .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+          .update(updates);
+        if (!rows) return { updated: 0 };
 
-      // Payments ledger row so revenue reports pick up the collection
-      await trx('payments').insert({
-        customer_id: invoice.customer_id,
-        amount: collectedAmount,
-        status: 'paid',
-        description: `Invoice ${invoice.invoice_number} — ${collectedVia}`,
-        payment_date: etDateString(),
-        stripe_charge_id: stripeChargeId || null,
-        processor: stripeChargeId ? 'stripe' : null,
-        metadata: JSON.stringify({
+        await require('../services/payment-plans').completeActivePlansForInvoice(invoiceId, trx);
+
+        await trx('payments').insert(buildReconcilePaymentRecord(invoice, {
+          invoiceId,
+          collectedVia,
+          collectedAmount,
+          stripeChargeId,
+          chargeDetails,
+        }));
+
+        await auditPaymentReconcile({
+          tech_user_id: req.technicianId || null,
           invoice_id: invoiceId,
-          source: 'admin_payment_reconcile',
-          // The CHARGE's settlement moment, not the reconciliation moment:
-          // billing-cron's pause veto reads settled_event_at, and a row
-          // created at reconcile time without it would fall back to
-          // created_at — making a weeks-old charge look like money settled
-          // during the current failed attempt. chargeDetails.created is
-          // Stripe's epoch-seconds charge timestamp (verified above when a
-          // stripeChargeId is supplied). Non-Stripe reconciliations
-          // (check/cash) carry no stamp on purpose: they were recorded by a
-          // human NOW, and created_at is honest for them.
-          // The authoritative settlement moment: the balance transaction is
-          // created when the charge SUCCEEDS (for ACH that is settlement,
-          // not initiation); charge.created is the fallback for the rare
-          // charge whose bt did not expand — older-than-true, which errs
-          // toward the pause staying, never toward a false veto/clear.
-          ...(stripeChargeId && (chargeDetails?.balance_transaction?.created || chargeDetails?.created)
-            ? { settled_event_at: new Date((chargeDetails.balance_transaction?.created || chargeDetails.created) * 1000).toISOString() }
-            : {}),
-          // Payer ownership rides every ledger row (same marker the pause
-          // veto and auto-clear read) — a payer-funded reconciliation during
-          // a homeowner retry must not read as the homeowner's own tender.
-          ...(invoice.payer_id ? { payer_id: invoice.payer_id } : {}),
-        }),
-      });
+          invoice_number: invoice.invoice_number,
+          collected_via: collectedVia,
+          stripe_charge_id: stripeChargeId || null,
+          amount: collectedAmount,
+          ip_address: ipFromReq(req),
+          user_agent: uaFromReq(req),
+          trx,
+        });
 
-      // CRITICAL audit row — money flows through this endpoint and a missing
-      // row makes a "charged but unpaid" reconciliation drift impossible to
-      // trace later. Written INSIDE the transaction: an audit failure rolls
-      // the whole reconcile back, instead of 500ing a request whose invoice
-      // was already flipped paid (state change hidden behind an error).
-      await auditPaymentReconcile({
-        tech_user_id: req.technicianId || null,
-        invoice_id: invoiceId,
-        invoice_number: invoice.invoice_number,
-        collected_via: collectedVia,
-        stripe_charge_id: stripeChargeId || null,
-        amount: collectedAmount,
-        ip_address: ipFromReq(req),
-        user_agent: uaFromReq(req),
-        trx,
+        return { updated: rows };
       });
-
-      return { updated: rows };
-    });
     } catch (releaseErr) {
-      // 409-shaped combined-session refusals from the in-transaction
-      // reservation surface as retryable conflicts.
       if (releaseErr.statusCode === 409) {
         return res.status(409).json({ error: releaseErr.message });
       }
@@ -409,93 +506,28 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       });
     }
 
-    try {
-      const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-      await AnnualPrepayRenewals.syncTermForInvoicePayment({ id: invoiceId, status: 'paid', paid_at: new Date() });
-    } catch (e) {
-      logger.warn(`[reconcile] annual prepay activation skipped: ${e.message}`);
-    }
-
-    // Same automatic-clear contract as the webhook and record-payment: a
-    // reconciled payment is the customer paying. Settlement moment = the
-    // Stripe charge's own timestamp when we have one (the ordering guard
-    // then correctly refuses charges that predate the failure cycle), or
-    // NOW for check/cash. Skipped for payer-billed invoices — the payer's
-    // tender proves nothing about the homeowner's card.
-    if (!invoice.payer_id) {
-      try {
-        const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
-        const settledEpoch = chargeDetails?.balance_transaction?.created || chargeDetails?.created || null;
-        await maybeResumeBillingPauseOnPayment(invoice.customer_id, {
-          paymentIntentId: chargeDetails?.payment_intent || null,
-          source: 'admin_payment_reconcile',
-          settledAt: settledEpoch ? new Date(settledEpoch * 1000) : new Date(),
-        });
-      } catch (pauseErr) {
-        logger.warn(`[reconcile] billing-pause auto-clear failed: ${pauseErr.message}`);
-      }
-    }
-
     logger.info(`[reconcile] invoice ${invoice.invoice_number} marked paid via ${collectedVia}${stripeChargeId ? ` (${stripeChargeId})` : ''}`);
 
-    // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
-    // GATE_INVOICE_ISSUED_CLOSES_VISIT): a reconciled cash / check /
-    // off-platform payment is money received by hand for the visit this
-    // invoice bills — the same proof recordManualPayment closes on (GitHub
-    // r4 P1 #4127). After the commit, best-effort by contract; the operator
-    // who reconciled is the actor of the visit transition.
-    {
-      const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
-    }
-
-    // A combined-visit packet defers its review ask behind an unpaid invoice,
-    // and closeOutVisitForIssuedInvoice refuses packet-owned visits — so an
-    // off-platform settlement reconciled here never enrolled the ask the
-    // technician requested (Codex #4311 r29 P1). Same shared path the Stripe
-    // webhook, record-payment and credit rails use. Best-effort after the
-    // commit; an unrecorded enrollment is logged for the packet sweep.
-    try {
-      const settled = await db('invoices').where({ id: invoiceId }).first('id', 'invoice_number', 'customer_id', 'service_record_id', 'visit_completion_packet_id');
-      if (settled) {
-        const outcome = await require('../services/review-request').enrollForPaidInvoice(settled, { source: 'payments_reconcile' });
-        if (outcome && outcome.recorded === false) {
-          logger.error(`[reconcile] invoice ${settled.invoice_number || invoiceId} settled with an UNRECORDED review enrollment — the packet recovery sweep owns it`);
-          // No redelivery owns this rail (Codex #4311 r31 P1): without a
-          // durable record the ask is simply lost, so the office is told.
-          const alerted = await require('../services/dispatch-alerts').createAlert({
-            type: 'visit_closeout_review',
-            severity: 'warn',
-            payload: {
-              reason: 'review_enrollment_unrecorded',
-              source: 'payments_reconcile',
-              invoiceIds: [invoiceId],
-              detail: 'This settled invoice owes a review ask that could not be recorded — re-run the enrollment or ask manually.',
-            },
-          }).catch((alertErr) => {
-            logger.error(`[reconcile] could not raise the unrecorded-enrollment alert: ${alertErr.message}`);
-            return null;
-          });
-          // The alert is the durable signal; when it cannot be persisted the
-          // OPERATOR is the last one (Codex #4311 r40 P1) — this rail has no
-          // redelivery, and reporting a clean reconciliation would lose the
-          // requested review silently. The payment is recorded either way, so
-          // this rides the success response as a warning.
-          if (!alerted) reviewUnrecordedWarning = invoiceId;
-        }
-      }
-    } catch (enrollErr) {
-      logger.error(`[reconcile] review enrollment failed for invoice ${invoiceId}: ${enrollErr.message}`);
-    }
+    const reviewUnrecordedWarning = await runPostReconcileSideEffects(invoice, {
+      invoiceId,
+      chargeDetails,
+      technicianId: req.technicianId || null,
+    });
 
     const refreshed = await db('invoices').where({ id: invoiceId }).first();
-    res.json({ success: true, invoice: refreshed, stripe_charge: chargeDetails ? {
-      id: chargeDetails.id, amount: chargeDetails.amount / 100, receipt_url: chargeDetails.receipt_url,
-    } : null,
-    ...(reviewUnrecordedWarning ? {
-      reviewsUnrecorded: [reviewUnrecordedWarning],
-      warning: 'The payment is recorded, but the review ask for this visit could not be recorded and no alert could be raised — enroll it from the visit or ask manually.',
-    } : {}) });
+    res.json({
+      success: true,
+      invoice: refreshed,
+      stripe_charge: chargeDetails ? {
+        id: chargeDetails.id,
+        amount: Number(chargeDetails.amount_captured ?? chargeDetails.amount) / 100,
+        receipt_url: chargeDetails.receipt_url,
+      } : null,
+      ...(reviewUnrecordedWarning ? {
+        reviewsUnrecorded: [reviewUnrecordedWarning],
+        warning: 'The payment is recorded, but the review ask for this visit could not be recorded and no alert could be raised — enroll it from the visit or ask manually.',
+      } : {}),
+    });
   } catch (err) { next(err); }
 });
 

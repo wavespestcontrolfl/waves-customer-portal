@@ -133,8 +133,8 @@ describe('charge-now with the confirmed amount', () => {
         'autopay_monthly_cust-1_2026-10-30',
         expect.objectContaining({ operatorOverride: true }),
       );
-      // the rate is read again inside the billing lock, just before the charge
-      expect(customerReads).toEqual([[], ['monthly_rate']]);
+      // the customer state + rate are read again inside the billing lock, just before the charge
+      expect(customerReads).toEqual([[], ['id', 'active', 'deleted_at', 'payer_id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'billing_day']]);
     });
   });
 
@@ -159,8 +159,8 @@ describe('charge-now with the confirmed amount', () => {
       });
       expect(chargeMock).not.toHaveBeenCalled();
       expect(chargeOneTimeMock).not.toHaveBeenCalled();
-      // decided on the rate re-read inside the billing lock, just before the charge
-      expect(customerReads).toEqual([[], ['monthly_rate']]);
+      // decided on the customer state + rate re-read inside the billing lock, just before the charge
+      expect(customerReads).toEqual([[], ['id', 'active', 'deleted_at', 'payer_id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'billing_day']]);
       expect(paymentsQB.update).not.toHaveBeenCalled();
     });
   });
@@ -174,7 +174,7 @@ describe('charge-now with the confirmed amount', () => {
       const res = await post(baseUrl, body);
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({ error: message, rate_changed: true, current_amount: 99 });
-      expect(customerReads).toEqual([[], ['monthly_rate']]);
+      expect(customerReads).toEqual([[], ['id', 'active', 'deleted_at', 'payer_id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'billing_day']]);
       expect(chargeMock).not.toHaveBeenCalled();
       expect(paymentsQB.update).not.toHaveBeenCalled();
     });
@@ -188,12 +188,19 @@ describe('charge-now with the confirmed amount', () => {
     });
   });
 
-  test('an explicit amount still charges that amount and never reads the rate again', async () => {
+  test('an explicit amount charges that amount under the lock with a deterministic idempotency key and re-checks active/deleted/payer without re-reading rate', async () => {
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { amount: 25 });
       expect(res.status).toBe(200);
-      expect(chargeOneTimeMock).toHaveBeenCalledWith('cust-1', 25, expect.any(String), null, expect.any(Object), expect.objectContaining({ operatorOverride: true }));
-      expect(customerReads).toHaveLength(1);
+      expect(chargeOneTimeMock).toHaveBeenCalledWith(
+        'cust-1',
+        25,
+        expect.any(String),
+        expect.stringMatching(/^admin_charge_one_time_cust-1_2500_/),
+        expect.any(Object),
+        expect.objectContaining({ operatorOverride: true }),
+      );
+      expect(customerReads).toEqual([[], ['id', 'active', 'deleted_at', 'payer_id']]);
       expect(chargeMock).not.toHaveBeenCalled();
     });
   });

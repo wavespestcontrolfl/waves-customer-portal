@@ -933,6 +933,7 @@ router.post(
       switch (event.type) {
         case 'payment_intent.succeeded':
           await handlePaymentIntentSucceeded(event.data.object, event.created);
+          await require('../services/payment-failed-alert-close').closePaymentFailedAlertsForMonthlyDues({ paymentIntent: event.data.object });
           // Auto-clear a billing pause on the customer's OWN settled money
           // (owner ruling 2026-08-01: billing goes back to normal once they
           // pay). AFTER the handler so every durable ledger write of

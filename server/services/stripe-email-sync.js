@@ -4,10 +4,11 @@
  * transaction; drainDue() runs every minute (scheduler.js).
  *
  * Conservative by design: the app only writes a Stripe profile it can prove belongs to this one record.
- *  - Locks: the customer row FOR UPDATE first (the confirm's order: it updates the customer, then inserts the job), then
- *    the job, both held through one short Stripe call (10 s, no SDK retries). The job carries the address the customer
- *    confirmed; it is written only while the locked record still holds that address. A merge or its undo must lock this
- *    customer row to move its Stripe id, so nothing moves between the checks and the write.
+ *  - Locks: two short transactions with NO DB lock held across Stripe HTTP. Transaction 1 locks the customer row FOR
+ *    UPDATE first (the confirm's order: customer, then job), runs local ownership/supersession checks, leases the job
+ *    for 2 minutes, and commits so concurrent edits/payments never stall on Stripe latency. After the bounded Stripe
+ *    calls (10 s, no SDK retries), Transaction 2 re-locks customer then job, re-checks whether a newer email write or
+ *    merge superseded the job while Stripe was in flight, and commits the outcome.
  *  - Skipped with an office alert: a Stripe id another record also holds, another record's saved card uses, or a
  *    third-party payer holds; a record whose own saved cards point at another Stripe profile; a Stripe profile whose
  *    own record (metadata) does not name this customer; and any
@@ -161,54 +162,217 @@ async function pushToStripe(job, customer, email) {
     { ...opts, idempotencyKey: `stripe-email-sync:${job.id}:${customer.stripe_customer_id}:${job.attempts}` });
 }
 
-async function processJob(jobId) {
+const STRIPE_LEASE_MINUTES = 2;
+const STRIPE_EMAIL_SYNC_LOCK_NS = 'stripe.email.sync';
+
+// Called by email writers (customer-email-write.js) and merges (customer-dedupe.js)
+// AFTER acquiring customers FOR UPDATE: blocks until any in-flight Stripe email
+// write for these customer(s) completes so older jobs cannot overwrite a newer
+// confirmed email or write to a profile being transferred by a merge.
+async function lockStripeEmailSync(trx, customerIds) {
+  const ids = [...new Set((Array.isArray(customerIds) ? customerIds : [customerIds]).filter(Boolean).map(String))].sort();
+  for (const id of ids) {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [STRIPE_EMAIL_SYNC_LOCK_NS, id]);
+  }
+}
+
+async function lockStripeEmailSyncOnEmailChange(trx, customerId, previousEmail, nextEmail) {
+  if (nextEmail === undefined) return;
+  if (normEmail(nextEmail) === normEmail(previousEmail)) return;
+  await lockStripeEmailSync(trx, customerId);
+}
+
+async function scheduleJobLater(trx, jobId, minutes, patch = {}) {
+  const updated = await trx(TABLE).where({ id: jobId }).update({
+    ...patch,
+    updated_at: trx.fn.now(),
+    next_attempt_at: trx.raw("now() + (? * interval '1 minute')", [minutes]),
+  }).returning([trx.raw('updated_at::text AS version')]);
+  return updated?.[0]?.version || null;
+}
+
+async function finishJobOutcome(trx, job, customer, status, result, alert = false) {
+  await finish(trx, job, status, result);
+  if (alert) await alertOffice(trx, job, customer, result);
+  return result;
+}
+
+async function claimForStripePhase(jobId) {
   return db.transaction(async (trx) => {
     const claimed = await claim(trx, jobId);
-    if (!claimed) return 'busy';
+    if (!claimed) return { done: true, result: 'busy' };
     const { job, customer } = claimed;
 
-    const end = async (status, result, alert = false) => {
-      await finish(trx, job, status, result);
-      if (alert) await alertOffice(trx, job, customer, result);
-      return result;
-    };
-    const later = async (minutes, patch) => {
-      await trx(TABLE).where({ id: job.id }).update({ ...patch, updated_at: trx.fn.now(), next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [minutes]) });
-    };
-
-    if (!customer || isMergeRetiredRow(customer)) return end('skipped', 'gone');
+    if (!customer || isMergeRetiredRow(customer)) {
+      return { done: true, result: await finishJobOutcome(trx, job, customer, 'skipped', 'gone') };
+    }
     // Only the address the customer confirmed goes to Stripe: a record that holds anything else now (an office edit
     // since) is left alone, before any other check, so a stale job never raises an alert.
     const email = String(job.email || '').trim();
-    if (!email || normEmail(customer.email) !== normEmail(email)) return end('done', 'superseded');
+    if (!email || normEmail(customer.email) !== normEmail(email)) {
+      return { done: true, result: await finishJobOutcome(trx, job, customer, 'done', 'superseded') };
+    }
     // Unlinked: the card check still runs (cards on a profile the record does not link), then re-checks for a link.
     const linked = Boolean(customer.stripe_customer_id);
     const problem = await firstOwnershipProblem(trx, customer, linked ? ['card_conflict', 'merged', 'shared'] : ['card_conflict']);
-    if (problem) return end('skipped', problem, true);
+    if (problem) {
+      return { done: true, result: await finishJobOutcome(trx, job, customer, 'skipped', problem, true) };
+    }
     // A job whose Stripe tries ran out earlier but whose office alert could not be written: retry only the alert
     // (after the ownership checks above, so the alert never tells the office to edit a profile that became unsafe).
-    if (job.attempts >= MAX_ATTEMPTS) return giveUp(trx, job, customer);
+    if (job.attempts >= MAX_ATTEMPTS) {
+      return { done: true, result: await giveUp(trx, job, customer) };
+    }
     if (!linked) {
       const rechecks = job.not_linked_checks; // NOT NULL DEFAULT 0
-      if (rechecks >= NOT_LINKED_RECHECKS) return end('done', 'not_linked');
-      await later(2 ** (rechecks + 1), { not_linked_checks: rechecks + 1 });
-      return 'recheck';
+      if (rechecks >= NOT_LINKED_RECHECKS) {
+        return { done: true, result: await finishJobOutcome(trx, job, customer, 'done', 'not_linked') };
+      }
+      await scheduleJobLater(trx, job.id, 2 ** (rechecks + 1), { not_linked_checks: rechecks + 1 });
+      return { done: true, result: 'recheck' };
     }
 
-    let outcome;
-    try {
-      outcome = await pushToStripe(job, customer, email);
-    } catch (err) {
-      const attempts = job.attempts + 1;
-      const code = String(err.code || err.type || err.name || 'stripe_error').slice(0, 80);
-      // Out of tries: the spent budget commits on its own and the alert runs in a savepoint (giveUp); when the alert
-      // cannot be written, the next tick retries only the alert (above).
-      await later(backoffMinutes(attempts), { attempts, last_error: code });
-      return attempts >= MAX_ATTEMPTS ? giveUp(trx, job, customer) : 'retry';
+    // Lease the job briefly and release the DB transaction + customers FOR UPDATE
+    // lock BEFORE calling Stripe HTTP so slow Stripe calls cannot block writes
+    // on the customer row (payments/webhooks). The outer stripe.email.sync
+    // advisory lock stays held to serialize against concurrent email edits & merges.
+    const priorNextAttemptAt = job.next_attempt_at;
+    const leasedVersion = await scheduleJobLater(trx, job.id, STRIPE_LEASE_MINUTES);
+    return { done: false, job, customer, email, priorNextAttemptAt, leasedVersion };
+  });
+}
+
+async function finalizeStripePhase({ job, customer, email, priorNextAttemptAt, outcome, stripeError }) {
+  return db.transaction(async (trx) => {
+    // Do NOT take customers FOR UPDATE here: the outer stripe.email.sync advisory
+    // lock is still held while a waiting email writer or merge may hold customers
+    // FOR UPDATE waiting for that advisory lock (taking FOR UPDATE here would ABBA).
+    // No email edit or merge can commit until the advisory lock releases, so a
+    // plain read of customers sees the exact serialized state.
+    const liveCustomer = await trx('customers').where({ id: customer.id })
+      .first('id', 'email', 'stripe_customer_id', 'deleted_at', 'phone');
+    const liveJob = await trx(TABLE).where({ id: job.id, status: 'pending' }).forUpdate().first();
+    if (!liveJob) return 'busy';
+    if (!liveCustomer || isMergeRetiredRow(liveCustomer)) {
+      return finishJobOutcome(trx, liveJob, liveCustomer, 'skipped', 'gone');
     }
-    // No Stripe key on this process: untouched, a process with a key takes it (drainDue).
-    if (outcome === 'stripe_owner') return end('skipped', 'stripe_owner', true);
-    return outcome === 'not_configured' ? 'not_configured' : end('done', 'updated');
+    // A newer email write landed while the Stripe call was in flight: finish
+    // quietly as superseded so a stale failure/owner mismatch never alerts or
+    // overwrites newer work.
+    if (normEmail(liveCustomer.email) !== normEmail(email)) {
+      return finishJobOutcome(trx, liveJob, liveCustomer, 'done', 'superseded');
+    }
+    if (stripeError) {
+      const attempts = liveJob.attempts + 1;
+      const code = String(stripeError.code || stripeError.type || stripeError.name || 'stripe_error').slice(0, 80);
+      await scheduleJobLater(trx, liveJob.id, backoffMinutes(attempts), { attempts, last_error: code });
+      return attempts >= MAX_ATTEMPTS ? giveUp(trx, liveJob, liveCustomer) : 'retry';
+    }
+    if (outcome === 'not_configured') {
+      // No Stripe key on this process: restore the prior schedule untouched.
+      await trx(TABLE).where({ id: liveJob.id }).update({ next_attempt_at: priorNextAttemptAt });
+      return 'not_configured';
+    }
+    if (outcome === 'stripe_owner') {
+      return finishJobOutcome(trx, liveJob, liveCustomer, 'skipped', 'stripe_owner', true);
+    }
+    return finishJobOutcome(trx, liveJob, liveCustomer, 'done', 'updated');
+  });
+}
+
+function createAdvisoryLockClient() {
+  const knexConfig = require('../knexfile');
+  const config = require('../config');
+  const env = config.nodeEnv || 'development';
+  const conn = knexConfig[env]?.connection;
+  if (!conn) return null;
+  const { Client } = require('pg');
+  return new Client(conn);
+}
+
+async function acquireNonPooledAdvisoryLock(customerId) {
+  const client = createAdvisoryLockClient();
+  if (!client) return null;
+  await client.connect();
+  try {
+    const lockRes = await client.query(
+      'SELECT pg_try_advisory_lock(hashtext($1), hashtext($2::text)) AS locked',
+      [STRIPE_EMAIL_SYNC_LOCK_NS, String(customerId)],
+    );
+    if (lockRes?.rows?.[0]?.locked === false) {
+      await client.end().catch(() => {});
+      return { locked: false };
+    }
+    return {
+      locked: true,
+      release: async () => {
+        await client.query(
+          'SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))',
+          [STRIPE_EMAIL_SYNC_LOCK_NS, String(customerId)],
+        ).catch(() => {});
+        await client.end().catch(() => {});
+      },
+    };
+  } catch (err) {
+    await client.end().catch(() => {});
+    throw err;
+  }
+}
+
+async function runStripeEmailSyncPhases(jobId) {
+  const step1 = await claimForStripePhase(jobId);
+  if (step1.done) return step1.result;
+
+  let outcome = null;
+  let stripeError = null;
+  try {
+    outcome = await pushToStripe(step1.job, step1.customer, step1.email);
+  } catch (err) {
+    stripeError = err;
+  }
+
+  try {
+    return await finalizeStripePhase({
+      job: step1.job,
+      customer: step1.customer,
+      email: step1.email,
+      priorNextAttemptAt: step1.priorNextAttemptAt,
+      outcome,
+      stripeError,
+    });
+  } catch (finErr) {
+    if (step1.leasedVersion && finErr && typeof finErr === 'object') {
+      finErr.leasedVersion = step1.leasedVersion;
+    }
+    throw finErr;
+  }
+}
+
+async function processJob(jobId) {
+  const peek = await db(TABLE).where({ id: jobId }).first('customer_id');
+  if (!peek) return 'busy';
+  // Hold the cross-HTTP stripe.email.sync advisory lock on a dedicated
+  // non-pooled pg.Client when connected to Postgres so DB_POOL_MAX=2 never
+  // deadlocks if a concurrent email write waits on the lock while phase 2
+  // finalizes; fall back to a transaction advisory lock under mock DBs.
+  if (db?.client?.pool) {
+    const advisory = await acquireNonPooledAdvisoryLock(peek.customer_id);
+    if (advisory) {
+      if (!advisory.locked) return 'busy';
+      try {
+        return await runStripeEmailSyncPhases(jobId);
+      } finally {
+        await advisory.release();
+      }
+    }
+  }
+  return db.transaction(async (advisoryTrx) => {
+    const lockRes = await advisoryTrx.raw(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+      [STRIPE_EMAIL_SYNC_LOCK_NS, String(peek.customer_id)],
+    );
+    if (lockRes?.rows?.[0]?.locked === false) return 'busy';
+    return runStripeEmailSyncPhases(jobId);
   });
 }
 
@@ -224,9 +388,22 @@ async function pushBack(id, seen, err) {
     .returning(['id', 'customer_id', 'attempts']);
   if (!row || row.attempts < MAX_ATTEMPTS + WORKER_ERROR_GRACE) return;
   await db.transaction(async (trx) => {
+    // Lock customer first, then job (matches claim / confirm order) and check
+    // whether a newer email edit superseded or retired the customer before
+    // raising a gave-up office alert.
+    const customer = await trx('customers').where({ id: row.customer_id }).forUpdate()
+      .first('id', 'email', 'deleted_at', 'phone');
     const job = await trx(TABLE).where({ id, status: 'pending' }).forUpdate().first();
     if (!job) return;
-    const customer = (await trx('customers').where({ id: job.customer_id }).first('id', 'email')) || { id: job.customer_id, email: null };
+    if (!customer || isMergeRetiredRow(customer)) {
+      await finish(trx, job, 'skipped', 'gone');
+      return;
+    }
+    const email = String(job.email || '').trim();
+    if (!email || normEmail(customer.email) !== normEmail(email)) {
+      await finish(trx, job, 'done', 'superseded');
+      return;
+    }
     await alertOffice(trx, job, customer, 'gave_up');
     await finish(trx, job, 'failed', 'worker_error');
   });
@@ -271,9 +448,10 @@ async function drainOnce({ limit = 20 } = {}) {
         processed += 1;
         counts.error = (counts.error || 0) + 1;
         logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
-        // Only the version this drain saw: a job changed or rescheduled since keeps its own schedule.
-        // It spends a try too; a job that keeps failing here stops for good with an office alert (no Stripe write).
-        await pushBack(id, seen, err).catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
+        // Only the version this drain saw (or the committed lease version if
+        // finalization threw after leasing): a job changed or rescheduled since
+        // keeps its own schedule.
+        await pushBack(id, err?.leasedVersion || seen, err).catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
       }
     }
     if (page.length < limit) break;
@@ -282,4 +460,4 @@ async function drainOnce({ limit = 20 } = {}) {
   return counts;
 }
 
-module.exports = { enqueue, processJob, drainDue, MAX_ATTEMPTS, TABLE };
+module.exports = { enqueue, processJob, drainDue, lockStripeEmailSync, lockStripeEmailSyncOnEmailChange, MAX_ATTEMPTS, TABLE };

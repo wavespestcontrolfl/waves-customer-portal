@@ -937,6 +937,27 @@ const SETUP_RECOVERABLE_PI_STATUSES = new Set(
   [...REPLACEABLE_PI_STATUSES].filter(status => status !== 'requires_capture')
 );
 
+async function lockCustomerBeforeAutoCreditSetup(trx, invoice, opts) {
+  if (opts.skipAutoCredit || !invoice?.customer_id || invoice.payer_id) return;
+  const fg = require('../config/feature-gates');
+  if (!fg.isEnabled('autoApplyAccountCredit') && !fg.isEnabled('payPromoCode')) return;
+  // Preserve discount -> customer -> pay.combined.customer -> invoice across
+  // concurrent estimate-promo and pay-page promo redemptions.
+  await require('./invoice-promo-code').prelockPendingPromoDiscount(trx, invoice);
+  let ownerId = String(invoice.customer_id);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await trx('customers').where({ id: ownerId }).forUpdate().first('id');
+    const freshOwner = await trx('invoices').where({ id: invoice.id }).first('customer_id');
+    const freshId = freshOwner?.customer_id ? String(freshOwner.customer_id) : null;
+    if (!freshId || freshId === ownerId) return;
+    ownerId = freshId;
+  }
+  const ownerErr = new Error('The account changed while preparing this payment — refreshing.');
+  ownerErr.statusCode = 409;
+  ownerErr.staleBalance = true;
+  throw ownerErr;
+}
+
 async function assertStatementChildrenPayableIfPresent(statementId, conn, opts) {
   const Settle = require('./payer-statement-settle');
   await Settle.assertStatementChildrenPayable(statementId, conn, opts);
@@ -4209,6 +4230,10 @@ const StripeService = {
         // gate-off single-invoice payment would still queue behind payer
         // edits and other combined-lock holders instead of being
         // byte-identical to the pre-gate behavior.
+        // Align with apply-credit, reconcile, and recordManualPayment's
+        // customer -> pay.combined.customer -> invoice lock hierarchy whenever
+        // auto-apply account credit can lock customers later in this trx.
+        await lockCustomerBeforeAutoCreditSetup(trx, invoice, opts);
         if (opts.includeOpenBalance && require('../config/feature-gates').isEnabled('payIncludeBalance')
           && invoice.customer_id && !invoice.payer_id) {
           // Ownership revalidated AFTER each lock (codex r30 P1, same

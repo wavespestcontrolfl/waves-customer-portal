@@ -58,6 +58,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 }));
 jest.mock('../services/stripe', () => ({
   chargeInvoiceWithSavedCard: jest.fn(),
+  assertNoInvoiceChargeReconciliationPending: jest.fn().mockResolvedValue(undefined),
 }));
 // Invoice issued ⇒ visit completed (GATE_INVOICE_ISSUED_CLOSES_VISIT): a
 // reconciled hand payment closes the visit it bills, after the commit.

@@ -4920,6 +4920,9 @@ const customerUpdateHandler = async (req, res, next) => {
             // Planned and refused here; the Stripe cancels run as the LAST step of this transaction.
             applySessionRelease = payerRelease.apply || null;
           }
+          await require('../services/stripe-email-sync').lockStripeEmailSyncOnEmailChange(
+            trx, req.params.id, lockedBefore.email, updates.email,
+          );
           await trx('customers').where({ id: req.params.id }).update(updates);
           // A contact-slot rewrite from the admin editor is the same identity
           // mutation as the portal's contact save (codex #6363 r7 P2): a

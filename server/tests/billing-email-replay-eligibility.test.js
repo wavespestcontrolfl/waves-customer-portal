@@ -101,6 +101,19 @@ describe('pre-charge replay eligibility', () => {
       .resolves.toEqual({ eligible: true });
   });
 
+  test('keeps a clamped month-end billing_day (31 -> Feb 28) at T+3 ET', async () => {
+    jest.setSystemTime(new Date('2026-02-25T16:00:00Z'));
+    try {
+      const database = databaseWith({ customers: [{ id: customerId, active: true, autopay_enabled: true,
+        monthly_rate: 89, billing_mode: 'monthly_membership', billing_day: 31 }] });
+      await expect(billingEmailReplayEligible({ customer_id: customerId,
+        source_entry_point: 'autopay_pre_charge_reminder', charge_date: '2026-02-28' }, database))
+        .resolves.toEqual({ eligible: true });
+    } finally {
+      jest.setSystemTime(new Date('2026-09-26T16:00:00Z'));
+    }
+  });
+
   test.each([
     ['today', 0, {}],
     ['T+4', 4, {}],

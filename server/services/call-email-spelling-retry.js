@@ -629,6 +629,9 @@ async function commitDeliveredRetry({ sendRow }, client) {
   const settle = (status, reason) => applySettlement(client(TABLE).where({ id: row.id, status: 'resending' }), { status, reason }, client);
   const before = await liveCustomer(client, row.customer_id).forUpdate().first();
   if (!before) { await settle('skipped', 'customer_gone'); return { committed: false, touched: true }; }
+  if (typeof client?.raw === 'function') {
+    await require('./stripe-email-sync').lockStripeEmailSync(client, row.customer_id);
+  }
   const { lockCustomerEmail } = require('../utils/customer-comms-lock');
   await lockCustomerEmail(client, address);
   // Re-judged at commit: the address may have been claimed since the send. The mail already delivered, but no record moves.

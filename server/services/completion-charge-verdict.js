@@ -32,6 +32,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { completionInvoiceAmount, hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
 const { billByInvoiceVisit } = require('./bill-by-invoice');
 const { ACCEPT_MINT_NOTE_RE } = require('./invoice-notes');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
@@ -66,7 +67,7 @@ async function resolveAppointmentCardLane({
   // — the credit fence below must see it. customerAutopayActive gates
   // ONLY the Stripe charge (the composite charge condition further down).
   if (!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane
-    && svc.is_recurring !== true
+    && !isRecurringLineageVisit(svc)
     && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id) {
     try {
       if (require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {

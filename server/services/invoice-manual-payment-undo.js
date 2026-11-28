@@ -248,24 +248,43 @@ async function describeManualPaymentUndo(invoiceId) {
 // representative invoice is another one). Only a bell closed since the payment: one a person closed earlier keeps its earlier done_at
 // (or a resolution of their own) and is left.
 async function reopenPaymentFailedBells(trx, invoiceId, since) {
-  const { RESOLUTION, TRIGGER_KEYS } = require('./payment-failed-alert-close');
-  const { parseJson, failedAllocationInvoiceIds } = require('./payment-failed-allocation');
+  const { RESOLUTION, MONTHLY_RESOLUTION, TRIGGER_KEYS } = require('./payment-failed-alert-close');
+  const { parseJson, failedAllocationInvoiceIds, monthlyDuesContextOf, isFailedAllocationSettled } = require('./payment-failed-allocation');
+  const { duesMonthOfLineItems } = require('./billing-lane');
+  const undoneInvoice = await trx('invoices').where({ id: invoiceId }).first('customer_id', 'payer_id', 'line_items');
+  const undoneDuesMonth = undoneInvoice && !undoneInvoice.payer_id
+    ? duesMonthOfLineItems(undoneInvoice.line_items)
+    : null;
   const closed = await trx('notifications')
-    .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments', resolution: RESOLUTION })
+    .where({ recipient_type: 'admin', category: 'payment', done_by: 'payments' })
+    .whereIn('resolution', [RESOLUTION, MONTHLY_RESOLUTION])
     .whereRaw("metadata->>'triggerKey' IN (?, ?)", TRIGGER_KEYS)
     .where('done_at', '>=', since)
     .select('id', 'metadata');
   const reopen = [];
   for (const bell of closed) {
     const meta = parseJson(bell.metadata);
-    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds } = meta.payload || {};
+    const { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds, customerId, billedMonth } = meta.payload || {};
     // A bill_payment_error bell closes on payload.invoiceId alone (payment-failed-alert-close.js), so it reopens on that alone.
     if (meta.triggerKey === 'bill_payment_error') {
       if (bellInvoiceId != null && String(bellInvoiceId) === String(invoiceId)) reopen.push(bell.id);
       continue;
     }
     const allocation = await failedAllocationInvoiceIds(trx, { paymentIntentId, invoiceId: bellInvoiceId, allocationInvoiceIds });
-    if (allocation.includes(String(invoiceId))) reopen.push(bell.id);
+    if (allocation.includes(String(invoiceId))) {
+      reopen.push(bell.id);
+      continue;
+    }
+    if (undoneDuesMonth && undoneInvoice?.customer_id && !allocation.length) {
+      const ledgerRows = paymentIntentId
+        ? await trx('payments').where({ stripe_payment_intent_id: String(paymentIntentId) }).select('customer_id', 'payment_date', 'description', 'metadata')
+        : [];
+      const ctx = monthlyDuesContextOf({ customerId, billedMonth }, ledgerRows);
+      if (ctx.billedMonth === undoneDuesMonth && ctx.customerId === String(undoneInvoice.customer_id)
+        && !(await isFailedAllocationSettled(trx, { paymentIntentId, customerId: ctx.customerId, billedMonth: ctx.billedMonth }))) {
+        reopen.push(bell.id);
+      }
+    }
   }
   if (!reopen.length) return 0;
   return trx('notifications').whereIn('id', reopen).update({ done_at: null, done_by: null, resolution: null });
