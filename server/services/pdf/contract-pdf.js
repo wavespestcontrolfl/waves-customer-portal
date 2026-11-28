@@ -240,6 +240,7 @@ function generateContractPDF(contract, customer, sink, opts = {}) {
   }
 
   doc.end();
+  return doc;
 }
 
 // Buffer variant for email attachments / archival (used by the post-sign
@@ -256,7 +257,12 @@ function streamToBuffer(streamFn) {
       },
       on() {}, once() {}, emit() {},
     };
-    try { streamFn(buffSink); } catch (err) { reject(err); }
+    try {
+      const doc = streamFn(buffSink);
+      if (doc && typeof doc.on === 'function') doc.on('error', reject);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 

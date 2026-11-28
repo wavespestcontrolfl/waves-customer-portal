@@ -59,6 +59,24 @@ const quizLimiter = rateLimit({
   message: { error: 'Too many requests. Try again in a minute.' },
 });
 
+function setPrivatePageHeaders(res) {
+  const headers = {
+    'Cache-Control': 'no-store',
+    'X-Robots-Tag': 'noindex',
+    'Referrer-Policy': 'no-referrer',
+  };
+  if (typeof res.set === 'function') {
+    res.set(headers);
+  } else if (typeof res.setHeader === 'function') {
+    for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
+  }
+}
+
+function sendConfirmHtml(res, heading, bodyHtml, status = 200) {
+  setPrivatePageHeaders(res);
+  return res.status(status).type('html').send(renderConfirmPage(heading, bodyHtml));
+}
+
 function escapeHtml(s) {
   if (s == null) return '';
   return String(s)
@@ -137,13 +155,17 @@ router.post('/unsubscribe/:token', async (req, res) => {
         ? await db('newsletter_subscribers').where({ unsubscribe_token: req.params.token }).first()
         : null);
     const email = sub ? escapeHtml(sub.email) : '';
+    const heading = sub ? "You're unsubscribed." : 'Link expired or invalid.';
     const bodyHtml = sub
       ? `<p>We won't send any more newsletters${email ? ` to <span class="email">${email}</span>` : ''}.</p>
          <p style="margin-bottom:0">If this was a mistake, sign up again at <a href="https://www.wavespestcontrol.com/newsletter/">/newsletter</a>.</p>`
       : `<p>This unsubscribe link is expired or invalid.</p><p style="margin-bottom:0">Email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we'll help.</p>`;
-    return res.status(200).type('html').send(renderConfirmPage("You're unsubscribed.", bodyHtml));
+    return sendConfirmHtml(res, heading, bodyHtml, 200);
   } catch (err) {
     logger.error(`[newsletter] unsubscribe POST failed: ${err.message}`);
+    if (req.body?.confirm_unsubscribe === '1') {
+      return sendConfirmHtml(res, 'Something went wrong.', '<p style="margin-bottom:0">Please try again or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> to unsubscribe.</p>', 500);
+    }
     res.status(200).json({ success: true });  // still 200 for mail clients
   }
 });
@@ -185,10 +207,10 @@ router.get('/unsubscribe/:token', async (req, res) => {
       heading = 'Link expired or invalid.';
       bodyHtml = `<p>This unsubscribe link no longer matches a subscription.</p><p style="margin-bottom:0">Email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we'll help.</p>`;
     }
-    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+    return sendConfirmHtml(res, heading, bodyHtml, 200);
   } catch (err) {
     logger.error(`[newsletter] unsubscribe GET failed: ${err.message}`);
-    res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com to unsubscribe.');
+    return sendConfirmHtml(res, 'Something went wrong.', '<p style="margin-bottom:0">Please try again or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> to unsubscribe.</p>', 500);
   }
 });
 
@@ -235,10 +257,10 @@ router.get('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
           </form>
           <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">${smallLine}</p>
         `;
-    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+    return sendConfirmHtml(res, heading, bodyHtml, 200);
   } catch (err) {
     logger.error(`[newsletter] quiz GET failed: ${err.message}`);
-    res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com and we\'ll help.');
+    return sendConfirmHtml(res, 'Something went wrong.', '<p style="margin-bottom:0">Please try again or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we\'ll help.</p>', 500);
   }
 });
 
@@ -276,7 +298,7 @@ router.post('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
           <p style="margin:0 0 10px;"><a href="${escapeHtml(bookUrl)}" class="btn">${escapeHtml(bookLabel)}</a></p>
           <p style="margin-bottom:0; font-size:14px;">or call us at <a href="${WAVES_SUPPORT_PHONE_TEL}">${escapeHtml(WAVES_SUPPORT_PHONE_DISPLAY)}</a>.</p>
         `;
-    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+    return sendConfirmHtml(res, heading, bodyHtml, 200);
   } catch (err) {
     logger.error(`[newsletter] quiz POST failed: ${err.message}`);
     res.status(200).json({ ok: true });
@@ -373,8 +395,8 @@ router.get('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
     if (reaction && reaction.key === 'needs-work') {
       heading = 'Ouch — help us fix it.';
       const options = MISSING_OPTIONS.map((o) => `
-            <label style="display:block;margin:0 0 10px;font-size:16px;color:#3F4A65;cursor:pointer;">
-              <input type="checkbox" name="missing" value="${escapeHtml(o.key)}" style="margin-right:8px;vertical-align:middle;" />${escapeHtml(o.label)}
+            <label style="display:flex;align-items:center;gap:10px;min-height:44px;padding:6px 0;margin:0 0 4px;font-size:16px;color:#3F4A65;cursor:pointer;">
+              <input type="checkbox" name="missing" value="${escapeHtml(o.key)}" style="width:20px;height:20px;flex:0 0 auto;" /><span>${escapeHtml(o.label)}</span>
             </label>`).join('');
       bodyHtml = `
           <p>You picked <strong>${escapeHtml(pick)}</strong>. What was missing?</p>
@@ -394,10 +416,10 @@ router.get('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
           </form>
           <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>`;
     }
-    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+    return sendConfirmHtml(res, heading, bodyHtml, 200);
   } catch (err) {
     logger.error(`[newsletter] feedback GET failed: ${err.message}`);
-    res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com and we\'ll help.');
+    return sendConfirmHtml(res, 'Something went wrong.', '<p style="margin-bottom:0">Please try again or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> and we\'ll help.</p>', 500);
   }
 });
 
@@ -433,7 +455,7 @@ router.post('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
           <p>Your take is counted and shapes next week's issue.</p>
           <p style="margin-bottom:0;">Know someone who'd dig the newsletter? Forward this week's issue their way.</p>`;
     }
-    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+    return sendConfirmHtml(res, heading, bodyHtml, 200);
   } catch (err) {
     logger.error(`[newsletter] feedback POST failed: ${err.message}`);
     res.status(200).json({ ok: true });
@@ -534,6 +556,7 @@ function renderConfirmPage(heading, bodyHtml) {
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width,initial-scale=1">
+        <meta name="robots" content="noindex">
         <title>${heading} — Waves Pest Control</title>
         <style>
           * { box-sizing: border-box; }
@@ -550,7 +573,7 @@ function renderConfirmPage(heading, bodyHtml) {
             }
           }
           .email { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #04395E; }
-          a { color: #0A7EC2; }
+          a { color: #065A8C; }
           .btn { display:block; width:100%; min-height:48px; text-align:center; background:#F5B520; background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%); color:#04395E; border:1px solid #FFEEB4; border-radius:10px; padding:13px 24px; font-weight:700; letter-spacing:0; cursor:pointer; font-size:16px; font-family:inherit; text-decoration:none; }
           .btn:hover { filter: brightness(0.97); }
           :is(a, button, input, textarea):focus-visible { outline: 2px solid #04395E; outline-offset: 3px; }
@@ -656,10 +679,10 @@ router.get('/confirm/:token', async (req, res) => {
       bodyHtml = `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://www.wavespestcontrol.com/newsletter/">/newsletter</a>.</p>`;
     }
 
-    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+    return sendConfirmHtml(res, heading, bodyHtml, 200);
   } catch (err) {
     logger.error(`[newsletter] confirm GET failed: ${err.message}`);
-    res.status(500).type('html').send(renderConfirmPage('Something went wrong.', '<p style="margin-bottom:0">Please try again in a few minutes or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> if you meant to confirm a subscription.</p>'));
+    return sendConfirmHtml(res, 'Something went wrong.', '<p style="margin-bottom:0">Please try again in a few minutes or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> if you meant to confirm a subscription.</p>', 500);
   }
 });
 
@@ -704,11 +727,14 @@ router.post('/confirm/:token', async (req, res) => {
       bodyHtml = `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://www.wavespestcontrol.com/newsletter/">/newsletter</a>.</p>`;
     }
 
-    res.type('html').send(renderConfirmPage(heading, bodyHtml));
+    return sendConfirmHtml(res, heading, bodyHtml, 200);
   } catch (err) {
     // A code, not the message: knex puts a failed query's bound values in its message, and this
     // path binds the confirmation token and the subscriber's address (AGENTS.md: no PII in logs).
     logger.error(`[newsletter] confirm POST failed: code=${err.code || err.name || 'unknown'}`);
+    if (req.is('application/x-www-form-urlencoded') || req.is('multipart/form-data')) {
+      return sendConfirmHtml(res, 'Something went wrong.', '<p style="margin-bottom:0">Please try again in a few minutes or email <a href="mailto:contact@wavespestcontrol.com">contact@wavespestcontrol.com</a> if you meant to confirm a subscription.</p>', 500);
+    }
     res.status(500).json({ error: 'confirm failed' });
   }
 });

@@ -147,11 +147,14 @@ function invoiceMetaBlock(doc, invoice, payment, x, y, mode) {
   if (invoice.service_type) rows.push(['Service', invoice.service_type]);
   if (invoice.po_number) rows.push(['PO number', invoice.po_number]);
 
+  const labelW = 96;
+  const valW = (612 - 40) - (x + labelW);
   doc.fontSize(PDF_TYPE.body).font('Helvetica');
   for (const [label, value] of rows) {
-    doc.fillColor(MUTED).text(label, x, y, { width: 110 });
-    doc.fillColor(INK).text(String(value || '—'), x + 110, y, { width: 180 });
-    y += 14;
+    const valStr = String(value || '—');
+    doc.fillColor(MUTED).text(label, x, y, { width: labelW });
+    doc.fillColor(INK).text(valStr, x + labelW, y, { width: valW });
+    y += Math.max(14, Math.ceil(doc.heightOfString(valStr, { width: valW })) + 3);
   }
   return y;
 }
@@ -752,6 +755,7 @@ function generateInvoicePDF(invoice, res) {
 
   footerBar(doc, isPaid ? 'Paid — thank you' : isPrepaid ? 'Covered by account credit — thank you' : 'Thank you for choosing Waves');
   doc.end();
+  return doc;
 }
 
 function generateReceiptPDF(invoice, payment, res) {
@@ -821,6 +825,7 @@ function generateReceiptPDF(invoice, payment, res) {
 
   footerBar(doc, fullRefund ? 'Refund processed' : 'Thank you — payment received');
   doc.end();
+  return doc;
 }
 
 function streamToBuffer(streamFn) {
@@ -837,7 +842,12 @@ function streamToBuffer(streamFn) {
       once() {},
       emit() {},
     };
-    try { streamFn(sink); } catch (err) { reject(err); }
+    try {
+      const doc = streamFn(sink);
+      if (doc && typeof doc.on === 'function') doc.on('error', reject);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 

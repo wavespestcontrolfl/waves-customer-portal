@@ -335,7 +335,7 @@ html[data-glass-theme] .waves-field-document-body [data-glass='soft']::before {
    styled document content to the meta floor, then promotes prose to the body
    size. The print block maps the same roles to a separate paper scale. */
 @media screen {
-  .waves-field-document .field-document-sheet [style]:where(:not(.doc-station-pin)) {
+  .waves-field-document .field-document-sheet [style]:where(:not(.doc-station-pin, .doc-marked-pin)) {
     font-size: var(--field-meta-size) !important;
   }
 
@@ -410,8 +410,21 @@ html[data-glass-theme] .waves-field-document-body [data-glass='soft']::before {
     text-align: left;
   }
 
-  .field-info-grid {
+  .field-info-grid,
+  .waves-field-document .doc-scope-grid {
     grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .waves-field-document .doc-products-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+
+  .waves-field-document .field-document-sheet a,
+  .waves-field-document .field-document-sheet p,
+  .waves-field-document .field-document-sheet td {
+    overflow-wrap: anywhere;
   }
 
   .waves-field-document .doc-photo-grid,
@@ -477,7 +490,7 @@ html[data-glass-theme] .waves-field-document-body [data-glass='soft']::before {
     font-size: var(--field-print-fine-size) !important;
   }
 
-  .waves-field-document .field-document-sheet [style]:where(:not(.doc-station-pin)) {
+  .waves-field-document .field-document-sheet [style]:where(:not(.doc-station-pin, .doc-marked-pin)) {
     font-size: var(--field-print-meta-size) !important;
   }
 

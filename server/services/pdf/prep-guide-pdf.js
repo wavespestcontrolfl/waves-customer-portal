@@ -95,9 +95,35 @@ function sectionHeading(doc, text) {
 
 function paragraph(doc, text) {
   if (!text) return;
-  ensureRoom(doc, 40);
-  doc.font('Helvetica').fontSize(9.5).fillColor(BODY)
-    .text(text, L, doc.y, { width: W, lineGap: 2 });
+  doc.font('Helvetica').fontSize(9.5);
+  const fullH = Math.ceil(doc.heightOfString(text, { width: W, lineGap: 2 }));
+  const pageCap = CONTENT_BOTTOM - 72;
+  if (fullH <= pageCap) {
+    ensureRoom(doc, fullH + 10);
+    doc.font('Helvetica').fontSize(9.5).fillColor(BODY)
+      .text(text, L, doc.y, { width: W, lineGap: 2 });
+    doc.moveDown(0.55);
+    return;
+  }
+  // Very long paragraph: emit sentence/word chunks so no chunk crosses CONTENT_BOTTOM.
+  const words = String(text).split(/\s+/);
+  let chunk = '';
+  for (const word of words) {
+    const candidate = chunk ? `${chunk} ${word}` : word;
+    const h = Math.ceil(doc.heightOfString(candidate, { width: W, lineGap: 2 }));
+    if (chunk && doc.y + h > CONTENT_BOTTOM - 8) {
+      doc.font('Helvetica').fontSize(9.5).fillColor(BODY).text(chunk, L, doc.y, { width: W, lineGap: 2 });
+      ensureRoom(doc, CONTENT_BOTTOM);
+      chunk = word;
+    } else {
+      chunk = candidate;
+    }
+  }
+  if (chunk) {
+    const h = Math.ceil(doc.heightOfString(chunk, { width: W, lineGap: 2 }));
+    ensureRoom(doc, h + 10);
+    doc.font('Helvetica').fontSize(9.5).fillColor(BODY).text(chunk, L, doc.y, { width: W, lineGap: 2 });
+  }
   doc.moveDown(0.55);
 }
 

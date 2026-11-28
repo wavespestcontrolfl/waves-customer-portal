@@ -51,6 +51,11 @@ function firstNameOf(fullName) {
   return String(fullName || '').trim().split(/\s+/)[0] || '';
 }
 
+function formatPhoneDisplay(e164) {
+  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(String(e164 || ''));
+  return m ? `(${m[1]}) ${m[2]}-${m[3]}` : String(e164 || '');
+}
+
 /**
  * Complete pass.json for the card — pure, unit-testable. Wallet renders the
  * QR itself from `barcodes`; colors carry the glass theme (passes are flat
@@ -61,6 +66,7 @@ function buildPassJson({
   customerFirstName,
   memberSinceYear,
   techName,
+  techLine = null,
   location,
   reviewUrl,
   referralUrl,
@@ -69,6 +75,8 @@ function buildPassJson({
   hasLeftGoogleReview = false,
 }) {
   const techFirst = firstNameOf(techName);
+  const contactPhoneRaw = techLine?.number || location.phoneRaw;
+  const contactPhone = techLine?.formatted || (techLine?.number ? formatPhoneDisplay(techLine.number) : location.phone);
   // No NEXT VISIT on the static pass (Codex P2 #2592): without PassKit
   // update plumbing (webServiceURL/authenticationToken) the date would sit
   // stale in Wallet forever. Returns with the pass-update follow-up.
@@ -121,7 +129,7 @@ function buildPassJson({
       auxiliaryFields: [{
         key: 'contact',
         label: techFirst ? `TEXT OR CALL ${techFirst.toUpperCase()}` : 'TEXT OR CALL',
-        value: location.phone,
+        value: contactPhone,
       }],
       backFields: [
         // The pass is the pocket shortcut; the DESIGNED experience (glass,
@@ -135,14 +143,14 @@ function buildPassJson({
         {
           key: 'text',
           label: techFirst ? `TEXT ${techFirst.toUpperCase()}` : 'TEXT US',
-          value: location.phone,
-          attributedValue: `<a href="sms:${location.phoneRaw}">${location.phone}</a>`,
+          value: contactPhone,
+          attributedValue: `<a href="sms:${contactPhoneRaw}">${contactPhone}</a>`,
         },
         {
           key: 'call',
           label: techFirst ? `CALL ${techFirst.toUpperCase()}` : 'CALL US',
-          value: location.phone,
-          attributedValue: `<a href="tel:${location.phoneRaw}">${location.phone}</a>`,
+          value: contactPhone,
+          attributedValue: `<a href="tel:${contactPhoneRaw}">${contactPhone}</a>`,
         },
         {
           key: 'portal',
@@ -213,6 +221,7 @@ async function generateForToken(token) {
 
   let techName = null;
   let techPhotoUrl = null;
+  let techLine = null;
   if (card.technician_id) {
     const tech = await db('technicians')
       .where({ id: card.technician_id })
@@ -222,6 +231,7 @@ async function generateForToken(token) {
       const { resolveTechPhotoUrl } = require('./tech-photo');
       techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
     }
+    techLine = await require('./tech-line').lineForTechnician(card.technician_id);
   }
 
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
@@ -237,6 +247,7 @@ async function generateForToken(token) {
     customerFirstName: customer.first_name,
     memberSinceYear: CardService.memberSinceYearET(customer),
     techName,
+    techLine,
     location,
     reviewUrl: card.review_short_url || card.review_target_url || location.googleReviewUrl,
     referralUrl,

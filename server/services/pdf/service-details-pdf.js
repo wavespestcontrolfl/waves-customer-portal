@@ -232,7 +232,7 @@ function ruledTable(doc, table) {
     if (top + h > CONTENT_BOTTOM) {
       footer(doc);
       doc.addPage();
-      top = 48;
+      top = drawFieldContinuationMasthead(doc, { title: 'Service details · continued' });
       drawRow(columns, top, headerH, true);
       top += headerH;
     }
@@ -265,7 +265,11 @@ function renderSections(doc, sections, onSlot) {
 
 function faqBlock(doc, faq) {
   for (const item of faq) {
-    ensureRoom(doc, 56);
+    doc.font('Helvetica-Bold').fontSize(10.5);
+    const qH = doc.heightOfString(String(item.q || ''), { width: W, lineGap: 1 });
+    doc.font('Helvetica').fontSize(10);
+    const aH = doc.heightOfString(String(item.a || ''), { width: W, lineGap: 1.5 });
+    ensureRoom(doc, Math.min(qH + aH + 18, CONTENT_BOTTOM - 80));
     doc.font('Helvetica-Bold').fontSize(10.5).fillColor(NAVY).text(item.q, L, doc.y, { width: W, lineGap: 1 });
     doc.moveDown(0.15);
     doc.font('Helvetica').fontSize(10).fillColor(BODY).text(item.a, L, doc.y, { width: W, lineGap: 1.5 });

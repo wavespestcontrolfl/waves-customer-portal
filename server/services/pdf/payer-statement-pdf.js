@@ -66,17 +66,26 @@ function sectionLabel(doc, label, x, y) {
 }
 
 function billBlock(doc, payer, x, y) {
+  const maxW = 276;
   y = sectionLabel(doc, 'Billed to', x, y);
-  doc.fontSize(11).font('Helvetica-Bold').fillColor(INK)
-    .text(payer.company_name || payer.display_name || 'Payer', x, y);
-  y += 14;
+  const name = payer.company_name || payer.display_name || 'Payer';
+  doc.fontSize(11).font('Helvetica-Bold').fillColor(INK);
+  doc.text(name, x, y, { width: maxW });
+  y += Math.max(14, Math.ceil(doc.heightOfString(name, { width: maxW })) + 2);
   doc.fontSize(10).font('Helvetica').fillColor(BODY);
-  if (payer.billing_address_line1) { doc.text(payer.billing_address_line1, x, y); y += 12; }
-  if (payer.billing_city || payer.billing_state || payer.billing_zip) {
-    doc.text(`${payer.billing_city || ''}${payer.billing_city ? ', ' : ''}${payer.billing_state || 'FL'} ${payer.billing_zip || ''}`.trim(), x, y);
-    y += 12;
+  if (payer.billing_address_line1) {
+    doc.text(payer.billing_address_line1, x, y, { width: maxW });
+    y += Math.max(12, Math.ceil(doc.heightOfString(payer.billing_address_line1, { width: maxW })) + 2);
   }
-  if (payer.ap_email) { doc.text(payer.ap_email, x, y); y += 12; }
+  if (payer.billing_city || payer.billing_state || payer.billing_zip) {
+    const cityLine = `${payer.billing_city || ''}${payer.billing_city ? ', ' : ''}${payer.billing_state || 'FL'} ${payer.billing_zip || ''}`.trim();
+    doc.text(cityLine, x, y, { width: maxW });
+    y += Math.max(12, Math.ceil(doc.heightOfString(cityLine, { width: maxW })) + 2);
+  }
+  if (payer.ap_email) {
+    doc.text(payer.ap_email, x, y, { width: maxW });
+    y += Math.max(12, Math.ceil(doc.heightOfString(payer.ap_email, { width: maxW })) + 2);
+  }
   return y;
 }
 
@@ -90,18 +99,21 @@ function metaBlock(doc, statement, x, y) {
     ['Terms', TERM_LABEL[statement.terms_snapshot] || statement.terms_snapshot || '—'],
     ['Due', dateOnly(statement.due_date)],
   ];
+  const labelW = 76;
+  const valW = PAGE_W - 40 - (x + labelW);
   doc.fontSize(10).font('Helvetica');
   for (const [label, value] of rows) {
-    doc.fillColor(MUTED).text(label, x, y, { width: 90 });
-    doc.fillColor(label === 'Due' && isOverdue ? RED : INK).text(String(value || '—'), x + 90, y, { width: 180 });
-    y += 14;
+    const valStr = String(value || '—');
+    doc.fillColor(MUTED).text(label, x, y, { width: labelW });
+    doc.fillColor(label === 'Due' && isOverdue ? RED : INK).text(valStr, x + labelW, y, { width: valW });
+    y += Math.max(14, Math.ceil(doc.heightOfString(valStr, { width: valW })) + 3);
   }
   return y;
 }
 
-// Columns: Date | Service | Property | Invoice # | Amount.
-const COL = { date: 40, service: 120, property: 290, invoice: 430, amount: 532 };
-const COL_W = { date: 74, service: 164, property: 134, invoice: 96, amount: 40 };
+// Columns: Date | Service | Property | Invoice # | Amount (right edge = 492 + 80 = 572 = PAGE_W - 40).
+const COL = { date: 40, service: 112, property: 266, invoice: 404, amount: 492 };
+const COL_W = { date: 68, service: 148, property: 132, invoice: 84, amount: 80 };
 
 function tableHeader(doc, y) {
   doc.fontSize(8).font('Helvetica-Bold').fillColor(MUTED);
@@ -109,7 +121,7 @@ function tableHeader(doc, y) {
   doc.text('SERVICE', COL.service, y, { characterSpacing: 0.8 });
   doc.text('PROPERTY', COL.property, y, { characterSpacing: 0.8 });
   doc.text('INVOICE', COL.invoice, y, { characterSpacing: 0.8 });
-  doc.text('AMOUNT', COL.amount, y, { width: COL_W.amount + 40, align: 'right', characterSpacing: 0.8 });
+  doc.text('AMOUNT', COL.amount, y, { width: COL_W.amount, align: 'right', characterSpacing: 0.8 });
   y += 13;
   doc.moveTo(40, y).lineTo(PAGE_W - 40, y).lineWidth(0.75).strokeColor(RULE).stroke();
   return y + 8;
@@ -138,7 +150,7 @@ function statementTable(doc, lines, startY) {
     doc.fillColor(INK).text(line.service_type || 'Service', COL.service, y, { width: COL_W.service });
     doc.fillColor(BODY).text(property, COL.property, y, { width: COL_W.property });
     doc.fillColor(MUTED).fontSize(8).text(line.invoice_number || '—', COL.invoice, y, { width: COL_W.invoice });
-    doc.fontSize(9).fillColor(INK).text(currency(line.total), COL.amount, y, { width: COL_W.amount + 40, align: 'right' });
+    doc.fontSize(9).fillColor(INK).text(currency(line.total), COL.amount, y, { width: COL_W.amount, align: 'right' });
     y += rowH + 8;
   }
   return y;
@@ -192,7 +204,7 @@ function generatePayerStatementPDF({ statement, payer, lines }, sink) {
   headerBar(doc, statusLabel, statusColor);
 
   let yLeft = billBlock(doc, payer || {}, 40, 160);
-  let yRight = metaBlock(doc, statement, 360, 160);
+  let yRight = metaBlock(doc, statement, 330, 160);
   let y = Math.max(yLeft, yRight) + 20;
 
   y = statementTable(doc, lines || [], y);
@@ -200,6 +212,7 @@ function generatePayerStatementPDF({ statement, payer, lines }, sink) {
 
   footerBar(doc, isPaid ? 'Paid — thank you' : 'Thank you for choosing Waves Pest Control');
   doc.end();
+  return doc;
 }
 
 function streamToBuffer(streamFn) {
@@ -214,7 +227,12 @@ function streamToBuffer(streamFn) {
       },
       on() {}, once() {}, emit() {},
     };
-    try { streamFn(sink); } catch (err) { reject(err); }
+    try {
+      const doc = streamFn(sink);
+      if (doc && typeof doc.on === 'function') doc.on('error', reject);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 

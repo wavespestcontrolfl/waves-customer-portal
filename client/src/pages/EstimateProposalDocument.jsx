@@ -554,7 +554,7 @@ export default function EstimateProposalDocument({ data, token }) {
         {propertyScopeItems.length > 0 && (
           <div className="doc-keep">
             <SectionHeader>Property scope</SectionHeader>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '2px 22px' }}>
+            <div className="doc-scope-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '2px 22px' }}>
               {propertyScopeItems.map((item, idx) => (
                 <InfoRow key={`${item.label}-${idx}`} label={item.label}>{item.value}</InfoRow>
               ))}
@@ -612,16 +612,17 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
         )}
 
-        {/* Pricing */}
+        {/* Pricing — no outer doc-keep wrapper so multi-building proposals can
+            paginate cleanly across pages instead of clipping or blanking. */}
         {(buildings.length > 0 || programList.length > 0 || correctiveWork.length > 0) && (
-          <div className="doc-keep">
+          <div>
             <SectionHeader>
               {buildings.length > 0
                 ? (authoredProposal ? 'Your proposal' : 'Your services & pricing')
                 : 'Investment'}
             </SectionHeader>
             {buildings.map((building, bIdx) => (
-              <div key={`${building.name || 'b'}-${bIdx}`} style={{ marginTop: bIdx === 0 ? 0 : 8 }}>
+              <div className="doc-keep" key={`${building.name || 'b'}-${bIdx}`} style={{ marginTop: bIdx === 0 ? 0 : 8 }}>
                 {multiBuilding ? (
                   <div style={{ fontSize: 12, fontWeight: 700, color: NAVY, padding: '4px 0 2px' }}>{building.name || 'Service location'}</div>
                 ) : null}
@@ -837,22 +838,23 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
         ) : null}
 
-        {/* Terms + next steps */}
-        <div className="doc-keep">
+        {/* Terms + next steps — avoid outer doc-keep on long commercial terms
+            so multi-paragraph terms paginate cleanly instead of clipping. */}
+        <div>
           <SectionHeader>{termRows.length ? 'Service terms' : 'Terms'}</SectionHeader>
           {termRows.map(([label, value]) => (
             <div key={label} style={{ display: 'flex', gap: 8, padding: '2px 0', fontSize: 11.5, lineHeight: 1.45 }}>
               <span style={{ color: MUTED, flex: 'none', width: 110 }}>{label}</span>
-              <span style={{ color: INK, minWidth: 0 }}>{value}</span>
+              <span style={{ color: INK, minWidth: 0, overflowWrap: 'anywhere' }}>{value}</span>
             </div>
           ))}
           {proposal?.terms && termRows.length > 0 ? (
             <div style={{ marginTop: 4 }}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: NAVY }}>Additional terms</div>
-              <div style={{ fontSize: 11, color: INK, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{proposal.terms}</div>
+              <div style={{ fontSize: 11, color: INK, lineHeight: 1.55, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{proposal.terms}</div>
             </div>
           ) : null}
-          <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{termsLineText}</p>
+          <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK, overflowWrap: 'anywhere' }}>{termsLineText}</p>
         </div>
 
         <div className="doc-keep">

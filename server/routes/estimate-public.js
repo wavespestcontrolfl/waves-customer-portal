@@ -3563,7 +3563,6 @@ function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = n
 }
 
 const PERKS = [
-  'Priority scheduling — you jump the queue',
   'Re-service between visits at no charge',
   'Locked-in pricing for 12 months',
   'Free annual termite inspection',
@@ -3649,6 +3648,17 @@ function escapeHtml(s) {
   return String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function safeJsonForScript(value) {
+  const serialized = JSON.stringify(value);
+  if (serialized == null) return 'null';
+  return serialized
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 function isPresent(value) {
@@ -5464,7 +5474,7 @@ function viewGreetingFirstName(view) {
 }
 
 function renderExpiredPage(estimate) {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Estimate Expired — Waves</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Estimate Expired — Waves</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
 <style>
   *{box-sizing:border-box}
@@ -5490,7 +5500,7 @@ ${shellTopBar()}
 }
 
 function renderEstimateNotFoundPage() {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Estimate Not Found — Waves</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Estimate Not Found — Waves</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
 <style>
   *{box-sizing:border-box}
@@ -5883,8 +5893,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               cardConfirmSub: 'next step creates your invoice and makes secure payment available.',
               perksHeading: 'What WaveGuard members get',
               perksBody: pageGuaranteeScope !== 'all'
-                ? 'Your WaveGuard membership includes priority service, locked-in pricing, and access to your service team.'
-                : 'Your WaveGuard membership goes beyond routine visits - priority service, locked-in pricing, and protection between treatments.',
+                ? 'Your WaveGuard membership includes locked-in pricing, consistent recurring visits, and direct access to your service team.'
+                : 'Your WaveGuard membership goes beyond routine visits — locked-in pricing, direct access to your service team, and protection between treatments.',
               finalHeading: 'Go Waves! Wave Goodbye to Pests!',
               finalSubhead: '',
               finalBody: '',
@@ -7212,7 +7222,7 @@ ${require('../services/link-preview-metadata').fixedCardHeadTags('estimate')}
   .service-price-detail{font-size:14px;color:#475569;line-height:1.45;margin-top:2px;min-height:18px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
   .service-big-price{margin-top:14px;gap:8px 12px;align-content:flex-start}
-  .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:16px;color:#9CA3AF;text-decoration:line-through}
+  .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:16px;color:#5B6475;text-decoration:line-through}
   .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(24px,10.5vw,40px);line-height:.92;color:#1B2C5B}
   .service-big-price .anchor{font-size:16px;flex-basis:100%}
   .service-big-price .num{font-size:clamp(24px,10.5vw,40px)}
@@ -7244,7 +7254,7 @@ ${require('../services/link-preview-metadata').fixedCardHeadTags('estimate')}
   .mini-guarantee{margin-top:10px;font-size:14px;color:#1B2C5B}
   .mini-guarantee[data-mode-only="one_time"]{margin-top:4px;font-size:14px;line-height:1.55;color:#3F4A65}
   .mode-toggle{display:inline-flex;gap:4px;margin-top:18px;padding:4px;background:#F8FCFE;border-radius:999px;border:1px solid #CFE7F5}
-  .mode-btn{appearance:none;border:0;background:transparent;color:#475569;font:600 13px/1 Inter,system-ui,sans-serif;padding:10px 18px;border-radius:999px;cursor:pointer;letter-spacing:.02em;transition:background .15s,color .15s}
+  .mode-btn{appearance:none;border:0;background:transparent;color:#475569;font:600 14px/1 Inter,system-ui,sans-serif;min-height:44px;padding:12px 18px;border-radius:999px;cursor:pointer;letter-spacing:.02em;transition:background .15s,color .15s}
   .mode-btn.is-active{background:${ESTIMATE_BUTTON_BLUE};color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .choice-treatment{padding:14px 0 8px;max-width:720px}
@@ -7497,21 +7507,21 @@ ${require('../services/link-preview-metadata').fixedCardHeadTags('estimate')}
   .app-shot .phone img{display:block;width:100%;height:auto;border-radius:12px;background:#fff}
   .app-shot figcaption{margin-top:11px}
   .app-shot figcaption strong{display:block;font:700 14px/1.2 Inter,system-ui,sans-serif;color:#1B2C5B}
-  .app-shot figcaption span{display:block;margin-top:2px;font:500 12.5px/1.35 Inter,system-ui,sans-serif;color:#3F4A65}
+  .app-shot figcaption span{display:block;margin-top:2px;font:500 14px/1.35 Inter,system-ui,sans-serif;color:#3F4A65}
   .app-promo{margin-top:16px;padding:16px;border-radius:12px;background:${BRAND.blueLight};border:1px solid #CDEBFA}
   .app-promo-head strong{display:block;font:700 15px/1.3 Inter,system-ui,sans-serif;color:#1B2C5B}
-  .app-promo-head span{display:block;margin-top:2px;font:500 13px/1.45 Inter,system-ui,sans-serif;color:#3F4A65}
+  .app-promo-head span{display:block;margin-top:2px;font:500 14px/1.45 Inter,system-ui,sans-serif;color:#3F4A65}
   .app-features{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0 14px}
   @media(max-width:560px){.app-features{grid-template-columns:repeat(2,1fr)}}
   .app-feature{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid #DCEAF3;border-radius:10px;padding:10px 11px}
   .af-ico{flex:0 0 auto;width:28px;height:28px;border-radius:10px;background:${BRAND.blueLight};color:${BRAND.blueDark};display:flex;align-items:center;justify-content:center}
   .af-ico svg{width:17px;height:17px}
-  .app-feature>span{font:600 12.5px/1.25 Inter,system-ui,sans-serif;color:#1B2C5B}
+  .app-feature>span{font:600 14px/1.25 Inter,system-ui,sans-serif;color:#1B2C5B}
   .app-badges{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:2px}
   .app-badges.is-coming-soon{opacity:.92}
-  .app-badge{display:inline-flex;line-height:0;border-radius:10px}
+  .app-badge{display:inline-flex;line-height:0;border-radius:10px;padding:2px 0}
   .app-badge svg{display:block;height:40px;width:auto}
-  .app-badge-caption{flex-basis:100%;margin-top:-2px;font:600 12px/1 Inter,system-ui,sans-serif;color:${BRAND.blueDark};letter-spacing:.02em}
+  .app-badge-caption{flex-basis:100%;margin-top:-2px;font:600 14px/1.2 Inter,system-ui,sans-serif;color:${BRAND.blueDark};letter-spacing:.02em}
   .review-carousel{background:transparent;border:0;padding:0;position:relative}
   .review-track{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;transition:opacity .3s}
   @media(max-width:760px){.review-track{grid-template-columns:1fr}}
@@ -7522,9 +7532,9 @@ ${require('../services/link-preview-metadata').fixedCardHeadTags('estimate')}
   .rev-meta{font-size:14px;color:#475569}
   .review-link{display:inline-flex;margin-top:10px;color:#1B2C5B;font-size:14px;font-weight:700;text-decoration:none}
   .review-link:hover{text-decoration:underline}
-  .review-dots{display:flex;justify-content:center;gap:6px;margin-top:14px}
-  .review-dots button{width:7px;height:7px;border-radius:50%;border:none;background:#D4CBB8;cursor:pointer;padding:0;transition:all .2s}
-  .review-dots button.active{background:#1B2C5B;width:18px;border-radius:10px}
+  .review-dots{display:flex;justify-content:center;gap:0;margin-top:8px}
+  .review-dots button{width:44px;height:44px;border-radius:50%;border:none;background:#D4CBB8;background-clip:content-box;cursor:pointer;padding:18px;transition:all .2s}
+  .review-dots button.active{background:#1B2C5B;background-clip:content-box;width:54px;border-radius:10px}
   .review-track.fade{opacity:0}
   .reviews-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:14px;color:#1B2C5B;font-weight:600}
   .reviews-header .stars{color:${BRAND.yellow};letter-spacing:1px;font-size:14px}
@@ -7546,7 +7556,7 @@ ${require('../services/link-preview-metadata').fixedCardHeadTags('estimate')}
   .quote-required-banner{background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
   .site-footer{text-align:center;padding:40px 20px 32px;color:#475569;font-size:14px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
   .site-footer-socials{display:flex;justify-content:center;gap:12px;margin-bottom:16px}
-  .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
+  .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
   .site-footer-socials .soc:hover{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .site-footer-contact{margin-bottom:10px;font-size:14px;color:#3F4A65}
   .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500;white-space:nowrap}
@@ -7871,25 +7881,26 @@ ${shellTopBar()}
 ${shellQuestionsBar()}
 
 <script>
-  const TOKEN = ${JSON.stringify(token)};
-  const API = '/api/estimates/' + TOKEN;
-  const ESTIMATE_ASK_TOKEN = ${JSON.stringify(estimateAskToken)};
-  const LAWN_LIMITS_HASH = ${JSON.stringify(lawnLimitsHash(opts.lawnLimits || null))};
-  const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
-  const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
-  const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = ${JSON.stringify(requirePaymentSetupBeforeSlots)};
-  const BILLING_INTERVAL_MONTHS = ${JSON.stringify(billingIntervalMonthsForFrequencyKey(selectedRecurringFrequencyKey))};
-  const PRICE_PERIOD_WORD = ${JSON.stringify(recurringPricePeriodWord)};
-  const REVIEW_FALLBACKS = ${JSON.stringify(reviewFallbacks)};
-  const RECURRING_PAY_PREF_HEADING = ${JSON.stringify(pageCopy.payPrefHeading)};
-  const BOOKING_TITLE = ${JSON.stringify(pageCopy.bookingTitle)};
-  const BOOKING_SUBHEAD = ${JSON.stringify(pageCopy.bookingSubhead)};
-  const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
-  const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
-  const ANNUAL_PREPAY_INVOICE_TOTAL = ${JSON.stringify(prepayInvoiceTotal)};
-  const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(standardSetupDue)};
-  const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
-  const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
+  const escHtml = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const TOKEN = ${safeJsonForScript(token)};
+  const API = '/api/estimates/' + encodeURIComponent(TOKEN);
+  const ESTIMATE_ASK_TOKEN = ${safeJsonForScript(estimateAskToken)};
+  const LAWN_LIMITS_HASH = ${safeJsonForScript(lawnLimitsHash(opts.lawnLimits || null))};
+  const DEFAULT_RECURRING_FREQUENCY = ${safeJsonForScript(selectedRecurringFrequencyKey)};
+  const INITIAL_SERVICE_MODE = ${safeJsonForScript(isOneTimeOnly ? 'one_time' : 'recurring')};
+  const REQUIRE_PAYMENT_SETUP_BEFORE_SLOTS = ${safeJsonForScript(requirePaymentSetupBeforeSlots)};
+  const BILLING_INTERVAL_MONTHS = ${safeJsonForScript(billingIntervalMonthsForFrequencyKey(selectedRecurringFrequencyKey))};
+  const PRICE_PERIOD_WORD = ${safeJsonForScript(recurringPricePeriodWord)};
+  const REVIEW_FALLBACKS = ${safeJsonForScript(reviewFallbacks)};
+  const RECURRING_PAY_PREF_HEADING = ${safeJsonForScript(pageCopy.payPrefHeading)};
+  const BOOKING_TITLE = ${safeJsonForScript(pageCopy.bookingTitle)};
+  const BOOKING_SUBHEAD = ${safeJsonForScript(pageCopy.bookingSubhead)};
+  const CARD_CONFIRM_TITLE = ${safeJsonForScript(pageCopy.cardConfirmTitle)};
+  const CARD_CONFIRM_SUB = ${safeJsonForScript(pageCopy.cardConfirmSub)};
+  const ANNUAL_PREPAY_INVOICE_TOTAL = ${safeJsonForScript(prepayInvoiceTotal)};
+  const STANDARD_INVOICE_SETUP_DUE = ${safeJsonForScript(standardSetupDue)};
+  const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${safeJsonForScript(standardInvoiceCopy.hasFirstApplication)};
+  const STANDARD_NO_PAYMENT_COPY = ${safeJsonForScript(pageCopy.noPaymentCopy)};
   const PAY_AFTER_FIRST_VISIT_COPY = ${payAfterFirstVisitCopy ? 'true' : 'false'};
   const PAY_AFTER_SETUP_FEE_COPY = ${payAfterSetupFeeCopy ? 'true' : 'false'};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -8116,7 +8127,7 @@ ${shellQuestionsBar()}
   // Shared state for the booking card. Each step transitions the visible
   // sub-section. Reservation auto-expires server-side after 15 min; the
   // client countdown is cosmetic but matches the backend hold.
-  const EXISTING_APPOINTMENT_ID = ${JSON.stringify(existingAppointment?.id || null)};
+  const EXISTING_APPOINTMENT_ID = ${safeJsonForScript(existingAppointment?.id || null)};
   const bookingState = {
     selectedSlotId: null,
     selectedSlotLabel: null,
@@ -8428,7 +8439,7 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
     if (subhead) {
       subhead.textContent = isOneTime
         ? 'This books a single visit. You will not be charged today.'
-        : ${JSON.stringify(billingLede)};
+        : ${safeJsonForScript(billingLede)};
     }
     if (visitTitle) visitTitle.textContent = isOneTime ? 'Book + pay on service day' : 'Pay at the visit';
     if (visitSub) {
@@ -8473,10 +8484,10 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
     const rain = (typeof s.rainChance === 'number' && isFinite(s.rainChance) && s.rainChance >= 40)
       ? '<span class="slot-chip">\\u2614 ' + Math.round(s.rainChance) + '% rain</span>'
       : '';
-    return '<button type="button" class="slot-btn" data-slot-id="' + s.slotId + '" data-slot-label="' + day + ' at ' + start + '">'
-      + '<span class="slot-day">' + day + '</span>'
-      + '<span class="slot-time">' + start + '</span>'
-      + '<span class="slot-reason">' + reason + '</span>'
+    return '<button type="button" class="slot-btn" data-slot-id="' + escHtml(s.slotId) + '" data-slot-label="' + escHtml(day + ' at ' + start) + '">'
+      + '<span class="slot-day">' + escHtml(day) + '</span>'
+      + '<span class="slot-time">' + escHtml(start) + '</span>'
+      + '<span class="slot-reason">' + escHtml(reason) + '</span>'
       + rain
       + '</button>';
   }
@@ -8902,8 +8913,8 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
     const payLink = document.createElement('a');
     payLink.className = 'pay-pref-btn primary';
     payLink.href = data.invoicePayUrl;
-    payLink.innerHTML = '<span class="pay-pref-title">' + payTitle + '</span>'
-      + '<span class="pay-pref-sub">' + paySub + '</span>';
+    payLink.innerHTML = '<span class="pay-pref-title">' + escHtml(payTitle) + '</span>'
+      + '<span class="pay-pref-sub">' + escHtml(paySub) + '</span>';
 
     const doneBtn = document.createElement('button');
     doneBtn.type = 'button';
@@ -9163,7 +9174,7 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
     var params = new URLSearchParams(location.search);
     var tier = (params.get('bundle_tier') || 'updated').replace(/[^A-Za-z ]/g, '').slice(0, 24) || 'updated';
     var tierText = tier === 'updated' ? 'Updated bundle pricing' : tier + ' tier pricing';
-    div.innerHTML = '<span><strong>Bundle applied.</strong> ' + tierText + ' is now reflected below. We also sent a heads-up to our office.</span><button type="button" aria-label="Dismiss" style="background:none;border:none;color:#064E3B;cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;">\u00D7</button>';
+    div.innerHTML = '<span><strong>Bundle applied.</strong> ' + escHtml(tierText) + ' is now reflected below. We also sent a heads-up to our office.</span><button type="button" aria-label="Dismiss" style="background:none;border:none;color:#064E3B;cursor:pointer;font-size:18px;line-height:1;min-width:44px;min-height:44px;padding:4px 8px;">\u00D7</button>';
     div.querySelector('button').addEventListener('click', function () { div.remove(); });
     var wrap = document.querySelector('.wrap') || document.body;
     wrap.insertBefore(div, wrap.firstChild);
@@ -9262,6 +9273,8 @@ function sendEstimatePageHtml(res, html) {
     .set('Cache-Control', 'no-cache, no-store, must-revalidate')
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
+    .set('X-Robots-Tag', 'noindex')
+    .set('Referrer-Policy', 'no-referrer')
     .set('Content-Type', 'text/html; charset=utf-8')
     .send(html);
 }

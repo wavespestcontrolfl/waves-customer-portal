@@ -38,8 +38,10 @@ router.get('/:token', async (req, res, next) => {
     const data = await CardService.getCardData(req.params.token);
     if (!data) return res.status(404).json({ error: 'Card not found' });
     // Bearer-token payload (name, review flag, referral link, presigned tech
-    // photo) — same no-store treatment as the /card/:token shell.
+    // photo) — same no-store + noindex treatment as the /card/:token shell.
     res.set('Cache-Control', 'private, no-store');
+    res.set('X-Robots-Tag', 'noindex');
+    res.set('Referrer-Policy', 'no-referrer');
     res.json(data);
   } catch (err) {
     next(err);
@@ -56,6 +58,8 @@ router.get('/:token/wallet.pkpass', async (req, res, next) => {
     // from a pre-rollout tap must not outlive the PASS_* config flip
     // (Codex P2 #2592).
     res.set('Cache-Control', 'no-store');
+    res.set('X-Robots-Tag', 'noindex');
+    res.set('Referrer-Policy', 'no-referrer');
     const WalletPass = require('../services/wallet-pass');
     if (!WalletPass.walletConfigured()) return res.status(404).send('Not found');
     const buf = await WalletPass.generateForToken(req.params.token);
@@ -104,6 +108,8 @@ router.get('/:token/contact.vcf', async (req, res, next) => {
     res.set('Content-Type', 'text/vcard; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="waves-${slug}.vcf"`);
     res.set('Cache-Control', 'private, no-store');
+    res.set('X-Robots-Tag', 'noindex');
+    res.set('Referrer-Policy', 'no-referrer');
     res.send(vcf);
   } catch (err) {
     next(err);

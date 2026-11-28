@@ -722,6 +722,28 @@ function wrapText(text, font, size, maxWidth) {
   return lines;
 }
 
+function fitHeaderSubtitle(text, font, size, maxWidth) {
+  if (font.widthOfTextAtSize(text, size) <= maxWidth) return text;
+  const ellipsis = '...';
+  let cut = text;
+  while (cut.length > 1 && font.widthOfTextAtSize(`${cut}${ellipsis}`, size) > maxWidth) {
+    cut = cut.slice(0, -1).trimEnd();
+  }
+  return cut ? `${cut}${ellipsis}` : ellipsis;
+}
+
+function drawSubHeaderWithPageLabel(page, { sub, pageLabel, font, pageW, margin, y, color }) {
+  const pageLabelW = font.widthOfTextAtSize(pageLabel, 10);
+  const labelX = pageW - margin - pageLabelW;
+  const maxSubW = Math.max(80, labelX - margin - 14);
+  const fitted = fitHeaderSubtitle(sub, font, 10, maxSubW);
+  const fittedW = font.widthOfTextAtSize(fitted, 10);
+  const centeredX = (pageW - fittedW) / 2;
+  const subX = (centeredX >= margin && centeredX + fittedW <= labelX - 12) ? centeredX : margin;
+  page.drawText(fitted, { x: subX, y, size: 10, font, color });
+  page.drawText(pageLabel, { x: labelX, y, size: 10, font, color });
+}
+
 /**
  * Append continuation page(s) carrying the complete text of every entry that
  * could not fit its printed form lines at a readable size. The FDACS-13645
@@ -750,10 +772,15 @@ async function appendContinuationPages(pdfDoc, { entries, propertyAddress, inspe
     const sub = sanitizeText(
       `FDACS-13645 - ${propertyAddress || ''}${inspectionDate ? ` - Inspected ${inspectionDate}` : ''}`,
     );
-    const subW = font.widthOfTextAtSize(sub, 10);
-    page.drawText(sub, { x: (PAGE_W - subW) / 2, y: PAGE_H - 66, size: 10, font, color: gray });
-    const pageLabel = `Page C-${pageNum}`;
-    page.drawText(pageLabel, { x: PAGE_W - MARGIN - font.widthOfTextAtSize(pageLabel, 10), y: PAGE_H - 66, size: 10, font, color: gray });
+    drawSubHeaderWithPageLabel(page, {
+      sub,
+      pageLabel: `Page C-${pageNum}`,
+      font,
+      pageW: PAGE_W,
+      margin: MARGIN,
+      y: PAGE_H - 66,
+      color: gray,
+    });
     page.drawLine({ start: { x: MARGIN, y: PAGE_H - 76 }, end: { x: PAGE_W - MARGIN, y: PAGE_H - 76 }, thickness: 0.75, color: gray });
     y = PAGE_H - 96;
   };
@@ -814,10 +841,15 @@ async function appendPhotoAddendum(pdfDoc, { photos, propertyAddress, feeValues 
     const titleW = bold.widthOfTextAtSize(title, 14);
     page.drawText(title, { x: (PAGE_W - titleW) / 2, y: PAGE_H - 50, size: 14, font: bold });
     const sub = sanitizeText(`WDO Inspection Report - ${propertyAddress || ''}`);
-    const subW = font.widthOfTextAtSize(sub, 10);
-    page.drawText(sub, { x: (PAGE_W - subW) / 2, y: PAGE_H - 66, size: 10, font, color: gray });
-    const pageLabel = `Page A-${addendumPage}`;
-    page.drawText(pageLabel, { x: PAGE_W - MARGIN - font.widthOfTextAtSize(pageLabel, 10), y: PAGE_H - 66, size: 10, font, color: gray });
+    drawSubHeaderWithPageLabel(page, {
+      sub,
+      pageLabel: `Page A-${addendumPage}`,
+      font,
+      pageW: PAGE_W,
+      margin: MARGIN,
+      y: PAGE_H - 66,
+      color: gray,
+    });
     page.drawLine({ start: { x: MARGIN, y: PAGE_H - 76 }, end: { x: PAGE_W - MARGIN, y: PAGE_H - 76 }, thickness: 0.75, color: gray });
 
     for (let s = 0; s < 2; s += 1) {
