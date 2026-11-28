@@ -156,9 +156,32 @@ function resolveCallToTruckBriefForBooking(input) {
   return buildCallToTruckBrief({ ...opts, includeLocation: aniVerified });
 }
 
+// Backfill an empty customer_request on a reused booking row created by this
+// same call (e.g. live voice-agent booking before recording processing ran).
+// Never overwrites an existing customer_request and never mutates attached
+// manual bookings or rows owned by another call.
+async function backfillCallToTruckBriefOnReusedRow(trx, row, opts = {}) {
+  if (opts.skip || !row?.id || !opts.callId) return row;
+  if (String(row.source_call_log_id || '') !== String(opts.callId)) return row;
+  if (String(row.customer_request || '').trim()) return row;
+  const brief = resolveCallToTruckBriefForBooking({
+    ...opts.briefInput,
+    catalogServiceName: row.service_type || opts.briefInput?.catalogServiceName || null,
+    isAssessmentBooking: Boolean(opts.briefInput?.isAssessmentBooking || /assessment/i.test(String(row.service_type || ''))),
+  });
+  if (!brief) return row;
+  if (!(await trx.schema.hasColumn('scheduled_services', 'customer_request'))) return row;
+  const updated = await trx('scheduled_services')
+    .where({ id: row.id })
+    .whereRaw("COALESCE(TRIM(customer_request), '') = ''")
+    .update({ customer_request: brief, customer_request_source: 'call', updated_at: new Date() });
+  return updated ? { ...row, customer_request: brief, customer_request_source: 'call' } : row;
+}
+
 module.exports = {
   buildCallToTruckBrief,
   resolveCallToTruckBriefForBooking,
+  backfillCallToTruckBriefOnReusedRow,
   callerAniMatchesPrimaryPhone,
   ALLOWED_PROPERTY_LOCATIONS,
   MAX_BRIEF_CHARS,

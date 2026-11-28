@@ -18,14 +18,14 @@
 
 const COMPOSITE_MARKER_RE = /(?:^|\n)\s*(?:\[(?:AI|Live|Human|Transfer|Segment)\b[^\]]*\]|---{1,})/i;
 const SPEAKER_LINE_RE = /^(\s*)(Agent|Caller)(\s*:)(.*)$/i;
-const QUOTED_SPEECH_RE = /\b(?:they|she|he|recording|voicemail|message|greeting|someone)\s+(?:said|says|mentioned|left|calling)\b|\bheard\b/i;
+const QUOTED_SPEECH_RE = /\b(?:(?:they|she|he|recording|voicemail|message|greeting|prompt|menu|someone)\s+(?:said|says|mentioned|left|calling|starts?\s+with|plays?)|your\s+(?:voicemail|recording|greeting|prompt|menu|message)|heard)\b/i;
 const CALLER_CHECK_WAVES_RE = /\b(?:is\s+this|am\s+i\s+speaking\s+with|did\s+i\s+reach|is\s+that|calling\s+for)\s+waves\b/i;
 
 const NON_NAME_WORDS = 'not|really|very|so|just|frustrated|upset|angry|mad|happy|unhappy|done|still|someone|somebody|anybody|anyone|calling|speaking|talking|working|switching';
 const PERSON_NAME_TOKEN = `(?!(?:${NON_NAME_WORDS})\\b)[a-z][a-z'-]{1,20}`;
 
 const STAFF_SELF_ID_PATTERNS = Object.freeze([
-  /\b(?:thank(?:s|\s+you)\s+for\s+calling|welcome\s+to)\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
+  /^(?:(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|yes|yeah)\s*[,!.\-—]\s*)?(?:thank(?:s|\s+you)\s+for\s+calling|welcome\s+to)\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
   new RegExp(`(?:^|[.!\\n]\\s*)waves(?:\\s+pest(?:\\s+control)?)?\\s*[,\\.\\-—]\\s*(?:this\\s+is\\s+${PERSON_NAME_TOKEN}|my\\s+name\\s+is\\s+${PERSON_NAME_TOKEN}|how\\s+(?:can|may)\\s+(?:i|we)\\s+(?:help|assist)\\s+you)\\b`, 'i'),
   new RegExp(`\\b(?:this\\s+is|my\\s+name\\s+is)\\s+${PERSON_NAME_TOKEN}\\s+(?:calling\\s+)?(?:back\\s+)?(?:with|from|at)\\s+waves(?:\\s+pest(?:\\s+control)?)?\\b`, 'i'),
   new RegExp(`\\bi['’]?m\\s+${PERSON_NAME_TOKEN}\\s+calling\\s+(?:you\\s+)?(?:back\\s+)?(?:with|from)\\s+waves(?:\\s+pest(?:\\s+control)?)?\\b`, 'i'),

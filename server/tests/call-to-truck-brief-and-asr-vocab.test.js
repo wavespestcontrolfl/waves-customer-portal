@@ -8,6 +8,7 @@ const { fixSwappedSpeakerRoles } = require('../services/call-speaker-role-guard'
 const {
   buildCallToTruckBrief,
   resolveCallToTruckBriefForBooking,
+  backfillCallToTruckBriefOnReusedRow,
   MAX_BRIEF_CHARS,
 } = require('../services/call-to-truck-brief');
 const { bookedReasonBlock } = require('../services/service-report/report-writer-rules');
@@ -109,6 +110,7 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
       'Agent: Hello?\nCaller: Someone calling from Waves Pest Control left me a voicemail.\nAgent: Let me look up your account.',
       'Agent: Thank you for calling Waves Pest Control, this is Sarah.\nCaller: Hi, I need lawn care.',
       'Agent: How can I help today?\nCaller: Earlier the voicemail said thank you for calling Waves Pest Control and hung up.',
+      'Agent: How can I help today?\nCaller: Your voicemail starts with thank you for calling Waves Pest Control.',
     ];
     for (const transcript of cases) {
       expect(fixSwappedSpeakerRoles(transcript)).toEqual({ text: transcript, swapped: false, reason: null });
@@ -250,5 +252,62 @@ describe('PR B1: Call-to-Truck Brief (structured-only, report-safe & ANI-verifie
       (s) => s,
     );
     expect(cleanBookedReason).toContain('Reason: Pests: ghost ants (kitchen)');
+  });
+
+  test('backfillCallToTruckBriefOnReusedRow fills empty call-owned voice-agent rows (including shadow-mode re-service), preserves existing requests, and skips manual bookings', async () => {
+    const updates = [];
+    const mockTrx = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
+      update: jest.fn((payload) => {
+        updates.push(payload);
+        return Promise.resolve(1);
+      }),
+    }));
+    mockTrx.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+
+    const voiceAgentRow = {
+      id: 'svc-1',
+      source_call_log_id: 'call-1',
+      service_type: 'Covered Re-Service',
+      customer_request: null,
+    };
+    const filled = await backfillCallToTruckBriefOnReusedRow(mockTrx, voiceAgentRow, {
+      skip: false,
+      callId: 'call-1',
+      briefInput: {
+        callerAni: '+19415550100',
+        customerPrimaryPhone: '+19415550100',
+        v2Extraction: { service_request: { pests_observed: [{ pest_type: 'ghost_ants', location_on_property: 'kitchen' }] } },
+        isReService: true,
+      },
+    });
+    expect(filled.customer_request).toBe('Pests: ghost ants (kitchen)');
+    expect(filled.customer_request_source).toBe('call');
+    expect(updates).toHaveLength(1);
+
+    // Preserves existing customer_request
+    const preserved = await backfillCallToTruckBriefOnReusedRow(mockTrx, { ...voiceAgentRow, customer_request: 'Existing reason' }, {
+      skip: false,
+      callId: 'call-1',
+      briefInput: { v2Extraction: { service_request: { pests_observed: [{ pest_type: 'ants' }] } } },
+    });
+    expect(preserved.customer_request).toBe('Existing reason');
+    expect(updates).toHaveLength(1);
+
+    // Skips attached manual bookings (skip: true) and rows owned by another call
+    const skippedManual = await backfillCallToTruckBriefOnReusedRow(mockTrx, voiceAgentRow, {
+      skip: true,
+      callId: 'call-1',
+      briefInput: { v2Extraction: { service_request: { pests_observed: [{ pest_type: 'ants' }] } } },
+    });
+    expect(skippedManual.customer_request).toBeNull();
+    const otherCallRow = await backfillCallToTruckBriefOnReusedRow(mockTrx, { ...voiceAgentRow, source_call_log_id: 'call-other' }, {
+      skip: false,
+      callId: 'call-1',
+      briefInput: { v2Extraction: { service_request: { pests_observed: [{ pest_type: 'ants' }] } } },
+    });
+    expect(otherCallRow.customer_request).toBeNull();
+    expect(updates).toHaveLength(1);
   });
 });

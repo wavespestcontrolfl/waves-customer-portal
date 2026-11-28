@@ -255,7 +255,7 @@ const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 const { applySpeakerRoleGuard } = require('./call-speaker-role-guard');
-const { resolveCallToTruckBriefForBooking } = require('./call-to-truck-brief');
+const { resolveCallToTruckBriefForBooking, backfillCallToTruckBriefOnReusedRow } = require('./call-to-truck-brief');
 const { STT_HINTS, TRANSCRIPTION_DOMAIN_HINT_LINE } = require('../config/transcription-vocabulary');
 
 // Prod technician row is named "Adam" (verified 2026-07-08) — the old
@@ -21840,6 +21840,18 @@ const CallRecordingProcessor = {
                   // helper honors): a replay must not close its lead as won
                   // or spawn its follow-up visit (Codex #3361 r8 P1).
                   const primaryRowSkipped = String(primaryRow.status || '') === 'skipped';
+                  primaryRow = await backfillCallToTruckBriefOnReusedRow(trx, primaryRow, {
+                    skip: isAttachedManualBooking || primaryRowSkipped,
+                    callId: call.id,
+                    briefInput: {
+                      callerAni: clarifyAskTargetPhone(call),
+                      customerPrimaryPhone: customer?.phone || null,
+                      v2Extraction: v2ApprovedExtraction || v2CanonicalExtraction,
+                      catalogServiceName: callBookingCatalogRow?.name || null,
+                      isAssessmentBooking: isAssessmentServiceRow(callBookingCatalogRow),
+                      isReService: isFreeReServiceBookingRow(primaryRow) || isReServiceCatalogRow(callBookingCatalogRow),
+                    },
+                  });
                   if (!primaryRowSkipped && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
@@ -22495,7 +22507,7 @@ const CallRecordingProcessor = {
                 const callBookingCustomerRequest = resolveCallToTruckBriefForBooking({
                   callerAni: clarifyAskTargetPhone(call),
                   customerPrimaryPhone: customer?.phone || null,
-                  v2Extraction: v2ApprovedExtraction,
+                  v2Extraction: v2ApprovedExtraction || v2CanonicalExtraction,
                   catalogServiceName: callBookingCatalogRow?.name || null,
                   isAssessmentBooking: isAssessmentServiceRow(callBookingCatalogRow),
                   isReService: isReServiceBooking,
