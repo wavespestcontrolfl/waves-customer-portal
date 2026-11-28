@@ -328,12 +328,6 @@ async function liveVerdict(customerId, event, today, now) {
   const visit = upcoming.visit;
   // An open invoice alone never qualifies (owner 2026-11-24): the customer needs an upcoming visit billed to them.
   if (!visit) return { ok: false, reason: upcoming.payerBilled ? 'payer_billed' : 'no_upcoming_visit' };
-  // Preserve stubbed findActivePrepayTerm test doubles when no DB annual_prepay_terms rows cover/uncover the visit.
-  if (!upcoming.sawRealPrepayTerms
-    && await require('./open-balance').openBalanceExists(customerId) !== true) {
-    const fallbackTerm = await require('./customer-lifecycle-guard').findActivePrepayTerm(db, customerId);
-    if (fallbackTerm && !fallbackTerm.term_end) return { ok: false, reason: 'prepaid_nothing_due' };
-  }
   const email = await emailVerdict(customer);
   if (!email.ok) return email;
   return {

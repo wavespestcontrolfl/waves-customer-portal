@@ -919,24 +919,18 @@ const SETUP_RECOVERABLE_PI_STATUSES = new Set(
 
 async function assertStatementChildrenPayableIfPresent(statementId, conn, opts) {
   const Settle = require('./payer-statement-settle');
-  if (typeof Settle.assertStatementChildrenPayable === 'function') {
-    await Settle.assertStatementChildrenPayable(statementId, conn, opts);
-  }
+  await Settle.assertStatementChildrenPayable(statementId, conn, opts);
 }
 
 async function confirmStatementPaymentUnderLock(stripe, statementId, piId, isPayableStatementStatus) {
   const Settle = require('./payer-statement-settle');
-  const confirm = () => stripe.paymentIntents.confirm(piId, {}, { apiVersion: SURCHARGE_API_VERSION });
-  if (typeof Settle.withStatementMoneyLock !== 'function' || typeof Settle.assertStatementChildrenPayable !== 'function') {
-    return confirm();
-  }
   return Settle.withStatementMoneyLock(statementId, async (trx) => {
     const locked = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
     if (!locked || !isPayableStatementStatus(locked.status)) {
       throw new Error('This statement is not payable');
     }
     await Settle.assertStatementChildrenPayable(statementId, trx, { lock: true });
-    return confirm();
+    return stripe.paymentIntents.confirm(piId, {}, { apiVersion: SURCHARGE_API_VERSION });
   });
 }
 
