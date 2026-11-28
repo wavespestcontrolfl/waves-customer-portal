@@ -128,8 +128,7 @@ postgres('r1-sched-series-2: DELETE /:id/prepaid on annual coverage', () => {
     const after = await row(parentId);
     console.log('single/admin DELETE ->', res.status, JSON.stringify(res.body), '\nrow after:', JSON.stringify(after));
 
-    // DELETE /:id/prepaid is admin-only (requireAdmin): technician tokens are rejected with 403.
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(409);
     expect(after.prepaid_method).toBe('annual_prepay_invoice');
     expect(await AnnualPrepayRenewals.annualPrepayCoversVisit(after, trx)).toBe(true);
   });
