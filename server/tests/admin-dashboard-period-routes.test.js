@@ -52,6 +52,7 @@ const router = require('../routes/admin-dashboard');
 const { errorHandler } = require('../middleware/errors');
 const { DEFAULT_KPI_TARGETS } = require('../../shared/kpi-targets.cjs');
 const grossMarginMigration = require('../models/migrations/20261127180000_kpi_targets_gross_margin_55');
+const grossMarginAmberMigration = require('../models/migrations/20261127193000_kpi_targets_gross_margin_amber_band');
 const recurringAutopayMigration = require('../models/migrations/20261127190000_kpi_targets_recurring_autopay');
 
 const adminToken = jwt.sign({ type: 'access', tokenVersion: 1, technicianId: 'admin-1', scope: 'staff' }, process.env.JWT_SECRET);
@@ -125,19 +126,19 @@ describe('Period-driven dashboard endpoints', () => {
 });
 
 describe('Gross margin target 55% alignment', () => {
-  test('DEFAULT_KPI_TARGETS sets gross_margin target to 55%', () => {
+  test('DEFAULT_KPI_TARGETS sets gross_margin target to 55% with a 45% warning floor', () => {
     expect(DEFAULT_KPI_TARGETS.gross_margin).toEqual({
       target: 55,
       lowerIsBetter: false,
-      amberBandPct: 10,
+      amberBandPct: 18.19,
     });
   });
 
-  test('migration updates only untouched default 40% rows, copies saved autopay_pct target, and rolls back safely', async () => {
+  test('migrations update only untouched default 40%/10% rows, copy saved autopay_pct target, and roll back safely', async () => {
     const tables = {
       kpi_targets: [
-        { metric: 'gross_margin', target: 40, updated_by: null, updated_at: '2026-07-02T00:00:00Z' },
-        { metric: 'gross_margin', target: 40, updated_by: 'Adam', updated_at: '2026-08-01T00:00:00Z' },
+        { metric: 'gross_margin', target: 40, amber_band_pct: 10, updated_by: null, updated_at: '2026-07-02T00:00:00Z' },
+        { metric: 'gross_margin', target: 40, amber_band_pct: 10, updated_by: 'Adam', updated_at: '2026-08-01T00:00:00Z' },
         { metric: 'autopay_pct', target: 75, amber_band_pct: 10, lower_is_better: false, updated_by: 'Adam', updated_at: '2026-09-01T00:00:00Z' },
       ],
       audit_log: [],
@@ -177,9 +178,12 @@ describe('Gross margin target 55% alignment', () => {
 
     const knex = makeKnex();
     await grossMarginMigration.up(knex);
+    await grossMarginAmberMigration.up(knex);
     await recurringAutopayMigration.up(knex);
     expect(rows[0].target).toBe(55);
+    expect(rows[0].amber_band_pct).toBe(18.19);
     expect(rows[1].target).toBe(40); // owner-edited row untouched
+    expect(rows[1].amber_band_pct).toBe(10);
     expect(rows.find((r) => r.metric === 'recurring_autopay_pct')).toMatchObject({
       metric: 'recurring_autopay_pct',
       target: 75,
@@ -188,9 +192,12 @@ describe('Gross margin target 55% alignment', () => {
     });
 
     await recurringAutopayMigration.down(knex);
+    await grossMarginAmberMigration.down(knex);
     await grossMarginMigration.down(knex);
     expect(rows[0].target).toBe(40);
+    expect(rows[0].amber_band_pct).toBe(10);
     expect(rows[1].target).toBe(40);
+    expect(rows[1].amber_band_pct).toBe(10);
     expect(rows.find((r) => r.metric === 'recurring_autopay_pct')).toBeUndefined();
 
     // A pre-existing recurring_autopay_pct row (not inserted by up()) survives down() even if timestamps match.

@@ -56,6 +56,13 @@ describe("kpiTargetTone", () => {
     expect(kpiTargetTone(50, { lowerIsBetter: true })).toBeNull();
   });
 
+  it("gross_margin default shares Margin by Service Line's 55% target and 45% warning floor", () => {
+    expect(kpiTargetTone(55, DEFAULT_KPI_TARGETS.gross_margin)).toBe("good");
+    expect(kpiTargetTone(48, DEFAULT_KPI_TARGETS.gross_margin)).toBe("warn");
+    expect(kpiTargetTone(45, DEFAULT_KPI_TARGETS.gross_margin)).toBe("warn");
+    expect(kpiTargetTone(44.9, DEFAULT_KPI_TARGETS.gross_margin)).toBe("bad");
+  });
+
   it("every default target's metric has an owner-facing label (Settings tab renders them all)", () => {
     for (const metric of Object.keys(DEFAULT_KPI_TARGETS)) {
       expect(KPI_METRIC_LABELS[metric]).toBeTruthy();

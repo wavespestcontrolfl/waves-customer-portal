@@ -769,12 +769,11 @@ async function getEstimateFunnel(input) {
     // windows (e.g. Today) include carry-over acceptances from earlier sends.
     stageQuery(sentAtSql('e')).select(
       db.raw('COUNT(*) as c'),
-      db.raw(`COUNT(*) FILTER (WHERE ${countableViewAtSql('e')} IS NOT NULL) as cohort_viewed`),
-      // Require acceptance/decline at or after the effective send instant so a
-      // pre-delivery self-serve decision never inflates the staff-sent cohort's
-      // conversion rate (matches avgResponse right below).
-      db.raw(`COUNT(*) FILTER (WHERE e.status = 'accepted' AND e.accepted_at >= ${sentAtSql('e')}) as cohort_accepted`),
-      db.raw(`COUNT(*) FILTER (WHERE e.status = 'declined' AND e.declined_at >= ${sentAtSql('e')}) as cohort_declined`),
+      db.raw(`COUNT(*) FILTER (WHERE ${countableViewAtSql('e')} IS NOT NULL AND ${countableViewAtSql('e')} < ?) as cohort_viewed`, [bounds.toTs]),
+      // Require acceptance/decline within [sentAt, toTs) so neither pre-delivery
+      // self-serve decisions nor post-window outcomes distort historical cohorts.
+      db.raw(`COUNT(*) FILTER (WHERE e.status = 'accepted' AND e.accepted_at >= ${sentAtSql('e')} AND e.accepted_at < ?) as cohort_accepted`, [bounds.toTs]),
+      db.raw(`COUNT(*) FILTER (WHERE e.status = 'declined' AND e.declined_at >= ${sentAtSql('e')} AND e.declined_at < ?) as cohort_declined`, [bounds.toTs]),
     ).first(),
     stageQuery(countableViewAtSql('e')).count('* as c').first(),
     stageQuery('e.accepted_at', 'accepted').count('* as c').first(),
