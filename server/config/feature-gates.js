@@ -7460,7 +7460,9 @@ function outlinkTrackingLive() {
 // without the first the cadence is the legacy Day 30 one, without the second
 // the page shows one invoice while a reminder names the set.
 function dunningCustomerSchedulePrereqsLive() {
-  return process.env.GATE_DUNNING_LADDER_90 === 'true' && process.env.GATE_PAY_INCLUDE_BALANCE === 'true';
+  const balanceOn = process.env.GATE_PAY_INCLUDE_BALANCE === 'true'
+    || (process.env.GATE_PAY_INCLUDE_BALANCE !== 'false' && Boolean(gates.payIncludeBalance));
+  return process.env.GATE_DUNNING_LADDER_90 === 'true' && balanceOn;
 }
 
 function dunningCustomerScheduleLive() {
