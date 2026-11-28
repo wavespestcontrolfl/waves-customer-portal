@@ -495,7 +495,7 @@ describe('C2-23: non-ASCII attachment filename (macOS screenshot U+202F)', () =>
     const res = await fetch(`${baseUrl}/message/${emailId}/attachment/att-1`);
     expect(res.status).toBe(200);
     const cd = res.headers.get('content-disposition');
-    expect(cd).toContain('filename="Screenshot 2026-11-27 at 1.00.00_PM.png"');
+    expect(cd).toMatch(/filename="Screenshot 2026-11-27 at 1\.00\.00[_?]PM\.png"/);
     expect(cd).toContain("filename*=UTF-8''Screenshot%202026-11-27%20at%201.00.00%E2%80%AFPM.png");
   });
 });

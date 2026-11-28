@@ -278,16 +278,12 @@ router.get('/message/:id/attachment/:attachmentId', async (req, res) => {
     if (!att) return res.status(404).json({ error: 'Attachment not found' });
 
     const data = await gmailClient.getAttachment(email.gmail_id, req.params.attachmentId);
-    const rawName = String(att.filename || 'attachment').replace(/[\x00-\x1f\x7f\r\n]/g, ' ').trim() || 'attachment';
-    // ASCII fallback + RFC 5987 UTF-8 filename* so non-ASCII names (e.g. macOS
-    // screenshots with U+202F) never throw ERR_INVALID_CHAR in res.setHeader.
-    const asciiFallback = rawName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\/]/g, '_');
-    const encodedName = encodeURIComponent(rawName).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    const safeName = (att.filename || 'attachment').replace(/[\x00-\x1f\x7f"\\/]/g, '_');
     // Log internal ids only — staff name/email and the filename are PII and
     // stay out of application logs (the id resolves the record when needed).
     logger.info(`[email] Attachment downloaded: actor=${req.technicianId || 'unknown'} email=${email.id} attachment=${req.params.attachmentId}`);
     res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('Content-Disposition', `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedName}`);
+    res.attachment(safeName);
     res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
     res.send(data);
   } catch (err) {
