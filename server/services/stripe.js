@@ -77,7 +77,6 @@ const {
 const {
   assertInvoiceCollectible,
   assertInvoiceNotWithdrawnOrHeld,
-  assertInvoiceNotWithdrawnFromCustomer,
   invoiceWithdrawnFromCustomer,
   invoiceHeldForChemicalReview,
   isInvoiceCollectibleStatus,
