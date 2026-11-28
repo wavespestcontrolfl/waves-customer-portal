@@ -1316,11 +1316,31 @@ async function runTriageAutoResolve({ now = new Date() } = {}) {
   return runExclusive('triage-auto-resolve', () => sweep({ now }));
 }
 
+// Non-claimant resolution rules safe to evaluate over a scoped subset of sibling
+// call_log IDs (never runs quote_promised/not_confirmed claimant/contest rules on a
+// partial customer slice, and never runs quiet_aged/advisory age-outs on fresh calls).
+const EPISODE_SAFE_SWEEP_RULES = Object.freeze(new Set([
+  'address_moot',
+  'staff_booked_at_account_address',
+  'visit_completed_at_address',
+  'house_number_adopted',
+  'name_moot',
+  'first_name_moot',
+]));
+
+async function reconcileSiblingCallsNow({ callIds = [], now = new Date() } = {}) {
+  const ids = [...new Set((Array.isArray(callIds) ? callIds : []).filter(Boolean))];
+  if (!ids.length) return { skipped: true, reason: 'no_calls', applied: 0 };
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('triageAutoResolve')) return { skipped: true, reason: 'gated_off', applied: 0 };
+  return sweep({ now, callIds: ids, allowedRules: EPISODE_SAFE_SWEEP_RULES });
+}
+
 // The joined evidence rows the classifier consumes. OPEN only —
 // in_progress is human-claimed and must never be swept. With `itemIds`,
 // reloads exactly those cards (still open-only) — used for the locked
-// revalidation pass.
-function loadCandidateItems(conn, itemIds = null) {
+// revalidation pass. With `callIds`, scopes the initial scan to those calls.
+function loadCandidateItems(conn, itemIds = null, callIds = null) {
   const q = conn('triage_items as t')
     .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
     .leftJoin('customers as c', 'c.id', 'cl.customer_id')
@@ -1380,6 +1400,7 @@ function loadCandidateItems(conn, itemIds = null) {
       'c.secondary_phone as customer_secondary_phone',
     );
   if (itemIds) q.whereIn('t.id', itemIds);
+  if (callIds) q.whereIn('t.call_log_id', callIds);
   return q;
 }
 
@@ -2999,14 +3020,22 @@ async function reopenQuietAged({ since, apply = false, now = new Date(), conn = 
   return result;
 }
 
-async function sweep({ now = new Date(), only = null } = {}) {
-  const items = await loadCandidateItems(db);
+function ruleAllowedForSweep(decision, only, allowedRules) {
+  if (!decision) return false;
+  if (only && decision.rule !== only) return false;
+  if (allowedRules && !allowedRules.has(decision.rule)) return false;
+  return true;
+}
+
+async function sweep({ now = new Date(), only = null, callIds = null, allowedRules = null } = {}) {
+  const items = await loadCandidateItems(db, null, callIds);
+  if (!items.length) return { skipped: false, scanned: 0, applied: 0, deferred: 0, counts: {}, callsSynced: 0 };
   const evidence = await loadEvidence(db, items, { now });
 
   const decisions = [];
   for (const item of items) {
     const decision = classifyTriageItem(item, { evidence }, { now });
-    if (decision && (!only || decision.rule === only)) decisions.push({ item, ...decision });
+    if (ruleAllowedForSweep(decision, only, allowedRules)) decisions.push({ item, ...decision });
   }
   const { applied, deferred } = capDecisions(decisions);
 
@@ -3142,6 +3171,8 @@ module.exports = {
   unambiguousDictationTarget,
   loadUnambiguousEmailEvidence,
   runTriageAutoResolve,
+  reconcileSiblingCallsNow,
+  EPISODE_SAFE_SWEEP_RULES,
   planQuietAged,
   reopenQuietAged,
   planQuietAgedReopen,

@@ -1706,8 +1706,52 @@ async function newLeadRealertPass(now, clock) {
   }
 }
 
+async function scopedNewLeadCandidateQuery(leadId) {
+  const id = uuidOrNull(leadId);
+  if (!id) return [];
+  return db('notifications')
+    .where({ recipient_type: 'admin', category: 'new_lead' })
+    .whereNull('done_at')
+    .whereRaw("metadata->'retired' IS NULL")
+    .whereRaw("metadata->>'triggerKey' = 'new_lead'")
+    .where((q) => {
+      q.whereRaw("metadata->'payload'->>'leadId' = ?", [id])
+        .orWhereRaw("metadata->>'leadId' = ?", [id])
+        .orWhere('link', 'like', `%lead=${id}%`);
+    })
+    .orderBy('id', 'asc')
+    .limit(20)
+    .select('id', 'category', 'link', 'metadata', 'created_at', 'done_at', 'done_by');
+}
+
+// Scoped immediate relevance pass for one lead's open `new_lead` admin alerts
+// (e.g., right after a follow-up call books a visit within a 48h episode).
+// Uses the exact same live judgement, fresh recheck, metadata.retired stamp,
+// post-write check, kill switch, and automatic re-arming as the 10-minute sweep.
+async function reconcileLeadAlertsNow({ leadId, now = new Date() } = {}) {
+  if (!adminAlertRelevanceLive()) return { skipped: true, reason: 'switch_off', retired: 0 };
+  const rows = await scopedNewLeadCandidateQuery(leadId);
+  if (!rows.length) return { skipped: false, scanned: 0, retired: 0, byClass: {} };
+  const todayET = etDateString(now);
+  const byClass = {};
+  const data = await loadSubjects(rows);
+  for (const row of rows) {
+    try {
+      const cls = classify(row);
+      if (cls?.key === 'new_lead') {
+        await sweepRow(row, cls, subjectFor(row, data, todayET), { now, todayET, byClass });
+      }
+    } catch (err) {
+      logger.warn(`[alert-relevance] scoped lead alert ${row.id} skipped: ${errSummary(err)}`);
+    }
+  }
+  const retired = Object.values(byClass).reduce((a, b) => a + b, 0);
+  return { skipped: false, scanned: rows.length, retired, byClass };
+}
+
 module.exports = {
   runAdminAlertRelevanceSweep,
+  reconcileLeadAlertsNow,
   quoteAnswered,
   classify,
   loadSubjects,

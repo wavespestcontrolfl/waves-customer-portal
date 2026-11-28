@@ -258,6 +258,10 @@ const { syncVoiceMessageForCall } = require('./conversations');
 const { applySpeakerRoleGuard } = require('./call-speaker-role-guard');
 const { resolveCallToTruckBriefForBooking, backfillCallToTruckBriefOnReusedRow } = require('./call-to-truck-brief');
 const { STT_HINTS, TRANSCRIPTION_DOMAIN_HINT_LINE } = require('../config/transcription-vocabulary');
+const {
+  reconcilePriorEpisodeOnCallCompletion,
+  resolveFirstTouchCallLeadSource,
+} = require('./call-episode-reconciliation');
 
 // Prod technician row is named "Adam" (verified 2026-07-08) — the old
 // 'Adam B.' default never name-matched and assignment survived only on the
@@ -15658,6 +15662,17 @@ const CallRecordingProcessor = {
           leadSource.detail = (referredByName.toLowerCase() === 'unnamed'
             ? 'Referral (unnamed)' : `Referred by ${referredByName}`).slice(0, 200);
         }
+        const firstTouchLeadSource = await resolveFirstTouchCallLeadSource(db, {
+          contactPhone: phone,
+          currentCallId: call.id,
+          currentCallCreatedAt: call.created_at,
+          currentLeadSource: leadSource,
+          referredByName,
+          callerFirstName: extracted.first_name,
+          callerLastName: extracted.last_name,
+          isOutbound: isOutboundCall(call),
+          twilioNumbers: TWILIO_NUMBERS,
+        });
 
         try {
           // Parse address if AI extracted a full address string
@@ -15736,8 +15751,8 @@ const CallRecordingProcessor = {
               state: addrState,
               zip: addrZip || null,
               referral_code: code,
-              lead_source: leadSource.source || 'phone_call',
-              lead_source_detail: leadSource.detail || numberConfig?.domain || 'inbound call',
+              lead_source: firstTouchLeadSource.source || 'phone_call',
+              lead_source_detail: firstTouchLeadSource.detail || numberConfig?.domain || 'inbound call',
               pipeline_stage: 'new_lead',
               pipeline_stage_changed_at: new Date(),
               nearest_location_id: loc.id,
@@ -25977,6 +25992,19 @@ const CallRecordingProcessor = {
 
       // Suggest a last name to the office (GATE_CALL_LAST_NAME_LOOKUP): fire-and-forget, never awaited.
       if (customerId) require('./call-last-name-lookup').enqueueCallLastNameLookup({ callLogId: call.id, customerId });
+
+      // 48h episode reconciliation (after token-fenced finalization, generation-fenced):
+      // delegates stale Call 1 card settlement to triage-auto-resolve & customer-email-fanout
+      // and retires stale Call 1 call-intake new-lead alerts on confirmed non-re-service bookings.
+      await reconcilePriorEpisodeOnCallCompletion(db, {
+        call,
+        customerId,
+        leadId,
+        extracted,
+        appointmentResult,
+        bridgeNeedsConfirmation,
+        procGeneration,
+      });
 
       // The window this booking call committed needs no capture step either:
       // the visit row carries source_call_log_id, written in the booking

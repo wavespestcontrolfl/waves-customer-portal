@@ -357,6 +357,27 @@ async function runThreadDraft({
   }
 }
 
+// Pre-triage terminal skips that never need grounding or an LLM call:
+// 1. Vendor solicitation pitches (codex #4212 r1/r2).
+// 2. Inbound photo-follow-up texts answering a recent call where staff explicitly
+//    asked the caller to text a picture (unless the text also asks for a quote).
+async function preTriageTerminalSkip({
+  triggerBody, skipIntentGate, scopeCheckOnly, phone, triggerSmsLogId, hasMedia, inboundMedia,
+}) {
+  if (isSolicitationPitch(triggerBody)) return 'no_quote_intent_regex_solicitation';
+  if (!skipIntentGate && !scopeCheckOnly) {
+    const resolvedHasMedia = hasMedia !== undefined
+      ? Boolean(hasMedia)
+      : (Array.isArray(inboundMedia) ? inboundMedia.length > 0 : undefined);
+    const { isPhotoFollowUpToRecentCall } = require('../call-episode-reconciliation');
+    const isPhotoFollowUp = await isPhotoFollowUpToRecentCall(require('../../models/db'), {
+      phone, triggerBody, triggerSmsLogId, hasMedia: resolvedHasMedia,
+    });
+    if (isPhotoFollowUp) return 'photo_followup_to_call';
+  }
+  return null;
+}
+
 /**
  * The awaited entry (callers: Twilio webhook, lead-intake handoff). Cheap
  * and bounded — gate checks, the FAST classifier, and one durable bell
@@ -366,7 +387,7 @@ async function runThreadDraft({
  * (the lead-intake state machine, where the customer picked a service).
  */
 async function startSmsThreadDraft({
-  phone, triggerBody = '', triggerSmsLogId, skipIntentGate = false, skipCooldown = false, dryRun = false,
+  phone, triggerBody = '', triggerSmsLogId, hasMedia, inboundMedia, skipIntentGate = false, skipCooldown = false, dryRun = false,
   scopeCheckOnly = false, precomputedTriage,
   // Clarify-reply re-draft: the unsent automated draft this thread draft
   // replaces (retired inside the dedupe transaction, only on a real insert).
@@ -441,13 +462,13 @@ async function startSmsThreadDraft({
         return result;
       }
     }
-    // A vendor pitch is never a quote request — on the primary path AND on
-    // the skipIntentGate resumes (lead-intake / clarify), with or without
-    // scope guards, before triage is loaded or a model call is spent.
-    // Terminal: a caller's legacy fallback must not draft it either
-    // (codex #4212 r1/r2).
-    if (isSolicitationPitch(triggerBody)) {
-      result.skipped = 'no_quote_intent_regex_solicitation';
+    // A vendor pitch or a photo-follow-up text answering a recent call's photo
+    // request is never a new quote request — skip before triage or a model call.
+    const preSkip = await preTriageTerminalSkip({
+      triggerBody, skipIntentGate, scopeCheckOnly, phone, triggerSmsLogId, hasMedia, inboundMedia,
+    });
+    if (preSkip) {
+      result.skipped = preSkip;
       result.terminal = true;
       return result;
     }
