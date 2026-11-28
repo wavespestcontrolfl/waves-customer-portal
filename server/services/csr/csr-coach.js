@@ -875,12 +875,12 @@ Return JSON:
     for (const s of scores) {
       const name = s.csr_name || 'Unknown';
       if (!byCSR[name]) byCSR[name] = { calls: 0, booked: 0, firstCalls: 0, firstCallBooked: 0, totalScore: 0, scored: 0 };
+      const isBooked = s.call_outcome === 'booked';
+      const isFirst = Boolean(s.is_first_call_from_lead);
       byCSR[name].calls++;
-      if (s.call_outcome === 'booked') byCSR[name].booked++;
-      if (s.is_first_call_from_lead) {
-        byCSR[name].firstCalls++;
-        if (s.call_outcome === 'booked') byCSR[name].firstCallBooked++;
-      }
+      byCSR[name].booked += Number(isBooked);
+      byCSR[name].firstCalls += Number(isFirst);
+      byCSR[name].firstCallBooked += Number(isFirst && isBooked);
       if (s.total_score != null) { byCSR[name].totalScore += totalOnCurrentScale(s); byCSR[name].scored++; }
     }
 
@@ -893,8 +893,8 @@ Return JSON:
       const name = fu.assigned_to || 'Unknown';
       if (!fuByCSR[name]) fuByCSR[name] = { assigned: 0, completed: 0, booked: 0 };
       fuByCSR[name].assigned++;
-      if (['completed', 'verified'].includes(fu.status)) fuByCSR[name].completed++;
-      if (fu.job_booked_from_followup) fuByCSR[name].booked++;
+      fuByCSR[name].completed += Number(['completed', 'verified'].includes(fu.status));
+      fuByCSR[name].booked += Number(Boolean(fu.job_booked_from_followup));
     }
 
     const csrStats = Object.entries(byCSR).map(([name, data]) => {
