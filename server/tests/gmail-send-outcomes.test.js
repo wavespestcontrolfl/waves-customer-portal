@@ -5,6 +5,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const { google } = require('googleapis');
 const gmail = require('../services/email/gmail-client');
+const { stripQuotedAndSignature } = require('../services/email/email-strip');
 const OAuth2 = google.auth.OAuth2;
 let requests, providerFailure, expired, acceptedData;
 
@@ -131,4 +132,23 @@ test('sendMessage emits multipart/alternative MIME with base64-wrapped plain-tex
   expect(plainDecoded).toContain(`Hi Taylor & Sam,\r\nView estimate (https://portal.wavespestcontrol.com/estimate/abc?x=1&y=2) or Contact <billing@example.com> (mailto:billing@example.com) ${longNote}`);
   expect(plainDecoded).not.toContain('.a{color:red}');
   expect(htmlDecoded).toBe(htmlBody);
+});
+
+test('sendMessage marks blockquotes and Gmail quote/signature containers so stripQuotedAndSignature strips quoted history', async () => {
+  acceptedData = { id: 'synthetic-quote', threadId: 'synthetic-thread' };
+  const htmlBody = [
+    '<p>Thanks, we will see you Friday.</p>',
+    '<div class="gmail_signature"><p>Waves Support</p></div>',
+    '<div class="gmail_quote"><blockquote><p>I promise to send the waiver by Tuesday.</p></blockquote></div>',
+  ].join('');
+  await gmail.sendMessage('fixture@example.test', 'Re: Visit', htmlBody);
+  const payload = requests[0].data ?? requests[0].body;
+  const sentBody = typeof payload === 'string' ? JSON.parse(payload) : payload;
+  const raw = Buffer.from(sentBody.raw, 'base64url').toString('utf8');
+  const boundaryMatch = raw.match(/boundary="([^"]+)"/);
+  const sections = raw.split(`--${boundaryMatch[1]}`);
+  const [, plainB64 = ''] = sections[1].split('\r\n\r\n');
+  const plainDecoded = Buffer.from(plainB64.replace(/\r\n/g, ''), 'base64').toString('utf8');
+  expect(plainDecoded).toContain('> > I promise to send the waiver by Tuesday.');
+  expect(stripQuotedAndSignature(plainDecoded)).toBe('Thanks, we will see you Friday.');
 });

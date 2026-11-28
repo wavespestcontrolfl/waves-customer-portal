@@ -300,9 +300,10 @@ function buildOfferEmail(stage, first, vars) {
   const signoff = `${vars.sender_name}, owner`;
   return {
     subject,
-    html: wrapEmailHtml({ heading: 'Your job offer', paragraphs, buttonUrl: vars.offer_link, buttonLabel, signoff }),
+    html: wrapEmailHtml({ heading: 'Your job offer', paragraphs, buttonUrl: vars.offer_link, buttonLabel, signoff, lang: 'en' }),
     text: `${paragraphs.join('\n\n')}\n\n${vars.offer_link}\n\n${signoff}`,
     buttonLabel,
+    lang: 'en',
   };
 }
 
@@ -325,6 +326,7 @@ function buildEmailContent(app, stage, vars) {
       subject,
       html: wrapEmailHtml({ heading: subject, paragraphs: [intro, contactLine], lang }),
       text: `${intro}\n\n${contactLine}`,
+      lang,
     };
   }
 
@@ -342,6 +344,7 @@ function buildEmailContent(app, stage, vars) {
       html: wrapEmailHtml({ heading: subject, paragraphs: [intro, explain], buttonUrl: vars.interview_url, buttonLabel, lang }),
       text: `${intro}\n\n${vars.interview_url}\n\n${explain}`,
       buttonLabel,
+      lang,
     };
   }
 
@@ -368,10 +371,11 @@ function buildEmailContent(app, stage, vars) {
       html: wrapEmailHtml({ heading: subject, paragraphs, buttonUrl: vars.interview_url, buttonLabel, lang }),
       text: `${paragraphs.join('\n\n')}\n\n${vars.interview_url}`,
       buttonLabel,
+      lang,
     };
   }
 
-  return { subject: '', html: '', text: '' };
+  return { subject: '', html: '', text: '', lang };
 }
 
 // Settle the ledger row this send attempt owns — the shared tail of every
@@ -1183,6 +1187,7 @@ async function runEmailLeg(ctx) {
     ? wrapEmailHtml({
       heading: subject,
       paragraphs: String(text).split(/\n{2,}/),
+      lang: built.lang,
       ...(vars.interview_url ? { buttonUrl: vars.interview_url, buttonLabel: built.buttonLabel || 'Pick a time' } : {}),
     })
     : built.html;
