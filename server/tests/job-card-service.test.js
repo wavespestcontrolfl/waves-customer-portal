@@ -4127,8 +4127,8 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const dipelStructured = await jobCard.mixForProduct('dipel', 100, { serviceId: 'svc11', dbh: dipelNoRateDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(dipelStructured).toMatchObject({ amount: 8, amountMax: 16, unit: 'oz' });
 
-    // Direct-dose-only products (Merit 2F soil drench) skip tank math and surface the direct dose in warnings.
-    const merit = { id: 'merit', name: 'Merit 2F', epa_reg_number: '432-1312', default_rate: '0.1', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    // Direct-dose-only products (Merit 2F soil drench) skip tank math, hide unrelated catalog area rates, and surface the direct dose in warnings.
+    const merit = { id: 'merit', name: 'Merit 2F', epa_reg_number: '432-1312', default_rate: '0.1', default_unit: 'fl_oz/gal', default_rate_per_1000: 0.14, rate_unit: 'fl_oz', label_verified_at: '2027-12-01', active: true };
     const meritDb = dbFor({
       scheduled_services: [{ id: 'svc12', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
       products_catalog: [merit],
@@ -4139,6 +4139,8 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     });
     const meritCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc12', dbh: meritDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
     expect(meritCalc.amount).toBeNull();
+    expect(meritCalc.ratePer1000).toBeNull();
+    expect(meritCalc.ratePerGallon).toBeNull();
     expect(meritCalc.reason).toBe('Dose by plant size — follow the protocol dose below; no tank amount');
     expect(meritCalc.warnings.join(' ')).toContain('Soil drench, FlowZone soil injector: 0.1 to 0.2 fl oz per inch of trunk diameter');
     expect(meritCalc.warnings.join(' ')).toContain('Trees 15 inches across or more have separate borer directions on the label.');
@@ -4671,5 +4673,64 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(tristarCalc.warnings.filter((w) => w.includes('above the label maximum of 3.5 gal'))).toEqual([
       expect.stringContaining('Tree & Shrub Care — Whiteflies or soft scales (higher rate for high pressure)'),
     ]);
+
+    // A selected prose line paired with a single conditional mixRates row keeps conditional=true while preserving verified rates and label holds.
+    const singleCondProduct = { id: 'cond-p', name: 'Mainspring GNL', epa_reg_number: '100-1543', default_rate: '0.04', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const singleCondProtocols = {
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Mainspring GNL 8 fl oz/100 gal',
+          lineMeta: {
+            'Mainspring GNL 8 fl oz/100 gal': {
+              catalogProductHints: ['Mainspring GNL'],
+              labelRatePerGallon: { amount: 0.08, unit: 'fl_oz', use: 'whiteflies', epa: '100-1543', carrierGalPer1000: 1 },
+            },
+          },
+          mixRates: [{ product: 'Mainspring GNL', condition: 'If you find: Whitefly', where: 'Foliar', perGallon: { amount: 0.08, unit: 'fl oz' }, allowedSprayers: ['flowzone_4_gal'] }],
+        }],
+      },
+    };
+    const singleCondDb = dbFor({
+      scheduled_services: [{ id: 'svc37', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', assigned_equipment_system_id: 'sys-truck', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [singleCondProduct],
+      product_aliases: [],
+      equipment_calibrations: [{ id: 'cal-truck', equipment_system_id: 'sys-truck', technician_id: null, active: true, system_name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00', carrier_rate_gal_per_1000: '2.000' }],
+      equipment_systems: [
+        { id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' },
+        { id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: '4.00' },
+      ],
+      scheduled_service_addons: [],
+    });
+    const condAssignedTruck = await jobCard.mixForProduct('cond-p', 100, { serviceId: 'svc37', dbh: singleCondDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(condAssignedTruck.context.conditional).toBe(true);
+    expect(condAssignedTruck.amount).toBe(8);
+    expect(condAssignedTruck.rateVerified).toBe(true);
+    expect(condAssignedTruck.warnings).toContain('Truck Rig #1 is not allowed for Mainspring GNL.');
+    expect(condAssignedTruck.warnings.join(' ')).toContain('If you find: Whitefly');
+
+    // Explicitly selecting a disallowed sprayer warns beside the computed fill; selecting an allowed sprayer clears that warning.
+    const pickedTruck = await jobCard.mixForProduct('cond-p', 4, { serviceId: 'svc37', equipmentSystemId: 'sys-truck', dbh: singleCondDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(pickedTruck.amount).toBe(8.8);
+    expect(pickedTruck.warnings).toContain('Truck Rig #1 is not allowed for Mainspring GNL.');
+    const pickedFlowZone = await jobCard.mixForProduct('cond-p', 100, { serviceId: 'svc37', equipmentSystemId: 'sys-fz', dbh: singleCondDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(pickedFlowZone.amount).toBe(0.32);
+    expect(pickedFlowZone.warnings.join(' ')).not.toContain('is not allowed for Mainspring GNL.');
+
+    // A mismatched EPA label hold on the prose line is also preserved when merged with a single conditional mixRates row.
+    const heldSingleDb = dbFor({
+      scheduled_services: [{ id: 'svc38', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', first_name: 'A', last_name: 'B' }],
+      products_catalog: [{ ...singleCondProduct, epa_reg_number: '99999-1' }],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const heldSingle = await jobCard.mixForProduct('cond-p', 10, { serviceId: 'svc38', dbh: heldSingleDb, deps: { buildPlan: jest.fn(), protocols: singleCondProtocols }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(heldSingle.context.conditional).toBe(true);
+    expect(heldSingle.amount).toBe(0.4);
+    expect(heldSingle.warnings.join(' ')).toContain('If you find: Whitefly');
   });
 });
