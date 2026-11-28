@@ -388,9 +388,10 @@ describe("PayersPage URL encoding, detail cancellation, and dirty edit modal gua
 
     expect(await screen.findByText(/status unavailable/i)).toBeInTheDocument();
     expect(screen.queryByText(/active · next: Day 7/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Send reminder now" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send reminder now" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
   it("keeps reminder actions disabled while /followups is loading and cancels deep-link fetch when opening another dialog", async () => {
@@ -491,7 +492,8 @@ describe("PayersPage URL encoding, detail cancellation, and dirty edit modal gua
     fireEvent.click(await screen.findByText("S-st-bad-seq"));
 
     expect(await screen.findByText(/status unavailable/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Send reminder now" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send reminder now" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 });
