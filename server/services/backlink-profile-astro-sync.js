@@ -103,9 +103,11 @@ const NON_OFFICE_CITY_RE = SERVICE_AREA_CITY_PATTERN
 function urlHostAndPath(rawUrl) {
   let u;
   try { u = new URL(rawUrl); } catch { return null; }
+  let decodedPath;
+  try { decodedPath = decodeURIComponent(u.pathname); } catch { return null; }
   return {
     host: u.hostname.toLowerCase().replace(/^www\./, ''),
-    path: u.pathname.toLowerCase().replace(/\/+$/, ''),
+    path: decodedPath.toLowerCase().replace(/\s+/g, '-').replace(/\/+$/, ''),
   };
 }
 
@@ -214,9 +216,11 @@ async function getVerifiedProfilesByOffice() {
   for (const r of rows) {
     const raw = String(r.live_url || '').trim();
     if (!/^https:\/\/\S+$/.test(raw)) continue;
-    const base = raw.split('?')[0];
+    const noFrag = raw.split('#')[0];
+    const base = noFrag.split('?')[0];
     if (sameAsRejectReason(base)) { refused++; continue; }
     const hp = urlHostAndPath(base);
+    if (!hp) { refused++; continue; }
     const key = `${hp.host}${hp.path}`;
     const entry = byNormalized.get(key) || { claims: new Set(), resolved: new Set(), urls: new Set() };
     byNormalized.set(key, entry);
@@ -224,10 +228,10 @@ async function getVerifiedProfilesByOffice() {
       entry.claims.add(LOCATION_TO_OFFICE_SLUG[r.location] || `unknown:${r.location}`);
     }
     // Query variants participate only in cross-office conflict checks; only
-    // query-free rows may resolve or supply a published sameAs URL.
-    if (base.length === raw.length) {
-      entry.urls.add(raw);
-      const slug = officeSlugForRow(r.location, raw);
+    // query-free URLs (with any #fragment stripped) may resolve or ship.
+    if (base.length === noFrag.length) {
+      entry.urls.add(noFrag);
+      const slug = officeSlugForRow(r.location, noFrag);
       if (slug) entry.resolved.add(slug);
     }
   }

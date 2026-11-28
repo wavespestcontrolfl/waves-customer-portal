@@ -122,6 +122,10 @@ describe('getVerifiedProfilesByOffice', () => {
       // Rejected query row must not supply office for an unscoped cityless clean URL
       { live_url: 'https://citysquares.com/b/waves-pest-control-44444', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-44444?ref=x', location: 'venice' },
+      // Percent-encoded service-area locality stored under venice -> dropped
+      { live_url: 'https://nextdoor.com/pages/waves-pest-control-North%20Venice-fl/', location: 'venice' },
+      // Fragment-only URL ships with #fragment stripped
+      { live_url: 'https://reviews.birdeye.com/waves-pest-control-venice-999999#reviews', location: null },
       { live_url: 'https://sub.reviews.birdeye.com/waves-pest-control-lakewood-ranch-171362376431312', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota-bradenton-fl/', location: null },
       { live_url: 'https://nextdoor.com/pages/waves-pest-control-sarasota/posts/123', location: 'sarasota' },
@@ -158,6 +162,7 @@ describe('getVerifiedProfilesByOffice', () => {
       'https://citysquares.com/b/waves-pest-control-venice-26858800',
       'https://nextdoor.com/pages/waves-pest-control-venice-venice-fl-9crfqd/',
       'https://reviews.birdeye.com/waves-pest-control-venice-176686916548706',
+      'https://reviews.birdeye.com/waves-pest-control-venice-999999',
     ]);
   });
 
