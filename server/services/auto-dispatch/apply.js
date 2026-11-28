@@ -352,6 +352,21 @@ function coveredBy(still, fenced) {
   return (still.with || []).every((id) => held.has(String(id)));
 }
 
+async function assertLockedPreferencesUnchanged(trx, row, config, refuse) {
+  if (config.assertPreferencesUnchanged !== true || !config.prefs || !row || !row.customer_id) return;
+  await trx('customers').where('id', row.customer_id).forShare().first('id');
+  const livePrefs = await preferences.getCustomerSchedulingPreferences(
+    row.customer_id,
+    row.service_type,
+    trx,
+    { serviceId: row.service_id, serviceKey: row.service_key_snapshot, lock: true },
+  );
+  const { preferencesPrint } = require('./proofreader/nightly');
+  if (preferencesPrint(livePrefs) !== preferencesPrint(config.prefs)) {
+    throw refuse(row.id, 'scheduling preferences changed before commit');
+  }
+}
+
 function makeMoveGuard({ service, best, config = {} }) {
   const refuse = (rowId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
@@ -374,6 +389,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     await fenceCustomerCommsForMove(trx, row, refuse);
     // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.
     await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
+    await assertLockedPreferencesUnchanged(trx, row, config, refuse);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination, true);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     // The destination against the customer's blackout dates and mowing rule as saved now.

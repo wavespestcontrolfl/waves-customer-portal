@@ -1906,6 +1906,7 @@ function pairMoveConfig(entry, evalResult, checked, run) {
     ...config,
     remainingChanges: config.maxChangesPerRun - totals.changed,
     prefs: entry.prefs,
+    assertPreferencesUnchanged: true,
     lockBoundary,
     sourceConflict: null,
     startPointFor: (technicianId) => require('./candidate-slots')._internals.scoredStartPoint(entry.ctx, technicianId),

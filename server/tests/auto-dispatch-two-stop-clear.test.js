@@ -21,6 +21,7 @@ const {
     sameDateSouthCompatible,
     pairNeedsOverlapCheck,
     usesArrivalRouting,
+    legacyPairGapOk,
     livePairRowsValid,
     stampRouteOrderWithA,
     groupCandidateBuckets,
@@ -144,7 +145,7 @@ describe('two-stop-clear pure rules', () => {
       date: '2026-12-22',
       subChain: {
         prev: NORTH_EXIST,
-        next: MID,
+        home: HQ,
         prevDepMin: 585,
         baseDepMin: 585,
         proposedStops: [
@@ -152,6 +153,7 @@ describe('two-stop-clear pure rules', () => {
           { geo: NORTH_B, startMin: 660, durationMin: 45 },
         ],
         baselineStops: [],
+        tailStops: [{ geo: MID, startMin: 780, durationMin: 45 }],
       },
     });
     // Without certified route_order_ids on a numbered day, dispatch appends unsequenced visits after numbered stops:
@@ -164,12 +166,13 @@ describe('two-stop-clear pure rules', () => {
     });
     expect(uncertified.sameDestRoadSpec.subChain).toMatchObject({
       prev: MID,
-      next: HQ,
+      home: HQ,
       proposedStops: [
         { geo: NORTH_A, startMin: 600 },
         { geo: NORTH_B, startMin: 660 },
       ],
       baselineStops: [],
+      tailStops: [],
     });
     // Certified mid-route insertion whose route_order_ids no longer match rawDestWithA is REJECTED (never falls back to append).
     expect(jointDestinationMetrics({
@@ -202,7 +205,7 @@ describe('two-stop-clear pure rules', () => {
     })).toBeNull();
   });
 
-  test('sameDestRoadSpecFor builds sub-chain carrying intervening stops for disjoint placements', () => {
+  test('sameDestRoadSpecFor builds sub-chain carrying intervening and tail stops and rejects unlocated stops', () => {
     const disjoint = sameDestRoadSpecFor(
       [
         { id: 'a', geo: NORTH_A, startMin: 540, estimated_duration_minutes: 90 },
@@ -214,7 +217,7 @@ describe('two-stop-clear pure rules', () => {
     );
     expect(disjoint.subChain).toMatchObject({
       prev: HQ,
-      next: SOUTH,
+      home: HQ,
       proposedStops: [
         { geo: NORTH_A, startMin: 540, durationMin: 90 },
         { geo: MID, startMin: 660, durationMin: 60 },
@@ -223,8 +226,38 @@ describe('two-stop-clear pure rules', () => {
       baselineStops: [
         { geo: MID, startMin: 660, durationMin: 60 },
       ],
+      tailStops: [
+        { geo: SOUTH, startMin: 840, durationMin: 60 },
+      ],
     });
     expect(disjoint.subChain.prevDepMin).toBeLessThan(540);
+    // Any stop missing coordinates rejects road confirmation (never skips an unlocated stop).
+    expect(sameDestRoadSpecFor(
+      [
+        { id: 'a', geo: NORTH_A, startMin: 540, estimated_duration_minutes: 60 },
+        { id: 'd1', geo: null, startMin: 660, estimated_duration_minutes: 60 },
+        { id: 'b', geo: NORTH_B, startMin: 720, estimated_duration_minutes: 60 },
+      ],
+      'a', 'b', { date: '2026-12-22', startMinA: 540, startMinB: 720, home: HQ, vanDepartureMin: 480 },
+    )).toBeNull();
+  });
+
+  test('legacyPairGapOk requires travel time between paired stops when arrival routing is off', () => {
+    const destStops = [{ id: 'd1', geo: NORTH_EXIST, startMin: 480, endMin: 540, estimated_duration_minutes: 60 }];
+    const aStop = { id: 'a', geo: NORTH_A, estimated_duration_minutes: 60 };
+    const bStop = { id: 'b', geo: SOUTH, estimated_duration_minutes: 60 };
+    // Back-to-back 10:00-11:00 (north) and 11:00-12:00 (far south) leaves 0 min for a ~35 min drive -> rejected.
+    expect(legacyPairGapOk(
+      destStops, aStop, bStop,
+      { start_time: '10:00', end_time: '11:00' },
+      { start_time: '11:00', end_time: '12:00' },
+    )).toBe(false);
+    // 10:00-11:00 (north) and 12:00-13:00 (far south) gives a 60 min gap -> accepted.
+    expect(legacyPairGapOk(
+      destStops, aStop, bStop,
+      { start_time: '10:00', end_time: '11:00' },
+      { start_time: '12:00', end_time: '13:00' },
+    )).toBe(true);
   });
 
   test('sameDateSouthCompatible blocks mixing far-south and non-far-south stops onto the same destination day', () => {
@@ -344,17 +377,19 @@ describe('road-check confirmPairOnRoads', () => {
         {
           date: '2026-12-22', startMin: 600,
           subChain: {
-            prev: P('P1'), next: P('N1'), prevDepMin: 585, baseDepMin: 585,
+            prev: P('P1'), home: P('H'), prevDepMin: 585, baseDepMin: 585,
             proposedStops: [{ geo: P('A'), startMin: 600, durationMin: 90 }],
             baselineStops: [],
+            tailStops: [{ geo: P('N1'), startMin: 780, durationMin: 60 }],
           },
         },
         {
           date: '2026-12-23', startMin: 660,
           subChain: {
-            prev: P('P2'), next: P('N2'), prevDepMin: 645, baseDepMin: 645,
+            prev: P('P2'), home: P('H'), prevDepMin: 645, baseDepMin: 645,
             proposedStops: [{ geo: P('B'), startMin: 660, durationMin: 60 }],
             baselineStops: [],
+            tailStops: [{ geo: P('N2'), startMin: 780, durationMin: 60 }],
           },
         },
       ],
@@ -392,18 +427,19 @@ describe('road-check confirmPairOnRoads', () => {
     expect(await confirmPairOnRoads([pair], { sourceLegs, floor: 20, config: baseConfig, travel: null })).toBeNull();
   });
 
-  test('confirms same-day adjacent and disjoint sub-chain detours carrying delays across intervening stops', async () => {
+  test('confirms same-day adjacent and disjoint sub-chain detours carrying delays across intervening and tail stops until convergence', async () => {
     const adjPair = {
       sameDest: true,
       sameDestRoadSpec: {
         date: '2026-12-22', startMin: 600,
         subChain: {
-          prev: P('D1'), next: P('D2'), prevDepMin: 585, baseDepMin: 585,
+          prev: P('D1'), home: P('H'), prevDepMin: 585, baseDepMin: 585,
           proposedStops: [
             { geo: P('A'), startMin: 600, durationMin: 90 },
             { geo: P('B'), startMin: 660, durationMin: 60 },
           ],
           baselineStops: [],
+          tailStops: [{ geo: P('D2'), startMin: 780, durationMin: 60 }],
         },
       },
       saving: 30,
@@ -412,7 +448,8 @@ describe('road-check confirmPairOnRoads', () => {
     // Adjacent dest propagation:
     //   D1->A@585 (6) -> arrive 591, wait to 600, finish A at 690 (90 min job ran past B's 660 window!).
     //   A->B@690 (2) -> arrive 692, start B at 692, finish B at 752.
-    //   B->D2@752 (12); baseline D1->D2@585 (12) -> added = 6 + 2 + 12 - 12 = 8 min -> saving = 30.
+    //   B->D2@752 (12 -> arrive 764 <= 780) and baseline D1->D2@585 (12 -> arrive 597 <= 780):
+    //   BOTH depart D2 at 840 (converged!), so D2->H is NOT re-priced; added = 6 + 2 + 12 - 12 = 8 min -> saving = 30.
     const adjAsked = [];
     const adjMap = { 'H->A': 18, 'A->B': 2, 'B->H': 18, 'D1->A': 6, 'B->D2': 12, 'D1->D2': 12 };
     const adjTravel = {
@@ -429,7 +466,7 @@ describe('road-check confirmPairOnRoads', () => {
       sameDestRoadSpec: {
         date: '2026-12-22', startMin: 540,
         subChain: {
-          prev: P('H'), next: P('H'), prevDepMin: 525, baseDepMin: 640,
+          prev: P('H'), home: P('H'), prevDepMin: 525, baseDepMin: 640,
           proposedStops: [
             { geo: P('A'), startMin: 540, durationMin: 120 },
             { geo: P('D1'), startMin: 660, durationMin: 60 },
@@ -438,6 +475,7 @@ describe('road-check confirmPairOnRoads', () => {
           baselineStops: [
             { geo: P('D1'), startMin: 660, durationMin: 60 },
           ],
+          tailStops: [],
         },
       },
       saving: 22,
@@ -462,7 +500,8 @@ describe('road-check confirmPairOnRoads', () => {
     const disjRes = await confirmPairOnRoads([disjPair], { sourceLegs, floor: 20, config: baseConfig, travel: travelDateAware });
     expect(disjRes.road).toEqual({ source_drive_minutes: 38, added_drive_minutes: 17, saving_minutes: 21, source: 'google' });
     // Delay from A propagated through D1 (735) and B (801), while baseline D1 departed on time at 720.
-    expect(disjAsked.slice(3).map((l) => l.departureMin)).toEqual([525, 660, 735, 801, 640, 720]);
+    // Proposed legs: 525, 660, 735; baseline leg: 640; final home legs: 801 (proposed) and 720 (baseline).
+    expect(disjAsked.slice(3).map((l) => l.departureMin)).toEqual([525, 660, 735, 640, 801, 720]);
   });
 });
 

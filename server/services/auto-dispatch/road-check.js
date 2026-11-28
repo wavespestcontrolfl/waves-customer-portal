@@ -344,7 +344,7 @@ async function sourceDayRoadDrive(sourceLegs, travel) {
   return t3 == null ? null : round2(t1 + t2 + t3);
 }
 
-async function chainRoadDrive(date, startGeo, startDepMin, stops, endGeo, travel) {
+async function advanceStopsOnRoad(date, startGeo, startDepMin, stops, travel) {
   let cursorGeo = startGeo;
   let clock = startDepMin;
   let total = 0;
@@ -356,16 +356,51 @@ async function chainRoadDrive(date, startGeo, startDepMin, stops, endGeo, travel
     clock = Math.round(startAt + (Number.isFinite(stop.durationMin) ? stop.durationMin : 0));
     cursorGeo = stop.geo;
   }
-  const endMins = await lookupOneGoogleLeg({ date, from: cursorGeo, to: endGeo, departureMin: clock }, travel);
-  return endMins == null ? null : round2(total + endMins);
+  return { total, cursorGeo, clock };
+}
+
+function advanceClockAfterStop(clock, driveMins, stop) {
+  const startAt = Math.max(clock + driveMins, Number.isFinite(stop.startMin) ? stop.startMin : clock + driveMins);
+  return Math.round(startAt + (Number.isFinite(stop.durationMin) ? stop.durationMin : 0));
 }
 
 async function subChainRoadAdded(date, subChain, travel) {
   if (!subChain || !Number.isFinite(subChain.prevDepMin) || !Number.isFinite(subChain.baseDepMin)) return null;
-  const proposed = await chainRoadDrive(date, subChain.prev, subChain.prevDepMin, subChain.proposedStops, subChain.next, travel);
-  if (proposed == null) return null;
-  const baseline = await chainRoadDrive(date, subChain.prev, subChain.baseDepMin, subChain.baselineStops, subChain.next, travel);
-  return baseline == null ? null : Math.max(0, round2(proposed - baseline));
+  const prop = await advanceStopsOnRoad(date, subChain.prev, subChain.prevDepMin, subChain.proposedStops, travel);
+  if (!prop) return null;
+  const base = await advanceStopsOnRoad(date, subChain.prev, subChain.baseDepMin, subChain.baselineStops, travel);
+  if (!base) return null;
+  let propTotal = prop.total;
+  let baseTotal = base.total;
+  let propGeo = prop.cursorGeo;
+  let baseGeo = base.cursorGeo;
+  let propClock = prop.clock;
+  let baseClock = base.clock;
+  const tail = Array.isArray(subChain.tailStops) ? subChain.tailStops : [];
+  for (let i = 0; i < tail.length; i += 1) {
+    if (i > 0 && propClock === baseClock) return Math.max(0, round2(propTotal - baseTotal));
+    const stop = tail[i];
+    const mp = await lookupOneGoogleLeg({ date, from: propGeo, to: stop.geo, departureMin: propClock }, travel);
+    if (mp == null) return null;
+    const mb = await lookupOneGoogleLeg({ date, from: baseGeo, to: stop.geo, departureMin: baseClock }, travel);
+    if (mb == null) return null;
+    propTotal += mp;
+    baseTotal += mb;
+    propClock = advanceClockAfterStop(propClock, mp, stop);
+    baseClock = advanceClockAfterStop(baseClock, mb, stop);
+    propGeo = stop.geo;
+    baseGeo = stop.geo;
+  }
+  const endGeo = subChain.home || subChain.next;
+  if (tail.length === 0 || propClock !== baseClock) {
+    const mp = await lookupOneGoogleLeg({ date, from: propGeo, to: endGeo, departureMin: propClock }, travel);
+    if (mp == null) return null;
+    const mb = await lookupOneGoogleLeg({ date, from: baseGeo, to: endGeo, departureMin: baseClock }, travel);
+    if (mb == null) return null;
+    propTotal += mp;
+    baseTotal += mb;
+  }
+  return Math.max(0, round2(propTotal - baseTotal));
 }
 
 // Real-road added detour for a pair landing on the same destination day:
