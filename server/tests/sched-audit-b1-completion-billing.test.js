@@ -85,6 +85,37 @@ describe('Schedule & Dispatch audit Batch 1 — completion, billing & warn-never
     expect(res3).toBeNull();
     expect(repriced.paf_held_term_id).toBeNull();
     expect(callsBeforeCovers).toEqual([{ stampAtCall: null, skipDeferredHold: true }]);
+
+    // Member that ALREADY has a live collectible visit invoice must NEVER stamp
+    // paf_held_term_id (would double-bill via PAF release beside the visit invoice);
+    // instead it clears any stale stamp and hands off existing_member_invoice.
+    updates.length = 0;
+    termSpy.mockReset();
+    termSpy.mockResolvedValue({ id: 'term-paf-should-not-claim' });
+    const existingInvTrx = jest.fn((table) => {
+      const q = {
+        join: jest.fn(() => q),
+        where: jest.fn(() => q),
+        orWhere: jest.fn(() => q),
+        whereNotIn: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'invoices'
+          ? { id: 'inv-live-1', status: 'sent', title: 'Service visit', notes: '' }
+          : null)),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    const invoicedMember = { ...member, paf_held_term_id: 'term-stale-2' };
+    const res4 = await _test.memberBillingEligibility(invoicedMember, customer, existingInvTrx);
+    expect(res4).toEqual({
+      state: 'office_required',
+      reason: 'existing_member_invoice',
+      serviceId: 'svc-paf-1',
+      invoiceId: null,
+    });
+    expect(termSpy).not.toHaveBeenCalled();
+    expect(invoicedMember.paf_held_term_id).toBeNull();
+    expect(updates).toContainEqual({ table: 'scheduled_services', patch: { paf_held_term_id: null } });
   });
 
   test('P0-1: Phase 2 packetEffects excludes packet-billed and amount-only prepaid members from PAF holds', async () => {
@@ -125,11 +156,26 @@ describe('Schedule & Dispatch audit Batch 1 — completion, billing & warn-never
     })).toBe(false);
 
     const completeSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
-    expect(completeSrc).toContain('const packetBilledMember = await isPacketBilledMember(packetContext, svc.id, db);');
+    expect(completeSrc).toContain('const packetBilledMember = await isPacketBilledMember(packetContext, svc.id, db, { recordId: record.id, existingCompletionInvoice });');
     expect(completeSrc).toContain('const pafExcluded = isExcludedFromPafHold({ visitIsPayerBilled, svc, packetBilledMember });');
     expect(completeSrc).toContain('if (pafExcluded && svc.paf_held_term_id)');
     expect(completeSrc).toContain('if (!pafExcluded && !isBackfillCompletion)');
     expect(completeSrc).toContain('skipDeferredHold: isBackfillCompletion || pafExcluded');
+
+    // Phase 2 packetEffects also excludes a member whose existing live invoice
+    // caused the packet to hand off existing_member_invoice (packet_items.invoice_id is null).
+    const unlinkedPacketDb = jest.fn((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        whereNotNull: jest.fn(() => q),
+        whereNotIn: jest.fn(() => q),
+        orderBy: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'invoices' ? { id: 'inv-preexisting-1', status: 'sent' } : null)),
+      };
+      return q;
+    });
+    expect(await isPacketBilledMember({ phase: 'effects', packetId: 'pkt-2' }, 'svc-2', unlinkedPacketDb, { recordId: 'rec-2' })).toBe(true);
+    expect(await isPacketBilledMember(null, 'svc-2', unlinkedPacketDb, { existingCompletionInvoice: { id: 'inv-1' } })).toBe(true);
 
     const packetSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'visit-completion-invoice.js'), 'utf8');
     expect(packetSrc).toContain(".whereNotNull('paf_held_term_id')");

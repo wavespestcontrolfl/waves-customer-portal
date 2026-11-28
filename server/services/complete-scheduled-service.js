@@ -2561,13 +2561,21 @@ function pushUniqueLawnFinding(findings, finding) {
   );
   if (!exists) findings.push(finding);
 }
-async function isPacketBilledMember(packetContext, serviceId, database = db) {
+async function isPacketBilledMember(packetContext, serviceId, database = db, { recordId = null, existingCompletionInvoice = null } = {}) {
+  if (existingCompletionInvoice) return true;
   if (packetContext?.phase !== 'effects' || !packetContext?.packetId || !serviceId) return false;
   const billed = await database('visit_completion_packet_items')
     .where({ packet_id: packetContext.packetId, scheduled_service_id: serviceId })
     .whereNotNull('invoice_id')
     .first('id');
-  return Boolean(billed);
+  if (billed) return true;
+  const liveByVisit = await completionSuppressorInvoiceLookup(database, { scheduled_service_id: serviceId });
+  if (liveByVisit) return true;
+  if (recordId) {
+    const liveByRecord = await completionSuppressorInvoiceLookup(database, { service_record_id: recordId });
+    if (liveByRecord) return true;
+  }
+  return false;
 }
 function isExcludedFromPafHold({ visitIsPayerBilled, svc, packetBilledMember }) {
   return Boolean(visitIsPayerBilled || svc?.prepaid_method || Number(svc?.prepaid_amount) > 0 || packetBilledMember);
@@ -11724,7 +11732,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // text all read that stamp, never the live hold, which the year's charge
     // and activation end.
     let deferredPrepayCovered = false;
-    const packetBilledMember = await isPacketBilledMember(packetContext, svc.id, db);
+    const packetBilledMember = await isPacketBilledMember(packetContext, svc.id, db, { recordId: record.id, existingCompletionInvoice });
     const pafExcluded = isExcludedFromPafHold({ visitIsPayerBilled, svc, packetBilledMember });
     // A closeout (fresh or resumed) that is now payer-billed, paid another way,
     // or billed onto a grouped packet invoice is never held: clear any stamp an
