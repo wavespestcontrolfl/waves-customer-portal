@@ -1,6 +1,6 @@
 /**
- * Dispatcher kill switches. A proof-approved Pest Insider issue stays queued
- * while GATE_PEST_INSIDER_PROOF is off, and an issue the auto-send switch
+ * Dispatcher kill switches. A reply-approved Pest Insider issue is never
+ * dispatched, and an issue the auto-send switch
  * queued stays queued while GATE_NEWSLETTER_AUTO_SEND is off. Both checks sit
  * before any per-row work in processScheduledSends, so the lineup validator
  * being called is the signal that a row was allowed through.
@@ -63,19 +63,17 @@ beforeEach(() => {
     return work(trx);
   });
   process.env.GATE_NEWSLETTER_PROOF_APPROVAL = 'true';
-  delete process.env.GATE_PEST_INSIDER_PROOF;
   delete process.env.GATE_NEWSLETTER_AUTO_SEND;
 });
 
 afterAll(() => {
   delete process.env.GATE_NEWSLETTER_PROOF_APPROVAL;
-  delete process.env.GATE_PEST_INSIDER_PROOF;
   delete process.env.GATE_NEWSLETTER_AUTO_SEND;
   delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
 });
 
-describe('processScheduledSends: Pest Insider kill switch', () => {
-  test('gate off: a proof-approved Pest Insider issue is left scheduled', async () => {
+describe('processScheduledSends: reply-approved Pest Insider guard', () => {
+  test('a reply-approved Pest Insider issue is always left scheduled', async () => {
     wireDue([APPROVED_INSIDER]);
 
     await processScheduledSends();
@@ -83,16 +81,7 @@ describe('processScheduledSends: Pest Insider kill switch', () => {
     expect(mockValidateEventSelection).not.toHaveBeenCalled();
   });
 
-  test('gate on: the same issue goes through to dispatch', async () => {
-    process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    wireDue([APPROVED_INSIDER]);
-
-    await processScheduledSends();
-
-    expect(mockValidateEventSelection).toHaveBeenCalledTimes(1);
-  });
-
-  test('gate off: a Pest Insider issue scheduled by hand (no proof approval) is not held', async () => {
+  test('a Pest Insider issue scheduled by hand (no proof approval) is not held', async () => {
     wireDue([{ ...APPROVED_INSIDER, proof_approved_at: null }]);
 
     await processScheduledSends();
@@ -100,7 +89,7 @@ describe('processScheduledSends: Pest Insider kill switch', () => {
     expect(mockValidateEventSelection).toHaveBeenCalledTimes(1);
   });
 
-  test('gate off: a proof-approved weekly flagship is not held by the Pest Insider switch', async () => {
+  test('a proof-approved weekly flagship is not held by the Pest Insider guard', async () => {
     wireDue([{ ...APPROVED_INSIDER, id: 'send-1', newsletter_type: 'local-weekly-fresh-events' }]);
 
     await processScheduledSends();
@@ -415,7 +404,7 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     expect(mockValidateEventSelection).toHaveBeenCalledTimes(1);
   });
 
-  test('a Pest Insider issue approved by an APPROVED reply still follows GATE_PEST_INSIDER_PROOF, not this switch', async () => {
+  test('a Pest Insider issue approved by an APPROVED reply is never dispatched by this switch', async () => {
     const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_approval_email_id: 'email-1' }]);
 
     await processScheduledSends();

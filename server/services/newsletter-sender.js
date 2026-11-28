@@ -44,7 +44,7 @@ const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = re
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
-const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
+const { newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
 const { issueContextForSend, inSendWindow, issueSendAt, moveIssueForSend, SEND_WINDOW_MS } = require('./pest-insider/schedule');
 const { dateOnlyString } = require('../utils/date-only');
 const NewsletterSubscribers = require('./newsletter-subscribers');
@@ -2078,12 +2078,11 @@ async function processScheduledSends() {
       // An issue an auto-send switch queued: approved with no approving email.
       const autoQueued = Boolean(row.proof_approved_at) && !row.proof_approval_email_id;
       const pestInsider = row.newsletter_type === PEST_INSIDER_TYPE;
-      // Same rule for the type-specific switch: a reply-approved Pest
-      // Insider issue stays queued while GATE_PEST_INSIDER_PROOF is off. A
-      // Pest Insider issue scheduled by hand has no proof_approved_at and is
-      // unaffected; one the auto-send switch queued follows that switch.
-      if (row.proof_approved_at && pestInsider && !autoQueued && !pestInsiderProofLive()) {
-        logger.warn(`[newsletter-scheduler] send ${row.id} is a proof-approved Pest Insider issue but GATE_PEST_INSIDER_PROOF is off — leaving it scheduled`);
+      // A reply-approved Pest Insider issue is never dispatched: planned Pest
+      // Insider sends go through the auto-send path (GATE_PEST_INSIDER_AUTO_SEND),
+      // and a manual schedule has no proof_approved_at.
+      if (row.proof_approved_at && pestInsider && !autoQueued) {
+        logger.warn(`[newsletter-scheduler] send ${row.id} is a reply-approved Pest Insider issue — leaving it scheduled`);
         continue;
       }
       // An issue an auto-send switch queued stays queued while that switch is

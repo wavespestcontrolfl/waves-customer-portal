@@ -9491,8 +9491,8 @@ a call with no final callback keeps its 3), a call with no row (refused
 before admission) gets a fallback row with the same internal source, and
 the call gets no recording recovery and no failure bell. Every call reader
 drops the source through `relay-protocol.whereNotSandboxCall` /
-`isInternalCallSource` (no inbox thread, lead, KPI, missed-call or
-repeat-caller bell, text-back, booking-link text, or "call since the text"
+`isInternalCallSource` (no inbox thread, lead, KPI, missed-call bell,
+text-back, booking-link text, or "call since the text"
 for an unanswered reply). Gate off ⇒ every request rejected and nothing
 written. Any change to the number, caller or budget checks is security- and
 cost-critical).

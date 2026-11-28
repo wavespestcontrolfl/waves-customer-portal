@@ -464,20 +464,12 @@ describe('maybeHandleProofApproval', () => {
   test('an approval whose validation now fails releases the proof claim so the corrected draft gets a fresh proof (codex round 17 P2)', async () => {
     const stale = {
       ...PROOFED_DRAFT,
-      newsletter_type: 'pest-insider-monthly',
       html_body: '<p>Termites swarm again after storms.</p>',
       text_body: 'Termites swarm again after storms.',
     };
     const { sendsChain } = wireDb({ sends: { first: stale }, subscribers: { count: 5 } });
     mockValidate.mockReturnValue({ errors: ['Unverified claim (termite_second_swarm): "Termites swarm again after storms"'], warnings: [] });
-    const previousGate = process.env.GATE_PEST_INSIDER_PROOF;
-    process.env.GATE_PEST_INSIDER_PROOF = 'true'; // the Pest Insider proof switch is on: the approval reaches validation
-    let r;
-    try {
-      r = await maybeHandleProofApproval(APPROVAL_EMAIL);
-    } finally {
-      if (previousGate === undefined) delete process.env.GATE_PEST_INSIDER_PROOF; else process.env.GATE_PEST_INSIDER_PROOF = previousGate;
-    }
+    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
     expect(r).toBe(true);
     expect(mockSendCampaign).not.toHaveBeenCalled();
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
@@ -583,13 +575,10 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
-  describe('Pest Insider kill switch at approval time', () => {
+  describe('Pest Insider APPROVED replies are always refused', () => {
     const INSIDER = { ...PROOFED_DRAFT, id: 'send-pi-1', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September' };
 
-    afterEach(() => { delete process.env.GATE_PEST_INSIDER_PROOF; });
-
-    test('gate off: an APPROVED reply is refused, nothing is claimed or sent, and the draft is untouched', async () => {
-      delete process.env.GATE_PEST_INSIDER_PROOF;
+    test('an APPROVED reply is refused, nothing is claimed or sent, and the draft is untouched', async () => {
       const { sendsChain } = wireDb({ sends: { first: INSIDER } });
 
       const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
@@ -598,12 +587,11 @@ describe('maybeHandleProofApproval', () => {
       expect(sendsChain.update).not.toHaveBeenCalled();
       expect(mockSendCampaign).not.toHaveBeenCalled();
       expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
-        errors: expect.arrayContaining([expect.stringContaining('Pest Insider proof approval is switched off')]),
+        errors: expect.arrayContaining([expect.stringContaining('APPROVED reply does not send a Waves Pest Insider issue')]),
       }));
     });
 
-    test('gate off does not touch the weekly flagship', async () => {
-      delete process.env.GATE_PEST_INSIDER_PROOF;
+    test('does not touch the weekly flagship', async () => {
       const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
 
       await maybeHandleProofApproval(APPROVAL_EMAIL);
@@ -611,25 +599,7 @@ describe('maybeHandleProofApproval', () => {
       expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
     });
 
-    test('gate on: the approval is claimed and the issue dispatched', async () => {
-      process.env.GATE_PEST_INSIDER_PROOF = 'true';
-      mockValidateEventSelection.mockResolvedValue({ valid: true, errors: [], flagship: false });
-      const { sendsChain } = wireDb({ sends: { first: INSIDER }, subscribers: { first: { count: 5 } } });
-
-      const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
-
-      expect(r).toBe(true);
-      expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', proof_approved_at: expect.any(Date) }));
-      // A Pest Insider approval never dispatches straight from here: the
-      // scheduler tick re-reads the row, re-runs the gates and the validator
-      // and only then hands it to the sender — a PATCH that lands right
-      // after this approval has already returned the row to draft.
-      expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ scheduled_for: expect.any(Date) }));
-      expect(mockSendCampaign).not.toHaveBeenCalled();
-    });
-
-    test('a reply that does not say approved is handled before the gate, with no blocked notice', async () => {
-      delete process.env.GATE_PEST_INSIDER_PROOF;
+    test('a reply that does not say approved is ignored with no blocked notice', async () => {
       wireDb({ sends: { first: INSIDER } });
 
       await maybeHandleProofApproval({ ...APPROVAL_EMAIL, body_text: 'hold this one' });
@@ -1103,20 +1073,15 @@ describe('GATE_PEST_INSIDER_AUTO_SEND — a planned Waves Pest Insider issue sen
   });
 
   test('APPROVED never sends a planned issue at another time, and the owner is told the reply changed nothing', async () => {
-    process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    try {
-      const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_FYI_DRAFT }, issues: { first: ISSUE } });
-      expect(await maybeHandleProofApproval(APPROVED)).toBe(true);
+    const { sendsChain, issuesChain } = wireDb({ sends: { first: PI_FYI_DRAFT }, issues: { first: ISSUE } });
+    expect(await maybeHandleProofApproval(APPROVED)).toBe(true);
 
-      expect(sendsChain.update).not.toHaveBeenCalled();
-      expect(issuesChain.update).not.toHaveBeenCalled();
-      expect(mockSendCampaign).not.toHaveBeenCalled();
-      expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
-        errors: ['Approved, but an APPROVED reply does not send a Waves Pest Insider issue: it sends only by itself, on its Thursday at 7:00 AM ET, once it is queued. Nothing changed.'],
-      }));
-    } finally {
-      delete process.env.GATE_PEST_INSIDER_PROOF;
-    }
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(issuesChain.update).not.toHaveBeenCalled();
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: ['Approved, but an APPROVED reply does not send a Waves Pest Insider issue: it sends only by itself, on its Thursday at 7:00 AM ET, once it is queued. Nothing changed.'],
+    }));
   });
 
   test.each([

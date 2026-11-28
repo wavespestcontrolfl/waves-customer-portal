@@ -4628,8 +4628,7 @@ function initScheduledJobs() {
   // (inbound + day-of facts_block + human reply) into sms_sealed_eval_items
   // until the pool reaches SEALED_EVAL_TARGET, so the locked exam keeps
   // coverage as intents shift. Idempotent (anti-join + unique source draft);
-  // no-ops once full. Exam RUNS: manual endpoint, plus the gated nightly
-  // auto-run sweep below (smsSealedExamAutoRun).
+  // no-ops once full. Exam RUNS: manual endpoint and the Mac weekly loop.
   // =========================================================================
   cron.schedule('5 3 * * 0', async () => {
     if (!isEnabled('smsSealedEval')) return;
@@ -4640,26 +4639,6 @@ function initScheduledJobs() {
       await runExclusive('sms-sealed-eval-seal', () => sealEvalItems());
     } catch (err) {
       logger.error(`Sealed-eval freezer failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 5:10AM — Sealed-exam auto-run. Ensures the CURRENT drafter
-  // PROMPT_VERSION has a completed exam on every leg (first baselines +
-  // every prompt bump); cheap no-op between bumps. Runs after the nightly
-  // judge (3:55) and Sunday freezer (3:05) so fresh items/judgments are in.
-  // Doubly gated: smsSealedEval (harness live) AND smsSealedExamAutoRun
-  // (spend opt-in, kill = unset GATE_SMS_SEALED_EXAM_AUTORUN).
-  // =========================================================================
-  cron.schedule('10 5 * * *', async () => {
-    if (!isEnabled('smsSealedEval') || !isEnabled('smsSealedExamAutoRun')) return;
-    logger.info('Running: Sealed-exam auto-run sweep');
-    try {
-      const { runExclusive } = require('../utils/cron-lock');
-      const { runAutoExamSweep } = require('./sms-sealed-eval');
-      await runExclusive('sms-sealed-eval-autorun', () => runAutoExamSweep());
-    } catch (err) {
-      logger.error(`Sealed-exam auto-run sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -7915,7 +7894,6 @@ function initScheduledJobs() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
       Promise.resolve().then(() => require('./missed-call-bell').retireCalledBackMissedCalls()),
-      Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
       Promise.resolve().then(() => require('./missed-call-text-back').sweepMissedCallTextBacks()),
       // The promise-chaser bell's ONE path: a stateless, idempotent sweep
       // (see that file's docstring — eligibility is now a per-call stamp,
