@@ -210,9 +210,9 @@ describe('phone-only residential SMS drip pure helpers & central marketing conse
     expect(s2).not.toMatch(/Adam/i);
   });
 
-  test('ENGAGEMENT_OUTBOUND_TYPES includes Leads-page manual lead_outreach, lead_response, and call follow-up texts', () => {
+  test('ENGAGEMENT_OUTBOUND_TYPES includes Leads-page manual lead_outreach, lead_response, auto_reply, and call follow-up texts', () => {
     expect(ENGAGEMENT_OUTBOUND_TYPES).toEqual(expect.arrayContaining([
-      'lead_outreach', 'lead_response', 'voicemail_quote_link', 'missed_call_text_back', 'call_booking_link_text',
+      'lead_outreach', 'lead_response', 'auto_reply', 'voicemail_quote_link', 'missed_call_text_back', 'call_booking_link_text',
     ]));
   });
 
@@ -665,9 +665,10 @@ describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwardin
     // Missing/replaced claim row inside handoff -> LEAD_DRIP_CLAIM_NOT_OWNED
     const claimInsertMissing = chain({ returning: [{ id: 'claim-owned' }] });
     const claimUpdateMissing = chain();
+    const missingCustLockQ = chain({ result: [{ id: 'cust-punct-1' }] });
     const missingClaimTrx = makeDb({
       leads: [chain({ first: OPTED_IN_LEAD })],
-      customers: [chain({ result: [OPTED_IN_CUST] }), chain({ first: null })],
+      customers: [missingCustLockQ, chain({ result: [OPTED_IN_CUST] }), chain({ first: null })],
       estimates: [chain({ result: [] })],
       scheduled_services: [chain({ first: null })],
       invoices: [chain({ first: null })],
@@ -680,6 +681,7 @@ describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwardin
     }));
     const sendMessageMissing = jest.fn(async (input) => {
       const check = await input.providerPreSendCheck({ channel: 'sms', dbi: missingClaimTrx });
+      expect(missingCustLockQ.forNoKeyUpdate).toHaveBeenCalled();
       expect(check).toEqual(expect.objectContaining({ ok: false, code: 'LEAD_DRIP_CLAIM_NOT_OWNED' }));
       return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: false };
     });
@@ -690,16 +692,18 @@ describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwardin
     expect(resMissing.stopped).toBe(1);
   });
 
-  test('providerPreSendCheck locks lead FOR NO KEY UPDATE and returns retryable:true on transient DB error', async () => {
+  test('providerPreSendCheck locks customers & lead FOR NO KEY UPDATE and returns retryable:true on transient DB error', async () => {
     const claimInsert = chain({ returning: [{ id: 'claim-timeout' }] });
     const claimDelete = chain();
+    const custLockQ = chain({ result: [{ id: 'cust-punct-1' }] });
     const leadLockQ = chain({ firstError: Object.assign(new Error('statement timeout'), { code: '57014' }) });
-    const failingTrx = makeDb({ leads: [leadLockQ] });
+    const failingTrx = makeDb({ customers: [custLockQ], leads: [leadLockQ] });
     const dbh = makeDb(makeEligibleLeadQueues({
       new_lead_phone_drip_sends: [chain({ result: [] }), chain({ result: [] }), claimInsert, claimDelete],
     }));
     const sendMessage = jest.fn(async (input) => {
       const check = await input.providerPreSendCheck({ channel: 'sms', dbi: failingTrx });
+      expect(custLockQ.forNoKeyUpdate).toHaveBeenCalled();
       expect(leadLockQ.forNoKeyUpdate).toHaveBeenCalled();
       expect(check).toEqual(expect.objectContaining({
         ok: false,
@@ -803,6 +807,7 @@ describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwardin
     const handoffTrx = makeDb({
       leads: [chain({ first: OPTED_IN_LEAD })],
       customers: [
+        chain({ result: [{ id: 'cust-punct-1' }] }),
         chain({
           result: [
             OPTED_IN_CUST,

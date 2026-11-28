@@ -52,6 +52,7 @@ const ENGAGEMENT_OUTBOUND_TYPES = [
   'voicemail_quote_link',
   'missed_call_text_back',
   'call_booking_link_text',
+  'auto_reply',
   'ai_autosent',
   'ai_gratitude',
 ];
@@ -367,48 +368,55 @@ function buildPhoneDripHandoff(dbh, { customerIds = [], phone }) {
   });
 }
 
+async function verifyLockedDripState(conn, {
+  leadId, expectedPhone, claimId, lockedSet, nowFn, checkCallVetoes,
+}) {
+  const now = nowFn();
+  // Lock order: lockCustomerComms -> lockSmsPhone -> customers FOR NO KEY UPDATE -> leads FOR NO KEY UPDATE.
+  const lockedIds = [...lockedSet].sort();
+  if (lockedIds.length) {
+    const cq = conn('customers').whereIn('id', lockedIds).orderBy('id', 'asc');
+    await (typeof cq.forNoKeyUpdate === 'function' ? cq.forNoKeyUpdate() : cq).select('id');
+  }
+  const leadQ = conn('leads').where({ id: leadId });
+  const freshLead = await (typeof leadQ.forNoKeyUpdate === 'function' ? leadQ.forNoKeyUpdate() : leadQ).first(...LEAD_SELECT_COLS);
+  if (!isEligibleUnquotedLeadRow(freshLead)) {
+    return { ok: false, code: 'LEAD_DRIP_INELIGIBLE', reason: 'Lead is no longer an open unquoted phone-only residential lead' };
+  }
+  if (!phonesShareIdentity(freshLead.phone, expectedPhone)) {
+    return { ok: false, code: 'LEAD_PHONE_CHANGED', reason: 'Lead phone number changed before SMS handoff' };
+  }
+  const check = await leadShouldStop(conn, freshLead, { now, ...(checkCallVetoes ? { checkCallVetoes } : {}) });
+  if (check.stop) {
+    return { ok: false, code: `LEAD_DRIP_STOP_${check.stop.toUpperCase()}`, reason: `Lead stopped at handoff (${check.stop})` };
+  }
+  if ((check.matchedCustomerIds || []).some((cid) => !lockedSet.has(String(cid)))) {
+    return { ok: false, code: 'LEAD_DRIP_LOCK_SET_CHANGED', reason: 'Matched customer set changed before SMS handoff', retryable: true };
+  }
+  const ownedClaim = claimId
+    ? await conn('new_lead_phone_drip_sends').where({ id: claimId }).first('status')
+    : null;
+  if (!ownedClaim || ownedClaim.status !== 'claimed') {
+    return { ok: false, code: 'LEAD_DRIP_CLAIM_NOT_OWNED', reason: 'Drip claim missing or already settled' };
+  }
+  // Re-check 8 AM–8 PM ET right before synchronous provider dispatch after lock wait + DB reads.
+  if (!isWithinSendHoursET(nowFn())) {
+    return { ok: false, code: 'OUTSIDE_DRIP_SEND_HOURS', reason: 'Outside 8 AM–8 PM ET drip send hours after handoff checks', retryable: true };
+  }
+  return { ok: true };
+}
+
 function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, claimId, clock, checkCallVetoes, lockedCustomerIds = [] }) {
   const nowFn = clock || (() => new Date());
   const lockedSet = new Set((lockedCustomerIds || []).filter(Boolean).map(String));
   return async ({ dbi, database } = {}) => {
-    const now = nowFn();
-    if (!isWithinSendHoursET(now)) {
+    if (!isWithinSendHoursET(nowFn())) {
       return { ok: false, code: 'OUTSIDE_DRIP_SEND_HOURS', reason: 'Outside 8 AM–8 PM ET drip send hours at handoff', retryable: true };
     }
-    const conn = dbi || database || dbh;
     try {
-      // Lock order: lockCustomerComms -> lockSmsPhone -> leads row FOR NO KEY UPDATE.
-      const leadQ = conn('leads').where({ id: leadId });
-      const freshLead = await (typeof leadQ.forNoKeyUpdate === 'function' ? leadQ.forNoKeyUpdate() : leadQ).first(...LEAD_SELECT_COLS);
-      if (!isEligibleUnquotedLeadRow(freshLead)) {
-        return { ok: false, code: 'LEAD_DRIP_INELIGIBLE', reason: 'Lead is no longer an open unquoted phone-only residential lead' };
-      }
-      if (!phonesShareIdentity(freshLead.phone, expectedPhone)) {
-        return { ok: false, code: 'LEAD_PHONE_CHANGED', reason: 'Lead phone number changed before SMS handoff' };
-      }
-      const check = await leadShouldStop(conn, freshLead, { now, ...(checkCallVetoes ? { checkCallVetoes } : {}) });
-      if (check.stop) {
-        return { ok: false, code: `LEAD_DRIP_STOP_${check.stop.toUpperCase()}`, reason: `Lead stopped at handoff (${check.stop})` };
-      }
-      if ((check.matchedCustomerIds || []).some((cid) => !lockedSet.has(String(cid)))) {
-        return {
-          ok: false,
-          code: 'LEAD_DRIP_LOCK_SET_CHANGED',
-          reason: 'Matched customer set changed before SMS handoff',
-          retryable: true,
-        };
-      }
-      const ownedClaim = claimId
-        ? await conn('new_lead_phone_drip_sends').where({ id: claimId }).first('status')
-        : null;
-      if (!ownedClaim || ownedClaim.status !== 'claimed') {
-        return { ok: false, code: 'LEAD_DRIP_CLAIM_NOT_OWNED', reason: 'Drip claim missing or already settled' };
-      }
-      // Re-check 8 AM–8 PM ET right before synchronous provider dispatch after lock wait + DB reads.
-      if (!isWithinSendHoursET(nowFn())) {
-        return { ok: false, code: 'OUTSIDE_DRIP_SEND_HOURS', reason: 'Outside 8 AM–8 PM ET drip send hours after handoff checks', retryable: true };
-      }
-      return { ok: true };
+      return await verifyLockedDripState(dbi || database || dbh, {
+        leadId, expectedPhone, claimId, lockedSet, nowFn, checkCallVetoes,
+      });
     } catch (err) {
       logger.warn(`[new-lead-phone-sms-drip] handoff pre-send check read failed for lead ${leadId}: ${err?.code || err?.name || 'error'}`);
       return {
