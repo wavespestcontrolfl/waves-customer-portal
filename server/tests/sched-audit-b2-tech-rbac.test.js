@@ -120,9 +120,10 @@ describe('P0-5, P1-9, P1-11, P1-17 & P2: admin-dispatch RBAC, board LEFT JOINs &
         expect(board.techs.map((t) => t.id)).toEqual(['t-nogps']);
         expect(board.jobs.map((j) => j.id)).toEqual(['j-nocust']);
         const techSql = rawSqls.find((s) => s.includes('FROM technicians t'));
-        expect(techSql).toContain('LEFT JOIN tech_status');
-        expect(techSql).not.toContain("INTERVAL '24 hours'");
-        expect(rawSqls.find((s) => s.includes('FROM scheduled_services s'))).toContain('LEFT JOIN customers');
+        expect(techSql).toContain('LEFT JOIN tech_status ts ON ts.tech_id = t.id AND ts.location_updated_at >= NOW() - INTERVAL');
+        const jobSql = rawSqls.find((s) => s.includes('FROM scheduled_services s'));
+        expect(jobSql).toContain('LEFT JOIN customers');
+        expect(jobSql).toContain('s.customer_id IS NOT NULL OR s.reservation_expires_at IS NULL');
 
         // 3. Admin /alerts orders decision/critical first, uses stamped address, returns total
         const alertsRes = await fetch(`${base}/alerts`);
@@ -342,6 +343,57 @@ describe('P1-2 & P2: visit-hold alert cleanup, release guards, job-status holdFe
       const { transitionJobStatus } = require('../services/job-status');
       await expect(transitionJobStatus({ jobId: 'v-held', fromStatus: 'confirmed', toStatus: 'no_show', trx: fakeTrx }))
         .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_ON_HOLD' });
+    });
+  });
+
+  test('notClosedOut.resolveForService accepts held resolution and closes open NCO card', async () => {
+    await jest.isolateModulesAsync(async () => {
+      jest.dontMock('../services/not-closed-out');
+      jest.dontMock('../services/visit-hold');
+      jest.dontMock('../services/dispatch-assignment');
+      const updates = [];
+      const resolveAlert = jest.fn().mockResolvedValue({ id: 'nco-alert-1' });
+      const fakeTrx = jest.fn((table) => {
+        const c = {
+          where: jest.fn().mockReturnThis(),
+          leftJoin: jest.fn().mockReturnThis(),
+          whereNull: jest.fn().mockReturnThis(),
+          select: jest.fn().mockResolvedValue(table === 'dispatch_alerts' ? [{ id: 'nco-alert-1' }] : []),
+          first: jest.fn().mockResolvedValue(null),
+          update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+        };
+        return c;
+      });
+      fakeTrx.fn = { now: () => 'NOW()' };
+      fakeTrx.transaction = async (cb) => cb(fakeTrx);
+      fakeTrx.isTransaction = true;
+      fakeTrx.raw = jest.fn((s) => s);
+      jest.doMock('../models/db', () => fakeTrx);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/dispatch-alerts', () => ({ resolveAlert, resolveAlertsForJob: jest.fn().mockResolvedValue(1) }));
+
+      const { resolveForService } = require('../services/not-closed-out');
+      const res = await resolveForService({ serviceId: 'v-held-nco', resolution: 'held', resolvedBy: 'admin-1', trx: fakeTrx });
+      expect(res.resolved).toBe(1);
+      expect(updates[0]).toMatchObject({ table: 'reschedule_log', patch: expect.objectContaining({ resolution: 'held' }) });
+      expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'nco-alert-1', auto: true }));
+
+      process.env.GATE_VISIT_HOLD = 'true';
+      const todayEt = require('../utils/datetime-et').etDateString();
+      fakeTrx.mockImplementation(() => ({
+        leftJoin: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          job_id: 'v-held-today',
+          customer_id: 'c1',
+          status: 'confirmed',
+          scheduled_date: todayEt,
+          held_at: '2026-11-28T00:00:00Z',
+        }),
+      }));
+      const { buildDispatchJobUpdatePayload } = require('../services/dispatch-assignment');
+      const payload = await buildDispatchJobUpdatePayload('v-held-today', 'admin-1');
+      expect(payload.board_visible).toBe(false);
     });
   });
 });

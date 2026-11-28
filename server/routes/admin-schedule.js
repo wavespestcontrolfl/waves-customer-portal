@@ -457,11 +457,13 @@ async function appendVisitCapabilityOffWarnings(trx, technicianId, { primary, ad
   const capEntries = [primary];
   if (Array.isArray(addons)) {
     for (const a of addons) if (a) capEntries.push(normalizeAddonEntry(a));
-  } else if (serviceId) {
-    const existing = await trx('scheduled_service_addons')
+  } else if (serviceId && require('../config/feature-gates').techJobTypeChecksLive?.()) {
+    const readAddons = (conn) => conn('scheduled_service_addons')
       .where({ scheduled_service_id: serviceId })
-      .select('service_name as service_type', 'service_id')
-      .catch(() => []);
+      .select('service_name as service_type', 'service_id');
+    const existing = await (trx.isTransaction && typeof trx.transaction === 'function'
+      ? trx.transaction((sp) => readAddons(sp))
+      : readAddons(trx)).catch(() => []);
     capEntries.push(...existing);
   }
   const lines = await require('../services/technician-eligibility').capabilityOffWarningsFor(technicianId, capEntries, { conn: trx });
@@ -11935,7 +11937,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     // a row grouped since the read misses instead of moving
                     // alone (knex renders null as IS NULL).
                     visit_id: svc.visit_id ?? null,
-                  }),
+                  })
+                  .where(visitHoldService.unheldPredicate()),
                 svc,
               )
                 .update({ ...updates, ...recurringDispatchDuePatch(svc, updates), updated_at: new Date() })

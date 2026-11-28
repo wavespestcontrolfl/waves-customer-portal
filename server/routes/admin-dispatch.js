@@ -7046,7 +7046,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
           WHERE a.technician_id = t.id AND a.absence_date = ? AND a.cleared_at IS NULL
         ) AS out_today
       FROM technicians t
-      LEFT JOIN tech_status ts ON ts.tech_id = t.id
+      LEFT JOIN tech_status ts ON ts.tech_id = t.id AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
       LEFT JOIN (
         SELECT
           technician_id,
@@ -7215,6 +7215,7 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
       .leftJoin('technicians as t', 's.technician_id', 't.id')
       .leftJoin('customers as c', 's.customer_id', 'c.id')
       .where('s.id', req.params.id)
+      .where((q) => q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at'))
       .first(
         's.id as job_id',
         's.customer_id',

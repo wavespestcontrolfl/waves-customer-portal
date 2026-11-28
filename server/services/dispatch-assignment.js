@@ -5,6 +5,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
 const { assertAssignableTechnician } = require('./technician-eligibility');
+const visitHold = require('./visit-hold');
 const { techShiftHoursLive } = require('../config/feature-gates');
 
 const ADMIN_ROOM = 'dispatch:admins';
@@ -73,13 +74,15 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
       db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
       db.raw('COALESCE(s.service_address_city, c.city) as city'),
       db.raw('COALESCE(s.service_address_state, c.state) as state'),
-      db.raw('COALESCE(s.service_address_zip, c.zip) as zip')
+      db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+      ...visitHold.heldColumn('s')
     );
 
   if (!row) return null;
   const scheduledDate = dateOnly(row.scheduled_date);
   const boardVisible = scheduledDate === etDateString()
-    && !BOARD_HIDDEN_STATUSES.includes(row.status);
+    && !BOARD_HIDDEN_STATUSES.includes(row.status)
+    && !visitHold.rowIsHeld(row);
 
   return {
     job_id: row.job_id,

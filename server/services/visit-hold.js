@@ -49,6 +49,10 @@ function heldSqlGuard(alias = 'ss') {
   return visitHoldLive() ? ` AND ${alias}.held_at IS NULL` : '';
 }
 
+function unheldPredicate() {
+  return visitHoldLive() ? { held_at: null } : {};
+}
+
 // In-memory twin for rows already loaded (SELECT * rows carry held_at; a row loaded with named columns that omit
 // held_at reads as not held, so a caller that filters in memory must select the column).
 function rowIsHeld(row) {
@@ -466,6 +470,7 @@ module.exports = {
   isVisitHeld,
   heldVisitIds,
   heldColumn,
+  unheldPredicate,
   closeHoldBell,
   putVisitOnHold,
   releaseVisitHold,
