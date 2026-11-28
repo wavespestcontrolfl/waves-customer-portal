@@ -123,10 +123,9 @@ const ACCEPTED_STATUSES = ['queued', 'sent', 'delivered'];
 const DEDUPE_RETRY_MS = 5 * 60 * 1000;
 
 // Purposes guarded by the same claim without an explicit billing leg: the payer's pay-link text (payer-invoice-sms.js)
-// and keyed payment receipts (admin-billing-health.js manual charge replays) are one text per event, keyed by their
-// metadata.notificationEventKey, and two concurrent calls must send once. Their accepted sms_log row carries no leg
-// marker, so findAcceptedBillingTextLeg finds it by the pre-marker arm (key + real SID).
-const GUARDED_PURPOSES = Object.freeze(['payer_payment_link', 'payment_receipt']);
+// is one text per accepted email row, keyed by its notificationEventKey, and two concurrent calls must send once. Its
+// accepted sms_log row carries no leg marker, so findAcceptedBillingTextLeg finds it by the pre-marker arm (key + real SID).
+const GUARDED_PURPOSES = Object.freeze(['payer_payment_link']);
 const IN_FLIGHT_RETRY_MS = 2 * 60 * 1000;
 const CLAIM_STALE_MS = 5 * 60 * 1000;
 
@@ -402,7 +401,10 @@ async function claimOrResolve(trx, customerId, notificationEventKey, input) {
  */
 async function withBillingTextLegLock(input, send) {
   const metadata = input?.metadata || {};
-  if (metadata.billingDeliveryLeg !== 'sms' && !GUARDED_PURPOSES.includes(input?.purpose)) return send();
+  const guarded = metadata.billingDeliveryLeg === 'sms'
+    || GUARDED_PURPOSES.includes(input?.purpose)
+    || (input?.purpose === 'payment_receipt' && metadata.dedupePaymentReceipt === true);
+  if (!guarded) return send();
   const notificationEventKey = String(metadata.notificationEventKey || '').trim();
   const customerId = input?.customerId;
   if (!notificationEventKey || !customerId) return send();

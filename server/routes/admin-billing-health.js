@@ -651,7 +651,10 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           metadata: {
             source: 'admin_manual_charge',
             paymentId: payment.id || null,
-            ...(payment.id ? { notificationEventKey: `admin_manual_charge_receipt:${payment.id}` } : {}),
+            ...(payment.id ? {
+              notificationEventKey: `admin_manual_charge_receipt:${payment.id}`,
+              dedupePaymentReceipt: true,
+            } : {}),
           },
         });
         if (!result?.sent) logger.warn(`[admin-billing] receipt SMS blocked: ${result?.code || 'unknown'}`);
