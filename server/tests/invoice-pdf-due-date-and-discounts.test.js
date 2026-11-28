@@ -250,4 +250,87 @@ describe('invoice PDF wrapped discount labels in totalsBlock (B-39)', () => {
     expect(totalRow.page).toBeGreaterThan(1);
     expect(totalRow.y).toBeLessThanOrEqual(730);
   });
+
+  test('keeps PDF graphics-state saves and restores balanced per page when totals move to a new page', async () => {
+    const wrappedDiscount = 'WaveGuard Platinum Multi-Service Loyalty Promotional Discount Applied (15%)';
+    const lines = Array.from({ length: 24 }, (_, i) => ({
+      description: `Quarterly Pest Service Row ${i + 1}`,
+      quantity: 1,
+      unit_price: 10,
+      amount: 10,
+    }));
+    lines.push({ _kind: 'discount', description: wrappedDiscount, quantity: 1, unit_price: -36, amount: -36 });
+
+    const pageBalances = [0];
+    let pageIndex = 0;
+    const origSave = PDFDocument.prototype.save;
+    const origRestore = PDFDocument.prototype.restore;
+    const origAddPage = PDFDocument.prototype.addPage;
+    PDFDocument.prototype.save = function trackedSave(...args) {
+      pageBalances[pageIndex] += 1;
+      return origSave.apply(this, args);
+    };
+    PDFDocument.prototype.restore = function trackedRestore(...args) {
+      pageBalances[pageIndex] -= 1;
+      return origRestore.apply(this, args);
+    };
+    PDFDocument.prototype.addPage = function trackedAddPage(...args) {
+      const result = origAddPage.apply(this, args);
+      pageIndex += 1;
+      pageBalances.push(0);
+      return result;
+    };
+    try {
+      await buildInvoicePDFBuffer(invoice({
+        subtotal: 240,
+        discount_amount: 36,
+        discount_label: wrappedDiscount,
+        total: 204,
+        line_items: lines,
+      }));
+    } finally {
+      PDFDocument.prototype.save = origSave;
+      PDFDocument.prototype.restore = origRestore;
+      PDFDocument.prototype.addPage = origAddPage;
+    }
+
+    expect(pageBalances.length).toBeGreaterThan(1);
+    for (const balance of pageBalances) {
+      expect(balance).toBe(0);
+    }
+  });
+
+  test('paginates tall discount lists across pages while keeping TOTAL and its dollar amount on the same page', async () => {
+    const lines = [
+      { description: 'Annual Lawn & Pest Program', quantity: 1, unit_price: 1000, amount: 1000 },
+    ];
+    for (let i = 1; i <= 38; i += 1) {
+      lines.push({
+        _kind: 'discount',
+        description: `WaveGuard Multi-Property Seasonal Promotional Loyalty Credit Line #${i}`,
+        quantity: 1,
+        unit_price: -10,
+        amount: -10,
+      });
+    }
+
+    const calls = await captureCalls(() => buildInvoicePDFBuffer(invoice({
+      subtotal: 1000,
+      discount_amount: 380,
+      total: 620,
+      line_items: lines,
+    })));
+    const totalLabel = calls.find((c) => c.text === 'TOTAL');
+    const totalAmount = calls.find((c) => c.text === '$620.00' && c.y === totalLabel?.y && c.page === totalLabel?.page);
+    expect(totalLabel).toBeDefined();
+    expect(totalAmount).toBeDefined();
+    expect(totalLabel.page).toBeGreaterThan(1);
+    expect(totalLabel.y).toBeLessThanOrEqual(730);
+    // Verify no discount row overflowed past PAGE_BOTTOM.
+    const discountCalls = calls.filter((c) => c.text.startsWith('WaveGuard Multi-Property Seasonal Promotional Loyalty Credit Line #'));
+    expect(discountCalls).toHaveLength(38);
+    for (const row of discountCalls) {
+      expect(row.y).toBeLessThanOrEqual(730);
+    }
+  });
 });

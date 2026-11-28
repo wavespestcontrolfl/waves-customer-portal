@@ -344,4 +344,52 @@ describe("PayersPage URL encoding, detail cancellation, and dirty edit modal gua
     expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved payer changes?");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+  it("disables reminder actions and clears stale status when /followups refresh fails after an active load", async () => {
+    const payer = { id: "p-ref", display_name: "Refresh Fail Payer", active: true, payment_terms: "net30" };
+    const statement = {
+      id: "st-ref",
+      number: "ST-2026-009",
+      period_start: "2026-05-01",
+      period_end: "2026-05-31",
+      status: "sent",
+      total: 150,
+    };
+    let followupsCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, opts = {}) => {
+        const u = String(url);
+        if (u.endsWith("/statements")) return jsonRes({ statements: [statement] });
+        if (u.endsWith("/ar")) {
+          return jsonRes({ summary: { outstanding_total: 150, past_due_total: 0, statement_count: 1, buckets: {} } });
+        }
+        if (u.endsWith(`/statements/${statement.id}`)) return jsonRes({ lines: [] });
+        if (u.endsWith(`/statements/${statement.id}/followups/pause`) && opts.method === "POST") {
+          return jsonRes({ ok: true });
+        }
+        if (u.endsWith(`/statements/${statement.id}/followups`)) {
+          followupsCalls += 1;
+          if (followupsCalls === 1) return jsonRes({ sequence: { status: "active", next_step_label: "Day 7" } });
+          return new Response("502 Bad Gateway", { status: 502, headers: { "Content-Type": "text/plain" } });
+        }
+        return jsonRes({});
+      }),
+    );
+
+    render(<PayerDetailSheet payer={payer} onClose={vi.fn()} onEdit={vi.fn()} onChanged={vi.fn()} />);
+
+    fireEvent.click(await screen.findByText("S-st-ref"));
+    expect(await screen.findByText(/active · next: Day 7/)).toBeInTheDocument();
+
+    // Pause succeeds, then the post-action refresh of /followups fails.
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+
+    expect(await screen.findByText(/status unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/active · next: Day 7/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send reminder now" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+  });
 });

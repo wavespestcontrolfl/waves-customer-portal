@@ -296,6 +296,8 @@ function groupedLineItemsTable(doc, groups, x, y, width) {
 function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
   const visibleLineItems = visibleInvoiceLines(lineItems);
   const propertyGroups = groupInvoiceLinesByProperty(lineItems);
+  // Scope graphics-state save/restore strictly to the single-page header so a
+  // later page break in the rows or totals never emits an unmatched restore.
   doc.save();
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
   y += 8;
@@ -306,6 +308,7 @@ function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
   doc.text('AMOUNT', x + width - 70, y, { width: 70, align: 'right', characterSpacing: 1.2 });
   y += 14;
   doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
+  doc.restore();
   y += 6;
 
   doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(INK);
@@ -314,12 +317,11 @@ function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
   } else {
     for (const item of visibleLineItems) y = drawLineItemRow(doc, item, x, y, width);
   }
-  // The totals block that follows advances the same absolute y: reserve its
-  // height (plus a receipt's surcharge row and any wrapped/extra discount
-  // rows) so neither a long flat table nor a grouped table leaves TOTAL
-  // below the page.
-  y = ensureRoom(doc, y, 170 + extraTotalsHeight);
-  doc.restore();
+  // Keep a normal totals block together on one page; when an unusually tall
+  // discount list exceeds one page on its own, totalsBlock paginates row by row.
+  const totalsNeeded = 170 + extraTotalsHeight;
+  const maxSinglePageTotals = PAGE_BOTTOM - 90;
+  y = ensureRoom(doc, y, totalsNeeded <= maxSinglePageTotals ? totalsNeeded : 40);
   return y;
 }
 
@@ -445,8 +447,10 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const {
     highlightTotal = true, paidStamp = false, refundAmount = 0, cashPaid = 0, customer = null, partPayments = false,
   } = opts;
-  doc.save();
-  doc.moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
+  // Never wrap multi-row totals across doc.save()/doc.restore(): a page break
+  // inside ensureRoom would strand the save on the previous page and leave an
+  // unmatched restore on the new page.
+  doc.save().moveTo(x, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke().restore();
   y += 10;
 
   const facts = invoiceTotalsFacts(invoice, customer);
@@ -456,8 +460,10 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   const valueX = x + width - 70;
 
   const row = (label, value, color = BODY, bold = false) => {
-    doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color);
+    doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica');
     const rowHeight = totalsRowHeightFor(doc, label);
+    y = ensureRoom(doc, y, rowHeight);
+    doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color);
     doc.text(label, labelX, y, { width: TOTALS_LABEL_WIDTH, align: 'right' });
     doc.text(value, valueX, y, { width: 70, align: 'right' });
     y += rowHeight;
@@ -465,8 +471,11 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
 
   for (const [label, value] of totalsRowsAboveTotal(facts, opts.surcharge)) row(label, value);
 
+  // Reserve room for the separator rule and TOTAL line together so TOTAL and
+  // its dollar amount never split across pages.
+  y = ensureRoom(doc, y, highlightTotal ? 34 : 14);
   y += 2;
-  doc.moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
+  doc.save().moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke().restore();
   y += 8;
 
   if (highlightTotal) {
@@ -500,9 +509,9 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
     row('Refunded', deduction(refundAmount), RED, true);
     row('Net paid', currency(Math.max(0, netBasis - refundAmount)), NAVY, true);
   }
-  doc.restore();
 
   if (paidStamp) {
+    y = ensureRoom(doc, y, 46);
     doc.save();
     const stampY = y + 6;
     doc.roundedRect(x, stampY, 130, 32, 4)

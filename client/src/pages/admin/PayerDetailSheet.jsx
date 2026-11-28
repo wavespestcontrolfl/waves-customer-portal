@@ -325,6 +325,7 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
       setSequence(seq);
     } catch (err) {
       if (reqId === detailReqRef.current) {
+        setSequence(null);
         setSequenceError(err.message || "Could not load reminder status.");
       }
     }
@@ -460,7 +461,7 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
         <DunningControls
           base={base}
           sequence={sequence}
-          statusUnavailable={Boolean(sequenceError && !sequence)}
+          statusUnavailable={Boolean(sequenceError)}
           busy={busy}
           act={act}
         />
@@ -511,7 +512,8 @@ function ReconcileForm({ total, busy, onCancel, onSubmit }) {
 }
 
 function DunningControls({ base, sequence, statusUnavailable = false, busy, act }) {
-  const st = sequence?.status || null;
+  const st = statusUnavailable ? null : (sequence?.status || null);
+  const actionsDisabled = !!busy || statusUnavailable;
   return (
     <div className="mt-2 pt-2 border-t border-zinc-100">
       <div className="flex flex-wrap items-center gap-2">
@@ -529,20 +531,20 @@ function DunningControls({ base, sequence, statusUnavailable = false, busy, act 
             ? `active${sequence?.next_step_label ? ` · next: ${sequence.next_step_label}` : ""}`
             : "not started"}
         </span>
-        <Button size="sm" variant="ghost" loading={busy === "Reminder sent"} disabled={!!busy} onClick={() => act("Reminder sent", `${base}/followups/send-now`, {})}>
+        <Button size="sm" variant="ghost" loading={busy === "Reminder sent"} disabled={actionsDisabled} onClick={() => act("Reminder sent", `${base}/followups/send-now`, {})}>
           Send reminder now
         </Button>
         {st === "paused" ? (
-          <Button size="sm" variant="ghost" loading={busy === "Reminders resumed"} disabled={!!busy} onClick={() => act("Reminders resumed", `${base}/followups/resume`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders resumed"} disabled={actionsDisabled} onClick={() => act("Reminders resumed", `${base}/followups/resume`, {})}>
             Resume
           </Button>
         ) : st !== "stopped" && st !== "completed" ? (
-          <Button size="sm" variant="ghost" loading={busy === "Reminders paused"} disabled={!!busy} onClick={() => act("Reminders paused", `${base}/followups/pause`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders paused"} disabled={actionsDisabled} onClick={() => act("Reminders paused", `${base}/followups/pause`, {})}>
             Pause
           </Button>
         ) : null}
         {st !== "stopped" && (
-          <Button size="sm" variant="ghost" loading={busy === "Reminders stopped"} disabled={!!busy} onClick={() => act("Reminders stopped", `${base}/followups/stop`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders stopped"} disabled={actionsDisabled} onClick={() => act("Reminders stopped", `${base}/followups/stop`, {})}>
             Stop
           </Button>
         )}
