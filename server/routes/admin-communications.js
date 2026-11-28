@@ -602,6 +602,9 @@ async function sendSmsHandler(req, res, next) {
     // recruiting row behind it is explicit customer context and keeps the
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
+    if (recruitingContext?.conflict) {
+      return res.status(409).json({ error: recruitingContext.error, code: 'RECRUITING_PHONE_MISMATCH' });
+    }
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
       // Bar only: this branch SENDS (RecruitingComms.sendOwnerReply) before any draft verification, claim or pin, and it settles
       // no Agent Review decision. An Agent Review draft never goes out on an applicant thread: refused before any send or write.
@@ -2858,11 +2861,22 @@ router.get('/stats', requireAdmin, async (req, res, next) => {
   try {
     const som = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
 
-    // Read from unified messages joined to conversations so we can filter
-    // out internal-admin-phone traffic on either endpoint side.
+    // Read from unified messages joined to conversations + linked sms_log so we
+    // filter out internal-admin-phone traffic using the exact same resolved
+    // addresses as /log (including rows identified solely by sms_log).
+    const statsLegacyLinkSql = canonicalSmsLegacyLinkSql({
+      messageAlias: 'messages', conversationAlias: 'conversations',
+    });
+    const statsAddressProjection = canonicalSmsAddressProjectionSql({
+      messageAlias: 'messages', conversationAlias: 'conversations',
+      customerAlias: 'customers', legacyAlias: 'sms_response',
+    });
     const baseSms = () => db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+      .joinRaw(`LEFT JOIN LATERAL (
+        ${statsLegacyLinkSql}
+      ) sms_response ON true`)
       .where('messages.channel', 'sms')
       .where('messages.created_at', '>=', som);
 
@@ -2871,8 +2885,8 @@ router.get('/stats', requireAdmin, async (req, res, next) => {
         q = q.where(b => b.whereNot('conversations.our_endpoint_id', phone).orWhereNull('conversations.our_endpoint_id'))
           .where(b => b.whereNot('conversations.contact_phone', phone).orWhereNull('conversations.contact_phone'))
           .where(b => b.whereNot('customers.phone', phone).orWhereNull('customers.phone'))
-          .whereRaw("COALESCE(messages.metadata->>'sms_our_endpoint_id', '') <> ?", [phone])
-          .whereRaw("COALESCE(messages.metadata->>'sms_contact_phone', '') <> ?", [phone]);
+          .whereRaw(`COALESCE(${statsAddressProjection.endpointSql}, '') <> ?`, [phone])
+          .whereRaw(`COALESCE(${statsAddressProjection.contactPhoneSql}, '') <> ?`, [phone]);
       }
       return q;
     };
@@ -4418,9 +4432,15 @@ async function recruitingReplyContext(messageId, to) {
   // When contact_phone is null (customer-linked thread) or an application snapshot
   // phone exists, verify the application's actual delivery phone matches `to` so
   // sendOwnerReply can never deliver to a different phone after a profile edit.
+  // Return a conflict instead of null so callers refuse with 409 rather than
+  // falling through to the customer SMS pipeline when a customerId is present.
   const appPhone = normalizePhone(row.application_phone);
-  if (appPhone && appPhone !== normalizedTo) return null;
-  if (!row.contact_phone && !appPhone) return null;
+  if ((appPhone && appPhone !== normalizedTo) || (!row.contact_phone && !appPhone)) {
+    return {
+      conflict: true,
+      error: "This applicant's phone number changed — refresh the thread or reply from the recruiting queue.",
+    };
+  }
   const meta = parseJson(row.metadata, {});
   return { applicationId: meta.job_application_id || null, ourEndpointId: row.our_endpoint_id || null };
 }

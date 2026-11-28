@@ -30,7 +30,16 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
-const { phoneIdentitySql, NON_ACTIONABLE_INBOUND_TYPES, HUMAN_REPLY_TYPES } = require('./sms-response-policy');
+const {
+  phoneIdentitySql,
+  NON_ACTIONABLE_INBOUND_TYPES,
+  HUMAN_REPLY_TYPES,
+  DRAFT_REPLY_TYPES,
+  canonicalSmsLegacyLinkSql,
+  canonicalSmsAddressProjectionSql,
+  draftIdSql,
+  draftReplyToMessageIdSql,
+} = require('./sms-response-policy');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { detectHelp } = require('./messaging/opt-out-detector');
 
@@ -231,8 +240,9 @@ async function stampVerdicts(trx, key, verdict) {
 // After the tag commits, read every eligible text that carries an enforced
 // verdict and is still unread, not only the ones stamped now: a text whose read
 // failed on an earlier tag is repaired by the next tag (pre-push audit P1).
-// Outside the lock: read state is not part of the tag, and Not spam leaves
-// is_read alone. Returns true when the read failed.
+// Passes spamTagLockKey so markInboundSmsRead acquires the same per-sender
+// advisory lock as untagSpamSender and rechecks spam_verdict.enforced = true
+// atomically before updating is_read. Returns true when the read failed.
 async function readTaggedTexts(key, adminUserId) {
   try {
     const readIds = await actionableTypes(unifiedRows(key), 'm.message_type')
@@ -245,7 +255,12 @@ async function readTaggedTexts(key, adminUserId) {
     // The ONE read writer: messages.is_read, the sms_log mirror, and the
     // unknown-sender bell clean-up.
     const { markInboundSmsRead } = require('./inbound-sms-read');
-    await markInboundSmsRead({ messageIds: readIds, adminUserId: adminUserId || null, role: 'admin' });
+    await markInboundSmsRead({
+      messageIds: readIds,
+      adminUserId: adminUserId || null,
+      role: 'admin',
+      spamTagLockKey: key,
+    });
     return false;
   } catch (err) {
     logger.warn(`[sms-spam-tag] marking the tagged texts read failed: ${err.code || err.name || 'error'}`);
@@ -295,6 +310,68 @@ async function tagSpamSender({ number, adminUserId = null, reason = null, source
   return { phone, ...tagged, readFailed };
 }
 
+// Reuse the pending inbox's outbound-answer rules (sms-pending-conversations.js)
+// so reopening a rescued spam sender matches replies by sender + business line,
+// excludes click_followup drafts, and only credits ai_approved/ai_revised drafts
+// that answer that specific inbound message.
+async function findUnansweredInboundIds(trx, messageIds) {
+  if (!messageIds.length) return [];
+  const inLegacyLink = canonicalSmsLegacyLinkSql({ messageAlias: 'in_m', conversationAlias: 'in_c' });
+  const inAddress = canonicalSmsAddressProjectionSql({
+    messageAlias: 'in_m', conversationAlias: 'in_c', customerAlias: 'in_cu', legacyAlias: 'in_legacy',
+  });
+  const outLegacyLink = canonicalSmsLegacyLinkSql({ messageAlias: 'out_m', conversationAlias: 'out_c' });
+  const outAddress = canonicalSmsAddressProjectionSql({
+    messageAlias: 'out_m', conversationAlias: 'out_c', customerAlias: 'out_cu', legacyAlias: 'out_legacy',
+  });
+  const outDraftId = draftIdSql("COALESCE(out_audit.metadata->>'draft_id', out_legacy.metadata->>'draft_id', out_m.metadata->>'draft_id')");
+  const outDraftReplyToId = draftReplyToMessageIdSql('response_draft.sms_log_id');
+  const { rows = [] } = await trx.raw(`
+    SELECT in_m.id
+    FROM messages in_m
+    JOIN conversations in_c ON in_c.id = in_m.conversation_id
+    LEFT JOIN customers in_cu ON in_cu.id = in_c.customer_id
+    LEFT JOIN LATERAL (${inLegacyLink}) in_legacy ON true
+    WHERE in_m.id = ANY(CAST(:messageIds AS uuid[]))
+      AND in_m.channel = 'sms'
+      AND in_m.direction = 'inbound'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM messages out_m
+        JOIN conversations out_c ON out_c.id = out_m.conversation_id
+        LEFT JOIN customers out_cu ON out_cu.id = out_c.customer_id
+        LEFT JOIN LATERAL (${outLegacyLink}) out_legacy ON true
+        LEFT JOIN LATERAL (
+          SELECT mal.metadata
+          FROM messaging_audit_log mal
+          WHERE mal.provider_message_id = out_m.twilio_sid AND mal.channel = 'sms'
+          ORDER BY mal.created_at DESC, mal.id DESC LIMIT 1
+        ) out_audit ON true
+        LEFT JOIN message_drafts response_draft ON response_draft.id = ${outDraftId}
+        WHERE out_m.channel = 'sms'
+          AND out_m.direction = 'outbound'
+          AND ${inAddress.peerSql} <> ''
+          AND ${phoneIdentitySql(inAddress.endpointSql)} <> ''
+          AND ${outAddress.peerSql} = ${inAddress.peerSql}
+          AND ${phoneIdentitySql(outAddress.endpointSql)} = ${phoneIdentitySql(inAddress.endpointSql)}
+          AND COALESCE(out_legacy.message_type, out_m.message_type, '') = ANY(CAST(:humanReplyTypes AS text[]))
+          AND COALESCE(out_legacy.status, out_m.delivery_status, '') IN ('queued', 'sent', 'delivered')
+          AND COALESCE(out_legacy.created_at, out_m.created_at) > in_m.created_at
+          AND (
+            COALESCE(out_legacy.message_type, out_m.message_type, '') <> ALL(CAST(:draftReplyTypes AS text[]))
+            OR (CASE WHEN in_m.twilio_sid IS NULL AND response_draft.sms_log_id = in_legacy.id THEN in_m.id
+              ELSE ${outDraftReplyToId} END) = in_m.id
+          )
+          AND response_draft.intent IS DISTINCT FROM 'click_followup'
+      )
+  `, {
+    messageIds,
+    humanReplyTypes: HUMAN_REPLY_TYPES,
+    draftReplyTypes: DRAFT_REPLY_TYPES,
+  });
+  return rows.map((r) => r.id);
+}
+
 /**
  * Undo a tag. Deletes the row, sets spam_verdict.enforced = false (with
  * cleared_by and cleared_at) on that sender's texts that carry an enforced
@@ -319,22 +396,16 @@ async function untagSpamSender({ number, adminUserId = null } = {}) {
         .update({ metadata: trx.raw(CLEAR_VERDICT_SQL, [clearJson]), updated_at: new Date() });
       // Re-open unanswered inbound rows so the Messages unread badge surfaces
       // rescued prospects instead of leaving them silently read.
-      const reopened = await trx('messages')
-        .whereIn('id', messageIds)
-        .where({ channel: 'sms', direction: 'inbound' })
-        .whereNotExists(function hasLaterOutbound() {
-          this.select(1).from('messages as out_m')
-            .whereRaw('out_m.conversation_id = messages.conversation_id')
-            .where({ 'out_m.channel': 'sms', 'out_m.direction': 'outbound' })
-            .whereIn('out_m.message_type', HUMAN_REPLY_TYPES)
-            .whereIn('out_m.delivery_status', ['queued', 'sent', 'delivered'])
-            .whereRaw('out_m.created_at > messages.created_at');
-        })
-        .update({ is_read: false, read_at: null, read_by_admin_user_id: null, updated_at: new Date() })
-        .returning('twilio_sid');
-      const reopenedSids = reopened.map((r) => r.twilio_sid).filter(Boolean);
-      if (reopenedSids.length) {
-        await trx('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', reopenedSids).update({ is_read: false });
+      const unansweredIds = await findUnansweredInboundIds(trx, messageIds);
+      if (unansweredIds.length) {
+        const reopened = await trx('messages')
+          .whereIn('id', unansweredIds)
+          .update({ is_read: false, read_at: null, read_by_admin_user_id: null, updated_at: new Date() })
+          .returning('twilio_sid');
+        const reopenedSids = reopened.map((r) => r.twilio_sid).filter(Boolean);
+        if (reopenedSids.length) {
+          await trx('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', reopenedSids).update({ is_read: false });
+        }
       }
     }
     return { phone, removed: removed > 0, legacy: legacyIds.length, unified: messageIds.length };

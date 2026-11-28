@@ -108,6 +108,22 @@ describe('C2-02: sms-media HMAC validation & safe URLs', () => {
     ]);
   });
 
+  test('resolveVerifiedOutboundAttachments rejects more than 10 attachments before signing anything', async () => {
+    const attachments = Array.from({ length: 11 }, (_, i) => {
+      const key = `sms-attachments/file-${i}.jpg`;
+      return {
+        key,
+        fileName: `file-${i}.jpg`,
+        size: 1024,
+        mimeType: 'image/jpeg',
+        attachmentToken: smsMedia.createAttachmentToken({ key, size: 1024, mimeType: 'image/jpeg' }),
+      };
+    });
+    const res = await smsMedia.resolveVerifiedOutboundAttachments(attachments);
+    expect(res).toEqual({ error: 'Too many attachments (maximum 10 per message)', status: 400 });
+    expect(mockGetSignedUrl).not.toHaveBeenCalled();
+  });
+
   test('mediaFromOutboundAttachments drops raw urls and invalid tokens', () => {
     expect(smsMedia.mediaFromOutboundAttachments([], ['https://attacker.example/x.png'])).toEqual([]);
     expect(smsMedia.mediaFromOutboundAttachments([

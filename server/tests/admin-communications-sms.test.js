@@ -4621,4 +4621,28 @@ describe('POST /messages/:id/like', () => {
       expect(body.messages[2].customerReaction).toBeNull();
     });
   });
+
+  test('GET /stats excludes internal admin-phone traffic using lateral sms_log address projection like /log', async () => {
+    const joinRawCalls = [];
+    const whereRawCalls = [];
+    db.mockImplementation(() => {
+      const q = makeUniversalBuilder([{ count: '3', message_type: 'manual', sent: '3' }]);
+      q.joinRaw = jest.fn((sql) => { joinRawCalls.push(sql); return q; });
+      q.whereRaw = jest.fn((sql, binds) => { whereRawCalls.push({ sql, binds }); return q; });
+      q.count = jest.fn(() => {
+        const res = [{ count: '3' }];
+        res.first = jest.fn(async () => ({ count: '3' }));
+        res.groupBy = jest.fn(() => q);
+        res.orderBy = jest.fn(() => q);
+        return res;
+      });
+      return q;
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/stats`, { headers: { Authorization: 'Bearer admin' } });
+      expect(res.status).toBe(200);
+    });
+    expect(joinRawCalls.some((sql) => sql.includes('LEFT JOIN LATERAL') && sql.includes('FROM sms_log sl'))).toBe(true);
+    expect(whereRawCalls.some(({ sql }) => sql.includes('sms_response.from_phone') && sql.includes('sms_response.to_phone'))).toBe(true);
+  });
 });

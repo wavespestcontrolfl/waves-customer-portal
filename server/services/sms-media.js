@@ -193,12 +193,16 @@ function mediaFromOutboundAttachments(attachments = []) {
     }));
 }
 
+const MAX_OUTBOUND_ATTACHMENTS = 10;
+
 async function resolveVerifiedOutboundAttachments(attachments = []) {
   if (!Array.isArray(attachments) || !attachments.length) {
     return { media: [], mediaUrls: [] };
   }
-  const bounded = attachments.slice(0, 10);
-  if (bounded.some((a) => !isValidAttachmentToken(a))) {
+  if (attachments.length > MAX_OUTBOUND_ATTACHMENTS) {
+    return { error: `Too many attachments (maximum ${MAX_OUTBOUND_ATTACHMENTS} per message)`, status: 400 };
+  }
+  if (attachments.some((a) => !isValidAttachmentToken(a))) {
     return { error: 'Invalid or unverified media attachment', status: 400 };
   }
   if (!config.s3?.bucket) {
@@ -206,8 +210,8 @@ async function resolveVerifiedOutboundAttachments(attachments = []) {
   }
   const media = [];
   const mediaUrls = [];
-  for (let index = 0; index < bounded.length; index += 1) {
-    const a = bounded[index];
+  for (let index = 0; index < attachments.length; index += 1) {
+    const a = attachments[index];
     const signedUrl = await getSignedUrl(
       s3,
       new GetObjectCommand({ Bucket: config.s3.bucket, Key: a.key }),
