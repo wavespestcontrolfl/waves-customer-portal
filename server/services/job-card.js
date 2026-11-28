@@ -56,7 +56,7 @@ const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
-const { labelUseRate, labelRateCarrier, labelRateHoldText, perGallonRate } = require('../utils/protocol-label-rate');
+const { labelUseRate, labelRateCarrier, labelRateHoldText, perGallonRate, normalizeEpa } = require('../utils/protocol-label-rate');
 const spreaderSettings = require('./spreader-settings');
 
 // Office fallback when a property has no coordinates — the same point the
@@ -1487,12 +1487,9 @@ function mistingSafetyField(program, effectiveProgramKey) {
 function matchMixRateProduct(row, catalog) {
   const name = String(row?.product || '').trim();
   if (!name || !Array.isArray(catalog) || !catalog.length) return null;
-  const epa = String(row?.epa || '').trim().toLowerCase();
+  const epa = normalizeEpa(row?.epa);
   const pool = epa
-    ? catalog.filter((p) => {
-      const rowEpa = String(p?.epa_reg_number || '').trim().toLowerCase();
-      return !rowEpa || rowEpa === epa;
-    })
+    ? catalog.filter((p) => normalizeEpa(p?.epa_reg_number) === epa)
     : catalog;
   return resolveCatalogProductForName(name, pool) || null;
 }
@@ -1520,7 +1517,7 @@ function procedureMixRatesField(visit, catalog, lines) {
       const labelWarning = mixRowLabelWarning(row, matched, lines);
       return {
         ...row,
-        ...(matched ? { productId: matched.id } : {}),
+        productId: matched ? matched.id : null,
         ...(labelWarning ? { labelWarning } : {}),
       };
     }),
@@ -2208,6 +2205,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   ]);
   const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000, mixingOrder, bermudaMixingOrder, mixRequired, bermudaRequired } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
   const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
+  attachMixCalibrationWarnings([procedure, ...addons.map((a) => a.procedure)], lines, tank, facts.rig);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
   const products = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];
   // Limits are judged from the appointment start (now once the window has
@@ -2530,6 +2528,38 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
   const off = Boolean(lineCarrier && rigCarrier && Math.abs(rigCarrier - lineCarrier) > 1e-9);
   if (!off || dose.coversSqft == null) return dose;
   return { ...dose, labelCoversSqft: dose.coversSqft, coversSqft: Math.round((Number(volume) / rigCarrier) * 1000), rigSprayGalPer1000: rigCarrier };
+}
+
+// Reuse the tank calculator's carrier-volume and one-spray area-cap checks for every
+// procedure mix row when the appointment names an assigned sprayer rig.
+const SPRAY_VOL_GAL_RE = /(\d+(?:\.\d+)?)\s*gal\s+per\s+1,?000/i;
+function calibrationWarningsForMixRow(row, lines, rigCtx) {
+  if (!rigCtx.rigCarrier || !row?.perGallon?.amount) return [];
+  const line = row.productId ? lines.find((l) => String(l.product?.id) === String(row.productId)) : null;
+  const volMatch = SPRAY_VOL_GAL_RE.exec(String(row.sprayVolume || ''));
+  const lineCarrier = line?.labelCarrierGalPer1000 || (volMatch && Number(volMatch[1]) > 0 ? Number(volMatch[1]) : null);
+  const lo = Number(row.perGallon.amount);
+  const hi = Number(row.perGallon.amountMax > lo ? row.perGallon.amountMax : lo);
+  const band = lo > 0 && row.perGallon.unit ? { lo, hi, unit: String(row.perGallon.unit) } : null;
+  const capLine = areaCapOf(row.limit).areaCap ? areaCapOf(row.limit) : areaCapOf(line?.raw);
+  return [
+    rigVolumeWarning({ lineCarrier, ...rigCtx }),
+    areaCapWarning({ band, line: capLine, ...rigCtx }),
+  ].filter(Boolean);
+}
+
+function attachMixCalibrationWarnings(procedures, lines, tank, rig) {
+  const namedRig = Boolean(rig?.equipmentSystemId || rig?.calibrationId);
+  const rigCarrier = namedRig && tank?.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
+  if (!rigCarrier) return;
+  const rigCtx = { rigCarrier, rigName: tank.systemName || 'This rig', rigGalPer1000: tank.carrierGalPer1000 };
+  for (const proc of procedures) {
+    if (!Array.isArray(proc?.mixRates)) continue;
+    proc.mixRates = proc.mixRates.map((row) => {
+      const warnings = calibrationWarningsForMixRow(row, lines, rigCtx);
+      return warnings.length ? { ...row, calibrationWarnings: warnings } : row;
+    });
+  }
 }
 
 // One service's own conditions: "if needed", the target and restriction it covers (the line's own words), a label hold.
@@ -2878,5 +2908,5 @@ module.exports = {
   resolveVisitLines,
   describeLine,
   ALTERNATE_ADDRESS_BLOCK,
-  _test: { primaryProgramKey, protocolBand, fieldGuideMixWarning, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { primaryProgramKey, protocolBand, fieldGuideMixWarning, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow, attachMixCalibrationWarnings },
 };

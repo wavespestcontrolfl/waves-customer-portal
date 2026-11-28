@@ -3535,6 +3535,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
             { product: 'Demand CS', where: 'Over ceiling', perGallon: { amount: 1.5, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
             { product: 'Duplicate Item', where: 'Ambiguous', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
             { product: 'Tekko Pro IGR', where: 'Roach label rate', perGallon: { amount: 2, unit: 'fl oz' }, sprayers: ['bg_1_gal'], epa: '53883-335' },
+            { product: 'Blank Epa Product', where: 'Needs exact EPA', perGallon: { amount: 1, unit: 'fl oz' }, sprayers: ['bg_1_gal'], epa: '99999-999' },
           ],
           lineMeta: {
             'Apply growth regulator at 2 fl oz/gal': {
@@ -3554,6 +3555,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       { id: 'cat-demand', name: 'Demand CS', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
       { id: 'cat-dup-1', name: 'Duplicate Item', label_verified_at: '2026-08-01T00:00:00Z' },
       { id: 'cat-dup-2', name: 'Duplicate Item', label_verified_at: '2026-08-01T00:00:00Z' },
+      { id: 'cat-blank-epa', name: 'Blank Epa Product', label_verified_at: '2026-08-01T00:00:00Z', default_rate: '1', default_unit: 'fl_oz/gal' },
     ];
     const out = await jobCard.resolveVisitProducts({
       facts: { isLawn: false, serviceType: 'Mosquito Treatment - IGR', scheduledDate: '2026-09-04' },
@@ -3565,11 +3567,32 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       expect.objectContaining({ product: 'Suspend Polyzone', productId: 'cat-poly', labelWarning: 'Label rate not yet verified' }),
       expect.objectContaining({ product: 'Tekko Pro IGR', productId: 'cat-tekko' }),
       expect.objectContaining({ product: 'Demand CS', productId: 'cat-demand', labelWarning: 'Protocol dilution exceeds verified catalog label rate — confirm label before mixing.' }),
-      expect.objectContaining({ product: 'Duplicate Item' }),
+      expect.objectContaining({ product: 'Duplicate Item', productId: null }),
       expect.objectContaining({ product: 'Tekko Pro IGR', productId: 'cat-tekko' }),
+      expect.objectContaining({ product: 'Blank Epa Product', productId: null }),
     ]);
     expect(out.procedure.mixRates[1].labelWarning).toBeUndefined();
-    expect(out.procedure.mixRates[3].productId).toBeUndefined();
     expect(out.procedure.mixRates[4].labelWarning).toBeUndefined();
+
+    // Assigned sprayer carrier-volume and area-cap warnings ride on procedure.mixRates rows.
+    const proc = {
+      mixRates: [{
+        product: 'Tekko Pro IGR',
+        productId: 'cat-tekko',
+        perGallon: { amount: 2, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,000 sq ft',
+        limit: 'no more than 3 fl oz per 1,000 sq ft in one spray',
+      }],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [proc],
+      out.lines,
+      { source: 'rig', systemName: 'FlowZone #2', carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-2' },
+    );
+    expect(proc.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining("The card's rate is for 1 gal per 1,000 sq ft"),
+      expect.stringContaining('allows no more than 3 fl oz per 1,000 sq ft in one spray'),
+    ]);
   });
 });

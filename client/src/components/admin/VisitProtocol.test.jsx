@@ -124,7 +124,7 @@ it('keeps mix amounts visible and shows matching spray check warnings for primar
         ...mosquitoProc,
         mixRates: [
           ...mosquitoProc.mixRates,
-          { product: 'Suspend Polyzone', productId: 'p-missing-id', where: 'Absent ID check', perGallon: { amount: 0.4, unit: 'fl oz' }, sprayers: ['bg_1_gal'] },
+          { product: 'Suspend PolyZone', productId: null, where: 'Failed server lookup check', perGallon: { amount: 0.4, unit: 'fl oz' }, sprayers: ['bg_1_gal'], calibrationWarnings: ['Assigned sprayer puts out 2 gal per 1,000 sq ft instead of 1.'] },
         ],
       },
       addons: [{
@@ -148,6 +148,7 @@ it('keeps mix amounts visible and shows matching spray check warnings for primar
   expect(screen.getByText(/Wind 18 mph exceeds 15 mph PolyZone limit/)).toBeVisible();
   expect(screen.getByText(/0\.4 fl oz/)).toBeVisible();
   expect(screen.getByText(/Product check unavailable on this Job Card/)).toBeVisible();
+  expect(screen.getByText(/Assigned sprayer puts out 2 gal per 1,000 sq ft/)).toBeVisible();
   expect(screen.getByText('2 lb per 1,000 sq ft')).toBeVisible();
   expect(screen.getByText(/Label rate not yet verified/)).toBeVisible();
 });

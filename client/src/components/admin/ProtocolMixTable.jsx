@@ -2,8 +2,8 @@ import React from "react";
 import { mixTable } from "../../lib/protocol-mix-amounts";
 
 function productMatchForRow(row, products) {
-  if (row?.productId) {
-    return products.find((p) => String(p?.id) === String(row.productId)) || null;
+  if (row && Object.prototype.hasOwnProperty.call(row, "productId")) {
+    return row.productId ? products.find((p) => String(p?.id) === String(row.productId)) || null : null;
   }
   const target = String(row?.product || "").trim().toLowerCase();
   if (!target) return null;
@@ -19,6 +19,7 @@ function rowWarningInfo(row, products) {
   const missingCheck = liveCard && !match && !row?.labelRateMissing && Boolean(row?.perGallon || row?.dose);
   const rawParts = [
     row?.labelWarning,
+    ...(Array.isArray(row?.calibrationWarnings) ? row.calibrationWarnings : []),
     match?.amountNote,
     match?.verdict && match.verdict !== "ok" ? match.verdictReason : null,
     match?.verdictAction,
