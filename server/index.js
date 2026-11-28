@@ -452,16 +452,9 @@ const limiter = rateLimit({
 });
 // The disabled payer-statement-pay surface must ALWAYS look like Not Found —
 // even ahead of the global /api/ limiter — so an IP that already exhausted the
-// app-wide limit can't observe the surface via a 429 (contract: 404 when
-// GATE_PAYER_STATEMENTS is off). Runs before the limiter; the route's own
-// gate + per-route limiter still apply when the feature is enabled.
-app.use('/api/pay/statement', (req, res, next) => {
-   
-  if (!require('./config/feature-gates').isEnabled('payerStatements')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  next();
-});
+// app-wide limit can't observe the surface via a 429 (contract: 404 + noStore/noindex
+// when GATE_PAYER_STATEMENTS is off, B-55).
+app.use('/api/pay/statement', require('./routes/pay-statement').statementDarkPreGuard);
 // Dark photo-assessment funnels carry the same unobservable-when-dark
 // contract: while the gate is off the surface must read 404 even for an IP
 // that already exhausted the global /api/ limiter (a 429 would reveal it).

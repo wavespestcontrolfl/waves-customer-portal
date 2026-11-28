@@ -775,6 +775,22 @@ describe('the email ledger snapshot', () => {
     }
     expect(mockSendOne.mock.calls[0][0].html).toContain(token); // the provider still gets the real link
   });
+
+  test('keeps lang="es" and omits customer app promo when staff edit a Spanish interview invite', async () => {
+    const app = baseApp({ language: 'es', interview_token: 'c'.repeat(64) });
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockSendOne.mockClear();
+    await RecruitingComms.sendStageComms(app, 'interview_invite', {
+      sms: false,
+      email: true,
+      by: 'tech-1',
+      emailSubject: 'Entrevista con Waves — horario actualizado',
+      emailBody: 'Hola, elige un horario para conversar con nuestro equipo.',
+    });
+    const sentHtml = mockSendOne.mock.calls[0][0].html;
+    expect(sentHtml).toContain('<html lang="es">');
+    expect(sentHtml).not.toContain('Track visits, reports &amp; payments in the Waves app');
+  });
 });
 
 describe('sendStageComms — a held owner reply that pastes an offer link', () => {

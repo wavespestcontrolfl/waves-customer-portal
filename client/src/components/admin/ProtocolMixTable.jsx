@@ -1,9 +1,62 @@
 import React from "react";
 import { mixTable } from "../../lib/protocol-mix-amounts";
 
+function productMatchForRow(row, products) {
+  if (row && Object.prototype.hasOwnProperty.call(row, "productId")) {
+    return row.productId ? products.find((p) => String(p?.id) === String(row.productId)) || null : null;
+  }
+  const target = String(row?.product || "").trim().toLowerCase();
+  if (!target) return null;
+  const exactMatches = products.filter(
+    (p) => String(p?.name || "").trim().toLowerCase() === target,
+  );
+  return exactMatches.length === 1 ? exactMatches[0] : null;
+}
+
+function sprayFieldsForRow(match, spray) {
+  if (match) {
+    return {
+      isHold: match.verdict === "hold",
+      reason: match.verdict !== "ok" ? match.verdictReason : null,
+      action: match.verdictAction,
+      note: match.amountNote,
+    };
+  }
+  if (spray) {
+    return {
+      isHold: spray.verdict === "hold",
+      reason: spray.verdict && spray.verdict !== "ok" ? spray.reason : null,
+      action: spray.action,
+      note: null,
+    };
+  }
+  return null;
+}
+
+function rowWarningInfo(row, products) {
+  const liveCard = Array.isArray(products);
+  const match = liveCard ? productMatchForRow(row, products) : null;
+  const fields = sprayFieldsForRow(match, row?.sprayCheck);
+  const missingCheck = liveCard && !fields && !row?.labelRateMissing && Boolean(row?.perGallon || row?.dose);
+  const rawParts = [
+    row?.labelWarning,
+    ...(Array.isArray(row?.calibrationWarnings) ? row.calibrationWarnings : []),
+    fields?.note,
+    fields?.reason,
+    fields?.action,
+    missingCheck ? "Product check unavailable on this Job Card — verify spray check and label before mixing." : null,
+  ]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+  const parts = rawParts.filter(
+    (s, i) => !rawParts.some((other, j) => j !== i && (other === s ? j < i : other.includes(s))),
+  );
+  return parts.length ? { isHold: Boolean(fields?.isHold), text: parts.join(" · ") } : null;
+}
+
 // The card's mix amounts: one row per product, one column per sprayer the card uses. `sprayers`: the card's own tanks
 // (Tree & Shrub), else the pest cards' three. A row's `condition` is the visit's own "only if" line.
-export default function ProtocolMixTable({ mixRates, sprayers }) {
+export default function ProtocolMixTable({ mixRates, sprayers, products = null }) {
   const { rows, columns } = mixTable(mixRates, sprayers);
   if (!rows.length) return null;
   return (
@@ -36,6 +89,14 @@ export default function ProtocolMixTable({ mixRates, sprayers }) {
                   </td>
                 ))}
                 <td className="px-3 py-1.5 text-ink-secondary">
+                  {(() => {
+                    const warning = rowWarningInfo(row, products);
+                    return warning ? (
+                      <div role="alert" className={warning.isHold ? "text-alert-fg font-medium" : "text-warn-fg font-medium"}>
+                        Warning: {warning.text}
+                      </div>
+                    ) : null;
+                  })()}
                   {row.labelRateMissing ? <div className="text-alert-fg">Label rate not on file</div> : null}
                   {row.dose ? <div>Dose, not a tank mix: <span className="font-mono u-nums">{row.dose}</span></div> : null}
                   {row.note ? <div>{row.note}</div> : null}

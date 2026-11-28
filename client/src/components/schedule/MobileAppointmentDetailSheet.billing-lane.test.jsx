@@ -717,4 +717,27 @@ describe('MobileAppointmentDetailSheet sibling invoice needs-review visit', () =
     expect(screen.queryByText(/\$74\.70/)).not.toBeInTheDocument();
     expect(screen.queryByText(/no charge needed/i)).not.toBeInTheDocument();
   });
+
+  it('omits dollar amounts instead of rendering $0.00 when prediction.amount is redacted on a non-today technician visit', () => {
+    const redactedInvoice = {
+      ...BASE_SERVICE,
+      estimatedPrice: null,
+      billingLane: { mode: 'per_application', source: 'explicit', prediction: { kind: 'invoice', amount: null, grossAmount: null } },
+    };
+    render(<MobileAppointmentDetailSheet service={redactedInvoice} onClose={() => {}} adminActions={false} />);
+    expect(screen.getByText(/On completion: sends the customer an invoice\./i)).toBeInTheDocument();
+    expect(screen.queryByText(/\$0\.00/)).not.toBeInTheDocument();
+  });
+
+  it('never offers "Review & checkout" on a future visit for a technician while keeping details accessible', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{ ...BASE_SERVICE, scheduledDate: '2099-01-15', estimatedPrice: 120 }}
+        onClose={() => {}}
+        adminActions={false}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Review visit details/i })).toBeInTheDocument();
+  });
 });

@@ -11,6 +11,7 @@
 
 import { useEffect, useState } from 'react';
 import { stackablePresets } from '../../lib/discountStack';
+import { useStaffRole } from '../../hooks/useStaffRole';
 import { X, Tag, Gift, Star, DollarSign } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -40,21 +41,28 @@ function formatAmount(d) {
 
 export default function MobileItemDiscountPickerSheet({
   desktopVisible = false, onClose, onSelect, chosenDiscounts = [] }) {
+  const isStaffAdmin = useStaffRole() === 'admin';
+  const isTechnician = !isStaffAdmin;
   const [discounts, setDiscounts] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(isStaffAdmin);
   const [query, setQuery] = useState('');
 
   useEffect(() => {
+    if (isTechnician) return;
     adminFetch('/admin/discounts')
       .then((d) => { setDiscounts(Array.isArray(d) ? d : (d.discounts || [])); setLoading(false); })
       .catch(() => setLoading(false));
-  }, []);
+  }, [isTechnician]);
 
   const handleCustomAmount = () => {
-    const input = window.prompt('Custom amount (negative for a discount):');
+    const promptText = isStaffAdmin
+      ? 'Custom amount (negative for a discount):'
+      : 'Custom item amount ($):';
+    const input = window.prompt(promptText);
     if (input == null) return;
     const amt = Number(input);
     if (!Number.isFinite(amt) || amt === 0) return;
+    if (!isStaffAdmin && (amt < 0 || amt > 5000)) return;
     const label = window.prompt('Label (shown on invoice):', amt < 0 ? 'Custom Discount' : 'Custom Item') || (amt < 0 ? 'Custom Discount' : 'Custom Item');
     onSelect?.({ kind: 'custom_amount', label, amount: amt });
   };
@@ -155,32 +163,36 @@ export default function MobileItemDiscountPickerSheet({
             onClick={handleCustomAmount}
           />
 
-          {/* Custom discount rows */}
-          <button
-            type="button"
-            onClick={() => handleCustomDiscount('dollar')}
-            className="flex items-center gap-3 py-3 border-b border-hairline border-zinc-200 cursor-pointer hover:bg-zinc-50 text-left u-focus-ring"
-          >
-            <div className="flex items-center justify-center rounded-sm shrink-0 text-zinc-600" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E4E4E7' }} aria-hidden>
-              <Tag size={22} strokeWidth={1.75} />
-            </div>
-            <div className="flex-1 font-medium text-ink-primary" style={{ fontSize: 15 }}>Custom Discount</div>
-            <div className="text-ink-secondary" style={{ fontSize: 14 }}>Variable $</div>
-          </button>
-          <button
-            type="button"
-            onClick={() => handleCustomDiscount('percent')}
-            className="flex items-center gap-3 py-3 border-b border-hairline border-zinc-200 cursor-pointer hover:bg-zinc-50 text-left u-focus-ring"
-          >
-            <div className="flex items-center justify-center rounded-sm shrink-0 text-zinc-600" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E4E4E7' }} aria-hidden>
-              <Tag size={22} strokeWidth={1.75} />
-            </div>
-            <div className="flex-1 font-medium text-ink-primary" style={{ fontSize: 15 }}>Custom Discount</div>
-            <div className="text-ink-secondary" style={{ fontSize: 14 }}>Variable %</div>
-          </button>
+          {/* Custom discount rows (admin-only — server rejects technician custom discounts without an approved discount_id) */}
+          {isStaffAdmin && (
+            <>
+              <button
+                type="button"
+                onClick={() => handleCustomDiscount('dollar')}
+                className="flex items-center gap-3 py-3 border-b border-hairline border-zinc-200 cursor-pointer hover:bg-zinc-50 text-left u-focus-ring"
+              >
+                <div className="flex items-center justify-center rounded-sm shrink-0 text-zinc-600" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E4E4E7' }} aria-hidden>
+                  <Tag size={22} strokeWidth={1.75} />
+                </div>
+                <div className="flex-1 font-medium text-ink-primary" style={{ fontSize: 15 }}>Custom Discount</div>
+                <div className="text-ink-secondary" style={{ fontSize: 14 }}>Variable $</div>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleCustomDiscount('percent')}
+                className="flex items-center gap-3 py-3 border-b border-hairline border-zinc-200 cursor-pointer hover:bg-zinc-50 text-left u-focus-ring"
+              >
+                <div className="flex items-center justify-center rounded-sm shrink-0 text-zinc-600" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E4E4E7' }} aria-hidden>
+                  <Tag size={22} strokeWidth={1.75} />
+                </div>
+                <div className="flex-1 font-medium text-ink-primary" style={{ fontSize: 15 }}>Custom Discount</div>
+                <div className="text-ink-secondary" style={{ fontSize: 14 }}>Variable %</div>
+              </button>
+            </>
+          )}
 
-          {/* Library discounts */}
-          {loading ? (
+          {/* Library discounts (office-only — server rejects technician discounts during field checkout) */}
+          {isStaffAdmin && (loading ? (
             <div className="p-10 text-center text-ink-secondary" style={{ fontSize: 13 }}>Loading…</div>
           ) : activeDiscounts.map((d) => (
             <button
@@ -195,7 +207,7 @@ export default function MobileItemDiscountPickerSheet({
               <div className="flex-1 min-w-0 font-medium text-ink-primary truncate" style={{ fontSize: 15 }}>{d.name}</div>
               <div className="u-nums font-medium text-ink-primary shrink-0" style={{ fontSize: 14 }}>{formatAmount(d)}</div>
             </button>
-          ))}
+          )))}
         </div>
       </div>
     </div>

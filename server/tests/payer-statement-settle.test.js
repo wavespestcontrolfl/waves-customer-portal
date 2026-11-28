@@ -50,6 +50,8 @@ function handler(table) {
     return {
       where(clause) { if (clause && clause.id) this._id = clause.id; return this; },
       whereNotIn() { return this; },
+      whereRaw() { return this; },
+      forUpdate() { return this; },
       // The packet-owned children are read before the cascade so their
       // deferred review asks can be enrolled after the settlement commits.
       whereNotNull() { return this; },

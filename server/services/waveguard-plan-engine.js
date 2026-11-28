@@ -1780,6 +1780,38 @@ async function getActiveCalibrations(knex, filters = {}, { strict = false } = {}
   return savepointRead(knex, () => query).catch((err) => { if (strict) throw err; return []; });
 }
 
+async function resolveAssignedSystemId(knex, service, { strict = false } = {}) {
+  if (service.assigned_equipment_system_id) return service.assigned_equipment_system_id;
+  if (!service.assigned_calibration_id) return null;
+  const row = await savepointRead(knex, () => knex('equipment_calibrations')
+    .where({ id: service.assigned_calibration_id })
+    .first('equipment_system_id'))
+    .catch((err) => { if (strict) throw err; return null; });
+  return row?.equipment_system_id || null;
+}
+
+function serviceCalibrationFilter(rows, service, options, calibrationId) {
+  if (calibrationId && service.assigned_calibration_id && String(calibrationId) === String(service.assigned_calibration_id)) {
+    return rows;
+  }
+  const explicitPick = Boolean(options.equipmentSystemId || options.calibrationId);
+  const technicianId = explicitPick ? (options.technicianId || service.technician_id || null) : (service.technician_id || null);
+  if (explicitPick && !technicianId) return rows;
+  return rows.filter((row) => !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId)));
+}
+
+async function loadServiceCalibrations(knex, service, options = {}, { strict = false } = {}) {
+  const storedPin = service.assigned_calibration_id || null;
+  const assignedSystemId = options.equipmentSystemId && !options.calibrationId && storedPin
+    ? await resolveAssignedSystemId(knex, service, { strict })
+    : service.assigned_equipment_system_id;
+  const keepPin = Boolean(storedPin && (!options.equipmentSystemId || !assignedSystemId || String(options.equipmentSystemId) === String(assignedSystemId)));
+  const equipmentSystemId = options.equipmentSystemId || service.assigned_equipment_system_id;
+  const calibrationId = options.calibrationId || (keepPin ? storedPin : null);
+  const rows = await getActiveCalibrations(knex, { equipmentSystemId, calibrationId }, { strict });
+  return serviceCalibrationFilter(rows, service, options, calibrationId);
+}
+
 // strict: a failed catalog read throws instead of reading as an empty
 // catalog (the job card treats that plan as unavailable; the Lawn plan and
 // closeout keep the lenient default).
@@ -2328,8 +2360,8 @@ async function loadVisitForPlan(knex, id, scope = (q) => q) {
     .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days', 'lawn_protocol_version', 'lawn_protocol_key', 'lawn_protocol_window_key',
       // The stamped address: the property resolver's evidence for a visit with no property_id (the November nitrogen rule).
       'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
-      // The visit's own rig, once one is assigned (the tank sheet sizes on it before showing every tank).
-      'assigned_equipment_system_id', 'assigned_calibration_id')) || null;
+      // The visit's own rig and assigned technician (the tank sheet sizes on it before showing every tank, and scopes system-only calibrations).
+      'technician_id', 'assigned_equipment_system_id', 'assigned_calibration_id')) || null;
 }
 
 // The city a booked visit is judged under, resolved the way the plan resolves it (the stamped visit
@@ -2506,10 +2538,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const jurisdiction = resolveOrdinanceJurisdiction(service, profile);
   const resolvedOrdinanceCity = jurisdiction.city || null;
   const ordinances = profile ? await getApplicableOrdinances(knex, jurisdiction) : [];
-  const activeCalibrations = await getActiveCalibrations(knex, {
-    equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
-    calibrationId: options.calibrationId || service.assigned_calibration_id,
-  }, { strict });
+  const activeCalibrations = await loadServiceCalibrations(knex, service, options, { strict });
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
   // A visit on a lawn_rounds_9 series takes the program step of its round (roundRouting), not of its calendar month; null for every other
@@ -3061,6 +3090,7 @@ module.exports = {
   isConditionalSelected,
   summarizeCalibration,
   getActiveCalibrations,
+  loadServiceCalibrations,
   itemHasNitrogen,
   itemHasPhosphorus,
   itemIsPgr,

@@ -200,6 +200,7 @@ export default function DuplicateCustomersPage() {
   const [sameNameGroups, setSameNameGroups] = useState([]);
   const [sameNameError, setSameNameError] = useState("");
   const [merges, setMerges] = useState([]);
+  const [mergesError, setMergesError] = useState("");
   const [loading, setLoading] = useState(false);
   const [readError, setReadError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -217,15 +218,24 @@ export default function DuplicateCustomersPage() {
 
       // A secondary read failure must not erase the loaded Undo history
       // during a background refresh. The primary queue can still update.
-      const journal = await api("/admin/customer-duplicates/merges").catch(() => null);
+      let mergesFetchErr = "";
+      const journal = await api("/admin/customer-duplicates/merges").catch((err) => {
+        mergesFetchErr = err?.message || "Could not load recent merge history";
+        return null;
+      });
       if (seq !== loadSeq.current) return;
       setGroups(data.groups || []);
       setSameAddressGroups(data.sameAddressGroups || []);
       setSameAddressError(data.sameAddressError || "");
       setSameNameGroups(data.sameNameGroups || []);
       setSameNameError(data.sameNameError || "");
-      if (journal) setMerges(journal.merges || []);
-      else if (!background) setMerges([]);
+      if (journal) {
+        setMerges(journal.merges || []);
+        setMergesError("");
+      } else {
+        setMergesError(mergesFetchErr);
+        if (!background) setMerges([]);
+      }
       setReadError("");
     } catch (err) {
       if (seq === loadSeq.current) setReadError(err.message || "Could not load duplicate customers");
@@ -498,12 +508,14 @@ export default function DuplicateCustomersPage() {
         </div>
       )}
 
-      {merges.length > 0 && (
+      {(merges.length > 0 || mergesError) && (
         <div className="mt-4">
           <div className="mb-2 flex items-center gap-2">
             <span className="text-ui-caption font-medium text-ink-secondary">Recent merges</span>
             <span className="text-ui-body text-ink-secondary">last {merges.length} · journaled · eligible merges can be undone</span>
           </div>
+          {mergesError && <ActionFeedback error className="mb-3">{mergesError}</ActionFeedback>}
+          {merges.length > 0 && (
           <Card>
             <CardBody>
               <div className="grid gap-2">
@@ -570,6 +582,7 @@ export default function DuplicateCustomersPage() {
               </div>
             </CardBody>
           </Card>
+          )}
         </div>
       )}
     </UiSurface>

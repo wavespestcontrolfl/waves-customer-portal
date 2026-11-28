@@ -159,7 +159,7 @@ router.get('/:id/statements/:statementId', async (req, res, next) => {
   try {
     const statement = await loadOwnedStatement(req.params.id, req.params.statementId);
     if (!statement) return res.status(404).json({ error: 'Statement not found' });
-    const lines = await loadStatementLines(statement.id);
+    const lines = await loadStatementLines(statement.id, undefined, { status: statement.status });
     res.json({ statement, lines });
   } catch (err) {
     next(err);

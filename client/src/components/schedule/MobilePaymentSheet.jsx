@@ -39,10 +39,46 @@ import { useEffect, useRef, useState } from 'react';
 import { launchTapToPay } from '../../lib/tapToPay';
 import { getAdminUser } from '../../lib/adminAuth';
 import { holdReloadWhileSending } from '../../lib/reloadHolds';
+import { useIsStaffAdmin } from '../../hooks/useStaffRole';
 import MobileManualCardSheet from './MobileManualCardSheet';
 import MobileCashTenderSheet from './MobileCashTenderSheet';
 import MobileCheckTenderSheet from './MobileCheckTenderSheet';
 import MobileCardOnFileSheet from './MobileCardOnFileSheet';
+
+function buildPaymentSheetMethods({
+  isAdmin,
+  invoiceToken,
+  techCardOnFile,
+  hideInvoiceTender,
+  sendingInvoice,
+  onCash,
+  onCheck,
+  onManualCard,
+  onCardOnFile,
+  onInvoice,
+}) {
+  return [
+    ...(isAdmin ? [
+      { key: 'cash', label: 'Cash', onClick: onCash },
+      { key: 'check', label: 'Check', onClick: onCheck },
+    ] : []),
+    // Manual card entry uses the public /pay/:token flow, which stays admin-only
+    // so permanent public payment bearer links are never handed to technicians.
+    ...(invoiceToken
+      ? [{ key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: onManualCard }]
+      : []),
+    ...(isAdmin || techCardOnFile
+      ? [{ key: 'card_on_file', label: 'Card on File', onClick: onCardOnFile }]
+      : []),
+    ...(hideInvoiceTender || !isAdmin ? [] : [{
+      key: 'invoice',
+      label: 'Invoice',
+      subtitle: sendingInvoice ? 'Sending…' : 'Send SMS + email',
+      onClick: onInvoice,
+      disabled: sendingInvoice,
+    }]),
+  ];
+}
 
 export default function MobilePaymentSheet({
   service,
@@ -71,7 +107,7 @@ export default function MobilePaymentSheet({
   const API_BASE = import.meta.env.VITE_API_URL || '/api';
   // Missing or unknown role fails closed to the technician's card-only list:
   // the server refuses the office tenders to anyone but an admin.
-  const isAdmin = getAdminUser()?.role === 'admin';
+  const isAdmin = useIsStaffAdmin();
 
   // Safari Tap-to-Pay hands off via deep link without a callback: if the user
   // cancels WavesPay or returns to Safari, unlock the button instead of leaving
@@ -191,31 +227,18 @@ export default function MobilePaymentSheet({
     }
   }
 
-  const methods = [
-    ...(isAdmin ? [
-      { key: 'cash', label: 'Cash', onClick: () => setShowCash(true) },
-      { key: 'check', label: 'Check', onClick: () => setShowCheck(true) },
-    ] : []),
-    { key: 'manual_cc', label: 'Manual Credit Card Entry', onClick: () => setShowManualCard(true) },
-    // Card on File posts /admin/invoices/:id/charge-card (an off-session
-    // charge of a saved card): an admin always, a technician only on an
-    // invoice the server marked tech_card_on_file.
-    ...(isAdmin || techCardOnFile
-      ? [{ key: 'card_on_file', label: 'Card on File', onClick: () => setShowCardOnFile(true) }]
-      : []),
-    // The Invoice (send pay-link) tender is suppressed for the charge-in-person
-    // annual-prepay flow: that path means "collect now", and hiding the send option
-    // keeps closing-the-sheet unambiguously an abort (so the caller can void the
-    // uncollected invoice + cancel its pending term). Sending instead is the modal's
-    // separate "Create & send invoice" action. A technician never sends it.
-    ...(hideInvoiceTender || !isAdmin ? [] : [{
-      key: 'invoice',
-      label: 'Invoice',
-      subtitle: sendingInvoice ? 'Sending…' : 'Send SMS + email',
-      onClick: handleSendInvoice,
-      disabled: sendingInvoice,
-    }]),
-  ];
+  const methods = buildPaymentSheetMethods({
+    isAdmin,
+    invoiceToken,
+    techCardOnFile,
+    hideInvoiceTender,
+    sendingInvoice,
+    onCash: () => setShowCash(true),
+    onCheck: () => setShowCheck(true),
+    onManualCard: () => setShowManualCard(true),
+    onCardOnFile: () => setShowCardOnFile(true),
+    onInvoice: handleSendInvoice,
+  });
 
   return createPortal(
     <>
@@ -329,7 +352,7 @@ export default function MobilePaymentSheet({
         </div>
       </div>
 
-      {showManualCard && (
+      {showManualCard && invoiceToken && (
         <MobileManualCardSheet
           desktopVisible={desktopVisible}
           invoiceToken={invoiceToken}

@@ -34,11 +34,13 @@ const { auditCardDetailsSynced } = require('./audit-log');
 // Expiry within this many months of the current ET month is inside the
 // 60-day warning window (and the Auto Pay walk), so it is worth re-reading.
 const WINDOW_MONTHS = 2;
+// Skip cards expired further back than this (dead/abandoned cards aren't
+// refreshed by Stripe Account Updater forever) and cap daily Stripe calls (B-52).
+const MAX_PAST_MONTHS = 18;
+const MAX_DAILY_SYNC_CARDS = 200;
 
-// Gate read lazily: several suites mock feature-gates wholesale, and a
-// missing property just means "off".
 function gateOn() {
-  return require('../config/feature-gates').gates?.cardDetailsSync === true;
+  return require('../config/feature-gates').cardDetailsSyncLive();
 }
 
 // Same normalization isExpiredCardMethod uses: legacy rows hold 2-digit years.
@@ -184,10 +186,13 @@ async function refreshCardFromStripe(pmId, { source = 'webhook', database } = {}
 }
 
 function inRefreshWindow(row, now) {
+  if (row.deleted_at || row.detached_at) return false;
   const expiry = normalizedExpiry(row.exp_month, row.exp_year);
   if (!expiry) return true;
   const [curYear, curMonth] = etDateString(now).split('-').map(Number);
-  return expiry.year * 12 + expiry.month <= curYear * 12 + curMonth + WINDOW_MONTHS;
+  const nowMonths = curYear * 12 + curMonth;
+  const cardMonths = expiry.year * 12 + expiry.month;
+  return cardMonths >= nowMonths - MAX_PAST_MONTHS && cardMonths <= nowMonths + WINDOW_MONTHS;
 }
 
 // One Stripe card. Returns { updated, detached, error } counters.
@@ -205,10 +210,21 @@ async function syncNearExpiryCards({ now = new Date(), database } = {}) {
     .where({ processor: 'stripe' })
     .whereNotNull('stripe_payment_method_id')
     .select('id', 'method_type', 'stripe_payment_method_id', 'exp_month', 'exp_year');
-  const ids = new Set();
+  const eligibleSet = new Set();
   for (const row of rows) {
     if (!isBankMethodType(row.method_type) && inRefreshWindow(row, now)) {
-      ids.add(row.stripe_payment_method_id);
+      eligibleSet.add(row.stripe_payment_method_id);
+    }
+  }
+  const eligible = [...eligibleSet].sort();
+  const ids = [];
+  if (eligible.length > 0) {
+    const [yr, mo, dy] = etDateString(now).split('-').map(Number);
+    const dayIndex = Math.floor(Date.UTC(yr, mo - 1, dy) / 86400000);
+    const count = Math.min(MAX_DAILY_SYNC_CARDS, eligible.length);
+    const offset = (dayIndex * MAX_DAILY_SYNC_CARDS) % eligible.length;
+    for (let i = 0; i < count; i += 1) {
+      ids.push(eligible[(offset + i) % eligible.length]);
     }
   }
   const totals = { checked: 0, updated: 0, detached: 0, errors: 0 };

@@ -26,6 +26,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: jest.fn(() => false),
   sendOne: jest.fn(),
+  serviceGroupId: jest.fn(() => 22222),
 }));
 
 jest.mock('../services/logger', () => ({
@@ -179,6 +180,10 @@ describe('admin service outline sends', () => {
     const email = sendgrid.sendOne.mock.calls[0][0];
     expect(email.html).toContain('Hi &lt;img src=x onerror=alert(1)&gt;,');
     expect(email.html).not.toContain('<img src=x onerror=alert(1)>');
+    expect(email.fromEmail).toBe('contact@wavespestcontrol.com');
+    expect(email.fromName).toBe('Waves Pest Control');
+    expect(email.replyTo).toBe('contact@wavespestcontrol.com');
+    expect(email.asmGroupId).toBe(22222);
   });
 
   test('stores a resend token without overwriting the existing packet token hash', async () => {

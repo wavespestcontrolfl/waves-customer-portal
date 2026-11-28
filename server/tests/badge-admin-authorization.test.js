@@ -8,12 +8,13 @@ jest.mock('../middleware/auth', () => ({
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
-    if (req.headers['x-staff'] !== 'yes') return res.status(401).json({ error: 'staff auth required' });
-    req.techRole = 'technician';
+    const role = req.headers['x-staff-role'];
+    if (!role) return res.status(401).json({ error: 'staff auth required' });
+    req.techRole = role;
     return next();
   },
-  requireTechOrAdmin: (req, res, next) => (
-    req.techRole === 'technician' ? next() : res.status(403).json({ error: 'staff required' })
+  requireAdmin: (req, res, next) => (
+    req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })
   ),
 }));
 
@@ -42,10 +43,21 @@ describe('badge route authorization boundaries', () => {
     });
   });
 
-  test('a staff credential can access badge admin definitions', async () => {
+  test('a technician credential is refused on badge admin routes (403)', async () => {
+    await withServer(async (baseUrl) => {
+      for (const path of ['/badges/admin/definitions', '/badges/admin/stats', '/badges/admin/customer/cust-1']) {
+        const response = await fetch(`${baseUrl}${path}`, {
+          headers: { 'x-staff-role': 'technician' },
+        });
+        expect(response.status).toBe(403);
+      }
+    });
+  });
+
+  test('an admin credential can access badge admin definitions', async () => {
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/badges/admin/definitions`, {
-        headers: { 'x-staff': 'yes' },
+        headers: { 'x-staff-role': 'admin' },
       });
       expect(response.status).toBe(200);
       const body = await response.json();

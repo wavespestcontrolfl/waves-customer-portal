@@ -68,6 +68,85 @@ async function withStatementMoneyLock(statementId, fn, { database = db } = {}) {
   return database === db ? db.transaction(run) : run(database);
 }
 
+const NON_SETTLEABLE_CHILD_STATUSES = [
+  'void', 'paid', 'prepaid', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'disputed', 'processing', 'partial', 'partially_paid',
+];
+
+async function prepareSettleableStatementChildren(database, statementId, { lock = false } = {}) {
+  const { invoiceHeldForChemicalReview } = require('./invoice-helpers');
+  const childQ = database('invoices')
+    .where({ payer_statement_id: statementId })
+    .whereNot('status', 'void');
+  if (lock) childQ.forUpdate();
+  const childRows = await childQ
+    .select('id', 'invoice_number', 'customer_id', 'status', 'scheduled_send_error', 'visit_completion_packet_id');
+  const blockedChild = (childRows || []).find((row) => (
+    NON_SETTLEABLE_CHILD_STATUSES.includes(String(row?.status || '').toLowerCase())
+    || invoiceHeldForChemicalReview(row)
+  ));
+  if (blockedChild) {
+    const err = new Error(
+      `Cannot settle statement S-${statementId}: child invoice ${blockedChild.invoice_number || blockedChild.id} is held or in non-settleable status '${blockedChild.status}'.`,
+    );
+    err.statusCode = 409;
+    err.statementChildBlocked = true;
+    throw err;
+  }
+  return {
+    childCount: (childRows || []).length,
+    packetChildren: (childRows || []).filter((row) => row.visit_completion_packet_id != null),
+  };
+}
+
+async function assertStatementChildrenPayable(statementId, database = db, opts = {}) {
+  await prepareSettleableStatementChildren(database, statementId, opts);
+}
+
+async function upsertStatementPaymentRecord(database, {
+  statementId,
+  stmt,
+  stripePaymentIntentId,
+  stripeChargeId,
+  amountCents,
+  baseAmountCents,
+  surchargeAmountCents,
+  surchargeRateBps,
+  surchargePolicyVersion,
+  cardFunding,
+  cardBrand,
+  paymentMethod,
+  processor,
+  settledAt,
+  source,
+}) {
+  const existingRow = stripePaymentIntentId
+    ? await database('payments').where({ stripe_payment_intent_id: stripePaymentIntentId, statement_id: statementId }).first()
+    : null;
+  let priorMeta = {};
+  try { priorMeta = existingRow?.metadata ? (typeof existingRow.metadata === 'string' ? JSON.parse(existingRow.metadata) : existingRow.metadata) : {}; } catch (e) { /* legacy */ }
+  const rowData = {
+    customer_id: null,
+    payer_id: stmt.payer_id,
+    statement_id: statementId,
+    processor,
+    stripe_payment_intent_id: stripePaymentIntentId,
+    stripe_charge_id: stripeChargeId,
+    payment_date: etDateString(settledAt instanceof Date && !Number.isNaN(settledAt.getTime()) ? settledAt : undefined),
+    amount: amountCents / 100,
+    base_amount_cents: baseAmountCents,
+    surcharge_amount_cents: surchargeAmountCents || 0,
+    surcharge_rate_bps: surchargeRateBps || 0,
+    surcharge_policy_version: surchargePolicyVersion,
+    card_funding: cardFunding,
+    card_brand: cardBrand,
+    status: 'paid',
+    description: `Payer statement S-${statementId} settlement (${paymentMethod})`,
+    metadata: JSON.stringify({ ...priorMeta, statement_id: statementId, payer_id: stmt.payer_id, payment_method: paymentMethod, source }),
+  };
+  if (existingRow) await database('payments').where({ id: existingRow.id }).update(rowData);
+  else await database('payments').insert(rowData);
+}
+
 /**
  * Cascade-settle a statement to `paid`. MUST run inside the caller's transaction
  * (webhook or admin reconcile). Idempotent: a statement already `paid` is a
@@ -76,7 +155,28 @@ async function withStatementMoneyLock(statementId, fn, { database = db } = {}) {
  * `settlement.amountCents` = the CHARGED total (surcharged for a card; bare total
  * for ACH/offline). The base/surcharge split rides the `*_cents` columns.
  */
-async function settleStatementPaid(statementId, settlement = {}, { database = db, allowedStatuses = SETTLEABLE_STATEMENT_STATUSES } = {}) {
+const DEFAULT_SETTLEMENT = Object.freeze({
+  paymentMethod: 'offline',
+  processor: null,
+  stripePaymentIntentId: null,
+  stripeChargeId: null,
+  baseAmountCents: null,
+  surchargeAmountCents: 0,
+  surchargeRateBps: 0,
+  surchargePolicyVersion: null,
+  cardFunding: null,
+  cardBrand: null,
+  // Settlement moment when the caller knows it (the webhook passes
+  // Stripe's event timestamp); payment_date buckets P&L revenue, so
+  // defaulting to handler-run time would let a delayed/retried webhook
+  // move statement cash across a period boundary.
+  settledAt: null,
+  source: 'unknown',
+});
+
+async function settleStatementPaid(statementId, settlement, options) {
+  const database = (options && options.database) || db;
+  const allowedStatuses = (options && options.allowedStatuses) || SETTLEABLE_STATEMENT_STATUSES;
   // Serialize against concurrent/out-of-order dispute & refund events on the same
   // statement (they take the same advisory lock) — see withStatementMoneyLock.
   await database.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
@@ -105,27 +205,12 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
     throw err;
   }
 
-  const {
-    paymentMethod = 'offline',
-    processor = null,
-    stripePaymentIntentId = null,
-    stripeChargeId = null,
-    amountCents,
-    baseAmountCents = null,
-    surchargeAmountCents = 0,
-    surchargeRateBps = 0,
-    surchargePolicyVersion = null,
-    cardFunding = null,
-    cardBrand = null,
-    // Settlement moment when the caller knows it (the webhook passes
-    // Stripe's event timestamp); payment_date buckets P&L revenue, so
-    // defaulting to handler-run time would let a delayed/retried webhook
-    // move statement cash across a period boundary.
-    settledAt = null,
-    source = 'unknown',
-  } = settlement;
+  const s = { ...DEFAULT_SETTLEMENT, ...settlement };
+  if (!Number.isFinite(s.amountCents)) throw new Error('settleStatementPaid: numeric amountCents required');
 
-  if (!Number.isFinite(amountCents)) throw new Error('settleStatementPaid: numeric amountCents required');
+  // Guard BEFORE mutating payer_statements (B-34): lock and verify every
+  // attached non-void child invoice is settleable and not held.
+  const { childCount, packetChildren } = await prepareSettleableStatementChildren(database, statementId, { lock: true });
 
   // One settlement timestamp shared by the statement AND its children so a child's
   // paid_at is a true settlement marker (= statement.paid_at), not a per-row clock.
@@ -134,62 +219,27 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   await database('payer_statements').where({ id: statementId }).update({
     status: 'paid',
     paid_at: paidAt,
-    payment_method: paymentMethod,
-    stripe_charge_id: stripeChargeId || stmt.stripe_charge_id || null,
-    stripe_payment_intent_id: stripePaymentIntentId || stmt.stripe_payment_intent_id || null,
+    payment_method: s.paymentMethod,
+    stripe_charge_id: s.stripeChargeId || stmt.stripe_charge_id || null,
+    stripe_payment_intent_id: s.stripePaymentIntentId || stmt.stripe_payment_intent_id || null,
     updated_at: paidAt,
   });
 
-  // Cascade — accrued children are `draft`; settle every non-void/non-paid one.
-  // The packet-owned children are captured BEFORE the update: a review the
-  // closeout deferred behind an unpaid invoice is enrolled by the settlement
-  // signal, and this rail (NET statement payment) never sent one (Codex
-  // #4311 r29 P1). After the update those rows are indistinguishable from
-  // children settled by an earlier statement run.
-  const packetChildren = await database('invoices')
-    .where({ payer_statement_id: statementId })
-    .whereNotIn('status', ['void', 'paid'])
-    .whereNotNull('visit_completion_packet_id')
-    .select('id', 'invoice_number', 'customer_id', 'visit_completion_packet_id');
   const childrenSettled = await database('invoices')
     .where({ payer_statement_id: statementId })
-    .whereNotIn('status', ['void', 'paid'])
+    .whereNotIn('status', NON_SETTLEABLE_CHILD_STATUSES)
+    .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'chemical_addon_review:%')")
     .update({ status: 'paid', paid_at: paidAt, updated_at: paidAt });
+  if (childCount > 0 && Number.isFinite(childrenSettled) && childrenSettled < childCount) {
+    const err = new Error(`Cannot settle statement S-${statementId}: expected to settle ${childCount} child invoice(s), settled ${childrenSettled}.`);
+    err.statusCode = 409;
+    err.statementChildBlocked = true;
+    throw err;
+  }
 
-  // ONE payer-scoped ledger row (customer_id NULL — a statement spans many homes).
-  // UPSERT on the PI: an out-of-order dispute.closed can pre-write a durable
-  // marker row for this PI; settling must CONSUME it (update), not insert a
-  // duplicate. Merge any existing dispute_final marker into the metadata.
-  const existingRow = stripePaymentIntentId
-    ? await database('payments').where({ stripe_payment_intent_id: stripePaymentIntentId, statement_id: statementId }).first()
-    : null;
-  let priorMeta = {};
-  try { priorMeta = existingRow?.metadata ? (typeof existingRow.metadata === 'string' ? JSON.parse(existingRow.metadata) : existingRow.metadata) : {}; } catch (e) { /* legacy */ }
-  const rowData = {
-    customer_id: null,
-    payer_id: stmt.payer_id,
-    statement_id: statementId,
-    processor,
-    stripe_payment_intent_id: stripePaymentIntentId,
-    stripe_charge_id: stripeChargeId,
-    payment_date: etDateString(settledAt instanceof Date && !Number.isNaN(settledAt.getTime()) ? settledAt : undefined),
-    amount: amountCents / 100,
-    base_amount_cents: baseAmountCents,
-    surcharge_amount_cents: surchargeAmountCents || 0,
-    surcharge_rate_bps: surchargeRateBps || 0,
-    surcharge_policy_version: surchargePolicyVersion,
-    card_funding: cardFunding,
-    card_brand: cardBrand,
-    status: 'paid',
-    description: `Payer statement S-${statementId} settlement (${paymentMethod})`,
-    // `payments` has no `payment_method` string column (only payment_method_id FK)
-    // — the method rides metadata; payer_statements.payment_method holds it too.
-    metadata: JSON.stringify({ ...priorMeta, statement_id: statementId, payer_id: stmt.payer_id, payment_method: paymentMethod, source }),
-  };
-  if (existingRow) await database('payments').where({ id: existingRow.id }).update(rowData);
-  else await database('payments').insert(rowData);
+  await upsertStatementPaymentRecord(database, { ...s, statementId, stmt });
 
-  logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${source})`);
+  logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${s.paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${s.source})`);
   // The packet children are RETURNED, not enrolled here (local audit r29 P1):
   // both callers settle inside a transaction, and enrollment runs on the root
   // connection — it would read each child's pre-commit `unpaid` status,
@@ -365,6 +415,7 @@ module.exports = {
   priorPayableStatus,
   withStatementMoneyLock,
   settleStatementPaid,
+  assertStatementChildrenPayable,
   enrollSettledPacketReviews,
   markStatementProcessing,
   revertStatementProcessing,

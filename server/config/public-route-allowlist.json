@@ -37,7 +37,7 @@
         "USE /api/integrations/commitments-worker (commitmentsDarkGuard#fc9288cf)",
         "USE /api/pay (darkRoutePreGuard#3364a5c1)",
         "USE /api/pay (rejectUndecodablePath#5ebba315)",
-        "USE /api/pay/statement (inline function#cf970c43)",
+        "USE /api/pay/statement (statementDarkPreGuard#bc009b2c)",
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/appointment (inline function#e6220f30)",
         "USE /api/public/appointment (visitPrepPreParserGuard#0755b055)",
@@ -67,7 +67,7 @@
         "USE /api/public/secure-card (rejectUndecodablePath#5ebba315)",
         "USE /api/public/secure-card (inline function#8abc12e6)",
         "USE /api/public/track (trackPublicPreparser#28c4556d)",
-        "USE /api/public/email-resubscribe (preParserGuard#47ed312e)",
+        "USE /api/public/email-resubscribe (preParserGuard#8ee23bda)",
         "USE /api/public/home (preLimiterGuard#fcbfa1c4)",
         "USE /api/social/series (inline function#033624d5)",
         "USE /api/stripe/terminal/save-card-handoff (inline function#371094d5)"
@@ -391,7 +391,7 @@
       "mount": "/api/public/email-resubscribe",
       "reason": "Emailed 'Turn Waves emails back on?' confirm link (gap #18; owner 2026-11-04 chose confirm email incl. 'a small confirm page', copy approved): GET renders a read-only page, POST (the deliberate tap from that mailbox) lifts the customer's own unsubscribe; 32-byte token stored as sha256 only, 7-day expiry, single use; generic 404 page while GATE_PORTAL_EMAIL_RESUBSCRIBE is dark",
       "routes": [
-        "USE /api/public/email-resubscribe (preParserGuard#47ed312e)",
+        "USE /api/public/email-resubscribe (preParserGuard#8ee23bda)",
         "GET /api/public/email-resubscribe/:token",
         "POST /api/public/email-resubscribe/:token"
       ]
@@ -823,11 +823,11 @@
       "mount": "/api/pay/statement",
       "reason": "Tokenized account-statement payment page from customer comms; the USE entry is the router's 404-when-dark gate (always next() or 404)",
       "routes": [
-        "USE /api/pay/statement (inline function#d7bd2d4a)",
         "GET /api/pay/statement/:token",
         "POST /api/pay/statement/:token/finalize",
         "POST /api/pay/statement/:token/quote",
-        "POST /api/pay/statement/:token/setup"
+        "POST /api/pay/statement/:token/setup",
+        "USE /api/pay/statement (statementDarkPreGuard#bc009b2c)"
       ]
     },
     {

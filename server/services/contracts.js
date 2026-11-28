@@ -1,10 +1,11 @@
 const crypto = require('crypto');
 const { CONSENT_TEXT, CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const BUSINESS_NAME = 'Waves Pest Control, LLC';
 const BUSINESS_EMAIL = 'billing@wavespestcontrol.com';
-const BUSINESS_PHONE = '(941) 318-7612';
+const BUSINESS_PHONE = WAVES_SUPPORT_PHONE_DISPLAY;
 const CONTRACT_TOKEN_BYTES = 32;
 const CONTRACT_TOKEN_TTL_DAYS = 14;
 const CONTRACT_TOKEN_MAX_TTL_DAYS = 14;

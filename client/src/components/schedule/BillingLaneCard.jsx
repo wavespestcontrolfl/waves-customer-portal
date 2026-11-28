@@ -40,13 +40,28 @@ function predictionLine(prediction, siblingCoverage) {
     case 'covered_annual':
       return { color: GREEN, text: 'On completion: no invoice — covered by the annual prepay plan.' };
     case 'prepaid':
-      return { color: GREEN, text: `On completion: no new charge — ${money(prediction.amount)} already paid for this visit.` };
+      return {
+        color: GREEN,
+        text: prediction.amount == null
+          ? 'On completion: no new charge — prepaid for this visit.'
+          : `On completion: no new charge — ${money(prediction.amount)} already paid for this visit.`,
+      };
     case 'payer':
       return { color: MUTED, text: 'On completion: invoices the third-party billing party — do not collect from the customer.' };
     case 'auto_charge':
-      return { color: NEUTRAL.ink, text: `On completion: auto-charges the saved payment method ${money(prediction.amount)}.` };
+      return {
+        color: NEUTRAL.ink,
+        text: prediction.amount == null
+          ? 'On completion: auto-charges the saved payment method.'
+          : `On completion: auto-charges the saved payment method ${money(prediction.amount)}.`,
+      };
     case 'invoice':
-      return { color: NEUTRAL.ink, text: `On completion: sends the customer a ${money(prediction.amount)} invoice.` };
+      return {
+        color: NEUTRAL.ink,
+        text: prediction.amount == null
+          ? 'On completion: sends the customer an invoice.'
+          : `On completion: sends the customer a ${money(prediction.amount)} invoice.`,
+      };
     case 'covered_sibling_invoice': {
       const sibling = prediction.siblingServiceType ? ` on the ${prediction.siblingServiceType} visit` : '';
       const invoiceRef = prediction.invoiceNumber ? ` invoice ${prediction.invoiceNumber}` : ' an invoice';

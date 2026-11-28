@@ -386,14 +386,14 @@ export default function CustomerMovingCardV2({ customerId }) {
             onDone={async (message) => { setNote(message || ""); setManualUrl(""); await load(); }}
           />
         ))}
-        {note && <div className="text-12 text-ink-secondary mt-1.5" role="status">{note}</div>}
+        {note && <div className="text-14 text-ink-secondary mt-1.5" role="status">{note}</div>}
         {manualUrl && (
           <input
             ref={manualRef}
             readOnly
             aria-label="Moving link"
             value={manualUrl}
-            className="mt-1.5 w-full border-hairline border-zinc-300 rounded-sm px-2 py-1 text-12"
+            className="mt-1.5 w-full border-hairline border-zinc-300 rounded-sm px-2 py-1 text-16 md:text-14"
             onFocus={(e) => e.target.select()}
           />
         )}

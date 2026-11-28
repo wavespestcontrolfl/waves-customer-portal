@@ -34,13 +34,14 @@ function stubInvoiceRead(invoice) {
   return fetchMock;
 }
 
-function renderSheet() {
+function renderSheet(props = {}) {
   render(
     <MobilePaymentSheet
       desktopVisible
       service={{ id: 'svc-1' }}
       invoiceId="inv-1"
       amount={125}
+      {...props}
     />,
   );
 }
@@ -51,13 +52,13 @@ describe('MobilePaymentSheet tenders by role', () => {
     vi.unstubAllGlobals();
   });
 
-  it('renders every tender for an admin-role user, with no invoice read', () => {
+  it('renders every tender for an admin-role user with an invoice token, with no invoice read', () => {
     stubLocalStorage({
       waves_admin_token: 'test-token',
       waves_admin_user: JSON.stringify({ id: 'u1', role: 'admin' }),
     });
     const fetchMock = stubInvoiceRead({ id: 'inv-1' });
-    renderSheet();
+    renderSheet({ invoiceToken: 'tok-admin-1' });
     for (const label of ['Cash', 'Check', 'Manual Credit Card Entry', 'Card on File', 'Invoice']) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
@@ -65,7 +66,7 @@ describe('MobilePaymentSheet tenders by role', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('a technician takes cards only: no Cash, Check or Invoice, and the office line shows', async () => {
+  it('a technician takes cards only: no Cash, Check, Invoice, or token-gated Manual Card Entry when no public token is present', async () => {
     stubLocalStorage({
       waves_admin_token: 'test-token',
       waves_admin_user: JSON.stringify({ id: 'u2', role: 'technician' }),
@@ -75,8 +76,7 @@ describe('MobilePaymentSheet tenders by role', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/admin\/invoices\/inv-1$/);
     expect(screen.getByText('Tap to Pay on iPhone')).toBeInTheDocument();
-    expect(screen.getByText('Manual Credit Card Entry')).toBeInTheDocument();
-    for (const label of ['Cash', 'Check', 'Invoice', 'Card on File']) {
+    for (const label of ['Cash', 'Check', 'Invoice', 'Card on File', 'Manual Credit Card Entry']) {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }
     expect(screen.getByText('Cash or check: the office records it.')).toBeInTheDocument();
@@ -100,6 +100,7 @@ describe('MobilePaymentSheet tenders by role', () => {
     await waitFor(() => expect(first).toHaveBeenCalled());
     expect(screen.queryByText('Card on File')).not.toBeInTheDocument();
     expect(screen.queryByText('Cash')).not.toBeInTheDocument();
+    expect(screen.queryByText('Manual Credit Card Entry')).not.toBeInTheDocument();
     cleanup();
 
     stubLocalStorage({
@@ -111,7 +112,7 @@ describe('MobilePaymentSheet tenders by role', () => {
     await waitFor(() => expect(second).toHaveBeenCalled());
     expect(screen.queryByText('Cash')).not.toBeInTheDocument();
     expect(screen.queryByText('Card on File')).not.toBeInTheDocument();
-    expect(screen.getByText('Manual Credit Card Entry')).toBeInTheDocument();
+    expect(screen.queryByText('Manual Credit Card Entry')).not.toBeInTheDocument();
   });
 });
 
