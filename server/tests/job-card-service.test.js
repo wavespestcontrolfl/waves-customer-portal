@@ -3635,13 +3635,22 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     );
     expect(matchedFlowZone.mixRates[0].calibrationWarnings).toBeUndefined();
 
-    // Assigned truck rig triggers equipment mismatch (not dosage warning) on a FlowZone-only row.
+    // Assigned truck rig skips FlowZone-only mosquito dosage check without falsely prohibiting Termidor 100-gal tank rows.
     const truckMismatch = {
       mixRates: [{
         product: 'Suspend Polyzone',
         sprayers: ['flowzone_4_gal'],
         perGallon: { amount: 1.1, unit: 'fl oz' },
         sprayVolume: '1 gal per 1,500 sq ft',
+      }, {
+        product: 'Termidor SC',
+        sprayers: ['bg_1_gal', 'flowzone_4_gal'],
+        perGallon: { amount: 0.8, unit: 'fl oz' },
+        sprayVolume: '4 gal per 10 linear ft. 100 gal tank: 78 fl oz',
+      }, {
+        product: 'Explicitly Restricted Item',
+        allowedSprayers: ['flowzone_4_gal'],
+        perGallon: { amount: 1, unit: 'fl oz' },
       }],
     };
     jobCard._test.attachMixCalibrationWarnings(
@@ -3650,9 +3659,18 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       { equipmentSystemId: 'sys-truck' },
       [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
     );
-    expect(truckMismatch.mixRates[0].calibrationWarnings).toEqual([
-      'Truck Rig #1 is not an allowed sprayer for Suspend Polyzone (FlowZone 4 gal).',
+    expect(truckMismatch.mixRates[0].calibrationWarnings).toBeUndefined();
+    expect(truckMismatch.mixRates[1].calibrationWarnings).toBeUndefined();
+    expect(truckMismatch.mixRates[2].calibrationWarnings).toEqual([
+      'Truck Rig #1 is not allowed for Explicitly Restricted Item.',
     ]);
+
+    // Catalog-matched mixRates rows join the spray check and carry their verdict back.
+    const entries = [{ procedure: { mixRates: [{ product: 'Taurus SC', productId: 'cat-taurus' }] }, lines: [] }];
+    const merged = jobCard._test.mergeSprayCheckProducts([], entries, [{ id: 'cat-taurus', name: 'Taurus SC' }]);
+    expect(merged.map((p) => p.id)).toEqual(['cat-taurus']);
+    jobCard._test.attachMixSprayVerdicts(entries, [{ productId: 'cat-taurus', verdict: 'hold', reason: 'Rain within 2 hours' }]);
+    expect(entries[0].procedure.mixRates[0].sprayCheck).toEqual({ verdict: 'hold', reason: 'Rain within 2 hours' });
 
     // Assigned compatible sprayer with no usable calibration warns beside rows with sprayVolume or area limit.
     const uncalibratedRig = {

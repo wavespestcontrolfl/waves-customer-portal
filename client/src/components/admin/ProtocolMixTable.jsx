@@ -13,16 +13,37 @@ function productMatchForRow(row, products) {
   return exactMatches.length === 1 ? exactMatches[0] : null;
 }
 
+function sprayFieldsForRow(match, spray) {
+  if (match) {
+    return {
+      isHold: match.verdict === "hold",
+      reason: match.verdict !== "ok" ? match.verdictReason : null,
+      action: match.verdictAction,
+      note: match.amountNote,
+    };
+  }
+  if (spray) {
+    return {
+      isHold: spray.verdict === "hold",
+      reason: spray.verdict && spray.verdict !== "ok" ? spray.reason : null,
+      action: spray.action,
+      note: null,
+    };
+  }
+  return null;
+}
+
 function rowWarningInfo(row, products) {
   const liveCard = Array.isArray(products);
   const match = liveCard ? productMatchForRow(row, products) : null;
-  const missingCheck = liveCard && !match && !row?.labelRateMissing && Boolean(row?.perGallon || row?.dose);
+  const fields = sprayFieldsForRow(match, row?.sprayCheck);
+  const missingCheck = liveCard && !fields && !row?.labelRateMissing && Boolean(row?.perGallon || row?.dose);
   const rawParts = [
     row?.labelWarning,
     ...(Array.isArray(row?.calibrationWarnings) ? row.calibrationWarnings : []),
-    match?.amountNote,
-    match?.verdict && match.verdict !== "ok" ? match.verdictReason : null,
-    match?.verdictAction,
+    fields?.note,
+    fields?.reason,
+    fields?.action,
     missingCheck ? "Product check unavailable on this Job Card — verify spray check and label before mixing." : null,
   ]
     .map((s) => String(s || "").trim())
@@ -30,11 +51,7 @@ function rowWarningInfo(row, products) {
   const parts = rawParts.filter(
     (s, i) => !rawParts.some((other, j) => j !== i && (other === s ? j < i : other.includes(s))),
   );
-  if (!parts.length) return null;
-  return {
-    isHold: match?.verdict === "hold",
-    text: parts.join(" · "),
-  };
+  return parts.length ? { isHold: Boolean(fields?.isHold), text: parts.join(" · ") } : null;
 }
 
 // The card's mix amounts: one row per product, one column per sprayer the card uses. `sprayers`: the card's own tanks

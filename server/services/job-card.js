@@ -2205,20 +2205,23 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   ]);
   const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000, mixingOrder, bermudaMixingOrder, mixRequired, bermudaRequired } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
   const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
-  attachMixCalibrationWarnings([
-    { procedure, lines: lines.filter((l) => !l.source) },
-    ...addons.map((addon) => ({ procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
-  ], tank, facts.rig, systems);
+  const procedureEntries = [
+    { name: facts.serviceType, serviceKey: facts.serviceKey, procedure, lines: lines.filter((l) => !l.source) },
+    ...addons.map((addon) => ({ name: addon.name, serviceKey: null, procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
+  ];
+  attachMixCalibrationWarnings(procedureEntries, tank, facts.rig, systems);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
-  const products = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];
+  const lineProducts = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];
+  const products = mergeSprayCheckProducts(lineProducts, procedureEntries, catalog);
   // Limits are judged from the appointment start (now once the window has
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
   const labelSources = await checkReviewedWeatherSources(products);
   // The spray check judges with the rain rules and records what it shows (spray_rain_rule_shadow), never awaited,
   // never fatal, so the real rain odds behind every caution stay countable (owner 2026-10-29). A product's Waves
   // rule comes from the services whose lines name it (an add-on's line is its add-on's).
-  const rainRules = rainRulesFor(products, (p) => lines.filter((l) => l.product.id === p.id).map((l) => lineService(l, facts)));
+  const rainRules = rainRulesFor(products, (p) => sprayServicesForProduct(p, lines, procedureEntries, facts));
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
+  attachMixSprayVerdicts(procedureEntries, sprayCheck.verdicts);
   if (isToday && lines.length) {
     const shadow = sprayCheck;
     const names = new Map(products.map((p) => [p.id, p.name]));
@@ -2536,7 +2539,6 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
 // Reuse the tank calculator's carrier-volume and one-spray area-cap checks for every
 // procedure mix row when the appointment names an assigned sprayer rig.
 const SPRAY_VOL_GAL_RE = /(\d+(?:\.\d+)?)\s*gal(?:lon)?s?\s+per\s+(\d+(?:,\d+)?)\s*sq\.?\s*ft/i;
-const SPRAYER_KEY_LABELS = { bg_1_gal: 'B&G 1 gal', flowzone_4_gal: 'FlowZone 4 gal', rig_100_gal: 'Rig 100 gal' };
 const roundDbPrecision = (v) => Math.round(Number(v) * 1000) / 1000;
 
 function sprayVolumeGalPer1000(text) {
@@ -2557,21 +2559,34 @@ function rigSprayerKey(tank, assignedSys, rigName) {
   return null;
 }
 
-function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey }) {
-  const line = row.productId ? lines.find((l) => String(l.product?.id) === String(row.productId)) : null;
+function rigAppliesToMixRow(row, rigKey) {
+  if (!rigKey) return true;
+  const sprayers = Array.isArray(row.sprayers) ? row.sprayers : [];
+  if (!sprayers.length || sprayers.includes(rigKey)) return true;
+  return rigKey === 'rig_100_gal' && /100\s*gal/i.test(String(row.sprayVolume || ''));
+}
+
+function mixRowCarrierAndBand(row, line) {
   const rawCarrier = line?.labelCarrierGalPer1000 || sprayVolumeGalPer1000(row.sprayVolume);
   const lineCarrier = rawCarrier ? roundDbPrecision(rawCarrier) : null;
-  const lo = Number(row?.perGallon?.amount || 0);
-  const hi = Number(row?.perGallon?.amountMax > lo ? row.perGallon.amountMax : lo);
-  const band = lo > 0 && row?.perGallon?.unit ? { lo, hi, unit: String(row.perGallon.unit) } : null;
-  const capLine = areaCapOf(row.limit).areaCap ? areaCapOf(row.limit) : areaCapOf(line?.raw);
-  if (rigKey && Array.isArray(row.sprayers) && row.sprayers.length && !row.sprayers.includes(rigKey)) {
-    const allowed = row.sprayers.map((k) => SPRAYER_KEY_LABELS[k] || k).join(' or ');
-    return [`${rigCtx.rigName} is not an allowed sprayer for ${row.product} (${allowed}).`];
+  const lo = Number(row.perGallon?.amount || 0);
+  const hi = Math.max(lo, Number(row.perGallon?.amountMax || 0));
+  const band = lo > 0 && row.perGallon?.unit ? { lo, hi, unit: String(row.perGallon.unit) } : null;
+  const fromRow = areaCapOf(row.limit);
+  const capLine = fromRow.areaCap ? fromRow : areaCapOf(line?.raw);
+  return { lineCarrier, band, capLine };
+}
+
+function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey }) {
+  if (rigKey && Array.isArray(row.allowedSprayers) && !row.allowedSprayers.includes(rigKey)) {
+    return [`${rigCtx.rigName} is not allowed for ${row.product}.`];
   }
+  if (!rigAppliesToMixRow(row, rigKey)) return [];
+  const line = row.productId ? lines.find((l) => String(l.product?.id) === String(row.productId)) : null;
+  const { lineCarrier, band, capLine } = mixRowCarrierAndBand(row, line);
   if (!rigCtx.rigCarrier) {
     return lineCarrier || capLine.areaCap
-      ? [`${tank?.reason || 'No sprayer calibration on file'} — verify ${rigCtx.rigName} output against this row's spray volume or area limit.`]
+      ? [`${tank.reason || 'No sprayer calibration on file'} — verify ${rigCtx.rigName} output against this row's spray volume or area limit.`]
       : [];
   }
   return [
@@ -2581,20 +2596,60 @@ function calibrationWarningsForMixRow(row, lines, { tank, rigCtx, rigKey }) {
 }
 
 function attachMixCalibrationWarnings(entries, tank, rig, systems = []) {
-  const namedRig = Boolean(rig?.equipmentSystemId || rig?.calibrationId);
-  if (!namedRig) return;
-  const assignedSys = (systems || []).find((s) => rig?.equipmentSystemId && String(s.id) === String(rig.equipmentSystemId)) || null;
-  const rigCarrier = tank?.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? roundDbPrecision(tank.carrierGalPer1000) : null;
-  const rigName = tank?.systemName || assignedSys?.name || 'Assigned sprayer';
-  const rigCtx = { rigCarrier, rigName, rigGalPer1000: rigCarrier || tank?.carrierGalPer1000 };
+  const hasNamedRig = Boolean(rig && (rig.equipmentSystemId || rig.calibrationId));
+  if (!hasNamedRig || !tank) return;
+  const assignedSys = rig.equipmentSystemId ? systems.find((s) => String(s.id) === String(rig.equipmentSystemId)) : null;
+  const rigCarrier = tank.source === 'rig' && tank.carrierGalPer1000 > 0 ? roundDbPrecision(tank.carrierGalPer1000) : null;
+  const rigName = tank.systemName || assignedSys?.name || 'Assigned sprayer';
+  const rigCtx = { rigCarrier, rigName, rigGalPer1000: rigCarrier || tank.carrierGalPer1000 };
   const rigKey = rigSprayerKey(tank, assignedSys, rigName);
   for (const entry of entries) {
     const proc = entry?.procedure || entry;
-    const procLines = entry?.lines || [];
     if (!Array.isArray(proc?.mixRates)) continue;
     proc.mixRates = proc.mixRates.map((row) => {
-      const warnings = calibrationWarningsForMixRow(row, procLines, { tank, rigCtx, rigKey });
+      const warnings = calibrationWarningsForMixRow(row, entry?.lines || [], { tank, rigCtx, rigKey });
       return warnings.length ? { ...row, calibrationWarnings: warnings } : row;
+    });
+  }
+}
+
+function mergeSprayCheckProducts(lineProducts, entries, catalog) {
+  const byId = new Map(lineProducts.map((p) => [String(p.id), p]));
+  const catalogById = new Map((catalog || []).map((p) => [String(p.id), p]));
+  for (const entry of entries) {
+    for (const row of entry.procedure?.mixRates || []) {
+      const id = row.productId ? String(row.productId) : null;
+      if (id && !byId.has(id) && catalogById.has(id)) byId.set(id, catalogById.get(id));
+    }
+  }
+  return [...byId.values()];
+}
+
+function sprayServicesForProduct(product, lines, entries, facts) {
+  const fromLines = lines.filter((l) => l.product.id === product.id).map((l) => lineService(l, facts));
+  if (fromLines.length) return fromLines;
+  const pid = String(product.id);
+  const fromEntries = entries
+    .filter((entry) => entry.procedure?.mixRates?.some((row) => String(row.productId) === pid))
+    .map((entry) => ({ name: entry.name, serviceKey: entry.serviceKey }));
+  return fromEntries.length ? fromEntries : [{ name: facts.serviceType, serviceKey: facts.serviceKey || null }];
+}
+
+function attachMixSprayVerdicts(entries, verdicts) {
+  const byId = new Map((verdicts || []).map((v) => [String(v.productId), v]));
+  for (const entry of entries) {
+    if (!Array.isArray(entry.procedure?.mixRates)) continue;
+    entry.procedure.mixRates = entry.procedure.mixRates.map((row) => {
+      const v = row.productId ? byId.get(String(row.productId)) : null;
+      return v ? {
+        ...row,
+        sprayCheck: {
+          verdict: v.verdict,
+          reason: v.reason,
+          ...(v.level ? { level: v.level } : {}),
+          ...(v.action ? { action: v.action } : {}),
+        },
+      } : row;
     });
   }
 }
@@ -2947,5 +3002,5 @@ module.exports = {
   resolveVisitLines,
   describeLine,
   ALTERNATE_ADDRESS_BLOCK,
-  _test: { primaryProgramKey, protocolBand, fieldGuideMixWarning, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow, attachMixCalibrationWarnings },
+  _test: { primaryProgramKey, protocolBand, fieldGuideMixWarning, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow, attachMixCalibrationWarnings, mergeSprayCheckProducts, attachMixSprayVerdicts },
 };

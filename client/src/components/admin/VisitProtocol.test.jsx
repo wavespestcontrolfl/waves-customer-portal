@@ -124,6 +124,7 @@ it('keeps mix amounts visible and shows matching spray check warnings for primar
         ...mosquitoProc,
         mixRates: [
           ...mosquitoProc.mixRates,
+          { product: 'Taurus SC', productId: 'p-taurus', where: 'Foundation pin', perGallon: { amount: 0.8, unit: 'fl oz' }, sprayers: ['bg_1_gal'], sprayCheck: { verdict: 'hold', reason: 'Heavy rain expected within 2 hours.' } },
           { product: 'Suspend PolyZone', productId: null, where: 'Failed server lookup check', perGallon: { amount: 0.4, unit: 'fl oz' }, sprayers: ['bg_1_gal'], calibrationWarnings: ['Assigned sprayer puts out 2 gal per 1,000 sq ft instead of 1.'] },
         ],
       },
@@ -147,6 +148,7 @@ it('keeps mix amounts visible and shows matching spray check warnings for primar
   expect(screen.getByText('4.4 fl oz')).toBeVisible();
   expect(screen.getByText(/Wind 18 mph exceeds 15 mph PolyZone limit/)).toBeVisible();
   expect(screen.getByText(/0\.4 fl oz/)).toBeVisible();
+  expect(screen.getByText(/Heavy rain expected within 2 hours/)).toBeVisible();
   expect(screen.getByText(/Product check unavailable on this Job Card/)).toBeVisible();
   expect(screen.getByText(/Assigned sprayer puts out 2 gal per 1,000 sq ft/)).toBeVisible();
   expect(screen.getByText('2 lb per 1,000 sq ft')).toBeVisible();
