@@ -510,8 +510,12 @@ async function groupByPayingAddress(dbh, homes, { customers, payers, optedOut })
       continue;
     }
     if (!isEmailLike(address)) { noAddress.push(home); continue; }
-    if (!groups.has(key)) groups.set(key, { key, address, payer: null, homes: [] });
-    const group = groups.get(key);
+    // Keep payer-billed and self-pay homes in separate groups even when they
+    // share an email address so a payer home never exempts self-pay homes from
+    // shared-inbox opt-out suppression.
+    const groupKey = `${payer ? 'payer' : 'self'}:${key}`;
+    if (!groups.has(groupKey)) groups.set(groupKey, { key, address, payer: payer || null, homes: [] });
+    const group = groups.get(groupKey);
     if (payer && !group.payer) group.payer = payer;
     group.homes.push({ ...home, payment: await paymentCell(dbh, customer, payer) });
   }

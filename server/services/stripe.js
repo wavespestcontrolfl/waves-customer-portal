@@ -5229,6 +5229,7 @@ const StripeService = {
           err.staleBalance = true;
           throw err;
         }
+        await require('./invoice-promo-code').assertNoPendingPromoCode(lockedInvoice, trx);
         await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, lockedInvoice);
       }
       // Guard against a racing setup/replace having already repointed the PI.

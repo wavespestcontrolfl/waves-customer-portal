@@ -144,7 +144,9 @@ async function countActiveEstimatePromoHolds(conn, discountId, { customerId = nu
     .whereNotIn('e.status', DEAD_ESTIMATE_STATUSES)
     .whereNull('e.archived_at')
     .where(function notExpired() {
-      this.whereNull('e.expires_at').orWhere('e.expires_at', '>', conn.fn.now());
+      this.where('e.status', 'accepted')
+        .orWhereNull('e.expires_at')
+        .orWhere('e.expires_at', '>', conn.fn.now());
     });
   if (customerId) query.where('e.customer_id', customerId);
   const held = await query.count('* as c').first();

@@ -28,7 +28,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { round2, computeApplication } = require('./customer-credit');
 const { invoiceAmountDue, assertInvoiceCollectible } = require('./invoice-helpers');
-const { invoicePayerOwnership } = require('./invoice-payer-ownership');
+const { invoicePayerOwnership, linkedVisitIdOf } = require('./invoice-payer-ownership');
 const Promo = require('./estimate-promo-code');
 
 const gateOn = () => isEnabled('payPromoCode');
@@ -40,6 +40,8 @@ const VOID_REASONS = {
   customer_not_eligible: 'this customer is not eligible for the code or already used it',
   uses_exhausted: 'the code ran out of uses',
   invoice_below_minimum: 'the remaining balance is too small to apply this code',
+  payment_plan_active: 'this invoice is on an active payment plan',
+  invoice_not_payable: 'this invoice is no longer eligible for a promo code',
 };
 
 const RECONCILIATION_PENDING_CODES = new Set([
@@ -181,7 +183,9 @@ async function strictPendingPromoCredit(invoice, conn = db) {
   const row = await conn('invoice_promo_codes')
     .where({ invoice_id: invoice.id, status: 'entered' })
     .first('credit_amount');
-  return row ? applicablePromoAmountForInvoice(row.credit_amount, invoice) : 0;
+  if (!row) return 0;
+  if (await hasActivePaymentPlan(invoice.id, conn)) return 0;
+  return applicablePromoAmountForInvoice(row.credit_amount, invoice);
 }
 
 /**
@@ -326,9 +330,16 @@ async function redeemAndApplyPromoCode(trx, invoice) {
       if (liveOwner !== null) {
         throw Object.assign(new Error('promo credit blocked for payer-owned invoice'), { promoNotApplied: 'payer_owned' });
       }
+      if (await hasActivePaymentPlan(invoice.id, savepoint)) {
+        return voidRow(savepoint, row, 'payment_plan_active');
+      }
+      if (await isRenewalUnpayableForPromo(invoice, savepoint)) {
+        return voidRow(savepoint, row, 'invoice_not_payable');
+      }
       if (!(applicablePromoAmountForInvoice(row.credit_amount, invoice) > 0)) {
         return voidRow(savepoint, row, 'invoice_below_minimum');
       }
+      const effectiveVisitId = await linkedVisitIdOf(invoice, savepoint);
       const posted = await redeemRow(savepoint, row, invoice);
       // Voided (switched off, used up, not eligible): that verdict is kept.
       if (!(posted > 0)) return 0;
@@ -337,10 +348,17 @@ async function redeemAndApplyPromoCode(trx, invoice) {
         customerRequested: true,
         applyAtMost: posted,
         createdBy: APPLIED_BY,
-        ...(invoice.scheduled_service_id ? { requireSelfPayScheduledServiceId: invoice.scheduled_service_id } : {}),
+        ...(effectiveVisitId ? { requireSelfPayScheduledServiceId: effectiveVisitId } : {}),
       }, savepoint);
       if (!(drawn?.applied > 0)) {
         throw Object.assign(new Error('promo credit not applied'), { promoNotApplied: drawn?.skipped || 'nothing_applied' });
+      }
+      const actualApplied = round2(drawn.applied);
+      if (actualApplied !== round2(row.credit_amount)) {
+        await savepoint('invoice_promo_codes').where({ id: row.id }).update({
+          credit_amount: actualApplied,
+          updated_at: savepoint.fn.now(),
+        });
       }
       return drawn.applied;
     });

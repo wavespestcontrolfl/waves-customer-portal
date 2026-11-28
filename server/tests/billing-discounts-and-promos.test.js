@@ -238,9 +238,13 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
       let caught = null;
       await jest.isolateModulesAsync(async () => {
         jest.doMock('../config/feature-gates', () => ({ isEnabled: () => true }));
-        const mockConn = jest.fn(() => ({
+        const mockConn = jest.fn((table) => ({
           where: jest.fn().mockReturnThis(),
-          first: jest.fn(async () => ({ id: 'ipc-1', code: 'SAVE25', credit_amount: '25.00', status: 'entered' })),
+          first: jest.fn(async () => (
+            table === 'invoice_promo_codes'
+              ? { id: 'ipc-1', code: 'SAVE25', credit_amount: '25.00', status: 'entered' }
+              : null
+          )),
         }));
         const InvoicePromo = require('../services/invoice-promo-code');
         try {
@@ -259,7 +263,7 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
     test('pay-v2 /quote and stripe.js /update-amount & /finalize wire assertNoPendingPromoCode and 409 staleBalance (B-05)', () => {
       const stripeSrc = fs.readFileSync(path.join(__dirname, '../services/stripe.js'), 'utf8');
       const matches = stripeSrc.match(/assertNoPendingPromoCode\(/g) || [];
-      expect(matches).toHaveLength(7); // updateInvoicePaymentIntentMethod (pre + combined + single), quoteInvoiceSurcharge (+ sibling helper), finalizeInvoicePayment (pre + locked)
+      expect(matches).toHaveLength(8); // updateInvoicePaymentIntentMethod (pre + combined + single + replace single), quoteInvoiceSurcharge (+ sibling helper), finalizeInvoicePayment (pre + locked)
       const payV2Src = fs.readFileSync(path.join(__dirname, '../routes/pay-v2.js'), 'utf8');
       expect(payV2Src).toContain('respondPayPhaseError');
       expect(payV2Src).toContain('err.statusCode === 409 && err.staleBalance');
@@ -401,6 +405,7 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
               whereIn: jest.fn(() => q),
               whereNotIn: jest.fn(() => q),
               whereNull: jest.fn(() => q),
+              orWhereNull: jest.fn(() => q),
               orWhere: jest.fn(() => q),
               count: jest.fn(() => q),
               first: jest.fn(async () => ({ c: 0 })),
@@ -554,6 +559,29 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
       expect(emails).toContain('ap@builder.example');
       expect(emails).toContain('ok@example.com');
       expect(emails).not.toContain('family@example.com');
+
+      // When a payer home and an opted-out self-pay home share the exact same email
+      // address, the payer group still delivers while the self-pay group is suppressed.
+      const sharedCustomers = new Map([
+        ['c-p-shared', { id: 'c-p-shared', first_name: 'Builder', email: 'shared@example.com' }],
+        ['c-s-optout', { id: 'c-s-optout', first_name: 'OptOut', email: 'shared@example.com' }],
+        ['c-s-other', { id: 'c-s-other', first_name: 'Sibling', email: 'shared@example.com' }],
+      ]);
+      const sharedPayers = new Map([
+        ['p-shared', { id: 'p-shared', ap_email: 'shared@example.com', display_name: 'Shared AP' }],
+      ]);
+      const sharedOut = await groupByPayingAddress(
+        stubDbh,
+        [
+          { customerId: 'c-p-shared', payerId: 'p-shared', address: '1 Builder Way' },
+          { customerId: 'c-s-optout', payerId: null, address: '2 Home Way' },
+          { customerId: 'c-s-other', payerId: null, address: '3 Home Way' },
+        ],
+        { customers: sharedCustomers, payers: sharedPayers, optedOut: new Set(['c-s-optout']) },
+      );
+      expect(sharedOut.groups).toHaveLength(1);
+      expect(sharedOut.groups[0].payer?.id).toBe('p-shared');
+      expect(sharedOut.groups[0].homes.map((h) => h.customerId)).toEqual(['c-p-shared']);
     });
   });
 
