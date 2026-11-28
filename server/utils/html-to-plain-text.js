@@ -46,9 +46,9 @@ function endsWith(out, re) {
   return true;
 }
 
-function renderAnchor(node) {
+function renderAnchor(node, opts) {
   const labelParts = [];
-  for (const child of node.childNodes || []) collectText(child, labelParts);
+  for (const child of node.childNodes || []) collectText(child, labelParts, opts);
   const label = labelParts.join('').replace(/\s+/g, ' ').trim();
   const href = attrValue(node, 'href');
   if (!href || /^(?:javascript|data):/i.test(href)) return label;
@@ -56,20 +56,36 @@ function renderAnchor(node) {
   return `${label} (${href})`;
 }
 
-function renderChildren(node) {
+function renderChildren(node, opts) {
   const inner = [];
-  for (const child of node.childNodes || []) collectText(child, inner);
+  for (const child of node.childNodes || []) collectText(child, inner, opts);
   return normalizeLines(inner.join(''));
 }
 
-function renderCell(node, out) {
-  const cell = renderChildren(node);
+function renderCell(node, out, opts) {
+  const cell = renderChildren(node, opts);
   if (!cell) return;
   if (!endsWith(out, /[\s\n]$/)) out.push(' ');
   out.push(cell);
 }
 
-function renderSpecialTag(node, tag, out) {
+function renderQuoteOrSig(node, tag, out, opts) {
+  if (isQuoteContainer(node, tag)) {
+    if (opts.stripQuotes) return true;
+    const quoted = renderChildren(node, opts);
+    if (quoted) out.push(`\n${quoted.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')}\n`);
+    return true;
+  }
+  if (isSignatureContainer(node)) {
+    if (opts.stripSignatures) return true;
+    const sig = renderChildren(node, opts);
+    if (sig) out.push(`\n--\n${sig}\n`);
+    return true;
+  }
+  return false;
+}
+
+function renderSpecialTag(node, tag, out, opts) {
   if (tag === 'br') { out.push('\n'); return true; }
   if (tag === 'img') {
     const alt = attrValue(node, 'alt');
@@ -79,22 +95,12 @@ function renderSpecialTag(node, tag, out) {
     }
     return true;
   }
-  if (tag === 'a') { out.push(renderAnchor(node)); return true; }
-  if (CELL_TAGS.has(tag)) { renderCell(node, out); return true; }
-  if (isQuoteContainer(node, tag)) {
-    const quoted = renderChildren(node);
-    if (quoted) out.push(`\n${quoted.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')}\n`);
-    return true;
-  }
-  if (isSignatureContainer(node)) {
-    const sig = renderChildren(node);
-    if (sig) out.push(`\n--\n${sig}\n`);
-    return true;
-  }
-  return false;
+  if (tag === 'a') { out.push(renderAnchor(node, opts)); return true; }
+  if (CELL_TAGS.has(tag)) { renderCell(node, out, opts); return true; }
+  return renderQuoteOrSig(node, tag, out, opts);
 }
 
-function collectText(node, out) {
+function collectText(node, out, opts) {
   if (!node) return;
   if (node.nodeName === '#text') {
     out.push(String(node.value || '').replace(/\u00a0/g, ' '));
@@ -102,16 +108,16 @@ function collectText(node, out) {
   }
   const tag = String(node.tagName || '').toLowerCase();
   if (SKIP_TAGS.has(tag) || isHiddenNode(node)) return;
-  if (renderSpecialTag(node, tag, out)) return;
+  if (renderSpecialTag(node, tag, out, opts)) return;
   if (BLOCK_TAGS.has(tag) && !endsWith(out, /\n$/)) out.push('\n');
-  for (const child of node.childNodes || []) collectText(child, out);
+  for (const child of node.childNodes || []) collectText(child, out, opts);
   if (BLOCK_TAGS.has(tag) && !endsWith(out, /\n$/)) out.push('\n');
 }
 
-function htmlToPlainText(html) {
+function htmlToPlainText(html, opts = {}) {
   const fragment = parseFragment(String(html || ''));
   const parts = [];
-  for (const child of fragment.childNodes || []) collectText(child, parts);
+  for (const child of fragment.childNodes || []) collectText(child, parts, opts);
   return normalizeLines(parts.join(''));
 }
 

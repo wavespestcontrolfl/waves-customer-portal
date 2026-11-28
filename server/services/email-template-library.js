@@ -96,17 +96,20 @@ function safeImageUrl(url) {
   return /^(https?:\/\/|\/)/i.test(safe) ? safe : '';
 }
 
-function validatedUnsubscribeUrl(url) {
+const BATCH_UNSUBSCRIBE_TOKEN = '{{unsubscribe_url}}';
+
+function validatedUnsubscribeUrl(url, { allowAsmToken = false, allowBatchToken = false } = {}) {
   const trimmed = String(url == null ? '' : url).trim();
   if (!trimmed) return null;
-  if (trimmed === ASM_UNSUBSCRIBE_URL || /^\{\{[a-zA-Z0-9_]+\}\}$/.test(trimmed)) return trimmed;
+  if (allowAsmToken && trimmed === ASM_UNSUBSCRIBE_URL) return trimmed;
+  if (allowBatchToken && trimmed === BATCH_UNSUBSCRIBE_TOKEN) return trimmed;
   return /^(?:https?:\/\/|mailto:)/i.test(trimmed) ? trimmed : null;
 }
 
 function safeUnsubscribeHref(url) {
-  const valid = validatedUnsubscribeUrl(url);
+  const valid = validatedUnsubscribeUrl(url, { allowAsmToken: true, allowBatchToken: true });
   if (!valid) return null;
-  if (valid === ASM_UNSUBSCRIBE_URL || /^\{\{[a-zA-Z0-9_]+\}\}$/.test(valid)) return valid;
+  if (valid === ASM_UNSUBSCRIBE_URL || valid === BATCH_UNSUBSCRIBE_TOKEN) return valid;
   return escapeHtml(valid);
 }
 
@@ -557,7 +560,7 @@ function isMarketingSend(template, suppressionGroupKey) {
 }
 
 function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppressionGroupKey } = {}) {
-  const valid = validatedUnsubscribeUrl(unsubscribeUrl);
+  const valid = validatedUnsubscribeUrl(unsubscribeUrl, { allowAsmToken: Boolean(asmGroupId) });
   if (valid) return valid;
   if (isMarketingSend(template, suppressionGroupKey) && asmGroupId) return ASM_UNSUBSCRIBE_URL;
   return null;
@@ -848,7 +851,7 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // one stream ("referral emails", "these follow-ups") would understate it.
   // Only an admin preview/test passes a link for a service-stream template.
   const unsubScope = isMarketingSend(template, null) ? 'Waves marketing emails' : 'these emails';
-  const validUnsubUrl = validatedUnsubscribeUrl(unsubscribeUrl);
+  const validUnsubUrl = validatedUnsubscribeUrl(unsubscribeUrl, { allowAsmToken: true, allowBatchToken: true });
   const unsubHref = safeUnsubscribeHref(validUnsubUrl);
   const unsubFooterHtml = unsubHref
     ? `<a href="${unsubHref}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`

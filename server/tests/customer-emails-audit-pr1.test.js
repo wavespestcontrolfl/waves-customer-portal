@@ -126,6 +126,18 @@ describe('Customer emails audit PR 1 regressions', () => {
     expect(badUnsub.html).not.toContain('href="#"');
     expect(badUnsub.html).not.toContain('javascript:alert(1)');
     expect(badUnsub.text).not.toContain('javascript:alert(1)');
+
+    const unresolvedTokenUnsub = renderTemplate({
+      template: { template_key: 'newsletter.promo', name: 'Promo', mode: 'marketing' },
+      version: {
+        subject: 'Promo',
+        blocks: [{ type: 'paragraph', content: 'Hello' }],
+      },
+      payload: {},
+      unsubscribeUrl: '{{missing}}',
+    });
+    expect(unresolvedTokenUnsub.html).not.toContain('{{missing}}');
+    expect(unresolvedTokenUnsub.text).not.toContain('{{missing}}');
   });
 
   test('automation-runner passes escaped previewText as preheader and detects darkAwareBody', () => {

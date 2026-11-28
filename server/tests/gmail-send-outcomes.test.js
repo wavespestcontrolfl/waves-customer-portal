@@ -153,9 +153,13 @@ test('sendMessage marks blockquotes and Gmail quote/signature containers so stri
   expect(stripQuotedAndSignature(plainDecoded)).toBe('Thanks, we will see you Friday.');
 });
 
-test('emailPlainText preserves a staff reply written below a quoted HTML blockquote', async () => {
+test('emailPlainText preserves a staff reply below a Gmail quote container and excludes signature text', async () => {
   acceptedData = { id: 'synthetic-bottom-reply', threadId: 'synthetic-thread' };
-  const htmlBody = '<blockquote><p>Can you send the termite report tomorrow?</p></blockquote><p>Yes, I will send it by 10am tomorrow.</p>';
+  const htmlBody = [
+    '<div class="gmail_quote"><blockquote><p>Can you send the termite report tomorrow?</p></blockquote></div>',
+    '<p>Yes, I will send it by 10am tomorrow.</p>',
+    '<div class="gmail_signature"><p>Adam, Waves Pest Control</p></div>',
+  ].join('');
   await gmail.sendMessage('fixture@example.test', 'Re: Termite report', htmlBody);
   const payload = requests[0].data ?? requests[0].body;
   const sentBody = typeof payload === 'string' ? JSON.parse(payload) : payload;
@@ -170,4 +174,5 @@ test('emailPlainText preserves a staff reply written below a quoted HTML blockqu
   const htmlDecoded = decodePart(sections[2]);
   const extracted = stripQuotedAndSignature(emailPlainText({ body_text: plainDecoded, body_html: htmlDecoded }));
   expect(extracted).toBe('Yes, I will send it by 10am tomorrow.');
+  expect(extracted).not.toContain('Adam, Waves Pest Control');
 });

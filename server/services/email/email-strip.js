@@ -111,12 +111,13 @@ function stripQuotedAndSignature(bodyText) {
 function emailPlainText(row) {
   const text = String(row?.body_text || '');
   const html = String(row?.body_html || '');
-  // When both parts exist and the HTML carries explicit <blockquote> boundaries
-  // that became '>' markers in text/plain, stripQuotedAndSignature would cut at
-  // the first '>' and discard any reply written below or between quotes.
-  // Use HTML quote boundaries instead so bottom/inline replies survive.
-  if (html.trim() && /<blockquote\b/i.test(html) && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
-    return require('../newsletter-proof').htmlReplyToText(html);
+  // When both parts exist and the HTML carries explicit quote containers that
+  // became '>' markers in text/plain, stripQuotedAndSignature would cut at the
+  // first '>' and discard any reply written below or between quotes. Strip
+  // quote and signature nodes structurally from HTML so sibling replies survive
+  // without leaking signature boilerplate.
+  if (html.trim() && /<blockquote\b|(?:gmail_quote|yahoo_quoted)/i.test(html) && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
+    return require('../../utils/html-to-plain-text').htmlToPlainText(html, { stripQuotes: true, stripSignatures: true });
   }
   if (text.trim()) return text;
   return html.trim() ? require('../newsletter-proof').htmlReplyToText(html) : '';
