@@ -255,6 +255,10 @@ const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
+const {
+  reconcilePriorEpisodeOnCallCompletion,
+  resolveFirstTouchCallLeadSource,
+} = require('./call-episode-reconciliation');
 
 // Prod technician row is named "Adam" (verified 2026-07-08) — the old
 // 'Adam B.' default never name-matched and assignment survived only on the
@@ -15653,6 +15657,15 @@ const CallRecordingProcessor = {
           leadSource.detail = (referredByName.toLowerCase() === 'unnamed'
             ? 'Referral (unnamed)' : `Referred by ${referredByName}`).slice(0, 200);
         }
+        const firstTouchLeadSource = await resolveFirstTouchCallLeadSource(db, {
+          contactPhone: phone,
+          currentCallId: call.id,
+          currentCallCreatedAt: call.created_at,
+          currentLeadSource: leadSource,
+          referredByName,
+          isOutbound: isOutboundCall(call),
+          twilioNumbers: TWILIO_NUMBERS,
+        });
 
         try {
           // Parse address if AI extracted a full address string
@@ -15731,8 +15744,8 @@ const CallRecordingProcessor = {
               state: addrState,
               zip: addrZip || null,
               referral_code: code,
-              lead_source: leadSource.source || 'phone_call',
-              lead_source_detail: leadSource.detail || numberConfig?.domain || 'inbound call',
+              lead_source: firstTouchLeadSource.source || 'phone_call',
+              lead_source_detail: firstTouchLeadSource.detail || numberConfig?.domain || 'inbound call',
               pipeline_stage: 'new_lead',
               pipeline_stage_changed_at: new Date(),
               nearest_location_id: loc.id,
@@ -24966,6 +24979,18 @@ const CallRecordingProcessor = {
     // (codex #3677 P1). This is the last gate before the terminal write,
     // which is itself token-fenced.
     if (!(await stillOwnsClaim())) return abandonToPeer('the synopsis and scoring writes');
+    // 48h episode reconciliation: close stale Call 1 open address/name/email-missing
+    // triage cards and retire stale Call 1 new-lead bells once Call 2 verifies fields
+    // or books a confirmed visit for the same customer. Non-blocking by contract.
+    await reconcilePriorEpisodeOnCallCompletion(db, {
+      call,
+      customerId,
+      leadId,
+      extracted,
+      appointmentResult,
+      bridgeNeedsConfirmation,
+      addressValidation: effectiveAddressValidation,
+    });
     // Step 7b: Generate lead synopsis (Sales Strategist analysis)
     let synopsis = null;
     if (transcription && !extracted.is_spam && !extracted.is_voicemail) {

@@ -1332,7 +1332,12 @@ router.post('/sms', async (req, res) => {
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
       if (!staffSender && !intakeScopeVetoed && !pendingTimeAnswer && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
-        await startSmsThreadDraft({ phone: From, triggerBody: Body, triggerSmsLogId: smsLogEntry.id });
+        await startSmsThreadDraft({
+          phone: From,
+          triggerBody: Body,
+          triggerSmsLogId: smsLogEntry.id,
+          inboundMedia,
+        });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
 
