@@ -885,7 +885,12 @@ stamp — so every money seam on this surface reads the invoice ROW, not its
 status. `/setup`, `/quote`, `/finalize`, `/confirm` and `/update-amount`
 refuse such an invoice through the shared collectibility gate, and `/consent`,
 `/capture-setup` and `/setup-complete` refuse it with
-`409 { error, code: 'invoice_withdrawn_from_customer' }`. What that refusal
+`409 { error, code: 'invoice_withdrawn_from_customer' }`, while
+`/consent`, `/capture-setup`, and `/setup-complete` also refuse
+chemical-review-held invoices with
+`409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`, and `/consent`
+refuses unreadable/malformed combined-payment allocation metadata on the
+PI with `409 { error, code: 'COMBINED_ALLOCATION_UNREADABLE' }`. What that refusal
 guarantees, precisely: no consent is recorded and no Auto Pay enrollment
 happens for a withdrawn invoice — the authorization row and the ownership
 judgement commit in ONE transaction, and the enrollment re-judges ownership

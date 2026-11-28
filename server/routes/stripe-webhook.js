@@ -9527,7 +9527,12 @@ async function webhookInvoiceRefusesEnrollment(trx, invoiceId, customerId, { ext
     ? await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate().select('id', 'scheduled_send_error')
     : [];
   if (customerId) {
-    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    const cq = trx('customers').where({ id: customerId }).forUpdate();
+    if (typeof cq.noWait === 'function') {
+      await cq.noWait().first('id');
+    } else {
+      await cq.first('id');
+    }
   }
   const { invoiceHeldForChemicalReview } = require('../services/invoice-helpers');
   if (liveInvs.some((inv) => invoiceHeldForChemicalReview(inv))) {

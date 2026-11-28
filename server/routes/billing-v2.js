@@ -672,8 +672,7 @@ router.get('/balance', async (req, res, next) => {
           .orWhere('scheduled_send_error', 'like', 'payer_billed:%')
           .orWhere('scheduled_send_error', 'like', 'chemical_addon_review:%');
       })
-      .select('id', 'payer_id', 'scheduled_send_error')
-      .catch(() => []);
+      .select('id', 'payer_id', 'scheduled_send_error');
     const payerInvoiceIds = new Set();
     const heldInvoiceIds = new Set();
     for (const r of payerInvRows) {

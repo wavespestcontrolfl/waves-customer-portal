@@ -1015,21 +1015,37 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       expect(capturedUpdate.due_date.__raw).toContain('due_date < ?::date THEN ?::date ELSE due_date END');
     });
 
-    test('deduped delivery-recovery anchors due_date to original ET delivery timestamp and preserves due_date when unknown', () => {
-      const InvoiceService = require('../services/invoice');
+    test('deduped delivery-recovery anchors due_date to earliest known ET delivery timestamp and preserves due_date when unknown', () => {
+      const { invoiceDeliveryStampUpdates } = require('../services/messaging/billing-prior-delivery');
       const fakeDb = { raw: jest.fn((sql, bindings) => ({ __raw: sql, bindings })) };
+      const retryNow = new Date('2026-11-27T15:00:00Z');
 
-      const withOrig = InvoiceService._firstDeliveryDueDateUpdate(fakeDb, {
+      const withOrig = invoiceDeliveryStampUpdates(fakeDb, {
+        sms: true,
         deduped: true,
+        eventVisibleAt: '2026-11-24T15:00:00Z',
         smsEventVisibleAt: '2026-11-24T15:00:00Z',
+        now: retryNow,
       });
       expect(withOrig.due_date).toBeTruthy();
       expect(withOrig.due_date.bindings).toEqual(['2026-11-24', '2026-11-24']);
 
-      const unknownOrig = InvoiceService._firstDeliveryDueDateUpdate(fakeDb, {
-        deduped: true,
+      const mixedRetry = invoiceDeliveryStampUpdates(fakeDb, {
+        sms: true,
+        email: true,
+        deduped: false,
+        smsEventVisibleAt: '2026-11-24T15:00:00Z',
+        now: retryNow,
       });
-      expect(unknownOrig).toEqual({});
+      expect(mixedRetry.due_date).toBeTruthy();
+      expect(mixedRetry.due_date.bindings).toEqual(['2026-11-24', '2026-11-24']);
+
+      const unknownOrig = invoiceDeliveryStampUpdates(fakeDb, {
+        sms: true,
+        deduped: true,
+        now: retryNow,
+      });
+      expect(unknownOrig.due_date).toBeUndefined();
     });
   });
 });

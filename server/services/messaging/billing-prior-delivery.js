@@ -89,15 +89,16 @@ function invoiceDeliveryStampUpdates(db, options) {
   const times = invoiceDeliveryTimestamps(options);
   const dueDateAnchor = options.deduped
     ? earliestOriginalTime([options.eventVisibleAt, options.smsEventVisibleAt, options.emailEventVisibleAt])
-    : options.now;
+    : earliestOriginalTime([options.now || new Date(), options.smsEventVisibleAt, options.emailEventVisibleAt]);
   return {
     sent_at: db.raw('COALESCE(sent_at, ?)', [times.aggregate]),
     ...(options.sms ? { sms_sent_at: db.raw('COALESCE(sms_sent_at, ?)', [times.sms]) } : {}),
     ...(options.email
       ? { email_sent_at: db.raw('COALESCE(email_sent_at, ?)', [times.email]) } : {}),
     // A first delivery after the bill's due day takes the day it was delivered:
-    // a deduped delivery-recovery finalize anchors to the earliest known original
-    // Eastern delivery timestamp and leaves due_date untouched when unknown.
+    // anchor to the earliest accepted delivery timestamp (including any known
+    // prior channel event on a partial-channel retry), and leave due_date
+    // untouched on pure deduped recovery when original time is unknown.
     ...(dueDateAnchor ? { due_date: firstDeliveryDueDate(db, etDateString(dueDateAnchor)) } : {}),
   };
 }

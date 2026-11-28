@@ -14440,18 +14440,4 @@ module.exports._unvoidObligationReason = unvoidObligationReason;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 // Test-only seam (#5424 r14): the pending-channel replay queue row, to pin the persisted trusted
 // dispute-hold exemption (metadata.hold_exempt) that the replay's eligibility and boundary re-apply.
-function firstDeliveryDueDateUpdate(conn, { deduped, eventVisibleAt, smsEventVisibleAt, emailEventVisibleAt } = {}) {
-  const { firstDeliveryDueDate } = require('./invoice-helpers');
-  if (!deduped) {
-    return { due_date: firstDeliveryDueDate(conn, etDateString()) };
-  }
-  const timestamps = [eventVisibleAt, smsEventVisibleAt, emailEventVisibleAt]
-    .map((v) => (v ? new Date(v) : null))
-    .filter((d) => d && Number.isFinite(d.getTime()))
-    .sort((a, b) => a.getTime() - b.getTime());
-  if (!timestamps.length) return {};
-  return { due_date: firstDeliveryDueDate(conn, etDateString(timestamps[0])) };
-}
-
 module.exports._queuePendingChannelReplay = queuePendingChannelReplay;
-module.exports._firstDeliveryDueDateUpdate = firstDeliveryDueDateUpdate;

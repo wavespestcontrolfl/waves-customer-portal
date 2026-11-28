@@ -82,11 +82,30 @@ async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null, { ext
     ...(invoiceId ? [String(invoiceId)] : []),
     ...(Array.isArray(extraInvoiceIds) ? extraInvoiceIds.map((id) => String(id)) : []),
   ].filter(Boolean))].sort();
-  const liveInvs = ids.length
-    ? await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate().select('id', 'scheduled_send_error')
-    : [];
+  let liveInvs = [];
+  if (ids.length === 1) {
+    const one = await trx('invoices').where({ id: ids[0] }).forUpdate().first('id', 'scheduled_send_error');
+    if (one) liveInvs = [one];
+  } else if (ids.length > 1) {
+    liveInvs = await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate().select('id', 'scheduled_send_error');
+  }
   if (customerId) {
-    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    // Nonblocking customer lock while holding invoice locks (ABBA avoidance
+    // against customer-dedupe.js, which locks customers before invoices).
+    const cq = trx('customers').where({ id: customerId }).forUpdate();
+    if (typeof cq.noWait === 'function') {
+      try {
+        await cq.noWait().first('id');
+      } catch (lockErr) {
+        if (lockErr?.code !== '55P03') throw lockErr;
+        return {
+          status: 409,
+          body: { error: 'This account is being updated. Please try again in a moment.', code: 'INVOICE_BUSY_RETRY' },
+        };
+      }
+    } else {
+      await cq.first('id');
+    }
   }
   if (liveInvs.some((inv) => invoiceHeldForChemicalReview(inv))) {
     return {
