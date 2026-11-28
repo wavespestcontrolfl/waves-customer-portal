@@ -53,6 +53,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const SmartRebooker = require('../services/rebooker');
 const { noStore } = require('../middleware/no-store');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { recordPageView } = require('../services/customer-page-views');
 
 // Token-keyed appointment data (address, visit window) — never cacheable.
@@ -433,6 +434,7 @@ router.use(rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
@@ -442,6 +444,7 @@ const commitLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many attempts. Please try again in a minute.' },
 });
 
@@ -452,6 +455,7 @@ const findSlotsLimiter = rateLimit({
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
 
