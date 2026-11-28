@@ -567,14 +567,30 @@ async function loadVisitScopeRow(conn, visitId) {
   } catch { return null; }
 }
 
+function hasScopeLocality(key) {
+  if (!key) return false;
+  const { scopeKeysShareLocality } = require('./estimate-property-linkage');
+  return Boolean(scopeKeysShareLocality(key, key));
+}
+
+function mergeStreetKey(current, candidate) {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  if (!hasScopeLocality(current) && hasScopeLocality(candidate)) return candidate;
+  return current;
+}
+
 async function fillScopeFromServiceRow(conn, ss, acc, cache) {
   if (!ss) return;
   const { normalizedStampedStreet } = require('./estimate-property-linkage');
   if (!acc.propertyId && ss.property_id) acc.propertyId = String(ss.property_id);
-  if (!acc.streetKey) {
-    acc.streetKey = normalizedStampedStreet(ss.service_address_line1, ss.service_address_line2, ss.service_address_city, ss.service_address_zip);
+  const stamped = normalizedStampedStreet(
+    ss.service_address_line1, ss.service_address_line2, ss.service_address_city, ss.service_address_zip,
+  );
+  acc.streetKey = mergeStreetKey(acc.streetKey, stamped);
+  if (!hasScopeLocality(acc.streetKey) && ss.property_id) {
+    acc.streetKey = mergeStreetKey(acc.streetKey, await lookupPropertyStreet(conn, ss.property_id, cache));
   }
-  if (!acc.streetKey && ss.property_id) acc.streetKey = await lookupPropertyStreet(conn, ss.property_id, cache);
 }
 
 async function resolveVisitScope(conn, visitId, cache) {
@@ -584,16 +600,24 @@ async function resolveVisitScope(conn, visitId, cache) {
   const acc = { propertyId: null, streetKey: null };
   await fillScopeFromServiceRow(conn, ss, acc, cache);
   let parent = null;
-  if (ss && ss.recurring_parent_id && (!acc.propertyId || !acc.streetKey)) {
+  if (ss && ss.recurring_parent_id && (!acc.propertyId || !hasScopeLocality(acc.streetKey))) {
     parent = await loadVisitScopeRow(conn, ss.recurring_parent_id);
     await fillScopeFromServiceRow(conn, parent, acc, cache);
   }
   const estId = (ss && ss.source_estimate_id) || (parent && parent.source_estimate_id);
-  if (estId && (!acc.propertyId || !acc.streetKey)) {
+  if (estId && (!acc.propertyId || !hasScopeLocality(acc.streetKey))) {
     const est = await loadEstimateScopeRow(conn, estId);
     if (est) {
       if (!acc.propertyId && est.property_id) acc.propertyId = String(est.property_id);
-      if (!acc.streetKey && est.address) acc.streetKey = require('./estimate-property-linkage').normalizedEstimateStreet(est.address);
+      if (!hasScopeLocality(acc.streetKey) && est.address) {
+        acc.streetKey = mergeStreetKey(
+          acc.streetKey,
+          require('./estimate-property-linkage').normalizedEstimateStreet(est.address),
+        );
+      }
+      if (!hasScopeLocality(acc.streetKey) && est.property_id) {
+        acc.streetKey = mergeStreetKey(acc.streetKey, await lookupPropertyStreet(conn, est.property_id, cache));
+      }
     }
   }
   cache.visits.set(key, acc);
