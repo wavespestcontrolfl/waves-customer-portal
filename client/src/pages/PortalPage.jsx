@@ -967,7 +967,7 @@ function BeforeAfterSlider({ beforeAfter }) {
         paddingBottom: 16,
       }}>
         <div style={{
-          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
           <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>
@@ -991,7 +991,7 @@ function BeforeAfterSlider({ beforeAfter }) {
         transition: dragging.current ? 'none' : 'clip-path 0.05s ease-out',
       }}>
         <div style={{
-          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
           <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>
@@ -1839,6 +1839,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     );
   };
 
+  const desktopScrimBlur = compact ? 'none' : 'blur(5px)';
+
   // Portaled to <body>: the launch button lives inside a data-glass card
   // whose backdrop-filter makes it the fixed-position containing block —
   // rendered in place, the overlay pins to the card instead of the viewport
@@ -1847,7 +1849,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
       background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
-      backdropFilter: compact ? 'none' : 'blur(5px)',
+      backdropFilter: desktopScrimBlur,
+      WebkitBackdropFilter: desktopScrimBlur,
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',
@@ -1877,7 +1880,6 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
         <header style={{
           flexShrink: 0,
           background: 'rgba(255,255,255,0.96)',
-          backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           padding: compact
             ? 'calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 12px calc(14px + env(safe-area-inset-left, 0px))'
@@ -12333,6 +12335,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         zIndex: 180,
         background: 'rgba(15,23,42,0.48)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex',
         alignItems: compact ? 'flex-end' : 'center',
         justifyContent: 'center',
@@ -17205,6 +17208,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
   if (!open) return null;
 
+  const overlayBackdropBlur = compact ? 'none' : 'blur(5px)';
+
   return (
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
@@ -17212,7 +17217,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       // Mobile: full-screen sheet — keep the backdrop clear so the glass
       // modal frosts the portal scene instead of an opaque tan wash.
       background: compact ? 'transparent' : 'rgba(15,23,42,0.48)',
-      backdropFilter: compact ? 'none' : 'blur(5px)',
+      backdropFilter: overlayBackdropBlur,
+      WebkitBackdropFilter: overlayBackdropBlur,
       display: 'flex',
       alignItems: compact ? 'stretch' : 'center',
       justifyContent: 'center',
@@ -17251,8 +17257,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       >
         <header style={{
           flexShrink: 0,
-          background: 'rgba(255,255,255,0.35)',
-          backdropFilter: 'blur(12px)',
+          background: 'rgba(255,255,255,0.88)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           // Full-screen overlay: keep the header below the iOS status bar / notch.
           padding: compact
@@ -17777,8 +17782,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
             <footer style={{
               flexShrink: 0,
               borderTop: '1px solid rgba(255,255,255,0.65)',
-              background: 'rgba(255,255,255,0.35)',
-              backdropFilter: 'blur(12px)',
+              background: 'rgba(255,255,255,0.88)',
               padding: compact
                 ? '10px calc(14px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))'
                 : '14px 18px',
@@ -18082,7 +18086,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef,
       left: 'calc(10px + env(safe-area-inset-left, 0px))',
       right: 'calc(10px + env(safe-area-inset-right, 0px))',
       zIndex: 98,
-      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
+      background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
       borderRadius: 8,
       boxShadow: '0 14px 32px rgba(15,23,42,0.16)',
@@ -18150,6 +18154,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
         position: 'fixed', inset: 0, zIndex: 150,
         background: 'rgba(15,23,42,0.42)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
@@ -18342,6 +18347,7 @@ function WavesChatSheet({ onClose, onUnread, firstName }) {
         ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
         background: 'rgba(15,23,42,0.42)',
         backdropFilter: 'blur(5px)',
+        WebkitBackdropFilter: 'blur(5px)',
         display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
         padding: compact ? 0 : 24,
         boxSizing: 'border-box',
@@ -18736,7 +18742,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
     <div data-glass-scrim="" style={{
       position: 'fixed', bottom: 0, left: 0, right: 0, top: 0, zIndex: 200,
       ...(compact && viewport ? { top: viewport.top, height: viewport.height, bottom: 'auto' } : {}),
-      background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)',
+      background: 'rgba(15,23,42,0.42)', backdropFilter: 'blur(5px)', WebkitBackdropFilter: 'blur(5px)',
       display: 'flex', flexDirection: 'column', justifyContent: compact ? 'flex-end' : 'center',
       padding: compact ? 0 : 24,
     }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -18778,7 +18784,6 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           background: 'rgba(255,255,255,0.96)',
-          backdropFilter: 'blur(12px)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <img src="/waves-logo.png" alt="Waves" style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }} />

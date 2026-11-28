@@ -760,7 +760,7 @@ export default function App() {
           <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
           <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
-          <Route path="/visit/:token" element={<Suspense fallback={<div />}><WavesShell><VisitSummaryPage /></WavesShell></Suspense>} />
+          <Route path="/visit/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><VisitSummaryPage /></WavesShell></Suspense>} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           {/* Bank-verification texts/emails linked /billing, which the portal
