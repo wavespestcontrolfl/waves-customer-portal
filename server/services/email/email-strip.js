@@ -110,29 +110,36 @@ function normalizeCompare(s) {
     .trim();
 }
 
+const FORWARD_OR_OUTLOOK_BOUNDARIES = HISTORY_HEADERS.slice(1);
+
 function unquotedPlainParagraphs(text) {
   const decoded = decodeEntities(text).replace(/\r\n?/g, '\n');
-  const set = new Set();
+  const byNorm = new Map();
   let run = [];
   const flush = () => {
     if (!run.length) return;
-    const joined = normalizeCompare(run.join(' '));
-    if (joined) set.add(joined);
+    const joinedRaw = run.join(' ');
+    const joinedNorm = normalizeCompare(joinedRaw);
+    if (joinedNorm && !byNorm.has(joinedNorm)) byNorm.set(joinedNorm, joinedRaw);
     run = [];
   };
   for (const rawLine of decoded.split('\n')) {
     const trimmed = rawLine.trim();
-    if (/^[ \t]*--[ \t]*$/.test(rawLine) || /\*?\s*Office:\s*\(941\)/i.test(rawLine)) break;
-    if (!trimmed || /^[ \t]*>/.test(rawLine) || SENT_FROM.test(rawLine) || HISTORY_HEADERS.some((re) => re.test(trimmed))) {
+    if (
+      /^[ \t]*--[ \t]*$/.test(rawLine)
+      || /\*?\s*Office:\s*\(941\)/i.test(rawLine)
+      || FORWARD_OR_OUTLOOK_BOUNDARIES.some((re) => re.test(trimmed))
+    ) break;
+    if (!trimmed || /^[ \t]*>/.test(rawLine) || SENT_FROM.test(rawLine) || HISTORY_HEADERS[0].test(trimmed)) {
       flush();
       continue;
     }
     const lineNorm = normalizeCompare(trimmed);
-    if (lineNorm) set.add(lineNorm);
+    if (lineNorm && !byNorm.has(lineNorm)) byNorm.set(lineNorm, trimmed);
     run.push(trimmed);
   }
   flush();
-  return set;
+  return byNorm;
 }
 
 // The text of an email row: body_text, or its HTML converted when
@@ -146,8 +153,9 @@ function emailPlainText(row) {
   // When both parts exist and text/plain has '>' quote markers, ask the HTML
   // parser to remove recognized quote/signature containers (plus any adjacent
   // attribution line) using one shared predicate, and keep ONLY paragraphs the
-  // plain-text part also identifies as unquoted so bottom/inline replies survive
-  // while quoted history in either MIME part is excluded.
+  // plain-text part also identifies as unquoted (returning the matched plain
+  // paragraph to preserve URLs) so bottom/inline replies survive while quoted
+  // or forwarded history in either MIME part is excluded.
   if (html.trim() && /(?:^[ \t]*>|[ \t]>[ \t])/m.test(text)) {
     try {
       const parsed = require('../../utils/html-to-plain-text').htmlToPlainTextWithMeta(html, {
@@ -158,10 +166,11 @@ function emailPlainText(row) {
       });
       if (parsed.hasQuoteContainer) {
         const unquoted = unquotedPlainParagraphs(text);
-        const confirmed = parsed.text
-          .split('\n')
-          .map((line) => line.trim())
-          .filter((line) => line && unquoted.has(normalizeCompare(line)));
+        const confirmed = [];
+        for (const line of parsed.text.split('\n')) {
+          const matched = unquoted.get(normalizeCompare(line));
+          if (matched) confirmed.push(matched);
+        }
         const plainPrefix = stripQuotedAndSignature(text);
         if (!confirmed.length) return plainPrefix;
         const confirmedText = confirmed.join('\n');

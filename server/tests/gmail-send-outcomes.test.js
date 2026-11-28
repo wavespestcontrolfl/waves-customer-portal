@@ -207,7 +207,7 @@ test('emailPlainText preserves a staff reply below an attributed quote container
     body_text: 'Check the estimate (https://portal.wavespestcontrol.com/e/1) here.\n> Old thread',
     body_html: '<p>Check the <a href="https://portal.wavespestcontrol.com/e/1">estimate</a> here.</p><blockquote>Old thread</blockquote>',
   }));
-  expect(linkedReply).toBe('Check the estimate here.');
+  expect(linkedReply).toBe('Check the estimate (https://portal.wavespestcontrol.com/e/1) here.');
 
   const quotedTableCell = stripQuotedAndSignature(emailPlainText({
     body_text: '> Old table request',
@@ -220,4 +220,10 @@ test('emailPlainText preserves a staff reply below an attributed quote container
     body_html: '<p>Hi</p><p>Please cancel my service</p><blockquote>older quote</blockquote>',
   }));
   expect(textQuotedHtmlUnquoted).toBe('Hi');
+
+  const forwardedWithQuote = stripQuotedAndSignature(emailPlainText({
+    body_text: 'Thanks\n---------- Forwarded message ---------\nPlease cancel my Friday visit.\n> older quote',
+    body_html: '<p>Thanks</p><p>---------- Forwarded message ---------</p><p>Please cancel my Friday visit.</p><blockquote>older quote</blockquote>',
+  }));
+  expect(forwardedWithQuote).toBe('Thanks');
 });
