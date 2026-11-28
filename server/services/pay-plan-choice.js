@@ -71,13 +71,10 @@ function prepayNoteFirstInvoiceNumber(prepayNotes) {
 // anchor, F is the anchor, or a third invoice X is the anchor while both F and
 // P are open.
 function filterOutPlanChoiceAlternatives(anchorInvoice, openInvoices) {
-  const openNumbers = new Set(
-    [anchorInvoice?.invoice_number, ...(openInvoices || []).map((inv) => inv?.invoice_number)].filter(Boolean),
-  );
   return (openInvoices || []).filter((inv) => {
     if (prepayNoteNamesInvoice(anchorInvoice?.notes, inv?.invoice_number)) return false;
     const namedFirst = prepayNoteFirstInvoiceNumber(inv?.notes);
-    return !(namedFirst && namedFirst !== inv?.invoice_number && openNumbers.has(namedFirst));
+    return !(namedFirst && namedFirst !== inv?.invoice_number);
   });
 }
 
@@ -138,14 +135,25 @@ async function counterpartHasLivePaymentRow(counterpartId, conn) {
   }
 }
 
-async function counterpartLiveStripeState(counterpart, inspectStripe) {
+async function counterpartLiveStripeState(counterpart, inspectStripe, { retireConfirmable = false, conn = db } = {}) {
   if (!inspectStripe || !counterpart?.stripe_payment_intent_id) return null;
+  if (retireConfirmable) {
+    const verdict = await require('./prepaid-pi-guard').guardOpenPaymentIntentForPrepaid(counterpart, { inspectOnly: false });
+    if (verdict?.ok) {
+      await conn('invoices')
+        .where({ id: counterpart.id, stripe_payment_intent_id: counterpart.stripe_payment_intent_id })
+        .update({ stripe_payment_intent_id: null });
+      return null;
+    }
+    return verdict?.reason === 'payment_in_flight' ? 'processing' : 'unverifiable';
+  }
   try {
     const pi = await require('./stripe').retrievePaymentIntent(counterpart.stripe_payment_intent_id);
     if (!pi) return null;
     if (pi.status === 'succeeded' || pi.status === 'requires_capture') return 'paid';
-    const achMicro = pi.status === 'requires_action' && pi.next_action?.type === 'verify_with_microdeposits';
-    if (pi.status === 'processing' || achMicro) return 'processing';
+    if (pi.status === 'processing' || pi.status === 'requires_action' || pi.status === 'requires_confirmation') {
+      return 'processing';
+    }
     return null;
   } catch (err) {
     logger.warn(`[pay-plan-choice] counterpart PI check failed for invoice ${counterpart.id}: ${err.message} — failing closed`);
@@ -156,7 +164,7 @@ async function counterpartLiveStripeState(counterpart, inspectStripe) {
 // Returns conflict details if the alternative invoice in a pay-plan-choice
 // pair (F ↔ P) is already paid, prepaid, or processing (DB status, live
 // payments row, or — when inspectStripe=true — live Stripe PI). Null when clear.
-async function planChoiceCounterpartConflict(invoice, { conn = db, inspectStripe = false } = {}) {
+async function planChoiceCounterpartConflict(invoice, { conn = db, inspectStripe = false, retireConfirmable = false } = {}) {
   if (!planChoicePairKey(invoice)) return null;
   const counterparts = await loadPlanChoiceCounterparts(invoice, conn);
   for (const cp of counterparts) {
@@ -170,7 +178,7 @@ async function planChoiceCounterpartConflict(invoice, { conn = db, inspectStripe
     if (paymentStatus) {
       return { role: cp.role, invoiceId: cp.id, invoiceNumber: cp.invoice_number, status: paymentStatus, inProgress: paymentStatus === 'processing' };
     }
-    const piState = await counterpartLiveStripeState(cp, inspectStripe);
+    const piState = await counterpartLiveStripeState(cp, inspectStripe, { retireConfirmable, conn });
     if (piState) {
       return { role: cp.role, invoiceId: cp.id, invoiceNumber: cp.invoice_number, status: piState, inProgress: piState === 'processing' };
     }
@@ -192,8 +200,8 @@ function planChoiceConflictError(conflict) {
   return err;
 }
 
-async function assertPlanChoiceCounterpartPayable(conn, invoice, { inspectStripe = false } = {}) {
-  const conflict = await planChoiceCounterpartConflict(invoice, { conn, inspectStripe });
+async function assertPlanChoiceCounterpartPayable(conn, invoice, { inspectStripe = false, retireConfirmable = false } = {}) {
+  const conflict = await planChoiceCounterpartConflict(invoice, { conn, inspectStripe, retireConfirmable });
   if (conflict) throw planChoiceConflictError(conflict);
 }
 

@@ -4079,7 +4079,7 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
-        await assertPlanChoiceCounterpartIfPresent(trx, lockedInvoice, { inspectStripe: true });
+        await assertPlanChoiceCounterpartIfPresent(trx, lockedInvoice, { inspectStripe: true, retireConfirmable: true });
         // Preserve the original collectible status and provenance. Full
         // account-credit coverage below changes lockedInvoice to prepaid,
         // which the deposit guard correctly skips for pre-existing invoices.
@@ -5540,7 +5540,7 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
-        await assertPlanChoiceCounterpartIfPresent(finalizeTrx, lockedInvoice, { inspectStripe: true });
+        await assertPlanChoiceCounterpartIfPresent(finalizeTrx, lockedInvoice, { inspectStripe: true, retireConfirmable: true });
         if (String(lockedInvoice.stripe_payment_intent_id || '')
           !== String(invoice.stripe_payment_intent_id)) {
           throw new Error('Invoice has a different active payment');

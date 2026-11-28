@@ -465,7 +465,8 @@ describe('B-24: live locked existing-plan guard and non-successor property/serie
       { id: 's1-root', is_recurring: true, recurring_parent_id: null, recurring_pattern: 'quarterly' },
     ];
     setQueues({
-      scheduled_services: [qb({ rows: windowRows }), qb({ rows: outsideLinked })],
+      scheduled_services: [qb({ rows: windowRows })],
+      'scheduled_services as term_series_links': [qb({ rows: outsideLinked })],
     });
     const covered = await AnnualPrepayRenewals.coverageRowsForTerm(term, db);
     expect(covered.map((r) => r.id)).toEqual(['s1-v2', 's1-v3']);
@@ -651,5 +652,163 @@ describe('B-60: prepay year-end bell uses serviceMatchesCoverage for variant lab
     expect(isNextYearOf({ id: 'term-2', term_start: '2026-11-25', coverage_service_type: 'Pest Control' }, year1)).toBe(true);
     expect(isNextYearOf({ id: 'term-2', term_start: '2026-11-25', coverage_service_type: 'General Pest Control Service' }, year1)).toBe(true);
     expect(isNextYearOf({ id: 'term-2', term_start: '2026-11-25', coverage_service_type: 'Lawn Care' }, year1)).toBe(false);
+  });
+});
+
+describe('PR 7 pre-push Codex regression fixes', () => {
+  test('filterOutPlanChoiceAlternatives excludes plan-choice prepay even when paired first invoice is processing (absent from open candidates)', () => {
+    const prepay = {
+      id: 'inv-p',
+      invoice_number: 'WPC-2026-1002',
+      notes: PayPlanChoice.prepayInvoiceNote('WPC-2026-1001'),
+    };
+    const unrelated = { id: 'inv-x', invoice_number: 'WPC-2026-1003', notes: 'Routine service' };
+    expect(PayPlanChoice.filterOutPlanChoiceAlternatives(unrelated, [prepay])).toEqual([]);
+  });
+
+  test('assertPlanChoiceCounterpartPayable refuses 3DS requires_action on inspect and retires cancelable PI under retireConfirmable', async () => {
+    const EST_UUID = '11111111-1111-4111-8111-111111111111';
+    const prepayOpen = {
+      id: 'inv-p',
+      customer_id: 'cust-1',
+      invoice_number: 'WPC-2026-1002',
+      status: 'draft',
+      notes: PayPlanChoice.prepayInvoiceNote('WPC-2026-1001'),
+      annual_prepay_term_id: 'term-p',
+    };
+    const firstWith3ds = {
+      id: 'inv-f',
+      invoice_number: 'WPC-2026-1001',
+      status: 'sent',
+      notes: `Auto-generated from accepted estimate #${EST_UUID}.`,
+      stripe_payment_intent_id: 'pi_3ds_1',
+    };
+    const retrieveSpy = jest.spyOn(StripeService, 'retrievePaymentIntent').mockResolvedValue({ status: 'requires_action', next_action: { type: 'use_stripe_sdk' } });
+    const cancelSpy = jest.spyOn(StripeService, 'cancelPaymentIntent').mockResolvedValue({ id: 'pi_3ds_1', status: 'canceled' });
+    try {
+      setQueues({ invoices: [qb({ rows: [firstWith3ds] })], payments: [qb({ first: null })] });
+      await expect(PayPlanChoice.assertPlanChoiceCounterpartPayable(db, prepayOpen, { inspectStripe: true }))
+        .rejects.toMatchObject({ statusCode: 409, planChoiceConflict: true, inProgress: true });
+
+      setQueues({ invoices: [qb({ rows: [firstWith3ds] }), qb({ rows: [] }), qb({ update: 1 })], payments: [qb({ first: null })] });
+      await expect(PayPlanChoice.assertPlanChoiceCounterpartPayable(db, prepayOpen, { inspectStripe: true, retireConfirmable: true }))
+        .resolves.toBeUndefined();
+      expect(cancelSpy).toHaveBeenCalledWith('pi_3ds_1', { cancellation_reason: 'abandoned' });
+    } finally {
+      retrieveSpy.mockRestore();
+      cancelSpy.mockRestore();
+    }
+  });
+
+  test('assertNoExistingPlanForPrepay exempts createdCustomerId with unstamped billing_mode and assertCustomer360NoConflictingPlanForPrepay refuses omitted-property multi-property plans', async () => {
+    const manual = require('../services/estimate-manual-acceptance');
+    const makeTrx = ({ customerRow, liveRows = [], targetRow = null }) => {
+      const trx = jest.fn((table) => {
+        if (table === 'customers') {
+          return {
+            where: jest.fn().mockReturnThis(),
+            forUpdate: jest.fn().mockReturnThis(),
+            first: jest.fn(async () => customerRow),
+          };
+        }
+        if (table === 'scheduled_services') {
+          return {
+            where: jest.fn().mockReturnThis(),
+            whereNotIn: jest.fn().mockReturnThis(),
+            select: jest.fn(async () => liveRows),
+            first: jest.fn(async () => targetRow),
+          };
+        }
+        return {
+          where: jest.fn().mockReturnThis(),
+          whereNot: jest.fn().mockReturnThis(),
+          whereNotIn: jest.fn().mockReturnThis(),
+          first: jest.fn(async () => null),
+        };
+      });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
+      return trx;
+    };
+
+    const newCustTrx = makeTrx({
+      customerRow: { id: 'cust-new', pipeline_stage: 'active_customer', monthly_rate: 55, billing_mode: null },
+      liveRows: [],
+    });
+    await expect(manual.assertNoExistingPlanForPrepay(
+      newCustTrx,
+      { bookedAppointmentIds: [], createdCustomerId: 'cust-new' },
+      { id: 'est-1', customer_id: 'cust-new', estimate_data: {} },
+    )).resolves.toBeUndefined();
+
+    const multiPropTrx = makeTrx({
+      customerRow: { id: 'cust-mp', billing_mode: 'per_visit', monthly_rate: 0 },
+      liveRows: [
+        { id: 'ss-a', service_type: 'General Pest Control', property_id: 'prop-a' },
+        { id: 'ss-b', service_type: 'General Pest Control', property_id: 'prop-b' },
+      ],
+    });
+    await expect(manual.assertCustomer360NoConflictingPlanForPrepay(multiPropTrx, {
+      customerId: 'cust-mp',
+      coverageServiceType: 'Quarterly Pest Control',
+    })).rejects.toMatchObject({ status: 409, code: 'ANNUAL_PREPAY_EXISTING_PLAN' });
+  });
+
+  test('PlanRateLedger.revertPrepayAcceptPlanRates restores priorMonthlyRate in advisory mode and resetLedgerToScalar tags source_estimate_id', async () => {
+    const PlanRateLedger = require('../services/plan-rate-ledger');
+    const origGate = process.env.GATE_PLAN_RATE_LEDGER;
+    delete process.env.GATE_PLAN_RATE_LEDGER;
+    try {
+      const updates = [];
+      const inserted = [];
+      const fakeDb = jest.fn((table) => {
+        if (table === 'estimates') {
+          return {
+            where: jest.fn().mockReturnThis(),
+            first: jest.fn(async () => ({
+              estimate_data: {
+                acceptedBillingTerm: 'prepay_annual',
+                prepayPriorRateSnapshot: {
+                  customerId: 'cust-1',
+                  priorMonthlyRate: 62,
+                  writtenMonthlyRate: 79,
+                  priorComponents: [],
+                },
+              },
+            })),
+          };
+        }
+        if (table === 'customer_plan_rates') {
+          const q = {
+            where: jest.fn(() => q),
+            del: jest.fn(async () => 1),
+            insert: jest.fn(async (row) => { inserted.push(row); }),
+            select: jest.fn(async () => [{ family_key: 'lawn', monthly_rate: 50 }]),
+          };
+          return q;
+        }
+        if (table === 'customers') {
+          return {
+            where: jest.fn().mockReturnThis(),
+            first: jest.fn(async () => ({ id: 'cust-1', monthly_rate: 79 })),
+            update: jest.fn(async (patch) => { updates.push(patch); return 1; }),
+          };
+        }
+        throw new Error(`Unexpected table ${table}`);
+      });
+      fakeDb.schema = { hasTable: jest.fn(async () => true) };
+
+      await PlanRateLedger.resetLedgerToScalar(fakeDb, 'cust-1', 79, { source: 'unsliced_accept', estimateId: 'est-1' });
+      expect(inserted[0]).toMatchObject({ source_estimate_id: 'est-1', monthly_rate: 79 });
+
+      const reverted = await PlanRateLedger.revertPrepayAcceptPlanRates(fakeDb, {
+        customerId: 'cust-1',
+        sourceEstimateId: 'est-1',
+        termMonthlyRate: 79,
+      });
+      expect(reverted).toMatchObject({ reverted: true, restoredRate: 62 });
+      expect(updates[0]).toMatchObject({ monthly_rate: 62 });
+    } finally {
+      if (origGate !== undefined) process.env.GATE_PLAN_RATE_LEDGER = origGate;
+    }
   });
 });

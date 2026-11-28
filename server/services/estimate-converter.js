@@ -6409,7 +6409,7 @@ const EstimateConverter = {
           // Rung 6 when this opens the outermost transaction (standalone
           // path); a caller transaction already holds it (taken above).
           if (!database.isTransaction) await lockCustomerComms(sp, customerId);
-          return PlanRateLedger.resetLedgerToScalar(sp, customerId, convertedMonthlyRate, { source: 'gate_off_divergence' });
+          return PlanRateLedger.resetLedgerToScalar(sp, customerId, convertedMonthlyRate, { source: 'gate_off_divergence', estimateId });
         });
       } catch (divergenceErr) {
         logger.warn(`[estimate-converter] gate-off ledger divergence reset failed for customer ${customerId}: ${divergenceErr.message}`);
@@ -6426,7 +6426,7 @@ const EstimateConverter = {
       && ledgerScalar == null && ledgerAdvisoryScalar == null) {
       const PlanRateLedger = require('./plan-rate-ledger');
       if (PlanRateLedger.planRateLedgerEnabled()) {
-        await PlanRateLedger.syncScalarWriteToLedger(database, customerId, convertedMonthlyRate, { source: 'unsliced_accept' });
+        await PlanRateLedger.syncScalarWriteToLedger(database, customerId, convertedMonthlyRate, { source: 'unsliced_accept', estimateId });
       }
     }
     // Grouped accepts (bypassed above): the committed scalar is #3244's
@@ -6441,7 +6441,7 @@ const EstimateConverter = {
         const existingComponents = await database.transaction((sp) => PlanRateLedger.loadComponents(sp, customerId));
         hadComponents = existingComponents.some((row) => row.family_key !== PlanRateLedger.UNATTRIBUTED);
       } catch { hadComponents = false; }
-      await PlanRateLedger.syncScalarWriteToLedger(database, customerId, convertedMonthlyRate, { source: 'grouped_accept' });
+      await PlanRateLedger.syncScalarWriteToLedger(database, customerId, convertedMonthlyRate, { source: 'grouped_accept', estimateId });
       if (PlanRateLedger.planRateLedgerEnabled() && hadComponents) {
         planRateReviewNeeded = true;
       }

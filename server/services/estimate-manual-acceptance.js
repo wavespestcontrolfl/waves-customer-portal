@@ -927,7 +927,12 @@ async function assertNoExistingPlanForPrepay(trx, ctx, estimate) {
       ['property-preferences', String(estimate.customer_id)],
     );
     const linkedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
-    livePreservesMembership = !!(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
+    const createdCustomerId = ctx?.createdCustomerId ? String(ctx.createdCustomerId) : null;
+    const mintedByThisAccept = createdCustomerId != null
+      && linkedCustomer != null
+      && String(linkedCustomer.id) === createdCustomerId
+      && linkedCustomer.billing_mode == null;
+    livePreservesMembership = !mintedByThisAccept && Boolean(linkedCustomer && customerPreservesMonthlyMembership(linkedCustomer));
     hasLivePlan = await customerHasLiveRecurringPlan(trx, estimate.customer_id, estimate.id || null, ctx.bookedAppointmentIds);
   }
   if (estimateDataMembershipSnapshotIsExistingCustomer(estimate) || livePreservesMembership || hasLivePlan) {
@@ -955,7 +960,7 @@ function customerHasActiveMonthlyMembership(customer) {
 // silently stop billing. Single-service renewals and prepay-on-book for the
 // same service continue untouched.
 async function assertCustomer360NoConflictingPlanForPrepay(trx, {
-  customerId, coverageServiceType, propertyId = null, acquirePropertyLock = true,
+  customerId, coverageServiceType, propertyId = null, scheduledServiceId = null, acquirePropertyLock = true,
 } = {}) {
   if (!customerId) return;
   if (acquirePropertyLock) {
@@ -979,6 +984,11 @@ async function assertCustomer360NoConflictingPlanForPrepay(trx, {
     };
     throw err;
   }
+  let targetPropertyId = propertyId ? String(propertyId) : null;
+  if (!targetPropertyId && scheduledServiceId) {
+    const targetRow = await trx('scheduled_services').where({ id: scheduledServiceId, customer_id: customerId }).first('property_id');
+    if (targetRow?.property_id) targetPropertyId = String(targetRow.property_id);
+  }
   const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
   const { serviceMatchesCoverage, normalizeCoverageServiceType } = require('./annual-prepay-renewals');
   const liveRows = await trx('scheduled_services')
@@ -986,11 +996,17 @@ async function assertCustomer360NoConflictingPlanForPrepay(trx, {
     .whereNotIn('status', TERMINAL_STATUSES)
     .select('id', 'service_type', 'property_id');
   const targetType = normalizeCoverageServiceType(coverageServiceType);
-  const conflict = (liveRows || []).find((row) => {
-    if (propertyId && row.property_id && String(row.property_id) !== String(propertyId)) return true;
-    if (!targetType || !row.service_type) return false;
-    return !serviceMatchesCoverage(row, targetType);
-  });
+  const distinctProps = new Set((liveRows || []).map((r) => (r.property_id ? String(r.property_id) : null)).filter(Boolean));
+  const hasNullPropRow = (liveRows || []).some((r) => !r.property_id);
+  const ambiguousMultiProperty = !targetPropertyId
+    && ((liveRows || []).length > 1 && (distinctProps.size > 1 || (distinctProps.size === 1 && hasNullPropRow)));
+  const conflict = ambiguousMultiProperty
+    ? (liveRows || [])[0]
+    : (liveRows || []).find((row) => {
+      if (targetPropertyId && row.property_id && String(row.property_id) !== targetPropertyId) return true;
+      if (!targetType || !row.service_type) return false;
+      return !serviceMatchesCoverage(row, targetType);
+    });
   if (conflict) {
     const err = httpError(
       `This customer already has another active recurring plan (${conflict.service_type || 'other service'}) — annual prepay switches the whole account to annual_prepay billing, which would stop billing that plan.`,

@@ -63,6 +63,7 @@ function setDbQueues(queues) {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) {
       if (table === 'scheduled_services as seed_recheck') return query({ rows: [] });
+      if (table === 'scheduled_services as term_series_links') return query({ rows: [] });
       if (table === 'services') return query({ first: undefined });
       if (table === 'annual_prepay_terms as apt_owner_probe') {
         return query({ first: { customer_id: 'owner-unchanged' } });

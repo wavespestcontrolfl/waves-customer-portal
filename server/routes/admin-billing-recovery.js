@@ -251,10 +251,15 @@ async function unpaidPrepayBillByVisit(rows) {
   return byVisit;
 }
 
-async function hasPafHeldColumn(database = db) {
+async function hasPafHeldColumn(database = db, { throwOnError = false } = {}) {
   try {
-    return await database.schema.hasColumn('scheduled_services', 'paf_held_term_id');
-  } catch {
+    return Boolean(await database.schema.hasColumn('scheduled_services', 'paf_held_term_id'));
+  } catch (err) {
+    if (throwOnError) {
+      const e = new Error('Annual-prepay hold state could not be verified — try again.');
+      e.status = 503;
+      throw e;
+    }
     return false;
   }
 }
@@ -616,7 +621,7 @@ router.post('/:scheduledServiceId/dismiss', requireAdmin, async (req, res) => {
   const { scheduledServiceId } = req.params;
   const reason = String(req.body.reason || '').trim().slice(0, 300) || null;
   try {
-    const pafHeldAware = await hasPafHeldColumn(db);
+    const pafHeldAware = await hasPafHeldColumn(db, { throwOnError: true });
     // Same per-visit advisory lock as POST /bill so a dismiss can't race a bill
     // (no invoice can be cut for a visit being dismissed, and vice versa). All
     // eligibility is re-validated INSIDE the lock so a stale UI / direct request

@@ -6338,6 +6338,8 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
         customerId: customer.id,
         coverageServiceType,
+        propertyId: req.body?.propertyId || null,
+        scheduledServiceId: req.body?.scheduledServiceId || null,
         acquirePropertyLock: false,
       });
       // The credit consumes ONLY the estimate the operator was shown in the
@@ -6819,6 +6821,8 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       await require('../services/estimate-manual-acceptance').assertCustomer360NoConflictingPlanForPrepay(trx, {
         customerId: customer.id,
         coverageServiceType,
+        propertyId: req.body?.propertyId || null,
+        scheduledServiceId: req.body?.scheduledServiceId || null,
         acquirePropertyLock: false,
       });
       // Fee-free TOCTOU guard under the trx (same posture as the draft

@@ -13687,7 +13687,10 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // time must not open an annual prepay that silences their live plan.
         await require('../services/estimate-manual-acceptance').assertNoExistingPlanForPrepay(
           trx,
-          { bookedAppointmentIds: rowIds(capacityHold, existingAppointmentRow) },
+          {
+            bookedAppointmentIds: rowIds(capacityHold, existingAppointmentRow),
+            createdCustomerId: customerCreatedThisAccept ? customerId : null,
+          },
           { ...estimate, customer_id: customerId, estimate_data: estData },
         );
         // ATOMIC overlap guard (money-path audit P1): every ADMIN term-creation

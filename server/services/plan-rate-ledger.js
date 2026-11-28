@@ -490,7 +490,7 @@ async function applyAcceptToLedger(database, {
 // caller has locked the row, would invert the order against the wind-down
 // (rung 6 held, waiting on the row) and deadlock. The helpers below lock
 // only when they open the OUTERMOST transaction themselves.
-async function resetLedgerToScalar(database, customerId, rate, { source = 'scalar_write' } = {}) {
+async function resetLedgerToScalar(database, customerId, rate, { source = 'scalar_write', estimateId = null } = {}) {
   if (!(await ledgerTableExists(database))) return;
   await database('customer_plan_rates').where({ customer_id: customerId }).del();
   const amount = roundMoney(rate);
@@ -499,6 +499,7 @@ async function resetLedgerToScalar(database, customerId, rate, { source = 'scala
       customer_id: customerId,
       family_key: UNATTRIBUTED,
       monthly_rate: amount,
+      source_estimate_id: estimateId || null,
       source,
       effective_at: new Date(),
       updated_at: new Date(),
@@ -561,11 +562,11 @@ async function seedLedgerComponents(database, customerId, components = {}, { sou
 const MANUAL_RATE_SOURCES = new Set(['admin_edit', 'ib_update', 'ib_bulk_update']);
 const MANUAL_RATE_AUDIT_ACTION = 'customer.rate_manual_override';
 
-async function syncScalarWriteToLedger(database, customerId, rate, { source = 'scalar_write' } = {}) {
+async function syncScalarWriteToLedger(database, customerId, rate, { source = 'scalar_write', estimateId = null } = {}) {
   try {
     await database.transaction(async (sp) => {
       if (!database.isTransaction) await lockCustomerComms(sp, customerId); // rung 6 — see LOCKING above
-      return resetLedgerToScalar(sp, customerId, rate, { source });
+      return resetLedgerToScalar(sp, customerId, rate, { source, estimateId });
     });
   } catch (syncErr) {
     if (planRateLedgerEnabled()) {
@@ -721,19 +722,14 @@ async function capturePrepayPriorRateSnapshot(database, {
   const priorMonthlyRate = effectiveCustomer?.monthly_rate != null
     ? roundMoney(effectiveCustomer.monthly_rate)
     : null;
-  let priorComponents = [];
-  try {
-    const read = (q) => loadComponents(q, customerId, { includeMeta: true });
-    const rows = database?.isTransaction === true ? await database.transaction(read) : await read(database);
-    priorComponents = (rows || []).map((row) => ({
-      family_key: row.family_key,
-      monthly_rate: roundMoney(row.monthly_rate),
-      source_estimate_id: row.source_estimate_id || null,
-      source: row.source || null,
-    }));
-  } catch (err) {
-    logger.warn(`[plan-rate-ledger] prepay prior-rate snapshot read skipped for customer ${customerId}: ${err.message}`);
-  }
+  const read = (q) => loadComponents(q, customerId, { strictProbe: true, includeMeta: true });
+  const rows = database?.isTransaction === true ? await database.transaction(read) : await read(database);
+  const priorComponents = (rows || []).map((row) => ({
+    family_key: row.family_key,
+    monthly_rate: roundMoney(row.monthly_rate),
+    source_estimate_id: row.source_estimate_id || null,
+    source: row.source || null,
+  }));
   return { customerId: String(customerId), priorMonthlyRate, priorComponents };
 }
 
@@ -751,13 +747,8 @@ async function persistPrepayPriorRateSnapshot(database, { estimateId, snapshot, 
         [JSON.stringify(payload)],
       ),
     });
-  try {
-    await (database.isTransaction === true ? database.transaction(write) : write(database));
-    return true;
-  } catch (err) {
-    logger.warn(`[plan-rate-ledger] prepay prior-rate snapshot write skipped for estimate ${estimateId}: ${err.message}`);
-    return false;
-  }
+  await (database.isTransaction === true ? database.transaction(write) : write(database));
+  return true;
 }
 
 function parseEstimateDataForRevert(raw) {
@@ -807,13 +798,16 @@ function prepayCancelRateTarget({ snapshot, snapshotMatches, termMonthlyRate, cu
   if (!currentMatchesWritten && !(deletedCount > 0 && planRateLedgerEnabled())) {
     return { shouldUpdate: false, restoredRate: null };
   }
+  const priorRate = snapshotMatches && snapshot.priorMonthlyRate != null
+    ? roundMoney(snapshot.priorMonthlyRate)
+    : null;
+  if (!planRateLedgerEnabled() && currentMatchesWritten && priorRate !== null) {
+    return { shouldUpdate: true, restoredRate: priorRate };
+  }
   if (hasTable && remaining.length > 0) {
     const sum = remaining.reduce((acc, row) => acc + Number(row.monthly_rate || 0), 0);
     return { shouldUpdate: true, restoredRate: roundMoney(sum) };
   }
-  const priorRate = snapshotMatches && snapshot.priorMonthlyRate != null
-    ? roundMoney(snapshot.priorMonthlyRate)
-    : null;
   return { shouldUpdate: true, restoredRate: priorRate };
 }
 

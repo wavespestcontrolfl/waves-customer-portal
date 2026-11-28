@@ -931,10 +931,10 @@ async function nonSuccessorSeriesRoots(term, conn, rows = null) {
   if (term?.recurring_parent_id != null) roots.add(String(term.recurring_parent_id));
   addTermLinkedRoots(term, rows, roots);
   if (roots.size > 0 || !Array.isArray(rows) || typeof conn !== 'function' || !term?.customer_id) return roots;
-  const hasParentedSeries = rows.some((r) => r?.recurring_parent_id != null);
-  const candidateRoots = new Set(rows.map(rowSeriesRootId).filter(Boolean));
-  if (hasParentedSeries && candidateRoots.size > 1 && (term?.id != null || term?.source_estimate_id != null)) {
-    const linked = await conn('scheduled_services')
+  const candidateRootsPresent = rows.some((r) => Boolean(rowSeriesRootId(r)));
+  if (!candidateRootsPresent) return roots;
+  if (term?.id != null || term?.source_estimate_id != null) {
+    const linked = await conn('scheduled_services as term_series_links')
       .where({ customer_id: term.customer_id })
       .where((q) => {
         if (term?.id != null) q.where('annual_prepay_term_id', term.id);
@@ -4991,11 +4991,9 @@ async function stampedRowInNonSuccessorScope(term, scheduledService, conn) {
     const termProperty = await nonSuccessorTermPropertyId(term, conn, null);
     if (termProperty && rowProperty !== termProperty) return false;
   }
-  const termRoot = term?.series_root_id != null
-    ? String(term.series_root_id)
-    : (term?.recurring_parent_id != null ? String(term.recurring_parent_id) : null);
+  const owningRoots = await nonSuccessorSeriesRoots(term, conn, [scheduledService]);
   const rowRoot = rowSeriesRootId(scheduledService);
-  if (termRoot && rowRoot && rowRoot !== termRoot) return false;
+  if (owningRoots.size > 0 && rowRoot && !owningRoots.has(rowRoot)) return false;
   return true;
 }
 
