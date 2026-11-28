@@ -268,7 +268,7 @@ function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff, l
   if (buttonUrl) {
     const safeHref = escapeHtml(buttonUrl);
     parts.push(`<div style="margin:24px 0 14px 0;text-align:center;">${ctaButton(safeHref, escapeHtml(buttonLabel || buttonUrl))}</div>`);
-    parts.push(`<p class="dm-muted" style="font-family:${colors.FONT};font-size:14px;line-height:1.5;color:${colors.MUTED};word-break:break-all;margin:0 0 14px 0;">${safeHref}</p>`);
+    parts.push(`<p style="font-family:${colors.FONT};font-size:14px;line-height:1.5;color:${colors.MUTED};word-break:break-all;margin:0 0 14px 0;">${safeHref}</p>`);
   }
   if (signoff) {
     parts.push(`<p style="font-family:${colors.FONT};font-size:15px;line-height:1.58;margin:16px 0 0 0;color:${colors.BODY};">${escapeHtml(signoff)}</p>`);

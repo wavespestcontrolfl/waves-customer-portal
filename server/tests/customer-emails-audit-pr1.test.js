@@ -139,7 +139,12 @@ describe('Customer emails audit PR 1 regressions', () => {
     expect(unresolvedTokenUnsub.html).not.toContain('{{missing}}');
     expect(unresolvedTokenUnsub.text).not.toContain('{{missing}}');
 
-    for (const malformed of ['https://', 'mailto:']) {
+    for (const malformed of [
+      'https://',
+      'mailto:',
+      'https://portal.wavespestcontrol.com/unsubscribe/{{missing}}',
+      'https://portal.wavespestcontrol.com/unsubscribe/<%asm%>',
+    ]) {
       const out = renderTemplate({
         template: { template_key: 'newsletter.promo', name: 'Promo', mode: 'marketing' },
         version: { subject: 'Promo', blocks: [{ type: 'paragraph', content: 'Hello' }] },
@@ -147,6 +152,7 @@ describe('Customer emails audit PR 1 regressions', () => {
         unsubscribeUrl: malformed,
       });
       expect(out.html).not.toContain(`href="${malformed}"`);
+      expect(out.html).not.toContain('{{missing}}');
       expect(out.text).not.toContain(`Unsubscribe: ${malformed}`);
     }
   });
@@ -191,6 +197,7 @@ describe('Customer emails audit PR 1 regressions', () => {
     expect(out.html).toContain('>Pick a time</a>');
     expect(out.html).not.toContain('#0b5c3f');
     expect(out.html).not.toContain('font-size:12px');
+    expect(out.html).not.toContain('<p class="dm-muted"');
 
     const received = buildEmailContent(
       { language: 'en', applicant_name: 'Jordan Rivera' },

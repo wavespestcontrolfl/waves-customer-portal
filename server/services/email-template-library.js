@@ -99,7 +99,7 @@ function safeImageUrl(url) {
 const BATCH_UNSUBSCRIBE_TOKEN = '{{unsubscribe_url}}';
 
 function isValidUnsubscribeTarget(trimmed) {
-  if (/\s/.test(trimmed)) return false;
+  if (/\s|\{\{|\}\}|<%|%>/.test(trimmed)) return false;
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return Boolean(parsed.hostname);

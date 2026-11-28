@@ -2841,6 +2841,45 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
     }
   });
 
+  test('preflight rejects an unsubscribe URL containing unresolved placeholders when no ASM group is configured', async () => {
+    const marketingTemplate = () => ({
+      id: 'tpl-marketing',
+      template_key: 'newsletter.monthly',
+      name: 'Monthly Newsletter',
+      mode: 'marketing',
+      send_stream: 'marketing_newsletter',
+      active_version_id: 'ver-marketing',
+    });
+    const marketingVersion = () => ({
+      id: 'ver-marketing',
+      template_id: 'tpl-marketing',
+      version_number: 1,
+      status: 'active',
+      subject: 'Monthly update',
+      blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}, here is the monthly update.' }],
+    });
+    sendgrid.newsletterGroupId.mockReturnValue(null);
+    try {
+      setDbQueues({
+        email_templates: [chain({ first: marketingTemplate() })],
+        email_template_versions: [chain({ first: marketingVersion() })],
+      });
+      const result = await EmailTemplates.preflightTemplateSend({
+        templateKey: 'newsletter.monthly',
+        to: 'sam@example.com',
+        payload: { first_name: 'Sam' },
+        unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsubscribe/{{missing}}',
+      });
+      expect(result).toEqual({
+        ok: false,
+        reason: 'marketing template sends require an unsubscribe URL or SendGrid ASM group',
+        code: 'EMAIL_TEMPLATE_UNSUBSCRIBE_REQUIRED',
+      });
+    } finally {
+      sendgrid.newsletterGroupId.mockReturnValue(101);
+    }
+  });
+
   test('an infrastructure error in the shared chain (a template read failing) is rethrown, not read as a block', async () => {
     const failing = chain();
     failing.first = jest.fn(async () => { throw new Error('connection terminated'); });
