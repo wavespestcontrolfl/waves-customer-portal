@@ -2037,7 +2037,7 @@ function assertFenceTransaction(trx) {
 
 async function findAccountByContact(trx, {
   phone, email, matchEmail = false, confirmEmailAccountId = null, fenceAttach = false,
-  forceNewAccount = false, ignorePhoneMatch = false, exactUsPhone = false,
+  forceNewAccount = false, ignorePhoneMatch = false, exactUsPhone,
 }) {
   if (fenceAttach) assertFenceTransaction(trx);
   const digits = phoneLast10(phone);
