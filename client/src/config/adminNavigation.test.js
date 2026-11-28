@@ -20,7 +20,7 @@ describe("grouped workspaces", () => {
     for (const [query, id] of [['Recovery', 'recovery'], ['Payers', 'payers'], ['Taxes', 'taxes'], ['Health', 'toolHealth'], ['dispatch', 'schedule'], ['Reports', 'jobs']]) {
       expect(searchAdminWorkspacePages(admin, query).map((item) => item.id)).toContain(id);
     }
-    expect(searchAdminWorkspacePages(admin, 'accounting').map((item) => item.id)).toEqual(['banking', 'taxes']);
+    expect(searchAdminWorkspacePages(admin, 'accounting').map((item) => item.id)).toEqual(['banking', 'taxes', 'books']);
     const tech = getAdminWorkspaceGroups('technician', { agent_estimate: true });
     expect(searchAdminWorkspacePages(tech, 'Sales')).toEqual([]);
     expect(searchAdminWorkspacePages(tech, 'Contracts')).toEqual([]);
@@ -132,7 +132,7 @@ describe("admin navigation registry", () => {
       { id: "operations", itemIds: ["jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
       { id: "marketing", itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"] },
       { id: "team", itemIds: ["staff", "recruiting"] },
-      { id: "accounting", itemIds: ["banking", "taxes"] },
+      { id: "accounting", itemIds: ["banking", "taxes", "books"] },
       { id: "agents", itemIds: ["agents"] },
       { id: "settings", itemIds: ["settings", "toolHealth"] },
     ]);

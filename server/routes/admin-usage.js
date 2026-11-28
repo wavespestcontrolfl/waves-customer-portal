@@ -94,7 +94,7 @@ const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // route table by the drift test in admin-usage-routes.test.js, which parses
 // App.jsx — when you add an admin route, that test tells you to add it here.
 const KNOWN_PAGE_KEYS = new Set([
-  'ads', 'agent-decisions', 'agent-estimate', 'agents', 'auto-dispatch',
+  'accounting', 'ads', 'agent-decisions', 'agent-estimate', 'agents', 'auto-dispatch',
   'banking', 'bid-desk', 'bid-kit', 'bids', 'billing-recovery', 'blog', 'call-recordings', 'communications',
   'compliance', 'content-engine', 'content-registry', 'contracts',
   'credentials', 'customers', 'dashboard', 'data-hygiene', 'design-system',
