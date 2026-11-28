@@ -280,46 +280,99 @@ async function finalizeStripePhase({ job, customer, email, priorNextAttemptAt, o
   });
 }
 
+function createAdvisoryLockClient() {
+  const knexConfig = require('../knexfile');
+  const config = require('../config');
+  const env = config.nodeEnv || 'development';
+  const conn = knexConfig[env]?.connection;
+  if (!conn) return null;
+  const { Client } = require('pg');
+  return new Client(conn);
+}
+
+async function acquireNonPooledAdvisoryLock(customerId) {
+  const client = createAdvisoryLockClient();
+  if (!client) return null;
+  await client.connect();
+  try {
+    const lockRes = await client.query(
+      'SELECT pg_try_advisory_lock(hashtext($1), hashtext($2::text)) AS locked',
+      [STRIPE_EMAIL_SYNC_LOCK_NS, String(customerId)],
+    );
+    if (lockRes?.rows?.[0]?.locked === false) {
+      await client.end().catch(() => {});
+      return { locked: false };
+    }
+    return {
+      locked: true,
+      release: async () => {
+        await client.query(
+          'SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))',
+          [STRIPE_EMAIL_SYNC_LOCK_NS, String(customerId)],
+        ).catch(() => {});
+        await client.end().catch(() => {});
+      },
+    };
+  } catch (err) {
+    await client.end().catch(() => {});
+    throw err;
+  }
+}
+
+async function runStripeEmailSyncPhases(jobId) {
+  const step1 = await claimForStripePhase(jobId);
+  if (step1.done) return step1.result;
+
+  let outcome = null;
+  let stripeError = null;
+  try {
+    outcome = await pushToStripe(step1.job, step1.customer, step1.email);
+  } catch (err) {
+    stripeError = err;
+  }
+
+  try {
+    return await finalizeStripePhase({
+      job: step1.job,
+      customer: step1.customer,
+      email: step1.email,
+      priorNextAttemptAt: step1.priorNextAttemptAt,
+      outcome,
+      stripeError,
+    });
+  } catch (finErr) {
+    if (step1.leasedVersion && finErr && typeof finErr === 'object') {
+      finErr.leasedVersion = step1.leasedVersion;
+    }
+    throw finErr;
+  }
+}
+
 async function processJob(jobId) {
   const peek = await db(TABLE).where({ id: jobId }).first('customer_id');
   if (!peek) return 'busy';
-  // Hold ONLY the non-blocking stripe.email.sync advisory lock across Stripe HTTP
-  // (never customers FOR UPDATE): payments/webhooks never stall on Stripe latency,
-  // while email edits and customer merges wait for any in-flight Stripe email write
-  // to finish before mutating email or transferring Stripe profile ownership.
+  // Hold the cross-HTTP stripe.email.sync advisory lock on a dedicated
+  // non-pooled pg.Client when connected to Postgres so DB_POOL_MAX=2 never
+  // deadlocks if a concurrent email write waits on the lock while phase 2
+  // finalizes; fall back to a transaction advisory lock under mock DBs.
+  if (db?.client?.pool) {
+    const advisory = await acquireNonPooledAdvisoryLock(peek.customer_id);
+    if (advisory) {
+      if (!advisory.locked) return 'busy';
+      try {
+        return await runStripeEmailSyncPhases(jobId);
+      } finally {
+        await advisory.release();
+      }
+    }
+  }
   return db.transaction(async (advisoryTrx) => {
     const lockRes = await advisoryTrx.raw(
       'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
       [STRIPE_EMAIL_SYNC_LOCK_NS, String(peek.customer_id)],
     );
     if (lockRes?.rows?.[0]?.locked === false) return 'busy';
-
-    const step1 = await claimForStripePhase(jobId);
-    if (step1.done) return step1.result;
-
-    let outcome = null;
-    let stripeError = null;
-    try {
-      outcome = await pushToStripe(step1.job, step1.customer, step1.email);
-    } catch (err) {
-      stripeError = err;
-    }
-
-    try {
-      return await finalizeStripePhase({
-        job: step1.job,
-        customer: step1.customer,
-        email: step1.email,
-        priorNextAttemptAt: step1.priorNextAttemptAt,
-        outcome,
-        stripeError,
-      });
-    } catch (finErr) {
-      if (step1.leasedVersion && finErr && typeof finErr === 'object') {
-        finErr.leasedVersion = step1.leasedVersion;
-      }
-      throw finErr;
-    }
+    return runStripeEmailSyncPhases(jobId);
   });
 }
 

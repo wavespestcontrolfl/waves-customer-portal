@@ -206,6 +206,27 @@ async function verifySelfPayAndVisitUnderLock(trx, lockedInvoice, lockedCust) {
   return null;
 }
 
+async function lockInvoiceOwnerCustomerFirst(trx, invoice) {
+  // Acquire customers FOR UPDATE BEFORE releaseCombinedSessionBeforeCollection
+  // (which may write invoices in clearPaymentIntentStamps) so reconcile matches
+  // apply-credit's customers -> invoices lock hierarchy.
+  let ownerId = invoice.customer_id ? String(invoice.customer_id) : null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (ownerId) {
+      await trx('customers').where({ id: ownerId }).forUpdate().first('id', 'payer_id');
+    }
+    const currentRow = await trx('invoices').where({ id: invoice.id }).first('customer_id');
+    const freshOwnerId = currentRow?.customer_id ? String(currentRow.customer_id) : null;
+    if (!freshOwnerId || freshOwnerId === ownerId) {
+      return freshOwnerId || ownerId;
+    }
+    ownerId = freshOwnerId;
+  }
+  const ownerErr = new Error('The invoice ownership kept changing — try again');
+  ownerErr.statusCode = 409;
+  throw ownerErr;
+}
+
 async function checkReconcileFencesInLock(trx, { invoiceId, invoice, triagedPiId, chargePiId }) {
   // Acquire customers FOR UPDATE BEFORE invoices FOR UPDATE (matches apply-credit
   // lock order so concurrent reconcile + apply-credit cannot ABBA deadlock).
@@ -417,6 +438,8 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     let txResult;
     try {
       txResult = await db.transaction(async (trx) => {
+        const initialOwnerId = await lockInvoiceOwnerCustomerFirst(trx, invoice);
+        if (initialOwnerId) invoice.customer_id = initialOwnerId;
         const reservation = await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'reconciling this payment' });
         if (reservation.invoice?.customer_id) invoice.customer_id = reservation.invoice.customer_id;
         if (stripeChargeId) {

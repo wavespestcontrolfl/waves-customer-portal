@@ -225,9 +225,10 @@ function buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount) {
 }
 
 async function isManualChargeAlreadyLogged(lockOutcome, customerId, eventType) {
-  if (!lockOutcome?.payment?.id) return Boolean(lockOutcome?.replayed);
+  if (!lockOutcome?.replayed) return false;
+  if (!lockOutcome?.payment?.id) return true;
   const q = db('autopay_log');
-  if (!q || typeof q.where !== 'function') return Boolean(lockOutcome?.replayed);
+  if (!q || typeof q.where !== 'function') return true;
   const existing = await q
     .where({ customer_id: customerId, payment_id: lockOutcome.payment.id, event_type: eventType })
     .first('id');
@@ -236,9 +237,9 @@ async function isManualChargeAlreadyLogged(lockOutcome, customerId, eventType) {
 
 async function claimManualReceiptDelivery(customer, paymentId, lockOutcome) {
   if (!customer?.phone) return false;
-  if (!lockOutcome?.hasCallerKey || !paymentId) return true;
+  if (!lockOutcome?.hasCallerKey || !lockOutcome?.replayed || !paymentId) return true;
   const q = db('sms_messages');
-  if (!q || typeof q.where !== 'function') return !lockOutcome.replayed;
+  if (!q || typeof q.where !== 'function' || typeof q.whereRaw !== 'function') return !lockOutcome.replayed;
   const existing = await q
     .whereRaw("metadata->>'source' = 'admin_manual_charge' AND metadata->>'paymentId' = ?", [String(paymentId)])
     .first('id');
