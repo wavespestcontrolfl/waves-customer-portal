@@ -58,4 +58,39 @@ describe('Visit Brief: Add-On Prompt', () => {
     );
     expect(screen.queryByTestId('visit-brief-addon-prompt')).toBeNull();
   });
+
+  it('passes the sibling service that supplied the prompt on a grouped stop', () => {
+    const primary = { id: 'svc-primary', service_type: 'Mosquito Control', status: 'scheduled', customer_id: 'cust-1' };
+    const sibling = { id: 'svc-sibling', service_type: 'Quarterly Pest Control', status: 'scheduled', customer_id: 'cust-1' };
+    const stop = { primary, services: [primary, sibling] };
+    const onLead = vi.fn();
+    render(
+      <VisitBriefPanel
+        stop={stop}
+        detail={{
+          status: 'loaded',
+          byService: {
+            'svc-primary': { brief: { facts: { access: {} } } },
+            'svc-sibling': {
+              brief: {
+                facts: {
+                  access: {},
+                  addon_prompt: {
+                    targetFamily: 'lawn_care',
+                    targetLabel: 'Lawn Care',
+                    fieldLeadServiceType: 'Lawn',
+                    headline: 'No Lawn Care plan on file',
+                    detail: 'Ask if they want a Lawn Care quote (WaveGuard bundle savings apply). Tap below to flag for the office.',
+                  },
+                },
+              },
+            },
+          },
+        }}
+        onLead={onLead}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Flag Lawn Care Lead/i }));
+    expect(onLead).toHaveBeenCalledWith(sibling, 'Lawn');
+  });
 });

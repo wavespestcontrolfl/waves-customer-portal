@@ -1257,8 +1257,9 @@ function SetTextsSection({ line, service, visitIds, request, onBusyChange }) {
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
 const CALL_LOCK_MS = 45000;
 
-function firstAddonPrompt(memberBits) {
-  return memberBits.map((m) => m.facts?.addon_prompt).find(Boolean) || null;
+function firstAddonPromptMember(memberBits) {
+  const match = memberBits.find((m) => m.facts?.addon_prompt) || null;
+  return match ? { prompt: match.facts.addon_prompt, service: match.service } : null;
 }
 
 function AddonPromptBanner({ prompt, service, onLead }) {
@@ -1401,7 +1402,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const customerFlaggedMember = memberBits.find((m) => m.facts?.customerFlagged?.length) || null;
   const customerFlagged = customerFlaggedMember?.facts?.customerFlagged || null;
   // Zero-price Pest <-> Lawn cross-sell prompt (owner 2026-11-27 "ok go").
-  const addonPrompt = firstAddonPrompt(memberBits);
+  const addonMember = firstAddonPromptMember(memberBits);
   // Estimates dedupe by id: siblings booked from ONE estimate render it
   // once; separately-quoted siblings each render their own.
   const estimates = [];
@@ -1538,7 +1539,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         </div>
       )}
 
-      <AddonPromptBanner prompt={addonPrompt} service={service} onLead={onLead} />
+      <AddonPromptBanner prompt={addonMember?.prompt} service={addonMember?.service || service} onLead={onLead} />
 
       <SectionLabel>Actions</SectionLabel>
       {stop.services.map((s) => (
