@@ -249,10 +249,39 @@ export function callSummaryFor(call) {
   return { text: earlyText, early: true };
 }
 
+// Terminal dispositions where an early-summary draft next step or staff promise
+// is no longer actionable (already fulfilled, spam, or closed).
+const NEXT_STEP_CLOSED_DISPOSITIONS = new Set([
+  "spam",
+  "spam_discarded",
+  "booked",
+  "new_lead_booked",
+  "wrong_number_closed",
+  "vendor_logged",
+]);
+
 // The office's next step and what staff promised the caller (GATE_CALL_EARLY_SUMMARY), read straight from the early
-// summary so they stay on the row after the recording pipeline's summary replaces its text. Null when both are empty.
+// summary so they stay on the row after the recording pipeline's summary replaces its text. Null when both are empty,
+// or once the call is classified as spam or fulfilled.
 export function nextStepFor(call) {
+  if (!call) return null;
+  const extraction = parseAiExtraction(call);
   const meta = parseJsonObject(call?.metadata);
+  const hasScheduledFulfillment = Boolean(
+    call.scheduled_service_id ||
+    meta?.scheduled_service_id ||
+    meta?.auto_booking?.scheduled_service_id
+  );
+  if (
+    call.processing_status === "spam" ||
+    call.invalid_reason === "spam" ||
+    NEXT_STEP_CLOSED_DISPOSITIONS.has(call.disposition) ||
+    extraction?.is_spam === true ||
+    hasScheduledFulfillment ||
+    meta?.early_summary_fulfilled === true
+  ) {
+    return null;
+  }
   const early = meta?.live_transcription?.early_summary;
   const nextStep = typeof early?.next_step === "string" ? early.next_step.trim() : "";
   const promises = (Array.isArray(early?.promises) ? early.promises : [])
@@ -457,7 +486,7 @@ function StatButton({ label, value, filter, active, onClick, alert }) {
       <div
         className={cn(
           "text-22 font-mono u-nums",
-          alert && value > 0 ? "text-alert-fg" : "text-ink-primary",
+          alert && Number(value) > 0 ? "text-alert-fg" : "text-ink-primary",
         )}
       >
         {value}
@@ -554,11 +583,9 @@ export default function CallLogTabV2() {
   const [processResult, setProcessResult] = useState(null);
   const [routeFeedbackSavingId, setRouteFeedbackSavingId] = useState(null);
   const [routeFeedbackResult, setRouteFeedbackResult] = useState(null);
-  // Auto-processed sids — once we kick off a transcription run for a call
-  // we don't retry it during this session, even if it errors. Avoids hammering
-  // Gemini in a loop on a permanently-broken row.
-  const autoAttemptedRef = useRef(new Set());
-  const [autoProcessingSid, setAutoProcessingSid] = useState(null);
+  const didMountSearchRef = useRef(false);
+  const callToSearchSeqRef = useRef(0);
+  const callToAbortRef = useRef(null);
   // Dead-air voicemails are hidden from the voicemail bucket by default;
   // the disclosure chip on the voicemail card flips this to reveal them.
   const [showDeadAir, setShowDeadAir] = useState(false);
@@ -740,6 +767,9 @@ export default function CallLogTabV2() {
 
   useEffect(() => {
     loadCalls();
+    return () => {
+      callToAbortRef.current?.abort();
+    };
   }, []);
   // A call whose summary is still being written (awaitingSummary): reload until it lands. A hidden tab skips the
   // reload but keeps checking, and a failed reload still schedules the next one.
@@ -756,52 +786,15 @@ export default function CallLogTabV2() {
     return () => clearTimeout(t);
   }, [calls, summaryTick]);
   useEffect(() => {
+    if (!didMountSearchRef.current) {
+      didMountSearchRef.current = true;
+      return undefined;
+    }
     const t = setTimeout(() => {
       loadCalls(callLogSearch.trim());
     }, 300);
     return () => clearTimeout(t);
   }, [callLogSearch]);
-
-  // Calls that need backend Gemini processing — has a recording but the
-  // processor never finished extracting (no terminal status) and nothing
-  // was transcribed. Voicemail/spam/processed rows are intentionally skipped.
-  const needsAutoProcess = (c) => {
-    if (!c?.twilio_call_sid || !c.recording_available) return false;
-    if (c.transcription && c.transcription.length > 0) return false;
-    const status = c.processing_status;
-    if (status === "processed" || status === "voicemail" || status === "spam")
-      return false;
-    if (autoAttemptedRef.current.has(c.twilio_call_sid)) return false;
-    return true;
-  };
-
-  // Serial auto-processor: pick the next unprocessed call and run it through
-  // the Gemini pipeline (transcribe + extract → customer/lead/estimate).
-  // One at a time so we don't fan out a bunch of slow Gemini requests.
-  useEffect(() => {
-    if (autoProcessingSid || processingCallSid) return;
-    const next = calls.find(needsAutoProcess);
-    if (!next) return;
-
-    const sid = next.twilio_call_sid;
-    autoAttemptedRef.current.add(sid);
-    setAutoProcessingSid(sid);
-
-    (async () => {
-      try {
-        await adminFetch(`/admin/call-recordings/process/${sid}`, {
-          method: "POST",
-        });
-      } catch {
-        // Non-blocking — leave the row as-is; admin can manually reprocess.
-      } finally {
-        setAutoProcessingSid(null);
-        // Refresh so the new transcription / extraction shows up, which
-        // also re-runs this effect for the next pending call.
-        loadCalls(callLogSearch.trim());
-      }
-    })();
-  }, [calls, autoProcessingSid, processingCallSid]);
 
   const handleCall = async () => {
     if (!callTo.trim()) return;
@@ -1092,14 +1085,14 @@ export default function CallLogTabV2() {
         {" "}
         <StatButton
           label="Recent calls"
-          value={calls.length}
+          value={callsError && calls.length === 0 ? "—" : calls.length}
           filter="all"
           active={callFilter === "all"}
           onClick={() => setCallFilter("all")}
         />{" "}
         <StatButton
           label="Answered"
-          value={answered}
+          value={callsError && calls.length === 0 ? "—" : answered}
           filter="answered"
           active={callFilter === "answered"}
           onClick={() =>
@@ -1108,7 +1101,7 @@ export default function CallLogTabV2() {
         />{" "}
         <StatButton
           label="Voicemail"
-          value={voicemail}
+          value={callsError && calls.length === 0 ? "—" : voicemail}
           filter="voicemail"
           active={callFilter === "voicemail"}
           onClick={() =>
@@ -1117,7 +1110,7 @@ export default function CallLogTabV2() {
         />{" "}
         <StatButton
           label="Missed"
-          value={missed}
+          value={callsError && calls.length === 0 ? "—" : missed}
           filter="missed"
           active={callFilter === "missed"}
           alert
@@ -1178,7 +1171,6 @@ export default function CallLogTabV2() {
                     : transcriptText
                   : "";
                 const isProcessing =
-                  autoProcessingSid === c.twilio_call_sid ||
                   processingCallSid === c.twilio_call_sid;
 
                 return (
@@ -1253,7 +1245,7 @@ export default function CallLogTabV2() {
                           <button
                             type="button"
                             onClick={() => handleProcessCall(c.twilio_call_sid)}
-                            disabled={!!processingCallSid || !!autoProcessingSid}
+                            disabled={!!processingCallSid}
                             className="text-11 uppercase tracking-label text-ink-tertiary hover:text-ink-primary u-focus-ring"
                           >
                             Process
@@ -1438,6 +1430,8 @@ export default function CallLogTabV2() {
                 value={callToSearch || callTo}
                 onChange={async (e) => {
                   const val = e.target.value;
+                  callToAbortRef.current?.abort();
+                  const seq = (callToSearchSeqRef.current += 1);
                   setCallToCustomerId(null);
                   if (/^[\d\s()\-+]+$/.test(val)) {
                     setCallTo(val);
@@ -1447,6 +1441,8 @@ export default function CallLogTabV2() {
                     setCallToSearch(val);
                     setCallTo("");
                     if (val.length >= 2) {
+                      const controller = new AbortController();
+                      callToAbortRef.current = controller;
                       try {
                         const r = await fetch(
                           `${API_BASE}/admin/customers?search=${encodeURIComponent(val)}&limit=8&suggest=1`,
@@ -1454,11 +1450,15 @@ export default function CallLogTabV2() {
                             headers: {
                               Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
                             },
+                            signal: controller.signal,
                           },
                         );
+                        if (seq !== callToSearchSeqRef.current) return;
                         if (r.ok) {
                           const d = await r.json();
-                          setCallToResults(d.customers || []);
+                          if (seq === callToSearchSeqRef.current) {
+                            setCallToResults(d.customers || []);
+                          }
                         }
                       } catch {}
                     } else {
@@ -1478,6 +1478,8 @@ export default function CallLogTabV2() {
                       key={c.id}
                       type="button"
                       onClick={() => {
+                        callToAbortRef.current?.abort();
+                        callToSearchSeqRef.current += 1;
                         setCallTo(c.phone || "");
                         setCallToCustomerId(c.id || null);
                         setCallToSearch(
@@ -1726,8 +1728,6 @@ export default function CallLogTabV2() {
                         )}
                         {c.twilio_call_sid &&
                           (() => {
-                            const isAuto =
-                              autoProcessingSid === c.twilio_call_sid;
                             const isManual =
                               processingCallSid === c.twilio_call_sid;
                             const isProcessed =
@@ -1735,12 +1735,12 @@ export default function CallLogTabV2() {
                             const hasTranscript = !!(
                               c.transcription && c.transcription.length > 0
                             );
-                            if (isAuto || isManual) {
+                            if (isManual) {
                               return (
                                 <span className="text-12 text-ink-tertiary italic">
                                   {isProcessed
                                     ? "Reprocessing…"
-                                    : "Auto-transcribing…"}
+                                    : "Processing…"}
                                 </span>
                               );
                             }
@@ -1755,9 +1755,7 @@ export default function CallLogTabV2() {
                                   onClick={() =>
                                     handleProcessCall(c.twilio_call_sid)
                                   }
-                                  disabled={
-                                    !!processingCallSid || !!autoProcessingSid
-                                  }
+                                  disabled={!!processingCallSid}
                                   className="text-11 uppercase tracking-label text-ink-tertiary hover:text-ink-primary u-focus-ring"
                                 >
                                   Process
@@ -1773,9 +1771,7 @@ export default function CallLogTabV2() {
                                     // force applies as well as operator.
                                     handleProcessCall(c.twilio_call_sid, true)
                                   }
-                                  disabled={
-                                    !!processingCallSid || !!autoProcessingSid
-                                  }
+                                  disabled={!!processingCallSid}
                                   className="text-11 uppercase tracking-label text-ink-tertiary hover:text-ink-primary u-focus-ring"
                                 >
                                   Reprocess

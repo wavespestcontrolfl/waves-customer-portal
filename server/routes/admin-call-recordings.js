@@ -140,29 +140,32 @@ router.get('/stats', requireAdmin, async (req, res, next) => {
 // GET /recordings — list recordings with processing status
 router.get('/recordings', requireAdmin, async (req, res, next) => {
   try {
-    const { status, limit = 50, page = 1 } = req.query;
-    let query = db('call_log')
-      .whereNotNull('recording_url')
-      .where('recording_url', '!=', '')
+    const { status } = req.query;
+    const pageNum = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const { whereNotSandboxCall } = require('../services/voice-agent/relay-protocol');
+    const baseFilter = (q) => {
+      let filtered = whereNotSandboxCall(q, 'call_log.source')
+        .whereNotNull('call_log.recording_url')
+        .where('call_log.recording_url', '!=', '');
+      if (status) filtered = filtered.where('call_log.processing_status', status);
+      return filtered;
+    };
+    const offset = (pageNum - 1) * limitNum;
+    const recordings = await baseFilter(db('call_log'))
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .select(
         'call_log.*',
         'customers.first_name', 'customers.last_name',
-        'customers.email as customer_email', 'customers.phone as customer_phone'
+        'customers.email as customer_email', 'customers.phone as customer_phone',
       )
-      .orderBy('call_log.created_at', 'desc');
+      .orderBy('call_log.created_at', 'desc')
+      .limit(limitNum)
+      .offset(offset);
 
-    if (status) query = query.where('call_log.processing_status', status);
+    const [{ count: total }] = await baseFilter(db('call_log')).count('* as count');
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    const recordings = await query.limit(parseInt(limit)).offset(offset);
-
-    const [{ count: total }] = await db('call_log')
-      .whereNotNull('recording_url')
-      .where('recording_url', '!=', '')
-      .count('* as count');
-
-    res.json({ recordings, total: parseInt(total), page: parseInt(page) });
+    res.json({ recordings, total: parseInt(total, 10) || 0, page: pageNum, limit: limitNum });
   } catch (err) { next(err); }
 });
 
@@ -814,6 +817,7 @@ router.post('/calls/:id/adopt-recording', requireAdmin, async (req, res, next) =
         // fields are replaced — never a processed row whose audio does not
         // match its intelligence.
         processing_status: null,
+        invalid_reason: null,
         // The verdict time described the previous recording too (Codex #6269 r2).
         processed_at: null,
         // …and the retry budget: extraction_attempts counted failures on the
@@ -1027,9 +1031,17 @@ async function findLiveCustomerForCall(call) {
 }
 
 // PUT /calls/:id/disposition — tag a call
+const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
+function maskLast4(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
+}
 router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
   try {
     const { disposition } = req.body;
+    if (!disposition || !Object.prototype.hasOwnProperty.call(DISPOSITION_LABELS, disposition)) {
+      return res.status(400).json({ error: `disposition must be one of: ${Object.keys(DISPOSITION_LABELS).join(', ')}` });
+    }
 
     // Auto-add disposition column if missing
     const cols = await db('call_log').columnInfo();
@@ -1037,13 +1049,21 @@ router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
       await db.schema.alterTable('call_log', t => t.string('disposition', 50)).catch(() => {});
     }
 
-    // Find the call record
-    let call = await db('call_log').where({ id: req.params.id }).first();
-    if (!call) call = await db('call_log').where({ twilio_call_sid: req.params.id }).first();
+    // Validate ID format before querying Postgres so a malformed id never
+    // triggers a 22P02 UUID cast 500.
+    const rawId = String(req.params.id || '');
+    const isCallSid = CALL_SID_RE.test(rawId);
+    if (!isCallSid && !UUID_RE.test(rawId)) {
+      return res.status(400).json({ error: 'Invalid call id' });
+    }
+    const call = isCallSid
+      ? await db('call_log').where({ twilio_call_sid: rawId }).first()
+      : await db('call_log').where({ id: rawId }).first();
     if (!call) return res.status(404).json({ error: 'Call not found' });
 
     if (disposition === 'spam') {
-      // SPAM: hard-block the number + delete call from log.
+      // SPAM: hard-block the number + soft-mark call as spam (never hard-delete,
+      // which would erase #8592 call metrics and orphan call_live_utterances).
       // Schema is owned by migration 20260418000006 (PR 1):
       //   number / block_type / blocked_by(uuid FK technicians) / reason
       //
@@ -1078,26 +1098,36 @@ router.put('/calls/:id/disposition', requireAdmin, async (req, res, next) => {
           reason: 'Tagged spam from call disposition',
           auto_blocked: false,
         }).onConflict('number').ignore();
-        logger.info(`[calls] Blocked spam number: ${call.from_phone}`);
+        logger.info(`[calls] Blocked spam number ending ${maskLast4(call.from_phone)} (call ${call.id})`);
       }
-      // Delete the call log entry. sms_log rows are deliberately KEPT: they are
-      // the A2P/consent audit trail for every text we ever sent to that number
-      // and must survive a block (the block itself stops future sends).
-      await db('call_log').where({ id: call.id }).del();
-      res.json({ success: true, disposition, deleted: true });
+      // Soft-mark the call row as spam rather than hard-deleting it so #8592
+      // call-health metrics stay accurate and call_live_utterances are never
+      // orphaned. Revoke processing_token and bump processing_generation so any
+      // in-flight recording worker or queued webhook timer cannot overwrite the
+      // manual spam verdict. sms_log rows are deliberately KEPT as the A2P trail.
+      await db('call_log').where({ id: call.id }).update({
+        disposition: 'spam',
+        processing_status: 'spam',
+        invalid_reason: 'spam',
+        processing_token: null,
+        processing_generation: db.raw('COALESCE(processing_generation, 0) + 1'),
+        updated_at: new Date(),
+      });
+      res.json({ success: true, disposition, blocked: Boolean(call.from_phone) });
     } else {
       // NON-SPAM: save disposition + attach to customer timeline
       await db('call_log').where({ id: call.id }).update({ disposition, updated_at: new Date() });
 
       // Attach to customer timeline if customer_id exists
       if (call.customer_id) {
-        const label = DISPOSITION_LABELS[disposition] || disposition;
+        const label = DISPOSITION_LABELS[disposition];
         const duration = call.duration_seconds ? `${Math.floor(call.duration_seconds / 60)}m ${call.duration_seconds % 60}s` : '';
+        const interactionType = String(call.direction || '').toLowerCase() === 'outbound' ? 'outbound_call' : 'inbound_call';
         await db('customer_interactions').insert({
           customer_id: call.customer_id,
-          interaction_type: 'inbound_call',
+          interaction_type: interactionType,
           subject: `Call tagged: ${label}${duration ? ` (${duration})` : ''}`,
-          body: call.transcript_text || null,
+          body: call.transcription || null,
           metadata: JSON.stringify({
             disposition,
             callSid: call.twilio_call_sid,

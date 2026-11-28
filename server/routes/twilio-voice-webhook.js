@@ -945,16 +945,17 @@ async function stampPreconnectScreen(callSid, value) {
     const row = await db('call_log')
       .where('twilio_call_sid', callSid)
       .orderBy('created_at', 'desc')
-      .first();
+      .first('id');
     if (!row) return;
-    let meta = {};
-    try {
-      meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    } catch { meta = {}; }
-    meta.preconnect_screen = value;
     await db('call_log')
       .where({ id: row.id })
-      .update({ metadata: JSON.stringify(meta), updated_at: new Date() });
+      .update({
+        metadata: db.raw(
+          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{preconnect_screen}', ?::jsonb, true)",
+          [JSON.stringify(value)],
+        ),
+        updated_at: new Date(),
+      });
   } catch (err) {
     logger.warn(`[preconnect-screen] stamp '${value}' failed for ${maskSid(callSid)}: ${err.message}`);
   }
@@ -3294,7 +3295,7 @@ router.post('/recording-status', async (req, res) => {
           await park(targetRow, attach.reason);
           break;
         }
-        const write = { ...recordingData };
+        const write = { ...recordingData, invalid_reason: null };
         if (attach.action === 'replace') {
           // The row's transcript/extraction (if any) describe the OLD
           // audio. Reset processing_status atomically with the swap so the
