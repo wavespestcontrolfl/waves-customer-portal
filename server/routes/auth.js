@@ -662,8 +662,8 @@ router.get('/me', authenticate, async (req, res, next) => {
     // Portal slider (owner ruling 2026-08-28): automatic credit application
     // is the customer's choice; default OFF.
     autoApplyAccountCredit: customer.auto_apply_account_credit === true,
-    // Edit-profile control (GATE_CUSTOMER_PROFILE_EDIT): the app shows it only while this is true.
-    profileEdit: require('../config/feature-gates').customerProfileEditLive(),
+    // Edit-profile control (GATE_CUSTOMER_PROFILE_EDIT): active non-cancelled account holders only.
+    profileEdit: require('../config/feature-gates').customerProfileEditLive() && req.customerInactive !== true && !req.contactSession && customer.active === true,
     credits,
     annualPrepay,
     // C4: the cancelled state the portal renders read-only. cancelledAt is
@@ -773,8 +773,9 @@ router.post('/select-property', authenticate, async (req, res, next) => {
     // account with the same contact claim (a saved-property selection is
     // never a contact's).
     if (req.contactSession) {
-      const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
-      if (!findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey)) {
+      const { findServiceContactSlotByPhoneKey, contactSlotMayLogIn } = require('../services/customer-contact');
+      if (!findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey)
+        || !contactSlotMayLogIn(target, req.contactSession.phoneKey)) {
         return res.status(403).json({ error: 'Property is not available for this account' });
       }
       const switched = await rotateRefreshSession(currentRefreshToken, {
@@ -889,7 +890,27 @@ router.delete('/account', authenticate, async (req, res, next) => {
     // common with this deletion and is left for its own request.
     const deletedProfiles = await withCustomerDeletionGate(
       affectedIds,
-      (trx) => trx('customers').whereIn('id', affectedIds).whereNull('deleted_at').update({ deleted_at: new Date() }),
+      async (trx) => {
+        const count = await trx('customers')
+          .whereIn('id', affectedIds)
+          .whereNull('deleted_at')
+          .update({ deleted_at: new Date() });
+        // Deactivate all push & Lock Screen live-activity registrations for the
+        // deleted profiles inside the same transaction. Once deleted_at is set,
+        // the client's subsequent logout -> POST /api/push/native-unsubscribe is
+        // rejected with 401 by authenticate (whereNull('deleted_at')), which
+        // would otherwise leave APNs/FCM tokens orphaned and active.
+        if (affectedIds.length) {
+          await trx('push_subscriptions')
+            .whereIn('customer_id', affectedIds)
+            .update({
+              active: false,
+              live_activity_start_token: null,
+              live_activity_os_major: null,
+            });
+        }
+        return count;
+      },
     );
 
     // Account deletion terminates every portal refresh session for the account

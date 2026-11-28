@@ -14,10 +14,11 @@
  */
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
-const { dispatchWithFallback } = require('../llm/call');
+const { etParts, etDateString, addETDays, validCalendarDate } = require('../../utils/datetime-et');
+const llmCall = require('../llm/call');
 
 const VALID_TIME_OF_DAY = new Set(['morning', 'afternoon', 'evening', 'any']);
+const AI_PARSE_TIMEOUT_MS = 4000;
 
 const WEEKDAYS = {
   sunday: 0, sun: 0,
@@ -36,8 +37,87 @@ const MONTHS = {
   december: 11, dec: 11,
 };
 
+const MONTH_PATTERN = 'january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec';
+const WEEKDAY_PATTERN = 'sunday|sun|monday|mon|tuesday|tues|tue|wednesday|weds|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat';
+const NEGATION_CONSTRAINT_RE = /\b(?:except|not|no|other than|besides|can'?t(?:\s+do)?|cannot(?:\s+do)?|don'?t(?:\s+want)?)\b/;
+const FAST_TOD_PREFIX_RE = /^(?:(?:in\s+the\s+)?(?:morning|mornings|afternoon|afternoons|evening|evenings)|any\s*time|anything|sometime|on|for|in)\s+/i;
+const FAST_TOD_SUFFIX_RE = /\s+(?:(?:in\s+the\s+)?(?:morning|mornings|afternoon|afternoons|evening|evenings)|any\s*time|please)$/i;
+// Strict whole-string date grammars for the instant $0 deterministic fast path.
+// Any extra words (negations like "Can't do Friday", multi-dates like "12/3 and 12/4",
+// "next week", clock times, or qualifiers) fail the whole-string match and go to AI.
+const FAST_DATE_CORE_RES = [
+  /^(?:today|tonight|tomorrow)$/,
+  /^(?:(?:this|next)\s+)?weekend$/,
+  /^this\s+week$/,
+  new RegExp(`^(?:(?:this|next)\\s+)?(?:${WEEKDAY_PATTERN})$`),
+  /^\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?$/,
+  new RegExp(`^(?:${MONTH_PATTERN})\\s+\\d{1,2}(?:st|nd|rd|th)?(?:\\s+\\d{4})?$`),
+  new RegExp(`^\\d{1,2}(?:st|nd|rd|th)?(?:\\s+of)?\\s+(?:${MONTH_PATTERN})(?:\\s+\\d{4})?$`),
+  new RegExp(`^(?:(?:early|mid|late|beginning of|end of)\\s+)?(?:${MONTH_PATTERN})$`),
+];
+
 function isYmd(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  return Boolean(validCalendarDate(value));
+}
+
+function shiftEtDate(ymd, days) {
+  return etDateString(addETDays(new Date(`${ymd}T12:00:00Z`), days));
+}
+
+function resolveCalendarDate(monthNum, dayNum, explicitYear, now) {
+  const mm = String(monthNum).padStart(2, '0');
+  const dd = String(dayNum).padStart(2, '0');
+  if (explicitYear != null) {
+    const yyyy = explicitYear < 100 ? 2000 + explicitYear : explicitYear;
+    return validCalendarDate(`${yyyy}-${mm}-${dd}`);
+  }
+  const { year } = etParts(now);
+  const today = etDateString(now);
+  const thisYear = validCalendarDate(`${year}-${mm}-${dd}`);
+  if (thisYear && thisYear >= today) return thisYear;
+  return validCalendarDate(`${year + 1}-${mm}-${dd}`);
+}
+
+function parseExplicitDate(q, now) {
+  const iso = q.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (iso) {
+    const valid = validCalendarDate(iso[1]);
+    return valid ? { date: valid } : { invalid: true };
+  }
+  const slash = q.match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/);
+  if (slash) {
+    const resolved = resolveCalendarDate(Number(slash[1]), Number(slash[2]), slash[3] ? Number(slash[3]) : null, now);
+    return resolved ? { date: resolved } : { invalid: true };
+  }
+  const monthDay = q.match(new RegExp(`\\b(${MONTH_PATTERN})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s*(\\d{4}))?\\b`));
+  if (monthDay) {
+    const resolved = resolveCalendarDate(MONTHS[monthDay[1]] + 1, Number(monthDay[2]), monthDay[3] ? Number(monthDay[3]) : null, now);
+    return resolved ? { date: resolved } : { invalid: true };
+  }
+  const dayMonth = q.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${MONTH_PATTERN})\\.?(?:,?\\s*(\\d{4}))?\\b`));
+  if (dayMonth) {
+    const resolved = resolveCalendarDate(MONTHS[dayMonth[2]] + 1, Number(dayMonth[1]), dayMonth[3] ? Number(dayMonth[3]) : null, now);
+    return resolved ? { date: resolved } : { invalid: true };
+  }
+  return null;
+}
+
+const isIsoDateShape = (s) => (
+  s.length === 10 && s[4] === '-' && s[7] === '-' && /^\d{8}$/.test(`${s.slice(0, 4)}${s.slice(5, 7)}${s.slice(8, 10)}`)
+);
+
+function canFastParseDeterministically(query) {
+  let core = String(query || '').trim().toLowerCase().replace(/[?.!,]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!core || core.length > 80) return false;
+  // Strip only allowlisted polite/time-of-day modifiers at the edges; any
+  // unconsumed words (e.g. "can't do", "and 12/4", "except") stay in `core`
+  // and fail the strict whole-string match below.
+  let prev;
+  do {
+    prev = core;
+    core = core.replace(FAST_TOD_PREFIX_RE, '').replace(FAST_TOD_SUFFIX_RE, '').trim();
+  } while (core !== prev);
+  return isIsoDateShape(core) || FAST_DATE_CORE_RES.some((re) => re.test(core));
 }
 
 function clampDate(date, minDate, maxDate) {
@@ -83,6 +163,26 @@ function weekdayFrom(now, targetDow, afterToday) {
   return etDateString(addETDays(now, delta));
 }
 
+function parseMonthRange(q, now) {
+  const monthMatch = q.match(/\b(early|mid|late|beginning of|end of)?\s*(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\b/);
+  if (!monthMatch) return null;
+  const mod = (monthMatch[1] || '').trim();
+  const monthIdx = MONTHS[monthMatch[2]];
+  const { year, month } = etParts(now);
+  // Pick this year if the month hasn't fully passed, else next year.
+  const targetYear = monthIdx < month - 1 ? year + 1 : year;
+  const lastDay = new Date(Date.UTC(targetYear, monthIdx + 1, 0)).getUTCDate();
+  const bounds = {
+    early: [1, 10], 'beginning of': [1, 10], mid: [11, 20], late: [21, lastDay], 'end of': [21, lastDay],
+  };
+  const [fromDay, toDay] = bounds[mod] || [1, lastDay];
+  const mm = String(monthIdx + 1).padStart(2, '0');
+  return {
+    dateFrom: `${targetYear}-${mm}-${String(fromDay).padStart(2, '0')}`,
+    dateTo: `${targetYear}-${mm}-${String(toDay).padStart(2, '0')}`,
+  };
+}
+
 function fallbackParse(query, now) {
   const q = String(query || '').toLowerCase();
   const timeOfDay = timeOfDayFromText(q);
@@ -90,6 +190,12 @@ function fallbackParse(query, now) {
 
   const single = (dateStr) => ({ dateFrom: dateStr, dateTo: dateStr, timeOfDay, understood: true });
   const range = (fromStr, toStr) => ({ dateFrom: fromStr, dateTo: toStr, timeOfDay, understood: true });
+
+  // Never collapse a negated or excluded date ("any day except tomorrow",
+  // "not this weekend", "can't do next Friday") into an understood positive target.
+  if (NEGATION_CONSTRAINT_RE.test(q)) {
+    return { dateFrom: null, dateTo: null, timeOfDay, understood: false };
+  }
 
   if (/\btoday\b|\btonight\b/.test(q)) return single(today);
   if (/\btomorrow\b/.test(q)) return single(etDateString(addETDays(now, 1)));
@@ -102,45 +208,43 @@ function fallbackParse(query, now) {
     if (!isNext && dow === 0) return single(today);
     if (!isNext && dow === 6) return range(today, etDateString(addETDays(now, 1)));
     const sat = nextWeekday(now, 6, isNext);
-    const satDate = new Date(`${sat}T12:00:00Z`);
-    const sun = new Date(satDate); sun.setUTCDate(sun.getUTCDate() + 1);
-    return range(sat, sun.toISOString().slice(0, 10));
+    return range(sat, shiftEtDate(sat, 1));
   }
 
-  // Explicit weekday ("next tuesday", "on friday", "thursday")
-  const dayMatch = q.match(/\b(next\s+)?(sunday|sun|monday|mon|tuesday|tues|tue|wednesday|weds|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat)\b/);
+  // Explicit calendar date ("Dec 3", "December 3rd", "12/3", "2026-12-03")
+  // runs BEFORE bare month matching so "Dec 3" resolves to Dec 3 (not Dec 1–31),
+  // impossible dates like "Feb 30" stop instead of matching all of Feb, and
+  // boundary/negated/multi-date phrases ("after 12/3", "12/3 or 12/4", "except 12/3")
+  // never collapse to one date on fallback.
+  const explicitDate = parseExplicitDate(q, now);
+  if (explicitDate) {
+    return explicitDate.date && canFastParseDeterministically(q)
+      ? single(explicitDate.date)
+      : { dateFrom: null, dateTo: null, timeOfDay, understood: false };
+  }
+
+  // Explicit weekday ("next tuesday", "on friday", "thursday") — require the
+  // whole phrase to match the deterministic grammar so ambiguous requests
+  // ("Friday or Saturday morning") stay unresolved instead of collapsing to one day.
+  const dayMatch = canFastParseDeterministically(q)
+    ? q.match(new RegExp(`\\b(next\\s+)?(${WEEKDAY_PATTERN})\\b`))
+    : null;
   if (dayMatch) {
     return single(weekdayFrom(now, WEEKDAYS[dayMatch[2]], !!dayMatch[1]));
   }
 
   // Month references ("july", "early july", "late june", "mid august")
-  const monthMatch = q.match(/\b(early|mid|late|beginning of|end of)?\s*(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\b/);
-  if (monthMatch) {
-    const mod = (monthMatch[1] || '').trim();
-    const monthIdx = MONTHS[monthMatch[2]];
-    const { year, month } = etParts(now);
-    // Pick this year if the month hasn't fully passed, else next year.
-    let targetYear = year;
-    if (monthIdx < month - 1) targetYear = year + 1;
-    const lastDay = new Date(Date.UTC(targetYear, monthIdx + 1, 0)).getUTCDate();
-    let fromDay = 1;
-    let toDay = lastDay;
-    if (mod === 'early' || mod === 'beginning of') { fromDay = 1; toDay = 10; }
-    else if (mod === 'mid') { fromDay = 11; toDay = 20; }
-    else if (mod === 'late' || mod === 'end of') { fromDay = 21; toDay = lastDay; }
-    const mm = String(monthIdx + 1).padStart(2, '0');
-    return range(`${targetYear}-${mm}-${String(fromDay).padStart(2, '0')}`, `${targetYear}-${mm}-${String(toDay).padStart(2, '0')}`);
-  }
+  const monthRange = parseMonthRange(q, now);
+  if (monthRange) return range(monthRange.dateFrom, monthRange.dateTo);
 
-  // Relative weeks
+  // Relative weeks ("next week" = upcoming Monday through Sunday, matching buildSystemPrompt)
   if (/\bnext\s+week\b/.test(q)) {
-    const mon = nextWeekday(now, 1, true);
-    const monDate = new Date(`${mon}T12:00:00Z`);
-    const sun = new Date(monDate); sun.setUTCDate(sun.getUTCDate() + 6);
-    return range(mon, sun.toISOString().slice(0, 10));
+    const mon = weekdayFrom(now, 1, true);
+    return range(mon, shiftEtDate(mon, 6));
   }
   if (/\bthis\s+week\b/.test(q)) {
-    return range(today, etDateString(addETDays(now, 6)));
+    const daysToSunday = (7 - etParts(now).dayOfWeek) % 7;
+    return range(today, shiftEtDate(today, daysToSunday));
   }
   if (/\bnext\s+month\b/.test(q)) {
     const { year, month } = etParts(now);
@@ -165,6 +269,7 @@ Today is ${dow}, ${todayStr} (Eastern Time). All dates you output must be in YYY
 
 Interpret relative phrases against today:
 - "tomorrow" = the next day; "this weekend" = the upcoming Saturday-Sunday.
+- "next week" = the upcoming Monday through Sunday.
 - A bare weekday ("Tuesday") = the next upcoming one (today counts). "next Tuesday" = the coming Tuesday, the first Tuesday after today.
 - "early/mid/late <month>" = days 1-10 / 11-20 / 21-end of that month.
 - A single requested day uses the same value for date_from and date_to.
@@ -172,7 +277,7 @@ Interpret relative phrases against today:
 }
 
 // Structured-output contract (llm/call.js jsonSchema): the provider constrains
-// the reply to this shape; isYmd below still rejects a malformed date.
+// the reply to this shape; isYmd below still rejects a malformed or impossible date.
 const WHEN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -186,9 +291,12 @@ const WHEN_SCHEMA = {
 };
 
 async function parseWithAI(query, now) {
-  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+  // Interactive customer-facing search: use fastStructuredInteractive (Luna, not the
+  // slower reasoning model behind fastStructured) with a strict wait budget.
+  const response = await llmCall.dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructuredInteractive, {
     laneId: 'parse_when',
     maxTokens: 300,
+    timeoutMs: AI_PARSE_TIMEOUT_MS,
     jsonMode: true,
     jsonSchema: WHEN_SCHEMA,
     system: buildSystemPrompt(now),
@@ -225,11 +333,24 @@ async function parseWhen(query, opts = {}) {
 
   let parsed = null;
   let source = 'fallback';
-  try {
-    parsed = await parseWithAI(query, now);
-    if (parsed) source = 'ai';
-  } catch (err) {
-    logger.warn(`[parse-when] AI parse failed: ${err.message}`);
+  // Instant, $0 deterministic path for clean date phrases ("Tomorrow morning",
+  // "This weekend", "Sunday", "Dec 3", "12/3"); complex natural language falls
+  // through to the fast interactive model below.
+  if (canFastParseDeterministically(query)) {
+    const fast = fallbackParse(query, now);
+    const invalidExplicit = !!parseExplicitDate(String(query || '').toLowerCase(), now)?.invalid;
+    if (invalidExplicit || (fast.understood && isYmd(fast.dateFrom) && isYmd(fast.dateTo))) {
+      parsed = fast;
+      source = 'deterministic';
+    }
+  }
+  if (!parsed) {
+    try {
+      parsed = await parseWithAI(query, now);
+      if (parsed) source = 'ai';
+    } catch (err) {
+      logger.warn(`[parse-when] AI parse failed: ${err.message}`);
+    }
   }
   if (!parsed) parsed = fallbackParse(query, now);
 

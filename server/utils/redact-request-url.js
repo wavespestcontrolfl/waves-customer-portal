@@ -148,6 +148,8 @@ function redactRequestPath(rawPath) {
   return segments.join('/');
 }
 
+const RELAY_SANDBOX_PATH_RE = /(?:^|\/)api\/webhooks\/twilio\/relay-sandbox\/?$/i;
+
 /**
  * Redact credentials without parsing and reserializing the URL. Preserving the
  * original path/query encoding keeps request logs useful and means malformed
@@ -161,7 +163,9 @@ function redactRequestUrl(rawUrl, { maskAllQuery = false } = {}) {
 
   const fragmentStart = rawUrl.indexOf('#', queryStart + 1);
   const queryEnd = fragmentStart < 0 ? rawUrl.length : fragmentStart;
-  const prefix = `${redactRequestPath(rawUrl.slice(0, queryStart))}?`;
+  const rawPath = rawUrl.slice(0, queryStart);
+  const maskSandboxSelector = RELAY_SANDBOX_PATH_RE.test(rawPath);
+  const prefix = `${redactRequestPath(rawPath)}?`;
   const suffix = maskAllQuery && fragmentStart >= 0 ? `#${REDACTED}` : rawUrl.slice(queryEnd);
   const query = rawUrl.slice(queryStart + 1, queryEnd);
 
@@ -174,6 +178,9 @@ function redactRequestUrl(rawUrl, { maskAllQuery = false } = {}) {
     // Every value masked, keys kept. A part with no "=" is masked whole (it is
     // a key and a value at once).
     if (maskAllQuery) return equals < 0 ? REDACTED : `${rawKey}=${REDACTED}`;
+    if (maskSandboxSelector && ['cell', 'mode'].includes(decodedKey.toLowerCase())) {
+      return equals < 0 ? REDACTED : `${rawKey}=${REDACTED}`;
+    }
     if (!isSensitiveQueryKey(decodedKey) && !looksLikeJwt(rawValue)) return part;
     return `${rawKey}=${REDACTED}`;
   }).join('&');

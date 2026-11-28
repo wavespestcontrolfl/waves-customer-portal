@@ -8,8 +8,9 @@ import { useParams } from 'react-router-dom';
 import { WavesShell, CustomerColumn, PublicStateCard, BrandButton } from '../components/brand';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
+import { useGlassSurface } from '../glass/glass-engine';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { DOC, DOC_FONT, DOC_FONT_SERIF, FS, FW, LH, SP, RADIUS, SHADOW } from '../theme-doc';
+import { DOC, DOC_FONT, FS, FW, LH, SP, RADIUS, SHADOW } from '../theme-doc';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -25,8 +26,8 @@ const SURFACE = {
   detailBg: '#F9F8F5',
 };
 
-const H1 = { fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading };
-const H2 = { fontFamily: DOC_FONT_SERIF, fontSize: FS.h3, fontWeight: FW.semibold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading };
+const H1 = { fontFamily: DOC_FONT, fontSize: FS.h2, fontWeight: FW.bold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading };
+const H2 = { fontFamily: DOC_FONT, fontSize: FS.h3, fontWeight: FW.semibold, color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading };
 const BODY = { fontSize: FS.bodyLg, lineHeight: LH.body, color: SURFACE.body, margin: `0 0 ${SP.md}px` };
 const LABEL = { display: 'block', fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.text, margin: `0 0 ${SP.xs}px` };
 const INPUT = {
@@ -295,6 +296,7 @@ function MoveForm({ token, view, onDone }) {
 }
 
 export default function MovingPage() {
+  useGlassSurface(true);
   const { token } = useParams();
   const [view, setView] = useState(null);
   const [state, setState] = useState('loading');

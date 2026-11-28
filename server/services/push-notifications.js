@@ -85,6 +85,23 @@ function staffAppRouteArgs(sub) {
   return [{ topic: data.topic, production: data.environment === 'production' }];
 }
 
+// Android users can disable an individual notification channel (e.g. Billing)
+// in system settings while app-wide push permission stays granted. nativePush
+// reports muted Waves channel IDs into subscription_data.disabledChannels so
+// push-first routing skips this device for muted channels and falls back to SMS.
+function androidChannelDisabled(sub, notification) {
+  if (sub?.platform !== 'android') return false;
+  let data = sub.subscription_data;
+  try {
+    if (typeof data === 'string') data = JSON.parse(data);
+  } catch {
+    return false;
+  }
+  const disabled = data?.disabledChannels;
+  if (!Array.isArray(disabled) || !disabled.length) return false;
+  return disabled.includes(fcm.channelIdForNotification(notification));
+}
+
 async function sendSubscription(sub, notification, options) {
   // iOS (Capacitor) subscriptions deliver via APNs, not web-push. Routing here
   // keeps every caller (sendToCustomer / sendToAdmins / sendToAdminUsers)
@@ -106,6 +123,9 @@ async function sendSubscription(sub, notification, options) {
 
   // Android (Capacitor) subscriptions deliver via FCM, same routing shape as iOS.
   if (sub.platform === 'android') {
+    if (androidChannelDisabled(sub, notification)) {
+      return { sent: false, skipped: true, reason: 'android_channel_disabled' };
+    }
     const result = await fcm.send(sub.device_token, notification, { shouldContinue: options?.shouldContinue });
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
@@ -217,8 +237,9 @@ class PushNotificationService {
   async customerStatus(customerId, database = db, { contactKey = null } = {}) {
     const context = await customerPushContext(customerId, database);
     if (!context) return { enabled: false, registered: false, fresh: false };
+    const scopeIds = contactKey ? [customerId] : context.ids;
     const rows = (await database('push_subscriptions')
-      .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
+      .whereIn('customer_id', scopeIds).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
       .filter((row) => (contactKey ? String(row.contact_phone_key || '') === String(contactKey) : !row.contact_phone_key));
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;
@@ -295,7 +316,8 @@ class PushNotificationService {
       const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
       if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
       if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-      subs = await contactDevicesAllowed(await query, contactPurpose, customerId);
+      subs = (await contactDevicesAllowed(await query, contactPurpose, customerId))
+        .filter((sub) => !androidChannelDisabled(sub, notification));
     } catch (err) {
       logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
       return { ...summarize([], 0), reason: 'subscription_lookup_failed' };

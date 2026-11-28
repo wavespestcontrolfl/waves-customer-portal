@@ -18,7 +18,12 @@ function restockMeta(raw) {
 // r29 P2). The Restock badge counts the same rows (countActiveRestockRequests).
 function whereActiveRestock(query, hasOrders) {
   if (!hasOrders) return query.whereIn('prr.status', ['open', 'ordered']);
-  return query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
+  // A cancelled request whose automatic order may be out still blocks the product's next claim: it stays listed so
+  // Record vendor cancellation can clear it (the one outstanding-order rule, order-dispatch.js).
+  const { maybePlacedSql } = require('./procurement/order-dispatch');
+  return query.where((q) => q.whereIn('prr.status', ['open', 'ordered'])
+    .orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)")
+    .orWhereRaw(`(prr.status = 'cancelled' AND NULLIF(vo.evidence->>'revokedAt', '') IS NULL AND ${maybePlacedSql('vo')})`));
 }
 
 // The Restock badge: how many requests the active queue lists, so the badge
@@ -132,10 +137,12 @@ function restockOrderView(row, showSpend, officeDetail = true) {
     // reason code only.
     error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
     placedAt: row.order_placed_at || null,
+    // An order that may exist (the one outstanding-order rule): the tab offers Record vendor cancellation for it.
+    outstanding: !row.order_revoked_at && require('./procurement/order-dispatch').isMaybePlaced({ placed_at: row.order_placed_at, error: row.order_error }),
     revokedAt: row.order_revoked_at || null,
     // What the order actually bought, in the request's unit (packages round
     // up) — the tab's receive default; a revoked order is not what arrives.
-    orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
+    orderedQuantity: !row.order_revoked_at && require('./procurement/order-dispatch').isMaybePlaced({ placed_at: row.order_placed_at, error: row.order_error }) && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
     // The order landed after the request was received by hand: the tab
     // offers one more receive (the late order's own) on the received row.
     landedAfterReceive: !!row.order_landed_after_receive,

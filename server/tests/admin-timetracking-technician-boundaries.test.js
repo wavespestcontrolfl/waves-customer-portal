@@ -87,8 +87,9 @@ function installTransaction(chains, { activeTimer } = {}) {
   const trx = jest.fn((table) => {
     if (table === 'time_entries') return activeTimers;
     if (table === 'audit_log') return audit;
+    if (table === 'tech_voice_pins') return makeChain();
     if (table === 'scheduled_services as s') return makeChain({ rows: [] });
-    if (table === 'scheduled_services' || table === 'service_records' || table === 'review_incentive_payouts') return makeChain({ first: undefined });
+    if (['scheduled_services', 'service_records', 'review_incentive_payouts', 'payroll_checks', 'payroll_pay_lines', 'payroll_time_off', 'payroll_w4_elections'].includes(table)) return makeChain({ first: undefined });
     if (table === 'technician_capabilities') {
       // createTechnician seeds the five dispatch categories on the same trx.
       const seed = makeChain();
@@ -583,8 +584,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
 
     test('update refuses a non-owner admin reassigning any row’s email to the full-access address', async () => {
       const target = makeChain({ first: rawTechnician });
-      const noConflict = makeChain({ first: undefined });
-      const tx = installTransaction([target, noConflict]);
+      const tx = installTransaction([target]);
 
       const result = await invoke(updateTechnician, {
         params: { id: 'tech-1' },
@@ -622,8 +622,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
 
       // The NEW allow-listed email is what a non-owner admin is refused now.
       const target2 = makeChain({ first: rawTechnician });
-      const noConflict2 = makeChain({ first: undefined });
-      const tx2 = installTransaction([target2, noConflict2]);
+      const tx2 = installTransaction([target2]);
       const refused = await invoke(updateTechnician, {
         params: { id: 'tech-1' },
         body: { email: 'owner@example.test' },
@@ -665,8 +664,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
     test('a non-owner admin cannot move the owner row’s CURRENT full-access email to an ordinary address', async () => {
       const ownerRow = { ...rawTechnician, id: 'owner-row', email: 'contact@wavespestcontrol.com' };
       const target = makeChain({ first: ownerRow });
-      const noConflict = makeChain({ first: undefined });
-      const tx = installTransaction([target, noConflict]);
+      const tx = installTransaction([target]);
 
       const result = await invoke(updateTechnician, {
         params: { id: 'owner-row' },
@@ -707,12 +705,20 @@ describe('admin timetracking technician data/auth boundaries', () => {
       }));
     });
 
-    test('an edit that resends the row’s existing, unchanged full-access email is never blocked', async () => {
-      // A non-owner admin editing an unrelated field (phone) on the OWNER's
-      // own profile row: the client sends the whole form back, including
-      // the owner's existing, unchanged email. This must succeed — the
-      // guard is keyed on an actual CHANGE, never on the field's presence.
+    test('a non-owner admin cannot edit unrelated fields on the owner row; the owner can resend their own unchanged email without rotating credentials', async () => {
       const ownerRow = { ...rawTechnician, id: 'owner-row', email: 'contact@wavespestcontrol.com' };
+      const targetBlocked = makeChain({ first: ownerRow });
+      installTransaction([targetBlocked]);
+
+      const blocked = await invoke(updateTechnician, {
+        params: { id: 'owner-row' },
+        body: { email: 'contact@wavespestcontrol.com', phone: '+19415550100' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-2',
+      });
+      expect(blocked.statusCode).toBe(403);
+
       const target = makeChain({ first: ownerRow });
       const noConflict = makeChain({ first: undefined });
       const write = makeChain();
@@ -722,9 +728,9 @@ describe('admin timetracking technician data/auth boundaries', () => {
       const result = await invoke(updateTechnician, {
         params: { id: 'owner-row' },
         body: { email: 'contact@wavespestcontrol.com', phone: '+19415550100' },
-        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        technician: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
         techRole: 'admin',
-        technicianId: 'admin-2',
+        technicianId: 'admin-1',
       });
 
       expect(result.statusCode).toBe(200);
@@ -800,6 +806,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
     expect(patch).toEqual({
       active: false,
       employment_status: 'inactive',
+      twilio_number: null,
       auth_token_version: 9,
       password_reset_token_hash: null,
       password_reset_expires_at: null,

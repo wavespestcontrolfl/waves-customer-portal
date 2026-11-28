@@ -7,6 +7,7 @@ import {
 } from "../../components/ui";
 import { useAdminTableScroll } from "../../hooks/useAdminTableScroll";
 import { useAdminTableViews } from "../../hooks/useAdminTableViews";
+import { useUnsavedLeaveGuard } from "../../hooks/useUnsavedLeaveGuard";
 import { normalizeTableColumns } from "../../lib/adminTableViewStorage";
 import { adminFetch } from "../../lib/adminFetch";
 import { etDateString, etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
@@ -243,6 +244,9 @@ function BidTable({ bids, selectedId, onSelect, visibleColumns = ALL_BID_COLUMNS
 // A lost reply whose recovery read failed too (the connection is still down): the bid on screen is not refreshed.
 const RELOAD_FAILED_MESSAGE = "Could not confirm the save, and the bid could not be reloaded. What you typed is kept: save again when the connection is back.";
 const isFailure = (message) => message.startsWith("Not saved") || message.startsWith(UNCONFIRMED_MESSAGE) || message === RELOAD_FAILED_MESSAGE;
+const isBidDetailDirty = (bid, dueEditedAt, status, note, checklistDirty = false) => Boolean(
+  bid && (checklistDirty || dueEditedAt !== null || status !== bid.status || note !== (bid.decision_note || "")),
+);
 
 // On a 409 conflict reload, refresh untouched decision fields from the server, keep only what the operator edited,
 // and explain both values whenever the server also changed the same field.
@@ -274,7 +278,7 @@ function decisionPatch(bid, status, note) {
   return patch;
 }
 
-function BidDetail({ bidId, onChanged, onClose, onProgress }) {
+function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
   const [dueInput, setDueInput] = useState("");
   // The bid version the date field was typed against: a date save is fenced on it, so a decision saved in between
@@ -282,6 +286,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [dueEditedAt, setDueEditedAt] = useState(null);
   const [status, setStatus] = useState("new");
   const [note, setNote] = useState("");
+  const [checklistDirty, setChecklistDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const headingRef = useRef(null);
@@ -413,6 +418,15 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   };
 
   const { bid, emails, extras } = state;
+  const dirty = isBidDetailDirty(bid, dueEditedAt, status, note, checklistDirty);
+  useUnsavedLeaveGuard(dirty, "Leave this bid with unsaved changes?");
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+  }, [dirty, onDirtyChange]);
+  const handleClose = () => {
+    if (!dirty || window.confirm("Leave this bid with unsaved changes?")) onClose();
+  };
   if (state.loading && !bid) return <Card><CardBody>Loading…</CardBody></Card>;
   if (state.error) return <ActionFeedback error onRetry={load}>{state.error}</ActionFeedback>;
   if (!bid) return null;
@@ -430,7 +444,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
               <div className="text-ui-body text-ink-secondary">Lead on the invite: {[bid.buyer_name, bid.buyer_email].filter(Boolean).join(" · ")}</div>
             )}
           </div>
-          <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
+          <Button size="sm" variant="ghost" onClick={handleClose}>Close</Button>
         </div>
 
         <div className="mb-4 grid gap-1 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2 text-ui-body">
@@ -474,7 +488,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         {message && <ActionFeedback error={isFailure(message)} className="mb-3">{message}</ActionFeedback>}
 
         {extras && (
-          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} reloadSeqRef={reloadSeqRef} />
+          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} reloadSeqRef={reloadSeqRef} onDirtyChange={setChecklistDirty} />
         )}
 
         {showEmailHeading(bid, emails) && <h3 className={`mb-1 text-ui-body font-medium text-zinc-900${extras ? " mt-4" : ""}`}>Emails on this bid</h3>}
@@ -675,7 +689,13 @@ export default function BidDeskPage({ embedded = false }) {
     if (button) button.focus({ preventScroll: true });
   }, [selectedId]);
 
-  const select = (id) => setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
+  const detailDirtyRef = useRef(false);
+  const handleDetailDirtyChange = useCallback((dirty) => { detailDirtyRef.current = dirty; }, []);
+  const select = (id, { force = false } = {}) => {
+    if (!force && id !== selectedId && detailDirtyRef.current && !window.confirm("Leave this bid with unsaved changes?")) return;
+    if (id !== selectedId) detailDirtyRef.current = false;
+    setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
+  };
 
   const shown = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -779,7 +799,7 @@ export default function BidDeskPage({ embedded = false }) {
 
           {selectedId && (
             <div className="mt-4">
-              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => { returnFocusTo.current = selectedId; select(""); }} onProgress={setProgress} />
+              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onDirtyChange={handleDetailDirtyChange} onClose={() => { returnFocusTo.current = selectedId; select("", { force: true }); }} onProgress={setProgress} />
             </div>
           )}
         </>

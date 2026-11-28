@@ -90,4 +90,110 @@ describe('saved estimate send confirmation',()=>{
   expect(screen.getByRole('radio',{name:'Text message and email',exact:true})).toBeDisabled();
   expect(screen.getByRole('radio',{name:'Email',exact:true})).not.toBeDisabled();
  });
+ it('unlocks channel/schedule controls and uses a fresh attempt key after a pre-dispatch 400 rejection',async()=>{
+  let posts=0;
+  const fetcher=vi.fn((url,opts)=>{
+   if(opts?.method!=='POST') return json(preview);
+   posts++;
+   if(posts===1) return json({error:'SMS channel unavailable'},400);
+   return json({sent:true,channels:{email:{ok:true,real:true}}});
+  });vi.stubGlobal('fetch',fetcher);
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole('radio',{name:'Text message',exact:true}));
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('SMS channel unavailable');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('Retrying checks the same attempt');
+  const emailRadio=screen.getByRole('radio',{name:'Email',exact:true});
+  expect(emailRadio).not.toBeDisabled();
+  fireEvent.click(emailRadio);
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByText(/provider accepted; delivery not confirmed/)).toBeInTheDocument();
+  const bodies=fetcher.mock.calls.filter(([,o])=>o?.method==='POST').map(([,o])=>JSON.parse(o.body));
+  expect(bodies).toHaveLength(2);
+  expect(bodies[0].sendMethod).toBe('sms');
+  expect(bodies[1].sendMethod).toBe('email');
+  expect(bodies[1].idempotencyKey).not.toBe(bodies[0].idempotencyKey);
+ });
+ it('handles non-JSON 502 error bodies without throwing a JSON parse crash',async()=>{
+  const fetcher=vi.fn((url,opts)=>opts?.method==='POST'
+   ? Promise.resolve({ok:false,status:502,json:async()=>{throw new SyntaxError('Unexpected token <');}})
+   : json(preview));
+  vi.stubGlobal('fetch',fetcher);
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole('radio',{name:'Email',exact:true}));
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The saved estimate is retained. Retrying checks the same attempt.');
+ });
+ it('treats an unreadable JSON body on 200 OK as uncertain, preserves the attempt key, and notifies onClose',async()=>{
+  let posts=0;
+  const onClose=vi.fn();
+  const fetcher=vi.fn((url,opts)=>{
+   if(opts?.method!=='POST') return json(preview);
+   posts++;
+   return posts===1
+    ? Promise.resolve({ok:true,status:200,json:async()=>{throw new SyntaxError('Unexpected end of JSON');}})
+    : json({sent:true,replayed:true,channels:{email:{ok:true,real:true}}});
+  });
+  vi.stubGlobal('fetch',fetcher);
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={onClose}/>);
+  fireEvent.click(await screen.findByRole('radio',{name:'Email',exact:true}));
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('unreadable send receipt');
+  expect(screen.getByRole('button',{name:'Check / retry attempt'})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
+  expect(onClose).toHaveBeenCalledWith({uncertain:true});
+  fireEvent.click(screen.getByRole('button',{name:'Check / retry attempt'}));
+  expect(await screen.findByText(/No new message was sent/)).toBeInTheDocument();
+  const bodies=fetcher.mock.calls.filter(([,o])=>o?.method==='POST').map(([,o])=>o.body);
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toBe(bodies[0]);
+ });
+ it('restricts selectable channels when allowedChannels is passed for a failed-channel retry',async()=>{
+  vi.stubGlobal('fetch',vi.fn(()=>json(preview)));
+  render(<EstimateSendDialog request={{id:preview.id,allowedChannels:['email']}} onClose={vi.fn()}/>);
+  expect(await screen.findByText('QA Recipient')).toBeInTheDocument();
+  expect(screen.getByRole('radio',{name:'Text message',exact:true})).toBeDisabled();
+  expect(screen.getByRole('radio',{name:'Text message and email',exact:true})).toBeDisabled();
+  expect(screen.getByRole('radio',{name:'Email',exact:true})).not.toBeDisabled();
+ });
+ it('shows an error instead of an empty preview when send-preview returns unreadable JSON on 200',async()=>{
+  vi.stubGlobal('fetch',vi.fn(()=>Promise.resolve({ok:true,status:200,json:async()=>{throw new SyntaxError('Unexpected token <');}})));
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={vi.fn()}/>);
+  expect(await screen.findByRole('alert')).toHaveTextContent('unreadable estimate preview');
+  expect(screen.queryByText('Unnamed recipient')).not.toBeInTheDocument();
+ });
+ it('preserves the attempt key when a retry receives 409 and allows scheduled receipt checks after the chosen time passes',async()=>{
+  vi.useFakeTimers({shouldAdvanceTime:true});
+  vi.setSystemTime(new Date('2026-06-01T14:00:00Z'));
+  try{
+   let posts=0;
+   const fetcher=vi.fn((url,opts)=>{
+    if(opts?.method!=='POST') return json(preview);
+    posts++;
+    if(posts===1) return Promise.reject(new Error('Lost response'));
+    if(posts===2) return json({error:'Delivery claim still active'},409);
+    return json({sent:true,replayed:true,scheduled:true,scheduledAt:'2026-06-01T14:05:00Z',channels:{}});
+   });
+   vi.stubGlobal('fetch',fetcher);
+   render(<EstimateSendDialog request={{id:preview.id}} onClose={vi.fn()}/>);
+   fireEvent.click(await screen.findByRole('radio',{name:'Email',exact:true}));
+   fireEvent.change(screen.getByLabelText('Send later in Eastern time'),{target:{value:'2026-06-01T10:05'}});
+   fireEvent.click(screen.getByRole('button',{name:'Confirm scheduled send'}));
+   expect(await screen.findByRole('alert')).toHaveTextContent('Lost response');
+
+   vi.setSystemTime(new Date('2026-06-01T14:10:00Z'));
+   fireEvent.click(screen.getByRole('button',{name:'Check / retry attempt'}));
+   expect(await screen.findByRole('alert')).toHaveTextContent('Delivery claim still active');
+   expect(screen.getByRole('button',{name:'Check / retry attempt'})).toBeInTheDocument();
+
+   fireEvent.click(screen.getByRole('button',{name:'Check / retry attempt'}));
+   expect(await screen.findByText(/No new message was sent/)).toBeInTheDocument();
+   const bodies=fetcher.mock.calls.filter(([,o])=>o?.method==='POST').map(([,o])=>o.body);
+   expect(bodies).toHaveLength(3);
+   expect(bodies[1]).toBe(bodies[0]);
+   expect(bodies[2]).toBe(bodies[0]);
+  }finally{
+   vi.useRealTimers();
+  }
+ });
 });

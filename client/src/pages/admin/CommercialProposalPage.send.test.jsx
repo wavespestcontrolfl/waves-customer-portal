@@ -461,3 +461,27 @@ it('saves a program visit length when typed and leaves it off when blank', async
   await waitFor(() => expect(calls.some((call) => call.method === 'PUT')).toBe(true));
   expect(JSON.parse(calls.find((call) => call.method === 'PUT').body).proposal.programs[0]).toMatchObject({ visitMinutes: 30 });
 });
+
+it('arms beforeunload and leave guard when dirty and preserves the editor if post-send reload fails', async () => {
+  mount();
+  const titleInput = await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.change(titleInput, { target: { value: 'Dirty proposal' } });
+  const unload = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(unload);
+  expect(unload.defaultPrevented).toBe(true);
+
+  const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  fireEvent.click(screen.getByRole('button', { name: 'Estimates' }));
+  expect(confirmSpy).toHaveBeenCalledTimes(1);
+  expect(screen.getByDisplayValue('Dirty proposal')).toBeInTheDocument();
+  confirmSpy.mockRestore();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Review and send' }));
+  fireEvent.click(await screen.findByLabelText('Email'));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
+  await screen.findByText(/provider accepted; delivery not confirmed/);
+  holdNextGet = async () => { throw new Error('Transient reload failure'); };
+  fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+  expect(await screen.findByText(/Saved, but could not refresh the proposal: Transient reload failure/)).toBeInTheDocument();
+  expect(screen.getByDisplayValue('Dirty proposal')).toBeInTheDocument();
+});

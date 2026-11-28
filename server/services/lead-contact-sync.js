@@ -140,7 +140,7 @@ async function staffTexts(dbi, peers, since) {
 // (callEndedAtSql) counts for nothing. The call that created a lead (its
 // metadata lead_id / relay_lead_id, or the lead's own twilio_call_sid) is
 // never its evidence.
-async function connectedCalls(dbi, peers, since) {
+async function connectedCalls(dbi, peers, since, { includeAgentCalls = true } = {}) {
   const ended = callEndedAtSql('cl');
   const started = callStartedAtSql('cl');
   const peerSql = `(CASE WHEN cl.direction = 'inbound' THEN ${phoneIdentitySql('cl.from_phone')} ELSE ${phoneIdentitySql('cl.to_phone')} END)`;
@@ -153,16 +153,18 @@ async function connectedCalls(dbi, peers, since) {
     .where((connected) => {
       connected
         .where((placed) => placed.where('cl.direction', 'outbound').whereRaw(personCallBackSql('cl')))
-        .orWhere((answered) => answered.where('cl.direction', 'inbound').where('cl.answered_by', 'human'))
+        .orWhere((answered) => answered.where('cl.direction', 'inbound').where('cl.answered_by', 'human'));
+      if (includeAgentCalls) {
         // The call agent's verdict speaks for INBOUND calls only. An outbound call
         // qualifies through personCallBackSql alone (customer leg completed, long enough).
-        .orWhere((agent) => agent
+        connected.orWhere((agent) => agent
           .where('cl.direction', 'inbound')
           .where('cl.processing_status', 'processed')
           .where('cl.v2_extraction_status', 'valid')
           .whereRaw("cl.ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
           .whereRaw("COALESCE(cl.call_outcome, '') <> 'voicemail'")
           .whereRaw("COALESCE(cl.answered_by, '') <> 'voicemail'"));
+      }
     })
     .orderByRaw(`${started} asc`)
     .limit(ROW_CAP)
@@ -234,15 +236,22 @@ async function openLeadIdentities(dbi, { peers, emails, customerIds }) {
   return owners;
 }
 
-// Leads a person already returned to 'new' by hand. The history row the Leads
-// page writes reads 'Status: <from> -> new' (with the arrow); that undo stands.
-async function reopenedLeadIds(dbi, leadIds) {
+// Leads a person already returned to 'new' by hand, mapped to their latest
+// reopen timestamp (ms). The history row the Leads page writes reads
+// 'Status: <from> -> new' (with the arrow); that undo stands.
+async function reopenedAtByLeadId(dbi, leadIds) {
   const rows = await dbi('lead_activities')
     .whereIn('lead_id', leadIds)
     .where('activity_type', 'status_change')
     .whereRaw("description LIKE '%→ new'")
-    .distinct('lead_id');
-  return new Set(rows.map((r) => String(r.lead_id)));
+    .groupBy('lead_id')
+    .select('lead_id', dbi.raw('MAX(created_at) as reopened_at'));
+  const map = new Map();
+  for (const r of rows) {
+    const at = r.reopened_at ? asDate(r.reopened_at)?.getTime() : null;
+    map.set(String(r.lead_id), Number.isFinite(at) ? at : null);
+  }
+  return map;
 }
 
 // ---- Judging --------------------------------------------------------------
@@ -264,13 +273,45 @@ function contactSkipReason(w, customerId, owners) {
   return null;
 }
 
+function judgeLeadEvidence(ident, { byKey, owners, reopened, allowPostReopenContact }) {
+  const { id, firstAt, customerId, keys, origins } = ident;
+  const wasReopened = reopened.has(id);
+  const reopenedAt = wasReopened ? reopened.get(id) : null;
+  if (wasReopened && (!allowPostReopenContact || reopenedAt == null)) {
+    return { skip: 'reopened_by_person', ...(reopenedAt != null ? { reopenedAt } : {}) };
+  }
+  const minAt = wasReopened && allowPostReopenContact ? Math.max(firstAt, reopenedAt) : firstAt;
+  const mine = keys.flatMap((key) => byKey.get(key) || [])
+    .filter((w) => w.at > minAt && !origins.some((origin) => w.originOf.includes(origin)))
+    .sort((a, b) => a.at - b.at);
+  const skips = [];
+  const usable = [];
+  for (const w of mine) {
+    const reason = contactSkipReason(w, customerId, owners);
+    if (reason) skips.push(reason);
+    else usable.push(w);
+  }
+  const first = usable[0];
+  if (first) {
+    return {
+      evidenceType: first.type,
+      evidenceId: first.id,
+      at: new Date(first.at),
+      identity: { [IDENTITY_FIELD[first.scope]]: first.value },
+    };
+  }
+  return wasReopened
+    ? { skip: 'reopened_by_person', reopenedAt }
+    : { skip: skips[0] || 'no_contact_evidence' };
+}
+
 /**
  * Judge a batch of 'new' leads. Read-only: returns Map(lead id -> verdict),
  * every lead with one: the earliest positive contact
  * ({ evidenceType, evidenceId, at }) or { skip: reason }. Each lead is judged
  * only on contact after its OWN first_contact_at.
  */
-async function judgeLeads(dbi, leads) {
+async function judgeLeads(dbi, leads, { humanOnlyCalls = false, allowPostReopenContact = false } = {}) {
   const verdicts = new Map();
   if (!leads.length) return verdicts;
   const since = new Date(Math.min(...leads.map((l) => ms(l.first_contact_at))));
@@ -286,31 +327,17 @@ async function judgeLeads(dbi, leads) {
 
   const [texts, calls, mails, visits, owners, reopened] = await Promise.all([
     staffTexts(dbi, peers, since),
-    connectedCalls(dbi, peers, since),
+    connectedCalls(dbi, peers, since, { includeAgentCalls: !humanOnlyCalls }),
     staffEmails(dbi, emails, since),
     bookedVisits(dbi, customerIds, since),
     openLeadIdentities(dbi, { peers, emails, customerIds }),
-    reopenedLeadIds(dbi, idents.map((i) => i.id)),
+    reopenedAtByLeadId(dbi, idents.map((i) => i.id)),
   ]);
   const byKey = new Map();
   for (const w of [...texts, ...calls, ...mails, ...visits]) byKey.set(w.key, [...(byKey.get(w.key) || []), w]);
 
-  for (const { id, firstAt, customerId, keys, origins } of idents) {
-    const mine = keys.flatMap((key) => byKey.get(key) || [])
-      .filter((w) => w.at > firstAt && !origins.some((origin) => w.originOf.includes(origin)))
-      .sort((a, b) => a.at - b.at);
-    const skips = [];
-    const usable = [];
-    for (const w of mine) {
-      const reason = contactSkipReason(w, customerId, owners);
-      if (reason) skips.push(reason);
-      else usable.push(w);
-    }
-    const first = usable[0];
-    const evidence = first && {
-      evidenceType: first.type, evidenceId: first.id, at: new Date(first.at), identity: { [IDENTITY_FIELD[first.scope]]: first.value },
-    };
-    verdicts.set(id, reopened.has(id) ? { skip: 'reopened_by_person' } : evidence || { skip: skips[0] || 'no_contact_evidence' });
+  for (const ident of idents) {
+    verdicts.set(ident.id, judgeLeadEvidence(ident, { byKey, owners, reopened, allowPostReopenContact }));
   }
   return verdicts;
 }

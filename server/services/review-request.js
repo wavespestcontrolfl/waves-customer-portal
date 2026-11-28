@@ -7867,7 +7867,7 @@ const ReviewService = {
       nextAllowedAt: new Date(Date.now() + 30 * 60 * 1000).toISOString() };
   },
 
-  async stopReviewSequence(sequenceId, reason = "manual") {
+  async stopReviewSequence(sequenceId, reason = "manual", { trx = null, repoint = null } = {}) {
     // A parked series final ('deferred', _parkDeferredFinal) is a durable
     // enrollment too: it blocks a new cadence for the customer and only the
     // redemption sweep ever touches it, so the stop path must reach it or
@@ -7875,15 +7875,17 @@ const ReviewService = {
     // row is the sweep's 15-minute lease mid-flight — every lease
     // transition is status-guarded, so it is left to settle (deferred,
     // active, or gone) and the caller retries; stopped: false says so.
-    const updated = await db("review_sequences")
+    const now = new Date();
+    const updated = await (trx || db)("review_sequences")
       .where({ id: sequenceId })
       .whereIn("status", ["active", "deferred"])
       .update({
+        ...(repoint ? { [repoint.column]: repoint.winnerId } : {}),
         status: "stopped",
         stop_reason: reason,
         next_run_at: null,
-        completed_at: new Date(),
-        updated_at: new Date(),
+        completed_at: now,
+        updated_at: now,
       });
     return { stopped: updated > 0 };
   },

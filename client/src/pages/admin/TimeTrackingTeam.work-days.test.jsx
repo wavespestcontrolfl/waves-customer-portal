@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../components/AddressAutocomplete', () => ({ default: () => null }));
 
-import { TeamTab } from './TimeTrackingPage';
+import { TeamTab } from './staff/TeamTab';
 
 // GATE_TECH_WORK_DAYS (owner 2026-10-25): the Team tab "Work days" row of seven
 // day toggles, shown only when the server says the gate is on.

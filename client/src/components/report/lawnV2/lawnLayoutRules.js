@@ -53,6 +53,14 @@ export function lawnLayoutActive(data, mode) {
 }
 
 /**
+ * The standard page body, or the lawn layout while the gate's payload key is on a live lawn report.
+ * Lives in lawnLayoutRules.js so non-lawn reports don't eagerly load LawnLayout.jsx.
+ */
+export function LawnLayoutSwitch({ data, mode, layout, children }) {
+  return lawnLayoutActive(data, mode) ? layout : children;
+}
+
+/**
  * The status card's data: "Your documents" is not part of the lawn layout, and "Next service" is left off when the
  * plan area prints that same appointment (nextVisitPlacement), so the date is printed once.
  */

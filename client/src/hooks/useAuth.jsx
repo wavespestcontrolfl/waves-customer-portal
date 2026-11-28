@@ -4,7 +4,7 @@ import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 import { clearNativeBadge } from '../native/nativeBadge';
 import { endVisitCards } from '../native/visitCard';
-import { clearSavedHome, homeIdentityKey, readHomeSnapshot, snapshotEligible, writeHomeSnapshot } from '../lib/homeSnapshot';
+import { clearSavedHome, homeIdentityKey, readHomeSnapshot, refreshHomeSnapshotCustomer, snapshotEligible, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 
 // Contact session (GATE_CONTACT_LOGIN): /auth/me names an on-location contact
@@ -438,6 +438,8 @@ export function AuthProvider({ children }) {
         // selection and the error state; this stale failure changes nothing.
         if (propertyReadSeqRef.current === propertyReadSeq) {
           adoptScopeFromMe(data);
+          // Refresh cached customer identity even if property list fetch fails transiently.
+          refreshHomeSnapshotCustomer({ token: api.token, requestIdentity, me: data });
           // The active customer is still valid. Preserve any property list we
           // already have instead of collapsing a multi-property account to a
           // single property, and surface a retry in the account menu.

@@ -226,12 +226,16 @@ async function sendTemplate({
   // and stored by its code only. An error message can carry the recipient address (a provider body, or a failed
   // insert's bound values). Default false = unchanged for every other caller.
   suppressProviderErrorLog = false,
+  // Takeover security notices (account.updated from customer profile edits): bypass
+  // notification_prefs.email_enabled = false so an opted-out holder still gets alerted,
+  // while still honoring SendGrid global bounce/spam suppressions inside sendOne.
+  bypassEmailOptOut = false,
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
   const contact = contactOverride || getPrimaryContact(recipientCustomer);
   const log = { customerId: recipientCustomer.id, templateKey, eventType, metadata };
-  const blocked = await templateRecipientPreflight({ contact, expectedRecipientKey, billingAuthorityInput, log });
+  const blocked = await templateRecipientPreflight({ contact, expectedRecipientKey, billingAuthorityInput, bypassEmailOptOut, log });
   if (blocked) return blocked;
   const finalPayload = await templatePayload({ customerId, recipientCustomer, contact, payload });
 
@@ -278,14 +282,14 @@ async function sendTemplate({
 // choice and the recipient to the shared billing email authority (owner
 // ruling 2026-09-27): read by the caller, and again at the provider handoff.
 // Returns the result to hand back, or null to go on.
-async function templateRecipientPreflight({ contact, expectedRecipientKey, billingAuthorityInput, log }) {
+async function templateRecipientPreflight({ contact, expectedRecipientKey, billingAuthorityInput, bypassEmailOptOut = false, log }) {
   const recipientSkip = templateRecipientSkip(contact, expectedRecipientKey);
   if (recipientSkip) {
     if (recipientSkip === 'recipient_changed') logger.warn(`[account-membership-email] ${log.templateKey} not sent for customer ${log.customerId}: the address changed since it was approved`);
     await logLifecycleEmailAttempt({ ...log, status: 'skipped', failureReason: recipientSkip });
     return { ok: false, skipped: true, reason: recipientSkip };
   }
-  const optOut = billingAuthorityInput ? { emailOptedOut: false } : await readEmailOptOut(log.customerId);
+  const optOut = (billingAuthorityInput || bypassEmailOptOut) ? { emailOptedOut: false } : await readEmailOptOut(log.customerId);
   if (optOut.unavailable) {
     await logLifecycleEmailAttempt({ ...log, status: 'failed', failureReason: 'prefs_unavailable' });
     return { ok: false, sent: false, transient: true, reason: 'prefs_unavailable' };
@@ -384,6 +388,8 @@ async function sendAccountUpdated({
   greetingName = null,
   // Passed to sendTemplate: a failure is logged and stored by its code only (the app's profile edit).
   suppressProviderErrorLog = false,
+  // Takeover security notice: bypass notification_prefs.email_enabled = false when true.
+  bypassEmailOptOut,
 } = {}) {
   // The account.updated template is a security-style "was this you?" notice.
   // Skip it when the recipient is the same person who made the change — a
@@ -416,6 +422,7 @@ async function sendAccountUpdated({
     eventType: 'account.updated',
     contactOverride,
     suppressProviderErrorLog,
+    bypassEmailOptOut,
     payload: {
       ...(greetingName ? { first_name: greetingName } : {}),
       account_section: accountSection,

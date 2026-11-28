@@ -135,7 +135,7 @@ function Rt6Employees({ employees }) {
       <TH>Employee</TH><TH>Social Security number</TH><TH align="right">Gross wages</TH><TH align="right">Taxable wages</TH>
     </TR></THead>
     <TBody>
-      {employees.map(employee => <TR key={employee.name}>
+      {employees.map(employee => <TR key={employee.technicianId || employee.name}>
         <TD>{employee.name}</TD>
         <TD>{employee.ssn || FROM_RECORDS}</TD>
         <TD align="right" nums><Amount label={`${employee.name} gross wages`} kind="cents" value={employee.grossCents} /></TD>

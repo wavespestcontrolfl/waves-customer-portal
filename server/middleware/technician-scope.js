@@ -129,8 +129,13 @@ const TECHNICIAN_ALLOW_LIST = [
   // Own timesheet. The timesheet dispute and own mileage are not on the list
   // (owner 2026-11-04, D5 A): the dispute router is admin-only and no
   // technician screen offers it, and no technician mileage route exists.
+  // Admin timetracking is narrowed to the exact 3 technician-reachable routes
+  // (dashboard own-status feed, roster read, and own photo upload) so future
+  // routes added under /api/admin/timetracking fail closed for technicians.
   { bucket: 'own-time', methods: ANY, pattern: /^\/api\/tech\/timetracking(\/.*)?$/ },
-  { bucket: 'own-time', methods: ANY, pattern: /^\/api\/admin\/timetracking(\/.*)?$/ },
+  { bucket: 'own-time', methods: READ, pattern: /^\/api\/admin\/timetracking$/ },
+  { bucket: 'own-time', methods: READ, pattern: /^\/api\/admin\/timetracking\/technicians$/ },
+  { bucket: 'own-time', methods: ['POST'], pattern: /^\/api\/admin\/timetracking\/technicians\/[^/]+\/photo$/ },
 
   // Texts with customers on their own visits: admin-communications scopes a
   // technician's inbox, sends, drafts and read-marks to customers on their
@@ -154,7 +159,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // The single-draft read the SMS tab uses (the router scopes it to the
   // technician's customers); list and stats are admin-only in the router.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/drafts\/[^/]+$/ },
-  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/sms-templates(\/.*)?$/ },
+  // SMS template reads only (never /issues, which returns cross-customer audit_log rows).
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/sms-templates(\/(?!issues(\/|$))[^/]+(\/variants)?)?$/ },
 
   // Promises and reschedule proposals (the Promises tab, the field cards).
   { bucket: 'promises', methods: ANY, pattern: /^\/api\/admin\/call-recordings\/(commitments|proposals)(\/.*)?$/ },

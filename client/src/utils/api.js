@@ -8,26 +8,36 @@ const REFRESH_LEASE_KEY = 'waves_refresh_lease';
 const REFRESH_LEASE_MS = 15 * 1000;
 const REFRESH_ACQUIRE_MS = 12 * 1000;
 
-export function tokenSessionIdentity(token) {
+function decodeJwtPayload(token) {
   if (!token || typeof token !== 'string') return null;
   try {
     const segment = token.split('.')[1];
     if (!segment) return null;
     const b64 = segment.replace(/-/g, '+').replace(/_/g, '/');
-    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
-    if (!payload?.customerId) return null;
-    return {
-      customerId: String(payload.customerId),
-      sessionId: payload.sessionId == null ? null : String(payload.sessionId),
-      // Selected saved property (GATE_APP_PROPERTY_SCOPE). A same-profile
-      // property switch keeps customerId AND sessionId, so the retry guard
-      // must compare this too or a stale select-property could retry under
-      // the new selection's credential.
-      propertyId: payload.propertyId == null ? null : String(payload.propertyId),
-    };
+    return JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
   } catch {
     return null;
   }
+}
+
+export function isAccessTokenExpiringSoon(token, skewMs = 30 * 1000) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== 'number') return false;
+  return payload.exp * 1000 <= Date.now() + skewMs;
+}
+
+export function tokenSessionIdentity(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload?.customerId) return null;
+  return {
+    customerId: String(payload.customerId),
+    sessionId: payload.sessionId == null ? null : String(payload.sessionId),
+    // Selected saved property (GATE_APP_PROPERTY_SCOPE). A same-profile
+    // property switch keeps customerId AND sessionId, so the retry guard
+    // must compare this too or a stale select-property could retry under
+    // the new selection's credential.
+    propertyId: payload.propertyId == null ? null : String(payload.propertyId),
+  };
 }
 
 export function sameRequestSession(left, right) {
@@ -130,6 +140,12 @@ export class ApiClient {
     this.refreshToken = refreshToken || null;
     this.getCache.clear();
     this.inflightGets.clear();
+  }
+
+  async ensureFreshToken(skewMs = 30 * 1000) {
+    if (!this.token || !this.refreshToken) return 'noop';
+    if (!isAccessTokenExpiringSoon(this.token, skewMs)) return 'valid';
+    return this.attemptRefresh();
   }
 
   /**
@@ -244,6 +260,7 @@ export class ApiClient {
         // partial batches use this to know which fields must never be
         // retried, same way `code` is a machine-readable discriminator.
         if (Array.isArray(errorBody?.rejected)) requestErr.rejected = errorBody.rejected;
+        if (errorBody?.attemptsLeft !== undefined) requestErr.attemptsLeft = errorBody.attemptsLeft;
         Object.assign(requestErr, partialSaveFields(errorBody));
         throw requestErr;
       }

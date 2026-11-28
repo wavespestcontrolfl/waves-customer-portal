@@ -72,6 +72,24 @@ test('Estimates can discover real inventory executors without preloading every d
   }));
 });
 
+test('set_customer_service_contact is found for its own searches and stays out of the customer edit searches (IB gap #28)', () => {
+  // Offered only on the platform path, like create_invoice.
+  const prior = process.env.GATE_IB_PLATFORM;
+  process.env.GATE_IB_PLATFORM = 'true';
+  const scope = { role: 'admin', context: 'customers', fullAccess: true };
+  const ids = (query) => registry.discover({ query }, scope).result.capabilities.map((c) => c.id);
+  try {
+    expect(ids('add secondary contact to customer account')[0]).toBe('set_customer_service_contact');
+    expect(ids('add authorized family member')).toContain('set_customer_service_contact');
+    for (const query of ['update customer', 'update customer fields', 'bulk update customers', 'reviewed admin edit confirm card']) {
+      expect(ids(query)).not.toContain('set_customer_service_contact');
+    }
+  } finally {
+    if (prior === undefined) delete process.env.GATE_IB_PLATFORM;
+    else process.env.GATE_IB_PLATFORM = prior;
+  }
+});
+
 test('list_commercial_proposals is found for its own searches and never pushes the estimate tools out of a customer estimate search', () => {
   const scope = { role: 'admin', context: 'procurement', fullAccess: true };
   const ids = (query) => registry.discover({ query }, scope).result.capabilities.map((c) => c.id);
@@ -427,12 +445,16 @@ const SCOPE_SNAPSHOT = {
     'compose_email',
     // set_customer_bill_to carries customer_id: the Bill-To and invoices it moves are that customer's own.
     'set_customer_bill_to',
+    // set_customer_service_contact carries customer_id: the contacts it changes are that customer's own.
+    'set_customer_service_contact',
     // schedule_sms carries customer_id: the queued text is that customer's own.
     'schedule_sms',
     // The Agent Review draft cards carry decision_id: a decision_id is a task record (validateRecordTarget binds the decision's customer to the task customer).
     'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft',
     // resolve_dispatch_alert carries alert_id or job_id: inside a customer-specific task validateRecordTarget binds it to the alert's own visit (alertVisitBinding), so only that customer's alert passes.
     'resolve_dispatch_alert',
+    // link_customer_family carries customer_id + other_customer_id (CUSTOMER_PAIR_SELECTORS reads both as customer records); unlink_customer_family carries customer_id.
+    'link_customer_family', 'unlink_customer_family',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.

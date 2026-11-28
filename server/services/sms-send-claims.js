@@ -13,23 +13,35 @@
  * longer-lived claims.
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 
 const WEEKLY_CLAIM_PREFIXES = ['bi_briefing_sms:'];
+// Keyed push dedupe leases & per-device partial-delivery markers
+// (notification-triggers.js): retained 30 days so webhook/call replays across
+// the full replay window stay single-shot even after daily SMS claim cleanup runs.
+const MONTHLY_CLAIM_PREFIXES = ['notif_push_dedupe:', 'notif_push_sub:', 'notif_push_partial:'];
 
 // async: a sync throw while building the query becomes a rejection, which
 // the routes' fire-and-forget `.catch(() => {})` already swallows.
 async function pruneSmsSendClaims(conn = db) {
+  const longerPrefixes = [...WEEKLY_CLAIM_PREFIXES, ...MONTHLY_CLAIM_PREFIXES];
   return conn('sms_send_claims')
     .where((q) => {
       q.where((daily) => {
         daily.where('created_at', '<', conn.raw("NOW() - interval '1 day'"));
-        for (const prefix of WEEKLY_CLAIM_PREFIXES) daily.whereRaw('left(claim_key, ?) <> ?', [prefix.length, prefix]);
+        for (const prefix of longerPrefixes) daily.whereRaw('left(claim_key, ?) <> ?', [prefix.length, prefix]);
       });
       for (const prefix of WEEKLY_CLAIM_PREFIXES) {
         q.orWhere((weekly) => {
           weekly.whereRaw('left(claim_key, ?) = ?', [prefix.length, prefix]);
           weekly.where('created_at', '<', conn.raw("NOW() - interval '8 days'"));
+        });
+      }
+      for (const prefix of MONTHLY_CLAIM_PREFIXES) {
+        q.orWhere((monthly) => {
+          monthly.whereRaw('left(claim_key, ?) = ?', [prefix.length, prefix]);
+          monthly.where('created_at', '<', conn.raw("NOW() - interval '30 days'"));
         });
       }
     })
@@ -54,4 +66,137 @@ async function releaseSendClaim(claimKey, conn = db) {
   await conn('sms_send_claims').where({ claim_key: claimKey }).del();
 }
 
-module.exports = { pruneSmsSendClaims, takeSendClaim, releaseSendClaim, WEEKLY_CLAIM_PREFIXES };
+async function hasAnySendClaim(claimKeys, conn = db) {
+  if (!Array.isArray(claimKeys) || claimKeys.length === 0) return false;
+  const row = await conn('sms_send_claims').whereIn('claim_key', claimKeys).first('id');
+  return Boolean(row);
+}
+
+// Atomically reserve a legacy daily claim alongside a scoped-sender marker in
+// one transaction. If an older release already claimed legacyKey (without the
+// marker), returns { allowed: false, reservedHere: false }. If a new-release
+// run reserved both (even if it crashed before claiming audiences), the marker
+// already exists so reruns get { allowed: true, reservedHere: false } and
+// resume unclaimed audiences safely.
+async function claimScopedDay(legacyKey, markerKey, conn = db) {
+  const run = async (trx) => {
+    if (await hasAnySendClaim([markerKey], trx)) return { allowed: true, reservedHere: false };
+    const gotLegacy = await takeSendClaim(legacyKey, trx);
+    if (!gotLegacy) return { allowed: false, reservedHere: false };
+    await takeSendClaim(markerKey, trx);
+    return { allowed: true, reservedHere: true };
+  };
+  return typeof conn.transaction === 'function' ? conn.transaction(run) : run(conn);
+}
+
+// Lease-backed keyed push claim in sms_send_claims (uses existing `outcome`
+// column: unique 'pending:<16hex>' owner token with a 5-minute recoverable
+// lease, or 'delivered' once all attempted devices finished without failures).
+// Returns:
+//   { state: 'acquired', ownerToken } — caller owns the pending lease
+//   { state: 'delivered', ownerToken: null } — previous attempt confirmed full delivery
+//   { state: 'in_flight', ownerToken: null } — another attempt holds a fresh lease
+async function acquirePushDedupeLease(claimKey, { leaseMinutes = 5 } = {}, conn = db) {
+  const ownerToken = `pending:${crypto.randomBytes(8).toString('hex')}`;
+  const inserted = await conn.raw(
+    `INSERT INTO sms_send_claims (claim_key, outcome) VALUES (?, ?)
+     ON CONFLICT (claim_key) DO NOTHING
+     RETURNING id`,
+    [claimKey, ownerToken],
+  );
+  if ((inserted?.rows || []).length > 0) return { state: 'acquired', ownerToken };
+
+  const reclaimed = await conn.raw(
+    `UPDATE sms_send_claims
+        SET created_at = NOW(), outcome = ?
+      WHERE claim_key = ?
+        AND (outcome = 'pending' OR outcome LIKE 'pending:%')
+        AND created_at < NOW() - (? * interval '1 minute')
+      RETURNING id`,
+    [ownerToken, claimKey, leaseMinutes],
+  );
+  if ((reclaimed?.rows || []).length > 0) return { state: 'acquired', ownerToken };
+
+  const existing = await conn('sms_send_claims').where({ claim_key: claimKey }).first('outcome');
+  if (existing?.outcome === 'delivered') return { state: 'delivered', ownerToken: null };
+  return { state: 'in_flight', ownerToken: null };
+}
+
+// Atomically verify lease ownership and renew created_at before each device
+// handoff so a slow fan-out cannot be reclaimed while still actively sending.
+async function renewPushDedupeLease(claimKey, ownerToken, conn = db) {
+  if (!claimKey || !ownerToken) return false;
+  const updated = await conn('sms_send_claims')
+    .where({ claim_key: claimKey, outcome: ownerToken })
+    .update({ created_at: conn.fn ? conn.fn.now() : new Date() });
+  return Number(updated) > 0;
+}
+
+async function markPushDedupeDelivered(claimKey, ownerToken, conn = db) {
+  if (!claimKey || !ownerToken) return false;
+  const updated = await conn('sms_send_claims')
+    .where({ claim_key: claimKey, outcome: ownerToken })
+    .update({ outcome: 'delivered', created_at: conn.fn ? conn.fn.now() : new Date() });
+  return Number(updated) > 0;
+}
+
+async function releasePushDedupeLease(claimKey, ownerToken, conn = db) {
+  if (!claimKey || !ownerToken) return false;
+  const deleted = await conn('sms_send_claims')
+    .where({ claim_key: claimKey, outcome: ownerToken })
+    .del();
+  return Number(deleted) > 0;
+}
+
+function pushClaimHash(claimKey) {
+  return crypto.createHash('sha256').update(String(claimKey)).digest('hex').slice(0, 16);
+}
+
+function pushSubClaimPrefix(claimKey) {
+  return `notif_push_sub:${pushClaimHash(claimKey)}:`;
+}
+
+function pushPartialMarkerKey(claimKey) {
+  return `notif_push_partial:${pushClaimHash(claimKey)}`;
+}
+
+// Per-device partial-delivery marker + exact-key partial sentinel stored in
+// sms_send_claims (retained 30d). Both lookups hit the UNIQUE index on
+// claim_key directly (no prefix table scans).
+async function recordPushDedupeSubDelivered(claimKey, subscriptionId, conn = db) {
+  if (!claimKey || !subscriptionId) return;
+  const subKey = `${pushSubClaimPrefix(claimKey)}${subscriptionId}`;
+  await conn.raw(
+    `INSERT INTO sms_send_claims (claim_key, outcome) VALUES (?, 'delivered')
+     ON CONFLICT (claim_key) DO NOTHING`,
+    [subKey],
+  );
+  await conn.raw(
+    `INSERT INTO sms_send_claims (claim_key, outcome) VALUES (?, 'partial')
+     ON CONFLICT (claim_key) DO NOTHING`,
+    [pushPartialMarkerKey(claimKey)],
+  );
+}
+
+async function listPushDedupeDeliveredSubs(claimKey, candidateSubIds = [], conn = db) {
+  if (!claimKey) return [];
+  const marker = await conn('sms_send_claims')
+    .where({ claim_key: pushPartialMarkerKey(claimKey) })
+    .first('id');
+  if (!marker) return [];
+  const ids = [...new Set((candidateSubIds || []).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const prefix = pushSubClaimPrefix(claimKey);
+  const subKeys = ids.map((id) => `${prefix}${id}`);
+  const rows = await conn('sms_send_claims')
+    .whereIn('claim_key', subKeys)
+    .select('claim_key');
+  return (rows || []).map((r) => String(r.claim_key).slice(prefix.length)).filter(Boolean);
+}
+
+module.exports = {
+  pruneSmsSendClaims, takeSendClaim, releaseSendClaim, hasAnySendClaim, claimScopedDay,
+  acquirePushDedupeLease, renewPushDedupeLease, markPushDedupeDelivered, releasePushDedupeLease,
+  recordPushDedupeSubDelivered, listPushDedupeDeliveredSubs, pushSubClaimPrefix, pushPartialMarkerKey,
+  WEEKLY_CLAIM_PREFIXES, MONTHLY_CLAIM_PREFIXES,
+};

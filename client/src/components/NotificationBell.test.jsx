@@ -1553,7 +1553,7 @@ describe('NotificationBell push Call (Waves Admin app)', () => {
     expect(posts()).toHaveLength(1);
   });
 
-  it('on the phone the answer opens on the Account tab, even when What\'s new was the last tab', async () => {
+  it('on the phone the call answer opens directly in the unified notification list', async () => {
     const original = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
     try {
@@ -1561,13 +1561,12 @@ describe('NotificationBell push Call (Waves Admin app)', () => {
       setup(() => ({ ok: true, status: 200, json: async () => ({ success: true, open: true, message: 'Calling your phone now. Press 1 to connect.' }) }));
       render(<NotificationBell type="admin" />);
       fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
-      fireEvent.click(await screen.findByRole('button', { name: "What's new" }));
+      expect(screen.queryByRole('button', { name: "What's new" })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'Close' }));
       act(() => {
         window.dispatchEvent(new CustomEvent('wavesadmin:alertcall', { detail: { value: `${ROW}.${VERSION}` }, cancelable: true }));
       });
       expect(await screen.findByRole('status')).toHaveTextContent('Calling your phone now. Press 1 to connect.');
-      expect(screen.queryByText('Nothing new right now')).toBeNull();
       expect(posts()).toHaveLength(1);
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
@@ -2272,7 +2271,7 @@ describe('NotificationBell admin — ranked list with an Area chip', () => {
 });
 
 describe('NotificationBell customer alerts strip, tabs and link taps', () => {
-  const STAFF_WORDS = /failed payments|overdue invoices|unmapped calls|push notifications|Enable push/i;
+  const STAFF_WORDS = /failed payments|new leads|voicemails|push notifications|Enable push/i;
 
   it('shows customer words, with no staff words, on the customer strip', async () => {
     native.enabled = true;
@@ -2287,7 +2286,7 @@ describe('NotificationBell customer alerts strip, tabs and link taps', () => {
     expect(strip).toHaveStyle({ color: CUSTOMER_SURFACE.text });
   });
 
-  it('keeps the staff strip and both tabs on the admin bell', async () => {
+  it('keeps the staff strip with accurate copy and omits the empty What\'s new tab on admin mobile', async () => {
     const { isPushEnabled } = await import('../lib/push-subscribe.js');
     isPushEnabled.mockResolvedValue(false);
     const originalWidth = window.innerWidth;
@@ -2296,12 +2295,26 @@ describe('NotificationBell customer alerts strip, tabs and link taps', () => {
       render(<NotificationBell type="admin" />);
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
       const button = await screen.findByRole('button', { name: 'Enable push' });
-      expect(button.parentElement).toHaveTextContent('Banner alerts for failed payments, overdue invoices, unmapped calls, and more.');
-      expect(screen.getByRole('button', { name: 'Account' })).toBeInTheDocument();
-      fireEvent.click(screen.getByRole('button', { name: "What's new" }));
-      expect(screen.getByText('Nothing new right now')).toBeInTheDocument();
+      expect(button.parentElement).toHaveTextContent('Banner alerts for customer texts, schedule changes, and visit updates.');
+      expect(screen.queryByRole('button', { name: 'Account' })).toBeNull();
+      expect(screen.queryByRole('button', { name: "What's new" })).toBeNull();
     } finally {
       isPushEnabled.mockResolvedValue(true);
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+    }
+  });
+
+  it('switches between mobile and desktop layouts when the viewport resizes', async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      expect(await screen.findByRole('button', { name: 'Close notifications' })).toBeInTheDocument();
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+      act(() => { window.dispatchEvent(new Event('resize')); });
+      expect(await screen.findByRole('button', { name: 'Close' })).toBeInTheDocument();
+    } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
     }
   });

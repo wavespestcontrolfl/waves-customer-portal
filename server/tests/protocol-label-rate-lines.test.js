@@ -135,7 +135,7 @@ describe('card lines that carry a label rate for their own pest', () => {
     const visit = protocols.cockroach.visits.find((v) => v.visit === 3);
     const lines = [...parseProtocolLines(visit.primary, 'base'), ...parseProtocolLines(visit.secondary, 'conditional')];
     expect(lines.map((line) => line.raw).join(' ')).not.toMatch(/growth regulator/i);
-    expect(visit.notes).toMatch(/No growth regulator at the follow-up/);
+    expect(visit.notes).toMatch(/No growth regulator at follow-up/);
   });
 
 });

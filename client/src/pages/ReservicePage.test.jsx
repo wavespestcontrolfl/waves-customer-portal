@@ -647,3 +647,54 @@ describe('ReservicePage fold (GATE_RESERVICE_FOLD_LINK)', () => {
     expect(screen.queryByTestId('reservice-photos-card')).not.toBeInTheDocument();
   });
 });
+
+describe('Phase 2B-2b UI guards (retry on null availability, double-submit ref lock, lane buttons)', () => {
+  it('renders a retry button when availability is null and reloads when tapped', async () => {
+    let gets = 0;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      gets += 1;
+      return Promise.resolve(jsonResponse(gets === 1 ? bookablePayload({ availability: null }) : bookablePayload()));
+    }));
+    renderPage();
+    expect(await screen.findByText(/We couldn't load open times just now/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Try again/i }));
+    expect(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toBeInTheDocument();
+  });
+
+  it('prevents concurrent duplicate POSTs on rapid double-click and disables lane buttons while submitting', async () => {
+    let resolvePost;
+    const postPromise = new Promise((r) => { resolvePost = r; });
+    const fetchMock = vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return postPromise;
+      return Promise.resolve(jsonResponse(bookablePayload({
+        lanes: [
+          { key: 'pest', label: 'Pest Control Re-Service', alreadyBooked: null },
+          { key: 'lawn', label: 'Lawn Care Re-Service', alreadyBooked: null },
+        ],
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Pests inside or out' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i }));
+    const submitBtn = screen.getByRole('button', { name: /Book .* free/i });
+    fireEvent.click(submitBtn);
+    fireEvent.click(submitBtn);
+
+    const posts = fetchMock.mock.calls.filter(([, o]) => o?.method === 'POST');
+    expect(posts).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'My lawn' })).toBeDisabled();
+
+    resolvePost(jsonResponse({
+      success: true, replayed: false, lane: 'pest', serviceType: 'Pest Control Re-Service',
+      date: '2026-07-12', window: { start: '13:00', end: '13:45' },
+      startLabel: '1:00 PM', endLabel: '1:45 PM', rescheduleUrl: '/reschedule/tok',
+    }));
+    await screen.findByText("You're all set");
+  });
+});

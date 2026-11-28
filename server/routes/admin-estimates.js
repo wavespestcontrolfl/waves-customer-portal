@@ -7,10 +7,15 @@ const { estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estim
 const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
 const { satellitePalmCountToConfirm } = require('../services/estimator-engine/lookup-palm-review');
 const router = express.Router();
+const ESTIMATE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.param('id', (req, _res, next, id) => {
+  req._estimateIdParam = id;
+  next();
+});
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callSideBlocksForEstimates, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 // Real handoffs kept in deliveryState.deliveredAt (oldest dropped first).
 const DELIVERY_HISTORY_MAX = 25;
@@ -52,6 +57,7 @@ const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
 const updatedWording = require('../services/estimate-updated-wording');
 const {
   createOrReuseAdminEstimate,
+  deliveryClaimFresh,
   estimateExpiresAt,
   estimateReviseBlock,
   selfServeMintEditRefusal,
@@ -661,7 +667,14 @@ function palmCountGateFor(row, carriedCount) {
   return { confirmedPalmCount, palmCountCleared: cleared && confirmedPalmCount == null };
 }
 
-function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ...palmCountGate } = {}) {
+function assertShareLinkPresent(estimate, requireShareLink) {
+  if (!requireShareLink || String(estimate.token || '').trim()) return;
+  const err = new Error('This estimate has no customer link token, so there is nothing to send. Rebuild it in the estimate tool to mint a shareable link.');
+  err.statusCode = 400;
+  throw err;
+}
+
+function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, requireShareLink = true, ...palmCountGate } = {}) {
   assertBidSendDate(estimate);
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
@@ -747,11 +760,7 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ..
   // Without this gate the customer link is built by template literal and the
   // SMS/email ships a literal /estimate/null — a dead link — while the
   // estimate still gets stamped `sent`.
-  if (!String(estimate.token || '').trim()) {
-    const err = new Error('This estimate has no customer link token, so there is nothing to send. Rebuild it in the estimate tool to mint a shareable link.');
-    err.statusCode = 400;
-    throw err;
-  }
+  assertShareLinkPresent(estimate, requireShareLink);
   if (!SENDABLE_ESTIMATE_STATUSES.has(String(estimate.status || 'draft'))) {
     const err = new Error(`Estimate status ${estimate.status || 'unknown'} cannot be sent.`);
     err.statusCode = 400;
@@ -959,6 +968,8 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // is a quote saved before the rule and reads legacy ($250 flat) on a first send and a resend alike.
   const priorWdoFlat = require('../services/estimate-floor-signal-replay').savedLegacyWdoFlatSignal(estimateData).legacyWdoFlat;
   if (typeof priorWdoFlat === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyWdoFlat: priorWdoFlat };
+  const priorNoYear1PrepayStamp = require('../services/estimate-floor-signal-replay').savedYear1PrepayNoPercentSignal(estimateData);
+  estimateDataForBundle.sendSnapshot = { ...estimateDataForBundle.sendSnapshot, ...priorNoYear1PrepayStamp };
   const snapshotAt = now().toISOString();
   const sendSnapshot = {
     ...(estimateData.sendSnapshot || {}),
@@ -1000,6 +1011,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
     sendSnapshot.legacyOneTimePestBuffer = priorPestBuffer === true;
     sendSnapshot.legacyPestAboveTable = priorPestAboveTable === true;
     sendSnapshot.legacyWholeHomeSizing = priorWholeHomeSizing === true;
+    Object.assign(sendSnapshot, priorNoYear1PrepayStamp);
     sendSnapshot.legacyLawnOneLane = priorLawnOneLane === true;
     // Carry the frozen one-time pest evidence onto the new bundle when there were no rows to recompute it from (never frozen -> absent).
     if (!rebuildHasPestRows) {
@@ -1384,25 +1396,12 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   return { ok: true, providerAttempted: true, providerAccepted: true, provider: 'smtp_fallback' };
 }
 
-router.use(adminAuthenticate, requireTechOrAdmin);
-// 2026-08-25 role lockdown (first-hire prep): estimates are a sales/pricing
-// surface — owner-only, with a NARROW staff read allowlist for the flows
-// tech-visible surfaces actually use: the single-estimate read (/:id) and
-// the schedule-source read the Create Appointment modal fires. The
-// collection list, analytics (actuals-variance, win-loss, source
-// performance), proposals, pricing audits, and every mutation require the
-// admin role.
-const STAFF_ESTIMATE_GET_RE = /^\/[A-Za-z0-9-]+(\/schedule-source)?$/;
-const OWNER_ONLY_NAMED_GETS = new Set([
-  '/actuals-variance', '/win-loss-slices', '/source-performance',
-]);
-router.use((req, res, next) => (
-  req.method === 'GET'
-    && STAFF_ESTIMATE_GET_RE.test(req.path)
-    && !OWNER_ONLY_NAMED_GETS.has(req.path)
-    ? next()
-    : requireAdmin(req, res, next)
-));
+// Estimates are an owner/admin-only sales & pricing surface. Technicians use
+// /api/tech/estimates (which pins reads/writes to their own drafts & route).
+// The former GET /:id/schedule-source staff carve-out had no UI caller outside
+// the admin-only Pipeline page and returned unscoped customer PII, pricing, and
+// the live estimate token.
+router.use(adminAuthenticate, requireAdmin);
 
 // Post-commit bell for a save whose engine recompute FAILED (validation audit
 // SEC-002; pre-push codex P1): the resolver fails open and reports the
@@ -6278,12 +6277,19 @@ function bookingLinkOneTimeLabel(estimateData) {
   }
 }
 
+function isExpiredUnacceptedBookingOffer(estimate) {
+  return estimate.status !== 'accepted'
+    && Boolean(estimate.expires_at)
+    && new Date(estimate.expires_at).getTime() <= Date.now();
+}
+
 // Whether a list row may offer "Send booking link": the route's refusals that
-// depend on the row alone (status, archived, invoice mode, unresolved manager
-// approval, and a recurring-only offer, which routes through onboarding). The
-// phone checks and the booked-slot guard stay request-time in the route.
+// depend on the row alone (status, expiry, archived, invoice mode, unresolved
+// manager approval, and a recurring-only offer, which routes through onboarding).
+// The phone checks and the booked-slot guard stay request-time in the route.
 function bookingLinkEligible(estimate, estimateData = estimate.estimate_data) {
   if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) return false;
+  if (isExpiredUnacceptedBookingOffer(estimate)) return false;
   if (estimate.archived_at || estimate.bill_by_invoice) return false;
   try {
     if (estimateDataHasUnresolvedManagerApproval(estimateData)) return false;
@@ -6319,6 +6325,11 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) {
       return res.status(400).json({
         error: `Booking link can only be sent for sent/viewed/accepted estimates. Current status: ${estimate.status}.`,
+      });
+    }
+    if (isExpiredUnacceptedBookingOffer(estimate)) {
+      return res.status(400).json({
+        error: 'This estimate has expired. Extend or resend it before sending a booking link.',
       });
     }
     if (estimate.archived_at) {
@@ -6372,30 +6383,34 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     // carry a stray expired timestamp the rescue hasn't cleared yet — the
     // expiry test must never apply to it, or a live appointment reads as
     // gone and a duplicate link goes out.
+    let linkedSvcId = null;
     try {
       const estData = typeof estimate.estimate_data === 'string'
         ? JSON.parse(estimate.estimate_data)
         : estimate.estimate_data;
-      const linkedSvcId = estData?.scheduled_service_id || null;
-      const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
-      const linked = await db('scheduled_services')
-        .where((q) => {
-          q.where({ source_estimate_id: estimate.id });
-          if (linkedSvcId) q.orWhere({ id: linkedSvcId });
-        })
-        .whereNotIn('status', TERMINAL_STATUSES)
-        .andWhere((q) => {
-          q.whereNotNull('customer_id')
-            .orWhereNull('reservation_expires_at')
-            .orWhereRaw('reservation_expires_at > NOW()');
-        })
-        .first();
-      if (linked) {
-        return res.status(409).json({
-          error: `Customer already has an appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
-        });
-      }
-    } catch (_) { /* on parse failure fall through — no false positive */ }
+      linkedSvcId = estData?.scheduled_service_id;
+    } catch { linkedSvcId = null; }
+    // Keep the DB collision check OUTSIDE the JSON parse catch: a transient
+    // DB failure must fail closed (500, no SMS) rather than sending a
+    // duplicate /book link to a customer who already has a live visit.
+    const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
+    const linked = await db('scheduled_services')
+      .where((q) => {
+        q.where({ source_estimate_id: estimate.id });
+        if (linkedSvcId) q.orWhere({ id: linkedSvcId });
+      })
+      .whereNotIn('status', TERMINAL_STATUSES)
+      .andWhere((q) => {
+        q.whereNotNull('customer_id')
+          .orWhereNull('reservation_expires_at')
+          .orWhereRaw('reservation_expires_at > NOW()');
+      })
+      .first();
+    if (linked) {
+      return res.status(409).json({
+        error: `Customer already has an appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
+      });
+    }
 
     // estimate_id stamps scheduled_services.source_estimate_id (same
     // correlation the accept-flow links carry) and the namespaced accept
@@ -6423,20 +6438,28 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     ));
     if (!msg) return res.status(422).json({ error: 'SMS template estimate_accepted_onetime is missing or inactive' });
 
+    const identity = estimate.customer_id
+      ? {
+        audience: 'customer',
+        customerId: estimate.customer_id,
+        identityTrustLevel: 'phone_matches_customer',
+      }
+      : {
+        audience: 'lead',
+        identityTrustLevel: 'phone_provided_unverified',
+        consentBasis: {
+          status: 'transactional_allowed',
+          source: 'admin_estimate_send_booking_link',
+          capturedAt: estimate.created_at || new Date().toISOString(),
+        },
+      };
     const smsResult = await sendCustomerMessage({
       to: estimate.customer_phone,
       body: msg,
       channel: 'sms',
-      audience: estimate.customer_id ? 'customer' : 'lead',
       purpose: 'estimate_followup',
-      customerId: estimate.customer_id || undefined,
       estimateId: estimate.id,
-      identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-      consentBasis: estimate.customer_id ? undefined : {
-        status: 'transactional_allowed',
-        source: 'admin_estimate_send_booking_link',
-        capturedAt: estimate.created_at || new Date().toISOString(),
-      },
+      ...identity,
       entryPoint: 'admin_estimate_send_booking_link',
       metadata: {
         original_message_type: 'estimate_accepted_onetime_manual_resend',
@@ -6812,6 +6835,60 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
+function draftDeleteError(statusCode, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
+}
+
+async function deleteDraftEstimateInTransaction(trx, estimateId) {
+  // Lock one_tap_purchases BEFORE estimates — matching server/services/one-tap-purchase.js
+  // confirmation lock order so concurrent delete vs confirm cannot deadlock.
+  const lockedOneTapRows = await trx('one_tap_purchases')
+    .where({ estimate_id: estimateId })
+    .orderBy('id')
+    .forUpdate()
+    .select('id', 'status');
+  const locked = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+  if (!locked) throw draftDeleteError(404, 'Estimate not found');
+  if (
+    locked.status !== 'draft'
+    || !estimateNeverIssued(locked)
+    || locked.price_locked_at
+    || deliveryClaimFresh(parseEstimateData(locked.estimate_data)?.estimatorEngine)
+  ) {
+    throw draftDeleteError(409, 'This estimate changed while you were deleting it. Refresh and retry.');
+  }
+  if (lockedOneTapRows.some((r) => r.status === 'completed')) {
+    throw draftDeleteError(400, 'This estimate carries a completed one-tap purchase and cannot be deleted.');
+  }
+  // Release any live uncommitted slot holds inside this transaction AFTER the
+  // locked eligibility checks so a failed/409 delete never discards a customer's hold.
+  await require('../services/slot-reservation').releaseEstimateHolds({
+    estimateId,
+    database: trx,
+  });
+  if (lockedOneTapRows.length) {
+    await trx('one_tap_purchases')
+      .whereIn('id', lockedOneTapRows.map((r) => r.id))
+      .whereNot({ status: 'completed' })
+      .del();
+  }
+  await trx('leads')
+    .where({ estimate_id: estimateId })
+    .update({ estimate_id: null, updated_at: new Date() });
+  const deletedCount = await trx('estimates')
+    .where({ id: estimateId, status: 'draft' })
+    .whereNull('sent_at')
+    .whereNull('viewed_at')
+    .whereNull('price_locked_at')
+    .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+    .del();
+  if (!deletedCount) {
+    throw draftDeleteError(409, 'This estimate changed while you were deleting it. Refresh and retry.');
+  }
+}
+
 // DELETE /api/admin/estimates/:id — delete a draft estimate only.
 // Sent/customer-facing estimates must stay auditably available; use archive
 // for closed rows instead of breaking public links.
@@ -6822,49 +6899,39 @@ router.delete('/:id', async (req, res, next) => {
     if (estimate.status !== 'draft') {
       return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
     }
+    if (!estimateNeverIssued(estimate)) {
+      return res.status(400).json({ error: 'Previously issued estimates cannot be deleted. Archive them instead.' });
+    }
+    if (estimate.price_locked_at || deliveryClaimFresh(parseEstimateData(estimate.estimate_data)?.estimatorEngine)) {
+      return res.status(409).json({ error: 'This estimate is locked or being sent and cannot be deleted.' });
+    }
     // One-tap ledger rows FK this estimate (NO ACTION): without removing
     // them first the delete below dies on 23503. A completed ledger row is
-    // a consent artifact and must never be deleted — it also implies the
-    // estimate is accepted, so the draft-only guard above already blocks it;
-    // belt-and-braces refuse anyway. Live holds are the 15-min sweeper's
-    // problem once the ledger row is gone.
+    // a consent artifact and must never be deleted — re-asserted under lock
+    // inside the transaction too so a racing completion cannot be deleted.
     const oneTapRows = await db('one_tap_purchases')
       .where({ estimate_id: req.params.id })
       .select('id', 'status');
     if (oneTapRows.some((r) => r.status === 'completed')) {
       return res.status(400).json({ error: 'This estimate carries a completed one-tap purchase and cannot be deleted.' });
     }
-    // A reserved attempt's LIVE hold also references this estimate
-    // (scheduled_services.source_estimate_id, NO ACTION) — release it
-    // through the slot-reservation mechanism first or the estimate delete
-    // below still 23503s until the hold sweeper runs.
-    const liveHolds = await db('scheduled_services')
-      .where({ source_estimate_id: req.params.id })
-      .whereNull('customer_id')
-      .whereNotNull('reservation_expires_at')
-      .select('id');
-    for (const hold of liveHolds) {
-      await require('../services/slot-reservation').releaseReservation({
-        scheduledServiceId: hold.id,
-        estimateId: req.params.id,
-      });
-    }
-    await db.transaction(async (trx) => {
-      if (oneTapRows.length) {
-        await trx('one_tap_purchases')
-          .whereIn('id', oneTapRows.map((r) => r.id))
-          .whereNot({ status: 'completed' })
-          .del();
-      }
-      await trx('leads')
-        .where({ estimate_id: req.params.id })
-        .update({ estimate_id: null, updated_at: new Date() });
-      await trx('estimates').where({ id: req.params.id }).del();
-    });
+    await db.transaction((trx) => deleteDraftEstimateInTransaction(trx, req.params.id));
     logger.info(`[estimates] Deleted estimate ${req.params.id}`);
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
+
+// Malformed UUID :id path parameters throw Postgres 22P02; answer 404 instead
+// of 500 while preserving unrelated 22P02 DB errors on valid estimate UUIDs
+// and keeping synthetic-id unit mocks unaffected.
+router.use((err, req, res, next) => (
+  err?.code === '22P02' && req._estimateIdParam && !ESTIMATE_UUID_RE.test(req._estimateIdParam)
+    ? res.status(404).json({ error: 'Estimate not found' })
+    : next(err)
+));
 
 // The old POST /cleanup-demo endpoint (bulk-delete estimates matching a
 // hardcoded list of seed customer names) is intentionally GONE: it was live

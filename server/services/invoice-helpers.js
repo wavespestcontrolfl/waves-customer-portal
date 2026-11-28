@@ -142,6 +142,15 @@ function isInvoiceCollectibleStatus(status) {
 // already share reads the stamp here. That keeps the invariant in a single
 // place instead of a convention each new collection path has to remember.
 const PACKET_WITHDRAWN_SEND_ERROR = /^payer_billed:/;
+// An unpaid invoice held for office billing review because its visit completed
+// a chemical area add-on with no recorded product application (owner 2026-11-26).
+// Enforced across follow-up reminders, automated collection, and pay-link delivery
+// until the office reviews and explicitly sends or edits/clears the hold.
+const CHEMICAL_ADDON_HOLD_SEND_ERROR = /^chemical_addon_review:/;
+
+function chemicalAddonHoldStamp(serviceId) {
+  return `chemical_addon_review:${serviceId}`;
+}
 
 // The stale-send recovery parks an ambiguous claim here: status `scheduled`
 // with a NULL scheduled_send_at (so no worker picks it up) and this text as
@@ -169,6 +178,9 @@ function selfPayAtDispatch(invoiceId, database) {
       if (live.payer_id || invoiceWithdrawnFromCustomer(live)) {
         return { ok: false, code: 'INVOICE_PAYER_BILLED', reason: 'invoice is billed to a third-party payer' };
       }
+      if (invoiceHeldForChemicalReview(live)) {
+        return { ok: false, code: 'INVOICE_CHEMICAL_ADDON_HOLD', reason: 'invoice is held for office chemical add-on review' };
+      }
       return { ok: true };
     } catch (err) {
       return { ok: false, code: 'INVOICE_UNREADABLE', reason: err.message };
@@ -177,7 +189,9 @@ function selfPayAtDispatch(invoiceId, database) {
 }
 
 function preserveWithdrawalStamp(database) {
-  return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
+  return database.raw(
+    "CASE WHEN scheduled_send_error LIKE 'payer_billed:%' OR scheduled_send_error LIKE 'chemical_addon_review:%' THEN scheduled_send_error ELSE NULL END",
+  );
 }
 
 // A bill's first delivery never carries a due date before the day it goes out (owner 2026-11-06,
@@ -265,6 +279,12 @@ function invoiceWithdrawnFromCustomer(invoice) {
     && PACKET_WITHDRAWN_SEND_ERROR.test(String(invoice.scheduled_send_error || ''));
 }
 
+function invoiceHeldForChemicalReview(invoice) {
+  return !!invoice
+    && typeof invoice === 'object'
+    && CHEMICAL_ADDON_HOLD_SEND_ERROR.test(String(invoice.scheduled_send_error || ''));
+}
+
 /**
  * Does the refunded Stripe payment still OWN this invoice? (B03 — the
  * single-invoice twin of the combined refund path's codex r36 P1 guard.)
@@ -320,13 +340,15 @@ function isUncountedPartialDueInvoice(invoice) {
     && !isStampedPayerInvoice(invoice)
     && invoiceStatusKey(invoice.status) === PARTIALLY_PAID_STATUS
     && !invoiceWithdrawnFromCustomer(invoice)
+    && !invoiceHeldForChemicalReview(invoice)
     && invoiceAmountDue(invoice) > 0;
 }
 function isCollectibleOwnInvoice(invoice) {
   return !!invoice
     && !isStampedPayerInvoice(invoice)
     && OWN_COLLECTIBLE_INVOICE_STATUSES.includes(invoiceStatusKey(invoice.status))
-    && !invoiceWithdrawnFromCustomer(invoice);
+    && !invoiceWithdrawnFromCustomer(invoice)
+    && !invoiceHeldForChemicalReview(invoice);
 }
 function hasCollectibleAmountDue(invoice) {
   return isCollectibleOwnInvoice(invoice) && invoiceAmountDue(invoice) > 0;
@@ -367,6 +389,11 @@ function assertInvoiceCollectible(invoice) {
   // reason (a withdrawal never stamps a terminal row, but a row that settled
   // between the withdrawal and this read can carry both).
   assertInvoiceNotWithdrawnFromCustomer(row);
+  if (invoiceHeldForChemicalReview(row)) {
+    const err = new Error('This invoice is held for office billing review of a chemical area add-on');
+    err.code = 'INVOICE_CHEMICAL_ADDON_HOLD';
+    throw err;
+  }
 }
 
 // The withdrawal half of assertInvoiceCollectible on its own, for the seams
@@ -588,6 +615,8 @@ module.exports = {
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceWithdrawnFromCustomer,
+  invoiceHeldForChemicalReview,
+  chemicalAddonHoldStamp,
   refundedPaymentOwnsInvoice,
   OWN_COLLECTIBLE_INVOICE_STATUSES,
   PARTIALLY_PAID_STATUS,

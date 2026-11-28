@@ -470,8 +470,9 @@ function mergeRefreshMetadataByRing(existingMeta, metadata, shouldRing) {
     // A ringing refresh clears the done fields (below), so a relevance
     // retirement stamp on the row is stale: dropped, or the sweep would never
     // judge this row again (admin-alert-relevance.js candidateQuery).
-    // The same for the quiet fall-off's Reopen hold (rungAt, stamped below, now says when the row last had news).
-    const { retired: _retired, [QUIET_HOLD_KEY]: _hold, ...standing } = existingMeta;
+    // The same for the quiet fall-off's Reopen hold (rungAt, stamped below, now says when the row last had news)
+    // and lateReRungAt (so a customer follow-up is eligible for a fresh 1-hour re-ring).
+    const { retired: _retired, [QUIET_HOLD_KEY]: _hold, lateReRungAt: _lateReRungAt, ...standing } = existingMeta;
     const merged = { ...standing, ...metadata, rungAt: new Date().toISOString() };
     // A DEFINED non-owner audience only — a caller outside ops-digest.js
     // (most refreshOnDedupe dedupe rows) never sets `audience` at all, and
@@ -1358,12 +1359,13 @@ const NotificationService = {
 
   // Mark all read for admin
   // An owner-only row (metadata.ownerOnly) is read only by the owner login (`fullAccess`): another login's "Mark all
-  // read" never clears the owner's unread Claude plans.
+  // read" never clears the owner's unread Claude plans. Already-done rows stay untouched (docs/admin-notifications.md §4.5),
+  // so quiet-72h fall-offs and system closes never get a retroactive read_at stamp.
   async markAllReadAdmin({ role, technicianId = null, fullAccess = false } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }),
       role, technicianId,
-    )).whereNull('read_at');
+    )).whereNull('done_at').whereNull('read_at');
     if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     await query.update({ read_at: new Date() });
   },

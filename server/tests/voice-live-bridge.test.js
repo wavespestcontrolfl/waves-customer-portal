@@ -1424,10 +1424,10 @@ describe('delegation: tools mode (GATE_VOICE_GPT_LIVE_TOOLS)', () => {
     const tools = bridgeMod.buildLiveInstructions({ tools: true });
     expect(tools.endsWith(bridgeMod.TOOLS_LIMITS)).toBe(true);
     expect(tools).not.toContain(bridgeMod.TRIAL_LIMITS);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate only these: prices, services offered, and a new-customer request/);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/cannot check open appointment times, accounts/);
-    expect(bridgeMod.TOOLS_LIMITS).not.toMatch(/Delegate[^.]*open (appointment )?times/);
-    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never guess or invent a price or service/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Delegate only these: prices, services offered, open appointment times by city,\s+and a new-customer request/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/Open times are practice-only and nothing is booked or held/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/cannot check accounts, visits, invoices, estimates, messages or call history/);
+    expect(bridgeMod.TOOLS_LIMITS).toMatch(/never guess or invent\s+a price, service or time/);
     expect(bridgeMod.TOOLS_LIMITS).toMatch(/estimates, messages or call history: if asked,\s+say this practice line cannot check that/);
     expect(bridgeMod.TOOLS_LIMITS.length).toBeLessThan(700);
     expect(bridgeMod.buildLiveInstructions().endsWith(bridgeMod.TRIAL_LIMITS)).toBe(true);
@@ -2454,5 +2454,134 @@ describe('instructions', () => {
     expect(bridgeMod.TRIAL_LIMITS.replace(/\s+/g, ' ')).toMatch(/cannot look anything up: no open appointment times, prices, accounts or records\. You cannot book, take a lead, send a text or transfer the call/);
     expect(bridgeMod.TRIAL_LIMITS).toMatch(/call or text the Waves office/);
     expect(bridgeMod.TRIAL_LIMITS).not.toMatch(/will call (them|you) back/);
+  });
+});
+
+describe('outbound audio volume optimizer (LUT gain + soft-clip limiter)', () => {
+  const {
+    mulawToLinear,
+    linearToMulaw,
+    OUTBOUND_GAIN_LUTS,
+    OUTBOUND_TARGET_RMS,
+    OUTBOUND_LIMITER_CEILING,
+  } = bridgeMod;
+
+  const rmsOf = (b64Payload) => {
+    const buf = Buffer.from(b64Payload, 'base64');
+    let sq = 0;
+    for (let i = 0; i < buf.length; i += 1) sq += mulawToLinear(buf[i]) ** 2;
+    return Math.sqrt(sq / buf.length);
+  };
+  const maxAbsOf = (b64Payload) => {
+    const buf = Buffer.from(b64Payload, 'base64');
+    let max = 0;
+    for (let i = 0; i < buf.length; i += 1) max = Math.max(max, Math.abs(mulawToLinear(buf[i])));
+    return max;
+  };
+  const toneChunk = (amplitude, length = 160) => {
+    const buf = Buffer.alloc(length);
+    for (let i = 0; i < length; i += 1) {
+      // Alternating sign wave at fixed linear magnitude so voiced RMS === amplitude
+      buf[i] = linearToMulaw(i % 2 === 0 ? amplitude : -amplitude);
+    }
+    return buf.toString('base64');
+  };
+
+  test('linearToMulaw is the exact inverse of mulawToLinear across all 255 non-negative-zero mu-law codes', () => {
+    for (let b = 0; b < 256; b += 1) {
+      if (b === 0x7f) {
+        expect(linearToMulaw(mulawToLinear(b))).toBe(0xff); // -0 normalizes to +0
+      } else {
+        expect(linearToMulaw(mulawToLinear(b))).toBe(b);
+      }
+    }
+  });
+
+  test('all precomputed LUTs preserve silence, leave noise floor (<100) untouched, stay monotonic, and never exceed the -1.5 dBFS ceiling', () => {
+    expect(OUTBOUND_GAIN_LUTS.length).toBe(21); // 0.0 dB through +10.0 dB in 0.5 dB steps
+    for (let step = 0; step < OUTBOUND_GAIN_LUTS.length; step += 1) {
+      const lut = OUTBOUND_GAIN_LUTS[step];
+      expect(lut[0xff]).toBe(0xff);
+      expect(lut[0x7f]).toBe(0x7f);
+      if (step === 0) {
+        for (let b = 0; b < 256; b += 1) expect(lut[b]).toBe(b);
+        continue;
+      }
+      // Check monotonicity by positive magnitude order (0xff -> 0x80) and negative (0x7f -> 0x00)
+      let prevPos = 0;
+      let prevNeg = 0;
+      for (let b = 0xff; b >= 0x80; b -= 1) {
+        const linIn = mulawToLinear(b);
+        const linOut = mulawToLinear(lut[b]);
+        if (Math.abs(linIn) < 100) expect(lut[b]).toBe(b);
+        expect(linOut).toBeGreaterThanOrEqual(prevPos);
+        expect(linOut).toBeLessThanOrEqual(OUTBOUND_LIMITER_CEILING);
+        prevPos = linOut;
+      }
+      for (let b = 0x7f; b >= 0x00; b -= 1) {
+        const linIn = mulawToLinear(b);
+        const linOut = Math.abs(mulawToLinear(lut[b]));
+        if (Math.abs(linIn) < 100) expect(lut[b]).toBe(b);
+        expect(linOut).toBeGreaterThanOrEqual(prevNeg);
+        expect(linOut).toBeLessThanOrEqual(OUTBOUND_LIMITER_CEILING);
+        prevNeg = linOut;
+      }
+    }
+  });
+
+  test('boosts quiet -26 dBFS model speech cleanly toward -16 dBFS on syllable #1 without clipping', async () => {
+    const t = setup();
+    await t.ready();
+    const quiet = toneChunk(1640, 160); // ~-26 dBFS voiced RMS
+    const inRms = rmsOf(quiet);
+    expect(inRms).toBeGreaterThan(1500);
+    expect(inRms).toBeLessThan(1800);
+
+    t.openai.receive({ type: 'session.output_audio.delta', delta: quiet });
+    const sent = t.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
+    expect(sent).toHaveLength(1);
+    const outRms = rmsOf(sent[0]);
+    expect(outRms).toBeGreaterThan(OUTBOUND_TARGET_RMS * 0.88);
+    expect(outRms).toBeLessThan(OUTBOUND_TARGET_RMS * 1.12);
+    expect(maxAbsOf(sent[0])).toBeLessThanOrEqual(OUTBOUND_LIMITER_CEILING);
+  });
+
+  test('passes silence-only and already-loud chunks through byte-identically (including immediately after a quiet chunk) and soft-clips embedded peaks', async () => {
+    const t = setup();
+    await t.ready();
+    const silent = Buffer.alloc(160, 0xff).toString('base64');
+    const loud = toneChunk(8000, 160); // already above -16 dBFS (5193)
+
+    t.openai.receive({ type: 'session.output_audio.delta', delta: silent });
+    t.openai.receive({ type: 'session.output_audio.delta', delta: loud });
+    let sent = t.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
+    expect(sent[0]).toBe(silent);
+    expect(sent[1]).toBe(loud);
+
+    // Quiet -> silence -> already-loud transition:
+    // 1) Quiet chunk (-26 dBFS) gets boosted toward -16 dBFS.
+    // 2) Inter-word silence pause passes through untouched without boosting noise.
+    // 3) Immediate above-target loud chunk resets gain to 0 dB and passes through byte-identically (no residual jump).
+    const t2 = setup();
+    await t2.ready();
+    t2.openai.receive({ type: 'session.output_audio.delta', delta: toneChunk(1640, 160) });
+    t2.openai.receive({ type: 'session.output_audio.delta', delta: silent });
+    t2.openai.receive({ type: 'session.output_audio.delta', delta: loud });
+    sent = t2.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
+    expect(rmsOf(sent[0])).toBeGreaterThan(OUTBOUND_TARGET_RMS * 0.88);
+    expect(sent[1]).toBe(silent);
+    expect(sent[2]).toBe(loud); // byte-identical immediately after a +10 dB quiet chunk
+
+    // Embedded loud transient inside a quiet-average chunk: gain boosts the quiet speech
+    // while the soft-clip limiter strictly caps the peak at or below OUTBOUND_LIMITER_CEILING (-1.68 dBFS).
+    const spiky = Buffer.alloc(160);
+    for (let i = 0; i < 160; i += 1) spiky[i] = linearToMulaw(i % 2 === 0 ? 1200 : -1200);
+    spiky[40] = 0x00; // -32124 full-scale spike inside a quiet chunk
+    spiky[41] = 0x80; // +32124 full-scale spike inside a quiet chunk
+    const t3 = setup();
+    await t3.ready();
+    t3.openai.receive({ type: 'session.output_audio.delta', delta: spiky.toString('base64') });
+    const spikySent = t3.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
+    expect(maxAbsOf(spikySent[0])).toBeLessThanOrEqual(OUTBOUND_LIMITER_CEILING);
   });
 });

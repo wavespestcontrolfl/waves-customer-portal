@@ -62,7 +62,7 @@ jest.mock('../models/db', () => {
   };
   const db = (table) => builder(table, false);
   db.transaction = jest.fn(async (fn) => {
-    mockTrx = Object.assign((table) => builder(table, true), { fn: { now: () => 'NOW()' }, isTrx: true });
+    mockTrx = Object.assign((table) => builder(table, true), { fn: { now: () => 'NOW()' }, raw: jest.fn(async () => undefined), isTrx: true });
     return fn(mockTrx);
   });
   return db;
@@ -104,6 +104,7 @@ describe('DELETE /admin/customers/:id (archive)', () => {
       // r6: archive never touches `active` (deleted_at already removes the
       // row from every charge set; restore must hand it back as archived).
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'customer_refresh_tokens', viaTrx: true, where: { customer_id: 'cust-1' }, patch: expect.objectContaining({ revoke_reason: 'account_inactive', revoked_at: expect.any(Date) }) }),
       expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
       expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
@@ -144,6 +145,7 @@ describe('archiveCustomerAsAdmin (the DELETE /:id handler, no HTTP)', () => {
       .resolves.toEqual({ status: 200, json: { success: true } });
     expect(mockState.updates).toEqual([
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'customer_refresh_tokens', viaTrx: true, where: { customer_id: 'cust-1' }, patch: expect.objectContaining({ revoke_reason: 'account_inactive', revoked_at: expect.any(Date) }) }),
       expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
       expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
@@ -236,6 +238,7 @@ describe('PATCH /admin/customers/:id/restore', () => {
       // time disarm existed may still be billing-armed), then clears ONLY
       // deleted_at: the customer comes back exactly as archived.
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'customer_refresh_tokens', viaTrx: true, where: { customer_id: 'cust-1' }, patch: expect.objectContaining({ revoke_reason: 'account_inactive', revoked_at: expect.any(Date) }) }),
       expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
       expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
       expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: null } }),

@@ -267,17 +267,52 @@ function HelpCard({ children }) {
   );
 }
 
-function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequired, onRetry }) {
+async function retryFlowAvailability({
+  flow, resolvedAddress, load, listRequest, refreshInspectionAvailability, onRecovered,
+}) {
+  if (flow !== 'inspection' || !resolvedAddress) {
+    await load();
+    onRecovered();
+    return;
+  }
+  await listRequest(true, async (signal) => {
+    try {
+      const answer = await refreshInspectionAvailability({ signal });
+      if (signal?.aborted || !answer) return;
+      if (answer.availability || answer.state === 'out_of_area' || (answer.state && answer.state !== 'ok')) {
+        onRecovered();
+      }
+    } catch { /* keep the recoverable retry card visible on transient failure */ }
+  })();
+}
+
+function EmptyTimesCard({ aiFiltered, data, inspectionLike, isReservice, resolvedAddress, onRetry }) {
   // Inspection GET can answer state:'ok' with availability:null and
   // service_area_unavailable:true (the county lookup itself failed, not a
   // verdict either way — Codex pre-push P1, 2026-09-24). Same recoverable
   // wording InspectionAddressGate already uses for the POST version of this
   // failure, plus a retry action since there's no form to resubmit here.
-  if (serviceAreaUnavailable) {
+  const locationReviewRequired = isReservice && !!data?.location_review_required;
+  const serviceAreaUnavailable = inspectionLike && !!data?.service_area_unavailable;
+  const hasHeldAddress = inspectionLike && Boolean(resolvedAddress);
+  const availabilityFailed = !aiFiltered && (!inspectionLike || hasHeldAddress) && data?.availability === null && !data?.needs_address && !data?.booking_unavailable;
+  if (locationReviewRequired) {
+    return (
+      <Card>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
+          We need to confirm your service address before we can schedule this re-service online. Text or call us and we&apos;ll take care of it.
+        </div>
+        <ContactRow />
+      </Card>
+    );
+  }
+  if (serviceAreaUnavailable || availabilityFailed) {
     return (
       <Card>
         <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginBottom: 12 }}>
-          We couldn&apos;t confirm your service area just now. Please try again in a moment, or text or call us.
+          {serviceAreaUnavailable
+            ? "We couldn't confirm your service area just now. Please try again in a moment, or text or call us."
+            : "We couldn't load open times just now. Please try again in a moment, or text or call us."}
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button
@@ -289,16 +324,6 @@ function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequ
           >
             Try again
           </button>
-        </div>
-        <ContactRow />
-      </Card>
-    );
-  }
-  if (locationReviewRequired) {
-    return (
-      <Card>
-        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
-          We need to confirm your service address before we can schedule this re-service online. Text or call us and we&apos;ll take care of it.
         </div>
         <ContactRow />
       </Card>
@@ -1280,7 +1305,7 @@ function ReserviceCoveredView({ data }) {
 // and the details line the tech preps from.
 function ReserviceHero({
   data, bookableLanes, selectedLane, onSelectLane, details, onDetails,
-  selectedPests, onTogglePest,
+  selectedPests, onTogglePest, submitting = false,
 }) {
   const pestChoices = data?.pestChoices?.[selectedLane] || null;
   return (
@@ -1311,6 +1336,7 @@ function ReserviceHero({
                   <button
                     key={lane.key}
                     type="button"
+                    disabled={submitting}
                     {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
                     onClick={() => onSelectLane(lane.key)}
                     style={{
@@ -1319,7 +1345,8 @@ function ReserviceHero({
                       border: `2px solid ${active ? COLORS.glassNavy : '#E7E2D7'}`,
                       borderRadius: 999,
                       padding: '9px 16px',
-                      cursor: 'pointer',
+                      cursor: submitting ? 'not-allowed' : 'pointer',
+                      opacity: submitting ? 0.65 : 1,
                       fontFamily: FONT_BODY,
                       fontSize: 14,
                       fontWeight: 700,
@@ -2222,11 +2249,19 @@ function ScheduleFlowPage({ flow }) {
         setOutOfArea({ county: body.county || null, ticket: body.waitlist_ticket || null });
         return { ...body, state: 'out_of_area' };
       }
+      if (res.status === 503 && body.error === 'service_area_unavailable') {
+        mergeData({ availability: null, needs_address: false, service_area_unavailable: true });
+        return { ...body, state: 'ok', availability: null, service_area_unavailable: true };
+      }
       if (!res.ok) throw new Error(body.error || 'availability refresh failed');
       // A terminal state (already_booked / converted / gone) replaces the
       // page, as the gate and the slot search do (Codex #4737 r11 pre-push P1).
       if (body.state && body.state !== 'ok') setData(body);
-      else mergeData({ availability: body.availability, needs_address: false });
+      else mergeData({
+        availability: body.availability,
+        needs_address: false,
+        service_area_unavailable: Boolean(body.service_area_unavailable),
+      });
       return body;
     }
     const res = await fetch(availabilityUrl, { signal });
@@ -2293,7 +2328,7 @@ function ScheduleFlowPage({ flow }) {
     if (body.availability) {
       // The pick survives when the results still offer it (see the
       // availability effect above); otherwise that effect clears it.
-      setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
+      setData((prev) => (prev ? { ...prev, availability: body.availability, service_area_unavailable: false, ...withNextVisit(body, prev) } : prev));
       setSubmitError(null);
       setAiFiltered(true);
     }
@@ -2315,13 +2350,31 @@ function ScheduleFlowPage({ flow }) {
     } catch { /* keep the filtered calendar + reset link */ }
   });
 
+  const retryAvailability = () => retryFlowAvailability({
+    flow,
+    resolvedAddress,
+    load,
+    listRequest,
+    refreshInspectionAvailability,
+    onRecovered: () => {
+      setSearchClosed(false);
+      setSubmitError(null);
+      setAiFiltered(false);
+      setAiSession((n) => n + 1);
+    },
+  });
+
   // The slot is explicit: the inline Book passes the selection, EmailPickCard
   // its own emailed time — still bookable after the customer browsed another
   // day (which clears the selection). fromTop routes errors to that card.
   // resultMarks rides into the success result ({ wePicked: true } from the
   // customer-pick card's "you pick for me").
+  // Synchronous lock preventing rapid double-taps from firing two concurrent
+  // booking POSTs before React re-renders `submitting: true`.
+  const submittingRef = useRef(false);
   const confirm = async (slotToBook, fromTop, resultMarks) => {
-    if (!slotToBook || submitting || listing.controller || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
+    if (submittingRef.current || !slotToBook || listing.controller || !cfg.canConfirm({ lane: selectedLane, data, details })) return;
+    submittingRef.current = true;
     setBookedFromTop(fromTop);
     setSubmitting(true);
     setSubmitError(null);
@@ -2401,7 +2454,7 @@ function ScheduleFlowPage({ flow }) {
           setData((prev) => (prev ? { ...prev, lead: body.lead || { ...prev.lead, address_display: null } } : prev));
         }
         if (body.availability) {
-          setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(body, prev) } : prev));
+          setData((prev) => (prev ? { ...prev, availability: body.availability, service_area_unavailable: false, ...withNextVisit(body, prev) } : prev));
         } else if (inspectionLike) {
           // The server's own refresh attempt came back empty — fall back
           // to a client-side refresh through the SAME address-aware helper
@@ -2476,6 +2529,7 @@ function ScheduleFlowPage({ flow }) {
       if (pageRequests.signal.aborted) return;
       setSubmitError('Something went wrong. Please try again, or text us and we\'ll help.');
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -2509,8 +2563,9 @@ function ScheduleFlowPage({ flow }) {
         selectedSlot={selectedSlot}
         bookableLanes={bookableLanes}
         selectedLane={selectedLane}
+        submitting={submitting}
         onSelectLane={(lane) => {
-          if (lane === selectedLane) return;
+          if (submittingRef.current || lane === selectedLane) return;
           loadAbortRef.current?.abort();
           setSelectedSlot(null);
           setSubmitError(null);
@@ -2641,9 +2696,11 @@ function ScheduleFlowPage({ flow }) {
           empty={(
             <EmptyTimesCard
               aiFiltered={aiFiltered}
-              serviceAreaUnavailable={inspectionLike && !!data?.service_area_unavailable}
-              locationReviewRequired={flow === 'reservice' && !!data?.location_review_required}
-              onRetry={load}
+              data={data}
+              inspectionLike={inspectionLike}
+              isReservice={flow === 'reservice'}
+              resolvedAddress={resolvedAddress}
+              onRetry={retryAvailability}
             />
           )}
         />

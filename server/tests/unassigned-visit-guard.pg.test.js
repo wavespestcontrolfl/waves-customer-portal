@@ -217,7 +217,7 @@ maybeDescribe('unassigned timed visits check (live Postgres)', () => {
     await visit(custA, { scheduled_date: '2098-03-12', technician_id: tech.id });
     await visit(custA, { scheduled_date: '2098-03-12', status: 'cancelled' });
     await visit(custA, { scheduled_date: '2098-03-12', status: 'completed' });
-    await visit(custA, { scheduled_date: '2098-03-12', reservation_expires_at: new Date('2098-03-12T00:00:00Z') });
+    await visit(null, { scheduled_date: '2098-03-12', reservation_expires_at: new Date('2098-03-12T00:00:00Z') });
 
     // 1. First run: one unread Schedule row naming the earliest visit, with both visits as item keys.
     await expect(run()).resolves.toEqual({ count: 2, outcome: 'raised' });

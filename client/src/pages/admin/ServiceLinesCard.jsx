@@ -36,8 +36,17 @@ function lineFetch(path, opts = {}) {
       "Content-Type": "application/json",
       ...opts.headers,
     },
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      const error = new Error(`HTTP ${r.status}`);
+      error.status = r.status;
+      try {
+        error.data = typeof r.json === "function" ? await r.json() : null;
+      } catch {
+        error.data = null;
+      }
+      throw error;
+    }
     return r.json();
   });
 }
@@ -60,7 +69,10 @@ function techOptions(techs, selectedIds) {
   return (techs || [])
     .filter((t) => {
       const status = t.employment_status || (t.active ? "active" : "inactive");
-      return status === "active" || status === "prospective" || wanted.has(t.id);
+      if (wanted.has(t.id)) return true;
+      if (status === "prospective") return true;
+      if (status === "active") return t.field_dispatchable !== false;
+      return false;
     })
     .map((t) => {
       const status = t.employment_status || (t.active ? "active" : "inactive");
@@ -100,7 +112,16 @@ export default function ServiceLinesCard({ techs = [], showToast = () => {} }) {
   const setField = (key, field, value) =>
     setRows((prev) => prev.map((r) => (r.service_category === key ? { ...r, [field]: value } : r)));
 
+  const duplicateLine = rows?.find(
+    (r) => r.home_technician_id && r.gap_technician_id && r.home_technician_id === r.gap_technician_id,
+  );
+
   const save = async () => {
+    if (duplicateLine) {
+      const lineLabel = SERVICE_LINES.find((l) => l.key === duplicateLine.service_category)?.label || duplicateLine.service_category;
+      showToast(`Failed: ${lineLabel} home and gap tech must be different people`);
+      return;
+    }
     setSaving(true);
     try {
       await lineFetch("/admin/timetracking/service-lines", {
@@ -116,7 +137,7 @@ export default function ServiceLinesCard({ techs = [], showToast = () => {} }) {
       showToast("Service lines saved");
       load();
     } catch (e) {
-      showToast("Failed: " + e.message);
+      showToast("Failed: " + (e?.data?.error || e.message));
     }
     setSaving(false);
   };
@@ -180,11 +201,16 @@ export default function ServiceLinesCard({ techs = [], showToast = () => {} }) {
           })}
         </div>
       )}
+      {duplicateLine && (
+        <p role="alert" style={{ margin: "10px 0 0", fontSize: 14, color: D.red }}>
+          Home tech and gap tech on the same service line must be different technicians.
+        </p>
+      )}
       <div style={{ marginTop: 12 }}>
         <button
           type="button"
           onClick={save}
-          disabled={saving || !rows}
+          disabled={saving || !rows || !!duplicateLine}
           style={{
             minHeight: 44,
             padding: "0 16px",
@@ -194,8 +220,8 @@ export default function ServiceLinesCard({ techs = [], showToast = () => {} }) {
             borderRadius: 4,
             fontSize: 14,
             fontWeight: 500,
-            cursor: saving || !rows ? "default" : "pointer",
-            opacity: saving || !rows ? 0.5 : 1,
+            cursor: saving || !rows || duplicateLine ? "default" : "pointer",
+            opacity: saving || !rows || duplicateLine ? 0.5 : 1,
           }}
         >
           {saving ? "Saving…" : "Save service lines"}

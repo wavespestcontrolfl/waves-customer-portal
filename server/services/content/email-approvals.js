@@ -719,7 +719,14 @@ async function executeDecision(row, decision, sender) {
     if (!runStillParked || !oppStillParked) {
       await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
         .update({ status: 'superseded', last_error: `already decided elsewhere (run ${run?.skip_reason || run?.outcome || 'gone'}, opp ${opp?.status || 'gone'})`, updated_at: new Date() });
-      await notifyAdmin('Reply arrived after the item was decided', `${row.token}: this draft was already decided (portal or a newer flow) before your reply — nothing was changed.`);
+      await alertContentApproval({
+        action: 'review late email approval reply',
+        why: 'An email approval reply arrived after this draft was already decided, so nothing changed.',
+        detail: `${row.token}: this draft was already decided (portal or a newer flow) before your reply — nothing was changed.`,
+        doneWhen: 'approval_checked',
+        token: row.token,
+        dedupeKey: `content-approval-late:${row.token}`,
+      });
       return { skipped: 'already_decided_elsewhere' };
     }
   }
@@ -742,7 +749,14 @@ async function executeDecision(row, decision, sender) {
         last_error: 'draft changed after email — re-requested',
         updated_at: new Date(),
       });
-      await notifyAdmin('Draft changed since you were emailed', `${row.token}: the draft was modified after your approval email went out, so your reply was NOT applied. A fresh email with the current content is on its way.`);
+      await alertContentApproval({
+        action: 're-review changed content draft by email',
+        why: 'The draft changed after the approval email went out, so your reply was not applied.',
+        detail: `${row.token}: the draft was modified after your approval email went out, so your reply was NOT applied. A fresh email with the current content is on its way.`,
+        doneWhen: 'updated_draft_decided',
+        token: row.token,
+        dedupeKey: `content-approval-changed:${row.token}`,
+      });
       return { skipped: 'draft_changed' };
     }
     // An oversized draft was never fully shown in the email, so an emailed
@@ -770,7 +784,14 @@ async function executeDecision(row, decision, sender) {
         const marker = 'oversized_approve_ignored';
         if (row.last_error !== marker) {
           await db('content_email_approvals').where({ id: row.id }).update({ last_error: marker, updated_at: new Date() });
-          await notifyAdmin('Approval requires the portal', `${row.token}: this draft exceeds email size limits, so your emailed "approved" was NOT executed. Review and approve it in /admin/seo.`);
+          await alertContentApproval({
+            action: 'approve oversized content draft in portal',
+            why: 'This draft exceeded email size limits, so your emailed approval was not applied.',
+            detail: `${row.token}: this draft exceeds email size limits, so your emailed "approved" was NOT executed. Review and approve it in /admin/seo.`,
+            doneWhen: 'draft_decided_in_portal',
+            token: row.token,
+            dedupeKey: `content-approval-oversized:${row.token}`,
+          });
         }
         return { skipped: 'requires_portal_review' };
       }
@@ -886,12 +907,26 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
           last_error: 'draft changed under lock — re-requested',
           updated_at: new Date(),
         });
-        await notifyAdmin('Draft changed since you were emailed', `${row.token}: the draft was modified before your reply executed — nothing was applied. A fresh email with the current content is on its way.`);
+        await alertContentApproval({
+          action: 're-review changed content draft by email',
+          why: 'The draft changed before your approval reply ran, so nothing was applied.',
+          detail: `${row.token}: the draft was modified before your reply executed — nothing was applied. A fresh email with the current content is on its way.`,
+          doneWhen: 'updated_draft_decided',
+          token: row.token,
+          dedupeKey: `content-approval-changed-lock:${row.token}`,
+        });
         return { skipped: 'draft_changed' };
       }
       await db('content_email_approvals').where({ id: row.id })
         .update({ status: 'superseded', last_error: message, updated_at: new Date() });
-      await notifyAdmin('Approval reply matched an outdated draft', `${row.token}: a newer draft replaced the one you were emailed — nothing was applied. A fresh approval email is on its way.`);
+      await alertContentApproval({
+        action: 're-review replacement content draft',
+        why: 'A newer draft replaced the one emailed to you, so your reply was not applied.',
+        detail: `${row.token}: a newer draft replaced the one you were emailed — nothing was applied. A fresh approval email is on its way.`,
+        doneWhen: 'updated_draft_decided',
+        token: row.token,
+        dedupeKey: `content-approval-outdated:${row.token}`,
+      });
       if (latest && isApprovableKind(latest.skip_reason)) {
         await sendApprovalRequest(latest).catch(() => {});
       }
@@ -926,7 +961,14 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
     // not silently lost, and the row never re-executes.
     await db('content_email_approvals').where({ id: row.id })
       .update({ status: 'failed', last_error: message, updated_at: new Date() });
-    await notifyAdmin('Approval decision failed to execute', `${row.token}: your "${decision}" reply was received but execution failed (${message.slice(0, 200)}). The item is still parked — check /admin/seo.`);
+    await alertContentApproval({
+      action: 'handle failed email approval decision',
+      why: 'Your email approval reply was received, but applying it failed and the draft is still parked.',
+      detail: `${row.token}: your "${decision}" reply was received but execution failed (${message.slice(0, 200)}). The item is still parked — check /admin/seo.`,
+      doneWhen: 'draft_decided_in_portal',
+      token: row.token,
+      dedupeKey: `content-approval-exec-failed:${row.token}`,
+    });
     throw err;
   }
 }
@@ -960,7 +1002,14 @@ async function recoverExecutingRows() {
       if (!reconciled) {
         await db('content_email_approvals').where({ id: row.id })
           .update({ status: 'failed', last_error: `${row.last_error} | not auto-retried: possible dangling publish`, updated_at: new Date() });
-        await notifyAdmin('Approval needs a manual check', `${row.token}: your approval hit an ambiguous failure mid-publish. Before re-approving in /admin/seo, check the astro repo for a dangling draft PR from this run.`);
+        await alertContentApproval({
+          action: 'check possible dangling content draft PR',
+          why: 'Your approval hit an ambiguous failure mid-publish, so check the website repo before re-approving.',
+          detail: `${row.token}: your approval hit an ambiguous failure mid-publish. Before re-approving in /admin/seo, check the astro repo for a dangling draft PR from this run.`,
+          doneWhen: 'dangling_publish_checked',
+          token: row.token,
+          dedupeKey: `content-approval-dangling:${row.token}`,
+        });
       }
       continue;
     }
@@ -972,10 +1021,24 @@ async function recoverExecutingRows() {
   return { recovered: stuck.length };
 }
 
-async function notifyAdmin(title, body) {
+async function alertContentApproval({ action, why, detail, doneWhen, token, dedupeKey }) {
   try {
-    const NotificationService = require('../notification-service');
-    await NotificationService.create({ recipientType: 'admin', recipientId: null, category: 'content', title, body, link: '/admin/seo' });
+    const { raiseAdminAlert } = require('../admin-alert-compose');
+    await raiseAdminAlert('content', {
+      area: 'Content',
+      action,
+      why,
+      severity: 'needs-you',
+      link: '/admin/seo',
+      subject: { type: 'check', id: `email-approval:${token || 'unknown'}` },
+      doneWhen,
+      who: 'person',
+    }, {
+      bell: true,
+      ...(dedupeKey ? { dedupeKey } : {}),
+      detail,
+      metadata: { approvalToken: token || null },
+    });
   } catch (err) {
     logger.warn(`[email-approvals] admin notification failed: ${err.message}`);
   }
@@ -1136,7 +1199,14 @@ async function pollReplies() {
         checked++;
         if (!senders.includes(sender)) {
           logger.warn(`[email-approvals] reply for ${row.token} from unauthorized sender ${maskEmail(sender)} — ignored`);
-          await notifyAdmin('Approval reply from unauthorized sender ignored', `${row.token}: a reply from ${maskEmail(sender)} was ignored. Only the configured approver address(es) may decide.`);
+          await alertContentApproval({
+            action: 'check unauthorized email approval reply',
+            why: 'An approval reply came from an unauthorized sender and was ignored.',
+            detail: `${row.token}: a reply from ${maskEmail(sender)} was ignored. Only the configured approver address(es) may decide.`,
+            doneWhen: 'security_alert_reviewed',
+            token: row.token,
+            dedupeKey: `content-approval-unauthorized:${row.token}:${cand.uid}`,
+          });
           continue;
         }
         const full = await client.fetchOne(cand.uid, { source: true }, { uid: true });
@@ -1144,13 +1214,27 @@ async function pollReplies() {
         // receiving server's DMARC/DKIM verdict must vouch for the domain.
         if (!verifySenderAuthentication(full?.source, sender)) {
           logger.warn(`[email-approvals] reply for ${row.token} from ${maskEmail(sender)} FAILED sender authentication (DMARC/DKIM) — ignored`);
-          await notifyAdmin('Approval reply failed authentication', `${row.token}: a reply claiming to be from ${maskEmail(sender)} did not pass DMARC/DKIM at the mail server and was ignored. If this was really you, reply again from your normal mail app (not a relay that breaks DKIM).`);
+          await alertContentApproval({
+            action: 'check unauthenticated email approval reply',
+            why: 'An approval reply failed mail authentication and was ignored.',
+            detail: `${row.token}: a reply claiming to be from ${maskEmail(sender)} did not pass DMARC/DKIM at the mail server and was ignored. If this was really you, reply again from your normal mail app (not a relay that breaks DKIM).`,
+            doneWhen: 'security_alert_reviewed',
+            token: row.token,
+            dedupeKey: `content-approval-unauth:${row.token}:${cand.uid}`,
+          });
           continue;
         }
         const decision = parseDecision(extractReplyText(full?.source));
         if (!decision) {
           logger.info(`[email-approvals] ambiguous reply for ${row.token} from ${maskEmail(sender)} — ignored`);
-          await notifyAdmin('Approval reply was ambiguous', `${row.token}: your reply didn't start with "approved" or "not approved" — nothing was done. Reply again with one of those exact words first.`);
+          await alertContentApproval({
+            action: 'resend unclear email approval reply',
+            why: 'Your reply did not start with approved or not approved, so nothing was done.',
+            detail: `${row.token}: your reply didn't start with "approved" or "not approved" — nothing was done. Reply again with one of those exact words first.`,
+            doneWhen: 'approval_reply_resent',
+            token: row.token,
+            dedupeKey: `content-approval-ambiguous:${row.token}:${cand.uid}`,
+          });
           continue;
         }
         try {
@@ -1158,7 +1242,7 @@ async function pollReplies() {
           if (!outcome.skipped) {
             decided++;
             logger.info(`[email-approvals] ${row.token} ${decision} by ${maskEmail(sender)} → ${outcome.executed}`);
-            await notifyAdmin(`Draft ${decision} via email`, `${row.token} (${row.kind}) ${decision} by ${maskEmail(sender)}.`);
+            // Good-news email approvals stay logged only (docs/admin-notifications.md §3).
           }
         } catch (err) {
           if (err.transient) {

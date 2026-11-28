@@ -17,12 +17,42 @@ const adsGapRuleMode = () => (typeof featureGates.adsGapRuleMode === 'function' 
 let _googleAds;
 function getGoogleAds() { return _googleAds || (_googleAds = require('./google-ads')); }
 
-// ad_campaigns.daily_budget_base / daily_budget_current are decimal(10,2), so
-// the largest storable value is 99,999,999.99. A budget above that (a typo like
-// 100000000) could be accepted by Google BEFORE the local write, then fail the
-// DB update — leaving the live campaign changed but the DB out of sync. Reject
-// it up front, before any push. (Google itself enforces its own maxima too.)
-const MAX_DAILY_BUDGET = 99999999.99;
+// Safety cap on a campaign's daily budget before pushing to Google Ads.
+// Configurable via ADS_MAX_DAILY_BUDGET (default $1,000/day, bounded below decimal(10,2))
+// so a typo or rogue advisor value can never spend five or six figures in a day.
+const ENV_MAX_DAILY_BUDGET = Number(process.env.ADS_MAX_DAILY_BUDGET);
+const MAX_DAILY_BUDGET = Number.isFinite(ENV_MAX_DAILY_BUDGET) && ENV_MAX_DAILY_BUDGET > 0
+  ? Math.min(ENV_MAX_DAILY_BUDGET, 99999999.99)
+  : 1000;
+
+// Shared cap guard enforced before EVERY forward Google Ads push (setBudget, setMode,
+// and automated adjustBudgets transitions/reconciles).
+function assertBudgetWithinCap(amount, campaignName = null) {
+  if (Number.isFinite(amount) && amount > MAX_DAILY_BUDGET) {
+    const label = campaignName ? ` for "${campaignName}"` : '';
+    const err = new Error(`Budget ${amount}${label} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
+    err.code = 'budget_cap_exceeded';
+    throw err;
+  }
+}
+
+// Shared W16 direction check against BOTH the recorded base/boundRef and the live current budget,
+// so a decrease_budget can never raise live spend when current < base and an increase_budget can never lower it.
+function checkBudgetDirection(direction, amount, { baseBudget, currentBudget }) {
+  const boundRef = Number.isFinite(baseBudget) && baseBudget > 0 ? baseBudget : currentBudget;
+  const liveRef = Number.isFinite(currentBudget) && currentBudget > 0 ? currentBudget : boundRef;
+  if (direction === 'increase') {
+    const isReconcileUp = Number.isFinite(baseBudget) && amount === baseBudget && liveRef < amount;
+    if ((amount <= boundRef && !isReconcileUp) || amount <= liveRef) {
+      return `Refusing increase_budget to $${amount}/day because it does not increase the current $${liveRef}/day live budget (base $${boundRef}/day).`;
+    }
+  } else if (direction === 'decrease') {
+    if (amount >= boundRef || amount >= liveRef) {
+      return `Refusing decrease_budget to $${amount}/day because it does not decrease the current $${liveRef}/day live budget (base $${boundRef}/day).`;
+    }
+  }
+  return null;
+}
 
 // ad_budget_log.reason is a varchar(255). A caller-supplied reason longer than
 // that would make the ad_budget_log insert fail AFTER the live Google push (and,
@@ -39,20 +69,24 @@ const MAX_REASON_LEN = 255;
 const SEARCH_CAMPAIGN_TYPES = new Set(['2', 'SEARCH', 'google_search']);
 
 // Physical stops per day for the gap window (see getGapWindow): a visit_id group
-// is one stop; with no visit_id, the same customer + same window_start (time,
-// NULL for a windowless placeholder) is one stop. visit_id is uuid and
-// window_start is time, so both are cast to text.
+// is one stop; with no visit_id, the same customer + same window_start + same
+// property (NULL for primary home) is one stop; an unclaimed anonymous hold
+// (customer_id IS NULL) counts as its own stop instead of collapsing to NULL.
 const GAP_STOPS_SQL = `COUNT(DISTINCT CASE
   WHEN visit_id IS NOT NULL THEN 'v:' || visit_id::text
-  ELSE 'c:' || customer_id::text || ':' || COALESCE(window_start::text, '')
+  WHEN customer_id IS NOT NULL THEN 'c:' || customer_id::text || ':' || COALESCE(window_start::text, '') || COALESCE(':' || property_id::text, '')
+  ELSE 'h:' || id::text
 END) AS stops`;
 // Under the caller's campaign row lock: every ad_budget_log writer holds the
 // same lock, so a change logged after this check can't slip in before the push.
+// Routine autonomous capacity-cron ticks (trigger = 'auto') do not block manual
+// or advisor-applied changes.
 async function assertNoChangeSince(trx, campaign, since) {
   if (!since) return;
   const recent = await trx('ad_budget_log')
     .where({ campaign_id: campaign.id })
     .where('created_at', '>=', since)
+    .where((q) => q.whereNull('trigger').orWhereNot('trigger', 'auto'))
     .first('created_at');
   if (recent) {
     const err = new Error(`"${campaign.campaign_name}" had a budget or mode change in the last 7 days, so this recommendation may repeat or undo it. Make the change manually if it's still right.`);
@@ -72,9 +106,9 @@ function boundReason(reason) {
 // the cron, the admin routes and the tests share one definition.
 // ---------------------------------------------------------------------------
 const GAP_RULE_DEFAULTS = Object.freeze({
-  weekday_limit: 9,
+  weekday_limit: 12,
   saturday_limit: 8,
-  sunday_limit: 6,
+  sunday_limit: 0,
   window_days: 7,
   run_at_open: 6,
   stop_below_open: 3,
@@ -188,26 +222,273 @@ function holdLogReason(hold) {
   return `Hold: ${hold.mode} until ${hold.until} (set in the portal)`;
 }
 
+const STOP_HOLD_LOG_RE = /^Hold: stop until \d{4}-\d{2}-\d{2} \(set in the portal\)/;
+
+// Verify under FOR UPDATE that the given timed 'stop' hold (or an unbroken chain of
+// stop-hold extensions ending at this hold) actually moved the campaign into 'stop'
+// (previous_mode !== 'stop') and that no newer budget change superseded it. If the
+// campaign was already manually stopped before the hold was applied, return false so
+// clearing/expiring the hold preserves that original stop.
+async function holdCausedCurrentThrottle(trx, campaign, hold) {
+  if (!hold || hold.mode !== 'stop' || campaign?.budget_mode !== 'stop') return false;
+  const recentLogs = await trx('ad_budget_log')
+    .where({ campaign_id: campaign.id })
+    .orderBy('created_at', 'desc')
+    .limit(20)
+    .select('previous_mode', 'new_mode', 'reason', 'created_at');
+  if (!Array.isArray(recentLogs) || recentLogs.length === 0) return false;
+  const latest = recentLogs[0];
+  if (latest.new_mode !== 'stop' || !String(latest.reason || '').startsWith(holdLogReason(hold))) {
+    return false;
+  }
+  for (const entry of recentLogs) {
+    if (entry.new_mode !== 'stop' || !STOP_HOLD_LOG_RE.test(String(entry.reason || ''))) {
+      return false;
+    }
+    if (entry.previous_mode && entry.previous_mode !== 'stop') {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Weekday of an ET calendar-date string (0 = Sunday). Noon UTC keeps the
 // date's own weekday whatever the zone or DST.
 function etDateWeekday(dateStr) {
   return new Date(`${dateStr}T12:00:00Z`).getUTCDay();
 }
 
+function isCapacityEligibleCampaign(c) {
+  if (!c || c.status !== 'active' || c.platform !== 'google_ads') return false;
+  if (!SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? ''))) return false;
+  return c.is_branded !== true && String(c.intent_type || '').toLowerCase() !== 'branded';
+}
+
+function isBrandedSearchCampaign(c) {
+  if (!c || c.status !== 'active' || c.platform !== 'google_ads') return false;
+  if (!SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? ''))) return false;
+  return c.is_branded === true || String(c.intent_type || '').toLowerCase() === 'branded';
+}
+
 class BudgetManager {
   /**
-   * The active Google campaigns the capacity rule may change: Search only
-   * (SEARCH_CAMPAIGN_TYPES). Any other active Google campaign is named in the
-   * log on every run, so a campaign the rule leaves alone is visible.
+   * The active Google campaigns the capacity rule may change: non-branded Search
+   * only (SEARCH_CAMPAIGN_TYPES, excluding is_branded / intent_type='branded').
+   * Any other active Google campaign is named in the log on every run, so a
+   * campaign the rule leaves alone is visible.
    */
   async listCapacityCampaigns() {
     const rows = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
-    const skipped = rows.filter((c) => !SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? '')));
-    if (skipped.length) {
-      const names = skipped.map((c) => `${c.campaign_name} (type ${c.campaign_type ?? 'none'})`).join(', ');
-      logger.info(`Budget adjust: left ${skipped.length} non-Search campaign(s) alone: ${names}`);
+    const isBranded = (c) => c.is_branded === true || String(c.intent_type || '').toLowerCase() === 'branded';
+    const nonSearch = rows.filter((c) => !SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? '')));
+    if (nonSearch.length) {
+      const names = nonSearch.map((c) => `${c.campaign_name} (type ${c.campaign_type ?? 'none'})`).join(', ');
+      logger.info(`Budget adjust: left ${nonSearch.length} non-Search campaign(s) alone: ${names}`);
     }
-    return rows.filter((c) => !skipped.includes(c));
+    const branded = rows.filter((c) => !nonSearch.includes(c) && isBranded(c));
+    if (branded.length) {
+      const names = branded.map((c) => c.campaign_name).join(', ');
+      logger.info(`Budget adjust: left ${branded.length} branded campaign(s) alone: ${names}`);
+    }
+    const todayEt = etDateString(new Date());
+    // Any non-capacity-eligible campaign (branded Search or non-Search) that still carries
+    // an expired timed hold from before holds were restricted must be inspected under lock:
+    // restore to base ONLY if the expired stop hold itself caused the current throttle, and
+    // otherwise clear only the stale hold metadata.
+    this._expiredNonAutomatedHolds = rows.filter((c) => {
+      if (isCapacityEligibleCampaign(c)) return false;
+      const rawHold = parseJsonObject(parseJsonObject(c.metadata)?.budget_hold);
+      return Boolean(rawHold) && !activeBudgetHold(c.metadata, todayEt);
+    });
+    // Branded Search campaigns left throttled without a timed hold by the previous
+    // capacity rule are checked against ad_budget_log and surfaced for owner review.
+    this._legacyBrandedCandidates = branded.filter((c) => (
+      c.budget_mode && c.budget_mode !== 'base'
+      && !parseJsonObject(parseJsonObject(c.metadata)?.budget_hold)
+    ));
+    return rows.filter((c) => isCapacityEligibleCampaign(c));
+  }
+
+  /**
+   * Identify branded Search campaigns that are currently throttled (budget_mode !== 'base',
+   * no stored timed hold) whose latest ad_budget_log entry was an automatic throttle
+   * (trigger='auto') from the prior capacity rule. Runs zero DB queries when no branded
+   * campaign is throttled.
+   */
+  async findLegacyAutoThrottledBranded(rows) {
+    const candidates = (Array.isArray(rows) ? rows : []).filter((c) => (
+      isBrandedSearchCampaign(c)
+      && c.budget_mode && c.budget_mode !== 'base'
+      && !parseJsonObject(parseJsonObject(c.metadata)?.budget_hold)
+    ));
+    if (!candidates.length) return [];
+    const flagged = [];
+    for (const campaign of candidates) {
+      const latestLog = await db('ad_budget_log')
+        .where({ campaign_id: campaign.id })
+        .orderBy('created_at', 'desc')
+        .first('new_mode', 'trigger', 'reason', 'created_at');
+      if (latestLog && latestLog.trigger === 'auto' && latestLog.new_mode === campaign.budget_mode) {
+        flagged.push({ campaign, latestLog });
+      }
+    }
+    return flagged;
+  }
+
+  async surfaceLegacyAutoThrottledBranded(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return [];
+    let flagged = [];
+    try {
+      flagged = await this.findLegacyAutoThrottledBranded(candidates);
+    } catch (err) {
+      logger.warn(`Budget adjust: could not check branded campaigns for prior automatic throttles: ${err.message}`);
+      return [];
+    }
+    for (const { campaign, latestLog } of flagged) {
+      logger.warn(`Budget adjust: branded campaign ${campaign.campaign_name} is still in ${campaign.budget_mode} ($${campaign.daily_budget_current}/day vs $${campaign.daily_budget_base}/day base) from a prior automatic throttle (${latestLog.reason || 'auto'}) — review and restore base budget manually`);
+      try {
+        await require('../admin-alert-compose').raiseAdminAlert('alert', {
+          area: 'Ads',
+          action: 'review branded campaign left throttled',
+          why: 'A branded Search campaign is still throttled by the old automatic capacity rule.',
+          severity: 'needs-you',
+          who: 'person',
+          link: '/admin/ppc',
+          subject: { type: 'campaign', id: String(campaign.id) },
+          doneWhen: 'campaign_budget_reviewed',
+        }, {
+          bellDefault: true,
+          dedupeKey: `branded-legacy-auto-throttle:${campaign.id}`,
+          detail: `Branded Search campaign "${campaign.campaign_name}" is still in "${campaign.budget_mode}" mode ($${campaign.daily_budget_current}/day vs $${campaign.daily_budget_base}/day base) from a prior automatic capacity throttle (${latestLog.reason || 'auto'}). Automatic capacity throttling no longer touches branded Search campaigns — review and restore its base budget if intended.`,
+          metadata: {
+            campaign_id: campaign.id,
+            campaign_name: campaign.campaign_name,
+            budget_mode: campaign.budget_mode,
+            daily_budget_current: campaign.daily_budget_current,
+            daily_budget_base: campaign.daily_budget_base,
+            prior_log_reason: latestLog.reason || null,
+          },
+        });
+      } catch (alertErr) {
+        logger.warn(`Budget adjust: failed to raise review alert for legacy auto-throttled branded campaign ${campaign.campaign_name}: ${alertErr.message}`);
+      }
+    }
+    return flagged;
+  }
+
+  /**
+   * Release expired timed holds on non-capacity-eligible campaigns (e.g. branded Search
+   * or non-Search campaigns that received a hold before holds were restricted). Restores
+   * a throttled campaign back to base budget ONLY when the expired hold itself was a
+   * 'stop' hold that caused the current throttle (verified from ad_budget_log under
+   * FOR UPDATE with no newer superseding budget change); otherwise clears only the
+   * stale metadata.budget_hold.
+   */
+  async releaseExpiredNonAutomatedHolds(candidates, now, todayEt) {
+    const totals = { changed: 0, failed: 0 };
+    if (!Array.isArray(candidates) || candidates.length === 0) return totals;
+    for (const listed of candidates) {
+      let restorePushed = null;
+      let outcome = null;
+      const opId = randomUUID();
+      try {
+        await db.transaction(async (trx) => {
+          const campaign = await trx('ad_campaigns').where({ id: listed.id }).forUpdate().first();
+          const lockAcquiredAt = new Date();
+          if (!campaign || campaign.status !== 'active' || campaign.platform !== 'google_ads') return;
+          if (isCapacityEligibleCampaign(campaign)) return;
+          const meta = parseJsonObject(campaign.metadata) || {};
+          const rawHold = parseJsonObject(meta.budget_hold);
+          if (!rawHold || activeBudgetHold(campaign.metadata, todayEt)) return;
+          const { budget_hold: removed, ...rest } = meta;
+          const clearedMeta = JSON.stringify({
+            ...rest,
+            budget_hold_cleared: {
+              at: now.toISOString(),
+              by: 'system:expired_hold',
+              mode: removed.mode || null,
+              until: removed.until || null,
+            },
+          });
+          // Verify under the lock that the expired hold itself caused the current throttle
+          // and no newer budget change superseded it before restoring ad spend.
+          const holdCausedThrottle = await holdCausedCurrentThrottle(trx, campaign, rawHold);
+          if (holdCausedThrottle) {
+            const restoredBudget = this.calculateBudget(campaign, 'base');
+            const linked = Boolean(campaign.platform_campaign_id);
+            let pushedLive = false;
+            if (linked) {
+              // Linked campaigns MUST confirm live restoration on Google Ads before clearing the
+              // expired hold — if live push is disabled, unconfigured, or base is null, retain the
+              // hold so the campaign cannot stay throttled on Google while local state says base.
+              if (!isEnabled('adsBudgetLivePush') || campaign.daily_budget_base == null || !getGoogleAds().isConfigured()) {
+                logger.warn(`Budget: retaining expired hold on linked non-automated campaign ${campaign.campaign_name} until live Google restoration is available`);
+                return;
+              }
+              if (restoredBudget > MAX_DAILY_BUDGET) {
+                logger.error(`Budget: ${campaign.campaign_name} expired hold restore to base ($${restoredBudget}/day) refused — exceeds daily safety cap of $${MAX_DAILY_BUDGET}`);
+                outcome = 'failed';
+                return;
+              }
+              const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, restoredBudget);
+              if (!pushed) {
+                logger.error(`Budget: ${campaign.campaign_name} expired hold restore NOT applied — Google Ads push failed; will retry next run`);
+                outcome = 'failed';
+                return;
+              }
+              pushedLive = true;
+              restorePushed = { campaign, attempted: restoredBudget, startedAt: lockAcquiredAt, opId, preLive: pushed?.previousDailyBudget ?? null };
+            }
+            await trx('ad_campaigns').where({ id: campaign.id }).update({
+              budget_mode: 'base',
+              daily_budget_current: restoredBudget,
+              metadata: clearedMeta,
+              updated_at: new Date(),
+            });
+            await trx('ad_budget_log').insert({
+              campaign_id: campaign.id,
+              campaign_name: campaign.campaign_name,
+              previous_mode: campaign.budget_mode,
+              new_mode: 'base',
+              previous_budget: campaign.daily_budget_current,
+              new_budget: restoredBudget,
+              reason: boundReason(`Expired hold released on non-automated campaign — restored to base${pushedLive ? ' (pushed to Google Ads)' : ''}`),
+              trigger: 'auto',
+              op_id: opId,
+              google_ads_updated: pushedLive,
+              created_at: new Date(),
+            });
+            outcome = 'changed';
+            logger.info(`Budget: released expired hold on non-automated campaign ${campaign.campaign_name} (${campaign.budget_mode}→base, $${restoredBudget}/day)`);
+          } else {
+            await trx('ad_campaigns').where({ id: campaign.id }).update({
+              metadata: clearedMeta,
+              updated_at: new Date(),
+            });
+            logger.info(`Budget: cleared expired hold metadata on non-automated campaign ${campaign.campaign_name}`);
+          }
+        });
+      } catch (err) {
+        if (restorePushed) {
+          const rollback = await this.rollbackAfterLivePush(
+            restorePushed.campaign, err, restorePushed.attempted, restorePushed.startedAt, restorePushed.opId, restorePushed.preLive,
+          );
+          if (rollback.code === 'apply_committed') {
+            outcome = 'changed';
+            logger.info(`Budget adjust: ${listed.campaign_name} expired-hold restore COMMIT ack was lost but is durable — no compensation needed`);
+          } else {
+            outcome = 'failed';
+            logger.error(`Budget adjust: ${listed.campaign_name} expired-hold persist failed after live push — ${rollback.message}`);
+          }
+        } else {
+          outcome = 'failed';
+          logger.error(`Budget adjust: failed to release expired hold on ${listed.campaign_name}: ${err.message}`);
+        }
+      }
+      if (outcome === 'changed') totals.changed += 1;
+      else if (outcome === 'failed') totals.failed += 1;
+    }
+    return totals;
   }
 
   /**
@@ -242,7 +523,13 @@ class BudgetManager {
     // capacity-based budget automation must not throttle Meta budgets locally —
     // that would drift the dashboard from Ads Manager until the next Meta sync.
     // Of the Google ones, only Search campaigns (listCapacityCampaigns).
+    this._expiredNonAutomatedHolds = [];
+    this._legacyBrandedCandidates = [];
     const campaigns = await this.listCapacityCampaigns();
+    const expiredNonAutomatedHolds = this._expiredNonAutomatedHolds || [];
+    const legacyBrandedCandidates = this._legacyBrandedCandidates || [];
+    this._expiredNonAutomatedHolds = [];
+    this._legacyBrandedCandidates = [];
     const targets = await db('ad_targets').first();
     const thresholds = {
       green: parseFloat(targets?.capacity_green_max || 70),
@@ -259,7 +546,7 @@ class BudgetManager {
     const gapCampaigns = [];
     if (gapMode === 'live') {
       try {
-        gap = await this.evaluateGapRule(now, targets);
+        gap = await this.evaluateGapRule(now, targets, { strictBlackouts: true });
       } catch (err) {
         // No window, no decision: leave every budget as it is (the old rule is
         // not a fallback) and let the cron record the failed tick.
@@ -318,14 +605,15 @@ class BudgetManager {
           // held (capacity math above can take a while — a writer committing
           // during it is already reflected in this locked snapshot).
           const lockAcquiredAt = new Date();
-          if (!campaign || campaign.status !== 'active') return;
+          if (!isCapacityEligibleCampaign(campaign)) return;
 
           // Holds and the live gap rule decide from the LOCKED row, so a hold set
           // or cleared (or a mode changed) since the list read is what they see.
-          // Gate off reads no hold. A hold wins over both rules; without one, live
-          // uses the gap decision and shadow keeps the old rule's mode.
+          // An active manual hold stored on the campaign is ALWAYS honored (even if
+          // GATE_ADS_GAP_RULE is flipped off, reading zero extra tables). Without a
+          // hold, live uses the gap decision and shadow/off keep the old rule's mode.
           let transitionReason = null;
-          const held = gapMode === 'off' ? null : activeBudgetHold(campaign.metadata, todayEt);
+          const held = activeBudgetHold(campaign.metadata, todayEt);
           if (held) {
             newMode = held.mode;
             transitionReason = holdLogReason(held);
@@ -349,6 +637,11 @@ class BudgetManager {
           // reconcile branch below converges Google onto the recorded mode.
           let pushedLive = false;
           if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+            if (newBudget > MAX_DAILY_BUDGET) {
+              logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} ($${newBudget}/day) refused — exceeds daily safety cap of $${MAX_DAILY_BUDGET}`);
+              outcome = 'failed';
+              return;
+            }
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} NOT applied — Google Ads push failed; will retry next run`);
@@ -402,8 +695,25 @@ class BudgetManager {
           // re-push the same budget every run. NULL current (never synced,
           // never set) is skipped — the daily sync populates it within a day.
           const expectedBudget = this.calculateBudget(campaign, campaign.budget_mode);
+          const expectedCents = Math.round(expectedBudget * 100);
           const currentCents = Math.round(parseFloat(campaign.daily_budget_current) * 100);
-          if (Number.isFinite(currentCents) && currentCents !== Math.round(expectedBudget * 100)) {
+          const stopCents = Math.round(this.calculateBudget(campaign, 'stop') * 100);
+          // W01: when the owner manually lowers a live Google Ads budget while in 'base'
+          // mode (currentCents < expectedCents and strictly above the 1% stop floor), do
+          // NOT push it back up — only heal a failed restore that is still stuck at/below
+          // the 1% stop throttle floor.
+          const isManualLowerInBase = campaign.budget_mode === 'base'
+            && Number.isFinite(currentCents)
+            && currentCents < expectedCents
+            && currentCents > stopCents;
+          if (isManualLowerInBase) {
+            logger.info(`Budget: ${campaign.campaign_name} live Google budget ($${(currentCents / 100).toFixed(2)}) is below base ($${expectedBudget.toFixed(2)}) in base mode — respecting lower live budget`);
+          } else if (Number.isFinite(currentCents) && currentCents !== expectedCents) {
+            if (expectedBudget > MAX_DAILY_BUDGET) {
+              logger.error(`Budget: ${campaign.campaign_name} reconcile ($${expectedBudget}/day) refused — exceeds daily safety cap of $${MAX_DAILY_BUDGET}`);
+              outcome = 'failed';
+              return;
+            }
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
@@ -456,6 +766,12 @@ class BudgetManager {
       else if (outcome === 'failed') summary.failed += 1;
     }
 
+    const expiredResults = await this.releaseExpiredNonAutomatedHolds(expiredNonAutomatedHolds, now, todayEt);
+    summary.changed += expiredResults.changed;
+    summary.failed += expiredResults.failed;
+
+    await this.surfaceLegacyAutoThrottledBranded(legacyBrandedCandidates);
+
     // Record what the gap rule decided (live) or would have decided (shadow).
     // A recording problem never touches the budgets the loop already settled; it
     // sets summary.recordFailed (only on failure) so the cron can report it.
@@ -500,40 +816,60 @@ class BudgetManager {
    * money on leads the crew cannot take. A customer's windowless rows on one day
    * count as one stop.
    */
-  async getGapWindow(now, settings) {
+  /** Company blackout / holiday closure dates in [start, end]. In strict mode (live gap rule), propagate read errors so holidays never look open. */
+  async getBlackoutDatesForWindow(start, end, { strict = false } = {}) {
+    try {
+      const { getBlackoutDates } = require('../scheduling/blackout-dates');
+      const dates = await getBlackoutDates(start, end, db, { strict });
+      return dates instanceof Set ? dates : new Set(dates || []);
+    } catch (err) {
+      if (strict) throw err;
+      return new Set();
+    }
+  }
+
+  async getGapWindow(now, settings, { strictBlackouts = false } = {}) {
     const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
     const dates = [];
     for (let i = 1; i <= settings.window_days; i += 1) dates.push(etDateString(addETDays(now, i)));
     const start = dates[0];
     const end = dates[dates.length - 1];
-    const rows = await db('scheduled_services')
-      .whereBetween('scheduled_date', [start, end])
-      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-      .where(function () {
-        this.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', db.fn.now());
-      })
-      .groupBy('scheduled_date')
-      .select(db.raw('scheduled_date::text AS day'))
-      .select(db.raw(GAP_STOPS_SQL));
+    const [rows, blackouts] = await Promise.all([
+      db('scheduled_services')
+        .whereBetween('scheduled_date', [start, end])
+        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+        .where(function () {
+          // A claimed booking (customer_id IS NOT NULL) counts even if reservation_expires_at
+          // was left populated; an unclaimed hold counts only while not expired.
+          this.whereNotNull('customer_id')
+            .orWhereNull('reservation_expires_at')
+            .orWhere('reservation_expires_at', '>', db.fn.now());
+        })
+        .groupBy('scheduled_date')
+        .select(db.raw('scheduled_date::text AS day'))
+        .select(db.raw(GAP_STOPS_SQL)),
+      this.getBlackoutDatesForWindow(start, end, { strict: strictBlackouts }),
+    ]);
     const stopsByDay = new Map(rows.map((r) => [String(r.day).slice(0, 10), parseInt(r.stops, 10) || 0]));
 
     const days = [];
     for (const date of dates) {
       const weekday = etDateWeekday(date);
       const perTech = weekday === 6 ? settings.saturday_limit : weekday === 0 ? settings.sunday_limit : settings.weekday_limit;
-      const techs = await this.getTechCountForArea('general', date, { workDays: true });
+      const closed = blackouts.has(date);
+      const techs = closed ? 0 : await this.getTechCountForArea('general', date, { workDays: true });
       const stops = stopsByDay.get(date) || 0;
-      const limit = techs * perTech;
-      days.push({ date, stops, techs, limit, open: Math.max(0, limit - stops) });
+      const limit = closed ? 0 : techs * perTech;
+      days.push({ date, stops, techs, limit, open: Math.max(0, limit - stops), ...(closed ? { blackout: true } : {}) });
     }
     const sum = (k) => days.reduce((n, d) => n + d[k], 0);
     return { window_start: start, window_end: end, days, total_open: sum('open'), total_limit: sum('limit'), total_stops: sum('stops') };
   }
 
   /** Window + thresholds + the log reason, for the cron and the admin GET route. */
-  async evaluateGapRule(now, targets) {
+  async evaluateGapRule(now, targets, { strictBlackouts = false } = {}) {
     const settings = normalizeGapSettings(targets?.metadata);
-    const win = await this.getGapWindow(now, settings);
+    const win = await this.getGapWindow(now, settings, { strictBlackouts });
     return {
       settings,
       ...win,
@@ -769,14 +1105,31 @@ class BudgetManager {
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual';
    * the advisor route passes 'advisor').
    */
-  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, requireActive = false, requireNoChangeSince = null, trigger = 'manual', hold } = {}) {
+  async setMode(campaignId, mode, reason = 'manual', { requireLivePush, requireActive, requireNoChangeSince = null, trigger = 'manual', hold, clearHold } = {}) {
     reason = boundReason(reason);
+    const holdOrClear = Boolean(hold || clearHold);
+    const expectedHoldChecks = clearHold?.requireIneligibleRestore
+      ? [['mode', clearHold.expectedMode], ['until', clearHold.expectedUntil]].filter(([, v]) => Boolean(v))
+      : null;
     // `hold` (the owner's budget hold, saved as metadata.budget_hold) commits in
     // the SAME locked transaction as the mode change, so the 2-hour job can never
-    // run between the two and undo the mode. Only the live-push path supports it.
-    const withHold = (campaign) => (hold
-      ? { metadata: JSON.stringify({ ...(parseJsonObject(campaign.metadata) || {}), budget_hold: hold }) }
-      : {});
+    // run between the two and undo the mode. `clearHold` atomically removes an
+    // existing hold and records budget_hold_cleared in the same transaction when
+    // releasing a throttled non-automated campaign back to base.
+    const withHold = (campaign) => {
+      if (hold) {
+        return { metadata: JSON.stringify({ ...(parseJsonObject(campaign.metadata) || {}), budget_hold: hold }) };
+      }
+      if (clearHold) {
+        const meta = parseJsonObject(campaign.metadata) || {};
+        const { budget_hold: removed, ...rest } = meta;
+        const nextMeta = removed
+          ? { ...rest, budget_hold_cleared: { at: clearHold.at, by: clearHold.by || null, mode: removed.mode || null, until: removed.until || null } }
+          : rest;
+        return { metadata: JSON.stringify(nextMeta) };
+      }
+      return {};
+    };
     // This operation's identity stamp on its audit row (lets the rollback —
     // and the no-push catch below — recognize a lost-COMMIT-ack as "actually
     // committed"). The rollback's supersession anchor is taken in-lock.
@@ -788,6 +1141,16 @@ class BudgetManager {
     if (!['base', 'spent', 'stop'].includes(mode)) {
       throw new Error(`Invalid budget mode "${mode}" — must be base, spent, or stop`);
     }
+
+    const recoverSetModeError = async (err, pushed, pending) => {
+      if (pushed) {
+        const recovery = await this.rollbackAfterLivePush(pushed.campaign, err, pushed.attempted, pushed.startedAt, pushed.opId, pushed.preLive);
+        if (recovery.code === 'apply_committed') return pushed.successResult;
+        throw recovery;
+      }
+      if (pending && await this.ownOpCommitted(opId)) return pending;
+      throw err;
+    };
 
     if (requireLivePush) {
       // Holding the row lock across the Google call is a deliberate tradeoff:
@@ -805,13 +1168,37 @@ class BudgetManager {
           // snapshot) can never read as "newer" in the rollback's audit check.
           const lockAcquiredAt = new Date();
           if (!campaign) throw new Error('Campaign not found');
-          if (campaign.platform !== 'google_ads') {
-            throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
-          }
-          if (requireActive && campaign.status !== 'active') {
-            const err = new Error(`"${campaign.campaign_name}" is ${campaign.status || 'not active'} — advisor changes only apply to active campaigns.`);
-            err.code = 'campaign_inactive';
-            throw err;
+          const eligible = isCapacityEligibleCampaign(campaign);
+          const guardFailure = [
+            [campaign.platform !== 'google_ads', `Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`],
+            [requireActive && campaign.status !== 'active', `"${campaign.campaign_name}" is ${campaign.status || 'not active'} — advisor changes only apply to active campaigns.`, { code: 'campaign_inactive' }],
+            [hold && !eligible, `Timed holds only apply to active non-branded Google Search campaigns managed by the automatic budget rule ("${campaign.campaign_name}" is not eligible).`, { code: 'hold_not_eligible' }],
+          ].find(([failed]) => failed);
+          if (guardFailure) throw Object.assign(new Error(guardFailure[1]), guardFailure[2]);
+          if (expectedHoldChecks) {
+            // Re-verify the hold, eligibility, and audit-log throttle ownership on the LOCKED row:
+            // restore 'base' ONLY when this exact hold still stands and caused the current 'stop'
+            // throttle (no newer manual/advisor/auto change superseded it). Otherwise clear only
+            // metadata.budget_hold without pushing ad spend to Google.
+            const lockedHold = parseJsonObject(parseJsonObject(campaign.metadata)?.budget_hold);
+            const sameHold = Boolean(lockedHold) && expectedHoldChecks.every(([k, expected]) => lockedHold[k] === expected);
+            const noopResult = {
+              campaign: campaign.campaign_name,
+              previousMode: campaign.budget_mode,
+              newMode: campaign.budget_mode,
+              newBudget: Number(campaign.daily_budget_current),
+              googleAdsUpdated: false,
+              livePushAttempted: false,
+              noop: true,
+            };
+            if (!sameHold) return noopResult;
+            if (eligible || mode === 'stop' || !(await holdCausedCurrentThrottle(trx, campaign, lockedHold))) {
+              await trx('ad_campaigns').where({ id: campaignId }).update({
+                ...withHold(campaign),
+                updated_at: new Date(),
+              });
+              return noopResult;
+            }
           }
           await assertNoChangeSince(trx, campaign, requireNoChangeSince);
           // Under the lock: two concurrent applies of the same rec both pass
@@ -820,35 +1207,35 @@ class BudgetManager {
           // A hold always takes the guarded path below, even when the campaign is
           // already in the held mode: a recorded mode or amount never proves what
           // Google runs, so a linked campaign is always pushed the held amount.
-          if (mode === campaign.budget_mode && !hold) {
+          if (mode === campaign.budget_mode && !holdOrClear) {
             const err = new Error(`"${campaign.campaign_name}" is already in ${mode} mode — nothing to apply.`);
             err.code = 'mode_noop';
             throw err;
           }
 
           const newBudget = this.calculateBudget(campaign, mode);
+          assertBudgetWithinCap(newBudget, campaign.campaign_name);
           const linked = Boolean(campaign.platform_campaign_id);
           let googleAdsUpdated = false;
           if (linked) {
-            const canPush = campaign.daily_budget_base != null && getGoogleAds().isConfigured();
-            if (!canPush) {
+            if (campaign.daily_budget_base == null || !getGoogleAds().isConfigured()) {
               const err = new Error(`"${campaign.campaign_name}" is linked to a live Google Ads campaign, but the live push can't run (Google Ads API not configured, or no base budget set) — nothing was changed.`);
               err.code = 'live_push_unavailable';
               throw err;
             }
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
-            googleAdsUpdated = !!pushed;
-            if (!googleAdsUpdated) {
+            if (!pushed) {
               const err = new Error(`Google Ads refused the budget update for "${campaign.campaign_name}" — nothing was changed. Check the campaign in Google Ads (shared budgets can't be updated from here).`);
               err.code = 'live_push_failed';
               throw err;
             }
+            googleAdsUpdated = true;
             pushedCampaign = {
               campaign,
               attempted: newBudget,
               startedAt: lockAcquiredAt,
               opId,
-              preLive: pushed?.previousDailyBudget ?? null,
+              preLive: pushed.previousDailyBudget ?? null,
               // Returned as-is if the rollback discovers the COMMIT actually
               // landed (lost acknowledgement) — the apply succeeded.
               successResult: { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated: true, livePushAttempted: true },
@@ -884,23 +1271,13 @@ class BudgetManager {
         });
       } catch (err) {
         // Every guard throws BEFORE pushedCampaign is set, so any rejection
-        // after it — the persist statements OR the transaction's own COMMIT —
-        // is a local failure after Google accepted the change, and it gets
-        // the compensating rollback instead of reading as an ordinary error.
-        if (pushedCampaign) {
-          const recovery = await this.rollbackAfterLivePush(pushedCampaign.campaign, err, pushedCampaign.attempted, pushedCampaign.startedAt, pushedCampaign.opId, pushedCampaign.preLive);
-          if (recovery.code === 'apply_committed') return pushedCampaign.successResult;
-          throw recovery;
-        }
-        // No live push ran (unlinked campaign) — but the transaction itself
-        // may still have committed with only its acknowledgement lost. A
-        // durable own audit row proves it; report the success that happened.
-        if (pendingResult && await this.ownOpCommitted(opId)) return pendingResult;
-        throw err;
+        // after it (persist or COMMIT) gets compensating rollback; an unlinked
+        // lost-COMMIT-ack is recovered via ownOpCommitted.
+        return recoverSetModeError(err, pushedCampaign, pendingResult);
       }
     }
-    // A hold is saved only by the live-push path above, never dropped here.
-    if (hold) throw new Error('A budget hold can only be saved with requireLivePush.');
+    // A hold or clearHold is saved only by the live-push path above, never dropped here.
+    if (holdOrClear) throw new Error('A budget hold change can only be saved with requireLivePush.');
 
     // Legacy (manual route) path: DB-first with a best-effort push, but now
     // inside the SAME row-locked transaction the advisor apply and the cron
@@ -927,6 +1304,7 @@ class BudgetManager {
       }
 
       const newBudget = this.calculateBudget(campaign, mode);
+      assertBudgetWithinCap(newBudget, campaign.campaign_name);
 
       await trx('ad_campaigns').where({ id: campaignId }).update({
         budget_mode: mode,
@@ -979,16 +1357,7 @@ class BudgetManager {
       return pendingResult;
     });
     } catch (err) {
-      if (manualPushed) {
-        const recovery = await this.rollbackAfterLivePush(manualPushed.campaign, err, manualPushed.attempted, manualPushed.startedAt, manualPushed.opId, manualPushed.preLive);
-        if (recovery.code === 'apply_committed') return manualPushed.successResult;
-        throw recovery;
-      }
-      // Best-effort path with no accepted push (refused/skipped): the trx may
-      // still have committed with its acknowledgement lost — a durable own
-      // audit row proves the local change landed.
-      if (pendingResult && await this.ownOpCommitted(opId)) return pendingResult;
-      throw err;
+      return recoverSetModeError(err, manualPushed, pendingResult);
     }
   }
 
@@ -1199,7 +1568,7 @@ class BudgetManager {
    * row lock (the advisor's 7-day no-repeat/no-reversal rule).
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual').
    */
-  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, requireNoChangeSince = null, trigger = 'manual' } = {}) {
+  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, requireDirection = null, requireNoChangeSince = null, trigger = 'manual' } = {}) {
     reason = boundReason(reason);
     const opId = randomUUID(); // audit-row identity; supersession anchor is taken in-lock
     // Validate the amount up front — a non-positive / NaN / non-finite base would
@@ -1216,7 +1585,7 @@ class BudgetManager {
     // Cap at the storable maximum BEFORE the Google push, so an over-large value
     // can't change the live campaign and then fail the decimal(10,2) DB write.
     if (base > MAX_DAILY_BUDGET) {
-      throw new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
+      throw Object.assign(new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`), { code: 'budget_cap_exceeded' });
     }
     // Round to cents so Google receives EXACTLY what the decimal(10,2) columns
     // store — a value like 50.001 would otherwise push exact micros to Google
@@ -1284,8 +1653,20 @@ class BudgetManager {
               throw err;
             }
           }
+          if (requireDirection) {
+            const dirErr = checkBudgetDirection(requireDirection, base, {
+              baseBudget: Number(campaign.daily_budget_base),
+              currentBudget: Number(campaign.daily_budget_current),
+            });
+            if (dirErr) {
+              const err = new Error(dirErr);
+              err.code = 'budget_direction_invalid';
+              throw err;
+            }
+          }
 
           const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
+          assertBudgetWithinCap(effectiveBudget, campaign.campaign_name);
           const linked = Boolean(campaign.platform_campaign_id);
           let googleAdsUpdated = false;
           if (linked) {
@@ -1294,7 +1675,9 @@ class BudgetManager {
               err.code = 'live_push_unavailable';
               throw err;
             }
-            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
+            const pushed = requireDirection
+              ? await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget, { requireDirection })
+              : await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
             googleAdsUpdated = !!pushed;
             if (!googleAdsUpdated) {
               const err = new Error(`Google Ads refused the budget update for "${campaign.campaign_name}" — nothing was changed. Check the campaign in Google Ads (shared budgets can't be updated from here).`);
@@ -1380,6 +1763,7 @@ class BudgetManager {
       // like setMode and the capacity cron. In 'base' mode this is the new base
       // itself; 'spent' stays frozen at daily_budget_current; 'stop' recomputes 1%.
       const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
+      assertBudgetWithinCap(effectiveBudget, campaign.campaign_name);
 
       // Push FIRST so daily_budget_current only ever records a budget Google is
       // actually running: if Google rejects the change (shared budget, API error)
@@ -1461,5 +1845,7 @@ module.exports.validateGapSettingsPatch = validateGapSettingsPatch;
 module.exports.gapBand = gapBand;
 module.exports.decideGapMode = decideGapMode;
 module.exports.activeBudgetHold = activeBudgetHold;
+module.exports.isCapacityEligibleCampaign = isCapacityEligibleCampaign;
+module.exports.isBrandedSearchCampaign = isBrandedSearchCampaign;
 module.exports.etDateWeekday = etDateWeekday;
 module.exports.soldDay = soldDay;

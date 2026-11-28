@@ -63,8 +63,16 @@ jest.mock('../models/db', () => {
 jest.mock('../services/procurement/order-dispatch', () => ({
   canAutoOrder: jest.fn(async ({ vendorId }) => mockState.autoOrder === true && (!mockState.autoOrderVendor || vendorId === mockState.autoOrderVendor)),
   findLiveAutoOrder: jest.fn(async () => mockState.liveAutoOrder || null), // the product's unreconciled automatic order
-  // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
-  settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
+  outstandingVendorOrder: jest.fn(async () => !!mockState.outstandingVendorOrder), // parked: a vendor order may already cover the request
+  maybePlacedSql: (alias = 'vo') => `(${alias}.placed_at IS NOT NULL)`, // the one outstanding-order rule's SQL; the mocked connection never runs it
+  // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2);
+  // when preserveOutstanding is passed and the parked row holds outstandingOrder evidence, returns preserved atomically.
+  settleRequestLedgerBells: jest.fn(async (_trx, _reqId, opts) => {
+    if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection');
+    if (opts?.preserveOutstanding && mockState.outstandingVendorOrder) return { preserved: 'vendor_order_outstanding' };
+    mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1;
+    return { settled: true };
+  }),
   retireRequestBell: jest.fn(async (_conn, requestId) => { (mockState.retiredBells = mockState.retiredBells || []).push(requestId); }),
   // The real cancel (status, metadata, bell retirement) runs in order-dispatch's own suites; here only that the sweep calls it.
   cancelAtClaim: jest.fn(async (_trx, { request, ineligible }) => { (mockState.cancelled = mockState.cancelled || []).push({ id: request.id, ineligible }); return { skipped: ineligible, cancelled: true }; }),
@@ -364,6 +372,20 @@ test('an open auto request with an automatic order already OUT (ambiguous submit
   } finally { mockState.liveAutoOrder = null; }
 });
 
+test('an open auto request parked because a vendor order may already cover it keeps that alert: no plain "order by hand" hand-off after the vendor gate closes', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Sticker Mule', metadata: { vendorId: 'vend-sm' } };
+  mockState.autoOrder = false;
+  mockState.outstandingVendorOrder = true;
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.renotified).toEqual([]);
+    expect(r.deduped).toEqual([expect.objectContaining({ requestId: 'req-auto' }), expect.objectContaining({ requestId: 'req-auto', reason: 'vendor_order_outstanding' })]);
+    expect(notify).not.toHaveBeenCalled();
+  } finally { mockState.outstandingVendorOrder = false; }
+});
+
 test('a re-ring settles the request\'s parked ledger bell (a pre-submit park\'s "order manually") BEFORE the generic hand-off rings; a failed settle withholds the hand-off and is a sweep error (Codex r31 P2)', async () => {
   const { settleRequestLedgerBells } = require('../services/procurement/order-dispatch');
   settleRequestLedgerBells.mockClear();
@@ -375,7 +397,7 @@ test('a re-ring settles the request\'s parked ledger bell (a pre-submit park\'s 
   const notify = jest.fn(async () => { order.push('bell'); return {}; });
   const r = await runSuppliesAutoReorderSweep({ notify });
   expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
-  expect(settleRequestLedgerBells).toHaveBeenCalledWith(expect.anything(), 'req-auto');
+  expect(settleRequestLedgerBells).toHaveBeenCalledWith(expect.anything(), 'req-auto', { preserveOutstanding: true });
   expect(order).toEqual(['settle', 'bell']);
   mockState.ledgerBellThrows = true;
   try {

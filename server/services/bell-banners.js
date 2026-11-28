@@ -42,9 +42,12 @@ const BELL_BANNER_KINDS = Object.freeze({
   live_call_next_step: Object.freeze({ nightQuiet: true }),
   // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05 "1, 2 and 3").
   estimate_stuck: Object.freeze({ nightQuiet: true }),
-  // A call booked a visit on an open estimate: its card filed, or time runs short on it (call-phone-yes-bell.js, owner
+  // A phone-yes card filed, or time short on it (call-phone-yes-bell.js, owner
   // 2026-11-18 "ok go", phone-yes step 1). Its writer runs only under GATE_CALL_PHONE_YES_ACCEPT.
   call_phone_yes: Object.freeze({ nightQuiet: true }),
+  // Live office-hours transfer where the handoff packet failed to save (relay-transfer.js):
+  // the staff member is answering the call right now, so push immediately with the call sound.
+  sandy_transfer_no_context: Object.freeze({ nightQuiet: false }),
 });
 
 const QUIET_FROM_HOUR = 21;
