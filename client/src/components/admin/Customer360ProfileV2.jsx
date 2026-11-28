@@ -4492,6 +4492,46 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
 // invoice flow (correct commercial-tax preview, full cadence set, term dates,
 // amount inference) instead of maintaining a parallel modal. See
 // schedule/AnnualPrepayLauncher.
+function AnnualPrepayDepositBanner({ depositCreditError, depositCredit, applyCredit, onToggleCredit, amount, estTaxInclusiveTotal }) {
+  return (
+    <>
+      {depositCreditError && (
+        <div className="sm:col-span-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm p-2.5">
+          {depositCreditError}
+        </div>
+      )}
+      {depositCredit && depositCredit.payerBilled && (
+        <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+          ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
+          {depositCredit.estimateSlug ? ` (estimate ${depositCredit.estimateSlug})` : ""} — NOT
+          applied here: this customer's invoices bill to a third party, and the homeowner's
+          deposit never credits a payer's bill. The credit stays on the ledger.
+        </div>
+      )}
+      {depositCredit && !depositCredit.payerBilled && (
+        <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={applyCredit}
+              onChange={(e) => onToggleCredit(e.target.checked)}
+              className="mt-0.5 u-focus-ring"
+            />
+            <span>
+              Apply ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
+              {depositCredit.estimateSlug ? ` from estimate ${depositCredit.estimateSlug}` : ""}.
+              Enter the full plan amount — the credit comes off the invoice automatically
+              {applyCredit && Number(amount) > 0
+                ? ` (customer pays $${Math.max(0, estTaxInclusiveTotal - Number(depositCredit.amount)).toFixed(2)})`
+                : ""}.
+            </span>
+          </label>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved, allowChargeInPerson = false, onChargeInPerson }) {
   const density = useUiDensity();
   const initialStart = defaultAnnualPrepayStart(activeTerm);
@@ -4803,39 +4843,14 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
-          {depositCreditError && (
-            <div className="sm:col-span-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm p-2.5">
-              {depositCreditError}
-            </div>
-          )}
-          {depositCredit && depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
-              ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
-              {depositCredit.estimateSlug ? ` (estimate ${depositCredit.estimateSlug})` : ""} — NOT
-              applied here: this customer's invoices bill to a third party, and the homeowner's
-              deposit never credits a payer's bill. The credit stays on the ledger.
-            </div>
-          )}
-          {depositCredit && !depositCredit.payerBilled && (
-            <div className="sm:col-span-2 text-ui-label text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={applyCredit}
-                  onChange={(e) => setApplyCredit(e.target.checked)}
-                  className="mt-0.5 u-focus-ring"
-                />
-                <span>
-                  Apply ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
-                  {depositCredit.estimateSlug ? ` from estimate ${depositCredit.estimateSlug}` : ""}.
-                  Enter the full plan amount — the credit comes off the invoice automatically
-                  {applyCredit && Number(amount) > 0
-                    ? ` (customer pays $${Math.max(0, estTaxInclusiveTotal - Number(depositCredit.amount)).toFixed(2)})`
-                    : ""}.
-                </span>
-              </label>
-            </div>
-          )}
+          <AnnualPrepayDepositBanner
+            depositCreditError={depositCreditError}
+            depositCredit={depositCredit}
+            applyCredit={applyCredit}
+            onToggleCredit={setApplyCredit}
+            amount={amount}
+            estTaxInclusiveTotal={estTaxInclusiveTotal}
+          />
           <AnnualPrepayServiceFields
             serviceOptions={serviceOptions}
             serviceType={serviceType}
@@ -10809,6 +10824,7 @@ function useCustomerPayer({
     payerSaving,
     handlePayerSelect,
     payers,
+    payersError,
     showNewPayer,
     newPayer,
     setNewPayer,

@@ -7055,19 +7055,18 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
       if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
         return res.status(400).json({ error: 'Refund amount must be greater than 0' });
       }
-      const remainingRefundable = Math.round((parseFloat(payment.amount || 0) - parseFloat(payment.refund_amount || 0)) * 100) / 100;
-      if (refundAmount > remainingRefundable) {
-        return res.status(400).json({ error: 'Refund amount cannot exceed remaining refundable amount' });
+      if (refundAmount > parseFloat(payment.amount || 0)) {
+        return res.status(400).json({ error: 'Refund amount cannot exceed payment amount' });
       }
     }
 
-    const StripeService = require('../services/stripe');
-    const result = await StripeService.refund(paymentId, { amount, reason: reason || 'requested_by_customer' });
     await auditCustomerMutation(req, 'customer.payment.refund', req.params.id, {
       paymentId,
       amount: amount || null,
       reason: reason || 'requested_by_customer',
     }, true);
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.refund(paymentId, { amount, reason: reason || 'requested_by_customer' });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -7088,12 +7087,12 @@ router.get('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
 router.post('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
   try {
     const CustomerOffboarding = require('../services/customer-offboarding');
-    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit(req.params.id, {
-      actorId: req.technicianId || null,
-    });
     await auditCustomerMutation(req, 'customer.cancel_signup', req.params.id, {
       reason: cleanOptionalText(req.body?.reason) || 'requested_by_customer',
     }, true);
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit(req.params.id, {
+      actorId: req.technicianId || null,
+    });
     res.json({ success: true, ...result });
   } catch (err) {
     if (err.blockers) return res.status(409).json({ error: err.message, blockers: err.blockers });

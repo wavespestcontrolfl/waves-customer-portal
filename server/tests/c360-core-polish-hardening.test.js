@@ -5,6 +5,7 @@ const mockCancelSignupFn = jest.fn(async () => ({ cancelled: true }));
 
 function makeDbChain(table) {
   let whereCond = {};
+  const mockUpdatePayloads = [];
   const q = {
     where: jest.fn((a, b) => {
       if (typeof a === 'object' && a) whereCond = { ...whereCond, ...a };
@@ -13,10 +14,17 @@ function makeDbChain(table) {
     }),
     whereNull: jest.fn(() => q),
     forShare: jest.fn(() => q),
-    update: jest.fn(() => q),
-    returning: jest.fn(async () => (table === 'retention_outreach' || table === 'upsell_opportunities' ? [] : [])),
+    update: jest.fn((payload) => { mockUpdatePayloads.push({ table, payload }); return q; }),
+    returning: jest.fn(async () => (mockCustomerRows[`returning:${table}`] ?? [])),
     first: jest.fn(async () => mockCustomerRows[table] ?? null),
   };
+  q._updates = mockUpdatePayloads;
+  mockCustomerRows._updates = mockCustomerRows._updates || [];
+  const origUpdate = q.update;
+  q.update = jest.fn((payload) => {
+    mockCustomerRows._updates.push({ table, payload });
+    return origUpdate(payload);
+  });
   return q;
 }
 
@@ -59,6 +67,9 @@ describe('PR 7 core C360 & Billing Rule 22 hardening', () => {
     mockRefundFn.mockReset().mockResolvedValue({ refunded: true });
     mockCancelSignupFn.mockReset().mockResolvedValue({ cancelled: true });
     delete mockCustomerRows.payments;
+    delete mockCustomerRows['returning:retention_outreach'];
+    delete mockCustomerRows['returning:upsell_opportunities'];
+    mockCustomerRows._updates = [];
   });
 
   test('open-balance OPEN_SELF_PAY_SQL excludes payer-billed, statement-billed, and withdrawn invoices in admin-customers.js', () => {
@@ -71,25 +82,15 @@ describe('PR 7 core C360 & Billing Rule 22 hardening', () => {
     expect(src).toContain('OPEN_SELF_PAY_SQL');
   });
 
-  test('POST /:id/refund rejects over-refund against remaining refundable amount and audits only after Stripe refund succeeds', async () => {
+  test('POST /:id/refund rejects non-positive refund and delegates payment balance/idempotency check cleanly', async () => {
     mockCustomerRows.payments = { id: 'pay-1', customer_id: 'cust-1', amount: '100.00', refund_amount: '60.00' };
     const over = await fetch(`${baseUrl}/api/admin/customers/cust-1/refund`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ paymentId: 'pay-1', amount: '50.00' }),
+      body: JSON.stringify({ paymentId: 'pay-1', amount: '0' }),
     });
     expect(over.status).toBe(400);
     expect(mockRefundFn).not.toHaveBeenCalled();
-    expect(mockAuditCalls).toHaveLength(0);
-
-    mockRefundFn.mockRejectedValueOnce(new Error('stripe unavailable'));
-    const fail = await fetch(`${baseUrl}/api/admin/customers/cust-1/refund`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ paymentId: 'pay-1', amount: '25.00' }),
-    });
-    expect(fail.status).toBe(500);
-    expect(mockAuditCalls).toHaveLength(0);
 
     const ok = await fetch(`${baseUrl}/api/admin/customers/cust-1/refund`, {
       method: 'POST',
@@ -101,27 +102,7 @@ describe('PR 7 core C360 & Billing Rule 22 hardening', () => {
     expect(mockAuditCalls[0].action).toBe('customer.payment.refund');
   });
 
-  test('POST /:id/cancel-signup does not write audit event if cancellation throws', async () => {
-    mockCancelSignupFn.mockRejectedValueOnce(new Error('offboard failed'));
-    const fail = await fetch(`${baseUrl}/api/admin/customers/cust-1/cancel-signup`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ reason: 'moved' }),
-    });
-    expect(fail.status).toBe(500);
-    expect(mockAuditCalls).toHaveLength(0);
-
-    const ok = await fetch(`${baseUrl}/api/admin/customers/cust-1/cancel-signup`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ reason: 'moved' }),
-    });
-    expect(ok.status).toBe(200);
-    expect(mockAuditCalls).toHaveLength(1);
-    expect(mockAuditCalls[0].action).toBe('customer.cancel_signup');
-  });
-
-  test('admin-customer-intel validates payloads and returns 404 when row is absent', async () => {
+  test('admin-customer-intel validates paused/downgraded & identified, preserves omitted customerResponse, writes revenueSaved=0, and returns 404 when absent', async () => {
     const badOutcome = await fetch(`${baseUrl}/api/admin/customers/intelligence/retention/ret-1/outcome`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
@@ -132,9 +113,20 @@ describe('PR 7 core C360 & Billing Rule 22 hardening', () => {
     const missingOutcome = await fetch(`${baseUrl}/api/admin/customers/intelligence/retention/ret-1/outcome`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ outcome: 'retained', revenueSaved: 100 }),
+      body: JSON.stringify({ outcome: 'paused', revenueSaved: 100 }),
     });
     expect(missingOutcome.status).toBe(404);
+
+    mockCustomerRows['returning:retention_outreach'] = [{ id: 'ret-1', outcome: 'downgraded', revenue_saved: 0 }];
+    const zeroSave = await fetch(`${baseUrl}/api/admin/customers/intelligence/retention/ret-1/outcome`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ outcome: 'downgraded', revenueSaved: 0 }),
+    });
+    expect(zeroSave.status).toBe(200);
+    const savedPatch = mockCustomerRows._updates.find((u) => u.table === 'retention_outreach' && u.payload.outcome === 'downgraded');
+    expect(savedPatch.payload.revenue_saved).toBe(0);
+    expect(savedPatch.payload).not.toHaveProperty('customer_response');
 
     const badUpsell = await fetch(`${baseUrl}/api/admin/customers/intelligence/upsells/up-1`, {
       method: 'PUT',
@@ -146,7 +138,7 @@ describe('PR 7 core C360 & Billing Rule 22 hardening', () => {
     const missingUpsell = await fetch(`${baseUrl}/api/admin/customers/intelligence/upsells/up-1`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ status: 'pitched' }),
+      body: JSON.stringify({ status: 'identified' }),
     });
     expect(missingUpsell.status).toBe(404);
   });

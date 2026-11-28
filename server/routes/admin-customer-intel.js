@@ -250,13 +250,13 @@ router.put('/retention/:id/skip', async (req, res, next) => {
 });
 
 const RETENTION_OUTCOME_SCHEMA = Joi.object({
-  outcome: Joi.string().valid('retained', 'cancelled', 'no_response', 'completed', 'other').required(),
+  outcome: Joi.string().valid('retained', 'cancelled', 'paused', 'downgraded', 'no_response', 'completed', 'other').required(),
   customerResponse: Joi.string().trim().max(2000).allow('', null),
   revenueSaved: Joi.number().min(0).max(1000000).allow(null),
 });
 
 const UPSELL_STATUS_SCHEMA = Joi.object({
-  status: Joi.string().valid('pending', 'pitched', 'accepted', 'declined', 'deferred', 'dismissed').required(),
+  status: Joi.string().valid('identified', 'pitched', 'accepted', 'declined', 'deferred', 'dismissed').required(),
   pitchedBy: Joi.string().trim().max(100).allow('', null),
 });
 
@@ -268,11 +268,11 @@ router.put('/retention/:id/outcome', async (req, res, next) => {
     const { outcome, customerResponse, revenueSaved } = value;
     const updates = {
       outcome,
-      customer_response: customerResponse ?? null,
       status: outcome === 'retained' ? 'save_successful' : outcome === 'cancelled' ? 'save_failed' : 'completed',
       updated_at: new Date(),
     };
-    if (revenueSaved != null && Number(revenueSaved) > 0) updates.revenue_saved = Number(revenueSaved);
+    if (customerResponse !== undefined) updates.customer_response = customerResponse === '' ? null : customerResponse;
+    if (revenueSaved !== undefined) updates.revenue_saved = revenueSaved == null ? null : Number(revenueSaved);
 
     const [updated] = await db('retention_outreach').where('id', req.params.id).update(updates).returning('*');
     if (!updated) return res.status(404).json({ error: 'Outreach not found' });
