@@ -18986,7 +18986,13 @@ export default function PortalPage() {
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
   const [showMenu, setShowMenu] = useState(false);
+  const [pendingProfileEmail, setPendingProfileEmail] = useState('');
+  const [pendingProfileNotice, setPendingProfileNotice] = useState('');
   const accountMenuDialogRef = useModalFocus(showMenu, () => setShowMenu(false));
+  useEffect(() => {
+    setPendingProfileEmail('');
+    setPendingProfileNotice('');
+  }, [customer?.id]);
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
@@ -19568,7 +19574,14 @@ export default function PortalPage() {
                     </div>
                   </div>
                   {/* Edit own name and email (GATE_CUSTOMER_PROFILE_EDIT): /auth/me profileEdit is true only while the gate is on. */}
-                  <ProfileEditCard customer={customer} refreshCustomer={refreshCustomer} />
+                  <ProfileEditCard
+                    customer={customer}
+                    refreshCustomer={refreshCustomer}
+                    pendingEmail={pendingProfileEmail}
+                    onPendingEmailChange={setPendingProfileEmail}
+                    notice={pendingProfileNotice}
+                    onNoticeChange={setPendingProfileNotice}
+                  />
                 </div>
                 {propertiesError && (
                   <div role="alert" style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}`, background: '#FFF7ED' }}>

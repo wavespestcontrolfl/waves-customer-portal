@@ -48,7 +48,7 @@ const EmailCode = require('../services/customer-email-change-code');
 
 const router = express.Router();
 
-const NAME_PART = Joi.string().trim().max(50).pattern(/^[^<>\u0000-\u001f]*$/, 'plain text');
+const NAME_PART = Joi.string().trim().max(50).pattern(/^[^<>\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]*$/, 'plain text');
 const profileSchema = Joi.object({
   firstName: NAME_PART.min(1),
   lastName: NAME_PART.allow(''),
@@ -127,10 +127,26 @@ function ownsActiveRow(row, req) {
   return row.active === true && String(row.account_id || row.id) === String(req.accountId);
 }
 
-// The customer row under FOR UPDATE, or null.
-async function lockOwnedCustomer(trx, { customerId, req }) {
-  const row = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
-  return row && ownsActiveRow(row, req) ? row : null;
+// Lock all live account rows in ascending ID order so sibling/customer locks never
+// invert executeMerge's sorted lock order.
+async function lockOwnedAccountRows(trx, { customerId, req }) {
+  const peek = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'account_id');
+  if (!peek) return null;
+  const rows = await trx('customers')
+    .whereNull('deleted_at')
+    .where((q) => {
+      q.where({ id: customerId });
+      if (peek.account_id) q.orWhere({ account_id: peek.account_id });
+    })
+    .orderBy('id', 'asc')
+    .forUpdate()
+    .select('*');
+  const before = rows.find((r) => String(r.id) === String(customerId)) || null;
+  if (!before || !ownsActiveRow(before, req)) return null;
+  const siblings = peek.account_id
+    ? rows.filter((r) => String(r.id) !== String(customerId) && String(r.account_id || '') === String(peek.account_id))
+    : [];
+  return { before, siblings };
 }
 
 // One committed audit row per quota unit, in the caller's transaction. Never a value: the name and email are the
@@ -150,16 +166,48 @@ async function auditStep(trx, { customerId, action, detail, req }) {
   });
 }
 
+function matchingFieldsPatch(target, before, changes) {
+  const patch = {};
+  for (const field of ['first_name', 'last_name', 'email']) {
+    if (field in changes && clean(target[field]).toLowerCase() === clean(before[field]).toLowerCase()) {
+      patch[field] = changes[field];
+    }
+  }
+  return patch;
+}
+
+// Keep customer_accounts and matching sibling properties aligned with holder profile
+// edits without overwriting intentionally different property-specific contacts.
+async function syncAccountAndSiblings(trx, { before, siblings = [], changes }) {
+  const accountId = before.account_id;
+  if (!accountId || !changes || !Object.keys(changes).length) return;
+  const acct = await trx('customer_accounts').where({ id: accountId }).forUpdate().first();
+  if (acct) {
+    const acctPatch = matchingFieldsPatch(acct, before, changes);
+    if (Object.keys(acctPatch).length) {
+      await trx('customer_accounts').where({ id: accountId }).update({ ...acctPatch, updated_at: trx.fn.now() });
+    }
+  }
+  for (const sib of siblings) {
+    const sibPatch = matchingFieldsPatch(sib, before, changes);
+    if (Object.keys(sibPatch).length) {
+      await trx('customers').where({ id: sib.id }).update({ ...sibPatch, updated_at: trx.fn.now() });
+    }
+  }
+}
+
 // Names save in one step: row lock, quota, update, the name fan-out with the locked before/after rows, audit row.
 async function commitNameEdit(trx, { customerId, input, req }) {
-  const before = await lockOwnedCustomer(trx, { customerId, req });
-  if (!before) return null;
+  const locked = await lockOwnedAccountRows(trx, { customerId, req });
+  if (!locked) return null;
+  const { before, siblings } = locked;
   const changes = diffNames(before, input);
   if (!Object.keys(changes).length) return { before, after: before, changes, emailSync: null };
   await assertUnderQuota(trx, customerId);
   await trx('customers').where({ id: customerId }).update({ ...changes, updated_at: trx.fn.now() });
   const after = { ...before, ...changes };
   await require('../services/customer-contact-fanout').propagateCustomerNameChange({ before, after }, trx);
+  await syncAccountAndSiblings(trx, { before, siblings, changes });
   await auditStep(trx, { customerId, action: AUDIT_SAVED, detail: { fields: Object.keys(changes) }, req });
   return { before, after, changes, emailSync: null };
 }
@@ -215,6 +263,8 @@ function sendChangeNotices({ customerId, before, after, changes }) {
       // The recipient is an address the customer typed or just left: the sender logs and stores a failure by its
       // code only, and the provider's own error body is not logged.
       suppressProviderErrorLog: true,
+      // Takeover security alarm (Decision 1): notify even when notification_prefs.email_enabled is false.
+      bypassEmailOptOut: true,
     })).catch((err) => logger.warn(`[customer-profile] account.updated email failed for ${customerId}: ${err.status || err.code || err.name || 'send_failed'}`));
   });
 }
@@ -344,8 +394,7 @@ router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
     // No active row under the lock: the account was cancelled (or removed) after authenticate() read it.
     if (!outcome) return res.status(403).json({ error: 'This account is not active.' });
 
-    const { before, after, changes, emailSync, pending, suppressed } = outcome;
-    runPostCommitFanout(emailSync, customerId);
+    const { before, after, changes, pending, suppressed } = outcome;
     if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
     // What was saved, in every answer below: a name saved in this request stays saved when its code did not go out.
     const saved = { profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) };
@@ -379,8 +428,9 @@ const CODE_REFUSALS = {
 // the request row: the same order as the PUT. Every refusal RETURNS (never throws) so the transaction commits: a wrong
 // code must keep its attempt count, and a spent request (right code, an address another account holds) stays consumed.
 async function confirmInTransaction(trx, { customerId, code, email, req }) {
-  const locked = await lockOwnedCustomer(trx, { customerId, req });
-  if (!locked) return { gone: true };
+  const lockedState = await lockOwnedAccountRows(trx, { customerId, req });
+  if (!lockedState) return { gone: true };
+  const { before: locked, siblings } = lockedState;
   const check = await EmailCode.checkCode(trx, { customerId, code, currentEmail: locked.email, expectedEmail: email });
   if (check.outcome !== 'ok') return { refused: check };
   const { request } = check;
@@ -392,6 +442,7 @@ async function confirmInTransaction(trx, { customerId, code, email, req }) {
   if (result.outcome === 'email_in_use') return { conflict: httpError(409, EMAIL_UNAVAILABLE, 'email_unavailable') };
   if (result.outcome === 'unchanged') return { edit: { before: result.before, after: result.before, changes: {}, emailSync: null } };
   const changes = { email: request.new_email };
+  await syncAccountAndSiblings(trx, { before: result.before, siblings, changes });
   await auditStep(trx, { customerId, action: AUDIT_SAVED, detail: { fields: Object.keys(changes) }, req });
   const after = { ...result.before, ...changes };
   await raiseEmailChangeAlert(trx, { customerId, before: result.before, after, requestId: request.id });

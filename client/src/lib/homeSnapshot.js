@@ -187,6 +187,14 @@ export function writeHomeSnapshot({ token, requestIdentity, me, propertyPayload 
   return true;
 }
 
+// Updates only the cached customer identity when /auth/me succeeded but
+// /auth/properties failed transiently, preserving the existing property list.
+export function refreshHomeSnapshotCustomer({ token, requestIdentity, me }) {
+  const existing = readHomeSnapshot(token);
+  if (!existing) return false;
+  return writeHomeSnapshot({ token, requestIdentity, me, propertyPayload: existing.properties });
+}
+
 // The saved account for this token, or null. Never throws.
 export function readHomeSnapshot(token) {
   const entry = readEntry(HOME_SNAPSHOT_KEY);

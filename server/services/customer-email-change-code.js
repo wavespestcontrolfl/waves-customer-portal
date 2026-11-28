@@ -41,7 +41,12 @@ function generateCode() {
 }
 
 function hashCode(requestId, code) {
-  return crypto.createHmac('sha256', String(config.jwt.secret || '')).update(`${requestId}:${code}`).digest('hex');
+  const baseSecret = String(config.jwt.secret || '');
+  if (!baseSecret && process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET is required to hash customer email verification codes');
+  }
+  const derivedKey = crypto.createHmac('sha256', baseSecret).update('waves:customer-email-change-code:v1').digest();
+  return crypto.createHmac('sha256', derivedKey).update(`${requestId}:${code}`).digest('hex');
 }
 
 function sameHash(a, b) {

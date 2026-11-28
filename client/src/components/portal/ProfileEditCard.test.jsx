@@ -123,11 +123,12 @@ describe('ProfileEditCard', () => {
     });
 
     it('a wrong code shows the server words and keeps the code step open', async () => {
-      api.confirmCustomerEmail.mockRejectedValue(new Error('That code is not right. Check the newest email and try again.'));
+      api.confirmCustomerEmail.mockRejectedValue(Object.assign(new Error('That code is not right. Check the newest email and try again.'), { attemptsLeft: 3 }));
       const refreshCustomer = await startEmailChange();
       fireEvent.change(screen.getByLabelText('Code'), { target: { value: '000000' } });
       fireEvent.click(screen.getByTestId('profile-code-confirm'));
       await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('not right'));
+      expect(screen.getByRole('alert')).toHaveTextContent('3 tries left');
       expect(screen.getByTestId('profile-code-form')).toBeInTheDocument();
       expect(refreshCustomer).not.toHaveBeenCalled();
     });
@@ -174,6 +175,15 @@ describe('ProfileEditCard', () => {
       await screen.findByTestId('profile-code-form');
       expect(api.updateCustomerProfile).toHaveBeenCalledWith({ firstName: 'Sam', email: NEW });
       expect(refreshCustomer).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('status')).toHaveTextContent('Name saved.');
+    });
+
+    it('controlled pendingEmail preserves step 2 across unmount/remount of the Account menu', () => {
+      const { rerender } = render(<ProfileEditCard customer={customer} refreshCustomer={vi.fn()} pendingEmail={NEW} onPendingEmailChange={vi.fn()} />);
+      expect(screen.getByTestId('profile-code-form')).toHaveTextContent(`We sent a code to ${NEW}`);
+      rerender(<div />);
+      rerender(<ProfileEditCard customer={customer} refreshCustomer={vi.fn()} pendingEmail={NEW} onPendingEmailChange={vi.fn()} />);
+      expect(screen.getByTestId('profile-code-form')).toHaveTextContent(`We sent a code to ${NEW}`);
     });
 
     it('a combined save whose code email fails: the saved name is shown, the baseline resets, and the retry sends only the email', async () => {

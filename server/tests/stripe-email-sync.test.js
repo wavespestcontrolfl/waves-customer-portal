@@ -3,11 +3,13 @@
  * linked Stripe customer, under the customer row lock, never onto a Stripe id another row shares.
  */
 describe('stripe-email-sync processJob', () => {
-  let state; let locks; let updateEmail; let raiseAdminAlert; let readOwner;
+  let state; let locks; let txDepth; let txDuringStripe; let updateEmail; let raiseAdminAlert; let readOwner;
 
   function load({ job = {}, customers = [], stripeResult = 'updated', lockedCustomers = [], owner } = {}) {
     jest.resetModules();
     locks = [];
+    txDepth = 0;
+    txDuringStripe = null;
     state = {
       jobs: [{ id: 'job-1', customer_id: 'c1', email: 'new@example.test', status: 'pending', attempts: 0, not_linked_checks: 0, due: true, updated_at: 'v1', ...job }],
       customers,
@@ -55,18 +57,29 @@ describe('stripe-email-sync processJob', () => {
     };
     const trx = Object.assign((t) => builder(t), { fn: { now: () => 'NOW' }, raw: (sql) => ({ sql }) });
     trx.transaction = async (fn) => fn(trx);
-    const db = Object.assign((t) => builder(t), { transaction: async (fn) => fn(trx), fn: trx.fn, raw: trx.raw });
+    const db = Object.assign((t) => builder(t), {
+      transaction: async (fn) => {
+        txDepth += 1;
+        try { return await fn(trx); } finally { txDepth -= 1; }
+      },
+      fn: trx.fn,
+      raw: trx.raw,
+    });
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     updateEmail = jest.fn(async () => {
+      txDuringStripe = txDepth > 0;
       locks.push('stripe-call');
       if (stripeResult instanceof Error) throw stripeResult;
       return stripeResult;
     });
     // By default each Stripe profile names the customer row that links it.
-    readOwner = jest.fn(async (sid) => (owner === undefined
-      ? { deleted: false, customerId: (state.customers.find((c) => c.stripe_customer_id === sid) || {}).id || null, payerId: null }
-      : owner));
+    readOwner = jest.fn(async (sid) => {
+      txDuringStripe = txDepth > 0;
+      return owner === undefined
+        ? { deleted: false, customerId: (state.customers.find((c) => c.stripe_customer_id === sid) || {}).id || null, payerId: null }
+        : owner;
+    });
     jest.doMock('../services/stripe', () => ({ updateCustomerEmail: updateEmail, readCustomerOwner: readOwner }));
     raiseAdminAlert = jest.fn(async () => ({ id: 'n1' }));
     jest.doMock('../services/admin-alert-compose', () => ({ raiseAdminAlert }));
@@ -75,12 +88,13 @@ describe('stripe-email-sync processJob', () => {
 
   const cust = (over = {}) => ({ id: 'c1', email: 'new@example.test', stripe_customer_id: 'cus_1', deleted_at: null, phone: '+19415550100', ...over });
 
-  test('updates Stripe with the email on file, holding the job and customer locks through the call', async () => {
+  test('updates Stripe with the email on file, releasing DB transaction and customer lock before Stripe HTTP', async () => {
     const sync = load({ customers: [cust()] });
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
     expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', { timeout: 10000, maxNetworkRetries: 0, idempotencyKey: 'stripe-email-sync:job-1:cus_1:0' });
-    // Customer first, then the job: the same order as an email confirm (no deadlock).
-    expect(locks).toEqual(['customers:c1', 'stripe_email_sync_jobs:job-1', 'stripe-call']);
+    // Phase 1 locks customer then job, commits (releasing locks before Stripe HTTP), then Phase 3 re-locks to finalize.
+    expect(txDuringStripe).toBe(false);
+    expect(locks).toEqual(['customers:c1', 'stripe_email_sync_jobs:job-1', 'stripe-call', 'customers:c1', 'stripe_email_sync_jobs:job-1']);
     expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'updated' });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
@@ -309,10 +323,9 @@ describe('stripe-email-sync processJob', () => {
   });
 
   test('no Stripe key on this process leaves the job untouched (no attempt, same schedule), and drainDue claims nothing', async () => {
-    const sync = load({ customers: [cust()], owner: null });
+    const sync = load({ job: { next_attempt_at: '2026-11-28T00:00:00Z' }, customers: [cust()], owner: null });
     await expect(sync.processJob('job-1')).resolves.toBe('not_configured');
-    expect(state.jobs[0]).toMatchObject({ status: 'pending', attempts: 0 });
-    expect(state.jobs[0].next_attempt_at).toBeUndefined();
+    expect(state.jobs[0]).toMatchObject({ status: 'pending', attempts: 0, next_attempt_at: '2026-11-28T00:00:00Z' });
     jest.doMock('../config/stripe-config', () => ({ secretKey: undefined }));
     await expect(sync.drainDue()).resolves.toEqual({});
   });
