@@ -183,7 +183,11 @@ describe('migrations & stop recognition', () => {
       });
       const { hasLocalContent } = require('../services/automation-runner');
       await hasLocalContent('new_lead');
-      expect(stepsQ.whereNotIn).toHaveBeenCalledWith('id', NEW_LEAD_EXTENDED_STEP_IDS);
+      const filter = stepsQ.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+      const rest = { whereNotIn: jest.fn() };
+      filter(rest);
+      expect(rest.whereNotIn).toHaveBeenCalledWith('id', NEW_LEAD_DRIP_STEP_IDS);
+      expect(rest.whereNotIn).toHaveBeenCalledWith('id', NEW_LEAD_EXTENDED_STEP_IDS);
     } finally {
       if (savedBase === undefined) delete process.env.GATE_NEW_LEAD_DRIP_STEPS;
       else process.env.GATE_NEW_LEAD_DRIP_STEPS = savedBase;

@@ -860,11 +860,15 @@ function enabledSequenceSteps(templateKey, client = db) {
           own.where('enabled', true).orWhereIn('id', NEW_LEAD_DRIP_STEP_IDS);
           if (extendedOn) own.orWhereIn('id', NEW_LEAD_EXTENDED_STEP_IDS);
         });
-      if (!extendedOn) query = query.whereNotIn('id', NEW_LEAD_EXTENDED_STEP_IDS);
+      if (!extendedOn) {
+        query = query.where((excl) => { excl.whereNotIn('id', NEW_LEAD_EXTENDED_STEP_IDS); });
+      }
     } else {
       query = client('automation_steps').where({ template_key: templateKey, enabled: true })
-        .where((rest) => rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS))
-        .whereNotIn('id', NEW_LEAD_EXTENDED_STEP_IDS);
+        .where((rest) => {
+          rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS);
+          rest.whereNotIn('id', NEW_LEAD_EXTENDED_STEP_IDS);
+        });
     }
   }
   return query.orderBy('step_order', 'asc').orderBy('id', 'asc');
