@@ -10,9 +10,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { stripTechOwnerOnlyMoney } = require('../routes/admin-schedule');
 
-function row() {
+function todayEt() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+function row(overrides = {}) {
   return {
     id: 'svc-1',
+    scheduledDate: todayEt(),
     monthlyRate: 89,
     leadScore: 70,
     estimatedPrice: 120,
@@ -25,8 +30,9 @@ function row() {
       openInvoiceCount: 1,
       hasOverdue: true,
       duesPaidThisMonth: true,
-      prediction: { kind: 'invoice', amount: 120 },
+      prediction: { kind: 'invoice', amount: 120, grossAmount: 135 },
     },
+    ...overrides,
   };
 }
 
@@ -53,6 +59,12 @@ describe('stripTechOwnerOnlyMoney', () => {
     const rows = [{ id: 'svc-2', monthlyRate: 10 }];
     expect(() => stripTechOwnerOnlyMoney({ techRole: 'technician' }, rows)).not.toThrow();
     expect(rows[0]).not.toHaveProperty('monthlyRate');
+  });
+
+  test('a technician on a non-today visit gets prediction amount and grossAmount redacted', () => {
+    const rows = [row({ scheduledDate: '2099-01-15' })];
+    stripTechOwnerOnlyMoney({ techRole: 'technician', technicianId: 't1' }, rows);
+    expect(rows[0].billingLane.prediction).toEqual({ kind: 'invoice', amount: null, grossAmount: null });
   });
 
   test('an admin still gets every field', () => {

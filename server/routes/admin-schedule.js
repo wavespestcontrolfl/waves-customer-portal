@@ -747,7 +747,7 @@ function stripTechOwnerOnlyMoney(req, rows) {
       if (row.billingLane.prediction && dateOnly(row.scheduledDate) !== today) {
         row.billingLane = {
           ...row.billingLane,
-          prediction: { ...row.billingLane.prediction, amount: null },
+          prediction: { ...row.billingLane.prediction, amount: null, grossAmount: null },
         };
       }
     }
