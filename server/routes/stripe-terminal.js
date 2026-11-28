@@ -381,14 +381,22 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     let mintedJti = null;
     let mintedExpiresAt = null;
     let ownershipLostAtMint = false;
+    let mintHandoffRefusal = null;
 
     await db.transaction(async (trx) => {
-      // Locked re-validation of the technician's assignment BEFORE anything
-      // else in the mint (no token row, no rate-limit write on a miss), in
-      // the billing lock order invoice → customer → visit (pre-push P1).
-      if (req.techRole === 'technician') {
-        await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
-        if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+      // Locked re-validation of the invoice hold/status and technician's
+      // assignment BEFORE anything else in the mint (no token row, no
+      // rate-limit write on a miss), in the billing lock order
+      // invoice → customer → visit (pre-push P1).
+      const mintInv = await trx('invoices').where({ id: invoice_id }).forUpdate().first();
+      if (!mintInv) {
+        ownershipLostAtMint = true;
+        return;
+      }
+      mintHandoffRefusal = terminalHandoffRefusal(mintInv);
+      if (mintHandoffRefusal) return;
+      if (req.techRole === 'technician' && invoice.customer_id) {
+        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       }
       if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
         ownershipLostAtMint = true;
@@ -464,18 +472,26 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       mintedExpiresAt = expires_at;
     });
 
+    const reverseHandoffCredit = async (createdBy, reasonLabel) => {
+      if (!(handoffCreditResult?.applied > 0)) return;
+      try {
+        const { reverseAppliedCredit } = require('../services/customer-credit');
+        await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy });
+      } catch (e) {
+        logger.warn(`[stripe-terminal] credit reversal after ${reasonLabel} handoff skipped for ${invoice_id}: ${e.message}`);
+      }
+    };
+
+    if (mintHandoffRefusal) {
+      await reverseHandoffCredit('system:handoff_invoice_refused', 'refused');
+      return res.status(mintHandoffRefusal.status).json(mintHandoffRefusal.body);
+    }
+
     if (ownershipLostAtMint) {
       // Same refusal as the pre-check above. Reverse the credit this seam
       // applied so the customer's credit is not consumed (and the invoice not
       // edit-locked) for a collection the technician is no longer assigned to.
-      if (handoffCreditResult?.applied > 0) {
-        try {
-          const { reverseAppliedCredit } = require('../services/customer-credit');
-          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_not_assigned' });
-        } catch (e) {
-          logger.warn(`[stripe-terminal] credit reversal after unassigned handoff skipped for ${invoice_id}: ${e.message}`);
-        }
-      }
+      await reverseHandoffCredit('system:handoff_not_assigned', 'unassigned');
       return res.status(404).json({ error: 'Invoice not found' });
     }
 
@@ -491,14 +507,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       // Mint was rate-limited — no handoff/deep link issued. Reverse any credit
       // this seam applied above so we don't consume the customer's credit and
       // edit-lock an invoice the tech couldn't actually collect on.
-      if (handoffCreditResult?.applied > 0) {
-        try {
-          const { reverseAppliedCredit } = require('../services/customer-credit');
-          await reverseAppliedCredit({ invoiceId: invoice_id, amount: handoffCreditResult.applied, createdBy: 'system:handoff_rate_limited' });
-        } catch (e) {
-          logger.warn(`[stripe-terminal] credit reversal after rate-limited handoff skipped for ${invoice_id}: ${e.message}`);
-        }
-      }
+      await reverseHandoffCredit('system:handoff_rate_limited', 'rate-limited');
       res.setHeader('Retry-After', String(rateLimitedRetryAfter));
       return res.status(429).json({
         error: 'Too many handoff mints. Try again in an hour.',

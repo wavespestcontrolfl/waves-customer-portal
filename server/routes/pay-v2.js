@@ -43,14 +43,16 @@ function errorPayload(err, extra = {}) {
   return { error: err.message, ...(err?.code ? { code: err.code } : {}), ...extra };
 }
 
-async function enrollmentInvoiceRefusal(trx, invoiceId) {
-  if (await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoiceId, trx)) {
-    return {
-      status: 409,
-      body: { error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' },
-    };
-  }
+async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null) {
+  // Billing lock order: invoice FOR UPDATE → customer FOR UPDATE → packet/visit
+  // SHARE checks. Matches stripe-terminal.js & customer-credit.js so concurrent
+  // enrollment + terminal/credit transactions cannot deadlock on opposite lock
+  // order, and acquires customer FOR UPDATE before invoicePayerOwnedNow's SHARE
+  // lock so enrollConsentedMethod never deadlocks upgrading SHARE → UPDATE.
   const liveInv = await trx('invoices').where({ id: invoiceId }).forUpdate().first('id', 'scheduled_send_error');
+  if (customerId) {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+  }
   if (liveInv && invoiceHeldForChemicalReview(liveInv)) {
     return {
       status: 409,
@@ -58,6 +60,12 @@ async function enrollmentInvoiceRefusal(trx, invoiceId) {
         error: 'This invoice is held for office billing review of a chemical area add-on',
         code: 'INVOICE_CHEMICAL_ADDON_HOLD',
       },
+    };
+  }
+  if (await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoiceId, trx)) {
+    return {
+      status: 409,
+      body: { error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' },
     };
   }
   return null;
@@ -1770,13 +1778,7 @@ router.post('/:token/consent', async (req, res, next) => {
     let row;
     try {
       row = await db.transaction(async (trx) => {
-        // The customer row FOR UPDATE first (local audit on r46): the
-        // ownership check takes it FOR SHARE and the enrollment then upgrades
-        // the same row to FOR UPDATE — two of these transactions holding
-        // SHARE would deadlock on that upgrade. Taking the stronger lock up
-        // front keeps the customer-before-member order intact.
-        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-        consentRefusal = await enrollmentInvoiceRefusal(trx, invoice.id);
+        consentRefusal = await enrollmentInvoiceRefusal(trx, invoice.id, invoice.customer_id);
         if (consentRefusal) throw PAYER_BILLED_ROLLBACK;
         const created = await ConsentService.recordConsent({
           customerId: invoice.customer_id,
@@ -2047,10 +2049,7 @@ router.post('/:token/setup-complete', async (req, res) => {
     let enrollment = null;
     try {
       await db.transaction(async (trx) => {
-        // Customer FOR UPDATE before the SHARE-taking ownership check, so the
-        // enrollment's own upgrade cannot deadlock against a sibling request.
-        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
-        setupRefusal = await enrollmentInvoiceRefusal(trx, invoice.id);
+        setupRefusal = await enrollmentInvoiceRefusal(trx, invoice.id, invoice.customer_id);
         if (setupRefusal) throw SETUP_PAYER_BILLED_ROLLBACK;
         if (needsConsentRow) {
           await ConsentService.recordConsent({

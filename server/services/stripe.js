@@ -5121,7 +5121,8 @@ const StripeService = {
       // as-is, not wrapped as a generic update failure — and so must the
       // combined allocation's staleBalance 409 (the page reloads to live
       // amounts).
-      if (err && (err.sessionChanged || err.staleBalance || err.code === 'DEPOSIT_RECONCILIATION_REQUIRED')) throw err;
+      if (err && (err.sessionChanged || err.staleBalance
+        || ['DEPOSIT_RECONCILIATION_REQUIRED', 'INVOICE_CHEMICAL_ADDON_HOLD'].includes(err.code))) throw err;
       if (err && err.consentStampChanged) {
         logger.info(`[stripe] PI ${effectivePaymentIntentId} consent stamp changed on update-amount; replacing for method=${selectedMethodCategory}`);
         return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, replacementContext());

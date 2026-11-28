@@ -25,6 +25,20 @@ const fs = require('fs');
 const path = require('path');
 
 describe('Billing Audit PR 2 — chemical-review holds & completion invariants', () => {
+  afterEach(() => {
+    jest.dontMock('stripe');
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/invoice');
+    jest.dontMock('../services/estimate-deposits');
+    jest.dontMock('../services/failed-payments');
+    jest.dontMock('../services/invoice-payer-ownership');
+    jest.dontMock('../services/pay-combined');
+    jest.dontMock('../services/invoice-followups');
+    jest.dontMock('../services/invoice-issued-closeout');
+    jest.resetModules();
+    jest.clearAllMocks();
+  });
+
   describe('B-02: competing completion holds do not mutually silence office alerts', () => {
     const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
 
@@ -498,10 +512,17 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       expect(adminSchedSrc).toContain('supersedeInvoiceHoldReason(inv)');
       expect(adminSchedSrc).toContain("'scheduled_send_error', 'notes'");
       expect(adminSchedSrc).toContain('if (payPageInvoiceId) this.orWhere({ id: payPageInvoiceId });');
-      // Locked enrollment hold check & preserved INVOICE_CHEMICAL_ADDON_HOLD code on /update-amount & collectibility guards
+      // Locked enrollment hold check (invoice locked BEFORE customer) & preserved INVOICE_CHEMICAL_ADDON_HOLD code
       const payV2Src = fs.readFileSync(path.join(__dirname, '../routes/pay-v2.js'), 'utf8');
-      expect(payV2Src.match(/enrollmentInvoiceRefusal\(trx, invoice\.id\)/g)).toHaveLength(2);
+      expect(payV2Src.match(/enrollmentInvoiceRefusal\(trx, invoice\.id, invoice\.customer_id\)/g)).toHaveLength(2);
+      const enrollFnStart = payV2Src.indexOf('async function enrollmentInvoiceRefusal');
+      const enrollFnBody = payV2Src.slice(enrollFnStart, enrollFnStart + 900);
+      expect(enrollFnBody.indexOf("trx('invoices')")).toBeGreaterThan(-1);
+      expect(enrollFnBody.indexOf("trx('customers')")).toBeGreaterThan(enrollFnBody.indexOf("trx('invoices')"));
       expect(payV2Src).toContain('errorPayload(err, { staleBalance: !!err.staleBalance })');
+      expect(stripeSrc).toContain("err.code === 'INVOICE_CHEMICAL_ADDON_HOLD'");
+      const termSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-terminal.js'), 'utf8');
+      expect(termSrc).toContain('mintHandoffRefusal = terminalHandoffRefusal(mintInv);');
       // Locked provider-boundary chemical hold check even for recipientOverride emails
       const emailSrc = fs.readFileSync(path.join(__dirname, '../services/invoice-email.js'), 'utf8');
       expect(emailSrc).toContain('invoiceDispatchOwnershipRefusal');
@@ -510,6 +531,196 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       const contractsSrc = fs.readFileSync(path.join(__dirname, '../../docs/public-route-contracts.md'), 'utf8');
       expect(contractsSrc).toContain("`409 { code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`");
       expect(contractsSrc).toContain("`409 { code: 'invoice_withdrawn_from_customer' }`");
+    });
+
+    test('open setup-fee partial coverage ($40 of $99) instructs $59.00 remaining in completion, terminal, and reconcile alerts', () => {
+      const {
+        resolveOpenSetupFeeCoverage,
+        buildUnmintedSetupFeeAlertBody,
+        buildTerminalSetupFeeNote,
+      } = require('../services/complete-scheduled-service');
+      const { _private: reconcilePrivate } = require('../services/setup-fee-alert-reconcile');
+
+      const settledNow = {
+        settled: false,
+        open: [{ invoiceId: 'inv-open-40', invoiceNumber: 'INV-OPEN-40', cents: 4000 }],
+      };
+      const cov = resolveOpenSetupFeeCoverage(settledNow, {
+        countedRows: [],
+        feeCovered: false,
+        expectedSetupFeeCents: 9900,
+        liveFeeCentsNow: 0,
+      });
+      expect(cov.openFeeCents).toBe(4000);
+      expect(cov.hasOpenFeeInvoice).toBe(true);
+      expect(cov.feeOnOpenInvoice).toBe(false);
+
+      const remainderCents = Math.max(0, 9900 - cov.openFeeCents);
+      const body = buildUnmintedSetupFeeAlertBody({
+        feeCoveredBy: null,
+        feeOnOpenInvoice: false,
+        openFeeInvoices: cov.openFeeInvoices,
+        applicationCoveredBy: null,
+        applicationCoveredOutOfBand: false,
+        unrecordedChemicalAddOnHold: false,
+        feeEstimateRef: 'est-40',
+        feeHistoryClause: 'its WaveGuard setup fee was never invoiced',
+        setupFeeLabel: `$${(remainderCents / 100).toFixed(2)} remaining`,
+        firstAppLabel: ' ($89.00)',
+        estimateId: 40,
+        setupFeeParkedNote: '',
+      });
+      expect(body).toContain('$59.00 remaining');
+      expect(body).not.toContain('$99.00');
+
+      const termNote = buildTerminalSetupFeeNote({
+        terminalSetupFeeNote: true,
+        terminalFeeCovered: false,
+        termExpectedFeeCents: 9900,
+        liveFeeCentsOnVisit: 0,
+        refundedFeeCentsTerm: 0,
+        openFeeCentsTerm: 4000,
+        openFeeInvoicesTerm: settledNow.open,
+        termFeeEstimateRef: 'est-40',
+        estimateId: 40,
+      });
+      expect(termNote).toContain('$59.00 remaining');
+      expect(termNote).not.toContain('$99.00');
+
+      expect(reconcilePrivate.reconcileFeeRemainderLabel(9900, 0, 4000)).toBe(' ($59.00 remaining)');
+      const termReconcileClause = reconcilePrivate.terminalFeeClauseFor(
+        { sourceEstimateId: 40 },
+        40,
+        { feeIsProven: false, effectiveCovered: 4000, tExpectCents: 9900 },
+      );
+      expect(termReconcileClause).toContain('$59.00 remaining');
+    });
+
+    test('chemical review stays ahead of every instruction to collect or bill the visit across completion, terminal, and reconcile alerts', () => {
+      const {
+        buildUnmintedSetupFeeAlertBody,
+        buildTerminalManualBillingBody,
+      } = require('../services/complete-scheduled-service');
+      const { _private: reconcilePrivate } = require('../services/setup-fee-alert-reconcile');
+
+      // Existing application invoice held for chemical review must NOT say "collect THAT invoice"
+      const appHeldBody = buildUnmintedSetupFeeAlertBody({
+        feeCoveredBy: null,
+        feeOnOpenInvoice: false,
+        openFeeInvoices: [],
+        applicationCoveredBy: {
+          id: 'inv-app-1',
+          invoice_number: 'INV-APP-1',
+          status: 'draft',
+          scheduled_send_error: 'chemical_addon_review:svc-1',
+        },
+        applicationCoveredOutOfBand: false,
+        unrecordedChemicalAddOnHold: true,
+        feeEstimateRef: 'est-held',
+        feeHistoryClause: 'its WaveGuard setup fee was never invoiced',
+        setupFeeLabel: '$99.00',
+        firstAppLabel: ' ($89.00)',
+        estimateId: 77,
+        setupFeeParkedNote: '',
+      });
+      expect(appHeldBody).toContain('do NOT collect or release THAT invoice until review confirms');
+      expect(appHeldBody).not.toContain('— collect THAT invoice');
+
+      // Terminal refunded-invoice alert with chemical hold must defer billing/collection until review
+      const termHeldBody = buildTerminalManualBillingBody({
+        terminalCompletionInvoice: { id: 'inv-ref', invoice_number: 'INV-REF-1', status: 'refunded' },
+        covered: false,
+        liveBesideNow: { id: 'inv-live', invoice_number: 'INV-LIVE-1', status: 'draft' },
+        liveBesideLabel: 'INV-LIVE-1',
+        terminalRestored: false,
+        completionTerminalIncludedSetupFee: false,
+        effectiveSetupFeeNote: '',
+        unrecordedChemicalAddOnHold: true,
+      });
+      expect(termHeldBody).toContain('hold collecting or releasing that invoice until office chemical add-on review confirms');
+      expect(termHeldBody).not.toContain('collect THAT invoice');
+
+      // Reconciler preserves chemical hold instruction on uncovered visits and held live invoices
+      const recAppInstr = reconcilePrivate.reconcileAppInstructionForVisits(
+        ['svc-99'],
+        { chemicalHoldVisitIds: ['svc-99'] },
+      );
+      expect(recAppInstr).toContain('HOLD billing until office chemical add-on review confirms');
+      const heldNotice = reconcilePrivate.reconcileHeldInvoiceNotice([
+        { id: 'inv-live', scheduled_send_error: 'chemical_addon_review:svc-99' },
+      ]);
+      expect(heldNotice).toContain('do NOT collect or release it until review confirms');
+    });
+
+    test('StripeService.updateInvoicePaymentIntentMethod rethrows locked INVOICE_CHEMICAL_ADDON_HOLD 409 unchanged', async () => {
+      let caught = null;
+      await jest.isolateModulesAsync(async () => {
+        jest.dontMock('../services/invoice-helpers');
+        const prevKey = process.env.STRIPE_SECRET_KEY;
+        process.env.STRIPE_SECRET_KEY = 'sk_test_dummy';
+        const mockStripe = {
+          paymentIntents: {
+            retrieve: jest.fn(async () => ({
+              id: 'pi_test_hold_race',
+              status: 'requires_payment_method',
+              payment_method_types: ['card'],
+              metadata: { waves_invoice_id: 'inv-race-hold', save_card_opt_in: 'false' },
+            })),
+            update: jest.fn(),
+          },
+        };
+        jest.doMock('stripe', () => jest.fn(() => mockStripe));
+        const unlockedInv = {
+          id: 'inv-race-hold',
+          invoice_number: 'INV-RACE-HOLD',
+          customer_id: 'cust-1',
+          status: 'sent',
+          total: 100,
+          credit_applied: 0,
+          amount_paid: 0,
+          stripe_payment_intent_id: 'pi_test_hold_race',
+          scheduled_send_error: null,
+        };
+        const lockedInv = {
+          ...unlockedInv,
+          scheduled_send_error: 'chemical_addon_review:svc-race',
+        };
+        const makeQ = (row) => {
+          const q = {
+            where: jest.fn(() => q),
+            whereNotIn: jest.fn(() => q),
+            forUpdate: jest.fn(() => q),
+            orderBy: jest.fn(() => q),
+            first: jest.fn(async () => row),
+          };
+          return q;
+        };
+        const mockDb = jest.fn((table) => makeQ(table === 'invoices' ? unlockedInv : null));
+        mockDb.transaction = jest.fn(async (fn) => {
+          const trx = jest.fn((table) => makeQ(table === 'invoices' ? lockedInv : null));
+          return fn(trx);
+        });
+        jest.doMock('../models/db', () => mockDb);
+        jest.doMock('../services/pay-combined', () => ({
+          combinedContextForInvoice: jest.fn(async () => null),
+          paymentIntentOwnsInvoice: jest.fn(() => false),
+          isCombinedPiMetadata: jest.fn(() => false),
+          clearPaymentIntentStamps: jest.fn(async () => {}),
+        }));
+        try {
+          const StripeService = require('../services/stripe');
+          await StripeService.updateInvoicePaymentIntentMethod('inv-race-hold', 'pi_test_hold_race', 'us_bank_account');
+        } catch (err) {
+          caught = err;
+        } finally {
+          if (prevKey === undefined) delete process.env.STRIPE_SECRET_KEY;
+          else process.env.STRIPE_SECRET_KEY = prevKey;
+        }
+      });
+      expect(caught).toBeTruthy();
+      expect(caught.message).toMatch(/chemical area add-on/i);
+      expect(caught.code).toBe('INVOICE_CHEMICAL_ADDON_HOLD');
+      expect(caught.statusCode).toBe(409);
     });
   });
 
