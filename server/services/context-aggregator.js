@@ -1394,9 +1394,11 @@ async function prioritizeServiceRecord(serviceHistory, customerId, focusServiceR
   }
   const focused = await db('service_records')
     .where({ id: focusServiceRecordId, customer_id: customerId, status: 'completed' })
-    .first()
-    .catch(() => null);
-  return focused ? [focused, ...serviceHistory.slice(0, Math.max(0, SERVICE_HISTORY_LIMIT - 1))] : serviceHistory;
+    .first();
+  if (!focused) {
+    throw Object.assign(new Error('Focused service record unavailable'), { code: 'FOCUS_SERVICE_RECORD_UNAVAILABLE' });
+  }
+  return [focused, ...serviceHistory.slice(0, Math.max(0, SERVICE_HISTORY_LIMIT - 1))];
 }
 
 class ContextAggregator {
@@ -1439,7 +1441,7 @@ class ContextAggregator {
   // Booking, invoice and visit state still reads as of now; that state has no history to rewind to.
   // `includeRouteStatus` (texting AI gap 4): TODAY's pre-en-route stop count sentence (loadRouteStatusFacts). Only the shadow drafter
   // opts in, with the real-answers gate on; every other caller pays no read and gets no key.
-  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus, smsPrepGuideFamily, asOf = null, focusServiceRecordId = null } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus, smsPrepGuideFamily, asOf = null, focusServiceRecordId } = {}) {
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
     const cappedAt = (qb) => (asOfDate ? qb.where('created_at', '<=', asOfDate) : qb);
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,

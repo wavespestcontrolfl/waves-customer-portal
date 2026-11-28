@@ -38,18 +38,35 @@ function makeDb(queues) {
 }
 
 describe('GATE_SMS_POST_VISIT_REDRAFT gate reader', () => {
-  let saved;
-  beforeEach(() => { saved = process.env.GATE_SMS_POST_VISIT_REDRAFT; delete process.env.GATE_SMS_POST_VISIT_REDRAFT; });
+  let savedRedraft;
+  let savedB1;
+  let savedReal;
+  beforeEach(() => {
+    savedRedraft = process.env.GATE_SMS_POST_VISIT_REDRAFT;
+    savedB1 = process.env.GATE_SMS_PROMPT_B1;
+    savedReal = process.env.GATE_SMS_REAL_ANSWERS;
+    delete process.env.GATE_SMS_POST_VISIT_REDRAFT;
+    delete process.env.GATE_SMS_PROMPT_B1;
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+  });
   afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_SMS_POST_VISIT_REDRAFT;
-    else process.env.GATE_SMS_POST_VISIT_REDRAFT = saved;
+    if (savedRedraft === undefined) delete process.env.GATE_SMS_POST_VISIT_REDRAFT;
+    else process.env.GATE_SMS_POST_VISIT_REDRAFT = savedRedraft;
+    if (savedB1 === undefined) delete process.env.GATE_SMS_PROMPT_B1;
+    else process.env.GATE_SMS_PROMPT_B1 = savedB1;
+    if (savedReal === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = savedReal;
   });
 
-  test('is strict === "true" and dark by default', () => {
+  test('is strict === "true", dark by default, and requires smsPromptB1Live() so findings actually load', () => {
     expect(smsPostVisitRedraftLive()).toBe(false);
     process.env.GATE_SMS_POST_VISIT_REDRAFT = '1';
     expect(smsPostVisitRedraftLive()).toBe(false);
     process.env.GATE_SMS_POST_VISIT_REDRAFT = 'true';
+    expect(smsPostVisitRedraftLive()).toBe(false);
+    process.env.GATE_SMS_PROMPT_B1 = 'true';
+    expect(smsPostVisitRedraftLive()).toBe(false);
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
     expect(smsPostVisitRedraftLive()).toBe(true);
   });
 });
@@ -206,7 +223,10 @@ describe('findEligibleInboundForPostVisitRedraft', () => {
       visitDateET: '2026-11-27',
     }, { threadHasLiveAnswer, pageSize: 2 });
 
-    expect(page2.whereRaw).toHaveBeenCalledWith('(s.created_at, s.id) < (?, ?)', [new Date('2026-11-27T15:00:00Z'), 'sms-b-1']);
+    expect(page2.whereRaw).toHaveBeenCalledWith(
+      '(s.created_at, s.id) < ((SELECT created_at FROM sms_log WHERE id = ?), ?)',
+      ['sms-b-1', 'sms-b-1'],
+    );
     expect(res?.smsLogId).toBe('sms-a-1');
   });
 
@@ -313,6 +333,55 @@ describe('draftPostVisitRevisionIfEligible', () => {
 
     expect(res).toEqual({ skipped: 'claim_in_flight' });
     expect(draftFn).not.toHaveBeenCalled();
+  });
+
+  test('retries bounded capacity skips (no_connection) before succeeding or reporting lock_unavailable', async () => {
+    const dbh = makeDb({
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
+      message_drafts: [chain({ first: PRIOR }), chain({ first: null }), chain({ first: null })],
+      customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
+    });
+    const draftFn = jest.fn(async () => 'draft-rev-retry');
+    const sleepFn = jest.fn(async () => {});
+    const lockFn = jest.fn()
+      .mockResolvedValueOnce({ skipped: true, reason: 'no_connection' })
+      .mockImplementationOnce(async (_name, fn) => fn());
+
+    const res = await draftPostVisitRevisionIfEligible({
+      customerId: 'cust-2',
+      serviceRecordId: 'rec-retry',
+      completedAt: new Date('2026-11-27T17:00:00Z'),
+      visitDateET: '2026-11-27',
+      dbh,
+      gates: { smsPostVisitRedraftLive: () => true },
+      draftFn,
+      lockFn,
+      sleepFn,
+      threadHasLiveAnswerFn: async () => null,
+    });
+    expect(lockFn).toHaveBeenCalledTimes(2);
+    expect(sleepFn).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ drafted: true, draftId: 'draft-rev-retry', supersedesDraftId: 'draft-orig-2' });
+
+    const dbh2 = makeDb({
+      sms_log: [chain({ result: [INBOUND] }), chain({ first: null })],
+      message_drafts: [chain({ first: PRIOR }), chain({ first: null })],
+      customers: [chain({ first: { id: 'cust-2', first_name: 'Sam' } })],
+    });
+    const lockAlwaysBusy = jest.fn(async () => ({ skipped: true, reason: 'no_connection' }));
+    const res2 = await draftPostVisitRevisionIfEligible({
+      customerId: 'cust-2',
+      completedAt: new Date('2026-11-27T17:00:00Z'),
+      visitDateET: '2026-11-27',
+      dbh: dbh2,
+      gates: { smsPostVisitRedraftLive: () => true },
+      draftFn: jest.fn(),
+      lockFn: lockAlwaysBusy,
+      sleepFn: jest.fn(async () => {}),
+      threadHasLiveAnswerFn: async () => null,
+    });
+    expect(lockAlwaysBusy).toHaveBeenCalledTimes(3);
+    expect(res2).toEqual({ skipped: 'lock_unavailable' });
   });
 });
 

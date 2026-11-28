@@ -136,7 +136,7 @@ async function findEligibleInboundForPostVisitRedraft(dbh, { customerId, complet
   const maxPages = Number(deps.maxPages) > 0 ? Number(deps.maxPages) : 10;
   const checkLiveAnswer = deps.threadHasLiveAnswer || threadHasLiveAnswer;
   const seenThreads = new Set();
-  let cursor = null;
+  let cursorId = null;
 
   for (let page = 0; page < maxPages; page += 1) {
     let q = dbh('sms_log as s')
@@ -151,8 +151,8 @@ async function findEligibleInboundForPostVisitRedraft(dbh, { customerId, complet
       .orderBy('s.created_at', 'desc')
       .orderBy('s.id', 'desc')
       .limit(pageSize);
-    if (cursor) {
-      q = q.whereRaw('(s.created_at, s.id) < (?, ?)', [cursor.created_at, cursor.id]);
+    if (cursorId) {
+      q = q.whereRaw('(s.created_at, s.id) < ((SELECT created_at FROM sms_log WHERE id = ?), ?)', [cursorId, cursorId]);
     }
     const inbounds = await q.select('s.id', 's.from_phone', 's.message_body', 's.created_at', 's.metadata');
     if (!inbounds.length) break;
@@ -166,8 +166,7 @@ async function findEligibleInboundForPostVisitRedraft(dbh, { customerId, complet
     }
 
     if (inbounds.length < pageSize) break;
-    const last = inbounds[inbounds.length - 1];
-    cursor = { created_at: last.created_at, id: last.id };
+    cursorId = inbounds[inbounds.length - 1].id;
   }
   return null;
 }
@@ -258,13 +257,28 @@ async function resolveRevisionInputs({ customerId, completedAt, visitDateET, dbh
   return { eligible, customer };
 }
 
+const DEFAULT_LOCK_RETRY_MS = 150;
+const MAX_NO_CONNECTION_RETRIES = 2;
+
+async function runWithCapacityRetries(acquire, lockKey, work, { sleepFn, maxRetries = MAX_NO_CONNECTION_RETRIES } = {}) {
+  const sleep = sleepFn || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const locked = await acquire(lockKey, work, { recordHealth: false });
+    if (!wasLockSkipped(locked)) return locked;
+    if (locked.reason !== 'no_connection') return { skipped: 'claim_in_flight' };
+    if (attempt < maxRetries) await sleep(DEFAULT_LOCK_RETRY_MS * (attempt + 1));
+  }
+  return { skipped: 'lock_unavailable' };
+}
+
 /**
  * Post-commit hook for visit completion. Never throws, never sends any customer message.
- * Gated behind GATE_SMS_POST_VISIT_REDRAFT (dark by default) and claims a per-inbound advisory
- * lock (`recordHealth: false`) before generating so concurrent closeouts cannot duplicate spend.
+ * Gated behind GATE_SMS_POST_VISIT_REDRAFT (dark by default, also requires GATE_SMS_PROMPT_B1
+ * so findings actually load) and claims a per-inbound advisory lock (`recordHealth: false`)
+ * with bounded retry on lock-slot saturation (`no_connection`).
  */
 async function draftPostVisitRevisionIfEligible(opts = {}) {
-  const { customerId, serviceRecordId = null, completedAt, visitDateET, dbh = db, gates, draftFn, lockFn, threadHasLiveAnswerFn } = opts;
+  const { customerId, serviceRecordId = null, completedAt, visitDateET, dbh = db, gates, draftFn, lockFn, sleepFn, threadHasLiveAnswerFn } = opts;
   if (!customerId) return { skipped: 'missing_customer' };
   const featureGates = gates || require('../config/feature-gates');
   if (featureGates.smsPostVisitRedraftLive?.() !== true) return { skipped: 'gate_off' };
@@ -273,8 +287,8 @@ async function draftPostVisitRevisionIfEligible(opts = {}) {
   if (resolved.skipped) return resolved;
 
   try {
-    const acquire = lockFn || runExclusive;
-    const locked = await acquire(
+    return await runWithCapacityRetries(
+      lockFn || runExclusive,
       `sms-post-visit-redraft:${resolved.eligible.smsLogId}`,
       () => generateClaimedRevision({
         dbh,
@@ -283,9 +297,8 @@ async function draftPostVisitRevisionIfEligible(opts = {}) {
         serviceRecordId,
         draftFn,
       }),
-      { recordHealth: false },
+      { sleepFn },
     );
-    return wasLockSkipped(locked) ? { skipped: 'claim_in_flight' } : locked;
   } catch (err) {
     if (err?.code === '23505') return { skipped: 'already_revised' };
     logger.warn(`[sms-post-visit-redraft] revision draft failed for customer ${customerId}: ${err?.code || err?.name || 'error'}`);
