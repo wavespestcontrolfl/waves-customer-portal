@@ -1281,10 +1281,12 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
       );
       if (retireRefusal) {
         if (outcome.insertedNew) {
-          await db('invoice_promo_codes')
-            .where({ invoice_id: invoice.id, status: 'entered' })
-            .delete()
-            .catch(() => {});
+          await db.transaction(async (cleanupTrx) => {
+            await cleanupTrx('invoices').where({ id: invoice.id }).forUpdate().first('id');
+            await cleanupTrx('invoice_promo_codes')
+              .where({ invoice_id: invoice.id, status: 'entered' })
+              .delete();
+          }).catch(() => {});
         }
         return res.status(409).json({
           error: 'A payment is already in progress for this invoice — please wait a moment and refresh.',
