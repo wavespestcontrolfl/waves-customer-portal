@@ -443,6 +443,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
   const [zoneTarget, setZoneTarget] = useState(null); // schedule row → treatment-zone mapper open
   const [leadTarget, setLeadTarget] = useState(null);
+  const [leadServiceType, setLeadServiceType] = useState('');
   // The estimate tool: its setup is read once for the workspace (null = off, nothing of it shows). The sheet's
   // `service` is the visit it opened from; `leadProspect` fills the flag form when the office must price it.
   const estimateSetup = useTechEstimateSetup();
@@ -1083,7 +1084,8 @@ export default function TechHomePage({ section = 'today' }) {
                 stop={selectedVisit} detail={stopDetail[selectedVisit.primary.id]}
                 onRetry={() => loadStopDetail(selectedVisit)}
                 onPhotos={(service) => setPhotoTarget({ id: service.id, customerName: service.customerName || service.customer_name || 'Customer' })}
-                onProject={openServiceReport} onZone={setZoneTarget} onLead={setLeadTarget}
+                onProject={openServiceReport} onZone={setZoneTarget}
+                onLead={(service, initialType = '') => { setLeadServiceType(typeof initialType === 'string' ? initialType : ''); setLeadTarget(service); }}
                 onEstimate={estimateSetup ? (service) => setEstimateTarget({ service }) : null}
                 onOutcome={setOutcomeTarget}
                 techLine={techLine} request={techRequest}
@@ -1505,7 +1507,8 @@ export default function TechHomePage({ section = 'today' }) {
         <FieldLeadModal
           service={leadTarget}
           initialProspect={leadProspect}
-          onClose={() => { setLeadTarget(null); setLeadProspect(null); }}
+          initialServiceType={leadServiceType}
+          onClose={() => { setLeadTarget(null); setLeadProspect(null); setLeadServiceType(''); }}
         />
       )}
 

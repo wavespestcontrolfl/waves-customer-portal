@@ -79,11 +79,12 @@ function LeadWho({ neighborEnabled, mode, onMode, prospect, onProspect, customer
 }
 
 // `initialProspect` (from the estimate tool's "the office needs to price this one") opens the Neighbor form filled in.
-export default function FieldLeadModal({ service, onClose, onSubmit, initialProspect = null }) {
+// `initialServiceType` (from the Visit Brief's zero-price Add-On prompt) pre-selects Lawn or Pest for one-tap flagging.
+export default function FieldLeadModal({ service, onClose, onSubmit, initialProspect = null, initialServiceType = '' }) {
   const fieldPortalClass = useFieldPortalClass();
   const isMobile = useIsMobile();
   const dialogRef = useModalFocus(true, onClose);
-  const [serviceType, setServiceType] = useState('');
+  const [serviceType, setServiceType] = useState(SERVICE_TYPES.includes(initialServiceType) ? initialServiceType : '');
   const [notes, setNotes] = useState('');
   const [urgency, setUrgency] = useState('normal');
   const [submitting, setSubmitting] = useState(false);

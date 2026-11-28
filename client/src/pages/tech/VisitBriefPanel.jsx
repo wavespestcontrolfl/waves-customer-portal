@@ -1368,6 +1368,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // fetch uses (any current member id resolves the same stop server-side).
   const customerFlaggedMember = memberBits.find((m) => m.facts?.customerFlagged?.length) || null;
   const customerFlagged = customerFlaggedMember?.facts?.customerFlagged || null;
+  // Zero-price Pest <-> Lawn cross-sell prompt (owner 2026-11-27 "ok go").
+  const addonPrompt = memberBits.map((m) => m.facts?.addon_prompt).find(Boolean) || null;
   // Estimates dedupe by id: siblings booked from ONE estimate render it
   // once; separately-quoted siblings each render their own.
   const estimates = [];
@@ -1501,6 +1503,31 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           >
             Couldn't load estimate & access details — retry
           </button>
+        </div>
+      )}
+
+      {addonPrompt && (
+        <div
+          data-testid="visit-brief-addon-prompt"
+          style={{
+            marginTop: 12, padding: 12, borderRadius: 6,
+            border: `1px solid ${DARK.border}`, background: DARK.bg,
+          }}
+        >
+          <div style={{ fontSize: 14, fontWeight: 600, color: DARK.text }}>
+            Add-on opportunity · {addonPrompt.headline}
+          </div>
+          <p style={{ ...factMutedStyle, margin: '4px 0 8px' }}>{addonPrompt.detail}</p>
+          {onLead && (
+            <button
+              type="button"
+              className="tf-button"
+              onClick={() => onLead(service, addonPrompt.fieldLeadServiceType)}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <Flag aria-hidden="true" size={14} /> Flag {addonPrompt.targetLabel} Lead
+            </button>
+          )}
         </div>
       )}
 
