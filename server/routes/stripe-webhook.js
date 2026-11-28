@@ -1182,14 +1182,15 @@ async function handleStatementPaymentIntentSucceeded(Settle, paymentIntent, stat
       },
     },
   });
-  if (!settledNow) return;
-  logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
-  await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
-  const unrecorded = await Settle.enrollSettledPacketReviews(settledPacketInvoiceIds, { source: 'payer_statement_webhook' });
-  await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
-    .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
-  if (unrecorded.length) {
-    throw new Error(`statement S-${statementId} settled but ${unrecorded.length} packet review enrollment(s) are unrecorded — retrying on redelivery`);
+  if (settledNow) {
+    logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
+    await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
+    const unrecorded = await Settle.enrollSettledPacketReviews(settledPacketInvoiceIds, { source: 'payer_statement_webhook' });
+    await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
+      .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
+    if (unrecorded.length) {
+      throw new Error(`statement S-${statementId} settled but ${unrecorded.length} packet review enrollment(s) are unrecorded — retrying on redelivery`);
+    }
   }
 }
 
