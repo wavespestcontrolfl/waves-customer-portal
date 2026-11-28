@@ -10210,10 +10210,16 @@ function initScheduledJobs() {
         const today = etDateString();
         const yesterday = etDateString(addETDays(new Date(), -1));
         const { isInternalTestCustomerId } = require('./internal-test-customers');
+        // Include yesterday's stuck en_route/on_site visits ONLY when the
+        // notClosedOutQueue decision queue is enabled (P1-16 + Codex P2): when
+        // the queue is off, onSkip() counts every row as a customer no-show.
+        const yesterdayStatuses = require('../config/feature-gates').isEnabled('notClosedOutQueue')
+          ? ['pending', 'confirmed', 'en_route', 'on_site']
+          : ['pending', 'confirmed'];
         const rawCandidates = await require('./visit-hold').excludeHeld(db('scheduled_services')
           .where((q) => {
             q.where((todayQ) => todayQ.where('scheduled_date', today).whereIn('status', ['pending', 'confirmed']))
-              .orWhere((prevQ) => prevQ.where('scheduled_date', yesterday).whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site']));
+              .orWhere((prevQ) => prevQ.where('scheduled_date', yesterday).whereIn('status', yesterdayStatuses));
           })
           .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at'))
           // A street-level address hold the office has not cleared was never dispatched, so it cannot be

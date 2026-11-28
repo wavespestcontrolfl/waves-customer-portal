@@ -148,9 +148,13 @@ export function useDispatchAlerts() {
   // card change to the drawer, then drops the cards.
   const markResolved = useCallback((ids) => {
     const gone = new Set(ids);
-    if (!gone.size) return;
+    if (!gone.size) return 0;
+    let newlyResolved = 0;
     for (const id of gone) {
-      resolvedIdsRef.current.add(id);
+      if (!resolvedIdsRef.current.has(id)) {
+        newlyResolved += 1;
+        resolvedIdsRef.current.add(id);
+      }
       changedAtRef.current.delete(id);
       const known = alertsRef.current.find((a) => a.id === id);
       // A card this board never saw (resolved before hydration landed) could
@@ -161,10 +165,10 @@ export function useDispatchAlerts() {
     }
     setAlerts((prev) => {
       const next = prev.filter((a) => !gone.has(a.id));
-      const dropped = prev.length - next.length;
-      if (dropped > 0) setTotal((t) => Math.max(next.length, t - dropped));
+      if (newlyResolved > 0) setTotal((t) => Math.max(next.length, t - newlyResolved));
       return next;
     });
+    return newlyResolved;
   }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -380,8 +384,9 @@ export function useDispatchAlerts() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     markResolved(Array.isArray(data.alert_ids) ? data.alert_ids : []);
+    requestResync();
     return data;
-  }, [markResolved]);
+  }, [markResolved, requestResync]);
 
   // The dispatcher's call on a "Visit not closed out" card: 'confirm_miss'
   // ("This was a miss"), 'dismiss' ("Not a miss") or 'done' (a confirmed miss

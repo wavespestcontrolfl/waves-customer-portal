@@ -360,8 +360,8 @@ async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
   async function doWrite(t) {
     const rows = await t('dispatch_alerts')
       .whereNull('resolved_at')
-      // decision-only cards are never swept away: closing one records nothing
-      .whereNotIn('type', DECISION_ONLY_ALERT_TYPES)
+      // Protected decision cards are never swept away by bulk Clear (P0-8).
+      .whereNotIn('type', BULK_CLEAR_PROTECTED_ALERT_TYPES)
       .update({
         resolved_at: t.fn.now(),
         resolved_by: resolvedBy || null,
@@ -422,11 +422,18 @@ const OVERDUE_ALERT_AUTO_RESOLVE_STATUSES = new Set([
   'no_show',
 ]);
 
-// Cards that are settled ONLY by a recorded decision on the card itself (their
-// own routes), never by the generic Resolve or the queue's Clear: closing one of
-// these without a decision would drop the visit from the worklist with nothing
-// recorded and nothing to bring it back (P0-8).
+// Cards that are settled ONLY by dedicated decision buttons on the card itself
+// (visit_not_closed_out: "This was a miss" / "Not a miss" / "Done"), never by
+// single-card generic Resolve.
 const DECISION_ONLY_ALERT_TYPES = Object.freeze([
+  'visit_not_closed_out',
+]);
+
+// Cards protected from bulk "Clear alerts" (resolveAllOpenAlerts) so clearing
+// informational backlog never wipes actionable office work (P0-8). Cards not in
+// DECISION_ONLY_ALERT_TYPES (follow_up_needed, tech_out_overflow) still allow
+// deliberate single-card dismissal via resolveAlertAsDispatcher.
+const BULK_CLEAR_PROTECTED_ALERT_TYPES = Object.freeze([
   'visit_not_closed_out',
   'follow_up_needed',
   'tech_out_overflow',
@@ -547,6 +554,7 @@ module.exports = {
   OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,
   OVERDUE_ALERT_TYPES,
   DECISION_ONLY_ALERT_TYPES,
+  BULK_CLEAR_PROTECTED_ALERT_TYPES,
   EVENT,
   EVENT_RESOLVED,
   ROOM,

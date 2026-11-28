@@ -17,31 +17,61 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 describe('P0-8 & P2: dispatch-alerts decision-only protection and savepoint-safe post-commit emits', () => {
-  test('DECISION_ONLY_ALERT_TYPES protects visit_not_closed_out, follow_up_needed, and tech_out_overflow', async () => {
+  test('BULK_CLEAR_PROTECTED_ALERT_TYPES protects all 3 decision cards from bulk Clear while follow_up_needed retains single-card Resolve', async () => {
     await jest.isolateModulesAsync(async () => {
       const targetRows = new Map([
-        ['a-nco', { type: 'visit_not_closed_out', resolved_at: null }],
-        ['a-fu', { type: 'follow_up_needed', resolved_at: null }],
-        ['a-to', { type: 'tech_out_overflow', resolved_at: null }],
+        ['a-nco', { id: 'a-nco', type: 'visit_not_closed_out', resolved_at: null }],
+        ['a-fu', { id: 'a-fu', type: 'follow_up_needed', resolved_at: null }],
+        ['a-to', { id: 'a-to', type: 'tech_out_overflow', resolved_at: null }],
       ]);
-      const fakeDb = jest.fn(() => ({
-        where: jest.fn(({ id }) => ({
-          first: jest.fn().mockResolvedValue(targetRows.get(id) || null),
+      const whereNotInCalls = [];
+      const makeChain = (id) => ({
+        where: jest.fn(({ id: qid }) => ({
+          first: jest.fn().mockResolvedValue(targetRows.get(qid) || null),
+          whereNull: jest.fn().mockReturnThis(),
+          update: jest.fn().mockReturnThis(),
+          returning: jest.fn().mockResolvedValue(targetRows.get(qid) ? [{ ...targetRows.get(qid), resolved_at: new Date(), resolved_by: 'admin-1' }] : []),
         })),
-      }));
+        whereNull: jest.fn().mockReturnThis(),
+        whereNotIn: jest.fn((col, vals) => {
+          whereNotInCalls.push([col, vals]);
+          return {
+            update: jest.fn().mockReturnThis(),
+            returning: jest.fn().mockResolvedValue([]),
+          };
+        }),
+        whereIn: jest.fn().mockReturnThis(),
+        update: jest.fn().mockResolvedValue(0),
+      });
+      const fakeDb = jest.fn(() => makeChain());
+      fakeDb.fn = { now: jest.fn(() => 'NOW()') };
+      fakeDb.raw = jest.fn((s) => s);
+      fakeDb.transaction = jest.fn(async (cb) => cb(fakeDb));
       jest.doMock('../models/db', () => fakeDb);
       jest.doMock('../sockets', () => ({ getIo: jest.fn(() => null) }));
       jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-      const { DECISION_ONLY_ALERT_TYPES, resolveAlertAsDispatcher } = require('../services/dispatch-alerts');
-      expect(DECISION_ONLY_ALERT_TYPES).toEqual(
+      const {
+        DECISION_ONLY_ALERT_TYPES,
+        BULK_CLEAR_PROTECTED_ALERT_TYPES,
+        resolveAlertAsDispatcher,
+        resolveAllOpenAlerts,
+      } = require('../services/dispatch-alerts');
+
+      // Bulk Clear protects all three decision cards (P0-8).
+      expect(BULK_CLEAR_PROTECTED_ALERT_TYPES).toEqual(
         expect.arrayContaining(['visit_not_closed_out', 'follow_up_needed', 'tech_out_overflow']),
       );
+      await resolveAllOpenAlerts({ resolvedBy: 'admin-1' });
+      expect(whereNotInCalls[0]).toEqual(['type', BULK_CLEAR_PROTECTED_ALERT_TYPES]);
 
-      for (const id of ['a-nco', 'a-fu', 'a-to']) {
-        const res = await resolveAlertAsDispatcher({ id, resolvedBy: 'admin-1' });
-        expect(res).toEqual({ outcome: 'decision_required' });
-      }
+      // Single-card Resolve still requires dedicated buttons for visit_not_closed_out,
+      // while allowing explicit office dismissal of follow_up_needed and tech_out_overflow.
+      expect(DECISION_ONLY_ALERT_TYPES).toEqual(['visit_not_closed_out']);
+      expect(await resolveAlertAsDispatcher({ id: 'a-nco', resolvedBy: 'admin-1' }))
+        .toEqual({ outcome: 'decision_required' });
+      const fuRes = await resolveAlertAsDispatcher({ id: 'a-fu', resolvedBy: 'admin-1' });
+      expect(fuRes.outcome).toBe('resolved');
     });
   });
 
