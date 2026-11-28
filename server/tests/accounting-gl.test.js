@@ -66,6 +66,7 @@ const {
   startReconciliation,
   updateReconciliation,
   cancelReconciliation,
+  reopenReconciliation,
   toggleClearedLines,
 } = require('../services/accounting/reconciliation');
 const { lockPeriod } = require('../services/accounting/periods');
@@ -98,6 +99,8 @@ const {
   isBankCheckSupersededByMercury,
   matchesSettlementKeyBase,
   decideExpenseVendorAction,
+  extractMerchantRefundTarget,
+  recoverGrossExpenseCents,
   timestampToUtcDate,
 } = require('../services/accounting/sync-bridge');
 const migrationGl = require('../models/migrations/20261127140000_accounting_gl_core');
@@ -2513,5 +2516,188 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     expect(rev1099.vendors[0].total_paid_cents).toBe(300000);
     expect(rev1099.vendors[0].excluded_1099k_cents).toBe(0);
     expect(rev1099.vendors[0].filing_required).toBe(true);
+  });
+
+  test('Codex R8: reopenReconciliation requires newest-first unwinding and merchant refunds post separately from gross expenses', async () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    // 1. Reopening January while February is still finalized is rejected (409 RECONCILIATION_ORDER)
+    const janId = '00000000-0000-4000-8000-000000009001';
+    const febId = '00000000-0000-4000-8000-000000009002';
+    const acctId = byCode.get(SYSTEM_CODES.CHECKING_PRIMARY).id;
+    let firstCall = 0;
+    const makeReopenConn = (hasLaterFinalized) => {
+      firstCall = 0;
+      const trx = () => {
+        const chain = {
+          where: () => chain,
+          whereNot: () => chain,
+          orWhere: () => chain,
+          forUpdate: () => chain,
+          orderBy: () => chain,
+          select: () => chain,
+          first: () => {
+            firstCall += 1;
+            if (firstCall === 1) {
+              return Promise.resolve({
+                id: janId,
+                account_id: acctId,
+                status: 'reconciled',
+                statement_end_date: '2026-01-31',
+                reconciled_at: '2026-02-02T12:00:00Z',
+                notes: null,
+              });
+            }
+            if (firstCall === 2) return Promise.resolve(null); // no in-progress session
+            if (firstCall === 3) {
+              return Promise.resolve(hasLaterFinalized ? { id: febId, statement_end_date: '2026-02-28' } : null);
+            }
+            return Promise.resolve(null);
+          },
+          update: () => Promise.resolve(1),
+        };
+        return chain;
+      };
+      trx.raw = (sql) => sql;
+      trx.fn = { now: () => new Date() };
+      return { transaction: (fn) => fn(trx) };
+    };
+
+    await expect(
+      reopenReconciliation(janId, { reason: 'Fix Jan typo', conn: makeReopenConn(true) }),
+    ).rejects.toMatchObject({ status: 409, code: 'RECONCILIATION_ORDER' });
+
+    // 2. Merchant refunds (both refund_applied and releasedRefundOf) recover gross purchase amount
+    //    and post the refund separately on its bank transaction date
+    const expId = 'exp-merch-100';
+    const btRefId = '00000000-0000-4000-8000-000000007701';
+    const appliedBt = {
+      id: btRefId,
+      status: 'refund_applied',
+      amount: '20.00',
+      txn_date: '2026-08-05',
+      account_type: 'card',
+      account_label: 'Amex Blue',
+      description: 'WAWA REFUND',
+      suggestion: { refundAppliedTo: expId, refundAmount: 20 },
+    };
+    const releasedBt = {
+      id: '00000000-0000-4000-8000-000000007702',
+      status: 'ignored',
+      amount: '15.00',
+      txn_date: '2026-08-10',
+      account_type: 'card',
+      suggestion: { releasedRefundOf: expId },
+    };
+    expect(extractMerchantRefundTarget(appliedBt)).toEqual({ expenseId: expId, refundCents: 2000 });
+    expect(extractMerchantRefundTarget(releasedBt)).toEqual({ expenseId: expId, refundCents: 1500 });
+    expect(extractMerchantRefundTarget({ status: 'unmatched', amount: '20.00', suggestion: {} })).toBeNull();
+    expect(recoverGrossExpenseCents('80.00', 2000)).toBe(10000);
+    expect(recoverGrossExpenseCents('0.00', 10000)).toBe(10000);
+
+    // $100 July purchase reduced to $80 by an August $20 card refund -> July posts $100, August posts -$20
+    const julExpenseJe = rules.buildExpenseEntry({
+      sourceId: expId,
+      entryDate: '2026-07-10',
+      paymentAccountCode: SYSTEM_CODES.CREDIT_CARD_PRIMARY,
+      paymentMethod: 'card',
+      splits: [{ accountCode: SYSTEM_CODES.COGS_FIELD_VEHICLE, amountCents: recoverGrossExpenseCents('80.00', 2000) }],
+      memo: 'Wawa fuel',
+    });
+    const augRefundJe = rules.buildExpenseRefundEntry({
+      sourceId: btRefId,
+      entryDate: '2026-08-05',
+      paymentAccountCode: SYSTEM_CODES.CREDIT_CARD_PRIMARY,
+      paymentMethod: 'card',
+      bankTransactionId: btRefId,
+      splits: [{ accountCode: SYSTEM_CODES.COGS_FIELD_VEHICLE, amountCents: 2000 }],
+      reference: expId,
+      memo: 'Merchant refund — Wawa',
+    });
+    expect(validateJournalEntryInput(julExpenseJe).totalCents).toBe(10000);
+    expect(validateJournalEntryInput(augRefundJe).totalCents).toBe(2000);
+
+    // July balances match the $100 bank debit; YTD balances reflect net $80
+    const julSums = accumulateEntries(accounts, [julExpenseJe]);
+    expect(bal(julSums, SYSTEM_CODES.CREDIT_CARD_PRIMARY)).toBe(10000);
+    expect(bal(julSums, SYSTEM_CODES.COGS_FIELD_VEHICLE)).toBe(10000);
+
+    const ytdSums = accumulateEntries(accounts, [julExpenseJe, augRefundJe]);
+    expect(bal(ytdSums, SYSTEM_CODES.CREDIT_CARD_PRIMARY)).toBe(8000);
+    expect(bal(ytdSums, SYSTEM_CODES.COGS_FIELD_VEHICLE)).toBe(8000);
+
+    // End-to-end dryRun sync previews BOTH the gross July expense AND the separate August merchant refund
+    const merchConn = (table) => {
+      const state = { hasJoinExpenses: false };
+      const chain = {
+        leftJoin: () => chain,
+        join: (t) => {
+          if (String(t).startsWith('expenses')) state.hasJoinExpenses = true;
+          return chain;
+        },
+        where: () => chain,
+        whereIn: () => chain,
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(accounts);
+          if (table === 'expenses as e') {
+            return Promise.resolve([{
+              id: expId,
+              category_id: null,
+              description: 'Wawa fuel',
+              amount: '80.00',
+              tax_deductible_amount: null,
+              notes: null,
+              expense_date: '2026-07-10',
+              vendor_name: 'Wawa',
+              payment_method: 'card',
+              scheduled_service_id: null,
+              updated_at: '2026-08-05T15:00:00Z',
+              category_name: 'Fuel',
+            }]);
+          }
+          if (table === 'bank_transactions as bt') {
+            if (state.hasJoinExpenses) {
+              return Promise.resolve([{
+                ...appliedBt,
+                exp_id: expId,
+                category_id: null,
+                exp_description: 'Wawa fuel',
+                exp_notes: null,
+                vendor_name: 'Wawa',
+                payment_method: 'card',
+                scheduled_service_id: null,
+              }]);
+            }
+            return Promise.resolve([appliedBt]);
+          }
+          return Promise.resolve([]);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return chain;
+    };
+    merchConn.raw = (sql) => sql;
+    merchConn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+    const merchPreview = await syncSubledgersToGl({ fromDate: '2026-07-01', toDate: '2026-08-31', dryRun: true, conn: merchConn });
+    expect(merchPreview.expenses.would_post).toBe(2);
+    expect(merchPreview.expenses.errors).toEqual([]);
   });
 });

@@ -434,6 +434,29 @@ async function reopenReconciliation(reconciliationId, { reason = '', actorId = n
       throw new AccountingError(409, 'Finish or clear the existing in-progress reconciliation on this account first');
     }
 
+    const laterFinalized = await trx('gl_reconciliations')
+      .where({ account_id: rec.account_id, status: 'reconciled' })
+      .whereNot('id', validId)
+      .where((q) => {
+        q.where('statement_end_date', '>', rec.statement_end_date);
+        if (rec.reconciled_at) {
+          q.orWhere((sameDay) => {
+            sameDay.where('statement_end_date', rec.statement_end_date)
+              .where('reconciled_at', '>', rec.reconciled_at);
+          });
+        }
+      })
+      .orderBy('statement_end_date', 'desc')
+      .first('id', trx.raw('statement_end_date::text as statement_end_date'));
+    if (laterFinalized) {
+      const laterEnd = dateCellText(laterFinalized.statement_end_date);
+      throw new AccountingError(
+        409,
+        `Reopen the later finalized reconciliation (${laterEnd}) on this account first — statements must be unwound newest-first`,
+        'RECONCILIATION_ORDER',
+      );
+    }
+
     await trx('gl_reconciliations')
       .where({ id: validId })
       .update({

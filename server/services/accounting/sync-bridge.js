@@ -2735,14 +2735,68 @@ function settlementKeyForTaxFiling(btId, classification) {
 async function loadBankTxnCapabilities(conn) {
   const hasBankTxns = await conn.schema.hasTable('bank_transactions');
   if (!hasBankTxns) {
-    return { hasBankTxns: false, hasPlaidCol: false, hasCheckMatch: false, hasFilingMatch: false };
+    return { hasBankTxns: false, hasPlaidCol: false, hasCheckMatch: false, hasFilingMatch: false, hasSuggestionCol: false };
   }
-  const [hasPlaidCol, hasCheckMatch, hasFilingMatch] = await Promise.all([
+  const [hasPlaidCol, hasCheckMatch, hasFilingMatch, hasSuggestionCol] = await Promise.all([
     hasSchemaColumn(conn, 'bank_transactions', 'plaid_account_id'),
     hasSchemaColumn(conn, 'bank_transactions', 'matched_payroll_check_id'),
     hasSchemaColumn(conn, 'bank_transactions', 'matched_tax_filing_id'),
+    hasSchemaColumn(conn, 'bank_transactions', 'suggestion'),
   ]);
-  return { hasBankTxns: true, hasPlaidCol, hasCheckMatch, hasFilingMatch };
+  return { hasBankTxns: true, hasPlaidCol, hasCheckMatch, hasFilingMatch, hasSuggestionCol };
+}
+
+/**
+ * Pure: extract the target expense ID and refund amount (in cents) from a bank_transactions
+ * credit row that reduced an expense via apply-refund (`refund_applied` + `refundAppliedTo`)
+ * or was terminally released without restoring the expense (`ignored` + `releasedRefundOf`).
+ */
+function extractMerchantRefundTarget(btRow) {
+  if (!btRow) return null;
+  const suggestion = parseJsonObject(btRow.suggestion);
+  if (btRow.status === 'refund_applied' && suggestion.refundAppliedTo != null) {
+    const refundCents = safeNonNegCents(suggestion.refundAmount ?? btRow.amount);
+    return refundCents > 0 ? { expenseId: String(suggestion.refundAppliedTo), refundCents } : null;
+  }
+  if (btRow.status === 'ignored' && suggestion.releasedRefundOf != null) {
+    const refundCents = safeNonNegCents(btRow.amount);
+    return refundCents > 0 ? { expenseId: String(suggestion.releasedRefundOf), refundCents } : null;
+  }
+  return null;
+}
+
+/**
+ * Pure: recover the original gross purchase amount for an expense whose stored `amount` was
+ * reduced by one or more applied/released bank-import merchant refunds.
+ */
+function recoverGrossExpenseCents(expAmount, appliedRefundCents = 0) {
+  const netCents = dollarsToCents(expAmount);
+  if (netCents == null || netCents < 0) return null;
+  return netCents + Math.max(0, Math.trunc(Number(appliedRefundCents) || 0));
+}
+
+async function loadMerchantRefundTotalsByExpense(conn, expenseIds, bankCaps) {
+  const map = new Map();
+  if (!expenseIds.length || !bankCaps.hasBankTxns || !bankCaps.hasSuggestionCol) return map;
+  const idStrings = expenseIds.map(String);
+  const rows = await conn('bank_transactions as bt')
+    .where((q) => {
+      q.where((applied) => {
+        applied.where('bt.status', 'refund_applied')
+          .whereIn(conn.raw("bt.suggestion->>'refundAppliedTo'"), idStrings);
+      }).orWhere((released) => {
+        released.where('bt.status', 'ignored')
+          .whereIn(conn.raw("bt.suggestion->>'releasedRefundOf'"), idStrings);
+      });
+    })
+    .select('bt.id', 'bt.status', 'bt.amount', 'bt.suggestion');
+
+  for (const r of rows) {
+    const target = extractMerchantRefundTarget(r);
+    if (!target) continue;
+    map.set(target.expenseId, (map.get(target.expenseId) || 0) + target.refundCents);
+  }
+  return map;
 }
 
 async function loadMatchedBankTxnsForExpenses(conn, expenseIds, bankCaps) {
@@ -2939,9 +2993,9 @@ function latestAdjustmentDate(entryDate, timestamps) {
   return latest;
 }
 
-async function syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, vendorById, ctx) {
+async function syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, vendorById, ctx, appliedRefundCents = 0) {
   const entryDate = dateCellText(exp.expense_date);
-  const amountCents = dollarsToCents(exp.amount);
+  const amountCents = recoverGrossExpenseCents(exp.amount, appliedRefundCents);
   if (!entryDate || amountCents == null || amountCents < 0) return;
 
   const isLiabilitySettlement = Boolean(
@@ -3098,16 +3152,20 @@ async function syncExpenses(conn, from, to, ctx, plaidGlLookup = null, bankCapsA
       'e.scheduled_service_id', 'e.updated_at', 'c.name as category_name',
     );
 
-  const matchedBankByExpense = await loadMatchedBankTxnsForExpenses(conn, rows.map((r) => r.id), bankCaps);
+  const [matchedBankByExpense, refundTotalsByExpense] = await Promise.all([
+    loadMatchedBankTxnsForExpenses(conn, rows.map((r) => r.id), bankCaps),
+    loadMerchantRefundTotalsByExpense(conn, rows.map((r) => r.id), bankCaps),
+  ]);
   const unmatchedContractors = new Map();
   for (const exp of rows) {
-    const amountCents = dollarsToCents(exp.amount);
+    const appliedRefundCents = refundTotalsByExpense.get(String(exp.id)) || 0;
+    const grossAmountCents = recoverGrossExpenseCents(exp.amount, appliedRefundCents) || 0;
     const mapped = exp.category_id ? glByCatId.get(exp.category_id) : null;
     const matchedVendor = vendorLookup.match(exp.vendor_name);
     const matchedAnyVendor = matchedVendor || vendorLookup.matchAny(exp.vendor_name);
     const matchedBankTxn = matchedBankByExpense.get(String(exp.id)) || null;
 
-    if (exp.vendor_name && !matchedAnyVendor && amountCents > 0) {
+    if (exp.vendor_name && !matchedAnyVendor && grossAmountCents > 0) {
       ctx.stats.expenses.unmatched_vendors += 1;
       const isContractorCat = mapped?.code === SYSTEM_CODES.COGS_SUBCONTRACTORS
         || /contract|subcontract|1099/i.test(String(exp.category_name || ''));
@@ -3115,16 +3173,141 @@ async function syncExpenses(conn, from, to, ctx, plaidGlLookup = null, bankCapsA
         const key = normalizeVendorName(exp.vendor_name);
         const prev = unmatchedContractors.get(key) || { vendor_name: String(exp.vendor_name).trim(), count: 0, total_cents: 0 };
         prev.count += 1;
-        prev.total_cents += amountCents;
+        prev.total_cents += grossAmountCents;
         unmatchedContractors.set(key, prev);
       }
     }
 
-    await syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, vendorLookup.byId, ctx);
+    await syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, vendorLookup.byId, ctx, appliedRefundCents);
   }
 
   ctx.stats.expenses.unmatched_contractor_vendors = Array.from(unmatchedContractors.values());
   await reconcileRemovedOrExcludedExpenses(conn, from, to, ctx);
+  await syncExpenseMerchantRefunds(conn, from, to, ctx, glByCatId, vendorLookup, plaidGlLookup, bankCaps);
+}
+
+async function syncSingleMerchantRefundRow(row, mapped, matchedVendor, matchedExpBankTxn, plaidGlLookup, ctx) {
+  const target = extractMerchantRefundTarget(row);
+  const entryDate = dateCellText(row.txn_date);
+  if (!target || !entryDate) return;
+
+  const isLiabilitySettlement = Boolean(
+    matchedExpBankTxn?.matched_payroll_check_id
+    || (matchedExpBankTxn?.matched_tax_filing_id && classifyTaxFilingSettlement(matchedExpBankTxn)),
+  );
+  if (isLiabilitySettlement) return;
+
+  const fallbackPayCode = paymentAccountCodeForExpense(row.payment_method);
+  const resolvedPayment = resolveBankTxnGlAccount(row, plaidGlLookup, fallbackPayCode);
+  const expLike = {
+    id: row.exp_id,
+    notes: row.exp_notes,
+    scheduled_service_id: row.scheduled_service_id,
+  };
+  const splits = buildExpenseSplits(expLike, mapped, matchedVendor, target.refundCents);
+  const detail = [row.vendor_name, row.description || row.exp_description].filter(Boolean).join(' — ');
+  const memo = `Merchant refund — ${detail || row.exp_id}`.slice(0, 500);
+  const keyBase = `expense-refund:bt:${row.id}`;
+
+  const run = async (trx) => postOrRepostSettlement(trx, {
+    keyBase,
+    ctx,
+    bucket: 'expenses',
+    buildEntry: (revKey) => rules.buildExpenseRefundEntry({
+      sourceType: 'expense_refund',
+      sourceId: row.id,
+      idempotencyKey: revKey,
+      entryDate,
+      paymentAccountId: resolvedPayment.accountId,
+      paymentAccountCode: resolvedPayment.accountCode,
+      paymentMethod: row.payment_method || null,
+      bankTransactionId: row.id,
+      splits,
+      vendorId: matchedVendor ? matchedVendor.id : null,
+      reference: String(row.exp_id),
+      memo,
+    }),
+  });
+
+  if (ctx.dryRun) {
+    await run(ctx.conn);
+  } else {
+    await withEntitySyncLock(ctx.conn, `gl-sync-expense-refund:${row.id}`, run);
+  }
+}
+
+async function reconcileRemovedExpenseMerchantRefunds(conn, from, to, ctx) {
+  const stale = await conn('gl_journal_entries as e')
+    .leftJoin('bank_transactions as bt', conn.raw('bt.id::text = e.source_id'))
+    .leftJoin('expenses as ex', conn.raw("ex.id::text = COALESCE(bt.suggestion->>'refundAppliedTo', bt.suggestion->>'releasedRefundOf')"))
+    .leftJoin('expense_categories as ec', 'ec.id', 'ex.category_id')
+    .where({ 'e.source_type': 'expense_refund', 'e.status': 'posted' })
+    .whereNull('e.reversed_by_entry_id')
+    .where((win) => {
+      win.whereBetween('e.entry_date', [from, to])
+        .orWhereRaw("bt.updated_at IS NOT NULL AND DATE(bt.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to])
+        .orWhereRaw("ex.updated_at IS NOT NULL AND DATE(ex.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .where((invalid) => {
+      invalid.whereNull('bt.id')
+        .orWhereRaw("NOT ((bt.status = 'refund_applied' AND bt.suggestion->>'refundAppliedTo' IS NOT NULL) OR (bt.status = 'ignored' AND bt.suggestion->>'releasedRefundOf' IS NOT NULL))")
+        .orWhereNull('ex.id')
+        .orWhereRaw("COALESCE(ec.name, '') = 'Payroll (counted from pay runs)'")
+        .orWhereRaw("COALESCE(ec.irs_line, '') IN ('13', '30')");
+    })
+    .select(
+      'e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'),
+      'bt.updated_at as bt_updated_at', 'ex.updated_at as exp_updated_at',
+    );
+
+  for (const row of stale) {
+    const entryDay = dateCellText(row.entry_date);
+    const updatedDay = timestampToEtDate(row.bt_updated_at || row.exp_updated_at);
+    const revDate = updatedDay && updatedDay >= entryDay ? updatedDay : entryDay;
+    await reverseOrPreview(row, revDate, 'Merchant expense refund undone or target expense removed', ctx, 'expenses');
+  }
+}
+
+async function syncExpenseMerchantRefunds(conn, from, to, ctx, glByCatId, vendorLookup, plaidGlLookup, bankCaps) {
+  if (!bankCaps.hasBankTxns || !bankCaps.hasSuggestionCol) return;
+  const cols = [
+    'bt.id', 'bt.status', 'bt.amount', 'bt.suggestion', 'bt.description',
+    'bt.account_label', 'bt.account_type', 'bt.matched_at', 'bt.updated_at',
+    conn.raw('bt.txn_date::text as txn_date'),
+    'e.id as exp_id', 'e.category_id', 'e.description as exp_description',
+    'e.notes as exp_notes', 'e.vendor_name', 'e.payment_method', 'e.scheduled_service_id',
+  ];
+  if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id');
+
+  const rows = await conn('bank_transactions as bt')
+    .join('expenses as e', conn.raw("e.id::text = COALESCE(bt.suggestion->>'refundAppliedTo', bt.suggestion->>'releasedRefundOf')"))
+    .leftJoin('expense_categories as c', 'c.id', 'e.category_id')
+    .where((q) => {
+      q.where((applied) => {
+        applied.where('bt.status', 'refund_applied')
+          .whereRaw("bt.suggestion->>'refundAppliedTo' IS NOT NULL");
+      }).orWhere((released) => {
+        released.where('bt.status', 'ignored')
+          .whereRaw("bt.suggestion->>'releasedRefundOf' IS NOT NULL");
+      });
+    })
+    .where((win) => {
+      win.whereBetween('bt.txn_date', [from, to])
+        .orWhereRaw("DATE(COALESCE(bt.matched_at, bt.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .whereRaw("COALESCE(c.name, '') <> 'Payroll (counted from pay runs)'")
+    .whereRaw("COALESCE(c.irs_line, '') NOT IN ('13', '30')")
+    .select(...cols);
+
+  const matchedExpBank = await loadMatchedBankTxnsForExpenses(conn, rows.map((r) => r.exp_id), bankCaps);
+  for (const row of rows) {
+    const mapped = row.category_id ? glByCatId.get(row.category_id) : null;
+    const matchedVendor = vendorLookup.match(row.vendor_name);
+    const matchedExpBankTxn = matchedExpBank.get(String(row.exp_id)) || null;
+    await syncSingleMerchantRefundRow(row, mapped, matchedVendor, matchedExpBankTxn, plaidGlLookup, ctx);
+  }
+
+  await reconcileRemovedExpenseMerchantRefunds(conn, from, to, ctx);
 }
 
 // ── 7. Payroll Runs & Settlements (Mercury Paychecks, Bank-Matched Checks & Tax Filings) ─
@@ -3711,6 +3894,8 @@ module.exports = {
   isBankCheckSupersededByMercury,
   matchesSettlementKeyBase,
   decideExpenseVendorAction,
+  extractMerchantRefundTarget,
+  recoverGrossExpenseCents,
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildRefundedDepositRestorePayload,

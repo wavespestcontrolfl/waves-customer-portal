@@ -792,6 +792,70 @@ function buildExpenseEntry({
 }
 
 /**
+ * 6b. Merchant Refund on an Expense (bank-import statement credit applied to an expense).
+ *     Posted separately on the bank credit's settlement date so the original purchase keeps
+ *     its gross debit on the purchase date while the refund debits the bank/card account
+ *     and credits the expense (and personal draw split if shared) on the refund date.
+ */
+function buildExpenseRefundEntry({
+  sourceType = 'expense_refund',
+  sourceId,
+  idempotencyKey = null,
+  entryDate,
+  paymentAccountCode = SYSTEM_CODES.CHECKING_PRIMARY,
+  paymentAccountId = null,
+  paymentMethod = null,
+  splits,
+  vendorId = null,
+  bankTransactionId = null,
+  memo,
+  reference = null,
+}) {
+  if (!Array.isArray(splits) || splits.length === 0) {
+    throw new AccountingError(400, 'At least one expense refund split line is required');
+  }
+  let total = 0;
+  const creditLines = splits.map((s, idx) => {
+    const amt = posInt(s.amountCents, `splits[${idx}].amountCents`);
+    if (amt <= 0) throw new AccountingError(400, `splits[${idx}].amountCents must be > 0`);
+    total += amt;
+    return {
+      accountId: s.accountId || null,
+      accountCode: s.accountId ? null : (s.accountCode || SYSTEM_CODES.OPEX_UNCATEGORIZED),
+      debitCents: 0,
+      creditCents: amt,
+      vendorId: s.vendorId || vendorId,
+      paymentMethod: s.paymentMethod || paymentMethod,
+      serviceLine: s.serviceLine || null,
+      scheduledServiceId: s.scheduledServiceId || null,
+      memo: s.memo || null,
+    };
+  });
+
+  const debitLine = {
+    accountId: paymentAccountId || null,
+    accountCode: paymentAccountId ? null : paymentAccountCode,
+    debitCents: total,
+    creditCents: 0,
+    vendorId,
+    paymentMethod,
+    bankTransactionId,
+  };
+
+  return {
+    entryDate,
+    entryType: 'operational',
+    basisScope: 'both',
+    sourceType,
+    sourceId: String(sourceId),
+    idempotencyKey: idempotencyKey || `expense-refund:bt:${sourceId}`,
+    reference: reference || String(sourceId),
+    memo: memo || 'Merchant expense refund',
+    lines: [debitLine, ...creditLines],
+  };
+}
+
+/**
  * 7. Internal Bank Transfer or Credit Card Payment (zero P&L impact!).
  *    - Bank -> Mercury: DR 1020 Mercury / CR 1010 Checking
  *    - Checking -> Credit Card payment: DR 2000 Credit Card / CR 1010 Checking
@@ -1217,6 +1281,7 @@ module.exports = {
   buildCustomerCreditEntry,
   buildStripePayoutEntry,
   buildExpenseEntry,
+  buildExpenseRefundEntry,
   buildTransferEntry,
   buildSalesTaxRemittanceEntry,
   buildPayrollRunEntry,
