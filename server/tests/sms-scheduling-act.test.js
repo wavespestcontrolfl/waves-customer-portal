@@ -16,7 +16,9 @@ const VISIT_ID = '11111111-1111-4111-8111-111111111111';
 const OFFER = { id: 'offer-1', kind: 'move_visit', customer_id: 'cust-1', scheduled_service_id: VISIT_ID, sent_at: new Date('2026-10-02T13:00:00Z') };
 const SLOT = { date: '2026-10-06', start: '10:00', end: '12:00' };
 const VISIT = { id: VISIT_ID, customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-10-05', window_start: '08:00:00', window_end: '10:00:00' };
-const SVC = { ...VISIT, visit_id: null, self_booking_id: null, is_recurring: false, customer_active: true };
+const PRIMARY_PHONE = '+19415550101';
+const SECONDARY_PHONE = '+19415550199';
+const SVC = { ...VISIT, visit_id: null, self_booking_id: null, is_recurring: false, customer_active: true, customer_phone: PRIMARY_PHONE };
 
 // A knex stand-in for the two decision-row writes the executor makes itself.
 function fakeDb({ claim = true, marked = true } = {}) {
@@ -60,7 +62,8 @@ function fakeDeps(over = {}) {
 }
 
 const run = (over = {}, deps = fakeDeps(), fake = fakeDb()) => act.executeMove({
-  decisionId: 'dec-1', offer: OFFER, slot: SLOT, visit: VISIT, inboundSmsLogId: 'in-1', repliedAt: REPLIED, now: NOW, dbh: fake.dbh, deps, ...over,
+  decisionId: 'dec-1', offer: OFFER, slot: SLOT, visit: VISIT, inboundSmsLogId: 'in-1', repliedAt: REPLIED,
+  liveWebhook: true, fromPhone: PRIMARY_PHONE, accountHolderPhone: PRIMARY_PHONE, now: NOW, dbh: fake.dbh, deps, ...over,
 }).then((result) => ({ result, deps, fake }));
 
 afterEach(() => { delete process.env[GATE]; });
@@ -88,7 +91,13 @@ describe('gate on', () => {
     expect(typeof options.moveGuard).toBe('function');
     expect(deps.rebooker.rescheduleSeries).not.toHaveBeenCalled();
     // Pinned to the slot this move committed: a newer move's reminder state is never overwritten.
-    expect(deps.reminders.handleReschedule).toHaveBeenCalledWith(VISIT_ID, '2026-10-06T10:00', { expectSchedule: { date: '2026-10-06', windowStart: '10:00' }, timePromise: 'set_time', previousDate: '2026-10-05' });
+    expect(deps.reminders.handleReschedule).toHaveBeenCalledWith(VISIT_ID, '2026-10-06T10:00', {
+      expectSchedule: { date: '2026-10-06', windowStart: '10:00' },
+      timePromise: 'set_time',
+      previousDate: '2026-10-05',
+      customerInitiated: true,
+      customerInitiatedPhone: PRIMARY_PHONE,
+    });
     expect(deps.emitDispatchJobUpdate).toHaveBeenCalledTimes(1);
   });
 
@@ -100,8 +109,36 @@ describe('gate on', () => {
     const options = deps.rebooker.rescheduleSeries.mock.calls[0][5];
     expect(options).toMatchObject({ notifyRequested: true, expectAnchor: { scheduled_date: '2026-10-05', window_start: '08:00:00' } });
     expect(typeof options.moveGuard).toBe('function');
-    expect(deps.applySeriesMoveEffects).toHaveBeenCalledWith(expect.objectContaining({ serviceId: VISIT_ID, notify: true }));
+    expect(deps.applySeriesMoveEffects).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: VISIT_ID,
+      notify: true,
+      customerInitiated: true,
+      customerInitiatedPhone: PRIMARY_PHONE,
+    }));
     expect(deps.reminders.handleReschedule).not.toHaveBeenCalled();
+  });
+
+  test('recovered sweep replies, secondary-contact replies, and international suffix collisions keep quiet hours on BOTH single and series moves', async () => {
+    for (const over of [
+      { liveWebhook: false, fromPhone: PRIMARY_PHONE, accountHolderPhone: PRIMARY_PHONE },
+      { liveWebhook: true, fromPhone: SECONDARY_PHONE, accountHolderPhone: PRIMARY_PHONE },
+      // International (+65) whose full digits equal the 10-digit NANP domestic alias (6594155501 vs +16594155501)
+      { liveWebhook: true, fromPhone: '+6594155501', accountHolderPhone: '+16594155501' },
+    ]) {
+      const singleDeps = fakeDeps();
+      await run(over, singleDeps);
+      expect(singleDeps.reminders.handleReschedule).toHaveBeenCalledWith(
+        VISIT_ID,
+        '2026-10-06T10:00',
+        expect.objectContaining({ customerInitiated: false, customerInitiatedPhone: null }),
+      );
+
+      const seriesDeps = fakeDeps({ reschedulePublic: { shouldReanchor: jest.fn(() => true) } });
+      await run(over, seriesDeps);
+      expect(seriesDeps.applySeriesMoveEffects).toHaveBeenCalledWith(
+        expect.objectContaining({ serviceId: VISIT_ID, notify: true, customerInitiated: false, customerInitiatedPhone: null }),
+      );
+    }
   });
 
   test.each([
