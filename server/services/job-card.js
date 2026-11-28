@@ -2250,8 +2250,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000, mixingOrder, bermudaMixingOrder, mixRequired, bermudaRequired } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
   const tank = procedureCalibrationTank(calibrations, facts.rig, facts.technicianId, carrierGalPer1000);
   const procedureEntries = [
-    { name: facts.serviceType, serviceKey: facts.serviceKey, procedure, lines: lines.filter((l) => !l.source) },
-    ...addons.map((addon) => ({ name: addon.name, serviceKey: addon.serviceKey, procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
+    { name: facts.serviceType, serviceKey: facts.serviceKey, isAddon: false, procedure, lines: lines.filter((l) => !l.source) },
+    ...addons.map((addon) => ({ name: addon.name, serviceKey: addon.serviceKey, isAddon: true, procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
   ];
   attachMixCalibrationWarnings(procedureEntries, tank, facts.rig, systems);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
@@ -2266,6 +2266,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const rainRules = rainRulesFor(products, (p) => sprayServicesForProduct(p, lines, procedureEntries, facts));
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
   attachMixSprayVerdicts(procedureEntries, sprayCheck.verdicts);
+  const cardLines = [...lines, ...requiredMixRateLines(procedureEntries, lines, catalog)];
   if (isToday && products.length) {
     const shadow = sprayCheck;
     const names = new Map(products.map((p) => [p.id, p.name]));
@@ -2278,8 +2279,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
       .catch((err) => logger.warn(`[job-card] rain rule shadow not recorded: ${err.message}`));
   }
   if (readinessOnly) {
-    const extraRequiredLines = requiredMixRateLines(procedureEntries, lines, catalog);
-    const readiness = dispatchReadiness({ facts, lines: [...lines, ...extraRequiredLines], products, blocks, sprayCheck, tank, isToday, now });
+    const readiness = dispatchReadiness({ facts, lines: cardLines, products, blocks, sprayCheck, tank, isToday, now });
     // Truck kit (docs/tool-inventory-tracker-scope.md PR 2): a required tool
     // the assigned truck lacks is a hold like stock or weather (add-ons and
     // the never-fatal read live in truck-kit.js).
@@ -2288,7 +2288,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   // A chemical area add-on's card also says how many applications of its product the property has had in 12 months.
   const cards = await require('./area-addon-limits').attachLimitUse(
-    await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh }),
+    await buildProductCards({ facts, lines: cardLines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh }),
     { serviceId: facts.serviceId, visitDay: facts.scheduledDate, dbh },
   );
 
@@ -2723,6 +2723,13 @@ function rigLineVolumeWarnings({ lineCarrier, line, band, rigCtx }) {
   ].filter(Boolean);
 }
 
+function protocolSprayVolumeFallback(line, lineCarrier) {
+  if (lineCarrier || !line?.exactSprayVolume) return null;
+  const covered = line.conditional ? String(line.useText || '').toLowerCase() : '';
+  if (covered && covered.includes(line.exactSprayVolume.toLowerCase())) return null;
+  return `Protocol spray volume: ${line.exactSprayVolume}`;
+}
+
 function singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, rigCtx, serviceWarnings }) {
   const uncalWarn = uncalibratedRigBoundWarning({ lineCarrier, line: protocolLine, rigCtx });
   const capWarn = uncalWarn ? null : areaCapWarning({ band: perGallon, line: protocolLine, ...rigCtx });
@@ -2731,7 +2738,8 @@ function singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, ri
     : [];
   const labelWarnings = !protocolLine?.conflictLines && Array.isArray(protocolLine?.rowLabelWarnings) ? protocolLine.rowLabelWarnings : [];
   const useNotes = Array.isArray(protocolLine?.doseUseNotes) ? protocolLine.doseUseNotes : [];
-  return [...labelWarnings, uncalWarn, rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, capWarn, ...boundWarnings, ...useNotes, ...serviceWarnings].filter(Boolean);
+  const fallbackVol = protocolSprayVolumeFallback(protocolLine, lineCarrier);
+  return [...labelWarnings, fallbackVol, uncalWarn, rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, capWarn, ...boundWarnings, ...useNotes, ...serviceWarnings].filter(Boolean);
 }
 
 function statedLabelVolume(raw) {
@@ -2859,17 +2867,18 @@ function isConditionalMixRow(row) {
 }
 
 function requiredMixRateLines(entries, lines, catalog) {
-  const lineIds = new Set(lines.map((l) => String(l.product.id)));
+  const selectedLineIds = new Set(lines.filter((l) => l.selected !== false).map((l) => String(l.product.id)));
   const catalogById = new Map(catalog.map((p) => [String(p.id), p]));
   const out = [];
   for (const entry of entries) {
     for (const row of entryMixRateRows(entry)) {
       const id = row.productId ? String(row.productId) : null;
-      if (!id || lineIds.has(id) || isConditionalMixRow(row)) continue;
+      if (!id || selectedLineIds.has(id) || isConditionalMixRow(row)) continue;
       const product = catalogById.get(id);
       if (!product) continue;
-      lineIds.add(id);
-      out.push({ product, selected: true, raw: row.product || '' });
+      selectedLineIds.add(id);
+      const detail = [row.product, row.where, row.sprayVolume, row.limit].filter(Boolean).join(' — ');
+      out.push({ product, role: 'base', selected: true, raw: detail || row.product || '', ...(entry.isAddon ? { source: entry.name } : {}) });
     }
   }
   return out;
@@ -2936,7 +2945,8 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     // The row's own conditions ride with it whether or not a number can be worked out for it.
     const labelWarnings = Array.isArray(line.rowLabelWarnings) ? line.rowLabelWarnings : [];
     const useNotes = Array.isArray(line.doseUseNotes) ? line.doseUseNotes : [];
-    const warning = [...lineConditions(line), ...labelWarnings, ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx }), ...useNotes];
+    const fallbackVol = protocolSprayVolumeFallback(line, lineCarrier);
+    const warning = [...lineConditions(line), ...labelWarnings, fallbackVol, ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx }), ...useNotes].filter(Boolean);
     if (!used || line.directDoseOnly) {
       const directWarn = line.directDoseOnly ? [DIRECT_DOSE_NO_TANK] : [];
       return { service: line.name, amount: null, unit: null, fromCard: false, warnings: [...directWarn, ...warning], ...(line.conditional ? { conditional: true } : {}) };
@@ -3069,6 +3079,14 @@ function directDoseNotes(directRows) {
     const detail = [row.dose, row.note, row.limit ? `(${row.limit})` : null].filter(Boolean).join(' ');
     return detail ? `${label}${detail}` : null;
   }).filter(Boolean);
+}
+
+function exactSprayVolumeOf(mixRows) {
+  for (const row of mixRows || []) {
+    const text = String(row?.sprayVolume || '').trim();
+    if (text && parseSprayVolumeSpecs(text).exact) return text;
+  }
+  return null;
 }
 
 function unrepresentedSprayVolume(row) {
@@ -3228,6 +3246,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const { rate, declared } = protocolHitRate(h);
     const tankOverrides = (h.mixRows || []).flatMap((row) => tankTableOverrides(row?.sprayVolume));
     const rowLabelWarnings = rowLabelWarningsOf(h.mixRows);
+    const exactSprayVolume = exactSprayVolumeOf(h.mixRows);
     const explicitDilution = Boolean(h.mixRows.some((row) => row?.perGallon)) || (!h.useSpecific && lineRateIsDilution(h.hit.raw, h.hit.selected === false));
     return {
       rate, declared, labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
@@ -3239,6 +3258,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
       ...(specs.max ? { maxCarrier: specs.max } : {}),
       ...(tankOverrides.length ? { tankOverrides } : {}),
       ...(rowLabelWarnings.length ? { rowLabelWarnings } : {}),
+      ...(exactSprayVolume ? { exactSprayVolume } : {}),
       ...(h.doseUseNotes?.length ? { doseUseNotes: h.doseUseNotes } : {}),
       ...(h.directDoseOnly ? { directDoseOnly: true } : {}),
       ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),

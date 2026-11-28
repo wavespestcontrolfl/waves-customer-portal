@@ -4333,6 +4333,76 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       expect.objectContaining({ kind: 'weather', status: 'caution', label: 'Wind caution · Taurus SC' }),
     ]));
 
+    // The full Job Card also surfaces required mixRates-only products (preserving add-on service names) so shortages flagged by dispatch readiness are visible,
+    // and an unselected/optional line on one service never suppresses a required mixRates stock check from another booked service.
+    const fullReadinessCard = await jobCard.buildJobCard('svc21', {
+      dbh: readinessDb,
+      deps: { getRecentCalls: async () => [], getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(fullReadinessCard.products).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'taurus', name: 'Taurus SC', onHand: 0, lowStock: true }),
+    ]));
+
+    const optPlusReqProtocols = {
+      termite: {
+        name: 'Termite Liquid Trench & Rod',
+        visits: [{ visit: 3, month: 'Any', primary: 'Inspect trench', secondary: 'Taurus SC only when work order names Taurus' }],
+      },
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Exterior perimeter',
+          mixRates: [{ product: 'Taurus SC', where: 'Outside: foundation band', perGallon: { amount: 0.4, unit: 'fl oz' }, epa: '53883-279' }],
+        }],
+      },
+    };
+    const optPlusReqDb = dbFor({
+      scheduled_services: [{ id: 'svc24', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [windyEmptyTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control', service_key: 'pest_general_quarterly' }],
+    });
+    const optPlusReqReadiness = await jobCard.buildJobCard('svc24', {
+      dbh: optPlusReqDb,
+      readinessOnly: true,
+      deps: { protocols: optPlusReqProtocols, getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(optPlusReqReadiness.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'stock', status: 'hold', label: 'Company stock short' }),
+    ]));
+    const optPlusReqCard = await jobCard.buildJobCard('svc24', {
+      dbh: optPlusReqDb,
+      deps: { protocols: optPlusReqProtocols, getRecentCalls: async () => [], getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(optPlusReqCard.products).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'taurus', conditional: false, line: expect.stringContaining('Quarterly Pest Control:') }),
+    ]));
+
+    // When catalog ceiling rejects a protocol dilution that had an exact spray volume (e.g. Antapex 10 g/gal at 1 gal/1,000 sq ft vs 2-5 g/gal catalog),
+    // the fallback result keeps the protocol spray-volume instruction visible beside the catalog amount.
+    const cappedAntapex = { id: 'antapex-cap', name: 'Atticus Antapex WSG', epa_reg_number: '91234-401', default_rate: '2-5', default_unit: 'g/gal', label_verified_at: '2027-12-01', active: true };
+    const cappedAntapexDb = dbFor({
+      scheduled_services: [{ id: 'svc25', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
+      products_catalog: [cappedAntapex],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const cappedAntapexCalc = await jobCard.mixForProduct('antapex-cap', 4, { serviceId: 'svc25', dbh: cappedAntapexDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(cappedAntapexCalc).toMatchObject({ rateSource: 'catalog', amount: 8, amountMax: 20, unit: 'g' });
+    expect(cappedAntapexCalc.sprayVolumeGalPer1000).toBeUndefined();
+    expect(cappedAntapexCalc.warnings).toContain('Protocol dilution exceeds verified catalog label rate — confirm label before mixing.');
+    expect(cappedAntapexCalc.warnings).toContain('Protocol spray volume: 1 gal per 1,000 sq ft');
+
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
       products_catalog: [tristar],
