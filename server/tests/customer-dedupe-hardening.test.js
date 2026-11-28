@@ -621,6 +621,38 @@ describe('PR 3 merge & undo table coverage', () => {
       archived_sequence_ids: ['seq-l'],
     });
   });
+
+  test('predictCollisionFolds discloses losing-side pending standalone Auto Pay links without requiring a winner collision, and previewMergeEffects excludes standalone rows', async () => {
+    const whereNotCalls = [];
+    const database = (table) => {
+      const q = {
+        where() { return q; },
+        whereNot(col, val) { whereNotCalls.push([table, col, val]); return q; },
+        whereIn() { return q; },
+        whereNotNull() { return q; },
+        count() { return q; },
+        first: async () => (table === 'referral_promoters' ? null : { n: table === 'appointment_card_requests' ? 1 : 0 }),
+        select: async () => {
+          if (table === 'appointment_card_requests') {
+            return [{ customer_id: 'lose-1', kind: 'customer', status: 'pending' }];
+          }
+          return [];
+        },
+      };
+      return q;
+    };
+    database.raw = async () => ({
+      rows: [{ table_name: 'appointment_card_requests', column_name: 'customer_id' }],
+    });
+
+    const folds = await dedupe._test.predictCollisionFolds(database, { id: 'win-1' }, { id: 'lose-1' });
+    expect(folds.tables).toContain('appointment_card_requests');
+    expect(folds.details.appointment_card_requests).toMatch(/archived record has a pending standalone Auto Pay setup link/i);
+
+    const effects = await dedupe.previewMergeEffects(database, 'win-1', 'lose-1');
+    expect(whereNotCalls).toEqual([['appointment_card_requests', 'kind', 'customer']]);
+    expect(effects.moving.appointment_card_requests).toBe(1);
+  });
 });
 
 describe('Static CI ratchet: every customer_id table with a customer_id unique index or non-id PK is explicitly handled in customer-dedupe.js', () => {

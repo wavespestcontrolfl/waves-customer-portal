@@ -8070,7 +8070,15 @@ async function previewMergeEffects(database, winnerId, loserId) {
   // Sequential per-column, concurrent per-table: two FK columns on one table
   // are rare, but summing them concurrently would race on one accumulator.
   await Promise.all([...byTable].map(async ([table, columns]) => {
-    for (const column of columns) await countInto(table, () => database(table).where(column, loserId));
+    for (const column of columns) {
+      await countInto(table, () => {
+        let q = database(table).where(column, loserId);
+        if (table === 'appointment_card_requests' && typeof q.whereNot === 'function') {
+          q = q.whereNot('kind', 'customer');
+        }
+        return q;
+      });
+    }
   }));
   await Promise.all(POLYMORPHIC_CUSTOMER_POINTERS.map(({ table, typeColumn, idColumn }) =>
     countInto(`${table}.${idColumn}`, () => database(table).where({ [typeColumn]: 'customer', [idColumn]: loserId }))));
@@ -8391,8 +8399,10 @@ async function predictExtraTableCollisionFolds(database, read, winnerId, loserId
       .filter((r) => r.kind === 'customer' && r.status === 'pending')
       .map((r) => String(r.customer_id)),
   );
-  if (pendingApptCardOwners.has(String(winnerId)) && pendingApptCardOwners.has(String(loserId))) {
-    details.appointment_card_requests = 'both records have a pending standalone Auto Pay setup link: the archived record\'s link is expired in place';
+  if (pendingApptCardOwners.has(String(loserId))) {
+    details.appointment_card_requests = pendingApptCardOwners.has(String(winnerId))
+      ? 'both records have a pending standalone Auto Pay setup link: the archived record\'s link is expired in place'
+      : 'archived record has a pending standalone Auto Pay setup link: it is expired in place rather than transferred';
   }
   const rawFollowupRows = await read('click_followup_actions', ['customer_id', 'status']);
   const openFollowupOwners = new Set(
