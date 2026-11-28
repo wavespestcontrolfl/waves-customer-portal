@@ -6917,7 +6917,7 @@ function isPostVisitRevision(draftTrigger, supersedesDraftId) {
 }
 
 function revisionColumnPatch(isRevision, draftTrigger, supersedesDraftId) {
-  return isRevision ? { draft_trigger: draftTrigger, supersedes_draft_id: supersedesDraftId || null } : {};
+  return isRevision ? { draft_trigger: draftTrigger || 'post_visit_closeout', supersedes_draft_id: supersedesDraftId || null } : {};
 }
 
 function unansweredReplyStampForDraft(isRevision, args) {
@@ -6932,10 +6932,15 @@ function allowAutoSendForDraft({ skipAutoSend, isRevision, deliveryMode, autoSen
   return !skipAutoSend && !isRevision && deliveryMode === autoSendMode && lintPass;
 }
 
+function isGratitudeDraftCandidate({ isRevision, source, hasMedia, schedulingIntent, customer, smsLogId, inboundMessage }) {
+  return !isRevision && GRATITUDE_CLASSIFY_SOURCES.has(source) && !hasMedia && !schedulingIntent
+    && Boolean(customer?.id) && Boolean(smsLogId) && isGratitudeOnly(inboundMessage);
+}
+
 async function draftShadowReply({
   inboundMessage, fromPhone, customer, smsLogId, intent, schedulingIntent = false,
   source = null, hasMedia = false, asOf = null, liveEta,
-  draftTrigger = 'inbound', supersedesDraftId = null, skipAutoSend = false,
+  draftTrigger, supersedesDraftId, skipAutoSend,
 }) {
   const startedAt = Date.now();
   const isRevision = isPostVisitRevision(draftTrigger, supersedesDraftId);
@@ -6944,8 +6949,9 @@ async function draftShadowReply({
     // A late Mac draft (source 'mac_late') takes the same gratitude classification and prompt as a live
     // one, so its cohort matches; its stamp below keeps source 'mac_late', which the gratitude send sweep
     // refuses (sms-gratitude-context.js: provenance must be 'live_webhook'), so it can never be sent.
-    let gratitudeCandidate = !isRevision && GRATITUDE_CLASSIFY_SOURCES.has(source) && !hasMedia && !schedulingIntent
-      && customer?.id && smsLogId && isGratitudeOnly(inboundMessage);
+    let gratitudeCandidate = isGratitudeDraftCandidate({
+      isRevision, source, hasMedia, schedulingIntent, customer, smsLogId, inboundMessage,
+    });
     if (gratitudeCandidate) {
       intent = { intent: GRATITUDE_INTENT, confidence: 1, approvedReply: buildGratitudeReply(customer.first_name) };
     }
