@@ -421,7 +421,6 @@ function mapPurposeToMessageType(purpose) {
     case 'referral':            return 'referral';
     case 'retention':           return 'manual';
     case 'marketing':           return 'manual';
-    case 'lead_promotional_followup': return 'manual';
     case 'internal_briefing':   return 'internal_alert';
     case 'support_resolution':  return 'manual';
     default:                    return 'manual';

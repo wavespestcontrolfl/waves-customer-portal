@@ -9,17 +9,18 @@
  *
  * Audience: unquoted open residential leads (`status IN ('new', 'contacted')`, `is_commercial IS NOT TRUE`)
  * with a phone number, NO email address, explicit promotional SMS opt-in bound to that exact destination
- * phone (complete phone identity via `phoneMatchDigits`, never an inbound call/SMS bypass and never a
- * mismatched phone), no explicit marketing opt-out, no linked/created/sent estimate, no booked visit,
- * not a paying customer, and no prior SMS engagement (including Leads-page `lead_outreach`).
+ * phone (complete phone identity via `phoneMatchDigits`, SMS-capable `marketing_channel`, or explicit
+ * web-form `marketing_sms_opt_in === true` bound to submitted phone), no explicit marketing opt-out,
+ * no linked/created/sent estimate (including any phone-matched customer), no booked visit, not a paying
+ * customer, and no prior SMS engagement (including Leads-page `lead_outreach`).
  *
  * Durability & safety:
  *   - Durable pre-dispatch claim in `new_lead_phone_drip_sends (lead_id, step)` before calling Twilio
  *     (deleted ONLY on definitive `deliveryOutcome === 'not_sent'`; `'uncertain'` stays locked).
- *   - Holds the canonical phone lock (`withSmsHandoff`) through final suppression/consent/stop rechecks
- *     (`providerPreSendCheck` reading through `dbi`) and Twilio dispatch.
+ *   - Holds the canonical phone lock (`withSmsHandoff`) through final suppression/consent/stop/window
+ *     rechecks (`providerPreSendCheck` reading through `dbi` with current clock) and Twilio dispatch.
  *   - Uses `purpose: 'lead_promotional_followup'` (`requireConsent: 'marketing'`, `prefsColumn: 'marketing_offers'`).
- *   - Keyset-paginates by `(created_at, id)` so claiming step 2 never shifts pages or skips due leads.
+ *   - Keyset-paginates using PostgreSQL `created_at::text` so microseconds are never truncated.
  *   - Brand copy = "Waves" ONLY, zero owner name, approved "per application" unit, STOP on Touch 1, 8 AM–8 PM ET.
  */
 
@@ -82,6 +83,11 @@ function phonesShareIdentity(phoneA, phoneB) {
   return a.some((digits) => b.includes(digits));
 }
 
+function isSmsCapableMarketingChannel(channel) {
+  const normalized = String(channel || '').trim().toLowerCase();
+  return !normalized || normalized === 'sms' || normalized === 'both';
+}
+
 function pickDueStep(lead, sentClaims, now = new Date()) {
   if (!isEligibleUnquotedLeadRow(lead)) return null;
   const createdMs = new Date(lead.created_at).getTime();
@@ -110,17 +116,24 @@ function parseExtractedData(raw) {
 }
 
 /**
- * Verifies explicit promotional SMS opt-in bound to the exact destination phone (`phoneMatchDigits`)
- * and rejects whenever ANY customer row linked by `customer_id` or sharing that phone has
- * `sms_enabled = false` or `marketing_offers = false`.
+ * Loads all active customer/notification_prefs rows linked by `lead.customer_id` OR matching
+ * the lead's exact destination phone identity (`phoneMatchDigits`), evaluates promotional SMS
+ * consent, and returns `{ consentBasis, matchedCustomerIds }`.
  *
- * Inbound calls/texts without promotional opt-in are NOT accepted for scheduled sales texts.
+ * Rules:
+ *   - Any linked or phone-matched customer with `sms_enabled=false`, `marketing_offers=false`,
+ *     or `marketing_channel='email'` blocks promotional SMS immediately.
+ *   - Customer opt-in requires `marketing_offers === true`, SMS-capable `marketing_channel`,
+ *     and complete phone identity match against `lead.phone`.
+ *   - Web-form opt-in requires `extracted.marketing_sms_opt_in === true` (generic transactional
+ *     `sms_opt_in` does NOT qualify and an explicit `marketing_sms_opt_in === false` never passes)
+ *     bound to the original submitted phone matching `lead.phone`.
  */
-async function verifyLeadSmsConsent(conn, lead, matchDigitsInput = null) {
+async function resolveLeadPromotionalConsent(conn, lead, matchDigitsInput = null) {
   const matchDigits = Array.isArray(matchDigitsInput) && matchDigitsInput.length
     ? matchDigitsInput
     : phoneMatchDigits(lead?.phone);
-  if (!matchDigits.length) return null;
+  if (!matchDigits.length) return { consentBasis: null, matchedCustomerIds: [] };
 
   const prefRows = await conn('customers as c')
     .leftJoin('notification_prefs as np', 'np.customer_id', 'c.id')
@@ -129,37 +142,50 @@ async function verifyLeadSmsConsent(conn, lead, matchDigitsInput = null) {
       if (lead.customer_id) w.where('c.id', lead.customer_id);
       w.orWhereRaw("REGEXP_REPLACE(COALESCE(c.phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits]);
     })
-    .select('c.id', 'c.phone', 'np.sms_enabled', 'np.marketing_offers');
+    .select('c.id', 'c.phone', 'np.sms_enabled', 'np.marketing_offers', 'np.marketing_channel');
 
   const rows = Array.isArray(prefRows) ? prefRows : [];
-  if (rows.some((r) => r.sms_enabled === false || r.marketing_offers === false)) {
-    return null;
+  const matchedCustomerIds = [...new Set([lead.customer_id, ...rows.map((r) => r.id)].filter(Boolean))];
+  if (rows.some((r) => r.sms_enabled === false || r.marketing_offers === false || !isSmsCapableMarketingChannel(r.marketing_channel))) {
+    return { consentBasis: null, matchedCustomerIds };
   }
 
   const matchedOptedInCustomer = rows.find((r) => (
-    r.marketing_offers === true && phonesShareIdentity(r.phone, lead.phone)
+    r.marketing_offers === true
+    && isSmsCapableMarketingChannel(r.marketing_channel)
+    && phonesShareIdentity(r.phone, lead.phone)
   ));
   if (matchedOptedInCustomer) {
-    return { status: 'opted_in', source: 'customer_notification_prefs', phoneBound: true };
+    return {
+      consentBasis: { status: 'opted_in', source: 'customer_notification_prefs', phoneBound: true },
+      matchedCustomerIds,
+    };
   }
 
   const extracted = parseExtractedData(lead.extracted_data);
-  const webOptIn = CONSENTED_WEB_LEAD_TYPES.has(lead.lead_type)
-    && (extracted.marketing_sms_opt_in === true || extracted.sms_opt_in === true || extracted.sms_consent === true);
+  const webPromoOptIn = CONSENTED_WEB_LEAD_TYPES.has(lead.lead_type) && extracted.marketing_sms_opt_in === true;
   const submittedPhone = extracted.sms_consent_phone || extracted.submitted_phone || extracted.phone || null;
-  if (webOptIn && submittedPhone && phonesShareIdentity(submittedPhone, lead.phone)) {
-    return { status: 'opted_in', source: 'web_form_sms_opt_in', phoneBound: true };
+  if (webPromoOptIn && submittedPhone && phonesShareIdentity(submittedPhone, lead.phone)) {
+    return {
+      consentBasis: { status: 'opted_in', source: 'web_form_sms_opt_in', phoneBound: true },
+      matchedCustomerIds,
+    };
   }
 
-  return null;
+  return { consentBasis: null, matchedCustomerIds };
 }
 
-async function hasBlockingEstimate(conn, lead) {
+async function verifyLeadSmsConsent(conn, lead, matchDigitsInput = null) {
+  const { consentBasis } = await resolveLeadPromotionalConsent(conn, lead, matchDigitsInput);
+  return consentBasis;
+}
+
+async function hasBlockingEstimate(conn, lead, customerIds) {
   const est = await conn('estimates')
     .where((w) => {
       w.whereRaw("estimate_data->>'lead_id' = ?", [String(lead.id)]);
-      if (lead.customer_id) {
-        w.orWhere((c) => c.where('customer_id', lead.customer_id)
+      if (customerIds.length) {
+        w.orWhere((c) => c.whereIn('customer_id', customerIds)
           .andWhere((when) => when.where('created_at', '>=', lead.created_at).orWhere('sent_at', '>=', lead.created_at)));
       }
     })
@@ -167,19 +193,19 @@ async function hasBlockingEstimate(conn, lead) {
   return Boolean(est);
 }
 
-async function hasCustomerConversion(conn, customerId) {
-  if (!customerId) return null;
+async function hasCustomerConversion(conn, customerIds) {
+  if (!customerIds.length) return null;
   const booked = await conn('scheduled_services')
-    .where({ customer_id: customerId })
+    .whereIn('customer_id', customerIds)
     .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
     .first('id');
   if (booked) return 'visit_booked';
 
-  const paid = await conn('invoices').where({ customer_id: customerId, status: 'paid' }).first('id');
+  const paid = await conn('invoices').whereIn('customer_id', customerIds).where({ status: 'paid' }).first('id');
   if (paid) return 'paying_customer';
 
-  const cust = await conn('customers').where({ id: customerId }).first('pipeline_stage');
-  if (cust && CUSTOMER_STAGES.includes(cust.pipeline_stage)) return 'existing_customer';
+  const cust = await conn('customers').whereIn('id', customerIds).whereIn('pipeline_stage', CUSTOMER_STAGES).first('id');
+  if (cust) return 'existing_customer';
   return null;
 }
 
@@ -187,12 +213,12 @@ async function leadShouldStop(conn, lead) {
   const matchDigits = phoneMatchDigits(lead?.phone);
   if (!matchDigits.length) return { stop: 'invalid_phone', consentBasis: null };
 
-  const consentBasis = await verifyLeadSmsConsent(conn, lead, matchDigits);
+  const { consentBasis, matchedCustomerIds } = await resolveLeadPromotionalConsent(conn, lead, matchDigits);
   if (!consentBasis) return { stop: 'no_recorded_consent', consentBasis: null };
 
-  if (await hasBlockingEstimate(conn, lead)) return { stop: 'has_estimate', consentBasis: null };
+  if (await hasBlockingEstimate(conn, lead, matchedCustomerIds)) return { stop: 'has_estimate', consentBasis: null };
 
-  const converted = await hasCustomerConversion(conn, lead.customer_id);
+  const converted = await hasCustomerConversion(conn, matchedCustomerIds);
   if (converted) return { stop: converted, consentBasis: null };
 
   // Match complete phone identity (`phoneMatchDigits`) so domestic and international numbers
@@ -274,8 +300,12 @@ function buildPhoneDripHandoff(dbh, { customerId, phone }) {
   };
 }
 
-function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step }) {
+function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step, clock }) {
+  const nowFn = clock || (() => new Date());
   return async ({ dbi, database } = {}) => {
+    if (!isWithinSendHoursET(nowFn())) {
+      return { ok: false, code: 'OUTSIDE_DRIP_SEND_HOURS', reason: 'Outside 8 AM–8 PM ET drip send hours at handoff', retryable: true };
+    }
     const conn = dbi || database || dbh;
     const freshLead = await conn('leads').where({ id: leadId }).first(...LEAD_SELECT_COLS);
     if (!isEligibleUnquotedLeadRow(freshLead)) {
@@ -298,7 +328,7 @@ function buildHandoffPreSendCheck({ dbh, leadId, expectedPhone, step }) {
   };
 }
 
-async function processOnePhoneLead(dbh, lead, { now, sender }) {
+async function processOnePhoneLead(dbh, lead, { now, clock, sender }) {
   const claims = await dbh('new_lead_phone_drip_sends')
     .where({ lead_id: lead.id })
     .select('step', 'status', 'sent_at', 'claimed_at');
@@ -330,7 +360,7 @@ async function processOnePhoneLead(dbh, lead, { now, sender }) {
       entryPoint: DRIP_ENTRY_POINT,
       metadata: { original_message_type: activityType, lead_id: lead.id, drip_step: step, delivery_key: deliveryKey },
       withSmsHandoff: buildPhoneDripHandoff(dbh, { customerId: lead.customer_id, phone: destinationPhone }),
-      providerPreSendCheck: buildHandoffPreSendCheck({ dbh, leadId: lead.id, expectedPhone: destinationPhone, step }),
+      providerPreSendCheck: buildHandoffPreSendCheck({ dbh, leadId: lead.id, expectedPhone: destinationPhone, step, clock }),
     });
   } catch (err) {
     const definitive = err?.providerOutcome?.deliveryOutcome === 'not_sent';
@@ -371,53 +401,57 @@ async function fetchPhoneDripLeadPage(dbh, { cutoffOldest, cutoffNewest, cursor,
     .orderBy('id', 'asc')
     .limit(batchSize);
   if (cursor) {
-    q = q.whereRaw('(created_at, id) > (?, ?)', [cursor.created_at, cursor.id]);
+    q = q.whereRaw('(created_at, id) > (?::timestamptz, ?)', [cursor.created_at, cursor.id]);
   }
-  return q.select(...LEAD_SELECT_COLS);
+  return q.select(...LEAD_SELECT_COLS, dbh.raw('created_at::text as cursor_created_at'));
 }
 
-async function processPhoneOnlyLeadSmsDrip({
-  now = new Date(),
-  limit = 25,
-  pageSize = null,
-  dbh = db,
-  gates = null,
-  sendMessage = null,
-} = {}) {
-  const featureGates = gates || require('../config/feature-gates');
+async function processPhoneOnlyLeadSmsDrip(opts) {
+  const cfg = {
+    now: new Date(),
+    limit: 25,
+    pageSize: null,
+    dbh: db,
+    gates: null,
+    sendMessage: null,
+    clock: null,
+    ...opts,
+  };
+  const featureGates = cfg.gates || require('../config/feature-gates');
   if (featureGates.newLeadDripExtendedLive?.() !== true) {
     return { skipped: 'gate_off', checked: 0, sent: 0, stopped: 0, deferred: 0 };
   }
-  if (!isWithinSendHoursET(now)) {
+  if (!isWithinSendHoursET(cfg.now)) {
     return { skipped: 'quiet_hours', checked: 0, sent: 0, stopped: 0, deferred: 0 };
   }
 
-  const cutoffOldest = new Date(now.getTime() - 168 * HOUR_MS);
-  const cutoffNewest = new Date(now.getTime() - 48 * HOUR_MS);
-  const batchSize = Number(pageSize) > 0 ? Math.min(200, Number(pageSize)) : Math.min(200, Math.max(limit * 2, 50));
-  const sender = sendMessage || require('./messaging/send-customer-message').sendCustomerMessage;
+  const cutoffOldest = new Date(cfg.now.getTime() - 168 * HOUR_MS);
+  const cutoffNewest = new Date(cfg.now.getTime() - 48 * HOUR_MS);
+  const batchSize = Math.min(200, Number(cfg.pageSize) > 0 ? Number(cfg.pageSize) : Math.max(cfg.limit * 2, 50));
+  const sender = cfg.sendMessage || require('./messaging/send-customer-message').sendCustomerMessage;
+  const clock = cfg.clock || (() => new Date());
   const counts = { checked: 0, sent: 0, stopped: 0, deferred: 0 };
   let cursor = null;
 
-  while (counts.sent < limit) {
-    const leads = await fetchPhoneDripLeadPage(dbh, { cutoffOldest, cutoffNewest, cursor, batchSize });
+  while (counts.sent < cfg.limit && isWithinSendHoursET(clock())) {
+    const leads = await fetchPhoneDripLeadPage(cfg.dbh, { cutoffOldest, cutoffNewest, cursor, batchSize });
     if (!leads.length) break;
 
     for (const lead of leads) {
+      if (counts.sent >= cfg.limit || !isWithinSendHoursET(clock())) break;
       counts.checked += 1;
       try {
-        const outcome = await processOnePhoneLead(dbh, lead, { now, sender });
+        const outcome = await processOnePhoneLead(cfg.dbh, lead, { now: cfg.now, clock, sender });
         if (outcome in counts) counts[outcome] += 1;
       } catch (err) {
         counts.deferred += 1;
-        logger.warn(`[new-lead-phone-sms-drip] deferred lead ${lead.id}: ${err?.code || err?.name || 'error'}`);
+        logger.warn(`[new-lead-phone-sms-drip] deferred lead ${lead.id}: ${err?.code || 'error'}`);
       }
-      if (counts.sent >= limit) break;
     }
 
     if (leads.length < batchSize) break;
     const last = leads[leads.length - 1];
-    cursor = { created_at: last.created_at, id: last.id };
+    cursor = { created_at: last.cursor_created_at || last.created_at, id: last.id };
   }
 
   return { skipped: null, ...counts };
@@ -433,7 +467,9 @@ module.exports = {
   buildPhoneDripCopy,
   isWithinSendHoursET,
   phonesShareIdentity,
+  isSmsCapableMarketingChannel,
   pickDueStep,
+  resolveLeadPromotionalConsent,
   verifyLeadSmsConsent,
   leadShouldStop,
   buildPhoneDripHandoff,

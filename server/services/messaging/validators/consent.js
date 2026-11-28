@@ -16,13 +16,40 @@ const db = require('../../../models/db');
 const logger = require('../../logger');
 const { toE164 } = require('../../../utils/phone');
 
-function hasVerifiedLeadWebPromoOptIn(input, contactState) {
-  return input.audience === 'lead'
-    && input.purpose === 'lead_promotional_followup'
-    && !contactState?.customer
-    && input.consentBasis?.status === 'opted_in'
-    && input.consentBasis?.source === 'web_form_sms_opt_in'
-    && input.consentBasis?.phoneBound === true;
+function resolveLeadOrApplicantNoPrefs(input, policy, contactState) {
+  if (
+    (input.audience === 'lead' || input.audience === 'applicant') &&
+    policy.requireConsent === 'transactional' &&
+    input.consentBasis &&
+    ['transactional_allowed', 'opted_in'].includes(input.consentBasis.status)
+  ) {
+    return { ok: true };
+  }
+  if (
+    input.audience === 'lead' &&
+    policy.requireConsent === 'transactional' &&
+    input.purpose === 'conversational'
+  ) {
+    return { ok: true };
+  }
+  if (
+    input.audience === 'lead' &&
+    input.purpose === 'lead_promotional_followup' &&
+    !contactState?.customer &&
+    input.consentBasis?.status === 'opted_in' &&
+    input.consentBasis?.source === 'web_form_sms_opt_in' &&
+    input.consentBasis?.phoneBound === true
+  ) {
+    if (contactState?.suppressionLoaded !== true) {
+      return {
+        ok: false,
+        code: 'CONSENT_LOOKUP_FAILED',
+        reason: 'messaging_suppression state not positively loaded — required before lead promotional consent; retry advised',
+      };
+    }
+    return { ok: true };
+  }
+  return null;
 }
 
 /**
@@ -81,36 +108,8 @@ async function checkConsentForPurpose(input, policy, contactState) {
   let prefs = contactState ? contactState.prefs : null;
 
   if (!prefs) {
-    if (
-      // Applicants mirror the lead exemption: a job_applications row is
-      // never a customers/notification_prefs row (job-applicant rule), so
-      // an applicant-purpose send always arrives with an explicit
-      // transactional_allowed consentBasis from recruiting-comms.js — there
-      // is no prefs row to ever load instead.
-      (input.audience === 'lead' || input.audience === 'applicant') &&
-      policy.requireConsent === 'transactional' &&
-      input.consentBasis &&
-      ['transactional_allowed', 'opted_in'].includes(input.consentBasis.status)
-    ) {
-      return { ok: true };
-    }
-    if (
-      input.audience === 'lead' &&
-      policy.requireConsent === 'transactional' &&
-      input.purpose === 'conversational'
-    ) {
-      return { ok: true };
-    }
-    if (hasVerifiedLeadWebPromoOptIn(input, contactState)) {
-      if (contactState?.suppressionLoaded !== true) {
-        return {
-          ok: false,
-          code: 'CONSENT_LOOKUP_FAILED',
-          reason: 'messaging_suppression state not positively loaded — required before lead promotional consent; retry advised',
-        };
-      }
-      return { ok: true };
-    }
+    const noPrefsVerdict = resolveLeadOrApplicantNoPrefs(input, policy, contactState);
+    if (noPrefsVerdict) return noPrefsVerdict;
     if (contactState && contactState.customer) {
       // Known customer, no row → table defaults. Same fail-closed guard as
       // the customer-less conversational exception below: a pre-customer
