@@ -17,37 +17,44 @@ function positiveFee(value) {
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : null;
 }
 
+const ADDON_PRICE_KEYS = ['estimated_price', 'estimatedPrice', 'base_price', 'basePrice', 'price'];
+
+function firstAddonFee(addon) {
+  if (!addon) return null;
+  for (const key of ADDON_PRICE_KEYS) {
+    const parsed = positiveFee(addon[key]);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
+function addonCentsTotal(addons) {
+  if (!Array.isArray(addons)) return 0;
+  let total = 0;
+  for (const a of addons) {
+    const p = firstAddonFee(a);
+    if (p !== null) total += Math.round(p * 100);
+  }
+  return total;
+}
+
 function bookedWdoVisitFee(visit) {
   if (!visit || typeof visit !== 'object') return null;
   const rawEstimated = visit.estimated_price ?? visit.estimatedPrice;
-  if (rawEstimated !== null && rawEstimated !== undefined && rawEstimated !== '' && Number(rawEstimated) === 0) {
-    return null;
-  }
+  if (rawEstimated !== '' && rawEstimated != null && Number(rawEstimated) === 0) return null;
   const primary = positiveFee(visit.primary_line_price ?? visit.primaryLinePrice);
   const estimated = positiveFee(rawEstimated);
-  const hasExplicitDiscount = Number(visit.discount_amount ?? visit.discountAmount ?? 0) > 0
-    || Number(visit.primary_line_discount ?? visit.primaryLineDiscount ?? 0) > 0;
-  const addons = visit.service_addons ?? visit.serviceAddons;
-  const addonCents = Array.isArray(addons)
-    ? addons.reduce((sum, a) => {
-      const p = positiveFee(a?.estimated_price ?? a?.estimatedPrice ?? a?.base_price ?? a?.basePrice ?? a?.price);
-      return sum + (p !== null ? Math.round(p * 100) : 0);
-    }, 0)
-    : 0;
-  const hasBillableAddons = visit.has_billable_addons === true
-    || visit.hasBillableAddons === true
-    || addonCents > 0;
-  if (hasBillableAddons) {
-    if (primary === null || hasExplicitDiscount) return null;
-    if (estimated !== null) {
-      if (addonCents === 0) return null;
-      if (Math.round(primary * 100) + addonCents !== Math.round(estimated * 100)) return null;
-    }
+  const hasExplicitDiscount = Number(visit.discount_amount || visit.discountAmount || 0) > 0
+    || Number(visit.primary_line_discount || visit.primaryLineDiscount || 0) > 0;
+  const addonCents = addonCentsTotal(visit.service_addons || visit.serviceAddons);
+  if (visit.has_billable_addons || visit.hasBillableAddons || addonCents > 0) {
+    if (primary === null || hasExplicitDiscount || addonCents === 0) return null;
+    if (estimated !== null && Math.round(primary * 100) + addonCents !== Math.round(estimated * 100)) return null;
     return primary;
   }
   if (hasExplicitDiscount && estimated === null) return null;
   if (primary !== null && estimated !== null) return Math.min(primary, estimated);
-  return estimated ?? primary ?? null;
+  return estimated ?? primary;
 }
 
 async function loadLinkedWdoVisit(project, database) {

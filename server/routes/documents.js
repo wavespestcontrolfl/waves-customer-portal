@@ -789,15 +789,25 @@ function groupDocumentsByType(allDocs) {
 // — and nothing at all when the report rule withholds from this contact. The
 // total counts the same scoped reports (codex r18 P2): the holder's other
 // homes' reports are neither listed nor counted.
+async function unsuppressedServiceReports(services) {
+  const visible = [];
+  for (const svc of services) {
+    if (!(await serviceRecordReportSuppressed(svc, db))) visible.push(svc);
+  }
+  return visible;
+}
+
 async function listContactServiceReports(req, res) {
   if (await contactReportsWithheld(req)) return res.json({ documents: {}, total: 0 });
   const page = documentPageBounds(req.query);
   const serviceRecordCols = await db('service_records').columnInfo().catch(() => ({}));
   const scope = await contactRecordScope(req);
   const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols, scope), page);
-  const reports = await serviceReportEntries(services, { contactOnly: true });
+  const visibleServices = await unsuppressedServiceReports(services);
+  const reports = await serviceReportEntries(visibleServices, { contactOnly: true });
   const [{ count }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols, scope).count('service_records.id as count');
-  return res.json({ documents: groupDocumentsByType(reports), total: parseInt(count, 10) });
+  const suppressedCount = services.length - visibleServices.length;
+  return res.json({ documents: groupDocumentsByType(reports), total: Math.max(0, parseInt(count, 10) - suppressedCount) });
 }
 
 // =========================================================================
@@ -822,7 +832,9 @@ router.get('/', authenticate, async (req, res, next) => {
 
     // Auto-generated service_report entries for completed services
     const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols), page);
-    const autoGenDocs = await serviceReportEntries(services, { docs });
+    const visibleServices = await unsuppressedServiceReports(services);
+    const autoGenDocs = await serviceReportEntries(visibleServices, { docs });
+    const suppressedServiceCount = services.length - visibleServices.length;
 
     // Signed agreements, authorizations and forms (customer_contracts).
     const contractDocs = await signedContractDocuments(req.customerId, page);
@@ -960,7 +972,7 @@ router.get('/', authenticate, async (req, res, next) => {
       }
     }
     const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs, ...annualPlanDocs, ...contractDocs];
-    const totalOnFile = parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length + annualPlanDocs.length + contractCount;
+    const totalOnFile = parseInt(storedDocCount, 10) + Math.max(0, parseInt(serviceReportCount, 10) - suppressedServiceCount) + projectDocs.length + annualPlanDocs.length + contractCount;
 
     res.json({ documents: groupDocumentsByType(allDocs), total: totalOnFile });
   } catch (err) {

@@ -423,7 +423,7 @@ function redactSpecificAmounts(text, values) {
 // "2nd inspection $175" or "0% discount $175" resolve to 175 rather than 2 or 0.
 const WDO_FEE_THOUSANDS_RE = /^\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?$/;
 const WDO_FEE_DECIMAL_RE = /^(?:\d+(?:\.\d{1,2})?|\.\d{1,2})$/;
-const WDO_NEGATIVE_CURRENCY_RE = /(?:(?:^|[^\w])-\s*(?:US\$|USD|\$)|(?:US\$|USD|\$)\s*-|\(\s*(?:US\$|USD|\$))\s*(?:\d|\.\d)|(?:(?:^|[^\w])-|\()\s*(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*dollars?\b/i;
+const WDO_NEGATIVE_CURRENCY_RE = /(?:^|[^\w])-\s*(?:US\$|USD|\$)\s*(?:\d|\.\d)|(?:US\$|USD|\$)\s*-\s*(?:\d|\.\d)|\(\s*(?:US\$|USD|\$)\s*(?!0+(?:\.0+)?\s*(?:\)|[^.\d]))(?:\d|\.\d)|(?:^|[^\w])-\s*(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*dollars?\b|\(\s*(?!0+(?:\.0+)?\s*dollars?\b)(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*dollars?\b/i;
 const WDO_CURRENCY_TOKEN_RE = /(?:US\$|USD|\$)\s*(\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)|(\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*dollars?\b/gi;
 const WDO_CURRENCY_RANGE_AFTER_RE = /(?:US\$|USD|\$)\s*(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*(?:[-–—/]|to\b|through\b|thru\b|or\b)\s*(?:US\$|USD|\$)?\s*(?:\d|\.\d)/i;
 const WDO_CURRENCY_RANGE_BEFORE_RE = /^\s*(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*(?:[-–/]|to\b|through\b|thru\b|or\b)\s*(?:(?:US\$|USD|\$)\s*(?:\d|\.\d)|(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*dollars?\b)/i;

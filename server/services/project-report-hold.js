@@ -385,35 +385,24 @@ async function reconcileWdoReportHoldOnInvoiceVoid(trx, invoice, { priorStatus =
 // projects row so legacy records closed while held stay gated until released,
 // and records immediately unlock once payment releases the report. Zero DB
 // queries for non-WDO / non-project service records.
+const SCHEMA_MISSING_RE = /column .*report_hold|relation .*projects|column .*service_record_id/i;
+
 async function isServiceRecordProjectReportHeld(structuredNotes, database = db, { serviceRecordId = null } = {}) {
   const notes = structuredNotes && typeof structuredNotes === 'object' ? structuredNotes : {};
-  const isWdoProject = notes.projectType === 'wdo_inspection' || notes.reportHeld === true;
   const projectId = notes.projectId || null;
-  if (isWdoProject && projectId) {
-    try {
-      const row = await database('projects').where({ id: projectId }).first('report_hold_status');
-      if (row && 'report_hold_status' in row) return isReportHeld(row);
-      return notes.reportHeld === true;
-    } catch (err) {
-      if (!/column .*report_hold|relation .*projects/i.test(err.message)) {
-        logger.warn(`[report-hold] service-record hold lookup failed for project ${projectId}: ${err.message}`);
-        return notes.reportHeld === true || !(notes.portalAttached && notes.projectReport?.url);
-      }
-      return notes.reportHeld === true;
-    }
+  const byProject = (notes.projectType === 'wdo_inspection' || notes.reportHeld === true) && projectId;
+  const where = byProject ? { id: projectId } : (serviceRecordId ? { service_record_id: serviceRecordId } : null);
+  if (!where) return notes.reportHeld === true;
+  try {
+    const row = await database('projects').where(where).first('report_hold_status');
+    if (row && 'report_hold_status' in row) return isReportHeld(row);
+    return notes.reportHeld === true;
+  } catch (err) {
+    if (SCHEMA_MISSING_RE.test(err.message)) return notes.reportHeld === true;
+    logger.warn(`[report-hold] service-record hold lookup failed: ${err.message}`);
+    if (!byProject) return true;
+    return notes.reportHeld === true || !(notes.portalAttached && notes.projectReport && notes.projectReport.url);
   }
-  if (serviceRecordId) {
-    try {
-      const linked = await database('projects').where({ service_record_id: serviceRecordId }).first('id', 'report_hold_status');
-      if (linked && 'report_hold_status' in linked) return isReportHeld(linked);
-    } catch (err) {
-      if (!/column .*report_hold|relation .*projects|column .*service_record_id/i.test(err.message)) {
-        logger.warn(`[report-hold] service-record link hold lookup failed for service record ${serviceRecordId}: ${err.message}`);
-        return true;
-      }
-    }
-  }
-  return notes.reportHeld === true;
 }
 
 module.exports = {

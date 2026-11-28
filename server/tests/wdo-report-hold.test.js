@@ -2017,7 +2017,7 @@ describe('audit fixes', () => {
       // the release-time portal decision, not the closeout's "not attached" (the report was unsent then)
       expect(srWrites[0].structured_notes.sql).toMatch(/'portalAttached', \?::boolean, 'projectReport', jsonb_build_object/);
       // ...and the paid report's recommendations join the note the held completion wrote without them
-      expect(srWrites[0].technician_notes.sql).toBe('CASE WHEN technician_notes IS NOT DISTINCT FROM ? THEN ? ELSE technician_notes END');
+      expect(srWrites[0].technician_notes.sql).toBe('CASE WHEN technician_notes IS NOT DISTINCT FROM ? OR technician_notes IS NOT DISTINCT FROM ? THEN ? ELSE technician_notes END');
       const [attached, token, url, tokenOnly] = srWrites[0].structured_notes.bindings;
       expect(token).toBe('tok-1');
       expect(tokenOnly).toBe(!attached);

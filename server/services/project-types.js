@@ -1357,7 +1357,13 @@ function projectRecordedFeeValues(project, { scheduledService = null, extraValue
   // default just like a blank one, so it must count as digit-free in the
   // resolve step even when archived filings carry numeric fees
   // (codex #2817 r31).
-  const values = [findings?.inspection_fee ?? ''];
+  const rawLiveFee = findings?.inspection_fee ?? '';
+  const isWdo = project?.project_type === 'wdo_inspection';
+  const parsedLiveFee = isWdo ? require('./wdo-inspection-fee').parseWdoFeeAmount(rawLiveFee) : null;
+  // Treat non-numeric WDO prose (e.g. "2nd inspection") as blank ('') so
+  // resolveFeeValuesForScrub still adds the $250 default fallback alongside
+  // any booked visit or historical values (B-25 / Codex P1).
+  const values = [isWdo && parsedLiveFee === null ? '' : rawLiveFee];
   if (scheduledService && project?.project_type === 'wdo_inspection') {
     const { bookedWdoVisitFee } = require('./wdo-inspection-fee');
     const booked = bookedWdoVisitFee(scheduledService);

@@ -37,6 +37,7 @@ const {
   redactSpecificAmounts,
   resolveFeeValuesForScrub,
   projectRecordedFeeValues,
+  resolveProjectRecordedFeeValues,
   projectArchivedFeeValues,
   projectTypeHasInternalFindingKeys,
   projectTypeFreeTextKeys,
@@ -3314,6 +3315,27 @@ async function lockProjectForInvoiceResolve(trx, project) {
   return locked || {};
 }
 
+async function findAlreadyBilledProjectInvoice(conn, project, linkedInvoiceId) {
+  const clauses = [
+    linkedInvoiceId ? { col: 'id', val: linkedInvoiceId } : null,
+    project.scheduled_service_id ? { col: 'scheduled_service_id', val: project.scheduled_service_id } : null,
+    project.service_record_id ? { col: 'service_record_id', val: project.service_record_id } : null,
+  ].filter(Boolean);
+  if (!clauses.length) return null;
+  const row = await conn('invoices')
+    .where({ customer_id: project.customer_id })
+    .whereIn('status', PROJECT_INVOICE_ALREADY_BILLED_STATUSES)
+    .where(function billedLinkage() {
+      for (const c of clauses) this.orWhere({ [c.col]: c.val });
+    })
+    .orderBy('created_at', 'desc')
+    .first();
+  if (!row || !PROJECT_INVOICE_ALREADY_BILLED_STATUSES.includes(String(row.status || '').toLowerCase())) {
+    return null;
+  }
+  return row;
+}
+
 async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false, holdRequested = false }) {
   // No-charge WDO (owner ruling 2026-07-15, #2751 follow-up): an explicit $0
   // inspection fee means nothing is billed for this visit. Refuse the
@@ -3328,8 +3350,17 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     throw err;
   }
   if (invoiceId) {
+    const blocked = await findAlreadyBilledProjectInvoice(db, project, project.invoice_id);
+    if (blocked) {
+      await persistProjectInvoiceLink(project, blocked.id);
+      throw alreadyBilledProjectError(blocked);
+    }
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
+    if (PROJECT_INVOICE_ALREADY_BILLED_STATUSES.includes(String(explicit.status || '').toLowerCase())) {
+      await persistProjectInvoiceLink(project, explicit.id);
+      throw alreadyBilledProjectError(explicit);
+    }
     // A held send links its invoice only when the hold is armed (armReportHold writes the link under the project
     // lock, after every hold check): a refused held send never relinks the project.
     if (!holdRequested) await persistProjectInvoiceLink(project, explicit.id);
@@ -3351,6 +3382,14 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     const locked = await lockProjectForInvoiceResolve(trx, project);
     const linkedInvoiceId = locked.invoice_id || project.invoice_id;
 
+    // 0. Check disputed/paid/processing invoices on the project or visit FIRST
+    //    so an older draft on the same visit can never bypass a disputed link.
+    const alreadyBilled = await findAlreadyBilledProjectInvoice(trx, project, linkedInvoiceId);
+    if (alreadyBilled) {
+      await persistProjectInvoiceLink(project, alreadyBilled.id, trx);
+      throw alreadyBilledProjectError(alreadyBilled);
+    }
+
     // 1. Reuse the invoice already recorded on the project (covers ad-hoc
     //    projects with no service linkage, and the dry-run → send → resend path).
     if (linkedInvoiceId) {
@@ -3366,9 +3405,6 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     if (project.scheduled_service_id || project.service_record_id) {
       const linked = await trx('invoices')
         .where({ customer_id: project.customer_id })
-        // Same terminal/disputed exclusion as the in-lock re-check below (codex
-        // #3344 r9-round pre-push; B-48): without it a refunded/cancelled/disputed
-        // invoice is adopted HERE and returned before the guarded recheck runs.
         .whereNotIn('status', PROJECT_INVOICE_NON_REUSABLE_STATUSES)
         .where(function invoiceLinkage() {
           if (project.scheduled_service_id) this.orWhere({ scheduled_service_id: project.scheduled_service_id });
@@ -3379,31 +3415,6 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       if (linked) {
         await persistProjectInvoiceLink(project, linked.id, trx);
         return { invoice: await maybeRepriceWdoDraft(linked, project, { database: trx }), created: false };
-      }
-    }
-
-    // 2b. Don't re-bill an already-billed or disputed visit. The reuse checks
-    //     above skip 'paid'/'void'/'disputed', so without this an admin who
-    //     previews/resends a report whose invoice was paid, processing, or
-    //     disputed would fall through to step 3 and mint a duplicate bill.
-    const billedLinkClauses = [
-      linkedInvoiceId ? { col: 'id', val: linkedInvoiceId } : null,
-      project.scheduled_service_id ? { col: 'scheduled_service_id', val: project.scheduled_service_id } : null,
-      project.service_record_id ? { col: 'service_record_id', val: project.service_record_id } : null,
-    ].filter(Boolean);
-    if (billedLinkClauses.length) {
-      const alreadyBilled = await trx('invoices')
-        .where({ customer_id: project.customer_id })
-        .whereIn('status', PROJECT_INVOICE_ALREADY_BILLED_STATUSES)
-        .where(function billedLinkage() {
-          for (const c of billedLinkClauses) this.orWhere({ [c.col]: c.val });
-        })
-        .orderBy('created_at', 'desc')
-        .first();
-      if (alreadyBilled) {
-        // Record the link so the UI can point at the settled/disputed invoice.
-        await persistProjectInvoiceLink(project, alreadyBilled.id, trx);
-        throw alreadyBilledProjectError(alreadyBilled);
       }
     }
 
@@ -4593,11 +4604,19 @@ async function restoreHeldVisitReportLink(project, reportPath, portalAttached, d
         "coalesce(structured_notes, '{}'::jsonb) || jsonb_build_object('portalAttached', ?::boolean, 'projectReport', jsonb_build_object('token', ?::text, 'url', ?::text, 'tokenOnly', ?::boolean), 'reportHeld', false, 'projectTitle', ?::text)",
         [Boolean(portalAttached), project.report_token, portalAttached ? (reportPath || null) : null, !portalAttached, project.title || null],
       ),
-      // The paid report's recommendations join the visit note the held completion wrote without them (a note
-      // someone has since edited is left as it is).
-      technician_notes: db.raw('CASE WHEN technician_notes IS NOT DISTINCT FROM ? THEN ? ELSE technician_notes END', [
-        completionTechnicianNotes(project, { reportHeld: true }), completionTechnicianNotes(project),
-      ]),
+      // The paid report's recommendations join the visit note the held completion wrote without them
+      // (match both the new 'Project completed.' placeholder and legacy 'Project completed: <title>'
+      // notes written before B-58, while preserving staff-edited notes).
+      technician_notes: db.raw(
+        'CASE WHEN technician_notes IS NOT DISTINCT FROM ? OR technician_notes IS NOT DISTINCT FROM ? THEN ? ELSE technician_notes END',
+        [
+          completionTechnicianNotes(project, { reportHeld: true }),
+          project.title
+            ? `Project completed: ${redactProjectTitleForWrite(project.title, project.project_type, await resolveProjectRecordedFeeValues(project, database))}`
+            : 'Project completed.',
+          completionTechnicianNotes(project),
+        ],
+      ),
     });
 }
 

@@ -70,6 +70,16 @@ function suppressedTypedReport(record) {
   return Boolean(mode) && mode !== 'auto_send';
 }
 
+async function serviceReportSuppressedOrHeld(record) {
+  if (suppressedTypedReport(record)) return true;
+  let notes = record?.structured_notes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  const { isServiceRecordProjectReportHeld } = require('../services/project-report-hold');
+  return isServiceRecordProjectReportHeld(notes, db, { serviceRecordId: record?.id || null });
+}
+
 // Seasonal pest forecast for the V2 report dashboards (pest + mosquito).
 // Best-effort with a hard 4s cap — a forecast/network hiccup must never
 // block or slow a report render.
@@ -128,7 +138,7 @@ router.param('token', async (req, res, next, token) => {
     const record = await db('service_records')
       .where({ report_view_token: token })
       .first('id', 'structured_notes');
-    if (!record || !suppressedTypedReport(record)) return next();
+    if (!record || !(await serviceReportSuppressedOrHeld(record))) return next();
     // Staff bypass is READ-only review access. Writes on suppressed reports
     // mirror customer read eligibility and are rejected for everyone — a
     // staff token must not store customer state (ratings, events, questions)
@@ -760,7 +770,7 @@ async function buildServiceReportV1ResponseData(service, token, {
     }
   }
 
-  if (suppressedTypedReport(service)) {
+  if (await serviceReportSuppressedOrHeld(service)) {
     return { ...data, dynamicContext, pdfUrl: null, internalOnly: true, ...(staffViewer ? { staffViewer: true } : {}) };
   }
 
@@ -1209,9 +1219,9 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
     if (!service || service.report_template_version !== 'service_report_v1') {
       return res.status(404).json({ error: 'Report not found' });
     }
-    // Suppressed reports take no event writes from anyone — this route is
+    // Suppressed/held reports take no event writes from anyone — this route is
     // skipped by the central param gate so its limiter runs before DB work.
-    if (suppressedTypedReport(service)) {
+    if (await serviceReportSuppressedOrHeld(service)) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
@@ -1616,7 +1626,7 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     if (!service || service.report_template_version !== 'service_report_v1' || !service.customer_id) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    if (suppressedTypedReport(service)) {
+    if (await serviceReportSuppressedOrHeld(service)) {
       return res.status(404).json({ error: 'Report not found' });
     }
     // Callback reports no longer render the referral card (owner
@@ -1682,9 +1692,9 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
     if (!service || service.report_template_version !== 'service_report_v1') {
       return res.status(404).json({ error: 'Report not found' });
     }
-    // Suppressed reports take no rating writes from anyone — this route is
+    // Suppressed/held reports take no rating writes from anyone — this route is
     // skipped by the central param gate so its limiter runs before DB work.
-    if (suppressedTypedReport(service)) {
+    if (await serviceReportSuppressedOrHeld(service)) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
@@ -2055,7 +2065,7 @@ router.get('/:token', async (req, res, next) => {
     // Suppressed-report access is enforced by the router.param('token')
     // gate; reaching here with a suppressed record means a staff viewer —
     // their shadow reviews aren't customer views.
-    if (!suppressedTypedReport(service)) await trackServiceReportView(service);
+    if (!(await serviceReportSuppressedOrHeld(service))) await trackServiceReportView(service);
 
     if (service.report_template_version === 'service_report_v1') {
       // Embed a hash of Pest Pressure visibility-affecting config in the
@@ -2446,7 +2456,7 @@ router.get('/:token/data', async (req, res, next) => {
     // Suppressed-report access is enforced by the router.param('token')
     // gate; a suppressed record here means a staff viewer. Staff reads of
     // customer-visible reports skip tracking the same way.
-    if (mode === 'live' && !staffViewer && !suppressedTypedReport(service)) {
+    if (mode === 'live' && !staffViewer && !(await serviceReportSuppressedOrHeld(service))) {
       await trackServiceReportView(service);
     }
 

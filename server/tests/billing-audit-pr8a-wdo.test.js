@@ -728,6 +728,8 @@ describe('B-58: held WDO project suppresses title, recommendations, and legacy/s
   test('pre-push fixes: trailing comma fee text, discounted multi-addon refusal, report_token revocation on void, pre-closeout service_record_id hold & fee redaction', async () => {
     const { parseWdoFeeAmount } = require('@waves/report-redaction');
     expect(parseWdoFeeAmount('$0, waived')).toBe(0);
+    expect(parseWdoFeeAmount('No charge ($0)')).toBe(0);
+    expect(parseWdoFeeAmount('($175)')).toBeNull();
     expect(parseWdoFeeAmount('$175, due at closing')).toBe(175);
     expect(parseWdoFeeAmount('$1,250, due at closing')).toBe(1250);
     expect(parseWdoFeeAmount('$1,23, due')).toBeNull();
@@ -749,6 +751,19 @@ describe('B-58: held WDO project suppresses title, recommendations, and legacy/s
       { project_type: 'wdo_inspection', findings: { inspection_fee: '' } },
       { scheduledService: { estimated_price: 175 } },
     )).toEqual(['175', 250]);
+    expect(projectRecordedFeeValues(
+      { project_type: 'wdo_inspection', findings: { inspection_fee: '2nd inspection' } },
+    )).toEqual([250]);
+
+    const fs = require('fs');
+    const path = require('path');
+    const adminProjectsSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-projects.js'), 'utf8');
+    expect(adminProjectsSrc).toContain('findAlreadyBilledProjectInvoice');
+    expect(adminProjectsSrc).toContain('`Project completed: ${redactProjectTitleForWrite(');
+    const docsSrc = fs.readFileSync(path.join(__dirname, '../routes/documents.js'), 'utf8');
+    expect(docsSrc).toContain('unsuppressedServiceReports');
+    const reportsPublicSrc = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
+    expect(reportsPublicSrc).toContain('serviceReportSuppressedOrHeld');
 
     await jest.isolateModulesAsync(async () => {
       const updates = [];
