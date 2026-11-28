@@ -9295,21 +9295,22 @@ sandbox number first. Every sandbox disclosure `<Play>` uses the remastered
 telephony WAV (`client/public/audio/waves-greeting-notice.wav`, -16 LUFS 8 kHz
 mono PCM, served from the current deploy host via `express.static`, overridable
 by an `https://` `VOICE_SANDBOX_GREETING_URL`). When `GATE_VOICE_GPT_LIVE_TEST`
-is OFF (or `?mode=menu` is requested on `/relay-sandbox`), the handler renders
-a 6-second two-digit DTMF `<Gather>` (a relay-profile cell code,
-`relay-profiles.SANDBOX_CELLS`; '99' = the raw env attributes; no digits ⇒ the
-production profile) followed by the same `<Connect><ConversationRelay>` +
-per-call minted token that `/voice` renders — the WS secret never leaves the
-server. When `GATE_VOICE_GPT_LIVE_TEST` is ON (explicit owner approval
-2026-11-28), plain `POST /relay-sandbox` bypasses the `<Gather>` wait and
-answers directly into GPT-Live Marin (`cell: '71'`, `voice: 'marin'`) after
-one complete disclosure clip (`<Play>` → optional `<Start><Recording>` →
-`<Connect action="…/relay-sandbox/live-complete"><Stream .../></Connect>`).
-Initial-webhook query overrides preserve every test entry point: `?mode=menu`
-renders the legacy 2-digit `<Gather>` keypad menu, `?cell=72` (or `71`) connects
-directly to that GPT-Live voice (same signature check and budget reservation),
-and `?cell=<profile-code>` (e.g. `09`, `10`, `99`) plays the full disclosure
-once and connects directly to that ConversationRelay profile. Any `/relay-sandbox`
+is OFF, `/relay-sandbox` ALWAYS renders the documented 6-second two-digit DTMF
+`<Gather>` (ignoring any `?cell=` query parameter, `71`/`72` included) followed
+by the same `<Connect><ConversationRelay>` + per-call minted token that `/voice`
+renders — the WS secret never leaves the server. When `GATE_VOICE_GPT_LIVE_TEST`
+is ON (explicit owner approval 2026-11-28), plain `POST /relay-sandbox` bypasses
+the `<Gather>` wait and answers directly into GPT-Live Marin (`cell: '71'`,
+`voice: 'marin'`) after one complete disclosure clip (`<Play>` → optional
+`<Start><Recording>` → `<Connect action="…/relay-sandbox/live-complete"><Stream .../></Connect>`).
+Callable test entry points are preserved for runners and bake-offs:
+`?mode=menu` or `VOICE_SANDBOX_MENU_DEFAULT=true` restores the 2-digit `<Gather>`
+keypad menu (so normal DTMF dialing reaches `71`, `72`, `01`–`10`, and `99` via
+`/relay-sandbox/cell` with zero webhook-URL change when toggled), `?cell=72` (or
+`71`) connects directly to that GPT-Live voice (same signature check and budget
+reservation), and `?cell=<known sandbox code>` (`resolveSandboxCell`, e.g. `09`,
+`10`, `99`; unknown query values are ignored and never logged) plays the full
+disclosure once and connects directly to that ConversationRelay profile. Any `/relay-sandbox`
 request taking a GPT-Live path (plain default with the gate on, or `?cell=71`/`72`)
 verifies `X-Twilio-Signature` in the route BEFORE any `call_log`, ledger, or
 Twilio REST write (whatever the middleware mode) and fails closed with a spoken

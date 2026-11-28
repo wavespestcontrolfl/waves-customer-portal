@@ -2669,10 +2669,10 @@ async function respondSandboxGatherRelay(req, res, callSid, recordingOk) {
   return res.type('text/xml').send(relayXml.replace('<Response>', `<Response>${gatherInner}${recordingOk ? SANDBOX_RECORDING_XML : ''}`));
 }
 
-async function respondSandboxRelayCell(req, res, callSid, digits, recordingOk) {
-  const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
-  const cell = resolveSandboxCell(digits);
-  logger.info(`[relay-sandbox] direct cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(callSid)}`);
+async function respondSandboxRelayCell(req, res, callSid, cell, recordingOk) {
+  // Log only the static allowlisted profile ID (never raw query text).
+  const profileLabel = cell ? cell.relayProfileId : 'production_profile';
+  logger.info(`[relay-sandbox] direct profile → ${profileLabel} ${maskSid(callSid)}`);
   await stampRelayProfile(callSid, cell || activeRelayTwiMLOptions());
   const notice = new VoiceResponse();
   notice.play(practiceGreetingUrl(req));
@@ -2681,17 +2681,20 @@ async function respondSandboxRelayCell(req, res, callSid, digits, recordingOk) {
 }
 
 function resolveSandboxAnswerMode(req) {
+  // Gate off ⇒ always the documented <Gather> keypad flow, byte-identical
+  // regardless of any query parameter (?cell=71/72 included).
+  if (!require('../config/feature-gates').voiceGptLiveTestLive()) return { kind: 'gather' };
   const mode = String(req.query?.mode || '').trim().toLowerCase();
-  if (mode === 'menu') return { kind: 'gather' };
+  if (mode === 'menu' || process.env.VOICE_SANDBOX_MENU_DEFAULT === 'true') return { kind: 'gather' };
   const queryCell = String(req.query?.cell || '').trim();
   if (queryCell) {
     const liveCell = gptLiveCellFor(queryCell);
-    return liveCell ? { kind: 'gpt_live', liveCell } : { kind: 'relay_cell', digits: queryCell };
+    if (liveCell) return { kind: 'gpt_live', liveCell };
+    const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
+    const relayCell = resolveSandboxCell(queryCell);
+    if (relayCell) return { kind: 'relay_cell', cell: relayCell };
   }
-  if (require('../config/feature-gates').voiceGptLiveTestLive()) {
-    return { kind: 'gpt_live', liveCell: GPT_LIVE_DEFAULT_CELL };
-  }
-  return { kind: 'gather' };
+  return { kind: 'gpt_live', liveCell: GPT_LIVE_DEFAULT_CELL };
 }
 
 router.post('/relay-sandbox', async (req, res) => {
@@ -2793,7 +2796,7 @@ router.post('/relay-sandbox', async (req, res) => {
       return await respondGptLiveCell(req, res, CallSid, answerMode.liveCell, recordingOk ? SANDBOX_RECORDING_XML : '');
     }
     if (answerMode.kind === 'relay_cell') {
-      return await respondSandboxRelayCell(req, res, CallSid, answerMode.digits, recordingOk);
+      return await respondSandboxRelayCell(req, res, CallSid, answerMode.cell, recordingOk);
     }
     return await respondSandboxGatherRelay(req, res, CallSid, recordingOk);
   } catch (err) {
