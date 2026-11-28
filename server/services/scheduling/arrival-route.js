@@ -1556,8 +1556,9 @@ function savepointContextRefusal(context, strictPlace) {
 }
 
 async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, autoDispatchPlace = false, startPoints = false, vanDepartureMin, expectedNeighbours = null }) {
+  const visitHold = require('../visit-hold');
   const row = await sp('scheduled_services').where({ id: serviceId })
-    .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
+    .first('scheduled_date', 'technician_id', 'window_start', 'window_end', ...visitHold.heldColumn());
   const date = row ? dateOnly(row.scheduled_date) : '';
   const strictPlace = autoDispatchPlace === true || Boolean(expectedNeighbours);
   const refuse = (reason) => {
@@ -1565,6 +1566,7 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, au
     return refusePlacement(serviceId, source, reason, date);
   };
   if (!row) return refuse('no_context');
+  if (visitHold.rowIsHeld(row)) return refuse('on_hold');
   if (!row.technician_id) return refuse('unassigned');
   if (!row.window_start || !date) return refuse('untimed');
   if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
@@ -1608,8 +1610,8 @@ async function persistCapacityAllocation(conn, anchor, memberIds) {
   // order. A busy reorder rolls this allocation back for a recoverable retry.
   if (!await require('./tech-day-lock').lockTechDays(conn,
     [{ techId: anchor.technician_id, date: dateOnly(anchor.scheduled_date) }], { wait: false })) throw capacityError();
-  const rows = await conn('scheduled_services').where({ scheduled_date: dateOnly(anchor.scheduled_date),
-    technician_id: anchor.technician_id }).select('id', 'route_order', 'window_start', 'created_at');
+  const rows = await require('../visit-hold').excludeHeld(conn('scheduled_services').where({ scheduled_date: dateOnly(anchor.scheduled_date),
+    technician_id: anchor.technician_id }), 'scheduled_services').select('id', 'route_order', 'window_start', 'created_at');
   const order = currentOrder(rows).filter(row => row.id === anchor.id || !memberIds.includes(row.id))
     .flatMap(row => row.id === anchor.id ? memberIds : [row.id]);
   if (!order.includes(anchor.id)) throw capacityError();

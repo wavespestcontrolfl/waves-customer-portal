@@ -19,6 +19,7 @@ async function loadGapCandidate(serviceId, conn) {
   if (!service) return { unavailable: 'candidate_not_found' };
   if (!['pending', 'confirmed'].includes(service.status) || service.reservation_expires_at
     || service.customer_active !== true || service.customer_deleted_at) return { unavailable: 'candidate_not_active' };
+  if (require('../visit-hold').rowIsHeld(service)) return { unavailable: 'candidate_on_hold' };
   if (service.auto_dispatch_locked || service.auto_dispatch_excluded) return { unavailable: 'candidate_locked_or_excluded' };
   const preferences = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, conn, { serviceId: service.service_id, serviceKey: service.service_key_snapshot });
   const deactivated = await conn('technician_capabilities').where({ service_category: preferences.service_category, active: false }).pluck('technician_id');

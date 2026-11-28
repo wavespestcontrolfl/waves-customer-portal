@@ -1158,6 +1158,47 @@ describe('slot reservation helpers', () => {
         expect(updateBuilder.update).not.toHaveBeenCalled();
       } finally { capabilities.mockRestore(); jest.useRealTimers(); }
     });
+
+    test('a winter hold committed under seasonal9 mosquito is refused SLOT_UNAVAILABLE, nothing written', async () => {
+      jest.useFakeTimers(); jest.setSystemTime(new Date('2027-11-01T15:00:00Z'));
+      const origSeasonalProfile = estimateSlotAvailability.seasonalSelectionProfile;
+      const origInSeason = estimateSlotAvailability.inMosquitoSeason;
+      estimateSlotAvailability.seasonalSelectionProfile = jest.fn(() => true);
+      estimateSlotAvailability.inMosquitoSeason = jest.fn(() => false);
+      try {
+        const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-11-20' }) };
+        const reservationBuilder = {
+          where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
+          first: jest.fn().mockResolvedValue({
+            id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-11-20',
+            window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
+            reservation_expires_at: '2027-11-20T13:15:00.000Z',
+          }),
+        };
+        const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+        const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+        const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true });
+        const trx = jest.fn((table) => {
+          if (table === 'scheduled_services') return scheduledBuilders.shift();
+          if (table === 'technicians') return techBuilder;
+          if (table === 'technician_absences') return { where: () => ({ whereNull: () => ({ first: async () => null }) }) };
+          throw new Error(`unexpected table ${table}`);
+        });
+        trx.raw = jest.fn((sql) => ({ raw: sql }));
+        trx.isTransaction = true;
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+          estimatedPrice: 99, estimate: { id: 'estimate-456', service_interest: 'Mosquito Control' },
+          selectedFrequency: 'seasonal9', trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: expect.stringMatching(/February through October/) });
+        expect(estimateSlotAvailability.inMosquitoSeason).toHaveBeenCalledWith('2027-11-20');
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally {
+        estimateSlotAvailability.seasonalSelectionProfile = origSeasonalProfile;
+        estimateSlotAvailability.inMosquitoSeason = origInSeason;
+        jest.useRealTimers();
+      }
+    });
   });
 
   test('commitReservation rebinds the held row to the accepted service profile', async () => {
