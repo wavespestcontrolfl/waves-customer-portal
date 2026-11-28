@@ -213,7 +213,7 @@ function ButtonLabel({ children }) {
   return <span className="block max-w-full text-center leading-tight" style={{ fontSize: 14 }}>{children}</span>;
 }
 
-function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
+function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, canAssign = true, onQuickAction, onRefresh }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
   const needsAttention =
@@ -262,7 +262,9 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onViewAudit, o
     Boolean(service.customerId || service.customer_id);
   const showEnRoute = Boolean(onEnRoute) && canMarkEnRoute(service);
   const showNavigate = Boolean(service.address);
-  const canAssignTechnician = (technicians || []).length > 0 || Boolean(service.technicianId);
+  // Only admins with a technician list can reassign stops (P1-10: prevents
+  // Tech #2 from seeing a primary Tech picker that 403s on select).
+  const canAssignTechnician = Boolean(canAssign && technicians.length);
   const hasActions =
     canAssignTechnician || showProtocol || showAudit || showEnRoute || showNavigate;
 
@@ -534,7 +536,7 @@ function withOpenHours(sorted, openHours) {
   return rows;
 }
 
-function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
+function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, canAssign = true, onQuickAction, onRefresh, onCreateSlot, outTechIds, bookingHours }) {
   const sorted = useMemo(() => sortByWindow(services || []), [services]);
   const now = useHourClock();
   // Techs marked out for the day can't take a booking; with the whole roster
@@ -623,6 +625,7 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
             onViewAudit={onViewAudit}
             owesCompletion={owesCompletion}
             technicians={technicians}
+            canAssign={canAssign}
             onQuickAction={onQuickAction}
             onRefresh={onRefresh}
           />
@@ -645,7 +648,7 @@ function DaySegment({ dateStr, services, weekDay, rainChance, onEdit, onEnRoute,
   );
 }
 
-export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
+export default function MobileDispatchList({ mode, date, services, refreshKey, onEdit, onEnRoute, onProtocol, onViewAudit, owesCompletion, technicians, canAssign = true, onQuickAction, onRefresh, onCreateSlot, bookingHours }) {
   const [weekData, setWeekData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -707,6 +710,7 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           onViewAudit={onViewAudit}
           owesCompletion={owesCompletion}
           technicians={technicians}
+          canAssign={canAssign}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
           onCreateSlot={onCreateSlot}
@@ -745,6 +749,7 @@ export default function MobileDispatchList({ mode, date, services, refreshKey, o
           onViewAudit={onViewAudit}
           owesCompletion={owesCompletion}
           technicians={technicians}
+          canAssign={canAssign}
           onQuickAction={onQuickAction}
           onRefresh={onRefresh}
           // A week still loading shows the previous week's rows: no booking from them.

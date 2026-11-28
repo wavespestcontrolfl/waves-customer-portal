@@ -2438,8 +2438,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   useEffect(() => {
     let cancelled = false;
     const customerId = service.customerId || service.customer_id;
-    setAddressState("loading");
     setSelectedPropertyId("");
+    if (!customerId) {
+      setAddressOptions([]);
+      setAddressState("ready");
+      return undefined;
+    }
+    setAddressState("loading");
     adminFetch(`/admin/customers/${customerId}/properties?context=appointment_address`)
       .then((data) => {
         if (cancelled) return;
@@ -3254,11 +3259,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const initialScheduledDate = service.scheduledDate
     ? String(service.scheduledDate).split("T")[0]
     : "";
-  const initialWindowStart = service.windowStart || "";
+  const initialWindowStart = String(service.windowStart || "").slice(0, 5);
+  const currentWindowStart = String(form.windowStart || "").slice(0, 5);
   const scheduleMoved =
     (form.scheduledDate !== initialScheduledDate ||
-      (form.windowStart || "") !== initialWindowStart) &&
-    !!form.windowStart;
+      currentWindowStart !== initialWindowStart) &&
+    !!currentWindowStart;
   const moveNotifyOffered = scheduleMoved;
 
   // See lineDiscountSaveBlocked's own comment for the compounding hazard
@@ -7725,6 +7731,15 @@ function protocolMonthForService(service) {
   );
 }
 
+function currentETMonthNumber() {
+  try {
+    const m = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "numeric" }).format(new Date()));
+    return Number.isFinite(m) && m >= 1 && m <= 12 ? m : new Date().getMonth() + 1;
+  } catch {
+    return new Date().getMonth() + 1;
+  }
+}
+
 const NO_TICKS = [];
 
 // `initialSection`: the tab to open on ("lawn_plan" from the Plan entry points); lawn visits only.
@@ -7815,10 +7830,21 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
       ? "lawn_protocol"
       : "overview");
   const [requestedSection, setActiveSection] = useState(defaultSection);
+  const userPickedSectionRef = useRef(false);
+  const selectSection = useCallback((sectionId) => {
+    userPickedSectionRef.current = true;
+    setActiveSection(sectionId);
+  }, []);
 
   useEffect(() => {
+    userPickedSectionRef.current = false;
     setActiveSection(defaultSection);
-  }, [service?.id, defaultSection]);
+    // Reset only when switching visits; defaultSection sync runs below while untouched.
+  }, [service?.id]);
+
+  useEffect(() => {
+    if (!userPickedSectionRef.current) setActiveSection(defaultSection);
+  }, [defaultSection]);
 
   useEffect(() => {
     let cancelled = false;
@@ -7901,7 +7927,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
       line === "mosquito"
         ? line
         : null;
-    const month = new Date().getMonth() + 1;
+    const month = currentETMonthNumber();
 
     setLoading(true);
     setLoadErrors([]);
@@ -8020,7 +8046,21 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
     return () => {
       cancelled = true;
     };
-  }, [service, isLawn, serviceCategory, loadAttempt]);
+    // Key on stable visit primitives so background schedule polls that recreate
+    // the `service` object reference do not reset ProtocolPanel into a spinner.
+  }, [
+    service.id,
+    service.customerId,
+    service.serviceType,
+    service.serviceTypeRaw,
+    service.scheduledDate,
+    service.lawnType,
+    service.lawn_type,
+    service.lawnSqft,
+    isLawn,
+    serviceCategory,
+    loadAttempt,
+  ]);
 
   const SECTIONS = [
     ...(jobCardEnabled ? [{ id: "job_card", label: "Job", count: null }] : []),
@@ -8192,7 +8232,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
           return (
             <button
               key={s.id}
-              onClick={() => setActiveSection(s.id)}
+              onClick={() => selectSection(s.id)}
               style={{
                 flex: "1 0 auto",
                 minWidth: 96,
@@ -9597,15 +9637,25 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // A failed load must read as a failure, not as "no suggestions": the
   // dialog shows Retry and points at the custom date picker.
   const [optionsError, setOptionsError] = useState(false);
+  const optionsSeqRef = useRef(0);
+  const sendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const loadOptions = useCallback(() => {
+    const seq = ++optionsSeqRef.current;
     setLoading(true);
     setOptionsError(false);
     return adminFetch(`/admin/dispatch/${service.id}/reschedule-options`)
       .then((d) => {
+        if (!mountedRef.current || seq !== optionsSeqRef.current) return;
         setOptions(d.options || []);
         setLoading(false);
       })
       .catch(() => {
+        if (!mountedRef.current || seq !== optionsSeqRef.current) return;
         setOptions([]);
         setOptionsError(true);
         setLoading(false);
@@ -9713,6 +9763,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // any other error) reports as before. Gate off: unchanged.
   const [seriesConfirm, setSeriesConfirm] = useState(null);
   const submitReschedule = async (body) => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
     setSending(true);
     try {
       const result = await adminFetch(
@@ -9751,8 +9803,10 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
         );
       }
+    } finally {
+      sendingRef.current = false;
+      if (mountedRef.current) setSending(false);
     }
-    setSending(false);
   };
   const confirmSeriesMove = () => {
     if (!seriesConfirm) return;
@@ -12567,44 +12621,88 @@ function RecapCapture({ serviceId, onChange }) {
 // Polls the recap render status, plays the MP4 (fetched as an authed blob so the
 // <video> tag doesn't need to carry a JWT), and gates sending on tech approval.
 // Flag-gated (pest-recap-v1) + pest visits only; renders next to FastCloseout.
+function RecapVideoPreview({ videoUrl, videoError, onRetry }) {
+  if (videoUrl) {
+    return <video src={videoUrl} controls playsInline style={{ width: "100%", maxWidth: 240, display: "block", margin: "0 auto 10px", borderRadius: 10, background: "#000" }} />;
+  }
+  if (videoError) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10, fontSize: 12.5, color: D.amber }}>
+        <span>Couldn’t load video preview.</span>
+        <button type="button" onClick={onRetry} style={{ padding: "6px 10px", borderRadius: 8, border: `1px solid ${D.border}`, background: "transparent", color: D.text, fontSize: 12, cursor: "pointer" }}>
+          Retry preview
+        </button>
+      </div>
+    );
+  }
+  return <div style={{ fontSize: 13, color: D.muted, marginBottom: 10 }}>Loading preview…</div>;
+}
+
 export function PestRecapCard({ serviceId }) {
   const [state, setState] = useState({ status: "loading" });
   const [videoUrl, setVideoUrl] = useState(null);
+  const [videoError, setVideoError] = useState(false);
+  const [videoAttempt, setVideoAttempt] = useState(0);
+  const [pollGen, setPollGen] = useState(0);
   const [busy, setBusy] = useState(false);
   const blobRef = useRef(null);
   const { enabled: glassesClips } = useFeatureFlagReady("recap-glasses-v1");
 
   const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-video`)
-    .then((d) => { setState(d || { status: "none" }); return d; })
+    .then((d) => {
+      const next = d || { status: "none" };
+      setState(next);
+      if (next.status === "pending" || next.status === "rendering") setPollGen((g) => g + 1);
+      return d;
+    })
     .catch(() => { setState({ status: "error" }); return null; });
 
   useEffect(() => {
     let alive = true;
+    let id = null;
+    const stopPolling = () => {
+      if (id != null) { clearInterval(id); id = null; }
+    };
     const fetchStatus = () => adminFetch(`/admin/dispatch/${serviceId}/recap-video`)
-      .then((d) => { if (alive) setState(d || { status: "none" }); })
-      .catch(() => { if (alive) setState({ status: "error" }); });
+      .then((d) => {
+        if (!alive) return;
+        const next = d || { status: "none" };
+        setState(next);
+        if (next.status !== "pending" && next.status !== "rendering") stopPolling();
+      })
+      .catch(() => {
+        if (!alive) return;
+        setState({ status: "error" });
+        stopPolling();
+      });
     fetchStatus();
-    const id = setInterval(fetchStatus, 4000);
-    return () => { alive = false; clearInterval(id); if (blobRef.current) URL.revokeObjectURL(blobRef.current); };
-  }, [serviceId]);
+    id = setInterval(fetchStatus, 4000);
+    return () => { alive = false; stopPolling(); if (blobRef.current) { URL.revokeObjectURL(blobRef.current); blobRef.current = null; } };
+  }, [serviceId, pollGen]);
 
   useEffect(() => {
     if (!(state.status === "ready" || state.status === "approved") || videoUrl) return undefined;
     let alive = true;
+    setVideoError(false);
     (async () => {
       try {
         const token = localStorage.getItem("waves_admin_token");
         const res = await fetch(`${API_BASE}/admin/dispatch/${serviceId}/recap-video/file`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-        if (!res.ok || !alive) return;
+        if (!res.ok) {
+          if (alive) setVideoError(true);
+          return;
+        }
         const blob = await res.blob();
         if (!alive) return;
         const url = URL.createObjectURL(blob);
         blobRef.current = url;
         setVideoUrl(url);
-      } catch { /* ignore */ }
+      } catch {
+        if (alive) setVideoError(true);
+      }
     })();
     return () => { alive = false; };
-  }, [state.status, videoUrl, serviceId]);
+  }, [state.status, videoUrl, serviceId, videoAttempt]);
 
   // A recap re-rendering (a late clip, Regenerate) drops the old preview; it reloads when ready.
   useEffect(() => {
@@ -12612,6 +12710,7 @@ export function PestRecapCard({ serviceId }) {
       URL.revokeObjectURL(blobRef.current);
       blobRef.current = null;
       setVideoUrl(null);
+      setVideoError(false);
     }
   }, [state.status]);
 
@@ -12624,6 +12723,7 @@ export function PestRecapCard({ serviceId }) {
   const regenerate = () => {
     if (blobRef.current) { URL.revokeObjectURL(blobRef.current); blobRef.current = null; }
     setVideoUrl(null);
+    setVideoError(false);
     return act("generate", { force: true });
   };
 
@@ -12651,9 +12751,14 @@ export function PestRecapCard({ serviceId }) {
       )}
       {(s === "ready" || s === "approved") && (
         <>
-          {videoUrl
-            ? <video src={videoUrl} controls playsInline style={{ width: "100%", maxWidth: 240, display: "block", margin: "0 auto 10px", borderRadius: 10, background: "#000" }} />
-            : <div style={{ fontSize: 13, color: D.muted, marginBottom: 10 }}>Loading preview…</div>}
+          <RecapVideoPreview
+            videoUrl={videoUrl}
+            videoError={videoError}
+            onRetry={() => setVideoAttempt((n) => n + 1)}
+          />
+          {state.error && (
+            <div role="alert" style={{ fontSize: 12.5, color: D.amber, marginBottom: 8 }}>{state.error}</div>
+          )}
           {s === "approved" ? (
             state.sent ? (
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -12688,6 +12793,15 @@ export function PestRecapCard({ serviceId }) {
         </div>
       )}
       {s === "error" && <div style={{ fontSize: 12.5, color: D.muted }}>Couldn’t load recap status.</div>}
+    </div>
+  );
+}
+
+function DesktopRecapCard({ eligible, serviceId }) {
+  if (!eligible) return null;
+  return (
+    <div style={{ width: "100%", maxWidth: 360, marginTop: 14, textAlign: "left" }}>
+      <PestRecapCard serviceId={serviceId} />
     </div>
   );
 }
@@ -15316,13 +15430,14 @@ export function CompletionPanel({
   }, []);
 
   useEffect(() => {
-    if (service.customerId) {
-      adminFetch(`/admin/schedule/next-visit?customerId=${service.customerId}`)
-        .then((d) => {
-          if (d.nextVisit) setNextVisit(d.nextVisit);
-        })
-        .catch(() => {});
-    }
+    if (!service.customerId) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/schedule/next-visit?customerId=${service.customerId}`)
+      .then((d) => {
+        if (!cancelled && d.nextVisit) setNextVisit(d.nextVisit);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
   }, [service.customerId]);
 
   // A restored draft can carry a tip id the library has since retired; the
@@ -23007,6 +23122,7 @@ export function CompletionPanel({
                   ))}
                 </div>
               )}
+            <DesktopRecapCard eligible={recapEligible} serviceId={service.id} />
             {(recapEligible ||
               (completionResult?.completionAdvisories?.length ?? 0) > 0) &&
               !completionResult?.followupSuggestion?.required && (
