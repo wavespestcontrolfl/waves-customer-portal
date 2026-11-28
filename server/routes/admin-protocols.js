@@ -822,6 +822,7 @@ async function assignedRigId(scheduled) {
 
 // Every active 110 gal tank's active calibration, tank #1 first (as getActiveCalibration orders them).
 async function getActiveBigTanks(scope = {}) {
+  if (scope.unresolvedPinRigId) return [];
   const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where({ 'ec.active': true, 'es.active': true, 'es.system_type': 'tank' })
@@ -1320,7 +1321,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // neither: every active 110 gal tank, so the sheet names each tank's amount when their numbers differ.
     const { rigId, calibration, calibrationScope } = await loadSheetCalibration(req, scheduled);
     const backpack = await getBackpackCalibration(calibration, calibrationScope);
-    const bigTanks = rigId ? [] : await getActiveBigTanks(calibrationScope);
+    const bigTanks = rigId || calibrationScope.unresolvedPinRigId ? [] : await getActiveBigTanks(calibrationScope);
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });

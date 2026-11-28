@@ -2566,6 +2566,15 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier, tankOverrides = 
 }
 
 const TANK_TABLE_RE = /\b(\d+(?:\.\d+)?)\s*gal(?:lon)?s?\s+tank\s*:\s*(\d+(?:\.\d+)?)\s*(fl\s*oz|oz|g|ml|lb|lbs)\b/ig;
+const TANK_TABLE_CLAUSE_RE = /(?:^|[.;]\s*)\d+(?:\.\d+)?\s*gal(?:lon)?s?\s+tank\s*:\s*\d+(?:\.\d+)?\s*(?:fl\s*oz|oz|g|ml|lb|lbs)(?:\s*\([^)]*\))?\.?/ig;
+
+function stripTankTableClauses(text) {
+  return String(text || '')
+    .replace(TANK_TABLE_CLAUSE_RE, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.;]+|[\s;]+$/g, '')
+    .trim();
+}
 
 function tankTableOverrides(text) {
   const overrides = [];
@@ -3091,8 +3100,9 @@ function syntheticHitFromMixRow(row, baseHit = null) {
   const declaredRate = mixRowRate(r);
   const condText = [r.condition, r.where, r.limit].filter(Boolean).join('; ');
   const conditional = CONDITIONAL_MIX_ROW_RE.test(condText) || base.selected === false;
+  const sprayVol = stripTankTableClauses(r.sprayVolume);
   const raw = [...new Set(
-    [r.condition, r.where, r.sprayVolume, r.limit, base.raw].map((p) => String(p || '').trim()).filter(Boolean),
+    [r.condition, r.where, sprayVol, r.limit, base.raw].map((p) => String(p || '').trim()).filter(Boolean),
   )].join('; ');
   const hit = { raw, selected: !conditional };
   if (declaredRate && !base.labelRateRefused) hit.declaredRate = declaredRate;
@@ -3119,7 +3129,7 @@ function exactSprayVolumeOf(mixRows) {
 }
 
 function unrepresentedSprayVolume(row) {
-  const text = String(row?.sprayVolume || '').trim();
+  const text = stripTankTableClauses(row?.sprayVolume);
   if (!text) return null;
   return parseSprayVolumeSpecs(text).exact ? null : text;
 }

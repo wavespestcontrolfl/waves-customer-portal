@@ -1790,23 +1790,26 @@ async function resolveAssignedSystemId(knex, service, { strict = false } = {}) {
   return row?.equipment_system_id || null;
 }
 
-async function loadServiceCalibrations(knex, service, options = {}, { strict = false } = {}) {
-  const assignedSystemId = options.equipmentSystemId && !options.calibrationId && service.assigned_calibration_id
-    ? await resolveAssignedSystemId(knex, service, { strict })
-    : service.assigned_equipment_system_id;
-  const rigOverridden = Boolean(
-    options.equipmentSystemId
-    && (!service.assigned_calibration_id || (assignedSystemId && String(options.equipmentSystemId) !== String(assignedSystemId))),
-  );
-  const equipmentSystemId = options.equipmentSystemId || service.assigned_equipment_system_id;
-  const calibrationId = options.calibrationId || (rigOverridden ? null : service.assigned_calibration_id);
-  const rows = await getActiveCalibrations(knex, { equipmentSystemId, calibrationId }, { strict });
-  const usesStoredPin = Boolean(calibrationId && service.assigned_calibration_id && String(calibrationId) === String(service.assigned_calibration_id));
-  if (usesStoredPin) return rows;
+function serviceCalibrationFilter(rows, service, options, calibrationId) {
+  if (calibrationId && service.assigned_calibration_id && String(calibrationId) === String(service.assigned_calibration_id)) {
+    return rows;
+  }
   const explicitPick = Boolean(options.equipmentSystemId || options.calibrationId);
   const technicianId = explicitPick ? (options.technicianId || service.technician_id || null) : (service.technician_id || null);
   if (explicitPick && !technicianId) return rows;
   return rows.filter((row) => !row.technician_id || (technicianId && String(row.technician_id) === String(technicianId)));
+}
+
+async function loadServiceCalibrations(knex, service, options = {}, { strict = false } = {}) {
+  const storedPin = service.assigned_calibration_id || null;
+  const assignedSystemId = options.equipmentSystemId && !options.calibrationId && storedPin
+    ? await resolveAssignedSystemId(knex, service, { strict })
+    : service.assigned_equipment_system_id;
+  const keepPin = Boolean(storedPin && (!options.equipmentSystemId || !assignedSystemId || String(options.equipmentSystemId) === String(assignedSystemId)));
+  const equipmentSystemId = options.equipmentSystemId || service.assigned_equipment_system_id;
+  const calibrationId = options.calibrationId || (keepPin ? storedPin : null);
+  const rows = await getActiveCalibrations(knex, { equipmentSystemId, calibrationId }, { strict });
+  return serviceCalibrationFilter(rows, service, options, calibrationId);
 }
 
 // strict: a failed catalog read throws instead of reading as an empty

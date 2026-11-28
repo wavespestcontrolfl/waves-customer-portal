@@ -4158,6 +4158,8 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const capped100 = await jobCard.mixForProduct('taurus', 100, { serviceId: 'svc14', dbh: cappedTaurusDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(capped100).toMatchObject({ rateSource: 'catalog', amount: 20, amountMax: 50, unit: 'fl_oz' });
     expect(capped100.warnings).toContain('Protocol dilution exceeds verified catalog label rate — confirm label before mixing.');
+    expect(capped100.warnings.join(' ')).toContain('4 gal per 10 linear ft for each foot of depth');
+    expect(capped100.warnings.join(' ')).not.toContain('78 fl oz');
 
     // February TriTek 1% and 1.5% share placement text and EPA; each keeps its distinct condition label, original restrictions, and conditional warning.
     const febOil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '1.28-2.56', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };

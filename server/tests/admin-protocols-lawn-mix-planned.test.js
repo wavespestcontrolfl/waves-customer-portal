@@ -542,5 +542,35 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
     expect(sheetCal.calibrationScope.unresolvedPinRigId).toBe('bp-sys');
     expect(await getBackpackCalibration(sheetCal.calibration, sheetCal.calibrationScope)).toBeNull();
   });
+
+  test('an unresolved calibration-only pin skips the alternate 110-gal tank fallback even when two tanks have different outputs', async () => {
+    const tank1 = { id: 'tank-1', equipment_system_id: 'sys-1', technician_id: null, system_name: '110-Gallon Spray Tank #1', system_type: 'tank', tank_capacity_gal: 110, carrier_gal_per_1000: 1.5 };
+    const tank2 = { id: 'tank-2', equipment_system_id: 'sys-2', technician_id: null, system_name: '110-Gallon Spray Tank #2', system_type: 'tank', tank_capacity_gal: 110, carrier_gal_per_1000: 2.5 };
+    db.mockImplementation((table) => {
+      if (table === 'equipment_calibrations') {
+        const q = readQuery([]);
+        q.first = jest.fn(() => Promise.reject(new Error('lookup failed')));
+        return q;
+      }
+      if (table === 'equipment_calibrations as ec') {
+        let filteredOut = false;
+        const q = readQuery([tank1, tank2]);
+        q.where = jest.fn((col, val) => { if (col === 'ec.id' && val === 'cal-missing') filteredOut = true; return q; });
+        q.first = jest.fn(async () => (filteredOut ? null : tank1));
+        q.then = (res, rej) => Promise.resolve(filteredOut ? [] : [tank1, tank2]).then(res, rej);
+        q.catch = (rej) => Promise.resolve(filteredOut ? [] : [tank1, tank2]).catch(rej);
+        return q;
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const sheetCal = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: null, assigned_calibration_id: 'cal-missing', technician_id: 'tech-a' },
+    );
+    expect(sheetCal.rigId).toBeNull();
+    expect(sheetCal.calibrationScope.unresolvedPinRigId).toBe('__unknown__');
+    expect(await getActiveBigTanks(sheetCal.calibrationScope)).toEqual([]);
+    expect(await getBackpackCalibration(sheetCal.calibration, sheetCal.calibrationScope)).toBeNull();
+  });
 });
 
