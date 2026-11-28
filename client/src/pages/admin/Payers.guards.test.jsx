@@ -461,4 +461,37 @@ describe("PayersPage URL encoding, detail cancellation, and dirty edit modal gua
     });
     expect(screen.queryByRole("heading", { name: "Late Deep Link Payer" })).not.toBeInTheDocument();
   });
+
+  it("rejects a non-null sequence object with a missing or unrecognized status and keeps reminder actions disabled", async () => {
+    const payer = { id: "p-bad-seq", display_name: "Malformed Seq Payer", active: true, payment_terms: "net30" };
+    const statement = {
+      id: "st-bad-seq",
+      number: "ST-2026-011",
+      period_start: "2026-05-01",
+      period_end: "2026-05-31",
+      status: "sent",
+      total: 100,
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const u = String(url);
+        if (u.endsWith("/statements")) return jsonRes({ statements: [statement] });
+        if (u.endsWith("/ar")) {
+          return jsonRes({ summary: { outstanding_total: 100, past_due_total: 0, statement_count: 1, buckets: {} } });
+        }
+        if (u.endsWith(`/statements/${statement.id}`)) return jsonRes({ lines: [] });
+        if (u.endsWith(`/statements/${statement.id}/followups`)) return jsonRes({ sequence: {} });
+        return jsonRes({});
+      }),
+    );
+
+    render(<PayerDetailSheet payer={payer} onClose={vi.fn()} onEdit={vi.fn()} onChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByText("S-st-bad-seq"));
+
+    expect(await screen.findByText(/status unavailable/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send reminder now" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+  });
 });

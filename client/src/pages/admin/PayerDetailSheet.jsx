@@ -321,7 +321,8 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
         throw new Error("Could not load reminder status.");
       }
       const seq = d2.sequence;
-      if (seq !== null && (typeof seq !== "object" || Array.isArray(seq))) {
+      const validSequenceStatuses = new Set(["active", "paused", "stopped", "completed"]);
+      if (seq !== null && (typeof seq !== "object" || Array.isArray(seq) || !validSequenceStatuses.has(seq.status))) {
         throw new Error("Could not load reminder status.");
       }
       setSequence(seq);

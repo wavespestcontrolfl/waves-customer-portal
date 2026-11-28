@@ -40,7 +40,8 @@ function invoice(overrides = {}) {
 
 async function captureCalls(build) {
   const texts = [];
-  let page = 1;
+  // PDFKit calls addPage() once during construction for page 1.
+  let page = 0;
   const realAddPage = PDFDocument.prototype.addPage;
   const addPageSpy = jest.spyOn(PDFDocument.prototype, 'addPage').mockImplementation(function recordPage(...args) {
     page += 1;
@@ -261,8 +262,8 @@ describe('invoice PDF wrapped discount labels in totalsBlock (B-39)', () => {
     }));
     lines.push({ _kind: 'discount', description: wrappedDiscount, quantity: 1, unit_price: -36, amount: -36 });
 
-    const pageBalances = [0];
-    let pageIndex = 0;
+    const pageBalances = [];
+    let pageIndex = -1;
     const origSave = PDFDocument.prototype.save;
     const origRestore = PDFDocument.prototype.restore;
     const origAddPage = PDFDocument.prototype.addPage;
@@ -332,5 +333,40 @@ describe('invoice PDF wrapped discount labels in totalsBlock (B-39)', () => {
     for (const row of discountCalls) {
       expect(row.y).toBeLessThanOrEqual(730);
     }
+  });
+
+  test('keeps a 17-line receipt totals block and PAID IN FULL stamp on page 1 when space permits', async () => {
+    const lines = Array.from({ length: 17 }, (_, i) => ({
+      description: `Quarterly Pest Service Row ${i + 1}`,
+      quantity: 1,
+      unit_price: 10,
+      amount: 10,
+    }));
+    const calls = await captureCalls(() => buildReceiptPDFBuffer(
+      invoice({
+        status: 'paid',
+        paid_at: new Date('2026-07-19T15:00:00Z'),
+        subtotal: 170,
+        discount_amount: 0,
+        total: 174.93,
+        line_items: lines,
+      }),
+      {
+        amount: 174.93,
+        refund_amount: 0,
+        card_brand: 'visa',
+        card_last_four: '4242',
+        surcharge_amount_cents: 493,
+        surcharge_rate_bps: 290,
+        metadata: { invoice_id: 'inv-1' },
+      },
+    ));
+    const totalRow = calls.find((c) => c.text === 'TOTAL');
+    const stampRow = calls.find((c) => c.text === 'PAID IN FULL');
+    expect(totalRow).toBeDefined();
+    expect(stampRow).toBeDefined();
+    expect(totalRow.page).toBe(1);
+    expect(stampRow.page).toBe(1);
+    expect(stampRow.y).toBeLessThanOrEqual(730);
   });
 });

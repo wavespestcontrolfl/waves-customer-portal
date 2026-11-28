@@ -293,7 +293,7 @@ function groupedLineItemsTable(doc, groups, x, y, width) {
   return y;
 }
 
-function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
+function lineItemsTable(doc, lineItems, x, y, width, totalsHeight = 170) {
   const visibleLineItems = visibleInvoiceLines(lineItems);
   const propertyGroups = groupInvoiceLinesByProperty(lineItems);
   // Scope graphics-state save/restore strictly to the single-page header so a
@@ -317,11 +317,10 @@ function lineItemsTable(doc, lineItems, x, y, width, extraTotalsHeight = 0) {
   } else {
     for (const item of visibleLineItems) y = drawLineItemRow(doc, item, x, y, width);
   }
-  // Keep a normal totals block together on one page; when an unusually tall
-  // discount list exceeds one page on its own, totalsBlock paginates row by row.
-  const totalsNeeded = 170 + extraTotalsHeight;
+  // Keep a totals block together on the current page whenever its measured
+  // height fits; when it exceeds a single page, totalsBlock paginates row by row.
   const maxSinglePageTotals = PAGE_BOTTOM - 90;
-  y = ensureRoom(doc, y, totalsNeeded <= maxSinglePageTotals ? totalsNeeded : 40);
+  y = ensureRoom(doc, y, totalsHeight <= maxSinglePageTotals ? totalsHeight : 40);
   return y;
 }
 
@@ -393,14 +392,34 @@ function totalsRowHeightFor(doc, label) {
   const labelHeight = doc.heightOfString(String(label || ''), { width: TOTALS_LABEL_WIDTH });
   return Math.max(TOTALS_ROW_HEIGHT, Math.ceil(labelHeight) + 4);
 }
-function extraDiscountRowsHeight(doc, invoice, customer) {
-  const { discountRows } = invoiceTotalsFacts(invoice, customer);
-  if (!discountRows.length) return 0;
+function totalsBlockHeight(doc, invoice, opts = {}) {
+  const {
+    highlightTotal = true, paidStamp = false, refundAmount = 0, customer = null, partPayments = false, surcharge = null,
+  } = opts;
+  const facts = invoiceTotalsFacts(invoice, customer);
   doc.save();
   doc.fontSize(PDF_TYPE.body).font('Helvetica');
-  const totalHeight = discountRows.reduce((sum, r) => sum + totalsRowHeightFor(doc, r.label), 0);
+  // 8pt gap before totalsBlock + 10pt after top rule
+  let height = 18;
+  for (const [label] of totalsRowsAboveTotal(facts, surcharge)) {
+    height += totalsRowHeightFor(doc, label);
+  }
+  height += 10 + (highlightTotal ? 20 : 0);
+  const amountPaid = partPayments ? facts.amountPaid : 0;
+  if (facts.creditApplied > 0) height += totalsRowHeightFor(doc, 'Account credit applied');
+  if (amountPaid > 0) height += totalsRowHeightFor(doc, 'Paid so far');
+  if (facts.creditApplied > 0 || amountPaid > 0) {
+    doc.font('Helvetica-Bold');
+    height += totalsRowHeightFor(doc, 'Amount due');
+    doc.font('Helvetica');
+  }
+  if (refundAmount > 0) {
+    doc.font('Helvetica-Bold');
+    height += totalsRowHeightFor(doc, 'Refunded') + totalsRowHeightFor(doc, 'Net paid');
+  }
+  if (paidStamp) height += 46;
   doc.restore();
-  return Math.max(0, totalHeight - TOTALS_ROW_HEIGHT);
+  return height;
 }
 
 // A receipt's credit card surcharge row (Visa Core Rules: shown separately on the front of the receipt, same type and size as the
@@ -635,8 +654,9 @@ function generateInvoicePDF(invoice, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);
-  y = lineItemsTable(doc, invoice.line_items, L, y, W, extraDiscountRowsHeight(doc, invoice, customer));
-  y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer, partPayments: true });
+  const invoiceTotalsOpts = { highlightTotal: true, paidStamp: isPaid, customer, partPayments: true };
+  y = lineItemsTable(doc, invoice.line_items, L, y, W, totalsBlockHeight(doc, invoice, invoiceTotalsOpts));
+  y = totalsBlock(doc, invoice, L, y + 8, W, invoiceTotalsOpts);
   if (!isSettled) y = previousBalanceBlock(doc, invoice.previous_balance, L, y, W);
 
   const customerNotes = customerVisibleInvoiceNotes(invoice.notes);
@@ -683,23 +703,17 @@ function generateReceiptPDF(invoice, payment, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   const surcharge = receiptSurchargeFacts(payment);
-  let surchargeHeight = 0;
-  if (surcharge) {
-    doc.save();
-    doc.fontSize(PDF_TYPE.body).font('Helvetica');
-    surchargeHeight = totalsRowHeightFor(doc, surcharge.label);
-    doc.restore();
-  }
-  y = lineItemsTable(doc, invoice.line_items, L, y, W,
-    surchargeHeight + extraDiscountRowsHeight(doc, invoice, customer));
-  y = totalsBlock(doc, invoiceWithSurchargedTotal(invoice, surcharge), L, y + 8, W, {
+  const receiptInvoice = invoiceWithSurchargedTotal(invoice, surcharge);
+  const receiptTotalsOpts = {
     highlightTotal: true,
     paidStamp: !refundAmount,
     refundAmount,
     cashPaid,
     customer,
     surcharge,
-  });
+  };
+  y = lineItemsTable(doc, invoice.line_items, L, y, W, totalsBlockHeight(doc, receiptInvoice, receiptTotalsOpts));
+  y = totalsBlock(doc, receiptInvoice, L, y + 8, W, receiptTotalsOpts);
 
   // Commercial-only recordkeeping note. Most residential receipts don't
   // need this boilerplate, but commercial accounts often want explicit
