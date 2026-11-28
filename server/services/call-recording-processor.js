@@ -255,7 +255,7 @@ const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 const { applySpeakerRoleGuard } = require('./call-speaker-role-guard');
-const { buildCallToTruckBrief } = require('./call-to-truck-brief');
+const { resolveCallToTruckBriefForBooking } = require('./call-to-truck-brief');
 const { STT_HINTS, TRANSCRIPTION_DOMAIN_HINT_LINE } = require('../config/transcription-vocabulary');
 
 // Prod technician row is named "Adam" (verified 2026-07-08) — the old
@@ -22487,12 +22487,15 @@ const CallRecordingProcessor = {
                 // Call-to-Truck Brief (scheduled_services.customer_request +
                 // customer_request_source = 'call', hasColumn-guarded):
                 // populates a clean, price-free, code-free operational brief
-                // for 100% of phone bookings (re-service + regular/specialty).
+                // for 100% of phone bookings (re-service + regular/specialty),
+                // enforcing GATE_CALL_ENRICH_CODES_REQUIRE_ANI on safety notes.
                 const isReServiceBooking = isReServiceCatalogRow(callBookingCatalogRow);
-                const callBookingCustomerRequest = buildCallToTruckBrief({
+                const callBookingCustomerRequest = await resolveCallToTruckBriefForBooking(trx, {
+                  customerId,
+                  callerAni: clarifyAskTargetPhone(call),
                   extracted: bookingExtracted,
                   v2Extraction: v2ApprovedExtraction,
-                  isForcedAssessment: Boolean(v2ForceAssessmentService),
+                  isAssessmentBooking: isAssessmentServiceRow(callBookingCatalogRow),
                   isReService: isReServiceBooking,
                 });
                 const hasCustomerRequestColumn = Boolean(callBookingCustomerRequest)
