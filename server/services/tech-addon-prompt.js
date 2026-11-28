@@ -5,29 +5,31 @@
  *
  * Surfaces a one-line cross-sell opportunity on the technician's expanded Visit Brief when an
  * active residential recurring customer owns only ONE of the two approved cross-sell pillars
- * at THIS visit's premises (`OFFER_LADDER = ['pest_control', 'lawn_care']`, owner ruling
- * 2026-11-21: never push Tree & Shrub or Termite).
+ * at THIS visit's primary premises (`OFFER_LADDER = ['pest_control', 'lawn_care']`, owner
+ * ruling 2026-11-21: never push Tree & Shrub or Termite).
  *
  * Hard constraints honored:
  *   - Uses the canonical premises-scoped ownership authority (`loadOwnedRecurringServiceKeys`
- *     with `streetScope` built via `resolveVisitPropertyScope` / `customerHasOnlyPrimaryPremises`)
- *     AND suppresses whenever `plan-rate-ledger` shows a positive monthly plan rate for the
- *     target family — fail-closed on any lookup error so a technician is NEVER told to pitch
- *     a service the customer already owns or pays for.
- *   - ZERO prices, margins, or discount numbers (owner ruling 2026-11-04: technician visibility).
- *   - Skips commercial customers (`customers.property_type` via `isCommercialProperty`, tier, or
- *     commercial service label) and customers with neither pillar (one-time/assessment visits).
+ *     with `streetScope` built via `resolveVisitPropertyScope` / `customerHasOnlyPrimaryPremises`,
+ *     proven primary premises only so Field Lead never quotes the wrong property) AND suppresses
+ *     whenever `plan-rate-ledger` (`strictProbe: true`) shows a positive monthly plan rate for
+ *     the target family — fail-closed on any lookup error.
+ *   - Checks commercial status across `customers.property_type`, `waveguard_tier`, visit label,
+ *     AND the visit's catalog row (`loadCatalogFieldsByRowId` + `isCommercialServiceRow`).
+ *   - ZERO prices, margins, discount percentages, or hardcoded tier claims (owner 2026-11-04).
  *   - Pre-fills the existing Field Lead modal (`Lawn` or `Pest`) so the office quotes it and
  *     credits the technician's seller commission (owner ruling 2026-11-09).
  */
 
-const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
+const { loadOwnedRecurringServiceKeys, loadCatalogFieldsByRowId } = require('./waveguard-existing-services');
+const { isCommercialServiceRow } = require('./self-booking-plan-sync');
 const { OFFER_LADDER } = require('./service-report/cross-sell');
 const { isCommercialProperty } = require('./pricing-engine/commercial-helpers');
 const { loadComponents } = require('./plan-rate-ledger');
 const linkage = require('./estimate-property-linkage');
 const {
   resolveVisitPropertyScope,
+  sameResolvedProperty,
   customerHasOnlyPrimaryPremises,
 } = require('./service-report/visit-property-scope');
 
@@ -37,14 +39,14 @@ const PILLAR_PROMPTS = Object.freeze({
     targetLabel: 'Lawn Care',
     fieldLeadServiceType: 'Lawn',
     headline: 'No Lawn Care plan on file',
-    detail: 'Ask if they want a Lawn Care quote (Silver bundle eligible). Tap below to flag for the office.',
+    detail: 'Ask if they want a Lawn Care quote (WaveGuard bundle savings apply). Tap below to flag for the office.',
   }),
   pest_control: Object.freeze({
     targetFamily: 'pest_control',
     targetLabel: 'Pest Control',
     fieldLeadServiceType: 'Pest',
     headline: 'No Pest Control plan on file',
-    detail: 'Ask if they want a Pest Control quote (Silver bundle eligible). Tap below to flag for the office.',
+    detail: 'Ask if they want a Pest Control quote (WaveGuard bundle savings apply). Tap below to flag for the office.',
   }),
 });
 
@@ -67,10 +69,15 @@ function pickTechAddonPrompt(ownedKeys, { isCommercial = false, planRateFamilies
 function isCommercialVisit(customer, svc) {
   return isCommercialProperty({ propertyType: customer.property_type })
     || String(customer.waveguard_tier || '').trim().toLowerCase() === 'commercial'
-    || /\bcommercial\b/i.test(String(svc.service_type || ''));
+    || isCommercialServiceRow(svc);
 }
 
-async function resolveVisitStreetScope(svc, customer, dbh, deps = {}) {
+/**
+ * Resolves a primary-premises streetScope for this visit, or null.
+ * Secondary-property visits are suppressed because Field Lead saves leads at the customer's
+ * primary address (never risk quoting the wrong property).
+ */
+async function resolvePrimaryVisitStreetScope(svc, customer, dbh, deps = {}) {
   const primaryStreet = linkage.normalizedStampedStreet(
     customer.address_line1, customer.address_line2, customer.city, customer.zip,
   );
@@ -78,19 +85,16 @@ async function resolveVisitStreetScope(svc, customer, dbh, deps = {}) {
 
   const resolveScope = deps.resolveVisitPropertyScope || resolveVisitPropertyScope;
   const scope = await resolveScope(svc, dbh);
-  let visitStreet = null;
   if (scope.hasEvidence) {
-    if (!scope.key) return null;
-    visitStreet = scope.key;
+    if (!scope.key || !sameResolvedProperty(scope.key, primaryStreet)) return null;
   } else {
     const proveSingle = deps.customerHasOnlyPrimaryPremises || customerHasOnlyPrimaryPremises;
     const onlyPrimary = await proveSingle(dbh, svc.customer_id, customer, primaryStreet, { unresolvedFails: true });
     if (!onlyPrimary) return null;
-    visitStreet = primaryStreet;
   }
 
   return {
-    estimateStreet: visitStreet,
+    estimateStreet: primaryStreet,
     customerPrimaryStreet: primaryStreet,
     requireSharedLocality: true,
   };
@@ -98,7 +102,7 @@ async function resolveVisitStreetScope(svc, customer, dbh, deps = {}) {
 
 /**
  * Fail-closed DB loader for the Visit Brief route. Never throws; returns null on any error,
- * unprovable premises, or ambiguous ownership state.
+ * secondary/unprovable premises, commercial catalog row, or ambiguous ownership state.
  */
 async function techAddonPromptFacts(svc, dbh, deps = {}) {
   if (!svc?.customer_id || !dbh) return null;
@@ -108,14 +112,20 @@ async function techAddonPromptFacts(svc, dbh, deps = {}) {
       .first('id', 'property_type', 'active', 'waveguard_tier', 'address_line1', 'address_line2', 'city', 'zip', 'has_multi_home');
     if (!customer || customer.active === false || isCommercialVisit(customer, svc)) return null;
 
-    const streetScope = await resolveVisitStreetScope(svc, customer, dbh, deps);
+    const loadCatalog = deps.loadCatalogFieldsByRowId || loadCatalogFieldsByRowId;
+    const catalogById = await loadCatalog(dbh, svc.customer_id);
+    if (!catalogById) return null;
+    const enrichedVisit = { ...svc, ...(svc.id ? (catalogById.get(svc.id) || {}) : {}) };
+    if (isCommercialServiceRow(enrichedVisit)) return null;
+
+    const streetScope = await resolvePrimaryVisitStreetScope(svc, customer, dbh, deps);
     if (!streetScope) return null;
 
     const loadKeys = deps.loadOwnedRecurringServiceKeys || loadOwnedRecurringServiceKeys;
     const loadPlan = deps.loadPlanComponents || loadComponents;
     const [ownedKeys, planComponents] = await Promise.all([
       loadKeys(dbh, svc.customer_id, { streetScope }),
-      loadPlan(dbh, svc.customer_id),
+      loadPlan(dbh, svc.customer_id, { strictProbe: true }),
     ]);
     const planRateFamilies = (planComponents || [])
       .filter((row) => Number(row.monthly_rate) > 0)
@@ -124,7 +134,7 @@ async function techAddonPromptFacts(svc, dbh, deps = {}) {
 
     return pickTechAddonPrompt(ownedKeys, { isCommercial: false, planRateFamilies });
   } catch {
-    // Fail-closed: never pitch a service when ownership, billing, or premises cannot be proved.
+    // Fail-closed: never pitch a service when ownership, catalog, billing, or premises cannot be proved.
     return null;
   }
 }
@@ -132,6 +142,6 @@ async function techAddonPromptFacts(svc, dbh, deps = {}) {
 module.exports = {
   PILLAR_PROMPTS,
   pickTechAddonPrompt,
-  resolveVisitStreetScope,
+  resolvePrimaryVisitStreetScope,
   techAddonPromptFacts,
 };

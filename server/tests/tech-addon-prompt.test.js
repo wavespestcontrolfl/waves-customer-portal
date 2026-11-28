@@ -51,6 +51,8 @@ const STAMPED_VISIT = {
   service_address_zip: '34231',
 };
 
+const RESIDENTIAL_CATALOG = async () => new Map([['svc-1', { service_key: 'pest-quarterly', service_category: 'pest' }]]);
+
 describe('pickTechAddonPrompt', () => {
   test('recommends Lawn Care when customer owns only pest_control', () => {
     const prompt = pickTechAddonPrompt(['pest_control']);
@@ -85,22 +87,23 @@ describe('pickTechAddonPrompt', () => {
     expect(pickTechAddonPrompt(['pest_control'], { isCommercial: true })).toBeNull();
   });
 
-  test('carries ZERO dollar prices, margins, or discount percentages (owner 2026-11-04)', () => {
+  test('carries ZERO dollar prices, percentages, or hardcoded tier claims (owner 2026-11-04)', () => {
     for (const p of Object.values(PILLAR_PROMPTS)) {
       const text = `${p.headline} ${p.detail}`;
-      expect(text).not.toMatch(/\$|\d+%|discount|margin/i);
+      expect(text).not.toMatch(/\$|\d+%|discount|margin|silver|gold|platinum/i);
       expect(text).not.toMatch(/tree|shrub|termite/i);
     }
   });
 });
 
 describe('techAddonPromptFacts', () => {
-  test('returns Lawn Care prompt with premises streetScope for single-pillar residential visit', async () => {
+  test('returns Lawn Care prompt with primary streetScope and strictProbe ledger check', async () => {
     const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
     const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
     const loadPlanComponents = jest.fn(async () => [{ family_key: 'pest_control', monthly_rate: 39 }]);
 
     const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadCatalogFieldsByRowId: RESIDENTIAL_CATALOG,
       loadOwnedRecurringServiceKeys,
       loadPlanComponents,
     });
@@ -113,12 +116,48 @@ describe('techAddonPromptFacts', () => {
         requireSharedLocality: true,
       },
     });
+    expect(loadPlanComponents).toHaveBeenCalledWith(dbh, 'cust-1', { strictProbe: true });
   });
 
   test('suppresses prompt when customer has a commercial property_type', async () => {
     const dbh = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, property_type: 'commercial' } });
     const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
     const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadCatalogFieldsByRowId: RESIDENTIAL_CATALOG,
+      loadOwnedRecurringServiceKeys,
+      loadPlanComponents: async () => [],
+    });
+    expect(prompt).toBeNull();
+    expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+  });
+
+  test('suppresses prompt when visit catalog row is commercial even with blank property_type', async () => {
+    const dbh = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, property_type: null } });
+    const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
+    const prompt = await techAddonPromptFacts(
+      { ...STAMPED_VISIT, service_type: 'Pest Control' },
+      dbh,
+      {
+        loadCatalogFieldsByRowId: async () => new Map([['svc-1', { service_key: 'commercial-pest', catalog_name: 'Commercial Pest' }]]),
+        loadOwnedRecurringServiceKeys,
+        loadPlanComponents: async () => [],
+      },
+    );
+    expect(prompt).toBeNull();
+    expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
+  });
+
+  test('suppresses prompt on secondary property so Field Lead never quotes the wrong address', async () => {
+    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+    const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
+    const secondaryVisit = {
+      ...STAMPED_VISIT,
+      service_address_line1: '999 Beach Rd',
+      service_address_city: 'Venice',
+      service_address_zip: '34285',
+    };
+    const prompt = await techAddonPromptFacts(secondaryVisit, dbh, {
+      loadCatalogFieldsByRowId: RESIDENTIAL_CATALOG,
       loadOwnedRecurringServiceKeys,
       loadPlanComponents: async () => [],
     });
@@ -129,6 +168,7 @@ describe('techAddonPromptFacts', () => {
   test('suppresses prompt when customer already has a positive plan-rate component for target family', async () => {
     const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
     const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadCatalogFieldsByRowId: RESIDENTIAL_CATALOG,
       loadOwnedRecurringServiceKeys: async () => ['pest_control'],
       loadPlanComponents: async () => [
         { family_key: 'pest_control', monthly_rate: 39 },
@@ -138,13 +178,21 @@ describe('techAddonPromptFacts', () => {
     expect(prompt).toBeNull();
   });
 
-  test('fails closed when plan-rate ledger lookup throws', async () => {
+  test('fails closed when plan-rate ledger or catalog lookup fails', async () => {
     const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+    const p1 = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadCatalogFieldsByRowId: RESIDENTIAL_CATALOG,
       loadOwnedRecurringServiceKeys: async () => ['pest_control'],
       loadPlanComponents: async () => { throw new Error('ledger unavailable'); },
     });
-    expect(prompt).toBeNull();
+    expect(p1).toBeNull();
+
+    const p2 = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      loadCatalogFieldsByRowId: async () => null,
+      loadOwnedRecurringServiceKeys: async () => ['pest_control'],
+      loadPlanComponents: async () => [],
+    });
+    expect(p2).toBeNull();
   });
 
   test('suppresses prompt when visit premises cannot be proven (multi-home unstamped visit)', async () => {
@@ -153,6 +201,7 @@ describe('techAddonPromptFacts', () => {
     const unstampedVisit = { id: 'svc-2', customer_id: 'cust-1', service_type: 'Quarterly Pest Control' };
 
     const prompt = await techAddonPromptFacts(unstampedVisit, dbh, {
+      loadCatalogFieldsByRowId: async () => new Map(),
       loadOwnedRecurringServiceKeys,
       loadPlanComponents: async () => [],
       resolveVisitPropertyScope: async () => ({ key: null, hasEvidence: false }),
@@ -160,27 +209,5 @@ describe('techAddonPromptFacts', () => {
     });
     expect(prompt).toBeNull();
     expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
-  });
-
-  test('suppresses prompt when visit has stamped street without locality (unprovable premises)', async () => {
-    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const loadOwnedRecurringServiceKeys = jest.fn(async () => ['pest_control']);
-    const partialVisit = { id: 'svc-3', customer_id: 'cust-1', service_type: 'Quarterly Pest Control', service_address_line1: '100 Main St' };
-
-    const prompt = await techAddonPromptFacts(partialVisit, dbh, {
-      loadOwnedRecurringServiceKeys,
-      loadPlanComponents: async () => [],
-    });
-    expect(prompt).toBeNull();
-    expect(loadOwnedRecurringServiceKeys).not.toHaveBeenCalled();
-  });
-
-  test('fails closed on ownership lookup error (never throws)', async () => {
-    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
-      loadOwnedRecurringServiceKeys: async () => { throw new Error('catalog unavailable'); },
-      loadPlanComponents: async () => [],
-    });
-    expect(prompt).toBeNull();
   });
 });

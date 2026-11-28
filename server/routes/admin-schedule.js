@@ -24896,9 +24896,9 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
       try {
         const facts = await PrevisitBrief.deterministicVisitFacts(svc, undefined, { pastVisits: true, customerAsked: true });
-        if (facts.customer_asked) customerAskedBound = true;
         const addonPrompt = await require('../services/tech-addon-prompt').techAddonPromptFacts(svc, db).catch(() => null);
         if (addonPrompt) facts.addon_prompt = addonPrompt;
+        if (facts.customer_asked || facts.addon_prompt) customerAskedBound = true;
         // Re-verify the assignment AFTER the facts queries (Codex P1 on
         // #3638): they run outside the atomic ownership-scoped fetch
         // above, so a dispatch reassignment during them would otherwise

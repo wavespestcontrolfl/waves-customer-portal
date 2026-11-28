@@ -84,7 +84,7 @@ function resolveInitialServiceType(value) {
 
 // `initialProspect` (from the estimate tool's "the office needs to price this one") opens the Neighbor form filled in.
 // `initialServiceType` (from the Visit Brief's zero-price Add-On prompt) pre-selects Lawn or Pest for one-tap flagging.
-export default function FieldLeadModal({ service, onClose, onSubmit, initialProspect = null, initialServiceType = '' }) {
+export default function FieldLeadModal({ service, onClose, onSubmit, initialProspect = null, initialServiceType }) {
   const fieldPortalClass = useFieldPortalClass();
   const isMobile = useIsMobile();
   const dialogRef = useModalFocus(true, onClose);
