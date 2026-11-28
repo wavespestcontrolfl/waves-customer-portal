@@ -315,15 +315,16 @@ async function lookupGoogleLegs(legs, travel) {
 }
 
 // Real-road drive of a 2-stop source day: home -> first -> second -> home,
-// each leg priced at its own expected departure minute.
+// each leg priced at its own expected departure minute (outbound, post-stop-1, post-stop-2).
 async function sourceDayRoadDrive(sourceLegs, travel) {
   if (!sourceLegs || !sourceLegs.date) return null;
-  const { date, firstStartMin, secondStartMin, home, first, second } = sourceLegs;
-  const dep1 = Number.isFinite(firstStartMin) ? firstStartMin : sourceLegs.startMin;
-  const dep2 = Number.isFinite(secondStartMin) ? secondStartMin : dep1;
-  if (!Number.isFinite(dep1) || !Number.isFinite(dep2)) return null;
+  const { date, firstDepMin, interStopDepMin, returnDepMin, home, first, second } = sourceLegs;
+  const dep1 = Number.isFinite(firstDepMin) ? firstDepMin : sourceLegs.firstStartMin;
+  const dep2 = Number.isFinite(interStopDepMin) ? interStopDepMin : (sourceLegs.secondStartMin ?? dep1);
+  const dep3 = Number.isFinite(returnDepMin) ? returnDepMin : dep2;
+  if (!Number.isFinite(dep1) || !Number.isFinite(dep2) || !Number.isFinite(dep3)) return null;
   const leg = (from, to, departureMin) => ({ date, from, to, departureMin });
-  const mins = await lookupGoogleLegs([leg(home, first, dep1), leg(first, second, dep2), leg(second, home, dep2)], travel);
+  const mins = await lookupGoogleLegs([leg(home, first, dep1), leg(first, second, dep2), leg(second, home, dep3)], travel);
   return mins ? round2(mins[0] + mins[1] + mins[2]) : null;
 }
 

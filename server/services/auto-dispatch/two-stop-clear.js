@@ -46,7 +46,7 @@ const { scoreAppointmentPlacement, _internals: { workloadScoreFor, hhmmToMin } }
 const moveRules = require('./move-rules');
 const { isBounceBackDate } = require('./bounce-guard');
 const {
-  physicalStops, chainDriveMinutes, routeCost, routeOrderCovers,
+  physicalStops, chainDriveMinutes, routeCost, stopPlanningMinutes, routeOrderCovers,
   _internals: { insertByRouteOrder },
 } = require('./route-model');
 const candidateSlots = require('./candidate-slots');
@@ -67,14 +67,17 @@ function round2(v) { return Math.round(v * 100) / 100; }
 
 function pairClearFloor(serviceA, serviceB, config) {
   if (!config) return 0;
-  const minFloor = 2 * (Number(config.minDayMoveDriveSavingMinutes) || 0);
-  const minRule = moveRules.minutesRuleFloor(serviceA, config) + moveRules.minutesRuleFloor(serviceB, config);
-  return Math.max(minFloor, minRule);
+  const ordFloor = Number(config.minDayMoveDriveSavingMinutes) || 0;
+  const minA = moveRules.minutesRuleFloor(serviceA, config);
+  const minB = moveRules.minutesRuleFloor(serviceB, config);
+  if (ordFloor <= 0 || minA <= 0 || minB <= 0) return 0;
+  return Math.max(2 * ordFloor, minA + minB);
 }
 
 function isEnabled(config) {
   if (!autoDispatchSharedModelLive() || !config || config.roadCheckEnabled !== true) return false;
-  return pairClearFloor({}, {}, config) > 0;
+  return (Number(config.minDayMoveDriveSavingMinutes) || 0) > 0
+    && ((Number(config.minutesRuleSavingMinutes) || 0) > 0 || (Number(config.minutesRuleSecondMoveSavingMinutes) || 0) > 0);
 }
 
 function isEligibleEntry(service, evalResult) {
@@ -96,13 +99,17 @@ function pairSourceDrive(stopA, stopB, home = HQ, sourceDate = null) {
   if (seq.length !== 2) return null;
   if (!seq[0].geo || !seq[1].geo) return null;
   const driveMinutes = round2(chainDriveMinutes([seq[0].geo, seq[1].geo], home));
+  const firstDepMin = seq[0].startMin;
+  const interStopDepMin = firstDepMin + (seq[0].minutes || stopPlanningMinutes(seq[0]));
+  const returnDepMin = Math.max(interStopDepMin, seq[1].startMin) + (seq[1].minutes || stopPlanningMinutes(seq[1]));
   return {
     driveMinutes,
     chain: seq,
     roadLegs: {
       date,
-      firstStartMin: seq[0].startMin,
-      secondStartMin: seq[1].startMin,
+      firstDepMin,
+      interStopDepMin,
+      returnDepMin,
       home,
       first: seq[0].geo,
       second: seq[1].geo,
@@ -162,41 +169,55 @@ function sameDestRoadSpecFor(finalChain, idA, idB, { date, startMinA, startMinB,
   };
 }
 
-function buildDestWithA(destStops, aStop, aCand) {
-  const baseSeq = physicalStops(destStops);
-  const placedA = { ...aStop, startMin: hhmmToMin(aCand.start_time), window_start: aCand.start_time, route_order: null };
+// Build the destination day's raw stop rows AFTER A lands (preserving every
+// grouped member row so physicalStops/routeCost/routeOrderCovers keep full
+// sibling durations and member IDs without double-collapsing).
+function buildRawDestWithA(destStops, aStop, aCand) {
+  const placedA = {
+    ...aStop,
+    startMin: hhmmToMin(aCand.start_time),
+    window_start: aCand.start_time,
+    window_end: aCand.end_time || null,
+    route_order: null,
+  };
   if (Array.isArray(aCand.route_order_ids) && routeOrderCovers(destStops, aCand.route_order_ids)) {
-    return insertByRouteOrder(baseSeq, placedA, aCand.route_order_ids)
-      .map((s, idx) => ({ ...s, route_order: idx + 1 }));
+    const rank = new Map();
+    aCand.route_order_ids.forEach((raw, idx) => {
+      const id = raw === '__candidate__' ? String(placedA.id) : String(raw);
+      rank.set(id, idx + 1);
+    });
+    return [...destStops, placedA].map((s) => (
+      s && rank.has(String(s.id)) ? { ...s, route_order: rank.get(String(s.id)) } : s
+    ));
   }
-  // Without certified route_order_ids, dispatch does not run placeMovedVisit:
-  // the moved visit keeps route_order = null and lands in canonical currentOrder.
-  return currentOrder([...baseSeq, placedA]);
+  return [...destStops, placedA];
 }
 
 function jointDestinationMetrics({
   destStops, destHome, aStop, bStop, aCand, bCand, bRouteOrderIds, currentScoreA, currentScoreB,
 }) {
   if (!Array.isArray(destStops) || destStops.length === 0) return null;
-  const destWithA = buildDestWithA(destStops, aStop, aCand);
-  const useRouteOrder = Array.isArray(bRouteOrderIds) && routeOrderCovers(destWithA, bRouteOrderIds);
+  const rawDestWithA = buildRawDestWithA(destStops, aStop, aCand);
+  const useRouteOrder = Array.isArray(bRouteOrderIds) && routeOrderCovers(rawDestWithA, bRouteOrderIds);
   const bUnit = {
     ...bStop,
     startMin: hhmmToMin(bCand.start_time),
     window_start: bCand.start_time,
+    window_end: bCand.end_time || null,
     route_order: null,
     insertByTime: useRouteOrder,
     ...(useRouteOrder ? { routeOrderIds: bRouteOrderIds } : {}),
   };
-  const costBoth = routeCost(destWithA, bUnit, destHome);
+  const costBoth = routeCost(rawDestWithA, bUnit, destHome);
   const combinedWorkload = workloadScoreFor({ route_minutes: costBoth.routeTimeWithMinutes }, destStops.length + 2);
   const minWorkload = Math.max(Number(currentScoreA.workload_score) || 0, Number(currentScoreB.workload_score) || 0);
   if (combinedWorkload < minWorkload) return null;
   const baseDrive = chainDriveMinutes(physicalStops(destStops).map((s) => s.geo), destHome);
   const addedDrive = Math.max(0, round2(costBoth.driveWithMinutes - baseDrive));
+  const physWithA = physicalStops(rawDestWithA);
   const finalChain = useRouteOrder
-    ? insertByRouteOrder(destWithA, bUnit, bRouteOrderIds)
-    : currentOrder([...destWithA, bUnit]);
+    ? insertByRouteOrder(physWithA, bUnit, bRouteOrderIds)
+    : currentOrder([...physWithA, bUnit]);
   const sameDestRoadSpec = sameDestRoadSpecFor(finalChain, aStop.id, bStop.id, {
     date: aCand.date,
     startMinA: hhmmToMin(aCand.start_time),
@@ -270,7 +291,7 @@ function activeRouteOrderIds(routeOrder, rows, targetId) {
   return active.map((id) => (id === targetId ? '__candidate__' : String(id)));
 }
 
-function syntheticRowFor(service, geo, cand) {
+function syntheticRowFor(service, geo, cand, { planningExempt = false } = {}) {
   return {
     id: service.id,
     customer_id: service.customer_id,
@@ -290,6 +311,7 @@ function syntheticRowFor(service, geo, cand) {
     lat: geo.lat,
     lng: geo.lng,
     route_order: null,
+    ...(planningExempt ? { planning_exempt: true } : {}),
   };
 }
 
@@ -328,7 +350,7 @@ async function checkSameDestArrival({ destCache, serviceA, geoA, serviceB, geoB,
     destTech: aCand.technician_id, destDate: aCand.date, serviceB, geoB, run,
   });
   if (!context) return { ok: false, bRouteOrderIds: null };
-  const synA = syntheticRowFor(serviceA, geoA, aCand);
+  const synA = syntheticRowFor(serviceA, geoA, aCand, { planningExempt: !schedulingPlanMinutesOnly() });
   const contextWithA = { ...context, rows: stampRouteOrderWithA(context.rows, synA, aCand.route_order_ids) };
   const canInsert = canPlaceInRoute([]) && !hasInsertionIncompatibleRow(contextWithA);
   const fit = evaluateArrivalPlacement(contextWithA, {
@@ -426,7 +448,8 @@ async function evaluatePairCombinations({
         bRouteOrderIds: arrival.bRouteOrderIds, currentScoreA, currentScoreB,
       });
       if (!joint) continue;
-      const slotB = joint.bRouteOrderIds ? { ...bRow.cand, route_order_ids: joint.bRouteOrderIds } : bRow.cand;
+      const { route_order_ids: _preAOrder, ...bCandBase } = bRow.cand;
+      const slotB = joint.bRouteOrderIds ? { ...bCandBase, route_order_ids: joint.bRouteOrderIds } : bCandBase;
       pairs.push({
         sameDest: true,
         slotA: aRow.cand,

@@ -51,11 +51,16 @@ describe('two-stop-clear pure rules', () => {
     bounceCooldownDays: 30,
   };
 
-  test('pairClearFloor requires sum of both visits minutes-rule floors (20 / 25 / 30 min)', () => {
+  test('pairClearFloor requires sum of both visits minutes-rule floors (20 / 25 / 30 min) and honors disabled rules', () => {
     expect(pairClearFloor({ auto_dispatch_change_count: 0 }, { auto_dispatch_change_count: 0 }, config)).toBe(20);
     expect(pairClearFloor({ auto_dispatch_change_count: 1 }, { auto_dispatch_change_count: 0 }, config)).toBe(25);
     expect(pairClearFloor({ auto_dispatch_change_count: 1 }, { auto_dispatch_change_count: 2 }, config)).toBe(30);
-    expect(pairClearFloor({}, {}, { minDayMoveDriveSavingMinutes: 0, minutesRuleSavingMinutes: 0 })).toBe(0);
+    expect(pairClearFloor({}, {}, { minDayMoveDriveSavingMinutes: 0, minutesRuleSavingMinutes: 10 })).toBe(0);
+    // Repeat-move threshold disabled (0): an already-moved visit cannot bypass its score bar via pair clear.
+    expect(pairClearFloor(
+      { auto_dispatch_change_count: 1 }, { auto_dispatch_change_count: 0 },
+      { ...config, minutesRuleSecondMoveSavingMinutes: 0 },
+    )).toBe(0);
   });
 
   test('pairSourceDrive captures full HQ round-trip stem for two nearby stops and rejects collapsed co-visits', () => {
@@ -70,7 +75,7 @@ describe('two-stop-clear pure rules', () => {
     expect(src).not.toBeNull();
     expect(src.driveMinutes).toBeGreaterThan(25);
     expect(src.roadLegs).toMatchObject({
-      date: '2026-12-21', firstStartMin: 600, secondStartMin: 720, home: HQ, first: NORTH_A, second: NORTH_B,
+      date: '2026-12-21', firstDepMin: 600, interStopDepMin: 660, returnDepMin: 780, home: HQ, first: NORTH_A, second: NORTH_B,
     });
     // Without an explicit or embedded sourceDate, fails closed (null).
     expect(pairSourceDrive(prodA, prodB, HQ)).toBeNull();
@@ -153,13 +158,19 @@ describe('two-stop-clear pure rules', () => {
     expect(jointDestinationMetrics({
       destStops: [], destHome: HQ, aStop, bStop, aCand, bCand, bRouteOrderIds: null, currentScoreA: curScore, currentScoreB: curScore,
     })).toBeNull();
-    // Overloaded destination day (combined route_minutes > 480) is rejected.
-    const heavyDest = Array.from({ length: 7 }, (_, i) => ({
-      id: `h${i}`, geo: MID, startMin: 480 + i * 60, window_start: `${String(8 + i).padStart(2, '0')}:00`, route_order: i + 1, estimated_duration_minutes: 60,
-    }));
+    // Overloaded destination day (combined route_minutes > 480) is rejected, including grouped member work preserved.
+    const heavyGroupedDest = [
+      { id: 'g1a', visit_id: 'vis1', geo: MID, startMin: 480, window_start: '08:00', window_end: '10:00', route_order: 1, estimated_duration_minutes: 120 },
+      { id: 'g1b', visit_id: 'vis1', geo: MID, startMin: 480, window_start: '08:00', window_end: '10:00', route_order: 2, estimated_duration_minutes: 180 },
+      { id: 'd3', geo: MID, startMin: 720, window_start: '12:00', window_end: '14:00', route_order: 3, estimated_duration_minutes: 120 },
+    ];
     expect(jointDestinationMetrics({
-      destStops: heavyDest, destHome: HQ, aStop, bStop, aCand: { date: '2026-12-22', start_time: '15:00' }, bCand: { date: '2026-12-22', start_time: '16:00' },
-      bRouteOrderIds: null, currentScoreA: curScore, currentScoreB: curScore,
+      destStops: heavyGroupedDest, destHome: HQ,
+      aStop: { ...aStop, window_end: '16:00', estimated_duration_minutes: 60 },
+      bStop: { ...bStop, window_end: '17:00', estimated_duration_minutes: 60 },
+      aCand: { date: '2026-12-22', start_time: '14:00', end_time: '15:00', route_order_ids: ['g1a', 'g1b', 'd3', '__candidate__'] },
+      bCand: { date: '2026-12-22', start_time: '15:00', end_time: '16:00' },
+      bRouteOrderIds: ['g1a', 'g1b', 'd3', 'a', '__candidate__'], currentScoreA: curScore, currentScoreB: curScore,
     })).toBeNull();
   });
 
@@ -245,7 +256,7 @@ describe('road-check confirmPairOnRoads', () => {
       return m == null ? { minutes: 10, source: 'conservative_model' } : { minutes: m, source: 'google_traffic' };
     },
   });
-  const sourceLegs = { date: '2026-12-21', firstStartMin: 540, secondStartMin: 840, home: P('H'), first: P('A'), second: P('B') };
+  const sourceLegs = { date: '2026-12-21', firstDepMin: 540, interStopDepMin: 600, returnDepMin: 900, home: P('H'), first: P('A'), second: P('B') };
   const baseConfig = { roadCheckEnabled: true };
 
   test('confirms different-day pair on real Google roads at each leg departure time and fails closed when disabled or unavailable', async () => {
@@ -253,7 +264,7 @@ describe('road-check confirmPairOnRoads', () => {
     const slotB = { [ROAD_LEGS]: { prev: P('P2'), stop: P('B'), next: P('N2'), date: '2026-12-23', startMin: 660 } };
     const pair = { sameDest: false, slotA, slotB, saving: 25 };
     const asked = [];
-    // Source day: H->A (18 at 540) + A->B (2 at 840) + B->H (18 at 840) = 38 min.
+    // Source day: H->A (18 at 540) + A->B (2 at 600) + B->H (18 at 900) = 38 min.
     // Dest A detour: 8 + 8 - 12 = 4 min. Dest B detour: 9 + 9 - 12 = 6 min. Total added = 10 min -> saving = 28 >= 20.
     const map = {
       'H->A': 18, 'A->B': 2, 'B->H': 18,
@@ -269,8 +280,8 @@ describe('road-check confirmPairOnRoads', () => {
       pair,
       road: { source_drive_minutes: 38, added_drive_minutes: 10, saving_minutes: 28, source: 'google' },
     });
-    // Source legs priced at firstStartMin (540) for inbound and secondStartMin (840) for inter-stop/return.
-    expect(asked.slice(0, 3).map((l) => l.departureMin)).toEqual([540, 840, 840]);
+    // Source legs priced at firstDepMin (540), interStopDepMin (600), and returnDepMin (900).
+    expect(asked.slice(0, 3).map((l) => l.departureMin)).toEqual([540, 600, 900]);
     // Missing Google answer fails closed (null, never commits on straight-line estimate).
     const miss = await confirmPairOnRoads([pair], { sourceLegs, floor: 20, config: baseConfig, travel: travelFor({ 'H->A': 18 }) });
     expect(miss).toBeNull();
