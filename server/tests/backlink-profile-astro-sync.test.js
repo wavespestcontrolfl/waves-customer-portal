@@ -119,6 +119,12 @@ describe('getVerifiedProfilesByOffice', () => {
       // Same N49 listing ID under conflicting Sarasota vs Venice city slugs -> omitted completely
       { live_url: 'https://www.n49.com/biz/999111/waves-pest-control-sarasota/', location: 'sarasota' },
       { live_url: 'https://www.n49.com/biz/999111/waves-pest-control-venice/', location: 'venice' },
+      // Same N49 listing ID with Englewood (sorts first) and Venice alias -> only valid Venice URL ships
+      { live_url: 'https://www.n49.com/biz/888222/waves-pest-control-englewood/', location: 'venice' },
+      { live_url: 'https://www.n49.com/biz/888222/waves-pest-control-venice/', location: 'venice' },
+      // Query-free Venice URL + unscoped Sarasota tracking URL on same N49 ID -> conflict omitted
+      { live_url: 'https://www.n49.com/biz/777333/waves-pest-control-venice/', location: 'venice' },
+      { live_url: 'https://www.n49.com/biz/777333/waves-pest-control-sarasota/?utm_source=x', location: null },
       // Unscoped Sarasota URL also claimed once by Venice -> omitted completely
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-66666', location: null },
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-66666', location: 'venice' },
@@ -171,6 +177,7 @@ describe('getVerifiedProfilesByOffice', () => {
       'https://nextdoor.com/pages/waves-pest-control-venice-venice-fl-9crfqd/',
       'https://reviews.birdeye.com/waves-pest-control-venice-176686916548706',
       'https://reviews.birdeye.com/waves-pest-control-venice-999999',
+      'https://www.n49.com/biz/888222/waves-pest-control-venice/',
     ]);
   });
 

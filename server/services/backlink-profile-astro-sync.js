@@ -221,27 +221,33 @@ async function getVerifiedProfilesByOffice() {
     const base = noFrag.split('?')[0];
     if (sameAsRejectReason(base)) { refused++; continue; }
     const hp = urlHostAndPath(base);
-    const n49Id = hp.host === 'n49.com' ? hp.path.match(/^\/biz\/(\d+)\//)?.[1] : null;
-    const key = n49Id ? `n49.com:/biz/${n49Id}` : `${hp.host}${hp.path}`;
-    const entry = byNormalized.get(key) || { claims: new Set(), resolved: new Set(), urls: new Set() };
-    byNormalized.set(key, entry);
+    // Group n49 aliases sharing the same numeric /biz/<id>/ across different city slugs.
+    const key = `${hp.host}${hp.path.replace(/^(\/biz\/\d+)\/.*/, '$1')}`;
+    let entry = byNormalized.get(key);
+    if (!entry) {
+      entry = { claims: new Set(), urls: new Set() };
+      byNormalized.set(key, entry);
+    }
+    const inferred = inferOfficeSlugFromUrl(hp.href);
+    if (inferred) entry.claims.add(inferred);
     if (r.location && r.location !== 'default') {
       entry.claims.add(LOCATION_TO_OFFICE_SLUG.get(r.location) || `unknown:${r.location}`);
     }
-    // Query variants participate only in cross-office conflict checks; only
-    // query-free URLs (with any #fragment stripped) may resolve or ship.
+    // Query variants contribute only conflict evidence; only validated
+    // query-free URLs (with #fragment stripped) may enter an office bucket.
     if (base.length === noFrag.length) {
-      entry.urls.add(hp.href);
       const slug = officeSlugForRow(r.location, hp.href);
-      if (slug) entry.resolved.add(slug);
+      if (slug) {
+        entry.claims.add(slug);
+        entry.urls.add(hp.href);
+      }
     }
   }
   const byOffice = Object.fromEntries(OFFICE_SLUGS.map((slug) => [slug, new Set()]));
   for (const entry of byNormalized.values()) {
     if (!entry.urls.size) { refused++; continue; }
-    const [slug] = entry.resolved;
-    const conflict = entry.claims.size > 1 || entry.resolved.size !== 1 || [...entry.claims].some((c) => c !== slug);
-    if (conflict) { dropped++; continue; }
+    if (entry.claims.size !== 1) { dropped++; continue; }
+    const [slug] = entry.claims;
     byOffice[slug].add([...entry.urls].sort()[0]);
   }
   if (dropped) logger.warn(`[backlink-sync] dropped ${dropped} listing(s) with an unknown or ambiguous office location`);
