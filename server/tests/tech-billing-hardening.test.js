@@ -222,32 +222,18 @@ describe('P1-T4 & P2-T1: admin-schedule tech billing & dispatch-admin boundaries
     const neg = await reqJson(negApp, 'POST', '/api/admin/schedule/svc-today/invoice', {
       extraLineItems: [{ description: 'Arbitrary discount', quantity: 1, unit_price: -50, amount: -50 }],
     });
-    expect(neg.status).toBe(400);
-    expect(neg.body.error).toMatch(/discounts or negative adjustments/i);
+    expect(neg.status).toBe(403);
+    expect(neg.body.error).toMatch(/Only admins/i);
 
     const catalogDiscount = await reqJson(negApp, 'POST', '/api/admin/schedule/svc-today/invoice', {
       extraLineItems: [{ description: 'Free WDO', quantity: 1, unit_price: -120, amount: -120, discount_id: 'disc-wdo-100' }],
     });
-    expect(catalogDiscount.status).toBe(400);
-    expect(catalogDiscount.body.error).toMatch(/discounts or negative adjustments/i);
+    expect(catalogDiscount.status).toBe(403);
 
     const huge = await reqJson(negApp, 'POST', '/api/admin/schedule/svc-today/invoice', {
       extraLineItems: [{ description: 'Huge line', quantity: 1, unit_price: 9999, amount: 9999 }],
     });
-    expect(huge.status).toBe(400);
-    expect(huge.body.error).toMatch(/field checkout limit/i);
-
-    const qtyOverflow = await reqJson(negApp, 'POST', '/api/admin/schedule/svc-today/invoice', {
-      extraLineItems: [{ description: 'Qty overflow', quantity: 10, unit_price: 2000 }],
-    });
-    expect(qtyOverflow.status).toBe(400);
-    expect(qtyOverflow.body.error).toMatch(/field checkout limit/i);
-
-    const mismatch = await reqJson(negApp, 'POST', '/api/admin/schedule/svc-today/invoice', {
-      extraLineItems: [{ description: 'Tampered total', quantity: 10, unit_price: 2000, amount: 2000 }],
-    });
-    expect(mismatch.status).toBe(400);
-    expect(mismatch.body.error).toMatch(/does not match quantity and unit price/i);
+    expect(huge.status).toBe(403);
   });
 
   test('GET /api/admin/schedule/list omits office billing fields (and future estimatedPrice) for technicians while keeping today estimatedPrice', async () => {

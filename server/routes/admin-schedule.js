@@ -738,10 +738,23 @@ function technicianTodayLiveVisitFilter(req, q) {
 
 function stripTechOwnerOnlyMoney(req, rows) {
   if (!isTechnicianRequest(req)) return;
+  const today = etDateString();
   for (const row of rows) {
     delete row.monthlyRate;
     delete row.leadScore;
-    if (row.billingLane) delete row.billingLane.monthlyRate;
+    if (row.billingLane) {
+      delete row.billingLane.monthlyRate;
+      if (row.billingLane.prediction && dateOnly(row.scheduledDate) !== today) {
+        row.billingLane = {
+          ...row.billingLane,
+          prediction: { ...row.billingLane.prediction, amount: null },
+        };
+      }
+    }
+    if (dateOnly(row.scheduledDate) !== today) {
+      delete row.estimatedPrice;
+      delete row.primaryLinePrice;
+    }
   }
 }
 
@@ -20178,7 +20191,11 @@ router.delete('/:id/prepaid', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-async function buildValidatedCheckoutExtraLines(extras, baseAmount) {
+// Validate extra checkout lines (including admin discount clamping) before minting.
+async function buildValidatedCheckoutExtraLines(extras, baseAmount, req = null) {
+  if (extras.length > 0 && req && isTechnicianRequest(req)) {
+    throw httpError(403, 'Only admins can add extra items or discounts during checkout.');
+  }
   const extraLines = extras
     .map((e) => {
       const quantity = Number(e?.quantity) || 1;
@@ -20553,12 +20570,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
     // Technicians may collect at the server-calculated visit total only —
     // never add custom services, negative lines, or discounts during checkout.
-    if (extras.length > 0 && isTechnicianRequest(req)) {
-      return res.status(403).json({ error: 'Only admins can add extra items or discounts during checkout.' });
-    }
-    const { error: techExtraErr, extraLines } = parseAndValidateExtraLines(req, extras);
-    if (techExtraErr) return res.status(400).json({ error: techExtraErr });
-    const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extraLines, amount);
+    const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extras, amount, req);
 
     const extrasTotal = invoiceExtraLines.reduce((s, e) => s + e.amount, 0);
     if (!(amount > 0) && extrasTotal <= 0) {

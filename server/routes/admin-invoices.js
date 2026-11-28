@@ -938,7 +938,10 @@ const TECH_SAFE_INVOICE_KEYS = [
   'service_date', 'due_date', 'paid_at', 'created_at', 'updated_at', 'payment_method',
 ];
 const TECH_SAFE_CUSTOMER_KEYS = [
-  'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
+  'first_name', 'last_name', 'phone', 'email',
+];
+const TECH_SAFE_VISIT_CUSTOMER_KEYS = [
+  ...TECH_SAFE_CUSTOMER_KEYS, 'address_line1', 'city', 'state', 'zip',
 ];
 
 function pickAllowedFields(source, keys) {
@@ -953,11 +956,14 @@ function pickAllowedFields(source, keys) {
 // permanent public bearer tokens, third-party payer snapshots (AP email /
 // address), annual-prepay plan pricing (monthlyRate / prepayAmount), saved
 // card metadata, discounts, credits, and office notes can never leak.
+// Only visit-bound invoices include the service customer's address fields;
+// customer-level prepay invoices omit address keys across multi-home accounts.
 function techSafeInvoicePayload(invoice) {
   const safe = pickAllowedFields(invoice, TECH_SAFE_INVOICE_KEYS);
   safe.tech_card_on_file = invoice.tech_card_on_file === true;
   const c = invoice.customer;
-  safe.customer = (c && typeof c === 'object') ? pickAllowedFields(c, TECH_SAFE_CUSTOMER_KEYS) : null;
+  const customerKeys = invoice.scheduled_service_id ? TECH_SAFE_VISIT_CUSTOMER_KEYS : TECH_SAFE_CUSTOMER_KEYS;
+  safe.customer = (c && typeof c === 'object') ? pickAllowedFields(c, customerKeys) : null;
   return safe;
 }
 

@@ -41,10 +41,10 @@ function formatAmount(d) {
 
 export default function MobileItemDiscountPickerSheet({
   desktopVisible = false, onClose, onSelect, chosenDiscounts = [] }) {
-  const isTechnician = useStaffRole() === 'technician';
-  const isStaffAdmin = !isTechnician;
+  const isStaffAdmin = useStaffRole() === 'admin';
+  const isTechnician = !isStaffAdmin;
   const [discounts, setDiscounts] = useState([]);
-  const [loading, setLoading] = useState(!isTechnician);
+  const [loading, setLoading] = useState(isStaffAdmin);
   const [query, setQuery] = useState('');
 
   useEffect(() => {
