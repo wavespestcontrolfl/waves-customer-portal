@@ -16,7 +16,7 @@
   html.admin-app[data-admin-theme="dark"] :is(.bg-white, .bg-surface-card) {
     background-color: #181b1f;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-50, .bg-surface-page, .bg-slate-50, .bg-gray-50, .bg-stone-50) {
+  html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-50, .bg-surface-page, .bg-slate-50, .bg-gray-50, .bg-stone-50, .bg-\[\#FAF7EF\], .bg-\[\#F8FCF6\], .bg-\[\#F1F9EE\], .bg-\[\#F1F7FA\]) {
     background-color: #14171a;
   }
   html.admin-app[data-admin-theme="dark"] :is(.bg-zinc-100, .bg-surface-hover, .bg-surface-sunken, .bg-slate-100, .bg-gray-100, .bg-stone-100) {
@@ -86,6 +86,43 @@
   }
   html.admin-app[data-admin-theme="dark"] .hover\:text-zinc-900:hover {
     color: #ffffff;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-100 {
+    background-color: #22262c !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-900\/10 {
+    background-color: rgba(244, 245, 246, 0.14) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-700\/10,
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-600\/10,
+  html.admin-app[data-admin-theme="dark"] .\!bg-zinc-400\/10 {
+    background-color: rgba(180, 186, 196, 0.14) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!border-zinc-900\/25 {
+    border-color: rgba(244, 245, 246, 0.35) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!border-zinc-700\/25,
+  html.admin-app[data-admin-theme="dark"] .\!border-zinc-600\/25,
+  html.admin-app[data-admin-theme="dark"] .\!border-zinc-400\/25 {
+    border-color: rgba(180, 186, 196, 0.3) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-zinc-900 {
+    color: #f4f5f6 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-zinc-700 {
+    color: #d1d6de !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-zinc-600 {
+    color: #b4bac4 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-zinc-400 {
+    color: #9ba3b0 !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!bg-alert-bg {
+    background-color: rgba(200, 49, 47, 0.2) !important;
+  }
+  html.admin-app[data-admin-theme="dark"] .\!text-alert-fg {
+    color: #f87171 !important;
   }
 
   /* Primary dark controls & strong badges (after text ramp so .text-white wins on light fill) */
@@ -183,7 +220,7 @@
   }
 
   /* Semantic washes & readable dark-mode semantic text */
-  html.admin-app[data-admin-theme="dark"] :is(.bg-alert-bg, .bg-red-50, .bg-red-100, .bg-waves-red-light) {
+  html.admin-app[data-admin-theme="dark"] :is(.bg-alert-bg, .bg-red-50, .bg-red-100, .bg-waves-red-light, .bg-\[\#FEECEB\], .bg-\[\#FEF3F2\]) {
     background-color: rgba(200, 49, 47, 0.2);
   }
   html.admin-app[data-admin-theme="dark"] :is(.text-alert-fg, .text-red-700, .text-red-800) {
@@ -199,7 +236,7 @@
   html.admin-app[data-admin-theme="dark"] :is(.text-warn-fg, .text-amber-800, .text-amber-700, .text-yellow-800) {
     color: #fcd34d;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.bg-waves-success-bg, .bg-green-50, .bg-green-100, .bg-emerald-50, .bg-emerald-100) {
+  html.admin-app[data-admin-theme="dark"] :is(.bg-waves-success-bg, .bg-green-50, .bg-green-100, .bg-emerald-50, .bg-emerald-100, .bg-\[\#EAF5E4\]) {
     background-color: rgba(4, 120, 87, 0.22);
   }
   html.admin-app[data-admin-theme="dark"] :is(.border-waves-success-border, .border-green-200, .border-emerald-200) {
@@ -246,12 +283,19 @@
     background-attachment: local, local, scroll, scroll;
   }
 
-  /* Recharts readability */
+  /* Recharts & SVG gauge readability */
   html.admin-app[data-admin-theme="dark"] .recharts-cartesian-grid line {
     stroke: #2c313a;
   }
   html.admin-app[data-admin-theme="dark"] .recharts-text {
     fill: #b4bac4;
+  }
+  html.admin-app[data-admin-theme="dark"] svg text[fill="#18181B" i],
+  html.admin-app[data-admin-theme="dark"] .recharts-wrapper text[fill="#18181B" i] {
+    fill: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] .recharts-radial-bar-background-sector {
+    fill: #2c313a;
   }
   html.admin-app[data-admin-theme="dark"] .recharts-default-tooltip {
     background-color: #181b1f !important;

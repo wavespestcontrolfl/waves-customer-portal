@@ -87,6 +87,39 @@ describe('Admin dark mode preference', () => {
     expect(saved('acct-1').darkMode).toBe(false);
   });
 
+  it('keeps dark mode active across admin route transitions while re-verifying and clears it when leaving admin', () => {
+    window.history.pushState({}, '', '/admin/dashboard');
+    try {
+      mount({ id: 'acct-1', role: 'admin' });
+      act(() => { navigation.setDarkMode(true); });
+      expect(document.documentElement.dataset.adminTheme).toBe('dark');
+
+      // Navigating within /admin remounts with enabled=false before /admin/auth/me resolves
+      cleanup();
+      window.history.pushState({}, '', '/admin/customers');
+      expect(document.documentElement.dataset.adminTheme).toBe('dark');
+      mount(null, { enabled: false });
+      expect(document.documentElement.dataset.adminTheme).toBe('dark');
+
+      // Leaving /admin clears data-admin-theme
+      cleanup();
+      window.history.pushState({}, '', '/');
+      mount({ id: 'acct-1', role: 'admin' }, { enabled: true });
+      cleanup();
+      expect(document.documentElement.dataset.adminTheme).toBeUndefined();
+
+      // Logging out / redirecting to /admin/login clears data-admin-theme too
+      window.history.pushState({}, '', '/admin/dashboard');
+      mount({ id: 'acct-1', role: 'admin' }, { enabled: true });
+      expect(document.documentElement.dataset.adminTheme).toBe('dark');
+      window.history.pushState({}, '', '/admin/login');
+      cleanup();
+      expect(document.documentElement.dataset.adminTheme).toBeUndefined();
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
   it('still applies dark mode in-session across provider remounts when storage writes fail', () => {
     const setItem = Storage.prototype.setItem;
     Storage.prototype.setItem = () => { throw new Error('QuotaExceededError'); };
