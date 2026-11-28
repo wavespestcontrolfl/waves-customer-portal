@@ -9303,21 +9303,31 @@ is ON (explicit owner approval 2026-11-28), plain `POST /relay-sandbox` bypasses
 the `<Gather>` wait and answers directly into GPT-Live Marin (`cell: '71'`,
 `voice: 'marin'`) after one complete disclosure clip (`<Play>` → optional
 `<Start><Recording>` → `<Connect action="…/relay-sandbox/live-complete"><Stream .../></Connect>`).
-Callable test entry points are preserved for runners and bake-offs:
-`?mode=menu` or `VOICE_SANDBOX_MENU_DEFAULT=true` restores the 2-digit `<Gather>`
-keypad menu (so normal DTMF dialing reaches `71`, `72`, `01`–`10`, and `99` via
-`/relay-sandbox/cell` with zero webhook-URL change when toggled), `?cell=72` (or
-`71`) connects directly to that GPT-Live voice (same signature check and budget
-reservation), and `?cell=<known sandbox code>` (`resolveSandboxCell`, e.g. `09`,
-`10`, `99`; unknown query values are ignored and never logged) plays the full
-disclosure once and connects directly to that ConversationRelay profile. Any `/relay-sandbox`
-request taking a GPT-Live path (plain default with the gate on, or `?cell=71`/`72`)
-verifies `X-Twilio-Signature` in the route BEFORE any `call_log`, ledger, or
-Twilio REST write (whatever the middleware mode) and fails closed with a spoken
-notice and `<Hangup/>`; a foreign-sourced `call_log` row is still refused 403
-before any budget claim, a detached relay stamps `relay_failed` and hangs up
-without reserving budget, and a full/unparseable budget responds with a spoken
-notice and `<Hangup/>` (no recording, no `<Stream>`). Payload: standard
+Callable test entry points are preserved for runners and bake-offs (explicit
+query selectors take precedence over `VOICE_SANDBOX_MENU_DEFAULT`, and `cell`
+and `mode` query values on `/api/webhooks/twilio/relay-sandbox` are redacted
+from access logs by `redact-request-url.js`):
+`?mode=menu` or `VOICE_SANDBOX_MENU_DEFAULT=true` (when no explicit `?cell=` is
+passed) restores the 2-digit `<Gather>` keypad menu (so normal DTMF dialing
+reaches `71`, `72`, `01`–`10`, and `99` via `/relay-sandbox/cell` with zero
+webhook-URL change when toggled), `?cell=72` (or `71`) connects directly to
+that GPT-Live voice (same signature check and budget reservation), and
+`?cell=<known sandbox code>` (`resolveSandboxCell`, e.g. `09`, `10`, or explicit
+`99` — which keeps the ConversationRelay production-profile fallback if
+`VOICE_RELAY_SANDBOX_ATTRS` is unset/invalid rather than reserving GPT-Live;
+unknown query values are ignored and never logged) plays the full disclosure
+once and connects directly to that ConversationRelay profile. Signature failure
+responses depend on the mount's `TWILIO_SIGNATURE_VALIDATION` mode: in `enforce`
+mode (production default), the mounted `validateTwilioSignature` middleware
+rejects missing or invalid `X-Twilio-Signature` with an empty `403` and missing
+`TWILIO_AUTH_TOKEN` with a `500` empty `<Response></Response>` XML BEFORE the
+route handler runs; only requests that pass through to the route handler (such
+as `log` or `disabled` middleware mode) hit the route's own
+`gptLiveRequestSigned` check BEFORE any `call_log`, ledger, or Twilio REST write
+and receive the `200` spoken refusal + `<Hangup/>`; a foreign-sourced `call_log`
+row is still refused 403 before any budget claim, a detached relay stamps
+`relay_failed` and hangs up without reserving budget, and a full/unparseable
+budget responds with a spoken notice and `<Hangup/>` (no recording, no `<Stream>`). Payload: standard
 Twilio voice-webhook form fields (`CallSid`, `From`, `To`, `CallStatus`,
 `Digits` on the cell action). The session that answers is a DRY RUN: the ws
 upgrade proves the sandbox source from the call_log row and the relay answers
@@ -9398,9 +9408,14 @@ starts a paid provider request** (no geocode, weather forecast, date parser or r
 city-centroid practice lookups only, never booked or held. The only provider requests the tools make are the
 brain's own model rounds (the only paid calls besides GPT-Live's voice time itself). The conversation has no transfer tool and no automatic handoff, so no
 handoff packet is ever written, and it never texts. The bridge keeps the caller's and GPT-Live's transcript fragments in
-memory only and the summary stores counts and times only. Before any write, both the direct `/relay-sandbox` GPT-Live path and `/relay-sandbox/cell`
-verify the request's Twilio signature themselves (the shared middleware lets unsigned requests through in its
-`log` and `disabled` modes); unsigned or invalid = refused with no `call_log`/ledger write and no Twilio update. Both routes
+memory only and the summary stores counts and times only. Signature failure responses follow the mount's middleware mode: in `enforce`
+mode, `validateTwilioSignature` answers missing/invalid `X-Twilio-Signature`
+with an empty `403` and missing `TWILIO_AUTH_TOKEN` with `500` empty
+`<Response></Response>` XML before the route runs; when a request reaches the
+handler (e.g. `log` or `disabled` middleware mode), both the direct
+`/relay-sandbox` GPT-Live path and `/relay-sandbox/cell` verify the request's
+Twilio signature themselves before any `call_log`/ledger write or Twilio REST
+update and refuse unsigned/invalid requests with a spoken notice + `<Hangup/>`. Both routes
 reserve one call's worst-case GPT-Live voice cost in the dedicated ledger table (`voice_gpt_live_ledger`, one row per CallSid)
 under an advisory lock before it issues the token (first releasing at $0 any reservation whose stream never opened
 within the token's life), and refuses the call

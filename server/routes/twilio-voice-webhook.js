@@ -2682,18 +2682,22 @@ async function respondSandboxRelayCell(req, res, callSid, cell, recordingOk) {
 
 function resolveSandboxAnswerMode(req) {
   // Gate off ⇒ always the documented <Gather> keypad flow, byte-identical
-  // regardless of any query parameter (?cell=71/72 included).
+  // regardless of any query parameter (?cell=71/72/99 included).
   if (!require('../config/feature-gates').voiceGptLiveTestLive()) return { kind: 'gather' };
   const mode = String(req.query?.mode || '').trim().toLowerCase();
-  if (mode === 'menu' || process.env.VOICE_SANDBOX_MENU_DEFAULT === 'true') return { kind: 'gather' };
+  if (mode === 'menu') return { kind: 'gather' };
   const queryCell = String(req.query?.cell || '').trim();
   if (queryCell) {
     const liveCell = gptLiveCellFor(queryCell);
     if (liveCell) return { kind: 'gpt_live', liveCell };
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const relayCell = resolveSandboxCell(queryCell);
-    if (relayCell) return { kind: 'relay_cell', cell: relayCell };
+    // Cell 99 explicitly selects the ConversationRelay raw-attrs path: when
+    // VOICE_RELAY_SANDBOX_ATTRS is unset/invalid, keep the keypad fallback to
+    // the production relay profile instead of reserving GPT-Live Marin.
+    if (relayCell || queryCell === '99') return { kind: 'relay_cell', cell: relayCell };
   }
+  if (process.env.VOICE_SANDBOX_MENU_DEFAULT === 'true') return { kind: 'gather' };
   return { kind: 'gpt_live', liveCell: GPT_LIVE_DEFAULT_CELL };
 }
 
