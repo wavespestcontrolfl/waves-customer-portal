@@ -886,9 +886,11 @@ router.post('/message/:id/reclassify', async (req, res) => {
         .recordStaffReclassify({ dbi: db, email, verdict: aiVerdict, pick: staffPick, staffUserId: req.technicianId });
     }
     if (classification.category === 'spam') {
-      if (restoredFromTrash) {
-        // The message is live in Gmail again — reverting to a stale trashed
-        // state would lie about reality. Give it a fresh quarantine cycle.
+      if (restoredFromTrash || claimedFromState === 'spam_reclass_retry') {
+        // The message is live in Gmail again (restoredFromTrash) or was waiting
+        // on a failed non-spam retry (spam_reclass_retry) — reverting to the
+        // prior state would lie about reality or strand it outside quarantine.
+        // Give it a fresh quarantine cycle.
         claimedForReclass = false;
         await executeAutoAction(email, classification);
       } else if (claimedForReclass) {

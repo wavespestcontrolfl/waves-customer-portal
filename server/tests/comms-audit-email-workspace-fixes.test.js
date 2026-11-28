@@ -311,6 +311,27 @@ describe('C2-04: reclassify restores claim & quarantine origin on unblockSender 
     expect({ status: r1.status, error: r1Body.error }).toEqual({ status: 502, error: expect.stringMatching(/Gmail unblock failed/i) });
     expect(tables.emails[0].auto_action).toBe('spam_reclass_retry');
   });
+
+  test('re-enters quarantine when a spam_reclass_retry row is reclassified as spam', async () => {
+    installDb({
+      emails: [{
+        id: '33333333-3333-4333-8333-333333333333',
+        gmail_id: 'gm-3',
+        from_address: 'spammer@example.com',
+        subject: 'Buy SEO',
+        classification: 'other',
+        auto_action: 'spam_reclass_retry',
+        quarantined_at: new Date(),
+        is_archived: true,
+      }],
+    });
+    const r = await fetch(`${baseUrl}/message/33333333-3333-4333-8333-333333333333/reclassify`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ classification: 'spam' }),
+    });
+    expect(r.status).toBe(200);
+    expect(tables.emails[0].classification).toBe('spam');
+    expect(tables.emails[0].auto_action).not.toBe('spam_reclass_retry');
+  });
 });
 
 describe('C2-05: explicit idempotent is_read on POST /message/:id/read', () => {
