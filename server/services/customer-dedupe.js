@@ -2393,30 +2393,40 @@ async function repointMultiHomeFamilyMembers(trx, _table, _column, winnerId, los
   return `dropped 1 duplicate family row, cleaned ${cleanedOrphan} singleton orphan`;
 }
 
-async function repointCustomerMoves(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id', 'status', 'pause_state', 'paused_at', 'service_request_id');
+async function repointCustomerMoves(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('customer_moves').where(column, loserId).select('id', 'status', 'pause_state', 'paused_at', 'service_request_id');
   let moved = 0;
   let closed = 0;
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
-        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+        await sp('customer_moves').where({ id: row.id }).update({ [column]: winnerId });
       });
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      // Acquire the move fence advisory lock and re-read under row lock so a
-      // pause worker that claimed paused_at (before setting pause_state) cannot
-      // be closed out mid-settlement.
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['customer-move-apply', String(row.id)]);
-      const fresh = await trx(table)
+      // Non-blocking try-lock avoids lock-order deadlocks while holding both
+      // customer locks; abort so callers can retry cleanly if a move fence is busy.
+      const lockRes = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['customer-move-apply', String(row.id)]);
+      if (lockRes?.rows?.[0]?.locked === false) {
+        throw Object.assign(new Error('Duplicate customer move is currently being updated — retry merging in a moment'), {
+          statusCode: 409,
+          isOperational: true,
+        });
+      }
+      const fresh = await trx('customer_moves')
         .where({ id: row.id })
         .forUpdate()
         .first('id', 'status', 'pause_state', 'paused_at', 'service_request_id') || row;
       if (fresh.paused_at || (fresh.pause_state && fresh.pause_state !== 'none')) {
         throw new Error('Both customers have live moves and the duplicate move has already started its pause workflow — reconcile the paused move before merging');
       }
-      await trx(table).where({ id: row.id }).update({
+      if (fresh.status === 'closed') {
+        await trx('customer_moves').where({ id: row.id }).update({ [column]: winnerId });
+        moved += 1;
+        continue;
+      }
+      await trx('customer_moves').where({ id: row.id }).update({
         [column]: winnerId,
         status: 'closed',
         closed_reason: 'cancelled',
@@ -2426,8 +2436,13 @@ async function repointCustomerMoves(trx, table, column, winnerId, loserId) {
       if (fresh.service_request_id) {
         await trx('service_requests')
           .where({ id: fresh.service_request_id })
-          .whereNotIn('status', ['completed', 'closed', 'cancelled'])
-          .update({ status: 'completed', updated_at: trx.fn.now() });
+          .whereNotIn('status', ['resolved', 'closed', 'cancelled', 'completed'])
+          .update({
+            status: 'resolved',
+            resolved_at: trx.fn.now(),
+            status_version: trx.raw('COALESCE(status_version, 0) + 1'),
+            updated_at: trx.fn.now(),
+          });
       }
       closed += 1;
     }
@@ -2436,13 +2451,14 @@ async function repointCustomerMoves(trx, table, column, winnerId, loserId) {
 }
 
 async function repointPromoCodesNullCollisions(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id');
+  const promoTable = table === 'invoice_promo_codes' ? 'invoice_promo_codes' : 'estimate_promo_codes';
+  const rows = await trx(promoTable).where(column, loserId).select('id');
   let moved = 0;
   let unlinked = 0;
   for (const { id } of rows) {
     try {
       await trx.transaction(async (sp) => {
-        await sp(table).where({ id }).update({ [column]: winnerId });
+        await sp(promoTable).where({ id }).update({ [column]: winnerId });
       });
       moved += 1;
     } catch (e) {
@@ -2450,26 +2466,30 @@ async function repointPromoCodesNullCollisions(trx, table, column, winnerId, los
       // Preserve financial promo-redemption audit row without violating the
       // partial unique redeemed-per-customer index (winner already holds a
       // redeemed row for this discount_id, so repeat redemption stays blocked).
-      await trx(table).where({ id }).update({ [column]: null, updated_at: trx.fn.now() });
+      if (promoTable === 'invoice_promo_codes') {
+        await trx('invoice_promo_codes').where({ id }).update({ [column]: null, updated_at: trx.fn.now() });
+      } else {
+        await trx('estimate_promo_codes').where({ id }).update({ [column]: null, updated_at: trx.fn.now() });
+      }
       unlinked += 1;
     }
   }
   return `moved ${moved}, detached ${unlinked} duplicate redeemed promo row(s) (winner already redeemed)`;
 }
 
-async function repointClickFollowupActions(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id', 'status', 'draft_id');
+async function repointClickFollowupActions(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('click_followup_actions').where(column, loserId).select('id', 'status', 'draft_id');
   let moved = 0;
   let dismissed = 0;
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
-        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+        await sp('click_followup_actions').where({ id: row.id }).update({ [column]: winnerId });
       });
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      await trx(table).where({ id: row.id }).update({
+      await trx('click_followup_actions').where({ id: row.id }).update({
         [column]: winnerId,
         status: 'dismissed',
         updated_at: trx.fn.now(),
@@ -2485,19 +2505,19 @@ async function repointClickFollowupActions(trx, table, column, winnerId, loserId
   return `moved ${moved}, dismissed ${dismissed} duplicate open click-followup row(s)`;
 }
 
-async function repointReviewSequences(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id', 'status');
+async function repointReviewSequences(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('review_sequences').where(column, loserId).select('id', 'status');
   let moved = 0;
   let stopped = 0;
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
-        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+        await sp('review_sequences').where({ id: row.id }).update({ [column]: winnerId });
       });
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      await trx(table).where({ id: row.id }).update({
+      await trx('review_sequences').where({ id: row.id }).update({
         [column]: winnerId,
         status: 'stopped',
         stop_reason: 'manual',
@@ -2510,14 +2530,14 @@ async function repointReviewSequences(trx, table, column, winnerId, loserId) {
   return `moved ${moved}, stopped ${stopped} duplicate active review sequence(s)`;
 }
 
-async function repointAppointmentCardRequests(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id', 'kind', 'status');
+async function repointAppointmentCardRequests(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('appointment_card_requests').where(column, loserId).select('id', 'kind', 'status');
   let moved = 0;
   let expired = 0;
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
-        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+        await sp('appointment_card_requests').where({ id: row.id }).update({ [column]: winnerId });
       });
       moved += 1;
     } catch (e) {
@@ -2525,10 +2545,11 @@ async function repointAppointmentCardRequests(trx, table, column, winnerId, lose
       if (row.kind !== 'customer' || row.status !== 'pending') {
         throw new Error('Both customers have an in-flight standalone Auto Pay setup link — wait for it to finish before merging');
       }
-      const updated = await trx(table)
+      // Expire in place on loserId without repointing onto winnerId, so an
+      // already-sent setup token link can never expose the survivor's first name.
+      const updated = await trx('appointment_card_requests')
         .where({ id: row.id, [column]: loserId, kind: 'customer', status: 'pending' })
         .update({
-          [column]: winnerId,
           status: 'expired',
           updated_at: trx.fn.now(),
         });
@@ -2541,8 +2562,8 @@ async function repointAppointmentCardRequests(trx, table, column, winnerId, lose
   return `moved ${moved}, expired ${expired} duplicate pending Auto Pay setup link(s)`;
 }
 
-async function repointCustomerAccessCodes(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table)
+async function repointCustomerAccessCodes(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('customer_access_codes')
     .where(column, loserId)
     .forUpdate()
     .select('id', 'source_type', 'source_id', 'kind', 'value_hash', 'instructions', 'life', 'status', 'property_id', 'scheduled_service_id');
@@ -2551,7 +2572,7 @@ async function repointCustomerAccessCodes(trx, table, column, winnerId, loserId)
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
-        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+        await sp('customer_access_codes').where({ id: row.id }).update({ [column]: winnerId });
       });
       moved += 1;
     } catch (e) {
@@ -2560,7 +2581,7 @@ async function repointCustomerAccessCodes(trx, table, column, winnerId, loserId)
       // md5(coalesce(instructions, ''))) and lock the conflicting winner row
       // before comparing life, status, property, and visit scope.
       const existing = row.source_id
-        ? await trx(table)
+        ? await trx('customer_access_codes')
           .where({
             [column]: winnerId,
             source_type: row.source_type,
@@ -2580,26 +2601,26 @@ async function repointCustomerAccessCodes(trx, table, column, winnerId, loserId)
       if (!sameDecisionAndScope) {
         throw new Error('Both customers have conflicting access-code decisions or property/visit scopes — reconcile access codes before merging');
       }
-      await trx(table).where({ id: row.id }).del();
+      await trx('customer_access_codes').where({ id: row.id }).del();
       dropped += 1;
     }
   }
   return `moved ${moved}, dropped ${dropped} identical duplicate access-code row(s)`;
 }
 
-async function repointCustomerSignals(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id');
+async function repointCustomerSignals(trx, _table, column, winnerId, loserId) {
+  const rows = await trx('customer_signals').where(column, loserId).select('id');
   let moved = 0;
   let resolved = 0;
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
-        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+        await sp('customer_signals').where({ id: row.id }).update({ [column]: winnerId });
       });
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      await trx(table).where({ id: row.id }).update({
+      await trx('customer_signals').where({ id: row.id }).update({
         [column]: winnerId,
         resolved: true,
         resolved_at: trx.fn.now(),
@@ -4359,11 +4380,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // the withdrawal after the sweep reads them, and must not wait on a payer row while holding invoices.
     await LinkedOwners.recordOwnerPlan(trx, { customerId: loser.id }, null, { lock: true });
     await LinkedOwners.recordOwnerPlan(trx, { customerId: winnerId }, null, { lock: true });
-    // The loser's open pin suggestion (and its bell) is retired, not moved: it names the retired profile.
-    await retirePinSuggestionsBeforeSweep(trx, loser.id);
     // Open email-change verification codes belong solely to the retired profile —
     // void them before the sweep (table is in REPOINT_EXCLUDED_TABLES).
     await voidOpenEmailChangeRequestsBeforeSweep(trx, loser.id, winner.id);
+    // The loser's open pin suggestion (and its bell) is retired, not moved: it names the retired profile.
+    await retirePinSuggestionsBeforeSweep(trx, loser.id);
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -8346,6 +8367,41 @@ async function predictCollisionFolds(database, winner, loser) {
   const liveMoveOwners = new Set(moveRows.map((r) => String(r.customer_id)));
   if (liveMoveOwners.has(String(winnerId)) && liveMoveOwners.has(String(loserId))) {
     details.customer_moves = 'both records have an open move: the surviving record\'s move stays open and the archived record\'s move is closed';
+  }
+  const rawApptCardRows = await read('appointment_card_requests', ['customer_id', 'kind', 'status']);
+  const pendingApptCardOwners = new Set(
+    (Array.isArray(rawApptCardRows) ? rawApptCardRows : [])
+      .filter((r) => r.kind === 'customer' && r.status === 'pending')
+      .map((r) => String(r.customer_id)),
+  );
+  if (pendingApptCardOwners.has(String(winnerId)) && pendingApptCardOwners.has(String(loserId))) {
+    details.appointment_card_requests = 'both records have a pending standalone Auto Pay setup link: the archived record\'s link is expired in place';
+  }
+  const rawFollowupRows = await read('click_followup_actions', ['customer_id', 'status']);
+  const openFollowupOwners = new Set(
+    (Array.isArray(rawFollowupRows) ? rawFollowupRows : [])
+      .filter((r) => r.status === 'pending' || r.status === 'drafted')
+      .map((r) => String(r.customer_id)),
+  );
+  if (openFollowupOwners.has(String(winnerId)) && openFollowupOwners.has(String(loserId))) {
+    details.click_followup_actions = 'both records have an open follow-up action: the archived record\'s duplicate action is dismissed and any pending draft rejected';
+  }
+  for (const promoTable of ['estimate_promo_codes', 'invoice_promo_codes']) {
+    let promoRows = [];
+    try {
+      promoRows = await database(promoTable)
+        .whereIn('redeemed_by_customer_id', ids)
+        .whereNotNull('discount_id')
+        .select('redeemed_by_customer_id', 'discount_id');
+    } catch (e) {
+      if (!(e && e.code === '42P01')) throw e;
+    }
+    const promoList = Array.isArray(promoRows) ? promoRows : [];
+    const winDiscounts = new Set(promoList.filter((r) => String(r.redeemed_by_customer_id) === String(winnerId)).map((r) => String(r.discount_id)));
+    const sharedDiscounts = [...new Set(promoList
+      .filter((r) => String(r.redeemed_by_customer_id) === String(loserId) && winDiscounts.has(String(r.discount_id)))
+      .map((r) => String(r.discount_id)))].sort();
+    if (sharedDiscounts.length) details[promoTable] = { shared_redeemed_discounts: sharedDiscounts };
   }
   return { tables: Object.keys(details).sort(), details };
 }

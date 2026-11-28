@@ -139,6 +139,59 @@ describe('PR 3 merge & undo table coverage', () => {
     ]);
   });
 
+  test('repointCustomerMoves resolves service_request as inbox resolved, preserves already-closed move on 23505, and aborts when try-lock is busy', async () => {
+    const reqUpdates = [];
+    const moveUpdates = [];
+    const makeTrx = ({ freshRow, locked = true }) => {
+      const trx = (table) => {
+        let whereObj = {};
+        const q = {
+          where(a, b) { if (typeof a === 'string') whereObj[a] = b; else whereObj = { ...whereObj, ...a }; return q; },
+          whereNotIn() { return q; },
+          forUpdate() { return q; },
+          select: async () => [freshRow],
+          first: async () => freshRow,
+          update: async (patch) => {
+            if (table === 'service_requests') reqUpdates.push({ id: whereObj.id, patch });
+            else moveUpdates.push({ id: whereObj.id, patch });
+            return 1;
+          },
+        };
+        return q;
+      };
+      trx.raw = async (sql) => (String(sql).includes('pg_try_advisory_xact_lock') ? { rows: [{ locked }] } : { raw: sql });
+      trx.fn = { now: () => 'NOW()' };
+      trx.transaction = async (cb) => cb(() => ({
+        where() { return { update: async () => { const e = new Error('23505'); e.code = '23505'; throw e; } }; },
+      }));
+      return trx;
+    };
+
+    // Busy move fence aborts immediately instead of blocking behind customer locks.
+    await expect(
+      dedupe._test.repointCustomerMoves(makeTrx({ freshRow: { id: 'mv-busy', status: 'open' }, locked: false }), 'customer_moves', 'customer_id', 'win-1', 'lose-1'),
+    ).rejects.toThrow(/currently being updated/i);
+
+    // Already-closed colliding move is repointed without overwriting its closed_reason/closed_at.
+    await dedupe._test.repointCustomerMoves(
+      makeTrx({ freshRow: { id: 'mv-closed', status: 'closed', pause_state: 'none', service_request_id: 'sr-closed' }, locked: true }),
+      'customer_moves', 'customer_id', 'win-1', 'lose-1',
+    );
+    expect(moveUpdates).toEqual([{ id: 'mv-closed', patch: { customer_id: 'win-1' } }]);
+    expect(reqUpdates).toEqual([]);
+
+    // Open move with service_request_id resolves the inbox row with 'resolved' + resolved_at + status_version.
+    moveUpdates.length = 0;
+    await dedupe._test.repointCustomerMoves(
+      makeTrx({ freshRow: { id: 'mv-open', status: 'open', pause_state: 'none', service_request_id: 'sr-open' }, locked: true }),
+      'customer_moves', 'customer_id', 'win-1', 'lose-1',
+    );
+    expect(reqUpdates).toEqual([{
+      id: 'sr-open',
+      patch: expect.objectContaining({ status: 'resolved', resolved_at: 'NOW()', updated_at: 'NOW()' }),
+    }]);
+  });
+
   test('repointPromoCodesNullCollisions detaches colliding redeemed promo row instead of deleting audit trail', async () => {
     const updates = [];
     const trx = () => {
@@ -270,7 +323,7 @@ describe('PR 3 merge & undo table coverage', () => {
     expect(msg).toMatch(/expired 1/);
     expect(updates).toEqual([{
       id: 'acr-1',
-      patch: { customer_id: 'win-1', status: 'expired', updated_at: 'NOW()' },
+      patch: { status: 'expired', updated_at: 'NOW()' },
     }]);
 
     await expect(
