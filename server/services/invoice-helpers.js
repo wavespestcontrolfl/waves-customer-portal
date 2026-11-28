@@ -389,11 +389,7 @@ function assertInvoiceCollectible(invoice) {
   // reason (a withdrawal never stamps a terminal row, but a row that settled
   // between the withdrawal and this read can carry both).
   assertInvoiceNotWithdrawnFromCustomer(row);
-  if (invoiceHeldForChemicalReview(row)) {
-    const err = new Error('This invoice is held for office billing review of a chemical area add-on');
-    err.code = 'INVOICE_CHEMICAL_ADDON_HOLD';
-    throw err;
-  }
+  assertInvoiceNotHeldForChemicalReview(row);
 }
 
 // The withdrawal half of assertInvoiceCollectible on its own, for the seams
@@ -408,6 +404,19 @@ function assertInvoiceNotWithdrawnFromCustomer(invoice) {
   if (invoiceWithdrawnFromCustomer(invoice)) {
     throw new Error('This visit is now billed to a third-party payer and is no longer payable here');
   }
+}
+
+function assertInvoiceNotHeldForChemicalReview(invoice) {
+  if (invoiceHeldForChemicalReview(invoice)) {
+    const err = new Error('This invoice is held for office billing review of a chemical area add-on');
+    err.code = 'INVOICE_CHEMICAL_ADDON_HOLD';
+    throw err;
+  }
+}
+
+function assertInvoiceNotWithdrawnOrHeld(invoice, { allowChemicalReviewReconcile = false } = {}) {
+  assertInvoiceNotWithdrawnFromCustomer(invoice);
+  if (!allowChemicalReviewReconcile) assertInvoiceNotHeldForChemicalReview(invoice);
 }
 
 function assertInvoiceVoidable(currentStatus) {
@@ -612,6 +621,8 @@ module.exports = {
   lockVisitForSettlement,
   assertInvoiceCollectible,
   assertInvoiceNotWithdrawnFromCustomer,
+  assertInvoiceNotHeldForChemicalReview,
+  assertInvoiceNotWithdrawnOrHeld,
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceWithdrawnFromCustomer,

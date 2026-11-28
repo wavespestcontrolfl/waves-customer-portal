@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ChevronDown, LogOut, Pin, Search, Sparkles } from 'lucide-react';
-import { Button, UiSurface } from '../ui';
+import { ChevronDown, LogOut, Moon, Pin, Search, Sparkles, Sun } from 'lucide-react';
+import { Button, Switch, UiSurface } from '../ui';
 import { cn } from '../ui/cn';
 import useAdminNavigation from '../../hooks/useAdminNavigation';
 import { markUsageSource } from '../../lib/adminUsage';
@@ -64,9 +64,10 @@ export function PinnedWorkspaceLinks({ onNavigate, source = 'sidebar' }) {
 }
 
 export default function AdminWorkspaceNavigation({ user, sessionReady, onClose, onAsk, onSearch, onLogout, unreadCount }) {
+  const darkModeLabelId = useId();
   const navigation = useAdminNavigation();
   if (!navigation) return null;
-  const { groups } = navigation;
+  const { groups, darkMode, setDarkMode } = navigation;
   return <UiSurface density="compact" className="flex min-h-0 flex-1 flex-col text-zinc-900">
     <div className="flex shrink-0 items-center gap-2 border-b border-zinc-200 px-3 py-3">
       <img src="/waves-logo.png" alt="Waves" className="h-7" />
@@ -90,6 +91,11 @@ export default function AdminWorkspaceNavigation({ user, sessionReady, onClose, 
     </nav>
     <div className="shrink-0 border-t border-zinc-200 px-2 py-2">
       {groups.filter((group) => group.section === 'Preferences').map((group) => <WorkspaceGroup key={group.id} group={group} onNavigate={onClose} />)}
+      <div className="flex items-center gap-2 rounded px-3 py-2">
+        {darkMode ? <Sun size={18} strokeWidth={1.75} className="shrink-0 text-zinc-600" aria-hidden /> : <Moon size={18} strokeWidth={1.75} className="shrink-0 text-zinc-600" aria-hidden />}
+        <span id={darkModeLabelId} className="min-w-0 flex-1 text-14 font-normal text-zinc-900">Dark mode</span>
+        <Switch checked={darkMode} onChange={(on) => setDarkMode(on)} aria-labelledby={darkModeLabelId} />
+      </div>
       <div className="mt-2 flex items-center gap-2 px-2">
         <div className="min-w-0 flex-1"><div className="truncate text-14 font-medium">{user?.name || 'Staff'}</div>
           <div className="text-14 text-zinc-500">{user?.role === 'admin' ? 'Admin' : 'Technician'}</div></div>

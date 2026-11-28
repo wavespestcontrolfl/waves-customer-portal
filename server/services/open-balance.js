@@ -295,6 +295,9 @@ function queryPortalPayableCandidates(customerId, eligibleDraftIds, { invoiceIds
     .where(function withdrawnExcluded() {
       this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
     })
+    .where(function chemicalHoldExcluded() {
+      this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'chemical_addon_review:%');
+    })
     .whereRaw('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0');
 
   if (invoiceIds?.length || invoiceNumbers?.length) {
@@ -310,11 +313,13 @@ function queryPortalPayableCandidates(customerId, eligibleDraftIds, { invoiceIds
   return query.select(
     'id', 'status', 'token', 'invoice_number', 'due_date',
     'total', 'credit_applied', 'amount_paid', 'scheduled_service_id', 'service_record_id',
+    'scheduled_send_error',
   );
 }
 
 function formatPayablePortalRow(row, eligibleDraftIds) {
   if (!row.token) return null;
+  if (invoiceHeldForChemicalReview(row)) return null;
   if (row.status && !OPEN_PORTAL_STATUSES.has(row.status) && !(row.status === 'draft' && eligibleDraftIds.has(String(row.id)))) {
     return null;
   }

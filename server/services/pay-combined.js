@@ -1238,7 +1238,20 @@ async function revokeOutstandingCombinedSessionsOnGateOff() {
  * cardLastFour, receiptUrl) the caller derived from the PI/charge.
  * Returns { settled, paymentStatus, invoiceIds, anchorPaymentRow }.
  */
-async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreated = null } = {}) {
+function assertAllocatedInvoicesNotHeld(allocation, byId, rejectHeldInvoices, allowChemicalReviewReconcile = false) {
+  if (!rejectHeldInvoices || allowChemicalReviewReconcile) return;
+  for (const entry of allocation) {
+    const inv = byId.get(String(entry.invoiceId));
+    if (!inv || !invoiceHeldForChemicalReview(inv)) continue;
+    const status = String(inv.status || '').toLowerCase();
+    if (['paid', 'prepaid'].includes(status)) continue;
+    const err = new Error('This invoice is held for office billing review of a chemical area add-on');
+    err.code = 'INVOICE_CHEMICAL_ADDON_HOLD';
+    throw err;
+  }
+}
+
+async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreated = null, rejectHeldInvoices = false, allowChemicalReviewReconcile } = {}) {
   const { invoicePaymentStatusForIntent } = require('./stripe-invoice-state');
   const { etDateString } = require('../utils/datetime-et');
   const piId = paymentIntent.id;
@@ -1273,6 +1286,7 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
     const ids = allocation.map((a) => a.invoiceId).sort();
     const rows = await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate();
     const byId = new Map(rows.map((r) => [String(r.id), r]));
+    assertAllocatedInvoicesNotHeld(allocation, byId, rejectHeldInvoices, allowChemicalReviewReconcile);
 
     // 'disputed' is terminal for this PI (mirrors the single-invoice
     // confirm guard): the money already went back via the chargeback. A

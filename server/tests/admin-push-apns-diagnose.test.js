@@ -253,4 +253,64 @@ describe('GET /api/admin/notifications/diagnose APNs/FCM reporting', () => {
       expect(json.summary).toContain('pushTransport');
     });
   });
+
+  test('excludes category:* bell-policy rows from disabledTriggers while still flagging muted trigger keys', async () => {
+    PushService.status.mockReturnValue({
+      available: true,
+      configured: false,
+      error: null,
+      apns: { configured: true, production: true },
+      fcm: { configured: false },
+    });
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return chain([{ id: 1, active: true, name: 'Admin' }]);
+      if (table === 'push_subscriptions') return chain([{ id: 's1', active: true, platform: 'ios' }]);
+      if (table === 'notification_preferences') {
+        return chain([
+          { trigger_key: 'category:billing', bell_enabled: false, push_enabled: true, sound_enabled: true },
+          { trigger_key: 'category:marketing', bell_enabled: false, push_enabled: true, sound_enabled: true },
+          { trigger_key: 'inbound_sms', bell_enabled: true, push_enabled: true, sound_enabled: true },
+        ]);
+      }
+      if (table === 'notifications') return chain([{ c: '2' }]);
+      return chain([]);
+    });
+
+    await withApp(adminNotificationsRouter, '/api/admin/notifications', async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/notifications/diagnose`);
+      const json = await res.json();
+      expect(res.status).toBe(200);
+      expect(json.checks.preferences).toEqual({
+        ok: true,
+        totalRows: 1,
+        disabledTriggers: [],
+      });
+      expect(json.summary).not.toContain('preferences');
+    });
+
+    // Real trigger rows with push/bell disabled are still flagged.
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return chain([{ id: 1, active: true, name: 'Admin' }]);
+      if (table === 'push_subscriptions') return chain([{ id: 's1', active: true, platform: 'ios' }]);
+      if (table === 'notification_preferences') {
+        return chain([
+          { trigger_key: 'category:billing', bell_enabled: false, push_enabled: true, sound_enabled: true },
+          { trigger_key: 'inbound_sms', bell_enabled: true, push_enabled: false, sound_enabled: true },
+        ]);
+      }
+      if (table === 'notifications') return chain([{ c: '2' }]);
+      return chain([]);
+    });
+
+    await withApp(adminNotificationsRouter, '/api/admin/notifications', async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/notifications/diagnose`);
+      const json = await res.json();
+      expect(res.status).toBe(200);
+      expect(json.checks.preferences.ok).toBe(false);
+      expect(json.checks.preferences.disabledTriggers).toEqual([
+        { trigger_key: 'inbound_sms', bell_enabled: true, push_enabled: false, sound_enabled: true },
+      ]);
+      expect(json.summary).toContain('preferences');
+    });
+  });
 });

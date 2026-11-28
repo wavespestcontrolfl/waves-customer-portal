@@ -198,8 +198,8 @@ gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). This gate never reaches production
 inbound calls: under it the relay accepts an OpenAI id only in a sandbox
 session or in the eval harness's own sessions (`evalHarness`, which
 `voice-relay-replay.js` alone sets), and the shared `VOICE_RELAY_MODEL` never
-takes one (collections reads it too). Production inbound has its own separate
-`GATE_VOICE_RELAY_OPENAI_INBOUND`, which eval-harness sessions never read. The runner never touches Sandy's
+takes one (collections reads it too). Ordinary production inbound calls stay
+Anthropic-only. The runner never touches Sandy's
 sandbox line, so this only widens what a **benchmark candidate** may run on.
 The runner:
   - requires `OPENAI_API_KEY` in its OWN process environment up front (a

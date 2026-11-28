@@ -1203,6 +1203,10 @@ export default function EmailTemplatesPanelV2() {
   const [testEmail, setTestEmail] = useState("contact@wavespestcontrol.com");
   const [toast, setToast] = useState("");
   const [readErrors, setReadErrors] = useState({});
+  const selectedKeyRef = useRef(selectedKey);
+  selectedKeyRef.current = selectedKey;
+  const detailSequence = useRef(0);
+  const suppressionsSequence = useRef(0);
   const historySequence = useRef(0);
   const templateIssuesSequence = useRef(0);
   const deliverabilitySequence = useRef(0);
@@ -1244,9 +1248,11 @@ export default function EmailTemplatesPanelV2() {
   }, []);
 
   const loadDetail = useCallback((key) => {
-    if (!key) return Promise.resolve(null);
-    return adminFetch(`/admin/email-templates/${key}`)
+    if (!key || key !== selectedKeyRef.current) return Promise.resolve(null);
+    const seq = ++detailSequence.current;
+    return adminFetch(`/admin/email-templates/${encodeURIComponent(key)}`)
       .then((d) => {
+        if (seq !== detailSequence.current || key !== selectedKeyRef.current) return;
         setDetail(d);
         setTemplateSettings(settingsFromTemplate(d.template));
         const version = latestDraft(d.versions) || activeVersion(d.versions, d.template);
@@ -1262,7 +1268,11 @@ export default function EmailTemplatesPanelV2() {
         applyFixture(fixture);
         setPreview(null);
       })
-      .catch((e) => setToast(`Template load failed: ${e.message}`));
+      .catch((e) => {
+        if (seq === detailSequence.current && key === selectedKeyRef.current) {
+          setToast(`Template load failed: ${e.message}`);
+        }
+      });
   }, [applyFixture]);
 
   const loadHistory = useCallback(({ background = false } = {}) => {
@@ -1300,6 +1310,7 @@ export default function EmailTemplatesPanelV2() {
   }, []);
 
   const loadSuppressions = useCallback(() => {
+    const seq = ++suppressionsSequence.current;
     setSuppressionLoading(true);
     const params = new URLSearchParams();
     params.set("limit", "150");
@@ -1308,11 +1319,16 @@ export default function EmailTemplatesPanelV2() {
     if (suppressionFilter.status) params.set("status", suppressionFilter.status);
     return adminFetch(`/admin/email-templates/suppressions?${params.toString()}`)
       .then((d) => {
+        if (seq !== suppressionsSequence.current) return;
         setSuppressions(d.suppressions || []);
         setSuppressionStats(d.stats || []);
       })
-      .catch((e) => setToast(`Suppressions load failed: ${e.message}`))
-      .finally(() => setSuppressionLoading(false));
+      .catch((e) => {
+        if (seq === suppressionsSequence.current) setToast(`Suppressions load failed: ${e.message}`);
+      })
+      .finally(() => {
+        if (seq === suppressionsSequence.current) setSuppressionLoading(false);
+      });
   }, [suppressionFilter]);
 
   const loadDeliverability = useCallback(({ background = false } = {}) => {
@@ -1345,12 +1361,22 @@ export default function EmailTemplatesPanelV2() {
   }, [loadTemplates, loadGroups]);
 
   useEffect(() => () => {
+    detailSequence.current += 1;
+    suppressionsSequence.current += 1;
     historySequence.current += 1;
     templateIssuesSequence.current += 1;
     deliverabilitySequence.current += 1;
   }, []);
 
   useEffect(() => {
+    setDetail(null);
+    setTemplateSettings(null);
+    setSelectedVersionId(null);
+    setDraft(null);
+    setSelectedFixtureId(null);
+    setFixtureName("");
+    setPayload("{}");
+    setPreview(null);
     loadDetail(selectedKey);
   }, [selectedKey, loadDetail]);
 
@@ -1395,7 +1421,9 @@ export default function EmailTemplatesPanelV2() {
     () => fixtures.find((f) => f.id === selectedFixtureId) || null,
     [fixtures, selectedFixtureId],
   );
-  const canEdit = draft && selectedVersion?.status === "draft";
+  const detailMatchesSelected = Boolean(selectedKey && detail?.template?.template_key === selectedKey);
+  const detailWriteDisabled = busy || !detailMatchesSelected;
+  const canEdit = Boolean(detailMatchesSelected && draft && selectedVersion?.status === "draft");
 
   const parsedPayload = () => {
     try {
@@ -1441,13 +1469,16 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const createDraft = async () => {
-    if (!selectedKey) return;
+    const key = selectedKey;
+    if (!key || !detailMatchesSelected) return;
     setBusy(true);
     setToast("");
     try {
-      const d = await adminFetch(`/admin/email-templates/${selectedKey}/versions`, { method: "POST" });
-      await loadDetail(selectedKey);
-      setSelectedVersionId(d.version?.id || null);
+      const d = await adminFetch(`/admin/email-templates/${encodeURIComponent(key)}/versions`, { method: "POST" });
+      if (key === selectedKeyRef.current) {
+        await loadDetail(key);
+        if (key === selectedKeyRef.current) setSelectedVersionId(d.version?.id || null);
+      }
       setToast("Draft created");
     } catch (e) {
       setToast(`Draft failed: ${e.message}`);
@@ -1457,7 +1488,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const persistDraft = async () => {
-    if (!selectedVersionId || !draft) return;
+    if (!detailMatchesSelected || !selectedVersionId || !draft) return;
     await adminFetch(`/admin/email-templates/versions/${selectedVersionId}`, {
       method: "PUT",
       body: JSON.stringify({
@@ -1471,7 +1502,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const saveDraft = async () => {
-    if (!selectedVersionId || !draft) return;
+    if (!detailMatchesSelected || !selectedVersionId || !draft) return;
     setBusy(true);
     setToast("");
     try {
@@ -1485,7 +1516,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const renderPreview = async () => {
-    if (!selectedVersionId) return;
+    if (!detailMatchesSelected || !selectedVersionId) return;
     setBusy(true);
     setToast("");
     try {
@@ -1512,7 +1543,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const sendTest = async () => {
-    if (!selectedVersionId) return;
+    if (!detailMatchesSelected || !selectedVersionId) return;
     setBusy(true);
     setToast("");
     try {
@@ -1530,7 +1561,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const publish = async () => {
-    if (!selectedVersionId) return;
+    if (!detailMatchesSelected || !selectedVersionId) return;
     setBusy(true);
     setToast("");
     try {
@@ -1549,7 +1580,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const saveTemplateSettings = async () => {
-    if (!selectedKey || !templateSettings) return;
+    if (!detailMatchesSelected || !selectedKey || !templateSettings) return;
     setBusy(true);
     setToast("");
     try {
@@ -1692,7 +1723,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const createFixture = async () => {
-    if (!selectedKey) return;
+    if (!detailMatchesSelected || !selectedKey) return;
     setBusy(true);
     setToast("");
     try {
@@ -1716,6 +1747,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const saveFixture = async () => {
+    if (!detailMatchesSelected) return;
     if (!selectedFixtureId) return createFixture();
     setBusy(true);
     setToast("");
@@ -1738,7 +1770,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const setDefaultFixture = async () => {
-    if (!selectedFixtureId) return;
+    if (!detailMatchesSelected || !selectedFixtureId) return;
     setBusy(true);
     setToast("");
     try {
@@ -1756,7 +1788,7 @@ export default function EmailTemplatesPanelV2() {
   };
 
   const deleteFixture = async () => {
-    if (!selectedFixtureId || fixtures.length <= 1) return;
+    if (!detailMatchesSelected || !selectedFixtureId || fixtures.length <= 1) return;
     setBusy(true);
     setToast("");
     try {
@@ -1906,24 +1938,24 @@ export default function EmailTemplatesPanelV2() {
               </div>
             </div>
             <div className="flex gap-2 flex-wrap">
-              <Button variant="secondary" size="sm" className="gap-2" onClick={() => loadDetail(selectedKey)}>
+              <Button variant="secondary" size="sm" className="gap-2" onClick={() => loadDetail(selectedKey)} disabled={busy || !selectedKey}>
                 <RefreshCw size={14} /> Reload
               </Button>
               {!canEdit && (
-                <Button variant="secondary" size="sm" className="gap-2" onClick={createDraft} disabled={busy}>
+                <Button variant="secondary" size="sm" className="gap-2" onClick={createDraft} disabled={detailWriteDisabled}>
                   <Plus size={14} /> New draft
                 </Button>
               )}
-              <Button variant="secondary" size="sm" className="gap-2" onClick={renderPreview} disabled={busy}>
+              <Button variant="secondary" size="sm" className="gap-2" onClick={renderPreview} disabled={detailWriteDisabled}>
                 <Eye size={14} /> Preview
               </Button>
               {canEdit && (
-                <Button variant="secondary" size="sm" className="gap-2" onClick={saveDraft} disabled={busy}>
+                <Button variant="secondary" size="sm" className="gap-2" onClick={saveDraft} disabled={detailWriteDisabled}>
                   <Save size={14} /> Save
                 </Button>
               )}
               {canEdit && (
-                <Button variant="primary" size="sm" className="gap-2" onClick={publish} disabled={busy}>
+                <Button variant="primary" size="sm" className="gap-2" onClick={publish} disabled={detailWriteDisabled}>
                   <CheckCircle size={14} /> Publish
                 </Button>
               )}
@@ -1933,7 +1965,7 @@ export default function EmailTemplatesPanelV2() {
             <TemplateSettingsPanel
               settings={templateSettings}
               groups={groups}
-              busy={busy}
+              busy={detailWriteDisabled}
               onChange={setTemplateSettings}
               onSave={saveTemplateSettings}
             />
@@ -2054,10 +2086,10 @@ export default function EmailTemplatesPanelV2() {
                   placeholder="Fixture name"
                 />
                 <div className="flex gap-2 flex-wrap">
-                  <Button variant="secondary" size="sm" className="gap-2" onClick={createFixture} disabled={busy}>
+                  <Button variant="secondary" size="sm" className="gap-2" onClick={createFixture} disabled={detailWriteDisabled}>
                     <Plus size={14} /> New
                   </Button>
-                  <Button variant="secondary" size="sm" className="gap-2" onClick={saveFixture} disabled={busy}>
+                  <Button variant="secondary" size="sm" className="gap-2" onClick={saveFixture} disabled={detailWriteDisabled}>
                     <Save size={14} /> Save
                   </Button>
                 </div>
@@ -2066,7 +2098,7 @@ export default function EmailTemplatesPanelV2() {
                 {selectedFixture?.is_default ? (
                   <Badge tone="strong">Default fixture</Badge>
                 ) : (
-                  <Button variant="ghost" size="sm" className="gap-2" onClick={setDefaultFixture} disabled={busy || !selectedFixtureId}>
+                  <Button variant="ghost" size="sm" className="gap-2" onClick={setDefaultFixture} disabled={detailWriteDisabled || !selectedFixtureId}>
                     <Star size={14} /> Set default
                   </Button>
                 )}
@@ -2075,7 +2107,7 @@ export default function EmailTemplatesPanelV2() {
                   size="sm"
                   className="gap-2"
                   onClick={deleteFixture}
-                  disabled={busy || !selectedFixtureId || fixtures.length <= 1}
+                  disabled={detailWriteDisabled || !selectedFixtureId || fixtures.length <= 1}
                 >
                   <Trash2 size={14} /> Delete
                 </Button>
@@ -2112,7 +2144,7 @@ export default function EmailTemplatesPanelV2() {
                   onChange={(e) => setTestEmail(e.target.value)}
                   className="max-w-xs"
                 />
-                <Button variant="secondary" className="gap-2" onClick={sendTest} disabled={busy}>
+                <Button variant="secondary" className="gap-2" onClick={sendTest} disabled={detailWriteDisabled}>
                   <Send size={14} /> Send test
                 </Button>
               </div>

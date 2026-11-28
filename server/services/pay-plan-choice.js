@@ -33,6 +33,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { acceptMintEstimateId } = require('./invoice-notes');
 const { portalUrl } = require('../utils/portal-url');
+const { invoiceHeldForChemicalReview, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 
 // A bill the customer can still pay (invoice.js isInvoiceCollectibleStatus
 // minus 'processing': money in flight is never offered a different plan).
@@ -235,6 +236,7 @@ function acceptEstimateForChoice(invoice) {
   if (!isEnabled('payPlanChoice')) return null;
   if (!invoice?.id || !invoice.customer_id || !invoice.scheduled_service_id || !invoice.invoice_number) return null;
   if (invoice.annual_prepay_term_id || invoice.payer_id || invoice.payer_statement_id) return null;
+  if (invoiceWithdrawnFromCustomer(invoice) || invoiceHeldForChemicalReview(invoice)) return null;
   // Money or credit already recorded on it: which plan that money belongs to is the office's call.
   if (invoice.payment_recorded_at || invoice.paid_at) return null;
   if (Number(invoice.amount_paid || 0) > 0 || Number(invoice.credit_applied || 0) > 0) return null;
@@ -262,20 +264,36 @@ async function hasPendingCreditOrPromoForChoice(invoice, conn = db, { projectedC
 }
 
 // The unpaid prepay invoice an earlier choice on this first invoice minted.
-async function pendingPrepayFor(invoice, estimateId) {
-  const terms = await db('annual_prepay_terms')
-    .where({ customer_id: invoice.customer_id, source_estimate_id: estimateId, status: 'payment_pending' })
-    .whereNull('renewal_decision')
-    .whereNotNull('prepay_invoice_id')
-    .select('prepay_invoice_id');
-  for (const term of terms) {
-    const prepay = await db('invoices')
-      .where({ id: term.prepay_invoice_id, customer_id: invoice.customer_id })
-      .first('id', 'token', 'status', 'total', 'notes');
-    if (prepay && OPEN_INVOICE_STATUSES.includes(String(prepay.status || '').toLowerCase())
-      && prepayNoteNamesInvoice(prepay.notes, invoice.invoice_number)) return prepay;
+// Re-reads (and locks when selecting) the original invoice so a hold or
+// withdrawal committed concurrently can never still hand back a pending link.
+async function pendingPrepayFor(invoice, estimateId, { lockOriginal = false } = {}) {
+  const checkInConn = async (conn) => {
+    let liveQuery = conn('invoices')
+      .where({ id: invoice.id, customer_id: invoice.customer_id });
+    if (lockOriginal && typeof liveQuery.forUpdate === 'function') liveQuery = liveQuery.forUpdate();
+    const liveInvoice = await liveQuery.first(
+      'id', 'customer_id', 'scheduled_service_id', 'invoice_number', 'annual_prepay_term_id',
+      'payer_id', 'payer_statement_id', 'scheduled_send_error', 'payment_recorded_at', 'status', 'notes',
+    );
+    if (!acceptEstimateForChoice(liveInvoice)) return null;
+    const terms = await conn('annual_prepay_terms')
+      .where({ customer_id: invoice.customer_id, source_estimate_id: estimateId, status: 'payment_pending' })
+      .whereNull('renewal_decision')
+      .whereNotNull('prepay_invoice_id')
+      .select('prepay_invoice_id');
+    for (const term of terms) {
+      const prepay = await conn('invoices')
+        .where({ id: term.prepay_invoice_id, customer_id: invoice.customer_id })
+        .first('id', 'token', 'status', 'total', 'notes');
+      if (prepay && OPEN_INVOICE_STATUSES.includes(String(prepay.status || '').toLowerCase())
+        && prepayNoteNamesInvoice(prepay.notes, liveInvoice.invoice_number)) return prepay;
+    }
+    return null;
+  };
+  if (lockOriginal && typeof db.transaction === 'function') {
+    return db.transaction(checkInConn);
   }
-  return null;
+  return checkInConn(db);
 }
 
 async function planChoiceForInvoice(invoice, { projectedCredit } = {}) {
@@ -325,7 +343,7 @@ async function selectAnnualPrepay(invoice) {
   if (!estimateId) return { refused: true };
   if (await planChoiceCounterpartConflict(invoice, { inspectStripe: true })) return { refused: true };
   const answer = (prepay) => ({ payUrl: portalUrl(`/pay/${prepay.token}`) });
-  const pending = await pendingPrepayFor(invoice, estimateId);
+  const pending = await pendingPrepayFor(invoice, estimateId, { lockOriginal: true });
   if (pending) return answer(pending);
   if (await hasPendingCreditOrPromoForChoice(invoice, db)) return { refused: true };
   const out = await require('../routes/admin-schedule').runPrepaySwitch({
@@ -339,7 +357,7 @@ async function selectAnnualPrepay(invoice) {
   if (out.httpStatus) {
     // A double submit: the second request lands on the first one's term
     // (the switch's overlap assert) and answers with that same link.
-    const raced = await pendingPrepayFor(invoice, estimateId);
+    const raced = await pendingPrepayFor(invoice, estimateId, { lockOriginal: true });
     return raced ? answer(raced) : { refused: true };
   }
   const minted = await db('invoices').where({ id: out.invoice.id }).first('id', 'token');

@@ -390,8 +390,10 @@ describe('/call-complete?conf=1 after a hold voicemail', () => {
     expect(callHold.holdState).toHaveBeenCalledWith(SID);
     expect(callHold.resumeRecording).toHaveBeenCalledWith(SID);
     expect(callHold.voicemailAnswered).toHaveBeenCalledWith(SID); // the caller is in the voicemail: the one bell is wanted
-    // Still an answered call: the usual bookkeeping, no call_outcome.
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', answered_by: 'human' }));
+    // Still an answered call: the usual bookkeeping, no call_outcome, and terminal status is deferred to /call-status
+    // while the caller is live leaving a hold voicemail (C2-32).
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ answered_by: 'human' }));
+    expect(update.mock.calls[0][0]).not.toHaveProperty('status');
     expect(update.mock.calls[0][0]).not.toHaveProperty('call_outcome');
     expect(res.body).not.toContain('<Record');
   });
@@ -430,7 +432,8 @@ describe('/call-complete?conf=1 after a hold voicemail', () => {
     expect(res.body).not.toContain('<Record');
     expect(callHold.checkHold).not.toHaveBeenCalled(); // the route decides nothing here
     expect(callHold.voicemailAnswered).toHaveBeenCalledWith(SID); // and the one bell is still wanted
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', answered_by: 'human' })); // still an answered call
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ answered_by: 'human' })); // still an answered call; status deferred to /call-status
+    expect(update.mock.calls[0][0]).not.toHaveProperty('status');
   });
 
   test('a resume try that hangs is cut off, and the answer still comes within the webhook limit', async () => {

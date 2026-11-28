@@ -479,14 +479,15 @@ describe('admin email template routes', () => {
   });
 
   test('protects operational email templates from hard delete', async () => {
-    setDbQueues({
-      email_templates: [chain({
-        first: {
-          id: 'template-1',
-          template_key: 'estimate.delivery',
-          status: 'active',
-        },
-      })],
+    const lockQuery = chain({
+      first: {
+        id: 'template-1',
+        template_key: 'estimate.delivery',
+        status: 'active',
+      },
+    });
+    setTransactionQueues({
+      email_templates: [lockQuery],
     });
 
     await withServer(async (baseUrl) => {
@@ -498,19 +499,21 @@ describe('admin email template routes', () => {
 
       expect(res.status).toBe(409);
       expect(body).toEqual({ error: 'template is protected from hard delete' });
-      expect(db.transaction).not.toHaveBeenCalled();
+      expect(lockQuery.forUpdate).toHaveBeenCalled();
+      expect(lockQuery.del).not.toHaveBeenCalled();
     });
   });
 
   test('requires email templates to be draft or archived before hard delete', async () => {
-    setDbQueues({
-      email_templates: [chain({
-        first: {
-          id: 'template-1',
-          template_key: 'custom.active',
-          status: 'active',
-        },
-      })],
+    const lockQuery = chain({
+      first: {
+        id: 'template-1',
+        template_key: 'custom.active',
+        status: 'active',
+      },
+    });
+    setTransactionQueues({
+      email_templates: [lockQuery],
     });
 
     await withServer(async (baseUrl) => {
@@ -522,19 +525,18 @@ describe('admin email template routes', () => {
 
       expect(res.status).toBe(409);
       expect(body).toEqual({ error: 'template must be draft or archived before hard delete' });
-      expect(db.transaction).not.toHaveBeenCalled();
+      expect(lockQuery.forUpdate).toHaveBeenCalled();
+      expect(lockQuery.del).not.toHaveBeenCalled();
     });
   });
 
-  test('guards email template delete when automations still reference it', async () => {
-    setDbQueues({
-      email_templates: [chain({ first: { id: 'template-1', template_key: 'custom.orphan', status: 'draft' } })],
-      email_template_automations: [chain({
-        result: [
-          { automation_key: 'custom.orphan' },
-          { automation_key: 'custom.orphan.followup' },
-        ],
-      })],
+  test('cleans up legacy email_template_automations rows when deleting a draft/archived template (#8620 deadlock fix)', async () => {
+    const lockQuery = chain({ first: { id: 'template-1', template_key: 'custom.orphan', status: 'draft' } });
+    const deleteAutomationsQuery = chain();
+    const deleteTemplateQuery = chain();
+    setTransactionQueues({
+      email_template_automations: [deleteAutomationsQuery],
+      email_templates: [lockQuery, deleteTemplateQuery],
     });
 
     await withServer(async (baseUrl) => {
@@ -544,23 +546,23 @@ describe('admin email template routes', () => {
       });
       const body = await res.json();
 
-      expect(res.status).toBe(409);
-      expect(body).toEqual({
-        error: 'template is referenced by automations',
-        automations: ['custom.orphan', 'custom.orphan.followup'],
-      });
-      expect(db.transaction).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(body).toEqual({ deleted: true });
+      expect(lockQuery.forUpdate).toHaveBeenCalled();
+      expect(deleteAutomationsQuery.where).toHaveBeenCalledWith({ template_key: 'custom.orphan' });
+      expect(deleteAutomationsQuery.del).toHaveBeenCalled();
+      expect(deleteTemplateQuery.where).toHaveBeenCalledWith({ id: 'template-1' });
+      expect(deleteTemplateQuery.del).toHaveBeenCalled();
     });
   });
 
   test('deletes an unreferenced email template inside a transaction', async () => {
+    const lockQuery = chain({ first: { id: 'template-1', template_key: 'orphan.template', status: 'draft' } });
+    const deleteAutomationsQuery = chain();
     const deleteQuery = chain();
-    setDbQueues({
-      email_templates: [chain({ first: { id: 'template-1', template_key: 'orphan.template', status: 'draft' } })],
-      email_template_automations: [chain({ result: [] })],
-    });
     setTransactionQueues({
-      email_templates: [deleteQuery],
+      email_template_automations: [deleteAutomationsQuery],
+      email_templates: [lockQuery, deleteQuery],
     });
 
     await withServer(async (baseUrl) => {
@@ -572,6 +574,9 @@ describe('admin email template routes', () => {
 
       expect(res.status).toBe(200);
       expect(body).toEqual({ deleted: true });
+      expect(lockQuery.forUpdate).toHaveBeenCalled();
+      expect(deleteAutomationsQuery.where).toHaveBeenCalledWith({ template_key: 'orphan.template' });
+      expect(deleteAutomationsQuery.del).toHaveBeenCalled();
       expect(deleteQuery.where).toHaveBeenCalledWith({ id: 'template-1' });
       expect(deleteQuery.del).toHaveBeenCalled();
     });

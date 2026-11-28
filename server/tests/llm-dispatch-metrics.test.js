@@ -1033,4 +1033,20 @@ describe('llm-dispatch-metrics', () => {
       expect(mockInsert.mock.calls[0][0].served_model).toBe('gpt-x');
     });
   });
+
+  describe('circuit-breaker failure reporting in detectExceptions', () => {
+    it('distinguishes backup failures from circuit-skipped chains where no backup ran', () => {
+      const { detectExceptions } = load();
+      const ex = detectExceptions([
+        { policy: 'a', total: 10, fallbacks: 0, failed: 2, singleLeg: false, circuitSkippedFailed: 2, circuitSkippedUnattempted: 0 },
+        { policy: 'b', total: 10, fallbacks: 0, failed: 1, singleLeg: false, circuitSkippedFailed: 0, circuitSkippedUnattempted: 1 },
+        { policy: 'c', total: 10, fallbacks: 0, failed: 3, singleLeg: false, circuitSkippedFailed: 1, circuitSkippedUnattempted: 2 },
+      ], []);
+      expect(ex.find((e) => e.policy === 'a').detail).toMatch(/2 skipped primary via open circuit and failed on backup/);
+      expect(ex.find((e) => e.policy === 'a').detail).not.toMatch(/before backup ran|BOTH providers/);
+      expect(ex.find((e) => e.policy === 'b').detail).toMatch(/1 skipped primary via open circuit before backup ran/);
+      expect(ex.find((e) => e.policy === 'b').detail).not.toMatch(/failed on backup|BOTH providers/);
+      expect(ex.find((e) => e.policy === 'c').detail).toMatch(/1 skipped primary via open circuit and failed on backup; 2 skipped primary via open circuit before backup ran/);
+    });
+  });
 });

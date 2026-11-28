@@ -42,18 +42,34 @@ jest.mock('../models/db', () => {
         rows = rows.filter((row) => (row[r.bindings[0]] || '') !== r.bindings[1]);
       }
       if (sqls.includes('stopped_at')) {
-        const [from] = q.raws.find((r) => r.sql.includes('::timestamptz > ?')).bindings;
-        const [to] = q.raws.find((r) => r.sql.includes('::timestamptz <= ?')).bindings;
+        const [from] = q.raws.find((r) => r.sql.includes(') > ?')).bindings;
+        const [to] = q.raws.find((r) => r.sql.includes(') <= ?')).bindings;
+        const terminal = new Set(['completed', 'busy', 'no-answer', 'failed', 'canceled']);
         rows = rows.filter((r) => {
-          const stopped = r.metadata?.live_transcription?.stopped_at;
-          return stopped && Date.parse(stopped) > Date.parse(from) && Date.parse(stopped) <= Date.parse(to) && !spoken(r)?.checked_at;
+          if (r.metadata?.live_transcription?.quarantined_at || r.transcription_metadata?.pan_detected === 'true') return false;
+          const lt = r.metadata?.live_transcription || {};
+          const endedAt = lt.stopped_at || (lt.live_at && terminal.has(r.status) ? r.metadata?.ended_at : null);
+          return endedAt && Date.parse(endedAt) > Date.parse(from) && Date.parse(endedAt) <= Date.parse(to) && !spoken(r)?.checked_at;
         }).map((r) => ({ id: r.id, twilio_call_sid: r.twilio_call_sid }));
       } else if (sqls.includes('jsonb_path_exists')) {
         const [, nowIso] = q.raws.find((r) => r.sql.includes('jsonb_path_exists')).bindings;
-        rows = rows.filter((r) => (spoken(r)?.reminders || []).some((x) => x.raised_at == null && x.due_at <= nowIso))
-          .map((r) => JSON.parse(JSON.stringify({ id: r.id, created_at: r.created_at, metadata: r.metadata })));
+        rows = rows.filter((r) => {
+          if (r.metadata?.live_transcription?.quarantined_at || r.transcription_metadata?.pan_detected === 'true') return false;
+          return (spoken(r)?.reminders || []).some((x) => x.raised_at == null && x.due_at <= nowIso);
+        }).map((r) => JSON.parse(JSON.stringify({ id: r.id, created_at: r.created_at, customer_id: r.customer_id || null, metadata: r.metadata })));
       }
       return rows.slice(0, q.max);
+    });
+    q.first = jest.fn(async () => {
+      const row = state.calls.find((r) => r.id === q.conds.id);
+      if (!row) return undefined;
+      if (row.metadata?.live_transcription?.quarantined_at || row.transcription_metadata?.pan_detected === 'true') return undefined;
+      const idxRaw = q.raws.find((r) => r.sql.includes("'reminders', ?::text]"));
+      if (idxRaw) {
+        const rem = spoken(row)?.reminders?.[Number(idxRaw.bindings[0])];
+        if (!rem || rem.raised_at != null) return undefined;
+      }
+      return { id: row.id };
     });
     q.update = jest.fn(async (patch) => {
       const row = state.calls.find((r) => r.id === q.conds.id);
@@ -409,5 +425,30 @@ describe('ring', () => {
     expect(`Comms — ${action}`.length).toBeLessThanOrEqual(60);
     expect(actionFrom('Check the call_log slot')).toBe('do the reminder you set on a call');
     expect(whyFrom(null)).toBe('Reminder you set on a call; open the call to see the notes.');
+  });
+
+  it('C2-20: passes customerId in alert metadata so internal test customers are suppressed, and skips quarantined calls', async () => {
+    setCall({ spoken: reminderState() });
+    db.__state.calls[0].customer_id = 'cust-test-1';
+    await spokenNotes.run(NOW);
+    expect(mockRaise).toHaveBeenCalledWith('live_call_reminder', expect.any(Object), expect.objectContaining({
+      metadata: { customerId: 'cust-test-1' },
+    }));
+    mockRaise.mockClear();
+    setCall({ spoken: reminderState() });
+    db.__state.calls[0].metadata.live_transcription.quarantined_at = '2026-11-17T18:55:00.000Z';
+    const out = await spokenNotes.run(NOW);
+    expect(out.raised).toBe(0);
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  it('C2-36: falls back to terminal call status + ended_at when transcription-stopped webhook was missed', async () => {
+    setCall({ stoppedAt: null });
+    db.__state.calls[0].status = 'completed';
+    db.__state.calls[0].metadata.ended_at = STOPPED;
+    db.__state.calls[0].metadata.live_transcription.live_at = '2026-11-17T18:45:00.000Z';
+    const out = await spokenNotes.run(NOW);
+    expect(out).toMatchObject({ checked: 1, asked: 1, saved: 1 });
+    expect(saved().notes).toEqual(['The gate code is on the lockbox.']);
   });
 });

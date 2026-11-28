@@ -739,21 +739,6 @@ const TRIGGER_REGISTRY = {
       alert: { buttons: require('./alert-call-button').callButtons({ callLogId: p.callLogId, close: 'called_back' }) },
     }),
   },
-  // Staff alert for a repeat window, gated by GATE_REPEAT_CALLER_BELL.
-  repeat_caller: {
-    label: 'Repeat caller',
-    category: 'missed_call',
-    priority: 'high',
-    group: 'Communication',
-    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
-    allowContactDetails: true,
-    build: (p) => ({
-      title: `Repeat caller — ${p.name || 'unknown number'}`,
-      body: `${p.phone || 'unknown number'} has called ${p.count} times in the last 3 hours (${p.unanswered} unanswered)${p.line ? ` on ${p.line}` : ''}.`,
-      link: callLink(p),
-      ...callButtonAlert({ callLogId: p.callLogId }),
-    }),
-  },
   // A lead calls back while a Waves promise from an earlier unbooked call
   // (a callback, a quote, a time to come out) is still open — gated by
   // GATE_PROMISE_CHASER_BELL. See services/promise-chaser-bell.js.
@@ -1462,11 +1447,6 @@ function pushTagFor(triggerKey, payload = {}) {
   }
   if (triggerKey === 'customer_missed_call') {
     return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
-  }
-  if (triggerKey === 'repeat_caller') {
-    // The persisted delivery identity survives a newer call reclaiming a
-    // push-only attempt. Different caller windows still have distinct tags.
-    return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
   }
   if (triggerKey === 'promise_chaser') {
     // Fallback only — the real dispatch path below tags with the bell's own

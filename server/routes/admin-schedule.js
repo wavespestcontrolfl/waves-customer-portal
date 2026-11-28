@@ -25598,6 +25598,17 @@ async function invoiceHasActivePromoCode(invoiceId, conn) {
 // or carrying the PaymentIntent that page opens — is the normal state, not a
 // refusal. That lane voids nothing at the choice; every money guard below
 // (collected, part-paid, credited, deposit, payer, foreign lines) still holds.
+function supersedeInvoiceHoldReason(inv) {
+  const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview } = require('../services/invoice-helpers');
+  if (inv.payer_id || inv.payer_statement_id || invoiceWithdrawnFromCustomer(inv)) {
+    return 'isn’t available — this visit’s invoice bills to a third-party payer';
+  }
+  if (invoiceHeldForChemicalReview(inv)) {
+    return 'isn’t available — this visit’s invoice is held for office chemical add-on billing review';
+  }
+  return null;
+}
+
 async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db, delivered = false }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0) {
     return { ok: true, supersedes: [] };
@@ -25643,8 +25654,8 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
           });
       })
       .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid', 'paid_at',
-        'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
-        'notes');
+        'payer_id', 'payer_statement_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
+        'scheduled_send_error', 'notes');
   } catch (err) {
     logger.warn(`[schedule:prepay-switch] attached-invoice lookup failed for ${visitIds.join(',')}: ${err.message} — refusing`);
     return { ok: false, blockReason: 'couldn’t confirm what this visit is already invoiced for — refresh and try again' };
@@ -25716,8 +25727,9 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     if (delivered && await invoiceHasActivePromoCode(inv.id, conn)) {
       return { ok: false, blockReason: `can’t be switched here — ${invLabel} has a promo code applied. Resolve it from Invoices first` };
     }
-    if (inv.payer_id) {
-      return { ok: false, blockReason: 'isn’t available — this visit’s invoice bills to a third-party payer' };
+    const holdBlockReason = supersedeInvoiceHoldReason(inv);
+    if (holdBlockReason) {
+      return { ok: false, blockReason: holdBlockReason };
     }
     supersedes.push({
       id: inv.id,
@@ -26702,6 +26714,7 @@ async function runPrepaySwitch({
       await trx('invoices')
         .where(function supersedeNets() {
           this.whereIn('scheduled_service_id', target.visitIds);
+          if (payPageInvoiceId) this.orWhere({ id: payPageInvoiceId });
           if (target.estimateId) {
             this.orWhere(function customerProvenance() {
               this.where({ customer_id: target.customerId })
