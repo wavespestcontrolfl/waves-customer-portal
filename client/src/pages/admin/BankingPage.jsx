@@ -1879,7 +1879,8 @@ const fmtAsOf = (iso) =>
     : "as of the last bank update";
 const cashOf = (a) => (a.available != null ? a.available : a.current);
 const isUsdEntry = (e) => String(e.currency || "USD").toUpperCase() === "USD";
-const cashMuted = { color: "#71717A", fontSize: 14, marginTop: 4 };
+const cashInk = "var(--text-primary, #09090B)";
+const cashMuted = { color: "var(--text-tertiary, #71717A)", fontSize: 14, marginTop: 4 };
 const cashRow = {
   display: "flex",
   justifyContent: "space-between",
@@ -1949,54 +1950,54 @@ function CashTodayCard({ balance, balanceError, refreshKey }) {
 
   return (
     <Card style={{ padding: "16px 20px", marginBottom: 16 }}>
-      <div style={{ fontSize: 16, fontWeight: 500, color: "#09090B", marginBottom: 6 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: cashInk, marginBottom: 6 }}>
         Cash today
       </div>
       {data.accounts.map((a) => (
         <div key={`${a.account_label}-${a.mask}`} style={cashRow}>
           <div>
-            <div style={{ color: "#09090B" }}>
+            <div style={{ color: cashInk }}>
               {a.name || a.account_label}
               {a.mask ? ` ••${a.mask}` : ""}
             </div>
             <div style={{ ...cashMuted, marginTop: 0 }}>{fmtAsOf(a.balance_as_of)}</div>
           </div>
-          <div className="u-nums" style={{ color: "#09090B" }}>
+          <div className="u-nums" style={{ color: cashInk }}>
             {cashOf(a) == null ? "—" : money(a, cashOf(a))}
           </div>
         </div>
       ))}
       {stripeOk && (
         <div style={cashRow}>
-          <div style={{ color: "#09090B" }}>Stripe: available and pending</div>
-          <div className="u-nums" style={{ color: "#09090B" }}>
+          <div style={{ color: cashInk }}>Stripe: available and pending</div>
+          <div className="u-nums" style={{ color: cashInk }}>
             {fmtM(stripePart)}
           </div>
         </div>
       )}
       <div style={cashRow}>
         <div>
-          <div style={{ color: "#09090B" }}>Stripe payouts on the way</div>
+          <div style={{ color: cashInk }}>Stripe payouts on the way</div>
           {nextArrival && (
             <div style={{ ...cashMuted, marginTop: 0 }}>
               next arrives {fmtDay(nextArrival)}
             </div>
           )}
         </div>
-        <div className="u-nums" style={{ color: "#09090B" }}>
+        <div className="u-nums" style={{ color: cashInk }}>
           {transitFailed ? "—" : fmtM(transitTotal)}
         </div>
       </div>
       <div
         style={{
           ...cashRow,
-          borderTop: "1px solid #E4E4E7",
+          borderTop: "1px solid var(--border-default, #E4E4E7)",
           marginTop: 6,
           paddingTop: 10,
         }}
       >
-        <div style={{ color: "#09090B", fontWeight: 500 }}>{totalLabel}</div>
-        <div className="u-nums" style={{ color: "#09090B", fontWeight: 500 }}>
+        <div style={{ color: cashInk, fontWeight: 500 }}>{totalLabel}</div>
+        <div className="u-nums" style={{ color: cashInk, fontWeight: 500 }}>
           {fmtM(total)}
         </div>
       </div>

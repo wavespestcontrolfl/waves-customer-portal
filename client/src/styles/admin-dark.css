@@ -162,6 +162,24 @@
     color: #6ee7b7 !important;
   }
 
+  /* Inline dark-zinc foregrounds inside darkened Card / .bg-white surfaces
+     (excludes inverted .bg-zinc-900 controls and elements on or inside an
+     explicit inline background so light-fill callouts keep dark text) */
+  html.admin-app[data-admin-theme="dark"]
+    :is(.bg-white, .bg-surface-card):not([style*="background"])
+    :is(
+      [style*="color: rgb(9, 9, 11)"],
+      [style*="color: rgb(24, 24, 27)"],
+      [style*="color: rgb(39, 39, 42)"]
+    ):not(.bg-zinc-900):not(.bg-zinc-900 *):not([style*="background"]):not(:is(.bg-white, .bg-surface-card) [style*="background"] *) {
+    color: #f4f5f6 !important;
+  }
+  html.admin-app[data-admin-theme="dark"]
+    :is(.bg-white, .bg-surface-card):not([style*="background"])
+    [style*="color: rgb(82, 82, 91)"]:not(.bg-zinc-900):not(.bg-zinc-900 *):not([style*="background"]):not(:is(.bg-white, .bg-surface-card) [style*="background"] *) {
+    color: #b4bac4 !important;
+  }
+
   /* Primary dark controls & strong badges (after text ramp so .text-white wins on light fill) */
   html.admin-app[data-admin-theme="dark"] .bg-zinc-900:not([class*="!bg-"]) {
     background-color: #f4f5f6;
@@ -394,11 +412,14 @@
   html.admin-app[data-admin-theme="dark"] .recharts-wrapper text[fill="#18181B" i] {
     fill: #f4f5f6;
   }
-  html.admin-app[data-admin-theme="dark"] .recharts-wrapper :is(path, rect, circle)[fill="#18181B" i] {
+  html.admin-app[data-admin-theme="dark"] svg :is(path, rect, circle)[fill="#18181B" i] {
     fill: #f4f5f6;
   }
-  html.admin-app[data-admin-theme="dark"] .recharts-wrapper :is(path, rect, circle, line)[stroke="#18181B" i] {
+  html.admin-app[data-admin-theme="dark"] svg :is(path, rect, circle, line)[stroke="#18181B" i] {
     stroke: #f4f5f6;
+  }
+  html.admin-app[data-admin-theme="dark"] svg line[stroke="#E4E4E7" i] {
+    stroke: #2c313a;
   }
   html.admin-app[data-admin-theme="dark"] .recharts-radial-bar-background-sector {
     fill: #2c313a;
