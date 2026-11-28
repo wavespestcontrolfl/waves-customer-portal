@@ -389,7 +389,7 @@ async function sendAccountUpdated({
   // Passed to sendTemplate: a failure is logged and stored by its code only (the app's profile edit).
   suppressProviderErrorLog = false,
   // Takeover security notice: bypass notification_prefs.email_enabled = false when true.
-  bypassEmailOptOut = false,
+  bypassEmailOptOut,
 } = {}) {
   // The account.updated template is a security-style "was this you?" notice.
   // Skip it when the recipient is the same person who made the change — a

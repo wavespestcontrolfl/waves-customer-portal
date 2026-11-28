@@ -166,9 +166,21 @@ async function auditStep(trx, { customerId, action, detail, req }) {
   });
 }
 
-function matchingFieldsPatch(target, before, changes) {
+function isSameHolderSibling(sib, before) {
+  const bFirst = clean(before.first_name).toLowerCase();
+  const bLast = clean(before.last_name).toLowerCase();
+  const bEmail = clean(before.email).toLowerCase();
+  if (!bFirst) return false;
+  if (clean(sib.first_name).toLowerCase() !== bFirst || clean(sib.last_name).toLowerCase() !== bLast) {
+    return false;
+  }
+  if (bEmail) return clean(sib.email).toLowerCase() === bEmail;
+  return Boolean(bLast) && clean(sib.email) === '';
+}
+
+function matchingFieldsPatch(target, before, changes, fields) {
   const patch = {};
-  for (const field of ['first_name', 'last_name', 'email']) {
+  for (const field of fields) {
     if (field in changes && clean(target[field]).toLowerCase() === clean(before[field]).toLowerCase()) {
       patch[field] = changes[field];
     }
@@ -183,17 +195,35 @@ async function syncAccountAndSiblings(trx, { before, siblings = [], changes }) {
   if (!accountId || !changes || !Object.keys(changes).length) return;
   const acct = await trx('customer_accounts').where({ id: accountId }).forUpdate().first();
   if (acct) {
-    const acctPatch = matchingFieldsPatch(acct, before, changes);
+    const acctPatch = matchingFieldsPatch(acct, before, changes, ['first_name', 'last_name', 'email']);
     if (Object.keys(acctPatch).length) {
       await trx('customer_accounts').where({ id: accountId }).update({ ...acctPatch, updated_at: trx.fn.now() });
     }
   }
+  const nameFields = ['first_name', 'last_name'];
   for (const sib of siblings) {
-    const sibPatch = matchingFieldsPatch(sib, before, changes);
+    if (!isSameHolderSibling(sib, before)) continue;
+    const sibPatch = matchingFieldsPatch(sib, before, changes, nameFields);
     if (Object.keys(sibPatch).length) {
       await trx('customers').where({ id: sib.id }).update({ ...sibPatch, updated_at: trx.fn.now() });
     }
   }
+}
+
+async function syncSiblingEmails(trx, { before, siblings = [], newEmail, req }) {
+  const syncs = [];
+  const stripeSync = require('../services/stripe-email-sync');
+  for (const sib of siblings) {
+    if (!isSameHolderSibling(sib, before)) continue;
+    const sibResult = await applyOperatorCustomerEmail(trx, {
+      customerId: sib.id, email: newEmail, source: 'Customer app profile edit', rowAllowed: (row) => ownsActiveRow(row, req),
+    });
+    if (sibResult.outcome === 'updated' || (sibResult.emailSync && sibResult.outcome !== 'unchanged' && sibResult.outcome !== 'email_in_use' && sibResult.outcome !== 'not_allowed' && sibResult.outcome !== 'customer_not_found')) {
+      await stripeSync.enqueue(trx, sib.id, newEmail, 'app_email_change');
+      syncs.push({ customerId: sib.id, emailSync: sibResult.emailSync });
+    }
+  }
+  return syncs;
 }
 
 // Names save in one step: row lock, quota, update, the name fan-out with the locked before/after rows, audit row.
@@ -442,13 +472,14 @@ async function confirmInTransaction(trx, { customerId, code, email, req }) {
   if (result.outcome === 'email_in_use') return { conflict: httpError(409, EMAIL_UNAVAILABLE, 'email_unavailable') };
   if (result.outcome === 'unchanged') return { edit: { before: result.before, after: result.before, changes: {}, emailSync: null } };
   const changes = { email: request.new_email };
-  await syncAccountAndSiblings(trx, { before: result.before, siblings, changes });
+  await syncAccountAndSiblings(trx, { before: result.before, siblings: [], changes });
+  const sibEmailSyncs = await syncSiblingEmails(trx, { before: result.before, siblings, newEmail: request.new_email, req });
   await auditStep(trx, { customerId, action: AUDIT_SAVED, detail: { fields: Object.keys(changes) }, req });
   const after = { ...result.before, ...changes };
   await raiseEmailChangeAlert(trx, { customerId, before: result.before, after, requestId: request.id });
   // Stripe's copy of the email follows (owner 11-27 "build"): a durable job in this same transaction.
   await require('../services/stripe-email-sync').enqueue(trx, customerId, request.new_email, 'app_email_change');
-  return { edit: { before: result.before, after, changes, emailSync: result.emailSync } };
+  return { edit: { before: result.before, after, changes, emailSync: result.emailSync, sibEmailSyncs } };
 }
 
 router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res, next) => {
@@ -467,8 +498,11 @@ router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res
       return res.status(status).json({ error: message, code, ...(outcome.refused.attemptsLeft !== undefined ? { attemptsLeft: outcome.refused.attemptsLeft } : {}) });
     }
 
-    const { before, after, changes, emailSync } = outcome.edit;
+    const { before, after, changes, emailSync, sibEmailSyncs = [] } = outcome.edit;
     runPostCommitFanout(emailSync, customerId);
+    for (const sibSync of sibEmailSyncs) {
+      runPostCommitFanout(sibSync.emailSync, sibSync.customerId);
+    }
     if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
     return res.json({ profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
   } catch (err) {

@@ -40,12 +40,20 @@ function generateCode() {
   return String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
 }
 
-function hashCode(requestId, code) {
+function hmacSecret() {
   const baseSecret = String(config.jwt.secret || '');
   if (!baseSecret && process.env.NODE_ENV === 'production') {
     throw new Error('JWT_SECRET is required to hash customer email verification codes');
   }
-  const derivedKey = crypto.createHmac('sha256', baseSecret).update('waves:customer-email-change-code:v1').digest();
+  return baseSecret;
+}
+
+function hashCode(requestId, code) {
+  return crypto.createHmac('sha256', hmacSecret()).update(`${requestId}:${code}`).digest('hex');
+}
+
+function hashCodeDomain(requestId, code) {
+  const derivedKey = crypto.createHmac('sha256', hmacSecret()).update('waves:customer-email-change-code:v1').digest();
   return crypto.createHmac('sha256', derivedKey).update(`${requestId}:${code}`).digest('hex');
 }
 
@@ -97,7 +105,10 @@ async function checkCode(trx, { customerId, code, currentEmail, expectedEmail = 
   }
   if (new Date(request.expires_at).getTime() <= Date.now()) return { outcome: 'expired', request };
   if (Number(request.attempts) >= MAX_ATTEMPTS) return { outcome: 'attempts', request };
-  if (sameHash(request.code_hash, hashCode(request.id, String(code || '').trim()))) return { outcome: 'ok', request };
+  const typed = String(code || '').trim();
+  const valid = sameHash(request.code_hash, hashCode(request.id, typed))
+    || sameHash(request.code_hash, hashCodeDomain(request.id, typed));
+  if (valid) return { outcome: 'ok', request };
   const attempts = Number(request.attempts) + 1;
   await trx(TABLE).where({ id: request.id }).update({ attempts, updated_at: trx.fn.now() });
   return { outcome: 'wrong', request, attemptsLeft: Math.max(0, MAX_ATTEMPTS - attempts) };

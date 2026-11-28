@@ -161,92 +161,55 @@ async function pushToStripe(job, customer, email) {
     { ...opts, idempotencyKey: `stripe-email-sync:${job.id}:${customer.stripe_customer_id}:${job.attempts}` });
 }
 
-async function claimAndPrepareSync(jobId) {
+async function processJob(jobId) {
   return db.transaction(async (trx) => {
     const claimed = await claim(trx, jobId);
-    if (!claimed) return { ready: false, result: 'busy' };
+    if (!claimed) return 'busy';
     const { job, customer } = claimed;
 
     const end = async (status, result, alert = false) => {
       await finish(trx, job, status, result);
       if (alert) await alertOffice(trx, job, customer, result);
-      return { ready: false, result };
+      return result;
     };
     const later = async (minutes, patch) => {
       await trx(TABLE).where({ id: job.id }).update({ ...patch, updated_at: trx.fn.now(), next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [minutes]) });
     };
 
     if (!customer || isMergeRetiredRow(customer)) return end('skipped', 'gone');
+    // Only the address the customer confirmed goes to Stripe: a record that holds anything else now (an office edit
+    // since) is left alone, before any other check, so a stale job never raises an alert.
     const email = String(job.email || '').trim();
     if (!email || normEmail(customer.email) !== normEmail(email)) return end('done', 'superseded');
+    // Unlinked: the card check still runs (cards on a profile the record does not link), then re-checks for a link.
     const linked = Boolean(customer.stripe_customer_id);
     const problem = await firstOwnershipProblem(trx, customer, linked ? ['card_conflict', 'merged', 'shared'] : ['card_conflict']);
     if (problem) return end('skipped', problem, true);
-    if (job.attempts >= MAX_ATTEMPTS) return { ready: false, result: await giveUp(trx, job, customer) };
+    // A job whose Stripe tries ran out earlier but whose office alert could not be written: retry only the alert
+    // (after the ownership checks above, so the alert never tells the office to edit a profile that became unsafe).
+    if (job.attempts >= MAX_ATTEMPTS) return giveUp(trx, job, customer);
     if (!linked) {
-      const rechecks = job.not_linked_checks;
+      const rechecks = job.not_linked_checks; // NOT NULL DEFAULT 0
       if (rechecks >= NOT_LINKED_RECHECKS) return end('done', 'not_linked');
       await later(2 ** (rechecks + 1), { not_linked_checks: rechecks + 1 });
-      return { ready: false, result: 'recheck' };
+      return 'recheck';
     }
-    // Lease the job row and commit BEFORE Stripe HTTP so customers FOR UPDATE
-    // is never held across external network calls (P2-P2).
-    const prevNextAttemptAt = job.next_attempt_at;
-    await trx(TABLE).where({ id: job.id }).update({
-      next_attempt_at: trx.raw("now() + interval '2 minutes'"),
-      updated_at: trx.fn.now(),
-    });
-    return { ready: true, job, customer, email, prevNextAttemptAt };
-  });
-}
 
-async function settleSyncAfterStripe(job, email, stripeOutcome, stripeErr, prevNextAttemptAt) {
-  if (!stripeErr && stripeOutcome === 'not_configured') {
-    await db(TABLE).where({ id: job.id, status: 'pending' }).update({
-      next_attempt_at: prevNextAttemptAt ?? db.fn.now(),
-      updated_at: db.fn.now(),
-    });
-    return 'not_configured';
-  }
-  return db.transaction(async (trx) => {
-    const customer = await trx('customers').where({ id: job.customer_id }).forUpdate()
-      .first('id', 'email', 'stripe_customer_id', 'deleted_at', 'phone');
-    const freshJob = await trx(TABLE).where({ id: job.id, status: 'pending' }).forUpdate().first();
-    if (!freshJob) return 'busy';
-    const end = async (status, result, alert = false) => {
-      await finish(trx, freshJob, status, result);
-      if (alert && customer) await alertOffice(trx, freshJob, customer, result);
-      return result;
-    };
-    if (!customer || isMergeRetiredRow(customer)) return end('skipped', 'gone');
-    if (normEmail(customer.email) !== normEmail(email)) return end('done', 'superseded');
-    if (stripeErr) {
-      const attempts = freshJob.attempts + 1;
-      const code = String(stripeErr.code || stripeErr.type || stripeErr.name || 'stripe_error').slice(0, 80);
-      await trx(TABLE).where({ id: freshJob.id }).update({
-        attempts,
-        last_error: code,
-        updated_at: trx.fn.now(),
-        next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [backoffMinutes(attempts)]),
-      });
-      return attempts >= MAX_ATTEMPTS ? giveUp(trx, { ...freshJob, attempts }, customer) : 'retry';
+    let outcome;
+    try {
+      outcome = await pushToStripe(job, customer, email);
+    } catch (err) {
+      const attempts = job.attempts + 1;
+      const code = String(err.code || err.type || err.name || 'stripe_error').slice(0, 80);
+      // Out of tries: the spent budget commits on its own and the alert runs in a savepoint (giveUp); when the alert
+      // cannot be written, the next tick retries only the alert (above).
+      await later(backoffMinutes(attempts), { attempts, last_error: code });
+      return attempts >= MAX_ATTEMPTS ? giveUp(trx, job, customer) : 'retry';
     }
-    if (stripeOutcome === 'stripe_owner') return end('skipped', 'stripe_owner', true);
-    return end('done', 'updated');
+    // No Stripe key on this process: untouched, a process with a key takes it (drainDue).
+    if (outcome === 'stripe_owner') return end('skipped', 'stripe_owner', true);
+    return outcome === 'not_configured' ? 'not_configured' : end('done', 'updated');
   });
-}
-
-async function processJob(jobId) {
-  const prep = await claimAndPrepareSync(jobId);
-  if (!prep.ready) return prep.result;
-  let outcome = null;
-  let stripeErr = null;
-  try {
-    outcome = await pushToStripe(prep.job, prep.customer, prep.email);
-  } catch (err) {
-    stripeErr = err;
-  }
-  return settleSyncAfterStripe(prep.job, prep.email, outcome, stripeErr, prep.prevNextAttemptAt);
 }
 
 // Up to `limit` jobs a tick, oldest due first. A job whose customer row another transaction holds answers 'busy' and
