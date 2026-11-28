@@ -17362,7 +17362,14 @@ function buildTerminalSetupFeeNote({
     return ` ALSO: the one-time WaveGuard setup fee for accepted estimate ${termFeeEstimateRef} is already on open invoice ${invs} (not paid yet) — do NOT bill it again.`;
   }
   const termFeeRemainder = Math.max(0, termExpectedFeeCents - coveredWithOpen);
-  if (!(termFeeRemainder > 0)) return '';
+  if (!(termFeeRemainder > 0)) {
+    // Open invoice(s) cover the fee while unpaid (even when the notice gate is
+    // off): keep a non-empty clause so the terminal alert and its
+    // setupFeeDedupeKey stay registered until the open fee invoice pays or voids.
+    const invs = openFeeInvoicesTerm.map((inv) => inv.invoiceNumber || inv.id).filter(Boolean).join(' and ');
+    const openRef = invs ? `open invoice ${invs}` : 'an open invoice';
+    return ` ALSO: the one-time WaveGuard setup fee for accepted estimate ${termFeeEstimateRef} is currently on ${openRef} (not paid yet) — do NOT bill it again; this alert clears after payment.`;
+  }
   return ` ALSO: the one-time WaveGuard setup fee ($${(termFeeRemainder / 100).toFixed(2)}${coveredWithOpen > 0 ? ' remaining' : ''}) for accepted estimate ${termFeeEstimateRef} was never fully invoiced — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${estimateId}" in the invoice notes; do NOT re-bill covered amounts.`;
 }
 

@@ -2616,10 +2616,11 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         let mirrorEnrollment = null;
         try {
           await db.transaction(async (trx) => {
-            // Customer FOR UPDATE before the SHARE-taking ownership check.
-            await trx('customers').where({ id: wavesCustomerId }).forUpdate().first('id');
-            if (mirrorInvoiceId
-              && await require('../services/visit-completion-packets').invoicePayerOwnedNow(mirrorInvoiceId, trx)) {
+            // Lock invoice BEFORE customer (billing lock order), then check
+            // chemical-review hold and payer ownership before recording consent
+            // or enrolling Auto Pay so a hold landed between mint and webhook
+            // cannot enroll Auto Pay on a held invoice.
+            if (await webhookInvoiceRefusesEnrollment(trx, mirrorInvoiceId, wavesCustomerId)) {
               throw MIRROR_PAYER_BILLED_ROLLBACK;
             }
             if (mirrorNeedsConsentRow) {
@@ -5569,12 +5570,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       let enrollment = null;
       try {
         await db.transaction(async (trx) => {
-          // Customer FOR UPDATE before the SHARE-taking ownership check, so
-          // the enrollment's upgrade of the same row cannot deadlock against
-          // a concurrent consent/enrollment transaction.
-          await trx('customers').where({ id: wavesCustomerId }).forUpdate().first('id');
-          if (coveredInvoiceId
-            && await require('../services/visit-completion-packets').invoicePayerOwnedNow(coveredInvoiceId, trx)) {
+          // Lock invoice BEFORE customer (billing lock order), then check
+          // chemical-review hold and payer ownership before recording consent
+          // or enrolling Auto Pay.
+          if (await webhookInvoiceRefusesEnrollment(trx, coveredInvoiceId, wavesCustomerId)) {
             throw COVERED_PAYER_BILLED_ROLLBACK;
           }
           if (coveredNeedsConsentRow) {
@@ -9487,8 +9486,31 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
   }
 }
 
+// Shared locked enrollment fence for payment_intent.succeeded save-card mirror
+// and setup_intent.succeeded covered_capture (billing lock order: invoice →
+// customer → packet/visit SHARE). Refuses consent + Auto Pay enrollment when
+// the invoice moved to a chemical-review hold or third-party payer between
+// intent mint and webhook delivery.
+async function webhookInvoiceRefusesEnrollment(trx, invoiceId, customerId) {
+  let liveInv = null;
+  if (invoiceId) {
+    liveInv = await trx('invoices').where({ id: invoiceId }).forUpdate().first('id', 'scheduled_send_error');
+  }
+  if (customerId) {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+  }
+  if (liveInv && require('../services/invoice-helpers').invoiceHeldForChemicalReview(liveInv)) {
+    return true;
+  }
+  if (invoiceId && await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoiceId, trx)) {
+    return true;
+  }
+  return false;
+}
+
 module.exports = router;
 // Exposed for unit tests.
+module.exports._webhookInvoiceRefusesEnrollment = webhookInvoiceRefusesEnrollment;
 module.exports._handleRefundFailed = handleRefundFailed;
 module.exports._handlePaymentMethodAutomaticallyUpdated = handlePaymentMethodAutomaticallyUpdated;
 module.exports._withDisputeRenewalGate = withDisputeRenewalGate;

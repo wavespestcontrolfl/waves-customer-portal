@@ -745,10 +745,13 @@ function terminalFeeClauseFor(meta, sourceEstimateId, { feeIsProven, effectiveCo
   const remainder = validExpect && effectiveCovered !== null
     ? Math.max(0, tExpectCents - effectiveCovered)
     : (validExpect ? tExpectCents : null);
+  const est = meta?.sourceEstimateId || sourceEstimateId;
+  if (remainder === 0) {
+    return ` ALSO: the one-time WaveGuard setup fee for accepted estimate #${est} is already on an open invoice (not paid yet) — do NOT bill it again; this alert clears after payment.`;
+  }
   const feeAmt = remainder !== null && remainder > 0
     ? `$${(remainder / 100).toFixed(2)}${effectiveCovered > 0 ? ' remaining' : ''}`
     : 'the accepted amount';
-  const est = meta?.sourceEstimateId || sourceEstimateId;
   return ` ALSO: the one-time WaveGuard setup fee (${feeAmt}) is still owed — bill the remainder using the EXACT line description "WaveGuard Membership — one-time setup fee" and include "accepted estimate #${est}" in the invoice notes; do NOT re-bill covered amounts.`;
 }
 

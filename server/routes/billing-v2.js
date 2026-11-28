@@ -668,7 +668,9 @@ router.get('/balance', async (req, res, next) => {
       // (Codex #4311 r36 P1) — drafts are deliberately excluded from
       // balanceCarryingInvoiceIds, so nothing else filtered it.
       .where(function payerOwned() {
-        this.whereNotNull('payer_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
+        this.whereNotNull('payer_id')
+          .orWhere('scheduled_send_error', 'like', 'payer_billed:%')
+          .orWhere('scheduled_send_error', 'like', 'chemical_addon_review:%');
       })
       .select('id')
       .catch(() => []);

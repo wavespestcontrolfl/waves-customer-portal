@@ -520,7 +520,6 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       expect(enrollFnBody.indexOf("trx('invoices')")).toBeGreaterThan(-1);
       expect(enrollFnBody.indexOf("trx('customers')")).toBeGreaterThan(enrollFnBody.indexOf("trx('invoices')"));
       expect(payV2Src).toContain('errorPayload(err, { staleBalance: !!err.staleBalance })');
-      expect(stripeSrc).toContain("err.code === 'INVOICE_CHEMICAL_ADDON_HOLD'");
       const termSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-terminal.js'), 'utf8');
       expect(termSrc).toContain('mintHandoffRefusal = terminalHandoffRefusal(mintInv);');
       // Locked provider-boundary chemical hold check even for recipientOverride emails
@@ -594,6 +593,55 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
         { feeIsProven: false, effectiveCovered: 4000, tExpectCents: 9900 },
       );
       expect(termReconcileClause).toContain('$59.00 remaining');
+
+      // Full $99 open unpaid coverage keeps a non-empty pending-open-invoice clause (even with notice gate off)
+      // and never tells staff to bill "the accepted amount".
+      const fullOpenTermNote = buildTerminalSetupFeeNote({
+        terminalSetupFeeNote: true,
+        terminalFeeCovered: false,
+        termExpectedFeeCents: 9900,
+        liveFeeCentsOnVisit: 0,
+        refundedFeeCentsTerm: 0,
+        openFeeCentsTerm: 9900,
+        openFeeInvoicesTerm: [{ invoiceId: 'inv-open-99', invoiceNumber: 'INV-OPEN-99', cents: 9900 }],
+        termFeeEstimateRef: 'est-99',
+        estimateId: 99,
+      });
+      expect(fullOpenTermNote).toContain('INV-OPEN-99');
+      expect(fullOpenTermNote).toContain('do NOT bill it again');
+      const fullOpenReconcile = reconcilePrivate.terminalFeeClauseFor(
+        { sourceEstimateId: 99 },
+        99,
+        { feeIsProven: false, effectiveCovered: 9900, tExpectCents: 9900 },
+      );
+      expect(fullOpenReconcile).toContain('open invoice');
+      expect(fullOpenReconcile).not.toContain('the accepted amount');
+    });
+
+    test('webhook enrollment fence locks invoice before customer and refuses chemical-held invoices on covered_capture & mirror', async () => {
+      const lockOrder = [];
+      let refused = false;
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../services/visit-completion-packets', () => ({
+          invoicePayerOwnedNow: jest.fn(async () => false),
+        }));
+        const { _webhookInvoiceRefusesEnrollment } = require('../routes/stripe-webhook');
+        const trx = jest.fn((table) => ({
+          where: jest.fn().mockReturnThis(),
+          forUpdate: jest.fn(function recordLock() {
+            lockOrder.push(table);
+            return this;
+          }),
+          first: jest.fn(async () => (
+            table === 'invoices'
+              ? { id: 'inv-held-wh', scheduled_send_error: 'chemical_addon_review:svc-1' }
+              : { id: 'cust-1' }
+          )),
+        }));
+        refused = await _webhookInvoiceRefusesEnrollment(trx, 'inv-held-wh', 'cust-1');
+      });
+      expect(refused).toBe(true);
+      expect(lockOrder).toEqual(['invoices', 'customers']);
     });
 
     test('chemical review stays ahead of every instruction to collect or bill the visit across completion, terminal, and reconcile alerts', () => {

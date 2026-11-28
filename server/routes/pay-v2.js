@@ -43,6 +43,10 @@ function errorPayload(err, extra = {}) {
   return { error: err.message, ...(err?.code ? { code: err.code } : {}), ...extra };
 }
 
+function confirmErrorStatus(err) {
+  return err && err.code === 'INVOICE_CHEMICAL_ADDON_HOLD' ? 409 : 400;
+}
+
 async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null) {
   // Billing lock order: invoice FOR UPDATE → customer FOR UPDATE → packet/visit
   // SHARE checks. Matches stripe-terminal.js & customer-credit.js so concurrent
@@ -1472,7 +1476,7 @@ router.post('/:token/confirm', async (req, res, next) => {
         throw err;
       }
     } catch (err) {
-      return res.status(400).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+      return res.status(confirmErrorStatus(err)).json(errorPayload(err));
     }
     if (invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
@@ -1518,15 +1522,16 @@ router.post('/:token/confirm', async (req, res, next) => {
     });
   } catch (err) {
     logger.error(`[pay-v2] Confirm error: ${err.message}`);
+    const confirmStatus = confirmErrorStatus(err);
     reportBillPaymentError(req, {
       invoice,
       phase: 'confirm',
       methodCategory: req.body?.methodCategory || invoice?.payment_method,
       paymentIntentId: req.body?.paymentIntentId,
       error: err,
-      statusCode: 400,
+      statusCode: confirmStatus,
     });
-    res.status(400).json({ error: err.message });
+    res.status(confirmStatus).json(errorPayload(err));
   }
 });
 

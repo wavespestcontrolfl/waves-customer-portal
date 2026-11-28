@@ -901,18 +901,34 @@ reconciliation and collects normally again). CHEMICAL AREA ADD-ON REVIEW HOLD
 (2026-11-26): an unpaid invoice whose visit completed a chemical area add-on
 without a recorded product application carries a `chemical_addon_review:<serviceId>`
 billing hold stamp while awaiting office review (keeping a collectible status
-and a NULL `payer_id`). `GET /api/pay/:token`, `GET /api/pay/:token/invoice.pdf`,
+and a NULL `payer_id`). On `GET /api/pay/:token`, `GET /api/pay/:token/invoice.pdf`,
 `/plan-choice`, `/consent`, `/capture-setup`, `/setup-complete`, `/setup`,
-`/quote`, `/update-amount`, `/finalize` and `/confirm` refuse such an invoice
-through the shared collectibility gate / hold check (`409` or `400`, code
-`INVOICE_CHEMICAL_ADDON_HOLD`); combined-balance selection (`open-balance.js` /
-`pay-combined.js`) and the authenticated portal balance / Pay Now list
-(`billing-v2.js` / `open-balance.js`) exclude held invoices and refuse any held
-row under the locked allocation verifier (`verifyAllocationLocked` → `409 staleBalance`);
-and `payPageZelleVisibility` withholds `manualPayOptions` (Zelle) on held
-invoices via `zelleDeniedByInvoiceState` (including its final DB re-read). No
-customer or service details leak, and once the office reviews and explicitly
-releases/sends the invoice it collects normally again. TERMITE RENEWAL ELIGIBILITY
+`/quote`, `/update-amount`, `/finalize`, and `/confirm`, a held invoice in a
+collectible non-processing status is refused (`409` on `GET`, `invoice.pdf`,
+`/plan-choice`, `/consent`, `/capture-setup`, `/setup-complete`, locked
+`/update-amount`, and `/confirm`; `400` on `/setup`, `/quote`, `/finalize`
+pre-check; all carrying `{ error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }`).
+Precedence and race outcomes: when the invoice is already in `status = 'processing'`
+(an ACH debit already submitted to Stripe before the hold landed), `/setup`
+returns `409 { error, inProgress: true }` (without `INVOICE_CHEMICAL_ADDON_HOLD`)
+so the page reflects the in-flight bank transfer; `/confirm` preserves
+`409 { error, code: 'INVOICE_CHEMICAL_ADDON_HOLD' }` both on the route pre-check
+and if the hold commits mid-request before `confirmInvoicePayment`'s locked
+settlement (while internal webhook settlement of an already-succeeded/processing
+PI passes `allowChemicalReviewReconcile: true` so cleared funds are never
+stranded); and both Stripe webhook enrollment paths (`payment_intent.succeeded`
+save-card mirror and `setup_intent.succeeded` `covered_capture`) take the same
+locked `invoices → customers` chemical-hold check so a hold committed between
+mint and webhook delivery never records consent or enrolls Auto Pay.
+Combined-balance selection (`open-balance.js` / `pay-combined.js`) and the
+authenticated portal balance (both `unpaidInvoices` and `standaloneFailedTotal`)
+/ Pay Now list (`billing-v2.js` / `open-balance.js`) exclude held invoices and
+refuse any held row under the locked allocation verifier
+(`verifyAllocationLocked` → `409 staleBalance`); and `payPageZelleVisibility`
+withholds `manualPayOptions` (Zelle) on held invoices via
+`zelleDeniedByInvoiceState` (including its final DB re-read). No customer or
+service details leak, and once the office reviews and explicitly releases/sends
+the invoice it collects normally again. TERMITE RENEWAL ELIGIBILITY
 (2026-09-28, dark behind GATE_TERMITE_ANNUAL_PLAN — only an invoice that is a
 termite annual-plan RENEWAL successor's prepay invoice, found through its own
 `annual_prepay_term_id` link, is ever judged; every other invoice is
