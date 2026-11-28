@@ -526,6 +526,10 @@ async function moveBlockedReason(move, { conn, env, day, techId, budget = NO_LIM
       if (budget.spent()) return { blocked: TIMED_OUT };
       // On the caller's connection: inside a reserve or extend that is the hold's transaction, never a second pool read.
       const p = await env.getReminderPrefs(row.customer_id, { scheduledServiceId: row.id, conn: dbh });
+      // getReminderPrefs catches its own SQL errors and returns { unavailable: true }:
+      // throw inside the savepoint so Knex rolls back an aborted subtransaction instead
+      // of trying to RELEASE SAVEPOINT on a 25P02-aborted transaction.
+      if (p?.unavailable === true) throw Object.assign(new Error('reminder prefs unavailable'), { code: 'PREFS_UNAVAILABLE' });
       if (!remindersOn(p)) return { blocked: 'reminders_off' };
       // true, false, or TIMED_OUT (passed on as it is).
       const byText = await remindersByText(p, row, env, dbh, budget);
@@ -536,8 +540,8 @@ async function moveBlockedReason(move, { conn, env, day, techId, budget = NO_LIM
     if (loaded.blocked) return loaded.blocked;
     prefs = loaded.prefs;
     pref = loaded.pref;
-  } catch {
-    return 'prefs_unreadable';
+  } catch (err) {
+    return err?.code === 'PREFS_UNAVAILABLE' ? 'reminders_off' : 'prefs_unreadable';
   }
   void prefs;
   return pref && !(move.toMin >= pref.startMin && move.toMin < pref.endMin) ? 'preference' : null;

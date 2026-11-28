@@ -2017,7 +2017,7 @@
     },
     {
       "endpoint": "/admin/schedule/blackout-dates",
-      "reviewed": "Handler (admin-schedule.js GET /blackout-dates): schedule_blackout_dates select from 30 days back, getWeeklyDaysOff and getClosedHolidays (blackout-dates.js: one system_settings read each through readOptional, which opens a SAVEPOINT only when handed a transaction; the route passes the plain db, so write:transaction is that read-only savepoint wrapper and is accepted), and upcomingHolidays (holidays.js: pure date math over the fixed HOLIDAYS table). No customer data, no write; read end to end. The blackout reason is staff-typed and stays withheld as a note. Re-reviewed 2026-11-24 (#8477): getClosedHolidays gained a strict-mode MALFORMED_SETTING throw for a non-array stored value; the GET does not pass strict, so its read is unchanged; signals and unresolved are the same.",
+      "reviewed": "Handler (admin-schedule.js GET /blackout-dates): schedule_blackout_dates select from 30 days back, getWeeklyDaysOff and getClosedHolidays (blackout-dates.js: one system_settings read each through readOptional, which opens a SAVEPOINT only when handed a transaction; the route passes the plain db, so write:transaction is that read-only savepoint wrapper and is accepted), and upcomingHolidays (holidays.js: pure date math over the fixed HOLIDAYS table). No customer data, no write; read end to end. The blackout reason is staff-typed and stays withheld as a note. Re-reviewed 2026-11-24 (#8477): getClosedHolidays gained a strict-mode MALFORMED_SETTING throw for a non-array stored value; the GET does not pass strict, so its read is unchanged; signals and unresolved are the same. Re-reviewed 2026-11-28 (PR #8776): getWeeklyDaysOff gained strict 0-6 integer element validation; GET /blackout-dates does not pass strict, so its read, signals, and unresolved are unchanged.",
       "scope": "broad",
       "office": true,
       "keywords": [
@@ -2043,7 +2043,7 @@
         "services/scheduling/blackout-dates.js#fn",
         "services/scheduling/holidays.js#holiday.dateIn"
       ],
-      "hash": "6c5302ee3c956d1f993be81bd110a9fb"
+      "hash": "f7802709b0bca465f21677090c57da60"
     },
     {
       "endpoint": "/admin/schedule/list",

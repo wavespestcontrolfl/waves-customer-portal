@@ -894,9 +894,13 @@ function makeRoomMovesPayload({ date, techId, shiftMin, moves }) {
 
 function heldProspectiveService(row) {
   const mix = row?.reservation_service_mix;
-  const combined = Array.isArray(mix?.services) && mix.services.length > 1;
+  const serviceType = row?.service_type || null;
+  // Multi-service recurring plans carry reservation_service_mix; one-time
+  // multi-service bundles stamp a "+"-joined service_type without a mix JSON.
+  const combined = (Array.isArray(mix?.services) && mix.services.length > 1)
+    || /\s+\+\s+/.test(String(serviceType || ''));
   return {
-    ...(row?.service_type ? { service_type: row.service_type } : {}),
+    ...(serviceType ? { service_type: serviceType } : {}),
     ...(combined ? { combined_services: true } : {}),
   };
 }
@@ -3286,5 +3290,6 @@ module.exports = {
     destinationHitUnderGate,
     extendMakeRoomState,
     moveMakeRoomStops,
+    heldProspectiveService,
   },
 };

@@ -389,10 +389,17 @@ function candidateRouteOrderIds(opts, fit, targetId, options, context) {
 
 async function loadCapacityBlackoutDates(dateFrom, dateTo, { includeBlackoutDates, strictBlackout } = {}) {
   if (includeBlackoutDates) return new Set();
-  const { getBlackoutDates } = require('./blackout-dates') || {};
-  return typeof getBlackoutDates === 'function'
-    ? getBlackoutDates(dateFrom, dateTo, undefined, { strict: strictBlackout === true })
-    : new Set();
+  const blackoutDates = require('./blackout-dates');
+  if (typeof blackoutDates.getBlackoutDates === 'function') {
+    return blackoutDates.getBlackoutDates(dateFrom, dateTo, undefined, { strict: strictBlackout === true });
+  }
+  try {
+    return (await blackoutDates.getBlackoutLayers(dateFrom, dateTo, undefined, { strict: strictBlackout === true })).dates;
+  } catch (err) {
+    if (strictBlackout === true) throw err;
+    require('../logger').warn(`[find-time] capacity blackout lookup failed (failing open): ${err.message}`);
+    return new Set();
+  }
 }
 
 async function findCapacitySlots(opts) {

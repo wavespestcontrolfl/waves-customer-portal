@@ -184,4 +184,41 @@ describe('Phase 2B-2a scheduling engine fixes', () => {
       prospectiveService: { service_type: 'Quarterly Pest Control', combined_services: true },
     }));
   });
+
+  test('P1-10b: booking-make-room throws inside savepointRead on getReminderPrefs { unavailable: true } so savepoint rolls back and maps to reminders_off', async () => {
+    const { _internals } = require('../services/scheduling/booking-make-room');
+    const sp = { name: 'sp' };
+    const trx = Object.assign(jest.fn(), {
+      isTransaction: true,
+      transaction: jest.fn(async (fn) => fn(sp)),
+    });
+    const getReminderPrefs = jest.fn().mockResolvedValue({ unavailable: true });
+    const row = {
+      id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1',
+      window_start: '09:00:00', window_end: '10:00:00',
+    };
+    const reason = await _internals.moveBlockedReason(
+      { row, fromMin: 540, toMin: 600 },
+      {
+        conn: trx,
+        env: { getReminderPrefs, fixedReason: () => null },
+        day: { allRows: [row] },
+        techId: 'tech-1',
+      },
+    );
+    expect(reason).toBe('reminders_off');
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    expect(getReminderPrefs).toHaveBeenCalledWith('cust-1', { scheduledServiceId: 'svc-1', conn: sp });
+  });
+
+  test('P1-9b: slot-reservation heldProspectiveService detects one-time "+" multi-service bundles', () => {
+    const { _internals } = require('../services/slot-reservation');
+    expect(_internals.heldProspectiveService({ service_type: 'Pest Control + Lawn Care' })).toEqual({
+      service_type: 'Pest Control + Lawn Care',
+      combined_services: true,
+    });
+    expect(_internals.heldProspectiveService({ service_type: 'Quarterly Pest Control' })).toEqual({
+      service_type: 'Quarterly Pest Control',
+    });
+  });
 });
