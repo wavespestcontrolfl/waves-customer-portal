@@ -75,7 +75,7 @@
   html.admin-app[data-admin-theme="dark"] :is(.text-zinc-800, .text-zinc-700, .text-slate-800, .text-slate-700, .text-gray-700, .text-stone-700) {
     color: #d1d6de;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.text-zinc-600, .text-ink-secondary, .text-slate-600, .text-gray-600, .text-stone-600) {
+  html.admin-app[data-admin-theme="dark"] :is(.text-zinc-600, .text-ink-secondary, .text-slate-600, .text-gray-600, .text-stone-600, .text-\[\#475569\]) {
     color: #b4bac4;
   }
   html.admin-app[data-admin-theme="dark"] :is(.text-zinc-500, .text-ink-tertiary, .text-slate-500, .text-gray-500, .text-stone-500) {
@@ -223,7 +223,10 @@
   html.admin-app[data-admin-theme="dark"] :is(.bg-alert-bg, .bg-red-50, .bg-red-100, .bg-waves-red-light, .bg-\[\#FEECEB\], .bg-\[\#FEF3F2\]) {
     background-color: rgba(200, 49, 47, 0.2);
   }
-  html.admin-app[data-admin-theme="dark"] :is(.text-alert-fg, .text-red-700, .text-red-800, .text-red-900) {
+  html.admin-app[data-admin-theme="dark"] .border-\[\#F1C7C2\] {
+    border-color: rgba(248, 113, 113, 0.4);
+  }
+  html.admin-app[data-admin-theme="dark"] :is(.text-alert-fg, .text-red-700, .text-red-800, .text-red-900, .text-\[\#B42318\]) {
     color: #f87171;
   }
   html.admin-app[data-admin-theme="dark"] .bg-alert-fg.text-white {
@@ -242,13 +245,13 @@
   html.admin-app[data-admin-theme="dark"] :is(.border-waves-success-border, .border-green-200, .border-emerald-200) {
     border-color: rgba(16, 185, 129, 0.35);
   }
-  html.admin-app[data-admin-theme="dark"] :is(.text-waves-success, .text-green-700, .text-green-800, .text-emerald-600, .text-emerald-700, .text-emerald-800) {
+  html.admin-app[data-admin-theme="dark"] :is(.text-waves-success, .text-green-700, .text-green-800, .text-emerald-600, .text-emerald-700, .text-emerald-800, .text-\[\#2E7D20\]) {
     color: #6ee7b7;
   }
   html.admin-app[data-admin-theme="dark"] :is(.bg-waves-blue-light, .bg-waves-blue-50, .bg-blue-50, .bg-blue-100, .bg-sky-50) {
     background-color: rgba(10, 126, 194, 0.2);
   }
-  html.admin-app[data-admin-theme="dark"] :is(.text-waves-blue, .text-waves-blue-dark, .text-blue-600, .text-blue-700, .text-blue-800, .text-sky-700) {
+  html.admin-app[data-admin-theme="dark"] :is(.text-waves-blue, .text-waves-blue-dark, .text-blue-600, .text-blue-700, .text-blue-800, .text-sky-700, .text-\[\#04395E\]) {
     color: #60a5fa;
   }
 

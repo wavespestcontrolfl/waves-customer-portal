@@ -174,10 +174,11 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     const root = document.documentElement;
     if (!enabled) {
       if (isStandaloneAdminPath(window.location.pathname)) delete root.dataset.adminTheme;
-      return undefined;
+    } else if (darkMode) {
+      root.dataset.adminTheme = 'dark';
+    } else {
+      delete root.dataset.adminTheme;
     }
-    if (darkMode) root.dataset.adminTheme = 'dark';
-    else delete root.dataset.adminTheme;
     return () => {
       const path = window.location.pathname;
       if (!isAdminPath(path) || isStandaloneAdminPath(path)) {

@@ -113,6 +113,11 @@ describe('Admin dark mode preference', () => {
         window.history.pushState({}, '', '/admin/dashboard');
         mount({ id: 'acct-1', role: 'admin' }, { enabled: true });
         expect(document.documentElement.dataset.adminTheme).toBe('dark');
+        cleanup();
+        // Also when an unverified (enabled=false) provider redirects to standalone auth
+        window.history.pushState({}, '', '/admin/customers');
+        mount(null, { enabled: false });
+        expect(document.documentElement.dataset.adminTheme).toBe('dark');
         window.history.pushState({}, '', standalonePath);
         cleanup();
         expect(document.documentElement.dataset.adminTheme).toBeUndefined();
