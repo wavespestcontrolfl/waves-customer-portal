@@ -171,7 +171,7 @@ maybeDescribe('Same family link (TEMP tables)', () => {
     await link(loser, other);
     expect(await rowsFor([winner, loser, other])).toHaveLength(3);
     const handler = dedupe._test.UNIQUE_COLLISION_HANDLERS.multi_home_family_members;
-    expect(handler).toBe(dedupe._test.repointRowwiseDropCollisions);
+    expect(handler).toBe(dedupe._test.repointMultiHomeFamilyMembers);
     // Winner is already a member: the loser's row collides on UNIQUE(customer_id) and drops.
     await conn.transaction((trx) => handler(trx, 'multi_home_family_members', 'customer_id', winner, loser));
     expect((await rowsFor([winner, loser, other])).map((r) => r.customer_id).sort()).toEqual([winner, other].sort());

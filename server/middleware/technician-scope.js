@@ -159,7 +159,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // The single-draft read the SMS tab uses (the router scopes it to the
   // technician's customers); list and stats are admin-only in the router.
   { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/drafts\/[^/]+$/ },
-  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/sms-templates(\/.*)?$/ },
+  // SMS template reads only (never /issues, which returns cross-customer audit_log rows).
+  { bucket: 'own-texts', methods: READ, pattern: /^\/api\/admin\/sms-templates(\/(?!issues(\/|$))[^/]+(\/variants)?)?$/ },
 
   // Promises and reschedule proposals (the Promises tab, the field cards).
   { bucket: 'promises', methods: ANY, pattern: /^\/api\/admin\/call-recordings\/(commitments|proposals)(\/.*)?$/ },

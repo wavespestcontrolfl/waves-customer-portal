@@ -12,14 +12,14 @@ const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { closeRequestAlertsOnResolve } = require('../services/portal-inbox');
 const { requestProperty } = require('../services/service-request-property');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { convertHeicToJpeg, MAX_HEIC_BYTES } = require('../services/heic-to-jpeg');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // Lifecycle the customer portal already renders (PortalPage STATUS_ORDER).
 const STATUSES = ['new', 'acknowledged', 'scheduled', 'resolved'];

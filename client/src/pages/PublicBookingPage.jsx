@@ -598,12 +598,17 @@ export default function PublicBookingPage() {
   // Fire-and-forget partial capture: once a visitor has entered a phone + picked
   // a slot, record a booking_intent so the recovery cron can follow up if they
   // bail before confirming. keepalive so it survives the tab closing right after.
-  const captureBookingIntent = () => {
+  const captureBookingIntent = async () => {
     const digits = phoneDigits(contact.phone);
     if (digits.length !== 10 || !selectedSlot || !captureTokenRef.current || !service) return;
     if (preferredSubmittedRef.current) return;
     try {
-      fetch(`${API_BASE}/booking/capture-intent`, {
+      const useAuthed = isAuthenticated && !tokenEntry;
+      if (useAuthed) await api.ensureFreshToken();
+      const doCaptureFetch = useAuthed
+        ? (url, opts) => api.fetchRaw(url, opts)
+        : (url, opts) => fetch(url, opts);
+      await doCaptureFetch(`${API_BASE}/booking/capture-intent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         keepalive: true,

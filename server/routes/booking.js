@@ -19,6 +19,7 @@ const {
 const logger = require('../services/logger');
 const { attributionWithSourceEvidence } = require('../services/lead-source-evidence');
 const { bookPreferredTimeLive } = require('../config/feature-gates');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const {
@@ -185,7 +186,7 @@ const { multiTechConfirmLive } = require('../config/feature-gates');
 const {
   bookArrivalGraceMinutes, delayWithinGrace, bookGapAdmits, bookClashesWaivable,
 } = require('../services/scheduling/book-arrival-grace');
-const { etDateString, addETDays, addETBusinessDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, addETBusinessDays, addETDaysAtWallClock, validCalendarDate } = require('../utils/datetime-et');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
 const {
@@ -1042,8 +1043,17 @@ function invalidateEstimateSlotCaches() {
   } catch { /* best-effort */ }
 }
 
+const customerLookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many lookups — please try again later.' },
+});
+
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
-router.get('/customer-lookup', async (req, res, next) => {
+router.get('/customer-lookup', noStore, customerLookupLimiter, async (req, res, next) => {
   try {
     const { phone, address, city, zip, unit } = req.query;
     const customerFields = ['id', 'first_name', 'last_name', 'email', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
@@ -2536,15 +2546,43 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false, paid
   });
 }
 
+function hasInvalidDateRange(dateFrom, dateTo) {
+  if (dateFrom !== undefined && (typeof dateFrom !== 'string' || !validCalendarDate(dateFrom))) return true;
+  if (dateTo !== undefined && (typeof dateTo !== 'string' || !validCalendarDate(dateTo))) return true;
+  return false;
+}
+
+function requireSelfBookingEnabled(req, res, next) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('selfBooking')) {
+    return res.status(503).json({ error: 'Self-scheduling coming soon' });
+  }
+  return next();
+}
+
+function validateAvailabilityDateRange(req, res, next) {
+  const { date_from, date_to } = req.query;
+  if (hasInvalidDateRange(date_from, date_to)) {
+    return res.status(400).json({ error: 'date_from and date_to must be YYYY-MM-DD' });
+  }
+  return next();
+}
+
+const availabilityLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many availability checks — please try again later.' },
+});
+
 // GET /api/booking/availability
 //   query: lat, lng, address, city, state, zip, unit, estimate_id,
 //          service_type, duration_minutes, date_from, date_to
-router.get('/availability', async (req, res, next) => {
+router.get('/availability', requireSelfBookingEnabled, availabilityLimiter, validateAvailabilityDateRange, async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('selfBooking')) {
-      return res.status(503).json({ error: 'Self-scheduling coming soon' });
-    }
 
     const {
       lat, lng, address, city, state, zip, unit, estimate_id,
@@ -7127,6 +7165,246 @@ const captureIntentHourlyLimiter = rateLimit({
 // estimate follow-up lane). admin-manual-booking-resend = admin estimate resend.
 const RECOVERY_SKIP_SOURCES = new Set(['admin-manual-booking-resend']);
 
+function customerContactMatchesCapture(customer, { submittedPhone, submittedEmail } = {}) {
+  if (!customer) return false;
+  const custPhone10 = normalizeUsPhoneLast10(customer.phone);
+  const subPhone10 = normalizeUsPhoneLast10(submittedPhone);
+  if (!custPhone10 || !subPhone10 || custPhone10 !== subPhone10) return false;
+  const subEmail = String(submittedEmail || '').trim().toLowerCase();
+  if (subEmail) {
+    const custEmail = String(customer.email || '').trim().toLowerCase();
+    if (!custEmail || subEmail !== custEmail) return false;
+  }
+  return true;
+}
+
+function bearerCustomerEligibleForBareRecovery(customer, { submittedPhone, submittedEmail } = {}) {
+  if (!customer || customer.deleted_at || customer.active === false) return false;
+  if (PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''))) return false;
+  return customerContactMatchesCapture(customer, { submittedPhone, submittedEmail });
+}
+
+async function handoffDraftDisallowsRecovery(handoffId, { submittedPhone, submittedEmail } = {}) {
+  try {
+    const draft = await db('estimates').where({ id: handoffId }).first(
+      'id', 'customer_id', 'source', 'status', 'archived_at', 'expires_at',
+      'customer_phone', 'customer_email', 'estimate_data',
+    );
+    if (!draft) return { disallowed: true, draftIneligible: true };
+    const hasDraftMeta = draft.source !== undefined || draft.status !== undefined
+      || draft.archived_at !== undefined || draft.expires_at !== undefined;
+    const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
+    const expired = Boolean(draft.expires_at && new Date(draft.expires_at) <= new Date());
+    if (hasDraftMeta && (expired || !wizardDraftSelfServeBookable(draft))) {
+      return { disallowed: true, draftIneligible: true };
+    }
+    const linkedCustomer = draft.customer_id
+      ? await db('customers').where({ id: draft.customer_id }).first('phone', 'email')
+      : null;
+    if (draft.customer_phone === undefined && linkedCustomer?.phone === undefined) {
+      return { disallowed: false, draftIneligible: false };
+    }
+    const contact = {
+      phone: draft.customer_phone || linkedCustomer?.phone,
+      email: draft.customer_email || linkedCustomer?.email,
+    };
+    if (!customerContactMatchesCapture(contact, { submittedPhone, submittedEmail })) {
+      return { disallowed: true, draftIneligible: false };
+    }
+    return { disallowed: false, draftIneligible: false };
+  } catch (err) {
+    logger.warn(`[booking:capture-intent] draft eligibility check failed — staging suppressed: ${err.message}`);
+    return { disallowed: true, draftIneligible: false };
+  }
+}
+
+// When GATE_BOOKING_CUSTOMERS_ONLY is enabled without an estimate handoff,
+// bare /capture-intent requests require both an active, established portal
+// customer bearer AND submitted phone/email matching that verified customer.
+async function bareCustomersOnlyCaptureState(req, isEnabled, { submittedPhone, submittedEmail } = {}) {
+  if (!isEnabled('bookingCustomersOnly')) return { suppressed: false, bearerCustomerId: null };
+  try {
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const customer = await resolveBearerCustomer(req);
+    if (!customer) return { suppressed: true, bearerCustomerId: null };
+    return {
+      suppressed: !bearerCustomerEligibleForBareRecovery(customer, { submittedPhone, submittedEmail }),
+      bearerCustomerId: customer.id,
+    };
+  } catch (err) {
+    logger.warn(`[booking:capture-intent] bearer check failed — staging suppressed: ${err.message}`);
+    return { suppressed: true, bearerCustomerId: null };
+  }
+}
+
+// Suppress recovery SMS/email staging while GATE_BOOKING_CUSTOMERS_ONLY is on
+// for (a) established or contact-mismatched/ineligible quote-wizard drafts and
+// (b) bare captures lacking an active established customer bearer + matching contact.
+async function resolveCaptureIntentSuppression(req, { isEnabled, handoffVerified, handoffId, submittedPhone, submittedEmail }) {
+  if (!isEnabled('bookingCustomersOnly')) return { suppressed: false, bearerCustomerId: null };
+  if (handoffVerified) {
+    let linked = false;
+    try {
+      linked = await establishedContactLinkedDraft(db, handoffId);
+    } catch (linkErr) {
+      logger.warn(`[booking:capture-intent] contact-link check failed — staging suppressed: ${linkErr.message}`);
+      linked = true;
+    }
+    if (linked) {
+      await suppressRecoveryIntents(db, { pricingEstimateId: handoffId }).catch((supErr) => {
+        logger.warn(`[booking:capture-intent] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
+      });
+      return { suppressed: true, bearerCustomerId: null, handoffContactMismatch: false };
+    }
+    const { disallowed, draftIneligible } = await handoffDraftDisallowsRecovery(handoffId, { submittedPhone, submittedEmail });
+    if (draftIneligible) {
+      await suppressRecoveryIntents(db, { pricingEstimateId: handoffId }).catch((supErr) => {
+        logger.warn(`[booking:capture-intent] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
+      });
+    }
+    return { suppressed: disallowed, bearerCustomerId: null, handoffContactMismatch: disallowed && !draftIneligible };
+  }
+  const bareState = await bareCustomersOnlyCaptureState(req, isEnabled, { submittedPhone, submittedEmail });
+  return { ...bareState, handoffContactMismatch: false };
+}
+
+async function lockHandoffSession(trx, pricingEstimateId, sessionId) {
+  if (!pricingEstimateId || !sessionId) return;
+  await trx.raw(
+    "SELECT pg_advisory_xact_lock(hashtext('booking-handoff-session'), hashtext(?::text))",
+    [`${pricingEstimateId}:${sessionId}`],
+  );
+}
+
+function scopeIntentWatermarkFilter(q, { sessionId, bearerCustomerId, pricingEstimateId }) {
+  if (bearerCustomerId) return q.where({ session_id: sessionId, customer_id: bearerCustomerId });
+  return q.where({ session_id: sessionId, pricing_estimate_id: pricingEstimateId });
+}
+
+async function hasNewerSessionIntent(conn, { sessionId, bearerCustomerId, pricingEstimateId, clientTs }) {
+  if (!sessionId || clientTs == null || (!bearerCustomerId && !pricingEstimateId)) return false;
+  const q = scopeIntentWatermarkFilter(
+    conn('booking_intents').whereNull('converted_at').where('capture_client_ts', '>', clientTs),
+    { sessionId, bearerCustomerId, pricingEstimateId },
+  );
+  return Boolean(await q.first('id'));
+}
+
+async function retireSupersededSessionIntent(trx, {
+  sessionId, bearerCustomerId = null, pricingEstimateId = null, clientTs, watermarkRow = null,
+}) {
+  if (!sessionId || (!bearerCustomerId && !pricingEstimateId)) return { stale: false };
+  const scope = { sessionId, bearerCustomerId, pricingEstimateId };
+  if (await hasNewerSessionIntent(trx, { ...scope, clientTs })) return { stale: true };
+  const tsPayload = clientTs != null ? { capture_client_ts: clientTs } : {};
+  const retireQ = scopeIntentWatermarkFilter(
+    trx('booking_intents').where({ suppressed: false }).whereNull('converted_at'),
+    scope,
+  );
+  if (clientTs != null) {
+    retireQ.where((sub) => sub.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs));
+  }
+  const retired = await retireQ.update({ suppressed: true, ...tsPayload, updated_at: trx.fn.now() });
+  if (retired === 0 && clientTs != null) {
+    const bumpQ = scopeIntentWatermarkFilter(
+      trx('booking_intents').where({ suppressed: true }).whereNull('converted_at')
+        .where((sub) => sub.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs)),
+      scope,
+    );
+    const bumped = await bumpQ.update({ ...tsPayload, updated_at: trx.fn.now() });
+    if (bumped === 0 && watermarkRow) {
+      await trx('booking_intents').insert({ ...watermarkRow, suppressed: true });
+    }
+  }
+  return { stale: false };
+}
+
+async function applyHandoffSessionWatermark(conn, {
+  handoffVerified, linkedEstablished, sessionId, pricingEstimateId, clientTs,
+}) {
+  if (!handoffVerified || !pricingEstimateId || !sessionId) return { stale: false };
+  if (linkedEstablished) {
+    return retireSupersededSessionIntent(conn, { sessionId, pricingEstimateId, clientTs });
+  }
+  if (await hasNewerSessionIntent(conn, { sessionId, pricingEstimateId, clientTs })) {
+    return { stale: true };
+  }
+  return { stale: false };
+}
+
+async function lockCustomerOwnerInTx(trx, initialCandidateId, resolveCustomerId) {
+  await lockCustomerComms(trx, initialCandidateId);
+  const heldKeys = new Set([String(initialCandidateId)]);
+  let ownerId = await resolveCustomerId();
+  for (let hop = 0; ownerId && !heldKeys.has(String(ownerId)); hop += 1) {
+    if (hop >= 4) {
+      // Degenerate ping-pong backstop: fail closed like a lookup
+      // error rather than writing under an unheld owner.
+      throw new Error('customer owner still moving under the comms fence (merge-undo churn)');
+    }
+    await lockCustomerComms(trx, ownerId);
+    heldKeys.add(String(ownerId));
+    ownerId = await resolveCustomerId();
+  }
+  return ownerId;
+}
+
+async function writeNonBearerIntent({
+  handoffVerified, linkedEstablished, handoffId, sessionId, clientTs,
+  row, resolveCustomerId, resolveOpenIntent, writeIntent,
+}) {
+  const serializeHandoff = Boolean(handoffVerified && handoffId && sessionId);
+  const candidateId = serializeHandoff ? null : await resolveCustomerId();
+  if (!serializeHandoff && !candidateId) {
+    row.customer_id = null;
+    return writeIntent(db, await resolveOpenIntent(db));
+  }
+  return db.transaction(async (trx) => {
+    if (serializeHandoff) await lockHandoffSession(trx, handoffId, sessionId);
+    const firstOwner = serializeHandoff ? await resolveCustomerId() : candidateId;
+    const ownerId = firstOwner ? await lockCustomerOwnerInTx(trx, firstOwner, resolveCustomerId) : null;
+    const wm = await applyHandoffSessionWatermark(trx, {
+      handoffVerified, linkedEstablished, sessionId, pricingEstimateId: handoffId, clientTs,
+    });
+    if (wm.stale) return { ok: true, stale: true };
+    row.customer_id = ownerId;
+    return writeIntent(trx, await resolveOpenIntent(trx));
+  });
+}
+
+async function writeBearerSerializedIntent({
+  trx, bearerCustomerId, sessionId, clientTs, submittedPhone, submittedEmail,
+  row, initialSuppressed, findOpenIntent, writeIntent,
+}) {
+  await lockCustomerComms(trx, bearerCustomerId);
+  const freshCustomer = await trx('customers')
+    .where({ id: bearerCustomerId })
+    .whereNull('deleted_at')
+    .first('id', 'active', 'pipeline_stage', 'phone', 'email');
+  const finalSuppressed = freshCustomer
+    ? !bearerCustomerEligibleForBareRecovery(freshCustomer, { submittedPhone, submittedEmail })
+    : true;
+  if (!(finalSuppressed || initialSuppressed)) {
+    if (await hasNewerSessionIntent(trx, { sessionId, bearerCustomerId, clientTs })) {
+      return { ok: true, stale: true };
+    }
+  } else {
+    const { stale } = await retireSupersededSessionIntent(trx, {
+      sessionId, bearerCustomerId, clientTs,
+    });
+    if (stale) return { ok: true, stale: true };
+  }
+  const writeRow = { ...row, customer_id: bearerCustomerId };
+  if (finalSuppressed || initialSuppressed) writeRow.suppressed = true;
+  else delete writeRow.suppressed;
+  return writeIntent(
+    trx,
+    await findOpenIntent(trx, Boolean(writeRow.suppressed), bearerCustomerId),
+    writeRow,
+    bearerCustomerId,
+  );
+}
+
 // POST /api/booking/capture-intent — partial capture of a high-intent /book
 // visitor (entered contact + picked a slot, hasn't confirmed yet) so the
 // abandoned-booking recovery cron can follow up if they never finish. One OPEN
@@ -7220,20 +7498,13 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // customer" (Codex r3 P2). A lookup error fails closed the same way
     // (suppressed row, ordinary response). Gate off: the flow still books, so
     // recovery is untouched.
-    let linkedEstablished = false;
-    if (handoffVerified && isEnabled('bookingCustomersOnly')) {
-      try {
-        linkedEstablished = await establishedContactLinkedDraft(db, handoffId);
-      } catch (linkErr) {
-        logger.warn(`[booking:capture-intent] contact-link check failed — staging suppressed: ${linkErr.message}`);
-        linkedEstablished = true;
-      }
-      if (linkedEstablished) {
-        await suppressRecoveryIntents(db, { pricingEstimateId: handoffId }).catch((supErr) => {
-          logger.warn(`[booking:capture-intent] recovery-intent suppression failed: ${supErr.code || supErr.name || 'error'}`);
-        });
-      }
-    }
+    const { suppressed: linkedEstablished, bearerCustomerId, handoffContactMismatch } = await resolveCaptureIntentSuppression(req, {
+      isEnabled,
+      handoffVerified,
+      handoffId,
+      submittedPhone: nc.phone || b.phone,
+      submittedEmail: nc.email || b.email,
+    });
     const row = {
       pricing_estimate_id: handoffVerified ? handoffId : null,
       pricing_estimate_token: handoffVerified ? handoffToken : null,
@@ -7273,6 +7544,28 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
 
     const tenMatch = (q) => q.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
 
+    const retireEarlySuppression = async (trx) => {
+      if (bearerCustomerId) await lockCustomerComms(trx, bearerCustomerId);
+      else await lockHandoffSession(trx, handoffId, sessionId);
+      const watermarkRow = bearerCustomerId ? { ...row, customer_id: bearerCustomerId, suppressed: true } : row;
+      await retireSupersededSessionIntent(trx, {
+        sessionId,
+        bearerCustomerId,
+        pricingEstimateId: handoffVerified ? handoffId : null,
+        clientTs,
+        watermarkRow,
+      });
+    };
+
+    const finishEarly = async (reason) => {
+      if (linkedEstablished && sessionId && (bearerCustomerId || (handoffVerified && handoffId && handoffContactMismatch))) {
+        await db.transaction(retireEarlySuppression).catch((retErr) => {
+          logger.warn(`[booking:capture-intent] early-exit retire failed: ${retErr.message}`);
+        });
+      }
+      return accepted(reason);
+    };
+
     // Already booked → nothing to recover. Check BOTH a recently-converted intent
     // AND a recent self_booked_appointment for the phone: a fire-and-forget
     // capture fired on the Confirm click can land AFTER /booking/confirm committed
@@ -7281,14 +7574,14 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // yet" nudge for a booking that already succeeded.
     const booked = await tenMatch(db('booking_intents').whereNotNull('converted_at')
       .where('converted_at', '>', new Date(Date.now() - 24 * 3600000))).first('id');
-    if (booked) return accepted('already_booked');
+    if (booked) return finishEarly('already_booked');
     const recentBooking = await db('self_booked_appointments as sba')
       .leftJoin('customers as c', 'sba.customer_id', 'c.id')
       .whereRaw("RIGHT(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
       .where('sba.created_at', '>', new Date(Date.now() - 6 * 3600000))
       .whereNot('sba.status', 'cancelled')
       .first('sba.id');
-    if (recentBooking) return accepted('already_booked');
+    if (recentBooking) return finishEarly('already_booked');
 
     // Revalidate the SUBMITTED booking context server-side. The IP-bound token
     // proves the caller fetched availability, but not for THIS slot — so confirm
@@ -7299,7 +7592,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     try {
       const { lat, lng } = await resolveBookingCoords({ lat: row.lat, lng: row.lng, address: row.address_line1, city: row.city });
       if (!lat || !lng || !row.slot_date || !row.slot_start) {
-        return accepted('unverified_slot');
+        return finishEarly('unverified_slot');
       }
       const cfg = (await db('booking_config').first()) || {};
       // Codex r5 P2 #5 — thread the same funnel identity /availability
@@ -7331,12 +7624,12 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
       const offered = !!day && Array.isArray(day.slots)
         && day.slots.some((s) => String(s.start_time).slice(0, 5) === String(row.slot_start).slice(0, 5));
-      if (!offered) return accepted('slot_unavailable');
+      if (!offered) return finishEarly('slot_unavailable');
       row.lat = lat;
       row.lng = lng;
     } catch (e) {
       logger.warn(`[booking:capture-intent] slot revalidation failed: ${e.message}`);
-      return accepted('unverified');
+      return finishEarly('unverified');
     }
 
     // Resolve an existing customer by phone so a recovery send to a known customer
@@ -7353,29 +7646,33 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // one — so a corrected phone (after a mistyped first attempt) updates the SAME
     // row instead of orphaning the wrong number as its own recovery-eligible
     // intent. Fall back to the phone match for older clients with no session id.
-    const resolveOpenIntent = async (conn) => {
+    const resolveOpenIntent = async (conn, suppressedFlag = linkedEstablished, scopedCustomerId = null) => {
       let found = null;
       if (sessionId) {
-        found = await conn('booking_intents').where({ session_id: sessionId })
-          .whereNull('converted_at').where('suppressed', linkedEstablished)
-          .orderBy('captured_at', 'desc').first('id');
+        const sq = conn('booking_intents').where({ session_id: sessionId })
+          .whereNull('converted_at').where('suppressed', suppressedFlag);
+        if (scopedCustomerId) sq.where({ customer_id: scopedCustomerId });
+        found = await sq.orderBy('captured_at', 'desc').first('id');
       }
       if (!found) {
-        found = await tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', linkedEstablished))
-          .orderBy('captured_at', 'desc').first('id');
+        const pq = scopedCustomerId
+          ? tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', suppressedFlag).where({ customer_id: scopedCustomerId }))
+          : tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', linkedEstablished));
+        found = await pq.orderBy('captured_at', 'desc').first('id');
       }
       return found;
     };
-    const writeIntent = async (conn, open) => {
+    const writeIntent = async (conn, open, targetRow = row, scopedCustomerId = null) => {
       if (open) {
         // Guard against a stale capture overwriting corrected contact: only apply if
         // this request's client timestamp is >= the stored one (or either is absent).
         const upd = conn('booking_intents').where({ id: open.id });
+        if (scopedCustomerId) upd.where({ customer_id: scopedCustomerId });
         if (clientTs != null) upd.where((q) => q.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs));
-        const affected = await upd.update(row);
+        const affected = await upd.update(targetRow);
         return { ok: true, intent_id: open.id, updated: affected === 1, stale: affected === 0 };
       }
-      const [created] = await conn('booking_intents').insert(row).returning('id');
+      const [created] = await conn('booking_intents').insert(targetRow).returning('id');
       return { ok: true, intent_id: created?.id || created, created: true };
     };
     // Customer-linked captures serialize against an in-flight customer-merge
@@ -7402,28 +7699,30 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // lock with it — it is recipient state too.
     let result;
     try {
-      const candidateId = await resolveCustomerId();
-      if (!candidateId) {
-        row.customer_id = null;
-        result = await writeIntent(db, await resolveOpenIntent(db));
+      if (bearerCustomerId) {
+        result = await db.transaction((trx) => writeBearerSerializedIntent({
+          trx,
+          bearerCustomerId,
+          sessionId,
+          clientTs,
+          submittedPhone: nc.phone || b.phone,
+          submittedEmail: nc.email || b.email,
+          row,
+          initialSuppressed: linkedEstablished,
+          findOpenIntent: resolveOpenIntent,
+          writeIntent,
+        }));
       } else {
-        result = await db.transaction(async (trx) => {
-          const lockKey = async (id) => lockCustomerComms(trx, id);
-          await lockKey(candidateId);
-          const heldKeys = new Set([String(candidateId)]);
-          let ownerId = await resolveCustomerId();
-          for (let hop = 0; ownerId && !heldKeys.has(String(ownerId)); hop += 1) {
-            if (hop >= 4) {
-              // Degenerate ping-pong backstop: fail closed like a lookup
-              // error rather than writing under an unheld owner.
-              throw new Error('customer owner still moving under the comms fence (merge-undo churn)');
-            }
-            await lockKey(ownerId);
-            heldKeys.add(String(ownerId));
-            ownerId = await resolveCustomerId();
-          }
-          row.customer_id = ownerId;
-          return writeIntent(trx, await resolveOpenIntent(trx));
+        result = await writeNonBearerIntent({
+          handoffVerified,
+          linkedEstablished,
+          handoffId,
+          sessionId,
+          clientTs,
+          row,
+          resolveCustomerId,
+          resolveOpenIntent,
+          writeIntent,
         });
       }
     } catch (e) {
@@ -7532,12 +7831,15 @@ router.post('/preferred-time', ...preferredTimePreParserGuard, preferredTimeLimi
   }
 });
 
-// GET /api/booking/sources — aggregate by source (for admin dashboard / intelligence bar)
-router.get('/sources', async (req, res, next) => {
+// GET /api/booking/sources — aggregate by source (admin dashboard / intelligence bar)
+router.get('/sources', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
-    const { days = 30 } = req.query;
-    const since = new Date();
-    since.setDate(since.getDate() - parseInt(days));
+    const rawDays = req.query.days;
+    const days = rawDays === undefined || rawDays === '' ? 30 : Number(rawDays);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      return res.status(400).json({ error: 'days must be an integer between 1 and 365' });
+    }
+    const since = addETDaysAtWallClock(new Date(), -days);
     const rows = await db('self_booked_appointments')
       .where('created_at', '>=', since)
       .whereNot('status', 'cancelled')
@@ -7545,7 +7847,7 @@ router.get('/sources', async (req, res, next) => {
       .count('* as count')
       .groupBy('source')
       .orderBy('count', 'desc');
-    res.json({ since: since.toISOString().split('T')[0], sources: rows });
+    res.json({ since: etDateString(since), sources: rows });
   } catch (err) { next(err); }
 });
 

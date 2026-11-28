@@ -93,7 +93,14 @@ describe("Messenger tab", () => {
     fireEvent.change(box, { target: { value: "  We can call at 3.  " } });
     expect(send).toBeEnabled();
     fireEvent.click(send);
-    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/messenger/threads/t-open/reply", { method: "POST", body: JSON.stringify({ text: "We can call at 3." }) }));
+    await waitFor(() => {
+      const replyCall = adminFetch.mock.calls.find(([url]) => url === "/admin/messenger/threads/t-open/reply");
+      expect(replyCall).toBeTruthy();
+      expect(replyCall[1].method).toBe("POST");
+      const payload = JSON.parse(replyCall[1].body);
+      expect(payload.text).toBe("We can call at 3.");
+      expect(payload.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    });
     await waitFor(() => expect(box).toHaveValue(""));
     expect(adminFetch.mock.calls.filter(([url]) => url === "/admin/messenger/threads").length).toBeGreaterThanOrEqual(2);
   });
@@ -246,7 +253,11 @@ describe("Messenger tab", () => {
     fireEvent.click(await screen.findByTestId("messenger-thread-t-done"));
     fireEvent.change(await screen.findByLabelText("Reply on Facebook"), { target: { value: "Glad to help" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith("/admin/messenger/threads/t-done/reply", { method: "POST", body: JSON.stringify({ text: "Glad to help" }) }));
+    await waitFor(() => {
+      const replyCall = adminFetch.mock.calls.find(([url]) => url === "/admin/messenger/threads/t-done/reply");
+      expect(replyCall).toBeTruthy();
+      expect(JSON.parse(replyCall[1].body).text).toBe("Glad to help");
+    });
     expect(adminFetch.mock.calls.filter(([url]) => url.endsWith("/reply"))).toHaveLength(1);
   });
 
@@ -436,6 +447,100 @@ describe("Messenger tab", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(60 * 1000); });
       expect(screen.getByTestId("messenger-thread-t-older")).toBeInTheDocument();
       expect(screen.getByTestId("messenger-thread-t-open")).toBeInTheDocument();
+    });
+  });
+
+  describe("resilience, idempotency, retry, and unviewable attachments (C2-27)", () => {
+    it("keeps the loaded conversation visible when POST /read fails transiently", async () => {
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: 2 };
+        if (url.endsWith("/read")) throw new Error("HTTP 500");
+        return detailFor(open);
+      });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+      const detail = await screen.findByTestId("messenger-detail");
+      expect(within(detail).getByText("Can someone call me about wasps?")).toBeInTheDocument();
+      // Give the rejected /read promise time to settle
+      await new Promise((r) => setTimeout(r, 20));
+      expect(screen.getByTestId("messenger-detail")).toBeInTheDocument();
+      expect(screen.queryByText("Could not open this thread.")).not.toBeInTheDocument();
+    });
+
+    it("reuses requestId when retrying the same reply text and generates a new one when edited, and notifies onMutate on success", async () => {
+      const onMutate = vi.fn();
+      let calls = 0;
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: 2 };
+        if (url.endsWith("/read")) return { updated: 0 };
+        if (url.endsWith("/reply")) {
+          calls += 1;
+          if (calls <= 2) throw Object.assign(new Error("send_failed"), { status: 502, details: { error: "send_failed" } });
+          return { sent: true, message: { id: "m-new" } };
+        }
+        return detailFor(open);
+      });
+      render(<MessengerTabV2 onMutate={onMutate} />);
+      fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+      const box = await screen.findByLabelText("Reply on Facebook");
+      fireEvent.change(box, { target: { value: "First try" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await screen.findByRole("alert");
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(calls).toBe(2));
+      fireEvent.change(box, { target: { value: "Edited reply" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(onMutate).toHaveBeenCalledTimes(1));
+      const ids = adminFetch.mock.calls.filter(([u]) => u.endsWith("/reply")).map(([, init]) => JSON.parse(init.body).requestId);
+      expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(ids[1]).toBe(ids[0]);
+      expect(ids[2]).not.toBe(ids[0]);
+    });
+
+    it("shows Retry buttons on list and detail load errors and reloads when clicked", async () => {
+      let listAttempts = 0;
+      let detailAttempts = 0;
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") {
+          listAttempts += 1;
+          if (listAttempts === 1) throw new Error("HTTP 500");
+          return { enabled: true, threads, hasMore: false, unanswered: 2 };
+        }
+        if (url === "/admin/messenger/threads/t-open") {
+          detailAttempts += 1;
+          if (detailAttempts === 1) throw new Error("HTTP 500");
+          return detailFor(open);
+        }
+        if (url.endsWith("/read")) return { updated: 0 };
+        return {};
+      });
+      render(<MessengerTabV2 />);
+      expect(await screen.findByText("Failed to load.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+      expect(await screen.findByText("Could not open this thread.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(await screen.findByTestId("messenger-detail")).toBeInTheDocument();
+    });
+
+    it("surfaces a View in Facebook note for [Photo] and [Attachment] messages", async () => {
+      adminFetch.mockImplementation(async (url) => {
+        if (url === "/admin/messenger/threads") return { enabled: true, threads, hasMore: false, unanswered: 2 };
+        if (url.endsWith("/read")) return { updated: 0 };
+        return {
+          enabled: true,
+          thread: open,
+          messages: [
+            { id: "m-photo", direction: "inbound", body: "[Photo]", createdAt: open.lastInboundAt, author: { type: "customer", name: open.name } },
+          ],
+        };
+      });
+      render(<MessengerTabV2 />);
+      fireEvent.click(await screen.findByTestId("messenger-thread-t-open"));
+      const note = await screen.findByTestId("messenger-media-note-m-photo");
+      expect(note).toHaveTextContent("Attachments cannot be previewed here.");
+      const link = within(note).getByRole("link", { name: /View in Facebook/ });
+      expect(link).toHaveAttribute("href", "https://business.facebook.com/latest/inbox/all");
     });
   });
 });

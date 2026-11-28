@@ -47,9 +47,22 @@ const STILL_WAITING = 'Still waiting: no reply after 1 business hour';
 const LATE_CLASSES = new Set(['portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered', 'portal_add_service_request']);
 // The classes whose answer is also an estimate handed to the customer.
 const QUOTE_CLASSES = new Set(['portal_chat_add_service', 'portal_add_service_request']);
+const CHAT_CLASSES = new Set(['portal_chat_add_service', 'portal_chat_answered']);
+const REQUEST_CLASSES = new Set(['portal_request_answered', 'portal_add_service_request']);
+const OPEN_CHAT_STATUSES = new Set(['pending', 'claimed']);
+const TERMINAL_REQUEST_STATUSES = new Set(['resolved', 'closed', 'cancelled']);
+const PORTAL_CHAT_PREFIX = 'portal-chat-escalation:';
 // A portal message's bell (see the header). The thread id is read as a uuid: it goes into a query.
 const MESSAGE_ITEM = Object.freeze({ key: 'portal_message' });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const uuidOrNull = (v) => (typeof v === 'string' && UUID_RE.test(v.trim()) ? v.trim().toLowerCase() : null);
+const escalationIdOf = (meta) => {
+  const direct = uuidOrNull(meta.escalationId);
+  if (direct) return direct;
+  const key = String(meta.dedupeKey || '');
+  return key.startsWith(PORTAL_CHAT_PREFIX) ? uuidOrNull(key.slice(PORTAL_CHAT_PREFIX.length)) : null;
+};
 
 const relevance = () => require('./admin-alert-relevance');
 const safeError = (err) => require('./notification-service').safeErrorSummary(err);
@@ -113,17 +126,52 @@ function dueItems(rows, now) {
 const reached = (bundle) => [bundle.textAt, bundle.backAt, bundle.inAt, bundle.replyAt]
   .some((at) => at && new Date(at).getTime() > bundle.anchor.getTime());
 
+// Verify live open status on ai_escalations / service_requests so closed items never get phantom re-rings.
+async function filterLiveOpenItems(items, conn = db) {
+  if (!items.length) return [];
+  const chatIds = [...new Set(items
+    .filter((i) => CHAT_CLASSES.has(i.cls?.key))
+    .map((i) => escalationIdOf(i.meta))
+    .filter(Boolean))];
+  const requestIds = [...new Set(items
+    .filter((i) => !i.cls || REQUEST_CLASSES.has(i.cls.key))
+    .map((i) => uuidOrNull(i.meta.requestId))
+    .filter(Boolean))];
+  const escalations = chatIds.length
+    ? new Map((await conn('ai_escalations').whereIn('id', chatIds).select('id', 'status')).map((r) => [String(r.id).toLowerCase(), String(r.status || '')]))
+    : new Map();
+  const requests = requestIds.length
+    ? new Map((await conn('service_requests').whereIn('id', requestIds).select('id', 'status')).map((r) => [String(r.id).toLowerCase(), String(r.status || 'new')]))
+    : new Map();
+  return items.filter((item) => {
+    if (CHAT_CLASSES.has(item.cls?.key)) {
+      const id = escalationIdOf(item.meta);
+      if (id) return OPEN_CHAT_STATUSES.has(escalations.get(id));
+    }
+    if (!item.cls || REQUEST_CLASSES.has(item.cls.key)) {
+      const id = uuidOrNull(item.meta.requestId);
+      if (id) {
+        const status = requests.get(id);
+        return status !== undefined && !TERMINAL_REQUEST_STATUSES.has(status);
+      }
+    }
+    return true;
+  });
+}
+
 // Which of these items still wait on a person. A witness read that fails is no verdict: nothing rings.
 async function stillWaiting(items) {
   if (!items.length) return [];
+  const openItems = await filterLiveOpenItems(items);
+  if (!openItems.length) return [];
   const { loadContactBundles } = require('./admin-alert-contact-witnesses');
   const bundles = await loadContactBundles(
-    items.map(({ row, askedAt, customerId }) => ({ id: row.id, kind: 'customer', bellAt: askedAt, refs: { customerId } })),
+    openItems.map(({ row, askedAt, customerId }) => ({ id: row.id, kind: 'customer', bellAt: askedAt, refs: { customerId } })),
     // A booked visit is not a reply to a portal ask: the witnesses' visit clause is not read here.
     { conn: db, bookedVisits: async () => new Map() },
   );
   const waiting = [];
-  for (const item of items) {
+  for (const item of openItems) {
     const bundle = bundles.get(String(item.row.id));
     if (!bundle || reached(bundle)) continue;
     // The close rule's own estimate test: a request bell is answered only by an estimate pricing its service.
@@ -304,8 +352,16 @@ function estimateDueItems(rows, now) {
 // The items whose estimate is still owed. A person's contact is no answer: only the close rule's estimate test
 // counts. A read that fails for one item is no verdict: that item is not rung.
 async function stillOwed(items) {
+  if (!items.length) return [];
+  let openItems;
+  try {
+    openItems = await filterLiveOpenItems(items);
+  } catch (err) {
+    logger.warn(`[portal-late-rering] live status check failed for estimates, nothing rung on this page: ${safeError(err)}`);
+    return [];
+  }
   const owed = [];
-  for (const item of items) {
+  for (const item of openItems) {
     try {
       if (!await relevance().quoteAnswered(db, { meta: item.meta, customerId: item.customerId, bellAt: item.askedAt })) owed.push(item);
     } catch (err) {

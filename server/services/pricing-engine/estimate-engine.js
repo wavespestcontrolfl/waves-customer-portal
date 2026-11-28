@@ -322,6 +322,23 @@ function withPreSlabReplayCost(options, knobs, legacyWrapper = false) {
   return replayed;
 }
 
+// Server-owned Bora-Care replay knobs + surface measurement fallbacks. Always
+// overwrites `knobs` (undefined when no replay knobs were supplied) so client-
+// supplied `services.boraCare.knobs` can never override live or replayed pricing.
+function withBoraCareReplayOptions(boraCareOptions, input) {
+  const knobs = input.boraCarePricingKnobs && typeof input.boraCarePricingKnobs === 'object' && !Array.isArray(input.boraCarePricingKnobs)
+    ? input.boraCarePricingKnobs
+    : undefined;
+  return {
+    ...boraCareOptions,
+    knobs,
+    surfaceLinearFt: boraCareOptions.surfaceLinearFt ?? boraCareOptions.wallLinearFt
+      ?? input.boraCareSurfaceLinearFt ?? input.boraCareWallLinearFt,
+    surfaceHeightFt: boraCareOptions.surfaceHeightFt ?? boraCareOptions.wallHeightFt
+      ?? input.boraCareSurfaceHeightFt ?? input.boraCareWallHeightFt,
+  };
+}
+
 function uniqueStrings(values = []) {
   return [...new Set((values || []).filter(Boolean))];
 }
@@ -1135,6 +1152,16 @@ function legacySpecialty1126(input, serviceKey = null) {
     && !(serviceKey && [input.addedServiceKeys, input.specialty1126CurrentServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
 }
 
+// Year-1 no-5% annual prepay policy (GATE_NO_YEAR1_PREPAY_DISCOUNT, owner 2026-11-05 + 2026-11-27):
+// returns { year1PrepayNoPercent: true } only when active on a fresh quote or replayed from a stamped quote.
+function year1PrepayStamp(input) {
+  const stamped = input?.year1PrepayNoPercent === true
+    || (input?.year1PrepayNoPercent !== false
+      && !input?.savedEstimateReplay
+      && require('../../config/feature-gates').noYear1PrepayDiscountLive());
+  return stamped ? { year1PrepayNoPercent: true } : {};
+}
+
 // The same home on a lot of exactly 2 acres (87,120 sq ft), for the recurring mosquito price of a bigger lot: the lot is capped, an
 // explicit treatable area is capped with it, and the profile re-derives hardscape, treatable area and category from there.
 // Null when the lot is not above 2 acres. `base` is the input generateEstimate gave calculatePropertyProfile for the real property.
@@ -1407,6 +1434,7 @@ function generateEstimate(input) {
     // Specialty prices stamp (see legacySpecialty1126 above): true = priced before them (old room curve, hand-priced lots above 2
     // acres, $250 wasp level).
     legacySpecialty1126: legacySpecialty1126(input),
+    ...year1PrepayStamp(input),
     // On an estimate priced before the specialty prices: the services of the three priced under them (added by this or an earlier
     // revision), so the next revision and replay keep them there while the older lines keep theirs.
     ...(legacySpecialty1126(input)
@@ -2374,18 +2402,8 @@ function generateEstimate(input) {
   }
   const boraCareService = services.boraCare || services.bora_care;
   if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control', { scopedOneTime: true })) {
-    const boraCareOptions = serviceOptions(boraCareService);
-    // Surface-treatment measurements may arrive via service options (route path)
-    // or at the top level of the estimate input (direct generateEstimate
-    // callers). The property profile does not carry them, so merge the top-level
-    // fields into the options the engine reads. Legacy wall* keys still accepted.
-    const result = priceBoraCare(property, {
-      ...boraCareOptions,
-      surfaceLinearFt: boraCareOptions.surfaceLinearFt ?? boraCareOptions.wallLinearFt
-        ?? input.boraCareSurfaceLinearFt ?? input.boraCareWallLinearFt,
-      surfaceHeightFt: boraCareOptions.surfaceHeightFt ?? boraCareOptions.wallHeightFt
-        ?? input.boraCareSurfaceHeightFt ?? input.boraCareWallHeightFt,
-    });
+    const boraCareOptions = withBoraCareReplayOptions(serviceOptions(boraCareService), input);
+    const result = priceBoraCare(property, boraCareOptions);
     lineItems.push(result);
   }
   const canonicalPreSlabService = services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab;

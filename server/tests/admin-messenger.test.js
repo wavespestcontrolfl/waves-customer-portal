@@ -144,6 +144,19 @@ describe('admin messenger routes', () => {
     expect(id).toBe(ID);
     expect(text).toBe('Thanks');
   });
+
+  test('reply forwards valid requestId and rejects invalid requestId with 400', async () => {
+    mockService.sendReply.mockResolvedValueOnce({ ok: true, message: { id: 'm10', createdAt: '2026-10-31T16:00:00.000Z' } });
+    await withServer(async (base) => {
+      for (const bad of ['', '   ', 123, 'x'.repeat(65)]) {
+        expect((await reply(base, { text: 'Hi', requestId: bad })).status).toBe(400);
+      }
+      expect(mockService.sendReply).not.toHaveBeenCalled();
+      const ok = await reply(base, { text: 'Hi', requestId: 'req-abc-123' });
+      expect(ok.status).toBe(200);
+    });
+    expect(mockService.sendReply.mock.calls[0][3]).toEqual({ requestId: 'req-abc-123' });
+  });
 });
 
 describe('pollMessenger exit', () => {
