@@ -451,3 +451,62 @@ it("tracks concurrent attachment downloads independently so clicking a second do
   resolveA();
   await waitFor(() => expect(btnA).not.toBeDisabled());
 });
+
+it("preserves parent 409 bid recovery when a checklist refresh runs while recovery is in flight", async () => {
+  let resolveRecovery;
+  let resolveChecklistRefresh;
+  let patchCount = 0;
+  let lastPatchBody = null;
+  let detailGets = 0;
+  const firstBid = detail({
+    bid: { status: "new", decision_note: "", updated_at: "2026-10-02T12:00:00.000Z" },
+    checklist: [item(1, { notes: "" })],
+    checklist_progress: { checked: 0, required: 1, total: 1 },
+  });
+  const recoveredBid = detail({
+    bid: { status: "no_bid", decision_note: "Server note", updated_at: "2026-10-02T15:00:00.000Z" },
+    checklist: [item(1, { notes: "Old checklist note" })],
+    checklist_progress: { checked: 0, required: 1, total: 1 },
+  });
+  const fresherChecklistBid = detail({
+    bid: { status: "no_bid", decision_note: "Server note", updated_at: "2026-10-02T15:00:00.000Z" },
+    checklist: [item(1, { notes: "Saved checklist note" })],
+    checklist_progress: { checked: 1, required: 1, total: 1 },
+  });
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => {
+      detailGets += 1;
+      if (detailGets === 1) return reply(firstBid);
+      if (detailGets === 2) return new Promise((r) => { resolveRecovery = () => r(reply(recoveredBid)); });
+      return new Promise((r) => { resolveChecklistRefresh = () => r(reply(fresherChecklistBid)); });
+    },
+    "PATCH /admin/bid-desk/b1": ({ body }) => {
+      patchCount += 1;
+      lastPatchBody = body;
+      if (patchCount === 1) return reply({ error: "This bid changed since you opened it." }, { ok: false, status: 409 });
+      return reply({ ok: true, bid: bid({ ...body, updated_at: "2026-10-02T16:00:00.000Z" }) });
+    },
+    "PATCH /admin/bid-desk/b1/checklist/i1": () => reply({ ok: true }),
+  });
+  renderPage();
+  await screen.findByLabelText("Line 1");
+  fireEvent.change(screen.getByLabelText("Decision"), { target: { value: "bid" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(resolveRecovery).toBeTypeOf("function"));
+
+  // Trigger a checklist refresh while the 409 parent recovery read is still in flight.
+  fireEvent.click(screen.getByLabelText("Line 1"));
+  await waitFor(() => expect(resolveChecklistRefresh).toBeTypeOf("function"));
+  resolveChecklistRefresh();
+  resolveRecovery();
+
+  // Parent 409 recovery still reconciles the bid and updates updated_at for retry.
+  expect(await screen.findByText(/Decision is now "No bid" on the server \(your draft: "Bid"\)/)).toBeInTheDocument();
+  expect(screen.getByLabelText("Note")).toHaveValue("Server note");
+
+  // Retrying Save decision uses the recovered updated_at instead of the stale one.
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  await waitFor(() => expect(patchCount).toBe(2));
+  expect(lastPatchBody.expected_updated_at).toBe("2026-10-02T15:00:00.000Z");
+});

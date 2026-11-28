@@ -292,20 +292,30 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   dueEditedAtNow.current = dueEditedAt;
   const decisionDraftRef = useRef({ bid: null, status: "new", note: "" });
   decisionDraftRef.current = { bid: state.bid, status, note };
-  // Shared monotonic reload sequence across BidDetail.load and BidChecklistPanel.refresh
-  // so an older parent reload cannot overwrite a newer checklist refresh (or vice versa).
+  // Separate monotonic sequences for BidDetail's own bid/emails/draft loads vs the
+  // shared sequence for checklist extras (shared with BidChecklistPanel.refresh).
+  // A checklist refresh must not discard a pending 409/lost-reply bid recovery,
+  // while an older parent load still cannot overwrite newer checklist extras.
+  const bidLoadSeqRef = useRef(0);
   const reloadSeqRef = useRef(0);
 
   // keepDrafts: the reload after a 409 or lost reply refreshes the bid as the server has it, refreshes untouched
   // fields so a retry cannot revert another operator's change, and preserves only fields the operator edited.
   const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false, preserveDueOnConflict = false } = {}) => {
-    const seq = ++reloadSeqRef.current;
+    const bidSeq = ++bidLoadSeqRef.current;
+    const extrasSeq = ++reloadSeqRef.current;
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
-      if (seq !== reloadSeqRef.current) return "";
-      const extras = { _seq: seq, checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] };
-      setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
+      if (bidSeq !== bidLoadSeqRef.current) return "";
+      const nextExtras = { _seq: extrasSeq, checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] };
+      setState((s) => ({
+        loading: false,
+        error: "",
+        bid: data.bid,
+        emails: data.emails,
+        extras: extrasSeq === reloadSeqRef.current ? nextExtras : (s.extras || nextExtras),
+      }));
       let dueConflictNote = "";
       if (preserveDueOnConflict && dueEditedAtNow.current) {
         // Keep the operator's typed deadline after a 409, advance the fence to the freshly
@@ -330,7 +340,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
       setNote(merged.note);
       return [dueConflictNote, merged.conflictNote].filter(Boolean).join(" ");
     } catch (err) {
-      if (seq !== reloadSeqRef.current) return "";
+      if (bidSeq !== bidLoadSeqRef.current) return "";
       // A recovery read that fails too keeps the bid and every field on screen as they are, unsaved typing included,
       // instead of replacing the detail with an error (whose Retry would reload without the drafts).
       if (keepDrafts) {
