@@ -77,6 +77,14 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
     expect(res.text).toContain('Agent: Hi, this is Jordan calling from Waves Pest Control');
     expect(res.text).toContain('Caller: Oh great, yes, 10 AM still works for me.');
     expect(contentTokenMultiset(res.text)).toEqual(contentTokenMultiset(outboundInverted));
+
+    const standardWavesGreeting = [
+      'Caller: Waves Pest Control, this is Sarah.',
+      'Agent: Hi, I have ants in my pantry.',
+    ].join('\n');
+    const stdRes = fixSwappedSpeakerRoles(standardWavesGreeting);
+    expect(stdRes.swapped).toBe(true);
+    expect(stdRes.text).toMatch(/^Agent: Waves Pest Control, this is Sarah\./);
   });
 
   test('does NOT swap when caller asks "Is this Waves Pest Control?" or "Good morning, Waves Pest Control?" or quotes a greeting', () => {
@@ -100,6 +108,13 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
       'Agent: Happy to check on that for you.',
     ].join('\n');
     expect(fixSwappedSpeakerRoles(customerMention)).toEqual({ text: customerMention, swapped: false, reason: null });
+
+    const customerGreetingWaves = [
+      'Agent: Hello?',
+      'Caller: Hi Waves, how can I help you?',
+      'Agent: Just checking in on your visit.',
+    ].join('\n');
+    expect(fixSwappedSpeakerRoles(customerGreetingWaves)).toEqual({ text: customerGreetingWaves, swapped: false, reason: null });
 
     const normal = [
       'Agent: Thank you for calling Waves Pest Control, this is Sarah.',
@@ -210,6 +225,19 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety
       expect(unverified).not.toContain('Sensitivity');
       expect(unverified).not.toContain('nursery');
       expect(unverified).not.toContain('kitchen');
+
+      // Unverified caller ANI with no pests -> uses ONLY server catalog row name (never extraction free text like requested_service)
+      const unverifiedNoPests = await resolveCallToTruckBriefForBooking(mockConn, {
+        customerId: 'cust-1',
+        callerAni: '+19415559999',
+        extracted: { requested_service: 'Do not treat the back lawn' },
+        v2Extraction: {},
+        catalogServiceName: 'One-Time Pest Control Service',
+        isAssessmentBooking: false,
+        isReService: false,
+      });
+      expect(unverifiedNoPests).toBe('Requested: One-Time Pest Control Service');
+      expect(unverifiedNoPests).not.toContain('back lawn');
 
       // Verified primary-phone ANI -> safety notes and full pest location included
       const verified = await resolveCallToTruckBriefForBooking(mockConn, { ...baseInput, callerAni: '(941) 555-0100' });

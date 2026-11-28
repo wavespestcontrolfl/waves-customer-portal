@@ -22495,6 +22495,7 @@ const CallRecordingProcessor = {
                   callerAni: clarifyAskTargetPhone(call),
                   extracted: bookingExtracted,
                   v2Extraction: v2ApprovedExtraction,
+                  catalogServiceName: callBookingCatalogRow?.name || null,
                   isAssessmentBooking: isAssessmentServiceRow(callBookingCatalogRow),
                   isReService: isReServiceBooking,
                 });

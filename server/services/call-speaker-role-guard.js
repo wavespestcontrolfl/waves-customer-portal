@@ -22,7 +22,7 @@ const QUOTED_OR_CALLER_CHECK_RE = /\b(?:they\s+said|she\s+said|he\s+said|recordi
 
 const STAFF_SELF_ID_PATTERNS = Object.freeze([
   /\b(?:thank(?:s|\s+you)\s+for\s+calling|welcome\s+to)\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
-  /\bwaves(?:\s+pest(?:\s+control)?)?\s*[,.\-—]\s*(?:this\s+is\s+[a-z]|my\s+name\s+is|how\s+(?:can|may)\s+(?:i|we)\s+(?:help|assist)\s+you)\b/i,
+  /(?:^|[.!\n]\s*)waves(?:\s+pest(?:\s+control)?)?\s*[,.\-—]\s*(?:this\s+is\s+[a-z][a-z'-]{1,20}|my\s+name\s+is\s+[a-z][a-z'-]{1,20}|how\s+(?:can|may)\s+(?:i|we)\s+(?:help|assist)\s+you)\b/i,
   /\b(?:this\s+is|my\s+name\s+is|i['’]?m)\s+[a-z][a-z'-]{1,20}\s+(?:calling\s+)?(?:back\s+)?(?:with|from|at)\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
   /\bcalling\s+(?:you\s+)?(?:back\s+)?from\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
 ]);
@@ -30,12 +30,14 @@ const STAFF_SELF_ID_PATTERNS = Object.freeze([
 function hasUnambiguousStaffSelfId(turnBody) {
   const body = String(turnBody || '').trim();
   if (!body || QUOTED_OR_CALLER_CHECK_RE.test(body)) return false;
-  if (/\bwaves\b/i.test(body) && /\bhow\s+(?:can|may)\s+(?:i|we)\s+(?:help|assist)\s+you\b/i.test(body)) {
+  if (STAFF_SELF_ID_PATTERNS.some((re) => re.test(body))) {
+    // Allow trailing `?` ONLY on explicit staff offer ("...how can I help you?").
+    if (/\?\s*$/.test(body) && !/\bhow\s+(?:can|may)\s+(?:i|we)\s+(?:help|assist)\s+you\b/i.test(body)) {
+      return false;
+    }
     return true;
   }
-  // A question ("Good morning, Waves Pest Control?") is a caller confirming who answered, not a staff greeting.
-  if (/\?\s*$/.test(body)) return false;
-  return STAFF_SELF_ID_PATTERNS.some((re) => re.test(body));
+  return false;
 }
 
 function collectLabeledTurns(lines) {

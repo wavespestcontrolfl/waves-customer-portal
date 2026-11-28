@@ -135,10 +135,13 @@ function nonObjectionPainPoints(extracted, v2) {
     .join('; ');
 }
 
-function formatRequestedFallback(extracted, sr, isReService) {
+function formatRequestedFallback(extracted, sr, { isReService = false, allowFreeText = true, catalogServiceName = null } = {}) {
   if (isReService) return '';
-  const raw = sr.specific_service_name || extracted.specific_service_name || extracted.requested_service || '';
-  const label = String(raw).replace(/[_-]+/g, ' ').trim();
+  // On ANI-unverified calls, use ONLY the server-resolved catalog row name (never extraction free text).
+  const raw = allowFreeText
+    ? (catalogServiceName || sr.specific_service_name || extracted.specific_service_name || extracted.requested_service || '')
+    : (catalogServiceName || '');
+  const label = String(raw).replace(/_+/g, ' ').trim();
   return label && !/^(?:other|unknown|general|unspecified)$/i.test(label) ? label : '';
 }
 
@@ -208,7 +211,11 @@ function buildCallToTruckBrief(input) {
   }
 
   if (!opts.isAssessmentBooking && !scopeEntries.length) {
-    pushEntry(scopeEntries, 'Requested', formatRequestedFallback(extracted, sr, opts.isReService));
+    pushEntry(scopeEntries, 'Requested', formatRequestedFallback(extracted, sr, {
+      isReService: opts.isReService,
+      allowFreeText,
+      catalogServiceName: opts.catalogServiceName || null,
+    }));
   }
 
   return assembleWithPriority(safetyEntries, scopeEntries);
