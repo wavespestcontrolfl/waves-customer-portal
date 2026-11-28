@@ -4926,23 +4926,30 @@ short code-shaped utterance by the same speaker within 30 s of a masked card
 number; a mask stamps `live_transcription.pan_detected`. While the
 star-key hold holds the caller (`conference_path.hold.phase = 'held'`, or
 `applied = 'held'` until Twilio confirms the return or the voicemail), a
-final utterance is answered 200 and not stored. With
+final utterance is answered 200 and not stored. Once Twilio confirms hold
+voicemail (`phase = 'voicemail'` and `applied = 'voicemail'`), `outbound_track`
+prompts (Waves' voicemail TTS, `speaker = 'staff'`) are answered 200 and
+discarded while `inbound_track` caller speech is stored so card-pause detection
+continues to run on the resumed recording. With
 `GATE_CALL_RECORDING_CARD_PAUSE` also on (dark, owner 2026-11-16 "ok build
 all"), a stored utterance that asks for or names card details, or one the
 scrub masked, pauses the caller's call recording by REST (`Twilio.CURRENT`,
-`Status=paused`, `PauseBehavior=silence`), off the response path; the
-recording resumes 90 s later, and a new trigger moves the end out. State is
-`live_transcription.card_pause`. A pause that was running when that gate
-went off still resumes. No new spend. The other events
+`Status=paused`, `PauseBehavior=silence`, falling back to the classic `<Dial>`
+child `dial_call_sid` on 20404 after re-fencing the sender lease), off the
+response path; the recording resumes 90 s later, and a new trigger moves the
+end out. State is `live_transcription.card_pause`. A pause that was running
+when that gate went off still resumes. No new spend. The other events
 stamp `live_at`, `stopped_at` or `event_error*`. Every outcome answers 200,
 a failed write included. The post-call card-number quarantine deletes the
-call's live utterances (and the early summary below).
+call's live utterances and strips `early_summary`, `spoken_notes`, and `assist`.
 With `GATE_CALL_EARLY_SUMMARY` also on (dark, owner 2026-11-16 "ok build all,
-use haiku"), `transcription-stopped` also schedules, after its 200 answer and
+use haiku"), `transcription-stopped` (and `/call-status` on terminal status
+when `stopped_at` is already stamped) schedules, after its 200 answer and
 a 3 s wait for the last utterances, one paid Claude Haiku 5.5 call over the
 call's live utterances: at most once per call (a compare-and-swap on
-`live_transcription.early_summary_claimed_at`), and none for a call with
-fewer than 3 utterances or one the recording pipeline already processed. Its
+`live_transcription.early_summary_claimed_at`), requiring `stopped_at` and
+terminal call status or `ended_at`, and skipping spam, `tech_line`, quarantined,
+fewer than 3 utterances, or already-processed rows. Its
 2-3 sentence reply, card numbers masked, is saved only on
 `live_transcription.early_summary` for the Calls tab: never on
 `call_summary`, and never sent to a customer. The same reply also carries

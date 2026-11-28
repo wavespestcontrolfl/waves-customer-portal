@@ -769,7 +769,7 @@ describe('scenarios: every earlier finding', () => {
     const events = fakeTwilio();
     expect(await hold.endHold(SID)).toBe('returned');
     expect(await staffGone()).toBe('room_ended');
-    expect(names(events)).toEqual(['list', 'participant', 'recording', 'list', 'room']);
+    expect(names(events)).toEqual(['list', 'participant', 'recording', 'list', 'list', 'room']);
     expect(raiseAdminAlert).not.toHaveBeenCalled();
     expect(holdOf().voicemail_at).toBeNull();
   });
@@ -1653,15 +1653,17 @@ describe('the Hold button: holdForPanel and requestHold', () => {
     expect(hold.holdForPanel({ ...answered, closed_at: iso(-5) })).toEqual(NONE);
   });
 
-  test("an answered call: the winning staff leg is moved by REST to the star route with by=button, and nothing is decided here", async () => {
+  test("an answered call: the winning staff leg is moved by REST to the star route with by=button under the per-call lock", async () => {
     seed(null);
     const events = fakeTwilio();
     await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('requested');
     expect(events).toEqual([{ name: 'call', sid: LEG, url: MOVED_TO, method: 'POST' }]);
-    // The star route decides the hold: no hold is written here and no lock is taken.
-    expect(holdOf()).toBeUndefined();
-    expect(db.__state.writes).toEqual([]);
-    expect(db.__state.txCount).toBe(0);
+    // Per-call advisory lock stamps hold_requested_at so concurrent clicks do not issue duplicate redirects.
+    expect(holdOf()?.hold_requested_at).toEqual(expect.any(String));
+    expect(db.__state.txCount).toBe(1);
+    // A second concurrent click inside the cooldown window returns 'requested' with no second Twilio move.
+    await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('requested');
+    expect(events).toHaveLength(1);
   });
 
   test("after a hold that is over, a new press moves the leg again; the URL names this server's own domain", async () => {
@@ -1677,8 +1679,7 @@ describe('the Hold button: holdForPanel and requestHold', () => {
     const events = fakeTwilio();
     await expect(hold.requestHold(SID, { by: 'voice' })).resolves.toBe('requested');
     expect(events).toEqual([{ name: 'call', sid: LEG, url: MOVED_TO.replace('by=button', 'by=voice'), method: 'POST' }]);
-    expect(holdOf()).toBeUndefined();
-    expect(db.__state.writes).toEqual([]);
+    expect(holdOf()?.hold_requested_at).toEqual(expect.any(String));
   });
 
   test("the voice trigger's speech from before the newest hold opened is stale: a late transcript after a star and a press 1 moves nothing", async () => {
@@ -1723,16 +1724,30 @@ describe('the Hold button: holdForPanel and requestHold', () => {
     expect(events).toEqual([]);
   });
 
-  test('Twilio refuses the move (the staff leg already hung up): failed, nothing written, the log has the code only', async () => {
+  test('Twilio refuses the move (the staff leg already hung up): failed, clears hold_requested_at, the log has the code only', async () => {
     seed(null);
     const events = fakeTwilio({ fail: { call: err(400, 21220) } });
     await expect(hold.requestHold(SID, { by: 'button' })).resolves.toBe('failed');
     expect(names(events)).toEqual(['call']);
-    expect(db.__state.writes).toEqual([]);
+    expect(holdOf()?.hold_requested_at).toBeNull();
     const logged = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
     expect(logged).toContain('21220');
     expect(logged).not.toContain(SID);
     expect(logged).not.toContain('+1941');
+  });
+
+  test('C2-18: startHold when room is still in init (post-press-1 <Say>) returns failed (not no_room) so staff rejoins instead of hanging up', async () => {
+    seed(null);
+    mockTw.api = {
+      conferences: Object.assign(jest.fn(), {
+        list: jest.fn(async ({ status }) => (status === 'init' ? [{ sid: 'CFinit', status: 'init' }] : [])),
+      }),
+      calls: jest.fn(),
+    };
+    await expect(hold.startHold(SID, { by: 'button', legSid: LEG })).resolves.toBe('failed');
+    expect(holdOf().gone).toBe(false);
+    expect(holdOf().ret_by).toBe('abort');
+    await expect(hold.roomIsOpen(SID)).resolves.toBe(true);
   });
 
   test('a database read error: failed, and no Twilio request', async () => {

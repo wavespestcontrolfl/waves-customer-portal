@@ -175,6 +175,13 @@ const LIVE_CALL_WINDOW_MS = 2 * 60 * 60 * 1000;
 const LIVE_CALL_MAX = 5;
 const LIVE_CALL_LINES = 15;
 const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
+function liveAnsweredBy(meta) {
+  const { transferTakenByOwner, ownerAnswered } = require('../services/live-call-upset-alert');
+  const csrName = String(meta.forward_acceptance?.csr_name || '').trim() || null;
+  if (!transferTakenByOwner(meta)) return csrName;
+  return csrName && ownerAnswered(meta.forward_acceptance) ? csrName : 'Owner';
+}
+
 router.get('/live', requireAdmin, async (req, res, next) => {
   try {
     if (!require('../config/feature-gates').isEnabled('liveCallTranscription')) {
@@ -190,10 +197,12 @@ router.get('/live', requireAdmin, async (req, res, next) => {
     const holdOn = callHold.isEnabled();
     const since = new Date(Date.now() - LIVE_CALL_WINDOW_MS);
     const ended = [...TERMINAL_CALL_STATUSES];
+    const { QUARANTINE_WHERE_SQL } = require('../services/live-call-transcription');
     const rows = await db('call_log')
       .where('created_at', '>=', since)
       .whereRaw("(metadata -> 'live_transcription' ->> 'live_at') IS NOT NULL")
       .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at') IS NULL")
+      .whereRaw(`NOT ${QUARANTINE_WHERE_SQL}`)
       .whereRaw(`(status IS NULL OR status NOT IN (${ended.map(() => '?').join(', ')}))`, ended)
       .orderBy('created_at', 'desc')
       .limit(LIVE_CALL_MAX)
@@ -220,7 +229,7 @@ router.get('/live', requireAdmin, async (req, res, next) => {
         customer: customer
           ? { id: customer.id, name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() }
           : null,
-        answered_by: String(meta.forward_acceptance?.csr_name || '').trim() || null,
+        answered_by: liveAnsweredBy(meta),
         assist: liveAssist ? liveAssist.assistForPanel(meta) : null,
         hold: holdOn ? callHold.holdForPanel(meta.conference_path) : null,
         lines: utterances.reverse().map((u) => ({ speaker: u.speaker, text: u.text || '', at: u.spoken_at })),

@@ -34,6 +34,11 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-w
 const { scrubPans } = require('../utils/pan-scrub');
 const { raiseAdminAlert, firstSentence, cutAtWord, breaksAlertRules, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const { parseETDateTime, etParts, formatETTime } = require('../utils/datetime-et');
+const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
+const { QUARANTINE_WHERE_SQL } = require('./live-call-transcription');
+
+const NOT_QUARANTINED_SQL = `NOT ${QUARANTINE_WHERE_SQL}`;
+const ENDED_AT_SQL = "COALESCE((metadata -> 'live_transcription' ->> 'stopped_at')::timestamptz, (metadata ->> 'ended_at')::timestamptz)";
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -169,6 +174,7 @@ async function claimCheck(callId, checkedAt) {
   const won = await db('call_log')
     .where('id', callId)
     .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
+    .whereRaw(NOT_QUARANTINED_SQL)
     .whereRaw(`${CHECKED_AT_SQL} IS NULL`)
     .update({
       metadata: db.raw(
@@ -182,6 +188,7 @@ async function claimCheck(callId, checkedAt) {
 async function saveResult(callId, checkedAt, result) {
   await db('call_log')
     .where('id', callId)
+    .whereRaw(NOT_QUARANTINED_SQL)
     .whereRaw(`${CHECKED_AT_SQL} = ?`, [checkedAt])
     .update({
       metadata: db.raw(
@@ -213,11 +220,19 @@ async function extractOne(call, now) {
 async function extractPending(now) {
   const since = new Date(now.getTime() - LOOKBACK_MS);
   const settled = new Date(now.getTime() - SETTLE_MS);
+  const endedStatuses = [...TERMINAL_CALL_STATUSES];
   const calls = await db('call_log')
     .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call takes no staff notes
-    .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at') IS NOT NULL")
-    .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at')::timestamptz > ?", [since.toISOString()])
-    .whereRaw("(metadata -> 'live_transcription' ->> 'stopped_at')::timestamptz <= ?", [settled.toISOString()])
+    .whereRaw(NOT_QUARANTINED_SQL)
+    .whereRaw(
+      `((metadata -> 'live_transcription' ->> 'stopped_at') IS NOT NULL`
+      + ` OR ((metadata -> 'live_transcription' ->> 'live_at') IS NOT NULL`
+      + ` AND (metadata ->> 'ended_at') IS NOT NULL`
+      + ` AND status IN (${endedStatuses.map(() => '?').join(', ')})))`,
+      endedStatuses,
+    )
+    .whereRaw(`${ENDED_AT_SQL} > ?`, [since.toISOString()])
+    .whereRaw(`${ENDED_AT_SQL} <= ?`, [settled.toISOString()])
     .whereRaw(`${CHECKED_AT_SQL} IS NULL`)
     .orderBy('created_at', 'asc')
     .limit(MAX_CALLS_PER_RUN)
@@ -275,8 +290,16 @@ function dueUnrung(r, nowMs) {
 }
 
 // Raises one reminder's bell, then stamps its raised_at. 1 = this run stamped it. Throws when the bell was not
-// written, so the caller leaves it unstamped for the next run.
+// written, so the caller leaves it unstamped for the next run. Re-checks quarantine and reminder presence right
+// before publishing so a concurrent PAN purge never leaks cached reminder text.
 async function ringOne(call, r, index, now) {
+  const stillLive = await db('call_log')
+    .where('id', call.id)
+    .whereRaw(NOT_QUARANTINED_SQL)
+    .whereRaw("(metadata #> ARRAY['live_transcription','spoken_notes','reminders', ?::text]) IS NOT NULL", [String(index)])
+    .whereRaw("(metadata #>> ARRAY['live_transcription','spoken_notes','reminders', ?::text, 'raised_at']) IS NULL", [String(index)])
+    .first('id');
+  if (!stillLive) return 0;
   const written = await raiseAdminAlert('live_call_reminder', {
     area: 'Comms',
     action: actionFrom(r.text),
@@ -286,7 +309,11 @@ async function ringOne(call, r, index, now) {
     subject: { type: 'call', id: String(call.id) },
     doneWhen: 'reminder_done',
     who: 'person',
-  }, { bell: true, dedupeKey: `spoken-reminder:${call.id}:${index}` });
+  }, {
+    bell: true,
+    dedupeKey: `spoken-reminder:${call.id}:${index}`,
+    ...(call.customer_id ? { metadata: { customerId: call.customer_id } } : {}),
+  });
   // notifyAdmin swallows a database failure and resolves null (live-call-upset-alert.js reads it the same way). A
   // row (also a dedupe hit: the standing bell) or an intentional suppression (bell policy, internal test customer:
   // id null, suppressed true) is delivered. Anything else is not.
@@ -302,13 +329,14 @@ async function ringDue(now) {
   const calls = await db('call_log')
     .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // a bake-off call rings no reminder
     .where('created_at', '>', since)
+    .whereRaw(NOT_QUARANTINED_SQL)
     .whereRaw(
       "jsonb_path_exists(metadata, ?::jsonpath, jsonb_build_object('now', ?::text))",
       ['$.live_transcription.spoken_notes.reminders[*] ? (@.raised_at == null && @.due_at <= $now)', now.toISOString()],
     )
     .orderBy('created_at', 'asc')
     .limit(50)
-    .select('id', 'created_at', 'metadata');
+    .select('id', 'created_at', 'customer_id', 'metadata');
   let raised = 0;
   for (const call of calls) {
     const reminders = meta(call.metadata).live_transcription?.spoken_notes?.reminders;
