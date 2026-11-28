@@ -2706,6 +2706,12 @@ function notifyTechOfSkippedVisit({ req, svc, transition, fromStatus }) {
   });
 }
 
+function techForbiddenStatusAction(req, svc, toStatus) {
+  if (req.techRole === 'admin') return false;
+  if (svc?.status === toStatus && ['cancelled', 'skipped', 'no_show'].includes(toStatus)) return false;
+  return toStatus === 'no_show' || toStatus === 'skipped' || toStatus === 'cancelled';
+}
+
 async function serviceStatusHandler(req, res, next) {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
@@ -2747,7 +2753,7 @@ async function serviceStatusHandler(req, res, next) {
     // visit (even this_only — P0-5), no_show (invoice void + card-on-file fee
     // charge), and skipped (removing a plan visit with no make-up) — stay
     // admin-only even on the tech's own visit.
-    if (req.techRole !== 'admin' && (toStatus === 'no_show' || toStatus === 'skipped' || toStatus === 'cancelled')) {
+    if (techForbiddenStatusAction(req, svc, toStatus)) {
       return res.status(403).json({ error: 'Admin access required for this action', code: 'admin_required' });
     }
 
