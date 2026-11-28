@@ -297,6 +297,23 @@ describe('wdoFeeSeedFromVisit', () => {
     })).toBe('');
   });
 
+  it('seeds primaryLinePrice when the visit has a billable add-on and no appointment-level discount (B-25)', () => {
+    expect(wdoFeeSeedFromVisit({
+      primaryLinePrice: 175,
+      estimatedPrice: 255,
+      serviceAddons: [{ serviceName: 'Rodent exclusion check', estimatedPrice: 80 }],
+    })).toBe(175);
+  });
+
+  it('seeds nothing when a billable-addon visit also carries an appointment-level discount (B-25)', () => {
+    expect(wdoFeeSeedFromVisit({
+      primaryLinePrice: 175,
+      estimatedPrice: 230,
+      discountAmount: 25,
+      serviceAddons: [{ serviceName: 'Rodent exclusion check', estimatedPrice: 80 }],
+    })).toBe('');
+  });
+
   it('still seeds when add-ons carry no dollars', () => {
     expect(wdoFeeSeedFromVisit({
       estimatedPrice: 175,
@@ -672,6 +689,19 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
     ));
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('/send-with-invoice'))).toHaveLength(0);
     expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/admin/projects/p-1/send'))).toHaveLength(1);
+  });
+
+  it('does NOT treat "0% discount $175" as a no-charge WDO report (B-25)', async () => {
+    renderWdoSheet({ defaultInspectionFee: '' });
+    await waitFor(() => expect(field('inspection_fee')).toBeTruthy());
+    fireEvent.change(field('inspection_fee'), { target: { value: '0% discount $175' } });
+    expect(field('inspection_fee').value).toBe('0% discount $175');
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    await screen.findByText('✓ Report draft saved');
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+    // Billable path offers "Send invoice & report", NOT the no-charge "Send report & finish service".
+    expect(await screen.findByRole('button', { name: 'Send invoice & report' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Send report & finish service' })).toBeNull();
   });
 
   it('closing from the sign step still reports the created project', async () => {

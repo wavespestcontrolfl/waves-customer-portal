@@ -16,6 +16,7 @@ const { renderAnnualPlanPdf } = require('../services/pdf/annual-plan-pdf');
 router.use(noStore);
 const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
+const { isServiceRecordProjectReportHeld } = require('../services/project-report-hold');
 const {
   getProjectType,
   redactInspectionFeeCuesForType,
@@ -986,6 +987,21 @@ router.get('/annual-plan/:id', authenticate, async (req, res, next) => {
   }
 });
 
+// Shared report-suppression predicate for legacy PDF generation, share-link
+// minting, and public /shared/:token rendering: blocks both non-auto_send
+// typed reports (internal_only / disabled) and WDO projects whose report
+// payment hold is still active (B-58).
+async function serviceRecordReportSuppressed(service, database = db) {
+  let notes = {};
+  try {
+    notes = typeof service?.structured_notes === 'string'
+      ? JSON.parse(service.structured_notes)
+      : (service?.structured_notes || {});
+  } catch { notes = {}; }
+  if (notes.typedReportDelivery && notes.typedReportDelivery !== 'auto_send') return true;
+  return isServiceRecordProjectReportHeld(notes, database);
+}
+
 // =========================================================================
 // GET /api/documents/service-report/:serviceRecordId — auto-generate PDF
 // =========================================================================
@@ -1016,17 +1032,11 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
 
     if (!service) return res.status(404).json({ error: 'Service record not found' });
 
-    // internal_only typed completions (Phase-1b shadow) are admin-review
-    // only — this authenticated fallback generator must refuse them too,
-    // since the portal client falls back here exactly when reportUrl is
-    // suppressed. 404 (not 403) so the record's existence isn't signposted.
-    let reportNotes = {};
-    try {
-      reportNotes = typeof service.structured_notes === 'string'
-        ? JSON.parse(service.structured_notes)
-        : (service.structured_notes || {});
-    } catch { reportNotes = {}; }
-    if (reportNotes.typedReportDelivery && reportNotes.typedReportDelivery !== 'auto_send') {
+    // internal_only typed completions (Phase-1b shadow) and payment-held WDO
+    // project records (B-58) are withheld — this authenticated fallback
+    // generator must refuse them too. 404 (not 403) so the record's existence
+    // isn't signposted.
+    if (await serviceRecordReportSuppressed(service, db)) {
       return res.status(404).json({ error: 'Service record not found' });
     }
 
@@ -1158,17 +1168,11 @@ router.post('/share/:id', authenticate, async (req, res, next) => {
         .first()
         .catch(() => null);
       if (!svc) return res.status(404).json({ error: 'Document not found' });
-      // Suppressed typed reports (internal_only shadow / disabled kill
-      // switch) are not shareable either — ownership alone isn't enough,
-      // or a crafted share request mints a public PDF link for a record
-      // every other customer surface hides.
-      let shareNotes = {};
-      try {
-        shareNotes = typeof svc.structured_notes === 'string'
-          ? JSON.parse(svc.structured_notes)
-          : (svc.structured_notes || {});
-      } catch { shareNotes = {}; }
-      if (shareNotes.typedReportDelivery && shareNotes.typedReportDelivery !== 'auto_send') {
+      // Suppressed typed reports (internal_only / disabled) and payment-held
+      // WDO project records (B-58) are not shareable either — ownership alone
+      // isn't enough, or a crafted share request mints a public PDF link for
+      // a record every other customer surface hides.
+      if (await serviceRecordReportSuppressed(svc, db)) {
         return res.status(404).json({ error: 'Document not found' });
       }
     } else {
@@ -1262,15 +1266,9 @@ router.get('/shared/:token', sharedDocLimiter, async (req, res, next) => {
         .first();
       if (!service) return res.status(404).json({ error: 'Document not found' });
 
-      // Defense in depth: even a previously-minted share link must not
-      // render a suppressed typed report (internal_only / disabled).
-      let sharedNotes = {};
-      try {
-        sharedNotes = typeof service.structured_notes === 'string'
-          ? JSON.parse(service.structured_notes)
-          : (service.structured_notes || {});
-      } catch { sharedNotes = {}; }
-      if (sharedNotes.typedReportDelivery && sharedNotes.typedReportDelivery !== 'auto_send') {
+      // Defense in depth: even a previously-minted share link must not render
+      // a suppressed typed report or a payment-held WDO project record (B-58).
+      if (await serviceRecordReportSuppressed(service, db)) {
         return res.status(404).json({ error: 'Document not found' });
       }
 

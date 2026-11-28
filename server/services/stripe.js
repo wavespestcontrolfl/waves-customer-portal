@@ -97,6 +97,33 @@ function assertLockedInvoiceNotPayerBilled(lockedInvoice) {
   }
 }
 
+// Post-settlement side effects shared by every credit-coverage path that
+// settles an invoice to `prepaid` (saved-card auto-cover, pay-page immediate
+// cover, and held-coverage settle after required-save capture): stop dunning,
+// complete active payment plans, sync any annual-prepay term, and run the
+// issued-invoice visit closeout (recording visit.report_after_pay_held under
+// GATE_REPORT_AFTER_PAY or closing an unstarted/arrived visit). Every step is
+// independent and fail-soft so an already-committed settlement stands.
+async function runCreditCoveragePostSettlement(invoiceId, { label = 'credit coverage' } = {}) {
+  try {
+    await require('./invoice-followups').stopOnPayment(invoiceId);
+  } catch (e) {
+    logger.warn(`[stripe] stopOnPayment after ${label} failed for ${invoiceId}: ${e.message}`);
+  }
+  await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
+  try {
+    const fresh = await db('invoices').where({ id: invoiceId }).first();
+    if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
+  } catch (e) {
+    logger.warn(`[stripe] term sync after ${label} failed for ${invoiceId}: ${e.message}`);
+  }
+  try {
+    await require('./invoice-issued-closeout').closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid' });
+  } catch (e) {
+    logger.warn(`[stripe] visit closeout after ${label} failed for ${invoiceId}: ${e.message}`);
+  }
+}
+
 // requireAutopayForCustomerId's deleted-account check on the LOCKED customer
 // row (see its call site).
 function assertLockedCustomerNotDeleted(lockedCustomer) {
@@ -3311,20 +3338,10 @@ const StripeService = {
     if (coveredByCredit) {
       // Account credit fully covered the invoice inside the committed transaction
       // above (now prepaid) — no card was charged. Run the same post-payment side
-      // effects a real payment would (stop dunning, sync any annual-prepay term).
+      // effects a real payment would (stop dunning, complete plans, sync any
+      // annual-prepay term, and run visit closeout / report-after-pay hold).
       logger.info(`[stripe] Card-on-file: account credit fully covered invoice ${invoice.invoice_number} — no card charge`);
-      try {
-        await require('./invoice-followups').stopOnPayment(invoiceId);
-      } catch (e) {
-        logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
-      }
-      await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
-      try {
-        const fresh = await db('invoices').where({ id: invoiceId }).first();
-        if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
-      } catch (e) {
-        logger.warn(`[stripe] term sync after credit coverage failed for ${invoiceId}: ${e.message}`);
-      }
+      await runCreditCoveragePostSettlement(invoiceId, { label: 'credit coverage' });
       return { covered_by_credit: true, status: 'prepaid', paymentId: null, paymentIntentId: null };
     }
 
@@ -4674,18 +4691,7 @@ const StripeService = {
         // above — no PaymentIntent to mint. Run the same post-payment side effects
         // a real payment would, and return a covered state (no clientSecret) so
         // the pay page settles instead of charging.
-        try {
-          await require('./invoice-followups').stopOnPayment(invoiceId);
-        } catch (e) {
-          logger.warn(`[stripe] stopOnPayment after credit coverage failed for ${invoiceId}: ${e.message}`);
-        }
-        await require('./payment-plans').completeActivePlansForPaidInvoice(invoiceId, 'credit_coverage');
-        try {
-          const fresh = await db('invoices').where({ id: invoiceId }).first();
-          if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
-        } catch (e) {
-          logger.warn(`[stripe] term sync after credit coverage failed for ${invoiceId}: ${e.message}`);
-        }
+        await runCreditCoveragePostSettlement(invoiceId, { label: 'credit coverage' });
         logger.info(`[stripe] Pay-page: account credit fully covered invoice ${invoice.invoice_number} — no PaymentIntent`);
         return { covered_by_credit: true, status: 'prepaid', clientSecret: null, paymentIntentId: null, amount: 0 };
       }
@@ -4789,17 +4795,7 @@ const StripeService = {
       };
     }
     // Same post-payment side effects the immediate covered path runs.
-    try {
-      await require('./invoice-followups').stopOnPayment(invoiceId);
-    } catch (e) {
-      logger.warn(`[stripe] stopOnPayment after held-coverage settle failed for ${invoiceId}: ${e.message}`);
-    }
-    try {
-      const fresh = await db('invoices').where({ id: invoiceId }).first();
-      if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
-    } catch (e) {
-      logger.warn(`[stripe] term sync after held-coverage settle failed for ${invoiceId}: ${e.message}`);
-    }
+    await runCreditCoveragePostSettlement(invoiceId, { label: 'held-coverage settle' });
     logger.info(`[stripe] Held credit coverage settled for invoice ${invoiceId} after required-save capture`);
     return { settled: true, alreadySettled: false, reason: null };
   },

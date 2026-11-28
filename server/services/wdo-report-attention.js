@@ -36,7 +36,7 @@ const SIGNED_UNSENT_HOURS = 48;
 const STUCK_APPT_HOURS = 24;
 const HOLD_ATTENTION_ATTEMPTS = 5;
 const { STALE_SEND_PARK_ERROR } = require('./invoice-helpers');
-const UNSETTLEABLE_INVOICE_STATUSES = ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible'];
+const UNSETTLEABLE_INVOICE_STATUSES = ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible', 'disputed'];
 const REMIND_DAYS = 7;
 const CATEGORY = 'wdo_report_attention';
 const CLEARED_RESOLUTION = 'All WDO reports are sent and no WDO inspection is waiting.';
@@ -119,7 +119,7 @@ async function findAttentionItems(now = new Date()) {
       .orWhere((releasing) => releasing
         .where('p.report_hold_status', 'releasing')
         .where('p.report_hold_locked_at', '<', new Date(now.getTime() - 60 * 60e3))))
-    .select('p.id', 'p.report_hold_attempts', 'p.report_hold_last_error');
+    .select('p.id', 'p.report_hold_attempts', 'p.report_hold_last_error', 'i.status as invoice_status');
 
   return { signedUnsent, stuckAppts, stuckHolds };
 }
@@ -163,7 +163,9 @@ function summarize({ signedUnsent, stuckAppts, stuckHolds }) {
     parts.push(`${stuckAppts.length} WDO inspection${stuckAppts.length === 1 ? '' : 's'} past date without a completed report`);
   }
   if (stuckHolds.length) {
-    parts.push(`${stuckHolds.length} held report${stuckHolds.length === 1 ? '' : 's'} not releasing`);
+    const disputedCount = stuckHolds.filter((p) => p.invoice_status === 'disputed').length;
+    const suffix = disputedCount ? ` (${disputedCount} disputed)` : '';
+    parts.push(`${stuckHolds.length} held report${stuckHolds.length === 1 ? '' : 's'} not releasing${suffix}`);
   }
   return parts.join(' · ');
 }

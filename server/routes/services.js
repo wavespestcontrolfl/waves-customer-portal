@@ -9,7 +9,12 @@ const { authenticate } = require('../middleware/auth');
 // rule: the reviewed report text only, never the tech's raw note, with the
 // legacy inspection-fee scrub on top (owner ruling 2026-10-01; codex #2817).
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
-const { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts } = require('../services/portal-service-history');
+const {
+  listPortalServiceHistory,
+  parseJsonObject,
+  suppressesCustomerArtifacts,
+  isServiceRecordArtifactSuppressed,
+} = require('../services/portal-service-history');
 const { etDateString } = require('../utils/datetime-et');
 
 // service_products columns the customer service-detail route returns (the table's columns before 20261009110000 added treated_place and 20261030120000 treated_places).
@@ -133,7 +138,7 @@ router.get('/:id', async (req, res, next) => {
     // (withholdReportArtifacts below); the holder's internal-only completion
     // keeps them, as today.
     const contactWithheld = await contactSessionReportsWithheld(req);
-    const suppressCustomerArtifacts = suppressesCustomerArtifacts(structuredNotes) || contactWithheld;
+    const suppressCustomerArtifacts = contactWithheld || await isServiceRecordArtifactSuppressed(structuredNotes, db);
 
     const products = suppressCustomerArtifacts
       ? []

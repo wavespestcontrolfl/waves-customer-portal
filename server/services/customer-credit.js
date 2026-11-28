@@ -682,6 +682,11 @@ async function runPostFullCoverageSideEffects(invoiceId) {
   } catch (e) {
     logger.warn(`[account-credit] annual-prepay term sync after full coverage failed for ${invoiceId}: ${e.message}`);
   }
+  try {
+    await require('./invoice-issued-closeout').closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid' });
+  } catch (e) {
+    logger.warn(`[account-credit] visit closeout after full coverage failed for ${invoiceId}: ${e.message}`);
+  }
 }
 
 /**

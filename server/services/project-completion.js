@@ -177,11 +177,11 @@ function positiveMoney(value) {
 }
 
 function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {}, project = null } = {}) {
-  // WDO owns a flat/default inspection fee independent of legacy appointment
-  // pricing. This shares the canonical resolver with invoice creation so a
-  // blank fee bills $250, a custom fee wins, and an explicit zero stays comped.
+  // WDO resolves the tech-entered fee first (explicit $0 stays comped), then
+  // the linked visit's booked WDO size/construction price ($150-$275), before
+  // falling back to the $250 default — sharing one resolver with invoice minting.
   if (project?.project_type === 'wdo_inspection') {
-    return resolveWdoInspectionFee(parseJsonObject(project.findings));
+    return resolveWdoInspectionFee(parseJsonObject(project.findings), { scheduledService });
   }
   const estimated = positiveMoney(scheduledService.estimated_price);
   if (estimated > 0) return estimated;
@@ -343,7 +343,7 @@ async function resolveProjectCompletionBilling({
   };
 }
 
-function projectCompletionNotes({ project, profile, portalAttached, reportPath }) {
+function projectCompletionNotes({ project, profile, portalAttached, reportPath, reportHeld = false }) {
   return {
     projectCompletion: true,
     projectId: project.id,
@@ -355,7 +355,8 @@ function projectCompletionNotes({ project, profile, portalAttached, reportPath }
     ...(projectTypeHasInternalFindingKeys(project.project_type)
       ? { feeValues: projectRecordedFeeValues(project) }
       : {}),
-    projectTitle: project.title || null,
+    projectTitle: reportHeld ? null : (project.title || null),
+    ...(reportHeld ? { reportHeld: true } : {}),
     completionMode: profile.completionMode || null,
     portalVisibility: profile.portalVisibility || null,
     portalAttachPolicy: profile.portalAttachPolicy || null,
@@ -418,8 +419,9 @@ function projectFollowupSuggestion({
 }
 
 // The visit-history note a project completion writes (service_records.technician_notes, which the customer's service
-// history returns). A report held for payment keeps its recommendations out until the paid release writes them.
+// history returns). A report held for payment keeps its title and recommendations out until the paid release writes them.
 function completionTechnicianNotes(project, { reportHeld = false } = {}) {
+  if (reportHeld) return 'Project completed.';
   // The recommendation copied here lands in service_records.technician_notes,
   // which the authenticated portal service-history API returns verbatim — so
   // a legacy narrative that predates the create/PUT write guard gets its
@@ -439,7 +441,7 @@ function completionTechnicianNotes(project, { reportHeld = false } = {}) {
   };
   return [
     project.title ? `Project completed: ${scrubCompletionText(project.title)}` : 'Project completed.',
-    project.recommendations && !reportHeld ? scrubCompletionText(project.recommendations) : '',
+    project.recommendations ? scrubCompletionText(project.recommendations) : '',
   ].filter(Boolean).join('\n\n');
 }
 
@@ -462,6 +464,7 @@ function buildServiceRecordInsert({
     profile,
     portalAttached,
     reportPath,
+    reportHeld,
   });
 
   const recordInsert = {
@@ -599,6 +602,7 @@ function buildServiceRecordProjectCompletionUpdate({
   lifecycleUpdates = {},
   portalAttached = false,
   reportPath = null,
+  reportHeld,
   nowValue = null,
 }) {
   const structuredNotes = projectCompletionNotes({
@@ -606,6 +610,7 @@ function buildServiceRecordProjectCompletionUpdate({
     profile,
     portalAttached,
     reportPath,
+    reportHeld: Boolean(reportHeld),
   });
   const existingStructuredNotes = parseJsonObject(serviceRecord.structured_notes);
   const existingServiceData = parseJsonObject(serviceRecord.service_data);
@@ -950,6 +955,7 @@ async function completeProjectBackedService({
         lifecycleUpdates,
         portalAttached,
         reportPath,
+        reportHeld,
         nowValue: trx.fn.now(),
       });
       // The customer's booking words freeze with the completion

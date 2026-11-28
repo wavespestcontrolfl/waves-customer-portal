@@ -26,10 +26,11 @@ const RESOLUTION = 'The bill was paid, voided or is no longer owed';
 const alertKey = (invoiceId) => `${KEY_PREFIX}${invoiceId}`;
 
 // Money is still owed by the customer on this bill: a live status, a balance,
-// and not billed to a third-party payer.
+// not disputed/uncollectible, and not billed to a third-party payer.
 function stillOwed(invoice) {
   return !!invoice
     && isInvoiceCollectibleStatus(invoice.status)
+    && !['disputed', 'uncollectible'].includes(String(invoice.status || '').trim().toLowerCase())
     && invoiceAmountDue(invoice) > 0
     && !invoice.payer_id
     && !invoiceWithdrawnFromCustomer(invoice);
@@ -102,11 +103,14 @@ async function runReportOnlyPaymentCheck({ now = new Date() } = {}) {
       // payment processing, a payer handoff) whose bill is owed again (the
       // debit returned) reopens and rings.
       const composed = composeAdminAlert(alertSpec(invoice, record));
-      await episodes.raiseAdminAlertWithReopen('billing', composed.headline, composed.why, {
+      const res = await episodes.raiseAdminAlertWithReopen('billing', composed.headline, composed.why, {
         link: composed.link, dedupeKey: key, metadata: composed.metadata,
+        // GATE_ADMIN_BELL_POLICY silences 'billing' by default; bellDefault
+        // rings unless the owner saved "off" for the category.
+        bellDefault: true,
         refreshOnDedupe: true, ringOnRefresh: () => false,
       });
-      raised += 1;
+      if (res?.rang === true) raised += 1;
     } catch (err) {
       logger.error(`[report-only-payment-alert] invoice ${invoice.id}: ${err.message}`);
     }

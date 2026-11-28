@@ -4454,6 +4454,11 @@ async function settleZeroDueBeforeSend(invoiceId, { fenceOwnership = false, row 
         logger.error(`[invoice] ${invoiceId}: review enrollment after zero-due settlement threw — settlement stands: ${enrollErr.message}`);
       }
     }
+    await require("./invoice-issued-closeout")
+      .closeOutVisitForIssuedInvoice({ invoiceId, trigger: "paid" })
+      .catch((closeoutErr) => {
+        logger.warn(`[invoice] ${invoiceId}: visit closeout after zero-due settlement failed — settlement stands: ${closeoutErr.message}`);
+      });
     return { kind: "settled", invoice: settlement.invoice };
   }
   if (settlement.reason === "visit_never_ran") {
@@ -12012,6 +12017,7 @@ const InvoiceService = {
     // update makes a concurrent void/payment lose cleanly, so the restore
     // can never run twice for one invoice.
     let invoice = null;
+    let clearedWdoHoldProjectIds = [];
     await db.transaction(async (trx) => {
       // A stamped dues invoice's void removes the month's coverage: commit
       // under the dues-month lock (first lock of this transaction).
@@ -12086,6 +12092,16 @@ const InvoiceService = {
       if (updated.payment_recorded_at || voidAppliedPaymentLocked) {
         throw new Error("A payment was applied to this invoice while voiding — issue a refund instead");
       }
+      // WDO report-hold fence (after locking invoices, matching arm/release lock order):
+      // refuse while a held report is releasing or if a settled/prepaid invoice's held
+      // report was already legally delivered; reconcile any still-held unpaid project so
+      // it never remains stranded pointing at a void invoice.
+      const wdoHoldVoid = await require("./project-report-hold").reconcileWdoReportHoldOnInvoiceVoid(trx, updated, {
+        priorStatus: current.status,
+        priorPaidAt: current.paid_at,
+        priorPrepaidAt: current.prepaid_at,
+      });
+      clearedWdoHoldProjectIds = wdoHoldVoid?.clearedProjectIds || [];
       // A void is a terminal exit for the invoice's collection path — an
       // ACTIVE payment plan must not survive it (it blocks edits/credit
       // reversal forever on a dead invoice). Cancel it in the SAME
@@ -12115,6 +12131,7 @@ const InvoiceService = {
       }
       invoice = updated;
     });
+    await require("./project-report-hold").closeClearedHoldBells(clearedWdoHoldProjectIds);
     await alertIfMembershipDuesCoverageReleased(invoice, { releasedBy: "voided" });
     await stopInvoiceFollowupSequence(id, "invoice_voided");
     try {

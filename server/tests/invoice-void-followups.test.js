@@ -19,6 +19,10 @@ const mockRestoreDepositCredit = jest.fn(async () => 0);
 jest.mock('../services/estimate-deposits', () => ({
   restoreDepositCreditForVoidedInvoice: (...args) => mockRestoreDepositCredit(...args),
 }));
+jest.mock('../services/project-report-hold', () => ({
+  reconcileWdoReportHoldOnInvoiceVoid: jest.fn(async () => ({ clearedProjectIds: [] })),
+  closeClearedHoldBells: jest.fn(async () => undefined),
+}));
 
 const db = require('../models/db');
 const FollowUps = require('../services/invoice-followups');

@@ -495,13 +495,56 @@ describe('WDO inspection fee resolution (no-charge rule)', () => {
     expect(resolveWdoInspectionFee({ inspection_fee: '', structure_sqft: '2200' })).toBe(250);
   });
 
-  test('wdoFeeIsExplicitZero only fires on a leading numeric zero', () => {
+  test('wdoFeeIsExplicitZero only fires on a true zero fee, never prose like "0% discount $175" (B-25)', () => {
     expect(wdoFeeIsExplicitZero('0')).toBe(true);
     expect(wdoFeeIsExplicitZero('$0.00')).toBe(true);
+    expect(wdoFeeIsExplicitZero('0 — comped')).toBe(true);
     expect(wdoFeeIsExplicitZero('')).toBe(false);
     expect(wdoFeeIsExplicitZero('waived')).toBe(false);
     expect(wdoFeeIsExplicitZero('175')).toBe(false);
+    expect(wdoFeeIsExplicitZero('0% discount $175')).toBe(false);
+    expect(wdoFeeIsExplicitZero('0% discount')).toBe(false);
+    expect(wdoFeeIsExplicitZero('-0')).toBe(false);
     expect(wdoFeeIsExplicitZero(null)).toBe(false);
+  });
+
+  test('rejects negatives, ranges, and prose digits; fixes leading decimals and prefers $-marked amounts (B-25)', () => {
+    // Negatives must never parse as positive fees
+    expect(resolveWdoInspectionFee({ inspection_fee: '-50' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '-$50' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '$-50' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '($50)' })).toBe(250);
+    // Leading decimals must parse as cents, not whole dollars
+    expect(resolveWdoInspectionFee({ inspection_fee: '.50' })).toBe(0.5);
+    expect(resolveWdoInspectionFee({ inspection_fee: '$.50' })).toBe(0.5);
+    // Prose digits must not hijack $-marked fees
+    expect(resolveWdoInspectionFee({ inspection_fee: '2nd inspection $175' })).toBe(175);
+    expect(resolveWdoInspectionFee({ inspection_fee: '0% discount $175' })).toBe(175);
+    expect(resolveWdoInspectionFee({ inspection_fee: 'Tier 2 — $225' })).toBe(225);
+    // Ambiguous ranges & bare non-fee prose fall back instead of picking the first number
+    expect(resolveWdoInspectionFee({ inspection_fee: '$150-$250' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '$150-250' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '150-250' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '150 to $250' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '2nd inspection' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '2200 sq ft' })).toBe(250);
+  });
+
+  test('falls back to booked visit price and existing draft fee before $250 (B-25)', () => {
+    expect(resolveWdoInspectionFee({ inspection_fee: '' }, { scheduledService: { estimated_price: 150 } })).toBe(150);
+    expect(resolveWdoInspectionFee(
+      { inspection_fee: 'TBD' },
+      { scheduledService: { primary_line_price: 175, estimated_price: 255, service_addons: [{ estimated_price: 80 }] } },
+    )).toBe(175);
+    // Add-on visit with no primary_line_price does not fold add-on total into the WDO line
+    expect(resolveWdoInspectionFee(
+      { inspection_fee: '' },
+      { scheduledService: { primary_line_price: null, estimated_price: 255, service_addons: [{ estimated_price: 80 }] }, fallbackFee: 175 },
+    )).toBe(175);
+    // Existing draft amount beats $250 fallback when visit has no price
+    expect(resolveWdoInspectionFee({ inspection_fee: '' }, { fallbackFee: 150 })).toBe(150);
+    // Explicit $0 still overrides booked visit price
+    expect(resolveWdoInspectionFee({ inspection_fee: '$0' }, { scheduledService: { estimated_price: 175 } })).toBe(0);
   });
 });
 

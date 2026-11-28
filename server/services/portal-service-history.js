@@ -16,6 +16,7 @@ const { customerCopyViolations } = require('./service-report/technician-report-c
 const { readReportIdentitySnapshot } = require('./service-report/report-identity-snapshot');
 const { formatAddress } = require('../utils/address-normalizer');
 const { effectiveServiceAddress, stampedAddressDiverges } = require('./stamped-address');
+const { isServiceRecordProjectReportHeld } = require('./project-report-hold');
 
 // Saved-property scope (GATE_APP_PROPERTY_SCOPE) on a service-record query
 // that LEFT JOINs the visit: the shared predicate's "every property retired"
@@ -63,6 +64,16 @@ function parseJsonObject(value) {
 
 function suppressesCustomerArtifacts(structuredNotes = {}) {
   return Boolean(structuredNotes.typedReportDelivery) && structuredNotes.typedReportDelivery !== 'auto_send';
+}
+
+// Customer-artifact suppression combining synchronous typed-report posture
+// (internal_only / disabled) and live WDO report payment hold status
+// (GATE_WDO_REPORT_HOLD, B-58). While a closed WDO project's report is still
+// held for payment, staged service photos, products, and completion notes
+// stay withheld across GET /api/services and GET /api/services/:id.
+async function isServiceRecordArtifactSuppressed(structuredNotes, database = db) {
+  if (suppressesCustomerArtifacts(structuredNotes)) return true;
+  return isServiceRecordProjectReportHeld(structuredNotes, database);
 }
 
 // A completed record; NULL is the column default's legacy shape (default
@@ -164,7 +175,7 @@ async function listPortalServiceHistory(customerId, {
   // Attach products and photo counts
   const enriched = await Promise.all(services.map(async (svc) => {
     const structuredNotes = parseJsonObject(svc.structured_notes);
-    const suppressCustomerArtifacts = suppressesCustomerArtifacts(structuredNotes);
+    const suppressCustomerArtifacts = await isServiceRecordArtifactSuppressed(structuredNotes, database);
 
     const products = suppressCustomerArtifacts
       ? []
@@ -263,4 +274,10 @@ async function listPortalServiceHistory(customerId, {
   return { services: enriched, total: parseInt(total.count) };
 }
 
-module.exports = { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts, scopeRecordsToProperty };
+module.exports = {
+  listPortalServiceHistory,
+  parseJsonObject,
+  suppressesCustomerArtifacts,
+  isServiceRecordArtifactSuppressed,
+  scopeRecordsToProperty,
+};

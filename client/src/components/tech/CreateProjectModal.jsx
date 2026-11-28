@@ -1,5 +1,6 @@
 import { renderWithDidYouMean } from '../admin/DidYouMean';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { wdoFeeIsExplicitZero } from '@waves/report-redaction';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -219,25 +220,25 @@ function formatStructureType(customer) {
   return '';
 }
 
-// The WDO fee seed for a schedule row — the inspection line's OWN net price,
-// or nothing. estimatedPrice is the visit's final total: on a single-line
-// visit that IS the inspection's net, but with billable add-ons it includes
-// their dollars too, and the auto-invoice bills findings.inspection_fee as a
-// single WDO line — a group total would fold add-on dollars into the fee
-// (Codex P1 r2). The primary line's own net isn't on the schedule payloads
-// (primaryLinePrice is the pre-discount base, and an appointment-level
-// discount's allocation isn't visible client-side), so with billable add-ons
-// we seed nothing and the tech enters the fee.
+// The WDO fee seed for a schedule row — the inspection line's OWN booked price,
+// or nothing. estimatedPrice is the visit's final total: on a single-line visit
+// that IS the inspection's net, while with billable add-ons it includes their
+// dollars too (Codex P1 r2). When billable add-ons exist and there is no
+// appointment-level discount, primaryLinePrice carries the booked WDO line
+// price ($150-$275) so the tech isn't left with a blank field that would fall
+// back to $250; if primaryLinePrice is absent or an appointment-level discount
+// applies across add-ons, seed nothing so the tech enters the exact fee.
 export function wdoFeeSeedFromVisit(service) {
   const addons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
   const hasBillableAddon = addons.some((a) => Number(a?.estimatedPrice ?? a?.basePrice ?? a?.price ?? 0) > 0);
-  if (hasBillableAddon) return '';
-  return service?.estimatedPrice ?? '';
-}
-
-function wdoFeeIsExplicitZero(value) {
-  const match = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  return match != null && Number(match[1]) === 0;
+  const primary = Number(service?.primaryLinePrice ?? service?.primary_line_price);
+  const validPrimary = Number.isFinite(primary) && primary > 0 ? primary : '';
+  if (hasBillableAddon) {
+    const hasApptDiscount = Number(service?.discountAmount ?? service?.discount_amount ?? 0) > 0;
+    return hasApptDiscount ? '' : validPrimary;
+  }
+  if (service?.estimatedPrice != null && service.estimatedPrice !== '') return service.estimatedPrice;
+  return validPrimary;
 }
 
 // Populate the WDO contact/address fields from the selected customer. With

@@ -12,6 +12,10 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   acquireTermiteGateAtEntry: jest.fn(async () => []),
 }));
 jest.mock('../services/estimate-deposits', () => ({ restoreDepositCreditForVoidedInvoice: jest.fn(async () => 0) }));
+jest.mock('../services/project-report-hold', () => ({
+  reconcileWdoReportHoldOnInvoiceVoid: jest.fn(async () => ({ clearedProjectIds: [] })),
+  closeClearedHoldBells: jest.fn(async () => undefined),
+}));
 jest.mock('../services/pay-combined', () => ({ clearPaymentIntentStamps: jest.fn(async () => undefined) }));
 const mockRetrievePi = jest.fn();
 const mockCancelPi = jest.fn();

@@ -30,9 +30,9 @@ describe('report-only payment alert: which bills still need the office', () => {
     }
   });
 
-  test('paid, voided, processing, payer-billed, withdrawn or zero-balance bills are not', () => {
+  test('paid, voided, processing, disputed, uncollectible, payer-billed, withdrawn or zero-balance bills are not', () => {
     expect(stillOwed(null)).toBe(false);
-    for (const status of ['paid', 'prepaid', 'processing', 'void', 'refunded', 'cancelled']) {
+    for (const status of ['paid', 'prepaid', 'processing', 'void', 'refunded', 'cancelled', 'disputed', 'uncollectible']) {
       expect(stillOwed({ ...owed, status })).toBe(false);
     }
     expect(stillOwed({ ...owed, amount_paid: 129 })).toBe(false);

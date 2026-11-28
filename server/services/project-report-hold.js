@@ -137,7 +137,7 @@ function reportLinkShared(project) {
 // a payment intent, a payments row (the ledger names the invoice under invoice_id, waves_invoice_id or a dispute's
 // dispute_invoice_id), a charge attempt, a paid or recorded payment, credit or an estimate deposit already applied, or a status that says money moved. The invoice row
 // is read whole, so a column this database lacks reads as absent.
-const PAYMENT_STATUSES = ['processing', 'paid', 'prepaid', 'partial', 'partially_paid', 'refunded'];
+const PAYMENT_STATUSES = ['processing', 'paid', 'prepaid', 'partial', 'partially_paid', 'refunded', 'disputed'];
 async function assertNoPaymentStarted(invoice, database = db) {
   const id = String(invoice.id);
   const started = invoice.stripe_payment_intent_id || invoice.paid_at || invoice.payment_recorded_at
@@ -258,6 +258,151 @@ async function closeInvoiceEmailBell(projectId) {
   }
 }
 
+// Read (and optionally FOR UPDATE lock) any project rows bound to an invoice.
+// Always called AFTER locking `invoices`, preserving the canonical lock order
+// (customers -> invoices -> projects) shared with armReportHold & release.
+async function findWdoReportHoldStateForInvoice(conn, invoiceId, { lock = false } = {}) {
+  const empty = { projects: [], releasing: null, released: null, held: [] };
+  if (!invoiceId || !conn) return empty;
+  try {
+    const query = conn('projects').where({ invoice_id: invoiceId });
+    if (lock && typeof query.forUpdate === 'function') query.forUpdate();
+    const rows = await query.select(
+      'id', 'status', 'project_type', 'report_hold_status',
+      'report_hold_released_at', 'sent_at', 'sent_outside_portal_at',
+    );
+    const projects = Array.isArray(rows) ? rows : [];
+    return {
+      projects,
+      releasing: projects.find((p) => p.report_hold_status === 'releasing') || null,
+      released: projects.find((p) => p.report_hold_status === 'released' || p.report_hold_released_at != null) || null,
+      held: projects.filter((p) => p.report_hold_status === 'held'),
+    };
+  } catch (err) {
+    if (/column .*report_hold|relation .*projects/i.test(err.message)) return empty;
+    throw err;
+  }
+}
+
+// Refuse reversing a payment/prepaid settlement once the held WDO report is
+// releasing or was already legally released and sent.
+async function assertNoReleasedWdoReportHoldForInvoice(conn, invoiceId, { lock = false, action = 'undo', when = true } = {}) {
+  if (!when) return null;
+  const state = await findWdoReportHoldStateForInvoice(conn, invoiceId, { lock });
+  if (state.releasing) {
+    const err = new Error(
+      action === 'reverse_prepaid'
+        ? 'This invoice\'s held WDO report is being sent right now — wait a moment and refresh before reversing credit.'
+        : 'The WDO report held for this invoice is being sent right now, so this payment cannot be undone here.',
+    );
+    err.statusCode = 409;
+    err.isOperational = true;
+    err.code = 'wdo_report_releasing';
+    throw err;
+  }
+  if (state.released) {
+    const err = new Error(
+      action === 'reverse_prepaid'
+        ? 'The WDO report held for this invoice was already released and sent, so its prepaid credit cannot be reversed here.'
+        : 'The WDO report held for this invoice was already released and sent, so this payment cannot be undone here.',
+    );
+    err.statusCode = 409;
+    err.isOperational = true;
+    err.code = 'wdo_report_released';
+    throw err;
+  }
+  return state;
+}
+
+async function closeClearedHoldBells(projectIds) {
+  for (const projectId of projectIds || []) {
+    await closeReleaseFailedBell(projectId);
+  }
+}
+
+// Inside voidInvoice's transaction (after locking `invoices`):
+// - Refuse while a held WDO report is actively releasing.
+// - Refuse voiding a settled/prepaid WDO invoice whose held report was already released.
+// - Reconcile any unpaid/unreleased 'held' project so it is not left stranded
+//   silently pointing at a void invoice: open projects clear the hold and unlink
+//   the void invoice; closed projects stamp an explicit error so the drawer
+//   banner turns red and the attention sweep surfaces it immediately.
+async function reconcileWdoReportHoldOnInvoiceVoid(trx, invoice, { priorStatus = null, priorPaidAt = null, priorPrepaidAt = null } = {}) {
+  if (!invoice?.id) return { clearedProjectIds: [] };
+  const state = await findWdoReportHoldStateForInvoice(trx, invoice.id, { lock: true });
+  if (state.releasing) {
+    const err = new Error('Cannot void this invoice — its held WDO report is being sent right now; wait a moment and retry');
+    err.code = 'WDO_REPORT_RELEASE_IN_PROGRESS';
+    err.statusCode = 409;
+    throw err;
+  }
+  const wasSettled = ['paid', 'prepaid'].includes(String(priorStatus || '').toLowerCase()) || Boolean(priorPaidAt || priorPrepaidAt);
+  if (wasSettled && state.released) {
+    const err = new Error('Cannot void this prepaid invoice — its held WDO report was already released and sent');
+    err.code = 'WDO_REPORT_ALREADY_RELEASED';
+    err.statusCode = 409;
+    throw err;
+  }
+  const nowValue = trx.fn?.now ? trx.fn.now() : new Date();
+  const clearedProjectIds = [];
+  for (const project of state.held) {
+    const isClosed = project.status === 'closed';
+    await trx('projects').where({ id: project.id, report_hold_status: 'held' }).update(
+      isClosed
+        ? {
+          report_hold_next_attempt_at: null,
+          report_hold_last_error: 'The linked invoice was voided; the report will not release automatically. Press Send report now to deliver it.',
+          updated_at: nowValue,
+        }
+        : {
+          report_hold_status: null,
+          report_hold_at: null,
+          report_hold_locked_at: null,
+          report_hold_next_attempt_at: null,
+          report_hold_attempts: 0,
+          report_hold_last_error: null,
+          invoice_id: null,
+          updated_at: nowValue,
+        },
+    );
+    if (!isClosed) clearedProjectIds.push(project.id);
+    await require('./audit-log').recordAuditEvent({
+      actor_type: 'system',
+      action: isClosed ? 'wdo.report_hold_flagged_on_invoice_void' : 'wdo.report_hold_cleared_on_invoice_void',
+      resource_type: 'project',
+      resource_id: project.id,
+      metadata: { invoiceId: String(invoice.id), projectStatus: project.status || null },
+      critical: true,
+      trx,
+    });
+  }
+  return { clearedProjectIds };
+}
+
+// Whether a customer-facing service record belongs to a WDO project whose
+// report payment hold is still active (held or releasing). Checks the live
+// projects row so legacy records closed while held stay gated until released,
+// and records immediately unlock once payment releases the report. Zero DB
+// queries for non-WDO / non-project service records.
+async function isServiceRecordProjectReportHeld(structuredNotes, database = db) {
+  if (!structuredNotes || typeof structuredNotes !== 'object') return false;
+  const isWdoProject = structuredNotes.projectType === 'wdo_inspection' || structuredNotes.reportHeld === true;
+  if (!isWdoProject) return false;
+  const projectId = structuredNotes.projectId || null;
+  if (!projectId) return structuredNotes.reportHeld === true;
+  try {
+    const row = await database('projects').where({ id: projectId }).first('report_hold_status');
+    if (row && 'report_hold_status' in row) return isReportHeld(row);
+    return structuredNotes.reportHeld === true;
+  } catch (err) {
+    if (!/column .*report_hold|relation .*projects/i.test(err.message)) {
+      logger.warn(`[report-hold] service-record hold lookup failed for project ${projectId}: ${err.message}`);
+      return structuredNotes.reportHeld === true || !(structuredNotes.portalAttached && structuredNotes.projectReport?.url);
+    }
+    return structuredNotes.reportHeld === true;
+  }
+}
+
 module.exports = {
   closeInvoiceEmailBell,
   sweepHeldReportReleases,
@@ -270,5 +415,10 @@ module.exports = {
   raiseInvoiceEmailUncertainBell,
   closeReleaseFailedBell,
   reportHoldBackoffMinutes,
+  findWdoReportHoldStateForInvoice,
+  assertNoReleasedWdoReportHoldForInvoice,
+  reconcileWdoReportHoldOnInvoiceVoid,
+  closeClearedHoldBells,
+  isServiceRecordProjectReportHeld,
   _internals: { recoverStaleReleasingClaims, findDueHeldProjectIds, STALE_RELEASING_MINUTES, bellKey },
 };

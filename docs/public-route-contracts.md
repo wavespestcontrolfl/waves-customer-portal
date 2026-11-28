@@ -7670,9 +7670,11 @@ server-rendered page reads the same pack, so the two paths cannot drift.
 `/api/documents/shared/:token` (read-only shared-document fetch incl.
 on-the-fly service-report PDFs — customer PII by design; 64-hex format
 gate, 24h expiry with 410, access-count audit, 30/15min limiter,
-`no-store`; a visit that carries the technician's own note prints the
-web report's screened form lists, never the merged note lists or
-`ai_report`).
+`no-store`; returns `404` when the linked service record is a suppressed
+typed report or belongs to a WDO project with an active report payment
+hold (`report_hold_status IN ('held', 'releasing')`); a visit that carries
+the technician's own note prints the web report's screened form lists,
+never the merged note lists or `ai_report`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
 terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
