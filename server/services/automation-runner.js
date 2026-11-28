@@ -18,6 +18,7 @@ const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
+const { parseFragment } = require('parse5');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
 const { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS, NEW_LEAD_EXTENDED_STEP_IDS } = require('./new-lead-drip-stops');
 
@@ -516,6 +517,14 @@ async function repointPaymentFailedEnrollment({ enrollment, sendId, current, ema
 // Defaulted to '' so every existing caller (testSequence, and any step
 // whose body never carries the placeholder) renders byte-identical to
 // before these params existed.
+function isWholeBodyDarkAware(html) {
+  const nodes = (parseFragment(String(html || '')).childNodes || []).filter((n) => (
+    n.nodeName !== '#comment' && (n.nodeName !== '#text' || String(n.value || '').trim() !== '')
+  ));
+  if (nodes.length !== 1) return false;
+  return (nodes[0].attrs || []).some((a) => a.name === 'data-dark-aware' && String(a.value).trim() === 'true');
+}
+
 function renderAutomationStepContent({ template, htmlBody, textBody, previewText = '', customer, asmGroupId, consultationHtml = '', consultationText = '' }) {
   const rawHtml = substitute(htmlBody || '', customer, { html: true }).replace(CONSULTATION_HTML_RE, withSeparator(consultationHtml));
   const rawText = substitute(textBody || '', customer).replace(CONSULTATION_TEXT_RE, withSeparator(consultationText));
@@ -530,7 +539,7 @@ function renderAutomationStepContent({ template, htmlBody, textBody, previewText
     ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from these emails.`
     : null;
   const preheader = previewText ? escapeHtml(substitute(previewText, customer)) : undefined;
-  const darkAwareBody = /\bclass\s*=\s*["'][^"']*\bdm-text\b/.test(String(htmlBody || ''));
+  const darkAwareBody = isWholeBodyDarkAware(htmlBody);
   const html = rawHtml
     ? wrapServiceEmail({ body: rawHtml, preheader, footerNote: unsubFooter, darkAwareBody })
     : '';

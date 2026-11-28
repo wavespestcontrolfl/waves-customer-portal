@@ -157,10 +157,10 @@ describe('Customer emails audit PR 1 regressions', () => {
     }
   });
 
-  test('automation-runner passes escaped previewText as preheader and detects darkAwareBody', () => {
+  test('automation-runner passes escaped previewText as preheader and requires whole-body darkAware opt-in', () => {
     const rendered = renderAutomationStepContent({
       template: { key: 'welcome_drip', name: 'Welcome' },
-      htmlBody: '<div class="dm-text"><p>Hi {{first_name}}</p></div>',
+      htmlBody: '<div data-dark-aware="true" class="dm-text"><p>Hi {{first_name}}</p></div>',
       textBody: 'Hi {{first_name}}',
       previewText: 'Welcome {{first_name}} <script>alert(1)</script>',
       customer: { first_name: 'Taylor & Co' },
@@ -185,8 +185,8 @@ describe('Customer emails audit PR 1 regressions', () => {
 
     const mixed = renderAutomationStepContent({
       template: { key: 'welcome_drip', name: 'Welcome' },
-      htmlBody: '<p style="color:#1a1a1a">Plain paragraph</p><a class="dm-gold" href="https://portal.wavespestcontrol.com/book">Book</a>',
-      textBody: 'Plain paragraph',
+      htmlBody: '<p class="dm-text">Tagged paragraph</p><div style="background:#ffffff;color:#1a1a1a">Legacy white panel</div>',
+      textBody: 'Tagged paragraph',
       customer: { first_name: 'Taylor' },
       asmGroupId: null,
     });
