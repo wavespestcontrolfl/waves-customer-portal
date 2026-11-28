@@ -1136,17 +1136,39 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
     if (typeof req.body?.code !== 'string') return res.status(400).json({ error: 'invalid_code' });
     // The code is saved under the invoice row lock, the lock /setup holds
     // when it redeems it: an invoice that was paid, voided or moved to a
-    // payer meanwhile takes no code.
+    // payer meanwhile takes no code. Any open client-confirmable PI on the
+    // invoice is retired before returning 200 so another tab cannot confirm
+    // the pre-promo gross amount directly at Stripe before reload runs /setup.
     const outcome = await db.transaction(async (trx) => {
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
       if (!locked) return null;
       // No code on an invoice that must save a payment method first: its
       // credit coverage is held for the capture step, not applied at /setup.
       if (await invoiceRequiresSavedMethod(locked, { database: trx })) return { ok: false, reason: 'invalid_code' };
-      return require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code }, trx);
+      const entered = await require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code }, trx);
+      return { ...entered, openPiId: locked.stripe_payment_intent_id || null };
     });
     if (!outcome) return notFound();
     if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
+    if (outcome.openPiId) {
+      const { retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
+      const retireRefusal = await retireOpenPaymentIntentBeforeSettlement(
+        { id: invoice.id, stripe_payment_intent_id: outcome.openPiId },
+        { action: 'applying a promo code' },
+      );
+      if (retireRefusal) {
+        if (outcome.insertedNew) {
+          await db('invoice_promo_codes')
+            .where({ invoice_id: invoice.id, status: 'entered' })
+            .delete()
+            .catch(() => {});
+        }
+        return res.status(retireRefusal.status).json({ error: retireRefusal.error });
+      }
+      await db('invoices')
+        .where({ id: invoice.id, stripe_payment_intent_id: outcome.openPiId })
+        .update({ stripe_payment_intent_id: null });
+    }
     return res.json({ success: true, promoCode: { canEnter: false, applied: outcome.applied } });
   } catch (err) {
     logger.warn(`[pay-v2] promo-code failed (code=${err?.code || 'none'}, invoice=${invoiceId || 'unresolved'})`);

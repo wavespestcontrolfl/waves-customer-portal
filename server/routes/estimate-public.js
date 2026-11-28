@@ -11753,9 +11753,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           });
         }
         let prepayQuoteOfferContribution = 0;
-        if (quoteCustomerId && require('../config/feature-gates').gates.autoApplyAccountCredit) {
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
           try {
-            const creditProj = await projectPrepayAcceptCredits(estimate, quoteCustomerId, prepayProjectedDue);
+            const creditProj = await projectPrepayAcceptCredits(estimate, quoteCustomerId || null, prepayProjectedDue);
             prepayQuoteOfferContribution = creditProj.offerContribution;
             prepayProjectedDue = creditProj.projectedDue;
           } catch (creditErr) {
@@ -34176,8 +34176,10 @@ module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
 module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;
 async function projectPrepayAcceptCredits(estimate, customerId, projectedDue, conn = db) {
   const { getBalance, computeApplication } = require('../services/customer-credit');
-  const balance = (await getBalance(customerId, conn)) || 0;
-  const offerAmount = (await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId, { dbh: conn })) || 0;
+  const balance = customerId ? ((await getBalance(customerId, conn)) || 0) : 0;
+  const offerAmount = customerId
+    ? ((await require('../services/inspection-credit').projectRedeemableOfferAmount(customerId, { dbh: conn })) || 0)
+    : 0;
   const promoAmount = (await require('../services/estimate-promo-code').projectPendingEstimatePromoAmount(estimate, customerId, conn)) || 0;
   const projection = computeApplication({ total: projectedDue, creditApplied: 0, balance: balance + offerAmount + promoAmount });
   const appliedCredit = projection.newCreditApplied || 0;

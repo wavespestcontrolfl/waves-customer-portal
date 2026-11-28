@@ -74,7 +74,11 @@ function applicablePromoAmountForInvoice(faceAmount, invoice) {
 
 function effectivePromoCreditAmount(row, invoice) {
   const face = round2(row.credit_amount);
-  if (!invoice || row.status === 'redeemed') return face;
+  if (!invoice) return face;
+  if (row.status === 'redeemed') {
+    const appliedOnInvoice = round2(invoice.credit_applied || 0);
+    return appliedOnInvoice > 0 ? Math.min(face, appliedOnInvoice) : face;
+  }
   return applicablePromoAmountForInvoice(face, invoice);
 }
 
@@ -145,7 +149,11 @@ async function promoCodeVerdictAfterSetup(invoiceId, conn = db) {
     if (!gateOn()) return undefined;
     const row = await conn('invoice_promo_codes').where({ invoice_id: invoiceId }).first();
     if (!row) return undefined;
-    return row.status === 'redeemed' ? { canEnter: false, applied: appliedView(row) } : null;
+    if (row.status !== 'redeemed') return null;
+    const invoice = await conn('invoices')
+      .where({ id: invoiceId })
+      .first('id', 'total', 'credit_applied', 'amount_paid', 'status');
+    return { canEnter: false, applied: appliedView(row, invoice || null) };
   } catch (err) {
     logger.warn(`[invoice-promo-code] setup verdict not read for invoice ${invoiceId}: ${err.code || err.message}`);
     return undefined;
@@ -154,8 +162,10 @@ async function promoCodeVerdictAfterSetup(invoiceId, conn = db) {
 
 /**
  * The credit a code entered on this invoice will post at the next payment
- * setup, or 0 (no code waiting, or the gate is off). The pay page projects
- * it so nothing is offered at the pre-credit amount in the meantime. A read
+ * setup, or 0 (no code waiting, or the gate is off). Returns the full face
+ * value that redeemRow posts into the credit ledger so full-coverage checks
+ * that sum auto-apply balance + pending promo accurately predict settlement
+ * even when the promo alone would stop at Stripe's $0.50 floor. A read
  * failure answers 0 and never fails the page.
  */
 async function pendingPromoCredit(invoice, conn = db) {
@@ -165,7 +175,7 @@ async function pendingPromoCredit(invoice, conn = db) {
     // Inside a caller's transaction the read runs in a savepoint, so a
     // failure here cannot leave that transaction aborted.
     const row = conn.isTransaction ? await conn.transaction(read) : await read(conn);
-    return row ? applicablePromoAmountForInvoice(row.credit_amount, invoice) : 0;
+    return row ? round2(row.credit_amount) : 0;
   } catch (err) {
     logger.warn(`[invoice-promo-code] pending credit not read for invoice ${invoice.id}: ${err.code || err.message}`);
     return 0;
@@ -236,7 +246,7 @@ async function enterPromoCodeOnInvoice({ invoice, rawCode }, conn = db) {
   const existing = await conn('invoice_promo_codes').where({ invoice_id: invoice.id }).first();
   if (existing) {
     return existing.code === code && existing.status !== 'void'
-      ? { ok: true, applied: appliedView(existing, invoice) }
+      ? { ok: true, applied: appliedView(existing, invoice), insertedNew: false }
       : { ok: false, reason: 'code_already_entered' };
   }
   if (!(await invoiceEligibleForPromoEntry(invoice, conn))) return { ok: false, reason: 'invalid_code' };
@@ -260,7 +270,7 @@ async function enterPromoCodeOnInvoice({ invoice, rawCode }, conn = db) {
     description: `Customer entered promo code ${code} on an invoice's pay page ($${creditAmount.toFixed(2)} account credit toward it).`,
     metadata: JSON.stringify({ code, discountId: discount.id, creditAmount, invoiceId: invoice.id }),
   });
-  return { ok: true, applied: appliedView(row, invoice) };
+  return { ok: true, applied: appliedView(row, invoice), insertedNew: true };
 }
 
 async function voidRow(trx, row, reason) {
@@ -324,6 +334,12 @@ async function redeemAndApplyPromoCode(trx, invoice) {
     return await trx.transaction(async (savepoint) => {
       const row = await savepoint('invoice_promo_codes').where({ invoice_id: invoice.id, status: 'entered' }).first();
       if (!row) return 0;
+      // Lock the customer row (billing lock order: invoices FOR UPDATE held by
+      // caller -> customers FOR UPDATE) so a concurrent customer-default payer
+      // assignment cannot race past invoicePayerOwnership when the invoice has
+      // no linked scheduled visit row.
+      const custLockQuery = savepoint('customers').where({ id: invoice.customer_id });
+      if (typeof custLockQuery.forUpdate === 'function') await custLockQuery.forUpdate().first('id');
       // Verify live third-party payer ownership inside the lock before
       // spending the homeowner's one-time promo code on a payer-owned invoice.
       const liveOwner = await invoicePayerOwnership(invoice, savepoint);
@@ -352,13 +368,6 @@ async function redeemAndApplyPromoCode(trx, invoice) {
       }, savepoint);
       if (!(drawn?.applied > 0)) {
         throw Object.assign(new Error('promo credit not applied'), { promoNotApplied: drawn?.skipped || 'nothing_applied' });
-      }
-      const actualApplied = round2(drawn.applied);
-      if (actualApplied !== round2(row.credit_amount)) {
-        await savepoint('invoice_promo_codes').where({ id: row.id }).update({
-          credit_amount: actualApplied,
-          updated_at: savepoint.fn.now(),
-        });
       }
       return drawn.applied;
     });

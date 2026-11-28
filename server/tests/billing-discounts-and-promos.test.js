@@ -437,7 +437,7 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
   describe('B-14: Estimate promo code projects and redeems in-tx on annual prepay accept', () => {
     test('estimate-public.js projects pending promo, keeps offerContribution scoped to inspection offers, and redeems promo before credit apply', () => {
       const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
-      expect(src).toContain('projectPrepayAcceptCredits(estimate, quoteCustomerId, prepayProjectedDue)');
+      expect(src).toContain('projectPrepayAcceptCredits(estimate, quoteCustomerId || null, prepayProjectedDue)');
       expect(src).toContain('projectPrepayAcceptCredits(estimate, customerId, revalidatedDue, trx)');
       expect(src).toContain('projectPendingEstimatePromoAmount(estimate, customerId, conn)');
       expect(src).toContain('redeemPromoCodeInAcceptTransaction(trx, estimate.id)');
@@ -446,6 +446,50 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
       expect(redeemIdx).toBeGreaterThan(-1);
       expect(applyIdx).toBeGreaterThan(redeemIdx);
       expect(src).toContain('Math.min(offerAmount, Math.round((appliedCredit - balance - promoAmount) * 100) / 100)');
+    });
+
+    test('round-3 invariants: promo entry retires open PI, pendingPromoCredit returns full face value, redeem locks customers and preserves credit_amount, new-customer prepay quote projects promo, and shared-inbox payer/self keys stay distinct', async () => {
+      const payV2Src = fs.readFileSync(path.join(__dirname, '../routes/pay-v2.js'), 'utf8');
+      expect(payV2Src).toContain('retireOpenPaymentIntentBeforeSettlement');
+      expect(payV2Src).toContain("action: 'applying a promo code'");
+
+      const promoSrc = fs.readFileSync(path.join(__dirname, '../services/invoice-promo-code.js'), 'utf8');
+      expect(promoSrc).toContain("savepoint('customers').where({ id: invoice.customer_id })");
+      expect(promoSrc).not.toContain('credit_amount: actualApplied');
+
+      // pendingPromoCredit returns full face value so promo + auto-credit full coverage is accurate
+      let pendingVal = 0;
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../config/feature-gates', () => ({ isEnabled: () => true, gates: {} }));
+        const InvoicePromo = require('../services/invoice-promo-code');
+        const mockConn = jest.fn(() => ({
+          where: jest.fn().mockReturnThis(),
+          first: jest.fn(async () => ({ credit_amount: 25 })),
+        }));
+        pendingVal = await InvoicePromo.pendingPromoCredit(
+          { id: 'inv-2520', customer_id: 'c-1', status: 'sent', total: 25.20, credit_applied: 0, amount_paid: 0 },
+          mockConn,
+        );
+      });
+      expect(pendingVal).toBe(25);
+
+      // New-customer projectPrepayAcceptCredits(estimate, null, ...) still projects estimate promo
+      let newCustProj = null;
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../services/customer-credit', () => ({
+          getBalance: jest.fn(async () => { throw new Error('must not call getBalance for null customer'); }),
+          computeApplication: ({ total, balance }) => ({ newCreditApplied: Math.min(total, balance) }),
+        }));
+        jest.doMock('../services/inspection-credit', () => ({
+          projectRedeemableOfferAmount: jest.fn(async () => { throw new Error('must not call offer for null customer'); }),
+        }));
+        jest.doMock('../services/estimate-promo-code', () => ({
+          projectPendingEstimatePromoAmount: jest.fn(async () => 25),
+        }));
+        const { projectPrepayAcceptCredits } = require('../routes/estimate-public');
+        newCustProj = await projectPrepayAcceptCredits({ id: 'est-new' }, null, 500, {});
+      });
+      expect(newCustProj).toEqual({ offerContribution: 0, projectedDue: 475 });
     });
 
     test('invoice-promo-code fails closed on DB error at money seams, rejects zero-applicable $0.50-min codes, uses renewalPaymentRefusal and stripe_invoice_charge_attempts', async () => {
@@ -582,6 +626,19 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
       expect(sharedOut.groups).toHaveLength(1);
       expect(sharedOut.groups[0].payer?.id).toBe('p-shared');
       expect(sharedOut.groups[0].homes.map((h) => h.customerId)).toEqual(['c-p-shared']);
+
+      // When neither group opted out on a shared inbox, payer and self-pay keep
+      // distinct group keys so idempotency and handoff revalidation never collide.
+      const bothShared = await groupByPayingAddress(
+        stubDbh,
+        [
+          { customerId: 'c-p-shared', payerId: 'p-shared', address: '1 Builder Way' },
+          { customerId: 'c-s-other', payerId: null, address: '3 Home Way' },
+        ],
+        { customers: sharedCustomers, payers: sharedPayers, optedOut: new Set() },
+      );
+      expect(bothShared.groups).toHaveLength(2);
+      expect(new Set(bothShared.groups.map((g) => g.key)).size).toBe(2);
     });
   });
 

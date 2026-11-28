@@ -512,14 +512,16 @@ async function groupByPayingAddress(dbh, homes, { customers, payers, optedOut })
     if (!isEmailLike(address)) { noAddress.push(home); continue; }
     // Keep payer-billed and self-pay homes in separate groups even when they
     // share an email address so a payer home never exempts self-pay homes from
-    // shared-inbox opt-out suppression.
-    const groupKey = `${payer ? 'payer' : 'self'}:${key}`;
-    if (!groups.has(groupKey)) groups.set(groupKey, { key, address, payer: payer || null, homes: [] });
+    // shared-inbox opt-out suppression, and give payer groups a distinct key
+    // so sends/idempotency/handoff revalidation never collide on shared inboxes
+    // (preserving existing self-pay keys for backward compatibility).
+    const groupKey = payer ? `payer:${key}` : key;
+    if (!groups.has(groupKey)) groups.set(groupKey, { key: groupKey, emailKey: key, address, payer: payer || null, homes: [] });
     const group = groups.get(groupKey);
     if (payer && !group.payer) group.payer = payer;
     group.homes.push({ ...home, payment: await paymentCell(dbh, customer, payer) });
   }
-  const filteredGroups = [...groups.values()].filter((g) => g.payer || !optedOutSelfPayKeys.has(g.key));
+  const filteredGroups = [...groups.values()].filter((g) => g.payer || !optedOutSelfPayKeys.has(g.emailKey));
   return { groups: filteredGroups, noAddress };
 }
 
