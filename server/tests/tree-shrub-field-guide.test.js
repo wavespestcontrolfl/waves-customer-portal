@@ -64,16 +64,16 @@ test('Zylam carries the soil-drench dose by plant height, kept out of the per-ga
     'Yearly limit: 78.9 fl oz per acre, which is 1.81 fl oz per 1,000 sq ft of bed area, sprays and drenches together.',
   ]));
   // The label's drench carrier: 1 quart of mix per foot, or 1/2 inch of irrigation; moist soil for 7 days.
-  expect(zylam.apply).toMatch(/Pull back mulch, rock or gravel first so the mix pools at the base\./);
-  expect(zylam.apply).toMatch(/at least 1 quart of water per foot of plant height/);
-  expect(zylam.apply).toMatch(/irrigate 1\/2 inch right after\. Keep the soil moist for 7 days\./);
+  expect(zylam.apply).toMatch(/Pull back mulch, rock or gravel so the mix pools at the base\./);
+  expect(zylam.apply).toMatch(/at least 1 quart of water per foot of height/);
+  expect(zylam.apply).toMatch(/irrigate 1\/2 inch right after\. Keep the soil moist 7 days\./);
   // The tank calculator keeps the foliar per-gallon range only.
   expect(zylam.mix).toEqual([0.0725, 0.16]);
   // Codex r5 #6200: the tank amount is named foliar-only, and the drench carries the label's timing.
   expect(zylam.mixLabel).toBe('Foliar spray only');
   expect(zylam.limits).toContain('After a soil drench, do not follow with a foliar Zylam spray or another neonicotinoid (label resistance direction).');
   expect(zylam.source).toMatch(/pp\. 2–6$/);
-  expect(zylam.apply).toMatch(/never by the tank amount\. The label directs soil applications early in the plant's growing cycle/);
+  expect(zylam.apply).toMatch(/never by the tank amount\. Label: soil applications early in the growing cycle/);
   expect(zylam.mixes).toBeUndefined();
 });
 
@@ -265,7 +265,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(acelepryn.source).toMatch(/EPA 100-1489/);
     expect(acelepryn.rates[0][0]).toBe('2–16 fl oz / 100 gal');
     expect(acelepryn.mix).toEqual([0.02, 0.16]);
-    expect(acelepryn.targets).toMatch(/no whitefly use/);
+    expect(acelepryn.targets).toMatch(/No whitefly use/);
     expect(acelepryn.name).toBe('Acelepryn Insecticide');
     expect(acelepryn.limits.join(' ')).toMatch(/rain is forecast within 48 hours/);
     expect(acelepryn.limits.join(' ')).toMatch(/At least 7 days between treatments\..*38\.3 fl oz per acre/);
@@ -305,7 +305,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
   test('the Mainspring guide entry no longer offers caterpillars', () => {
     const mainspring = guide.products.mainspring;
     expect(mainspring.rates.map((r) => r[1]).join(' ')).not.toMatch(/caterpillar/i);
-    expect(mainspring.targets).toMatch(/the program does not use Mainspring for them/);
+    expect(mainspring.targets).toMatch(/Caterpillars are on the label but not used/);
     expect(mainspring.program).toMatch(/never Mainspring/);
   });
 
@@ -348,8 +348,8 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(distance.rates[1][0]).toBe('Scale and mealybug: HOLD');
     const limits = distance.limits.join(' ');
     expect(limits).toMatch(/6 fl oz followed by 6 fl oz 21 to 28 days later/);
-    expect(distance.apply).toMatch(/Use the label volume/);
-    expect(limits).toMatch(/Scale and mealybug use is on hold\./);
+    expect(distance.apply).toMatch(/Label volume/);
+    expect(limits).toMatch(/Scale and mealybug: on hold\./);
     expect(limits).toMatch(/Do not apply Distance for scale or mealybug/);
     expect(limits).not.toMatch(/two per six months/);
     for (const visit of visits) {

@@ -204,8 +204,8 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     const before = { engineInputs: REQUEST(), sendSnapshot: { pricingBundle: bundle(600) } };
     expect(savedLegacyTwoStoryRoofSignal(before)).toEqual({ legacyTwoStoryRoof: true });
     // Every rule stamp is frozen from its own evidence: a priced, unstamped snapshot predates the one-time pest rule, the WDO size
-    // rule, the pest rule above 5,500 sq ft, the specialty prices (2026-11-26 evening) and whole-home sizing too.
-    expect(invalidated(before).sendSnapshot).toEqual({ legacyPricingRules: true, legacyTwoStoryRoof: true, legacyWdoFlat: true, legacyOneTimePestBuffer: true, legacyPestAboveTable: true, legacyWholeHomeSizing: true, legacySpecialty1126: true });
+    // rule, the pest rule above 5,500 sq ft, the specialty prices (2026-11-26 evening), whole-home sizing and the one lawn price lane too.
+    expect(invalidated(before).sendSnapshot).toEqual({ legacyPricingRules: true, legacyTwoStoryRoof: true, legacyWdoFlat: true, legacyOneTimePestBuffer: true, legacyPestAboveTable: true, legacyWholeHomeSizing: true, legacyLawnOneLane: true, legacySpecialty1126: true });
     expect(publicReplayTotal(invalidated(before))).toBe(600);
     expect(await recomputeTotal(invalidated(before))).toBe(600);
     // Sold under the rule: the snapshot builder froze the stamp (buildEstimateSendSnapshot), so the bundle can go.

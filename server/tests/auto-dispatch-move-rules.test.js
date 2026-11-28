@@ -246,8 +246,8 @@ test('a day move compares totals clamped WITHOUT the default-time credit (Codex 
 // qualifies below the score bar when customer preference and technician fit do not drop.
 describe('minutes rule', () => {
   const MINUTES = { ...CONFIG, roadCheckEnabled: true, minutesRuleSavingMinutes: 10 };
-  const full = (total, pref = 12.5, tech = 9.75) => ({
-    total_score: total, default_time_score: 0, customer_preference_score: pref, technician_score: tech,
+  const full = (total, pref = 12.5, tech = 9.75, workload = 5) => ({
+    total_score: total, default_time_score: 0, customer_preference_score: pref, technician_score: tech, workload_score: workload,
   });
   const CUR = { ...CURRENT, detour_minutes: 23 };
   const rankM = (scored, { service = SERVICE, current = CUR, threshold = 15, config = MINUTES, currentScore = full(50) } = {}) => rankCandidates({
@@ -265,11 +265,13 @@ describe('minutes rule', () => {
     expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62) }], { config: { ...MINUTES, minutesRuleSavingMinutes: 0 } }).qualifies).toBe(false);
   });
 
-  test('a saving under 10 min, a lost preference or technician fit, or no point gain does not qualify', () => {
+  test('a saving under 10 min, a lost preference, technician fit, or workload overload does not qualify; synthetic score penalties do not veto a real drive win', () => {
     expect(rankM([{ cand: dayMove({ detour_minutes: 14 }), sc: full(62) }]).qualifies).toBe(false); // 9 min
-    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62, 6.25) }]).qualifies).toBe(false);
-    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62, 12.5, 6) }]).qualifies).toBe(false);
-    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(50) }]).qualifies).toBe(false);
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62, 6.25) }]).qualifies).toBe(false); // lost pref
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62, 12.5, 6) }]).qualifies).toBe(false); // lost tech fit
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(62, 12.5, 9.75, 2) }]).qualifies).toBe(false); // workload overload
+    // Equal pref/tech/workload with 16 min saved still qualifies even when stabilityPenalty/continuity/detour-cap gives gain <= 0.
+    expect(rankM([{ cand: dayMove({ detour_minutes: 7 }), sc: full(48) }])).toMatchObject({ qualifies: true, byMinutes: true });
   });
 
   // Owner 2026-11-24 "do whatever you rec": a visit already moved needs 15 minutes, not the 20-point bar.
@@ -325,13 +327,13 @@ describe('minutes rule', () => {
     expect(r.normalBestMinutesFloor).toBe(10);
   });
 
-  test('a slot that clears the bar ranks first; minutes-rule slots rank by the bigger saving', () => {
+  test('among qualifying non-Sunday slots, the bigger real drive saving ranks first even when another slot cleared the synthetic bar', () => {
     const r = rankM([
-      { cand: dayMove({ date: '2026-12-02', detour_minutes: 10 }), sc: full(63) }, // 13 min, gain 13
-      { cand: dayMove({ date: '2026-12-04', detour_minutes: 3 }), sc: full(61) }, // 20 min, gain 11
-      { cand: dayMove({ date: '2026-12-05', detour_minutes: 12 }), sc: full(66) }, // clears the bar
+      { cand: dayMove({ date: '2026-12-02', detour_minutes: 10 }), sc: full(63) }, // 13 min, gain 13 (minutes rule)
+      { cand: dayMove({ date: '2026-12-04', detour_minutes: 3 }), sc: full(61) }, // 20 min, gain 11 (minutes rule)
+      { cand: dayMove({ date: '2026-12-05', detour_minutes: 12 }), sc: full(66) }, // 11 min, gain 16 (clears bar)
     ]);
-    expect(r.ranked.map((c) => c.date)).toEqual(['2026-12-05', '2026-12-04', '2026-12-02']);
-    expect(r.byMinutes).toBe(false);
+    expect(r.ranked.map((c) => c.date)).toEqual(['2026-12-04', '2026-12-02', '2026-12-05']);
+    expect(r.byMinutes).toBe(true);
   });
 });

@@ -122,6 +122,8 @@ describe('buildPnlReport', () => {
       checks: 1,
       wages: 1000,
       employerTaxes: 85.2,
+      employeeBenefits: 0,
+      retirementContributions: 0,
       total: 1085.2,
       bankLinesLeftOut: { count: 3, amount: 1085.2 },
       note: expect.stringContaining('"Payroll (counted from pay runs)" category are left out so nothing counts twice'),

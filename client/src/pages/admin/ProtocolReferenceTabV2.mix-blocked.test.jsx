@@ -189,3 +189,14 @@ it("the detailed product view puts its tank's Do not mix and Caution lines under
   // Its text names the LESCO surfactant, but it is in no tank with Celsius.
   for (const lines of under(kflow.raw)) expect(lines).toEqual([]);
 });
+
+// Owner 2026-11-27: a sprayer number with no expiry is a neutral note on the card, outside the alert box; a real warning stays in it.
+it("a sprayer number's note is plain text outside the alert box; a warning stays in the alert box", () => {
+  renderCard(plan({ items: [TETRINO], warnings: [
+    { code: "sprayer_number", severity: "note", message: "110-Gallon Spray Tank #1: 2 gal per 1,000 sq ft, from tank counts." },
+    { code: "missing_calibration", message: "No sprayer test on file for the selected tank." },
+  ] }));
+  const note = screen.getByText("110-Gallon Spray Tank #1: 2 gal per 1,000 sq ft, from tank counts.");
+  expect(note.closest(".bg-alert-bg")).toBeNull();
+  expect(screen.getByText("No sprayer test on file for the selected tank.").closest(".bg-alert-bg")).not.toBeNull();
+});

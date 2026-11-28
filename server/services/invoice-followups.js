@@ -28,9 +28,8 @@ const { billingLegDeliveryState, billingLegContactTime, originalBillingContactAr
 
 const db = require('../models/db');
 const invoiceHelpers = require('./invoice-helpers');
-const { invoiceWithdrawnFromCustomer } = invoiceHelpers;
+const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview, invoiceAmountDue } = invoiceHelpers;
 const logger = require('./logger');
-const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { gates } = require('../config/feature-gates');
@@ -109,6 +108,7 @@ function isSchedulableInvoice(invoice) {
 function followupArmBlock(invoice) {
   if (!isSchedulableInvoice(invoice)) return 'not_schedulable';
   if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return 'payer_billed';
+  if (invoiceHeldForChemicalReview(invoice)) return 'chemical_addon_hold';
   return null;
 }
 
@@ -119,6 +119,21 @@ function activePaymentPlan(database, invoiceId) {
 
 // The system stops a void leaves on a sequence; the resend re-arms them (scheduleForInvoice).
 const VOID_STOP_STAMPS = ['invoice_voided', 'invoice_voided:prev=paused', 'invoice_terminal_status:void'];
+
+// A sequence the SYSTEM paused while an invoice sat under a chemical add-on review hold (no admin id):
+// releasing the hold via office send/resend resumes ONLY this pause and recomputes next_touch_at.
+const CHEMICAL_REVIEW_PAUSE_REASON = 'unrecorded_chemical_addon_review';
+function isChemicalReviewPause(existing) {
+  return Boolean(existing)
+    && existing.status === 'paused'
+    && String(existing.paused_reason || '') === CHEMICAL_REVIEW_PAUSE_REASON
+    && !existing.paused_by_admin_id;
+}
+
+function rearmSourceFor(existing) {
+  if (!isChemicalReviewPause(existing)) return existing;
+  return { ...existing, paused_reason: null, paused_by_admin_id: null, paused_until: null };
+}
 
 // A sequence the SYSTEM stopped for a void (no admin id): the resend re-arms it.
 function isSystemVoidStop(existing) {
@@ -393,6 +408,7 @@ async function followupEmailInvoice(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first().catch(() => null);
   if (!invoice || isTerminalInvoice(invoice)) return { refusal: { ok: false, skipped: true, reason: 'invoice_not_eligible' } };
   if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return { refusal: { ok: false, skipped: true, reason: 'invoice_payer_billed' } };
+  if (invoiceHeldForChemicalReview(invoice)) return { refusal: { ok: false, skipped: true, reason: 'invoice_chemical_addon_hold' } };
   return { invoice };
 }
 
@@ -691,21 +707,26 @@ function rearmPatch(decision, now) {
 // a PAUSED row carries the ':prev=paused' suffix so a metadata-less legacy pause survives the round-trip, and
 // 'invoice_terminal_status:void' is the same system stop stamped by the 20260601000012 backfill migration (Codex #3493 r12 P0).
 async function reconcileExistingSequence(trx, invoice, existing, steps) {
-  if (!isSystemVoidStop(existing)) return existing;
-  const voidStopStamp = String(existing.stopped_reason || '');
+  const chemicalPause = isChemicalReviewPause(existing);
+  if (!chemicalPause && !isSystemVoidStop(existing)) return existing;
   // Every check is rearmDecisionFor's (shared with the Intelligence Bar's planner); this only writes the decision. Never
   // re-arm under an ACTIVE payment plan (Codex #3493 r6), restore a retained PAUSE rather than active dunning (r3/r8, and the
   // legacy migration stamp unconditionally, r14 P0), and hold an Auto Pay customer (r7 + r12: the retained held marker AND
   // live enrollment must agree; a read error keeps the hold, r16). The cadence anchors on when the invoice went out, NOT the
-  // due date (r4); a shifted anchor_at wins. The write stays conditional on the exact system stop, so a racing admin
+  // due date (r4); a shifted anchor_at wins. The write stays conditional on the exact system stop/pause, so a racing admin
   // pause/stop wins.
-  const decision = await rearmDecisionFor(trx, invoice, existing, { steps });
+  const decision = await rearmDecisionFor(trx, invoice, rearmSourceFor(existing), { steps });
   if (decision.kind === 'payment_plan') return existing;
-  const [written] = await trx('invoice_followup_sequences')
-    .where({ id: existing.id, status: 'stopped', stopped_reason: voidStopStamp })
-    .whereNull('stopped_by_admin_id')
-    .update(rearmPatch(decision, trx.fn.now()))
-    .returning('*');
+  const patch = chemicalPause
+    ? { ...rearmPatch(decision, trx.fn.now()), paused_reason: null, paused_until: null, paused_by_admin_id: null }
+    : rearmPatch(decision, trx.fn.now());
+  const q = trx('invoice_followup_sequences').where({ id: existing.id });
+  if (chemicalPause) {
+    q.where({ status: 'paused', paused_reason: CHEMICAL_REVIEW_PAUSE_REASON }).whereNull('paused_by_admin_id');
+  } else {
+    q.where({ status: 'stopped', stopped_reason: String(existing.stopped_reason || '') }).whereNull('stopped_by_admin_id');
+  }
+  const [written] = await q.update(patch).returning('*');
   return written || existing;
 }
 
@@ -915,9 +936,9 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
   if (block) return { arms: false, state: block, cadence };
   const existing = await database('invoice_followup_sequences').where({ invoice_id: invoice.id }).first();
   if (existing) {
-    if (!isSystemVoidStop(existing)) return { arms: false, state: `existing:${existing.status}`, cadence };
-    // The same decision scheduleForInvoice makes for a void-stopped sequence (rearmDecisionFor, from voidStopRearmAnchor).
-    const decision = await rearmDecisionFor(database, invoice, existing, { knownCustomer });
+    if (!isChemicalReviewPause(existing) && !isSystemVoidStop(existing)) return { arms: false, state: `existing:${existing.status}`, cadence };
+    // The same decision scheduleForInvoice makes for a void-stopped or chemical-paused sequence (rearmDecisionFor, from voidStopRearmAnchor).
+    const decision = await rearmDecisionFor(database, invoice, rearmSourceFor(existing), { knownCustomer });
     const REARM_STATE = { payment_plan: 'payment_plan', paused: 'paused', autopay_hold: 'autopay_hold', active: 'rearm', completed: 'completed' };
     return { arms: ['active', 'autopay_hold'].includes(decision.kind), state: REARM_STATE[decision.kind], cadence, nextTouchAt: decision.nextTouchAt || null };
   }
@@ -998,6 +1019,9 @@ async function selectAdoptionCandidates() {
     .whereNull('i.payer_id')
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .where(function chemicalHoldExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'chemical_addon_review:%');
     })
     .whereNull('c.deleted_at')
     // Same guard scheduleForInvoice applies under the invoice lock — filtered
@@ -1187,6 +1211,9 @@ async function runPending(options) {
     // move on a row whose payer_id stays NULL (Codex #4311 r31 P1).
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .where(function chemicalHoldExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'chemical_addon_review:%');
     })
     // A customer on an open customer_dunning_schedules row: the schedule owns
     // the cadence and these rows are membership state, never fired here —
@@ -1447,6 +1474,9 @@ async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { re
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
+    .where(function chemicalHoldExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'chemical_addon_review:%');
+    })
     .select(
       's.id', 's.invoice_id', 's.step_index', 's.anchor_at', 's.created_at', 'i.invoice_number',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at', 'i.created_at as invoice_created_at',
@@ -1481,7 +1511,8 @@ async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { re
       revived += await db.transaction(async (trx) => {
         const invoice = await trx('invoices').where({ id: row.invoice_id }).forUpdate().first('status', 'payer_id', 'scheduled_send_error');
         if (!invoice || !PUBLISHED_INVOICE_STATUSES.includes(normalizedStatus(invoice)) || invoice.payer_id
-          || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) return 0;
+          || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))
+          || invoiceHeldForChemicalReview(invoice)) return 0;
         return Number(await trx('invoice_followup_sequences').where(guard).update(patch)) || 0;
       });
     } catch (err) {
@@ -2195,6 +2226,16 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     logger.info(`[invoice-followups] paused sequence ${row.id} — invoice ${row.invoice_id} is billed to a third-party payer`);
     return exitNoSend(report, 'skipped', 'invoice_payer_billed');
   }
+  if (invoiceHeldForChemicalReview({ scheduled_send_error: sendError })) {
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
+      status: 'paused',
+      paused_reason: 'unrecorded_chemical_addon_review',
+      next_touch_at: null,
+    });
+    logger.info(`[invoice-followups] paused sequence ${row.id} — invoice ${row.invoice_id} is held for chemical add-on review`);
+    return exitNoSend(report, 'skipped', 'invoice_chemical_addon_hold');
+  }
 
   const customer = await db('customers').where({ id: row.customer_id }).first();
   // Guard every send path (cron runPending filters too, but sendNextTouchNow
@@ -2313,6 +2354,16 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     if (fresh && (fresh.payer_id || invoiceWithdrawnFromCustomer(fresh))) {
       logger.info(`[invoice-followups] dropped touch for sequence ${row.id} — invoice ${row.invoice_id} moved to a third-party payer during this run`);
       return exitNoSend(report, 'skipped', 'invoice_payer_billed');
+    }
+    if (fresh && invoiceHeldForChemicalReview(fresh)) {
+      await db('invoice_followup_sequences').where({ id: row.id }).update({
+        updated_at: db.fn.now(),
+        status: 'paused',
+        paused_reason: 'unrecorded_chemical_addon_review',
+        next_touch_at: null,
+      }).catch(() => {});
+      logger.info(`[invoice-followups] dropped touch for sequence ${row.id} — invoice ${row.invoice_id} held for chemical add-on review during this run`);
+      return exitNoSend(report, 'skipped', 'invoice_chemical_addon_hold');
     }
     if (fresh) {
       row.total = fresh.total;

@@ -131,9 +131,6 @@ beforeEach(() => { detector.loadPromiseEvents.mockReset(); detector.loadPromiseE
 afterAll(() => { delete process.env.AUTO_DISPATCH_ALLOW_APPLY; });
 
 const skipCodes = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action !== 'changed').map((d) => d.reason_code);
-
-
-const skipTexts = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.reason_code === 'REMINDER_SENT_FROZEN').map((d) => d.reason_description);
 const tiers = (over = {}) => runAutoDispatch({ mode: 'apply', routeTiersEnabled: true, ...over });
 const flex = (over = {}) => runAutoDispatch({ mode: 'apply', flexTierEnabled: true, ...over });
 
@@ -144,27 +141,25 @@ const unknownPromise = () => detector.loadPromiseEvents.mockResolvedValue([promi
 const hourPromise = () => detector.loadPromiseEvents.mockResolvedValue([promise({ start_at: SLOT })]);
 
 describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name, go, moves) => {
-  test('a visit 30 h out whose latest promise is day-only is skipped REMINDER_SENT_FROZEN at evaluation', async () => {
+  test('owner 2026-11-26 (W20): a visit 30 h out whose latest promise is day-only is NOT frozen at evaluation', async () => {
     setup(30, [reminderRow(30, {})]);
     dayPromise();
     const res = await go();
-    expect(res.changed).toBe(0);
-    expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
-    expect(skipTexts()[0]).toContain('told-time');
-    expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+    expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
+    if (moves) expect(res.changed).toBe(1);
   });
 
-  test('an unknown-window promise is skipped too', async () => {
+  test('owner 2026-11-26 (W20): an unknown-window promise is NOT frozen when anyPromise is false', async () => {
     setup(30, [reminderRow(30, {})]);
     unknownPromise();
     const res = await go();
-    expect(res.changed).toBe(0);
-    expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
+    expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
+    if (moves) expect(res.changed).toBe(1);
   });
 
-  test('a day-only promise sent between pass 1 and the apply freezes the move (apply-time re-check)', async () => {
+  test('an explicit hour-window promise sent between pass 1 and apply still freezes the move', async () => {
     setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
-    detector.loadPromiseEvents.mockResolvedValueOnce([]).mockResolvedValue([promise({ level: 'day' })]);
+    detector.loadPromiseEvents.mockResolvedValueOnce([]).mockResolvedValue([promise({ start_at: SLOT })]);
     const res = await go();
     expect(res.changed).toBe(0);
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
@@ -193,20 +188,19 @@ describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name
 });
 
 describe('the run config', () => {
-  test('the run config records dayOnlyPromise: true', async () => {
+  test('the run config records dayOnlyPromise: false matching W20 freezeReadArgs (anyPromise: false)', async () => {
     setup(30, [reminderRow(30, {})]);
     dayPromise();
-    const res = await tiers();
-    expect(res.changed).toBe(0);
-    expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
-    expect(audit.startRun.mock.calls[0][0].dayOnlyPromise).toBe(true);
+    await tiers();
+    expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
+    expect(audit.startRun.mock.calls[0][0].dayOnlyPromise).toBe(false);
   });
 });
 
 describe('the freeze option', () => {
   const { freezeReadArgs } = _internals;
-  test('freezeReadArgs always adds anyPromise to the told-lock options', () => {
-    expect(freezeReadArgs('flex')).toEqual([25, { lock24h: true, toldLock: true, anyPromise: true }]);
-    expect(freezeReadArgs('tiers')).toEqual([24.25, { lock24h: true, toldLock: true, anyPromise: true }]);
+  test('freezeReadArgs sets anyPromise: false (owner 2026-11-26 W20: day-only confirmations are not frozen before 72h)', () => {
+    expect(freezeReadArgs('flex')).toEqual([25, { lock24h: true, toldLock: true, anyPromise: false }]);
+    expect(freezeReadArgs('tiers')).toEqual([24.25, { lock24h: true, toldLock: true, anyPromise: false }]);
   });
 });

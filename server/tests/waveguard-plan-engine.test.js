@@ -251,7 +251,7 @@ describe('waveguard-plan-engine helpers', () => {
       expect(resolve('Applied repellent solution with surfactant to perimeter').name).toBe('LESCO Crosscheck Plus');
       // The non-repellent line names no product: Taurus SC has a yearly label limit, so only the count-aware close-out
       // mix adds it (a hint would select it on the pre-visit Job Card at the catalog dilution with no limit).
-      expect(resolve('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice')?.name).not.toBe('Taurus SC');
+      expect(resolve('Applied non-repellent to foundation (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice')?.name).not.toBe('Taurus SC');
       // Left on Atticus Antapex WSG on purpose: roach activity on a regular visit is an open owner question.
       expect(resolve('Treated interior cracks & crevices (activity present)').name).toBe('Atticus Antapex WSG');
       expect(lineMeta['Treated exterior perimeter band']).toMatchObject({ scope: 'exterior', treatmentApplied: true });
@@ -262,7 +262,7 @@ describe('waveguard-plan-engine helpers', () => {
       expect(hints('Treated exterior perimeter band')).toEqual(['LESCO Crosscheck Plus']);
       expect(hints('Applied repellent solution with surfactant to perimeter')).toEqual(['LESCO Crosscheck Plus']);
       // The non-repellent line names no product (Taurus SC has a yearly label limit the close-out mix checks).
-      expect(hints('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice')).toBeUndefined();
+      expect(hints('Applied non-repellent to foundation (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice')).toBeUndefined();
       expect(hints('Treated interior cracks & crevices (activity present)')).toEqual(['Atticus Antapex WSG']);
       // Visits 2 to 6 are unchanged: still no Crosscheck or Taurus hint there that this ruling did not set.
       for (const visit of protocols.pest.visits.slice(1)) {

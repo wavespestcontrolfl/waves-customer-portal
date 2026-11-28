@@ -15,13 +15,7 @@ const path = require('path');
 
 const MODELS = require(path.join(__dirname, '..', 'server', 'config', 'models'));
 
-const apiKey = process.env.ANTHROPIC_API_KEY;
-if (!apiKey) {
-  console.error('ANTHROPIC_API_KEY not set. Load it first:  export ANTHROPIC_API_KEY=...');
-  process.exit(1);
-}
-
-function fetchModels() {
+function fetchModels(apiKey) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: 'api.anthropic.com',
@@ -37,7 +31,7 @@ function fetchModels() {
       res.on('end', () => {
         if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}: ${body}`));
         try { resolve(JSON.parse(body)); }
-        catch (err) { reject(new Error(`Invalid JSON: ${body.slice(0, 200)}`)); }
+        catch { reject(new Error(`Invalid JSON: ${body.slice(0, 200)}`)); }
       });
     });
     req.on('error', reject);
@@ -45,11 +39,32 @@ function fetchModels() {
   });
 }
 
-(async () => {
+const NON_ANTHROPIC_KEY_RE = /^(OPENAI|GEMINI|TYPESAFE|CLOUDFLARE)_/;
+const NON_TIER_KEYS = new Set([
+  'DEFAULT', 'PROVIDER', 'ROUTES', 'TEXT_POLICIES',
+  'ANTHROPIC_EFFORT', 'ROUTINE_EFFORT', // effort levels, not model ids
+]);
+
+// Exclude non-tier exports by KEY, not by value — so a MISCONFIGURED Anthropic
+// tier (e.g. MODEL_FLAGSHIP set to a non-claude id) is still validated and
+// warned about, rather than silently dropped.
+function selectAnthropicTiers(modelsObj) {
+  return Object.keys(modelsObj).filter(
+    (k) => !NON_TIER_KEYS.has(k) && !NON_ANTHROPIC_KEY_RE.test(k) && typeof modelsObj[k] === 'string',
+  );
+}
+
+async function main() {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.error('ANTHROPIC_API_KEY not set. Load it first:  export ANTHROPIC_API_KEY=...');
+    process.exit(1);
+  }
+
   console.log('Checking available Claude models via Anthropic API...\n');
 
   let result;
-  try { result = await fetchModels(); }
+  try { result = await fetchModels(apiKey); }
   catch (err) {
     console.error('Fetch failed:', err.message);
     process.exit(1);
@@ -73,24 +88,7 @@ function fetchModels() {
 
   console.log('\n──────────────────────────────────────────────────────');
   console.log('Currently in use (server/config/models.js):');
-  // Validate every Anthropic tier so a new one (e.g. VOICE) can't slip past the
-  // checker. Exclude the non-tier exports by KEY, not by value — so a MISCONFIGURED
-  // tier (e.g. MODEL_FLAGSHIP set to a non-claude id) is still validated and warned
-  // about, rather than silently dropped. DEFAULT is an alias of FLAGSHIP; PROVIDER/
-  // ROUTES/TEXT_POLICIES are objects; OPENAI_*/GEMINI_* belong to other providers and
-  // are validated by their own providers, not Anthropic's /v1/models list.
-  // OPENAI_SMS_DRAFT is an OpenAI ID (SMS reply-drafting split); SMS_SONNET is
-  // Anthropic and intentionally NOT excluded — it validates like a tier.
-  const NON_TIER_KEYS = new Set([
-    'DEFAULT', 'PROVIDER', 'ROUTES', 'TEXT_POLICIES',
-    'ROUTINE_EFFORT', // an effort level ('low'), not a model id
-    'OPENAI_BEST', 'OPENAI_BALANCED', 'OPENAI_FAST', 'OPENAI_FAST_INTERACTIVE', 'OPENAI_REPORT_WRITER', 'OPENAI_SMS_DRAFT',
-    'GEMINI_VISION_BEST', 'GEMINI_IMAGE_BEST', 'GEMINI_IMAGE_STABLE',
-    'GEMINI_VIDEO_FAST', 'GEMINI_VIDEO_QUALITY',
-  ]);
-  const TIERS = Object.keys(MODELS).filter(
-    (k) => !NON_TIER_KEYS.has(k) && typeof MODELS[k] === 'string',
-  );
+  const TIERS = selectAnthropicTiers(MODELS);
   const labelWidth = Math.max(...TIERS.map((t) => t.length));
   TIERS.forEach((t) => console.log(`  ${t.padEnd(labelWidth)}  = ${MODELS[t]}`));
 
@@ -109,4 +107,10 @@ function fetchModels() {
   } else {
     console.log('\nYou are already on the latest.');
   }
-})();
+}
+
+module.exports = { selectAnthropicTiers, NON_ANTHROPIC_KEY_RE, NON_TIER_KEYS };
+
+if (require.main === module) {
+  main();
+}

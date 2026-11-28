@@ -59,7 +59,7 @@ const OPTS = { requireLivePush: true, requireActive: true, trigger: 'manual', ho
 beforeEach(() => {
   jest.clearAllMocks();
   row = {
-    id: 'c-1', campaign_name: 'Waves Pest Control - GBP Search', platform: 'google_ads', platform_campaign_id: '123',
+    id: 'c-1', campaign_name: 'Waves Pest Control - GBP Search', platform: 'google_ads', campaign_type: 'SEARCH', platform_campaign_id: '123',
     status: 'active', budget_mode: 'stop', daily_budget_base: '5', daily_budget_current: '0.05', metadata: { keep: 'me' },
   };
   committed = [];

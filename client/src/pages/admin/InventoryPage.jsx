@@ -3593,7 +3593,7 @@ function RestockStatusCell({
   // Mark Ordered eligibility: an owner, an open request, and no bot claim
   // placing.
   const canAct =
-    canAuthor && request.status === "open" && order?.status !== "placing";
+    canAuthor && request.status === "open" && order?.status !== "placing" && !orderOutstanding(order);
   const summary = order ? autoOrderSummary(order) : null;
   // Links show only while their presigned URLs are live; an expired or empty
   // fetch falls back to the button, and live links keep a Refresh beside them.
@@ -3664,6 +3664,10 @@ function RestockStatusCell({
   );
 }
 
+// `outstanding` is the server's one outstanding-order rule (placed, or a post-submit park even without its
+// timestamp); an older payload falls back to placedAt. Such an order hides Mark Ordered and Cancel.
+const orderOutstanding = (order) => order?.outstanding ?? (!!order?.placedAt && !order.revokedAt);
+
 // Restock tab — the receive draft (quantity / unit) and the Receive / Cancel
 // actions; the dispatcher owns a placing request, and a dispatched order that
 // is neither received nor revoked cannot be cancelled (the server 409s both).
@@ -3702,14 +3706,16 @@ function RestockActionCell({
     );
   const lateOrderReceive =
     request.status === "received" && !!request.order?.landedAfterReceive;
-  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive)
+  // A cancelled request whose order may be out still blocks the product's next order: staff receive the goods when
+  // they arrive (or close it as already counted), or record the vendor cancellation. It never offers Cancel again.
+  const cancelledOut = request.status === "cancelled" && orderOutstanding(request.order);
+  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive && !cancelledOut)
     return (
       <TD>
         <span className="text-ink-secondary">Closed</span>
       </TD>
     );
-  // placedAt set means the order exists, so revokedAt needs no ?.
-  const orderOut = !!request.order?.placedAt && !request.order.revokedAt;
+  const orderOut = orderOutstanding(request.order);
   return (
     <TD>
       <div className="grid gap-[6px] min-w-[220px]">

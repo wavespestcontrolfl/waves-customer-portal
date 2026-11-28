@@ -66,6 +66,97 @@ function hhmmFromMin(min) {
   return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 }
 
+function hhmmToMin(t) {
+  if (!t) return null;
+  const [h, m] = String(t).split(':').map(Number);
+  return Number.isNaN(h) ? null : h * 60 + (m || 0);
+}
+
+// Insert a moved standalone candidate at the exact route position chosen by
+// arrival-route.js (slot.route_order_ids from findCapacitySlots) so overlapping
+// 2-hour arrival windows price the exact same neighbours that placeMovedVisit
+// will write. Falls back to chronological arrival-window insertion when the
+// stop set doesn't match every stop in `sequence`.
+function stopRankIn(stop, rank) {
+  if (stop.id != null && rank.has(String(stop.id))) return rank.get(String(stop.id));
+  for (const id of stop.memberIds || []) if (rank.has(String(id))) return rank.get(String(id));
+  for (const id of stop.coIds || []) if (rank.has(String(id))) return rank.get(String(id));
+  return null;
+}
+
+function physicalStopIndexById(phys) {
+  const map = new Map();
+  phys.forEach((s, idx) => {
+    if (s.id != null) map.set(String(s.id), idx);
+    for (const id of s.memberIds || []) map.set(String(id), idx);
+    for (const id of s.coIds || []) map.set(String(id), idx);
+  });
+  return map;
+}
+
+// Verify a 1-to-1 contiguous physical-stop correspondence between `stops` and
+// the solver's `routeOrderIds` (which flattens multi-row groups to every member ID),
+// keeping existing stops in their relative order so the 3 neighboring legs around
+// the candidate are the only legs changed for road confirmation.
+function routeOrderCovers(stops, routeOrderIds) {
+  if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return false;
+  const phys = physicalStops(stops);
+  const byId = physicalStopIndexById(phys);
+  const seenIds = new Set();
+  let lastIdx = -1;
+  let nextExpected = 0;
+  let candCount = 0;
+  for (const raw of routeOrderIds) {
+    const id = String(raw);
+    if (id === '__candidate__') {
+      candCount += 1;
+      lastIdx = -1;
+      continue;
+    }
+    const idx = byId.get(id);
+    if (idx == null || seenIds.has(id)) return false;
+    if (idx !== lastIdx) {
+      if (idx !== nextExpected) return false;
+      lastIdx = idx;
+      nextExpected += 1;
+    }
+    seenIds.add(id);
+  }
+  return candCount === 1 && nextExpected === phys.length && seenIds.size === byId.size;
+}
+
+function insertByRouteOrder(sequence, unit, routeOrderIds) {
+  if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return insertByWindow(sequence, unit);
+  const rank = new Map(routeOrderIds.map((id, i) => [String(id), i]));
+  const candRank = rank.get('__candidate__');
+  if (candRank == null) return insertByWindow(sequence, unit);
+  const tagged = [];
+  for (let i = 0; i < sequence.length; i += 1) {
+    const r = stopRankIn(sequence[i], rank);
+    if (r == null) return insertByWindow(sequence, unit);
+    tagged.push({ stop: sequence[i], r, idx: i });
+  }
+  tagged.push({ stop: unit, r: candRank, idx: sequence.length });
+  tagged.sort((a, b) => a.r - b.r || a.idx - b.idx);
+  return tagged.map((t) => t.stop);
+}
+
+// Insert a moved standalone candidate at its arrival-window position in
+// `sequence` (before the first stop whose window starts strictly later,
+// matching arrival-route.js placeMovedVisit / timeFallbackOrder), instead of
+// appending an unsequenced stop at COALESCE(route_order, 999) behind every
+// numbered stop on the destination day.
+function insertByWindow(sequence, unit) {
+  const unitStart = Number.isFinite(unit.startMin) ? unit.startMin : hhmmToMin(unit.window_start);
+  if (!Number.isFinite(unitStart)) return [...sequence, unit];
+  const idx = sequence.findIndex((s) => {
+    const sStart = Number.isFinite(s.startMin) ? s.startMin : hhmmToMin(s.window_start);
+    return Number.isFinite(sStart) && sStart > unitStart;
+  });
+  if (idx < 0) return [...sequence, unit];
+  return [...sequence.slice(0, idx), unit, ...sequence.slice(idx)];
+}
+
 // The keys the canonical sequence reads (route_order, window_start,
 // created_at, id): a stop given only a `startMin` reads it as its start.
 function withSequenceKeys(stop) {
@@ -145,6 +236,9 @@ function physicalStops(stops) {
 function chainWithVisit(sequence, visit) {
   const own = Number.isFinite(visit.startMin) ? { ...visit, window_start: hhmmFromMin(visit.startMin) } : withSequenceKeys(visit);
   const unit = visit.unitMembers && visit.unitMembers.length ? groupUnit([own, ...visit.unitMembers]) : own;
+  if (visit.insertByTime === true) {
+    return Array.isArray(visit.routeOrderIds) ? insertByRouteOrder(sequence, unit, visit.routeOrderIds) : insertByWindow(sequence, unit);
+  }
   return currentOrder([...sequence, unit]);
 }
 
@@ -195,10 +289,16 @@ function routeCost(otherStops, visit, home = HQ) {
   }
   const chain = chainWithVisit(sequence, visit);
   const driveWithMinutes = chainDriveMinutes(chain.map((s) => s.geo), home);
+  // Charge the larger of (a) marginal detour in the solver's baseline order
+  // (so stale-order repairs never hide candidate detour) and (b) total added
+  // drive over the original stored order (so a longer reorder never looks free).
+  const baselineDrive = Array.isArray(visit.routeOrderIds)
+    ? chainDriveMinutes(chain.filter((s) => s.id !== visit.id && !(s.memberIds || []).includes(visit.id)).map((s) => s.geo), home)
+    : driveWithoutMinutes;
   // The moving unit: the visit plus any co-located group members moving with it.
   const visitMinutes = stopPlanningMinutes(visit) + sumPlanningMinutes(visit.unitMembers);
   const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
-  const detourMinutes = Math.max(0, driveWithMinutes - driveWithoutMinutes);
+  const detourMinutes = Math.max(0, driveWithMinutes - baselineDrive, driveWithMinutes - driveWithoutMinutes);
   return {
     driveWithoutMinutes, driveWithMinutes, detourMinutes, routeTimeWithoutMinutes, routeTimeWithMinutes,
     neighbours: neighboursOf(chain, visit, home),
@@ -240,7 +340,8 @@ module.exports = {
   stopPlanningMinutes,
   chainDriveMinutes,
   routeCost,
+  routeOrderCovers,
   clusterShare,
   physicalStops,
-  _internals: { physicalStops, chainWithVisit, groupUnit, sumPlanningMinutes },
+  _internals: { physicalStops, chainWithVisit, insertByWindow, insertByRouteOrder, groupUnit, sumPlanningMinutes },
 };

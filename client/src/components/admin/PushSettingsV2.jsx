@@ -26,7 +26,7 @@
 //   not just locally. Otherwise we keep firing pushes to an
 //   endpoint the browser has revoked.
 import { useState, useEffect } from "react";
-import { Badge, Button, Card, CardBody, Switch, cn } from "../../components/ui";
+import { Button, Card, CardBody, Switch, cn } from "../../components/ui";
 import {
   ensurePushSubscription,
   disablePush,
@@ -46,10 +46,19 @@ function adminFetch(path, options = {}) {
     },
     ...options,
   }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      const err = new Error(`HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
     return r.json();
   });
 }
+
+// Gateway/timeout statuses can arrive while the server's PUT transaction is
+// still running (or after it committed), so treat them as unknown outcomes
+// just like a dropped network connection.
+const AMBIGUOUS_SAVE_STATUSES = new Set([408, 502, 503, 504]);
 
 const PRIORITY_CLASS = {
   urgent: "bg-alert-fg",
@@ -71,6 +80,7 @@ const BELL_CATEGORY_LABELS = {
   estimate_hot_view: "Estimate hot views",
   estimate_change_request: "Estimate change requests",
   estimate_stuck: "Customers stuck or still deciding on an estimate",
+  customer_landline_from_call: "Landline numbers from calls",
   visit_prep_photos: "Customer photos before a visit",
   truck_kit: "Truck check tool issues",
   access_codes: "Gate codes found in messages",
@@ -102,6 +112,7 @@ const BELL_CATEGORY_LABELS = {
   email_alert: "Email alerts (complaints, lead review)",
   email_rescue: "Email rescued from spam",
   email_rescue_review: "Spam rescue needs review",
+  typed_decisions: "AI decision review list",
   llm_cost: "AI spend spikes",
   review_low_rating: "New Google reviews of 4 stars or fewer",
 };
@@ -120,16 +131,21 @@ export default function PushSettingsV2() {
   const [pushError, setPushError] = useState("");
   const [prefsLoading, setPrefsLoading] = useState(true);
   const [prefsFailed, setPrefsFailed] = useState(false);
+  const [prefsVersion, setPrefsVersion] = useState(null);
 
-  const loadPreferences = async () => {
+  const loadPreferences = async ({ clearError = false } = {}) => {
     setPrefsLoading(true);
     setPrefsFailed(false);
     try {
       const r = await adminFetch("/admin/push/preferences");
       setPrefs(r.preferences || []);
       setCatPrefs(r.bellCategories || []);
+      setPrefsVersion(r.version || null);
+      if (clearError) setPushError("");
+      return true;
     } catch {
       setPrefsFailed(true);
+      return false;
     } finally {
       setPrefsLoading(false);
     }
@@ -165,29 +181,63 @@ export default function PushSettingsV2() {
     }
   };
 
+  const controlsDisabled = saving || prefsLoading || prefsFailed;
+
   const updatePref = (key, field, value) => {
+    if (controlsDisabled) return;
     setPrefs((cur) =>
       cur.map((p) => (p.key === key ? { ...p, [field]: value } : p)),
     );
   };
 
   const save = async () => {
-    if (prefsLoading || prefsFailed) return;
+    if (controlsDisabled) return;
     setSaving(true);
+    setPushError("");
     try {
-      await adminFetch("/admin/push/preferences", {
+      const saved = await adminFetch("/admin/push/preferences", {
         method: "PUT",
-        body: JSON.stringify({ preferences: [...prefs, ...catPrefs] }),
+        body: JSON.stringify({
+          preferences: [...prefs, ...catPrefs],
+          ...(prefsVersion ? { expectedVersion: prefsVersion } : {}),
+        }),
       });
+      if (saved?.version) setPrefsVersion(saved.version);
       showToast("Preferences saved");
     } catch (e) {
-      alert("Save failed: " + e.message);
+      // Distinguish confirmed HTTP rejections (4xx/500 where the server
+      // finished and rolled back — including 409 VERSION_CONFLICT if an
+      // earlier timed-out save committed late) from unknown outcomes (dropped
+      // connections, timeouts, or 408/502/503/504 gateway responses where the
+      // PUT transaction may still be running). For unknown outcomes, keep
+      // controls locked until the user explicitly reloads via Try again; any
+      // subsequent save carries expectedVersion so a late commit rejects stale
+      // overwrites with 409.
+      const confirmedRejection = Boolean(e?.status && !AMBIGUOUS_SAVE_STATUSES.has(e.status));
+      if (confirmedRejection) {
+        const reloaded = await loadPreferences();
+        setPushError(
+          e.status === 409
+            ? (reloaded
+              ? "Your notification settings changed on the server. Reloaded the latest settings."
+              : "Your notification settings changed on the server, and reloading them failed. Try again before saving.")
+            : (reloaded
+              ? `Couldn't save notification preferences (${e.message}). Reloaded saved settings from the server.`
+              : `Couldn't save notification preferences (${e.message}), and reloading saved settings failed. Try again before saving.`),
+        );
+      } else {
+        setPrefsFailed(true);
+        setPushError(
+          `Couldn't confirm saving notification preferences (${e?.message || "network error"}). Try again once connected to reload saved settings before making changes.`,
+        );
+      }
     } finally {
       setSaving(false);
     }
   };
 
   const test = async () => {
+    setPushError("");
     try {
       const result = await sendTestPush({ apiBase: API_BASE });
       showToast(
@@ -196,7 +246,7 @@ export default function PushSettingsV2() {
           : "No active device subscription",
       );
     } catch (e) {
-      alert(e.message);
+      setPushError(e.message || "Couldn't send test notification");
     }
   };
 
@@ -273,11 +323,11 @@ export default function PushSettingsV2() {
           </Button>{" "}
         </div>
         )}
-        {/* Push error */}
+        {/* Push / save error */}
         {pushError && (
-          <div className="p-3 mb-4 bg-alert-bg border-hairline border-alert-fg rounded-md flex items-start gap-2.5">
+          <div role="alert" className="p-3 mb-4 bg-alert-bg border-hairline border-alert-fg rounded-md flex items-start gap-2.5">
             {" "}
-            <div className="flex-1 text-13 text-alert-fg leading-relaxed">
+            <div className="flex-1 text-14 text-alert-fg leading-relaxed">
               {pushError}
             </div>{" "}
             <button
@@ -295,7 +345,7 @@ export default function PushSettingsV2() {
         {prefsFailed && (
           <div role="alert" className="p-3 mb-4 bg-alert-bg border-hairline border-alert-fg rounded-md text-14 text-alert-fg">
             <p className="mb-2">Notification preferences couldn&apos;t be loaded. Try again before saving.</p>
-            <Button variant="secondary" size="sm" onClick={loadPreferences}>Try again</Button>
+            <Button variant="secondary" size="sm" onClick={() => loadPreferences({ clearError: true })}>Try again</Button>
           </div>
         )}
 
@@ -338,6 +388,7 @@ export default function PushSettingsV2() {
                     {" "}
                     <Switch
                       checked={!!p.push_enabled}
+                      disabled={controlsDisabled}
                       onChange={(v) => updatePref(p.key, "push_enabled", v)}
                     />{" "}
                   </div>{" "}
@@ -345,6 +396,7 @@ export default function PushSettingsV2() {
                     {" "}
                     <Switch
                       checked={!!p.bell_enabled}
+                      disabled={controlsDisabled}
                       onChange={(v) => updatePref(p.key, "bell_enabled", v)}
                     />{" "}
                   </div>{" "}
@@ -352,6 +404,7 @@ export default function PushSettingsV2() {
                     {" "}
                     <Switch
                       checked={!!p.sound_enabled}
+                      disabled={controlsDisabled}
                       onChange={(v) => updatePref(p.key, "sound_enabled", v)}
                     />{" "}
                   </div>{" "}
@@ -369,11 +422,17 @@ export default function PushSettingsV2() {
               Bell + push categories
             </div>{" "}
             <div className="px-3 pb-2 text-12 text-ink-tertiary">
-              The bell, phone banner and app badge ring for customer
-              communication only (texts, emails, calls, voicemails, new
-              leads). These categories are silent by default. Toggle one on
-              to get its bell again — and its phone banner, for events that
-              push.
+              These category overrides apply while the admin bell policy is
+              active. Customer communication (texts, emails, calls, voicemails,
+              new leads) and specific exceptions (such as failed payments and
+              retired alerts like refunds) follow their own rules regardless of
+              the category toggle here. For other categories below, any saved on
+              choice permits eligible alerts on the shared admin bell (items
+              routed to Claude&apos;s queue, such as the AI decision review
+              list, still go there instead), and a saved off choice silences the
+              category when no active administrator has saved it on. Each toggle
+              controls that category&apos;s bell (and phone banner, for
+              categories that send push notifications).
             </div>{" "}
             <div className="bg-white border-hairline rounded-md overflow-hidden">
               {catPrefs.map((c, i) => (
@@ -390,13 +449,15 @@ export default function PushSettingsV2() {
                   </span>{" "}
                   <Switch
                     checked={!!c.bell_enabled}
-                    onChange={(v) =>
+                    disabled={controlsDisabled}
+                    onChange={(v) => {
+                      if (controlsDisabled) return;
                       setCatPrefs((cur) =>
                         cur.map((p) =>
                           p.key === c.key ? { ...p, bell_enabled: v } : p,
                         ),
-                      )
-                    }
+                      );
+                    }}
                   />{" "}
                 </div>
               ))}

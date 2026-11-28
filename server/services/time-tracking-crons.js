@@ -99,32 +99,31 @@ function initTimeTrackingCrons() {
   cron.schedule('0 0 * * *', async () => {
     logger.info('[time-tracking-cron] Running nightly daily summary computation');
     try {
-      const dateStr = addStaffWorkDays(staffWorkDate(new Date()), -1);
+      await runExclusive('time-tracking-midnight-daily', async () => {
+        const dateStr = addStaffWorkDays(staffWorkDate(new Date()), -1);
 
-      const techs = await db('technicians').where({ active: true }).select('id', 'name');
-      let computed = 0;
+        // Discover every technician with non-voided entries yesterday (including
+        // technicians deactivated mid-day who still earned those hours).
+        const entryTechs = await db('time_entries')
+          .where('status', '!=', 'voided')
+          .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [dateStr])
+          .distinct('technician_id')
+          .select('technician_id');
+        let computed = 0;
 
-      for (const tech of techs) {
-        try {
-          // Check if there were any entries that day
-          const hasEntries = await db('time_entries')
-            .where({ technician_id: tech.id })
-            .where('status', '!=', 'voided')
-            .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [dateStr])
-            .first();
-
-          if (hasEntries) {
-            await timeTracking.computeDailySummary(tech.id, dateStr);
+        for (const row of entryTechs) {
+          try {
+            await timeTracking.computeDailySummary(row.technician_id, dateStr);
             computed++;
+          } catch (err) {
+            logger.error(`[time-tracking-cron] Daily summary failed for tech id=${row.technician_id} (${errTag(err)})`);
           }
-        } catch (err) {
-          logger.error(`[time-tracking-cron] Daily summary failed for tech ${tech.name}`, { error: err.message });
         }
-      }
 
-      logger.info(`[time-tracking-cron] Daily summaries computed: ${computed} techs for ${dateStr}`);
+        logger.info(`[time-tracking-cron] Daily summaries computed: ${computed} techs for ${dateStr}`);
+      });
     } catch (err) {
-      logger.error('[time-tracking-cron] Nightly daily summary job failed', { error: err.message });
+      logger.error(`[time-tracking-cron] Nightly daily summary job failed (${errTag(err)})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -134,40 +133,48 @@ function initTimeTrackingCrons() {
   cron.schedule('0 5 * * 1', async () => {
     logger.info('[time-tracking-cron] Running weekly summary + approval bell');
     try {
-      // Previous week's Monday (ET calendar)
-      const previousWeekDate = addStaffWorkDays(staffWorkDate(new Date()), -7);
-      const weekStartStr = staffWeekStartForWorkDate(previousWeekDate);
-      const { end: weekEndStr } = staffWeekRange(weekStartStr);
+      await runExclusive('time-tracking-monday-weekly', async () => {
+        // Previous week's Monday (ET calendar)
+        const previousWeekDate = addStaffWorkDays(staffWorkDate(new Date()), -7);
+        const weekStartStr = staffWeekStartForWorkDate(previousWeekDate);
+        const { end: weekEndStr } = staffWeekRange(weekStartStr);
 
-      const techs = await db('technicians').where({ active: true }).select('id', 'name');
-      let computed = 0;
-      let pendingCount = 0;
-
-      for (const tech of techs) {
-        try {
-          const hasDailies = await db('time_entry_daily_summary')
-            .where({ technician_id: tech.id })
+        // Include every technician who worked during the week (even if deactivated
+        // mid-week) so their final payroll week is always summarized.
+        const [dailyTechs, entryTechs] = await Promise.all([
+          db('time_entry_daily_summary')
             .where('work_date', '>=', weekStartStr)
             .where('work_date', '<=', weekEndStr)
-            .first();
+            .distinct('technician_id')
+            .select('technician_id'),
+          db('time_entries')
+            .where('status', '!=', 'voided')
+            .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [weekStartStr, weekEndStr])
+            .distinct('technician_id')
+            .select('technician_id'),
+        ]);
+        const technicianIds = [...new Set([...dailyTechs, ...entryTechs].map((r) => r.technician_id))];
+        let computed = 0;
+        let pendingCount = 0;
 
-          if (hasDailies) {
-            const weekly = await timeTracking.computeWeeklySummary(tech.id, weekStartStr);
+        for (const techId of technicianIds) {
+          try {
+            const weekly = await timeTracking.computeWeeklySummary(techId, weekStartStr);
             computed++;
             if (weekly && weekly.status !== 'approved') pendingCount++;
+          } catch (err) {
+            logger.error(`[time-tracking-cron] Weekly summary failed for tech id=${techId} (${errTag(err)})`);
           }
-        } catch (err) {
-          logger.error(`[time-tracking-cron] Weekly summary failed for tech ${tech.name}`, { error: err.message });
         }
-      }
 
-      logger.info(`[time-tracking-cron] Weekly summaries computed: ${computed} techs for week of ${weekStartStr}`);
+        logger.info(`[time-tracking-cron] Weekly summaries computed: ${computed} techs for week of ${weekStartStr}`);
 
-      // One admin bell while the Approvals page lists a week that waits (every technician with worked time, deactivated
-      // ones too); none, and an open one closes, when it lists none. pendingCount is only the fallback if that read fails.
-      await timesheetBells.reconcileWeekBell(weekStartStr, { fallbackCount: pendingCount });
+        // One admin bell while the Approvals page lists a week that waits (every technician with worked time, deactivated
+        // ones too); none, and an open one closes, when it lists none. pendingCount is only the fallback if that read fails.
+        await timesheetBells.reconcileWeekBell(weekStartStr, { fallbackCount: pendingCount });
+      });
     } catch (err) {
-      logger.error('[time-tracking-cron] Weekly summary job failed', { error: err.message });
+      logger.error(`[time-tracking-cron] Weekly summary job failed (${errTag(err)})`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -2,12 +2,19 @@
 // A first-contact stranger's body is never scanned for opt-out phrasing, so a
 // robotext's own "reply NO to stop texting" footer cannot earn an
 // unsubscribe reply from a Waves line (audit 2026-09-09).
-const state = { results: [], fail: false, tables: [] };
+const state = { results: [], selectResults: [], fail: false, tables: [] };
 jest.mock('../utils/recruiting-thread-scope', () => { const real = jest.requireActual('../utils/recruiting-thread-scope'); return { ...real, isRecruitingPhone: jest.fn(async () => false) }; });
+const mockAppendCommsHistory = jest.fn(async () => {});
+jest.mock('../services/recruiting-comms', () => ({
+  appendCommsHistory: (...args) => mockAppendCommsHistory(...args),
+  maskPhone: (p) => `masked:${p}`,
+}));
 jest.mock('../models/db', () => {
   const q = {
     where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q),
-    whereNot: jest.fn(() => q), orWhereNull: jest.fn(() => q), join: jest.fn(() => q),
+    whereNot: jest.fn(() => q), whereNotNull: jest.fn(() => q), orWhereNull: jest.fn(() => q), join: jest.fn(() => q),
+    select: jest.fn(async () => state.selectResults.shift() ?? []),
+    update: jest.fn(async () => 1),
     first: jest.fn(async () => { if (state.fail) throw Object.assign(new Error('query failed for +19415551234'), { code: '08006' }); return state.results.shift() ?? null; }),
   };
   const db = jest.fn((table) => { state.tables.push(table); return q; });
@@ -24,7 +31,7 @@ jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest
 jest.mock('../services/sms-intent', () => ({ hasSchedulingIntent: jest.fn(() => false), isSmsReaction: jest.fn(() => false) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.wavespestcontrol.com') }));
 
-const { hasOutboundHistory } = require('../routes/twilio-webhook')._internals;
+const { hasOutboundHistory, mirrorApplicantSmsCompliance } = require('../routes/twilio-webhook')._internals;
 
 describe('hasOutboundHistory — who may receive a STOP/HELP/START reply', () => {
   beforeEach(() => { state.results = []; state.fail = false; state.tables = []; });
@@ -74,5 +81,40 @@ describe('hasOutboundHistory — who may receive a STOP/HELP/START reply', () =>
     const log = require('../services/logger').warn.mock.calls.at(-1);
     expect(JSON.stringify(log)).not.toContain('19415551234');
     expect(log[1]).toEqual({ code: '08006' });
+  });
+});
+
+describe('mirrorApplicantSmsCompliance', () => {
+  beforeEach(() => {
+    state.results = [];
+    state.selectResults = [];
+    state.fail = false;
+    state.tables = [];
+    mockAppendCommsHistory.mockClear();
+  });
+
+  test('passes an array of entries to appendCommsHistory for applicant STOP/START compliance events', async () => {
+    state.selectResults = [[{ id: 'app-1', comms_history: [] }]];
+    await mirrorApplicantSmsCompliance({
+      from: '+19415551234',
+      body: 'STOP',
+      messageSid: 'SM_stop_1',
+      stage: 'applicant_opt_out',
+      code: 'sms_stop',
+      revokeOfferConsent: true,
+    });
+    expect(mockAppendCommsHistory).toHaveBeenCalledTimes(1);
+    const [appId, entries] = mockAppendCommsHistory.mock.calls[0];
+    expect(appId).toBe('app-1');
+    expect(Array.isArray(entries)).toBe(true);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      stage: 'applicant_opt_out',
+      channel: 'sms',
+      outcome: 'received',
+      code: 'sms_stop',
+      by: 'applicant',
+      twilio_sid: 'SM_stop_1',
+    });
   });
 });

@@ -444,7 +444,7 @@ async function queueHeldInvoiceForSender(invoiceId, database = db, { rearmExhaus
   if (rearmExhausted) {
   const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('../invoice-helpers');
   const likeEscape = (text) => text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-  const PARK_PREFIXES = [STALE_SEND_PARK_ERROR, 'payer_billed:', SUMMARY_TEXT_PLANNED_ERROR, 'renewal_send_withheld'];
+  const PARK_PREFIXES = [STALE_SEND_PARK_ERROR, 'payer_billed:', 'chemical_addon_review:', SUMMARY_TEXT_PLANNED_ERROR, 'renewal_send_withheld'];
   let rearmQuery = database('invoices')
     .where({ id: invoiceId, status: 'scheduled' })
     .whereNotNull('scheduled_send_at')

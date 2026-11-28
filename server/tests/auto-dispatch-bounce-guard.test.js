@@ -40,9 +40,9 @@ describe('config bounceCooldownDays', () => {
     else process.env.AUTO_DISPATCH_BOUNCE_COOLDOWN_DAYS = prev;
   });
 
-  test('defaults to 7 in flex mode and 0 otherwise; env and override win', () => {
+  test('defaults to 30 in flex mode and 0 otherwise; env and override win', () => {
     delete process.env.AUTO_DISPATCH_BOUNCE_COOLDOWN_DAYS;
-    expect(getAutoDispatchConfig({ flexTierEnabled: true }).bounceCooldownDays).toBe(7);
+    expect(getAutoDispatchConfig({ flexTierEnabled: true }).bounceCooldownDays).toBe(30);
     expect(getAutoDispatchConfig({ flexTierEnabled: false, routeTiersEnabled: true }).bounceCooldownDays).toBe(0);
     expect(getAutoDispatchConfig({ flexTierEnabled: false, routeTiersEnabled: false }).bounceCooldownDays).toBe(0);
     process.env.AUTO_DISPATCH_BOUNCE_COOLDOWN_DAYS = '10';

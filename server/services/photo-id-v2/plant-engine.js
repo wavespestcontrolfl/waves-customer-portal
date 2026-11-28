@@ -56,12 +56,14 @@ const {
   buildIdentityCandidatesPrompt,
   buildIdentityVerifyPrompt,
   buildConditionIndexLine,
+  buildCustomerFactsBlock,
   buildConditionSelectionPrompt,
   buildEscalationPrompt,
+  buildRefereeSystemPrompt,
   buildRefereePrompt,
 } = require('./plant-engine-prompts');
 
-const PROMPT_VERSION = 'photo-id-v2-plant-1';
+const PROMPT_VERSION = 'photo-id-v2-plant-2';
 // Gemini's reasoning shares this budget with the JSON answer, and the plant
 // prompts (three identity slots, a condition index) run longer than the pest
 // ones: at 2048 a lawn read came back cut off in the 2026-09-28 photo eval,
@@ -1311,7 +1313,7 @@ async function callConditionSelection(images, promptArgs, timeoutMs, singleRead 
   const route = plantPolicy(singleRead)?.primary;
   return callWithProvider(route, {
     system: buildConditionSelectionPrompt(promptArgs),
-    text: 'Assess these photos against the list above.',
+    text: `${buildCustomerFactsBlock(promptArgs)}\n\nAssess these photos against the list above.`,
     images,
     jsonMode: true,
     jsonSchema: CONDITIONS_SCHEMA,
@@ -1327,7 +1329,7 @@ async function callEscalation(images, promptArgs, timeoutMs, singleRead = false)
   const route = plantPolicy(singleRead)?.fallback;
   return callWithProvider(route, {
     system: buildEscalationPrompt(promptArgs),
-    text: 'Identify and assess these photos fresh.',
+    text: `${buildCustomerFactsBlock(promptArgs)}\n\nIdentify and assess these photos fresh.`,
     images,
     jsonMode: true,
     jsonSchema: ESCALATION_SCHEMA,
@@ -2002,10 +2004,10 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
 
   const promptArgs = escalationPromptArgs(run, identity, conditions);
   const earlierReads = earlierReadsFor(escalation, unsureScopes);
-  const system = `${buildEscalationPrompt(promptArgs)}\n\n${buildRefereePrompt(earlierReads)}`;
+  const system = buildRefereeSystemPrompt(promptArgs);
   const result = await callWithProvider(MODELS.ROUTES.plantIdReferee, {
     system,
-    text: 'Identify and assess these photos fresh, as the deciding vote.',
+    text: `${buildCustomerFactsBlock(promptArgs)}\n\n${buildRefereePrompt(earlierReads)}\n\nIdentify and assess these photos fresh, as the deciding vote.`,
     images: run.images,
     jsonMode: true,
     jsonSchema: ESCALATION_SCHEMA,

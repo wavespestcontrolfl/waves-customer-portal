@@ -29,7 +29,7 @@ describe('gate off / legacy capture is unchanged', () => {
     expect(input.SYSTEM_PROMPT).not.toMatch(/SHOT GUIDE/);
     expect(input.SYSTEM_PROMPT).toContain('(front / close_up / trouble)');
     expect(input.RESPONSE_SCHEMA.properties.findings.items.properties.zone.enum).toEqual(['front', 'close_up', 'trouble', 'unknown']);
-    expect(input.PROMPT_DIGEST).toBe(sha(input.SYSTEM_PROMPT, '\n', JSON.stringify(input.RESPONSE_SCHEMA)));
+    expect(input.PROMPT_DIGEST).toBe(sha(input.SYSTEM_PROMPT, '\n', JSON.stringify(input.RESPONSE_SCHEMA), '\n', input.GEMINI_SYSTEM_CHANNEL));
     expect(input.buildUserText(2, {})).toBe('Assess the lawn in the 2 numbered photos of this visit.');
     expect(input.buildUserText(2, {}, { shotList: false, zones: ['front'] })).toBe(input.buildUserText(2, {}));
     const photos = [photo('a'), photo('b')];
@@ -60,7 +60,7 @@ describe('shot guide (shot-list captures)', () => {
     expect(variant.version).not.toBe(input.PROMPT_VERSION);
     expect(variant.system).not.toBe(input.SYSTEM_PROMPT);
     expect(variant.digest).not.toBe(input.PROMPT_DIGEST);
-    expect(variant.digest).toBe(sha(variant.system, '\n', JSON.stringify(variant.schema)));
+    expect(variant.digest).toBe(sha(variant.system, '\n', JSON.stringify(variant.schema), '\n', input.GEMINI_SYSTEM_CHANNEL));
     expect(variant.schema.properties.findings.items.properties.zone.enum).toEqual([...FULL, 'unknown']);
     const photos = [photo('a'), photo('b')];
     const args = { photos, photoZones: ['front', 'close_up'], visionContext: { season: 'peak' } };

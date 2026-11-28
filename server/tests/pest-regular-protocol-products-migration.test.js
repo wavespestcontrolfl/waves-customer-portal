@@ -523,14 +523,14 @@ describe('pest regular protocol products: the protocol hints', () => {
     expect(hints('Applied repellent solution with surfactant to perimeter')).toEqual(['LESCO Crosscheck Plus']);
     // No Taurus hint: a hint would select Taurus on the pre-visit Job Card with the catalog dilution and no yearly
     // limit. The close-out house mix, which reads the home's yearly count, is the only thing that adds it.
-    expect(hints('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice')).toBeUndefined();
+    expect(hints('Applied non-repellent to foundation (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice')).toBeUndefined();
   });
 
   // The tank is shared: Taurus SC allows an 18-in band at doors and windows, but the Crosscheck Plus in the same tank allows
   // "a band not to exceed one inch" there (owner 2026-11-25, protocols page D21). The line states the tighter one.
   test('the foundation line states the band both products in the shared tank allow (1 ft up + 1 ft out; 1-in pin stream at openings), in the checklist and the lineMeta key alike', () => {
     const visit = protocols.pest.visits[0];
-    const line = 'Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice';
+    const line = 'Applied non-repellent to foundation (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice';
     expect(visit.primary.split('\n')).toContain(line);
     expect(Object.keys(visit.lineMeta)).toContain(line);
     expect(JSON.stringify(protocols)).not.toMatch(/6-ft/);

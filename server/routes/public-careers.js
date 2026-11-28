@@ -47,6 +47,14 @@ const applyIpLimiter = rateLimit({
   skip: () => process.env.NODE_ENV !== 'production',
 });
 
+const applyDailyIpLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 12,
+  message: { error: 'Daily submission limit reached. Please try again tomorrow.' },
+  keyGenerator: (req) => `jobapply:day:${ipFallbackKey(req.ip)}`,
+  skip: () => process.env.NODE_ENV !== 'production',
+});
+
 function applyPhoneKey(req) {
   const phone = normalizeNanpPhone(req.body && req.body.phone);
   return phone ? phone.slice(-10) : '';
@@ -59,7 +67,7 @@ const applyPhoneLimiter = rateLimit({
   skip: (req) => process.env.NODE_ENV !== 'production' || !applyPhoneKey(req),
 });
 
-router.post('/apply', applyIpLimiter, applyPhoneLimiter, async (req, res) => {
+router.post('/apply', applyIpLimiter, applyDailyIpLimiter, applyPhoneLimiter, async (req, res) => {
   try {
     const body = req.body || {};
 
@@ -188,6 +196,7 @@ async function interviewViewPayload(application, { slotsRequired = true } = {}) 
   }
   return {
     first_name: firstNameOf(contact.name),
+    language: application.language === 'es' ? 'es' : 'en',
     status: application.interview_booked_at ? 'booked' : 'open',
     mode_options: ['phone', 'in_person'],
     in_person_address: WAVES_ADDRESS_LINE,

@@ -82,6 +82,28 @@ async function getAccessToken() {
   }
 }
 
+const ANDROID_CHANNELS = Object.freeze({
+  SERVICE_UPDATES: 'waves_service_updates',
+  BILLING: 'waves_billing',
+  MESSAGES: 'waves_messages',
+});
+const ANDROID_NOTIFICATION_COLOR = '#04395E';
+const ANDROID_NOTIFICATION_ICON = 'ic_stat_waves';
+
+function channelIdForNotification(notification = {}) {
+  if (typeof notification.channelId === 'string' && notification.channelId.trim()) {
+    return notification.channelId.trim();
+  }
+  const signal = `${notification.category || ''} ${notification.tag || ''} ${notification.url || ''}`.toLowerCase();
+  if (/\b(billing|payment|invoice|receipt|autopay|card)\b|tab=billing|\/pay\/|\/receipt\//.test(signal)) {
+    return ANDROID_CHANNELS.BILLING;
+  }
+  if (/\b(message|messages|chat|reply|portal_reply)\b|tab=messages/.test(signal)) {
+    return ANDROID_CHANNELS.MESSAGES;
+  }
+  return ANDROID_CHANNELS.SERVICE_UPDATES;
+}
+
 /**
  * Pure: map our generic notification shape ({ title, body, url, badge, ...data })
  * into an FCM HTTP v1 message. Everything that isn't title/body rides along as
@@ -95,7 +117,15 @@ function buildFcmMessage(deviceToken, notification = {}) {
     if (v === undefined || v === null) continue;
     data[k] = typeof v === 'string' ? v : String(v);
   }
-  const android = { priority: 'high', notification: { sound: 'default' } };
+  const android = {
+    priority: 'high',
+    notification: {
+      sound: 'default',
+      channel_id: channelIdForNotification(notification),
+      color: ANDROID_NOTIFICATION_COLOR,
+      icon: ANDROID_NOTIFICATION_ICON,
+    },
+  };
   if (notification.ephemeral) android.ttl = '0s';
   else if (Number.isFinite(Date.parse(notification.expiresAt || ''))) {
     // The notification's own expiry (push-notifications.js webPushTtl): FCM keeps it for an offline phone only that long.
@@ -242,6 +272,8 @@ function status() {
 
 module.exports = {
   FCM_REQUEST_TIMEOUT_MS,
+  ANDROID_CHANNELS,
+  channelIdForNotification,
   send,
   status,
   // exported for unit tests
