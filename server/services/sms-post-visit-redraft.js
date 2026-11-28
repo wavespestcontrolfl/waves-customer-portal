@@ -165,7 +165,7 @@ async function findEligibleInboundForPostVisitRedraft(dbh, { customerId, complet
 
 /**
  * Read-only paginated candidate discovery helper (not yet wired into `sms-late-drafter.js`).
- * Filters to completed, non-backfill, non-incomplete service records before pagination.
+ * Filters to completed, non-backfill, non-incomplete, non-customer_declined records before pagination.
  */
 async function findPostVisitRedraftCandidates(dbh, { visitDateET, limit = 25, pageSize = null } = {}, deps = {}) {
   const { day, start, end } = etDayBounds(visitDateET);
@@ -182,7 +182,7 @@ async function findPostVisitRedraftCandidates(dbh, { visitDateET, limit = 25, pa
       .where('status', 'completed')
       .whereNotNull('customer_id')
       .whereRaw("COALESCE(structured_notes->>'backfill', 'false') <> 'true'")
-      .whereRaw("COALESCE(structured_notes->>'visitOutcome', 'completed') <> 'incomplete'")
+      .whereRaw("COALESCE(structured_notes->>'visitOutcome', 'completed') NOT IN ('incomplete', 'customer_declined')")
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')
       .offset(offset)
@@ -348,8 +348,22 @@ async function draftPostVisitRevisionIfEligible(opts = {}) {
   }
 }
 
-function triggerOnVisitComplete({ isBackfillCompletion, isIncompleteVisit, svc, record } = {}) {
-  if (isBackfillCompletion || isIncompleteVisit || !svc?.customer_id || !record?.id) return;
+function parseStructuredNotesOutcome(notes) {
+  if (!notes) return null;
+  if (typeof notes === 'object') return notes.visitOutcome || null;
+  try { return JSON.parse(notes)?.visitOutcome || null; } catch { return null; }
+}
+
+function triggerOnVisitComplete({ isBackfillCompletion, isIncompleteVisit, visitOutcome, svc, record } = {}) {
+  const outcome = visitOutcome || parseStructuredNotesOutcome(record?.structured_notes);
+  if (
+    isBackfillCompletion
+    || isIncompleteVisit
+    || outcome === 'incomplete'
+    || outcome === 'customer_declined'
+    || !svc?.customer_id
+    || !record?.id
+  ) return;
   draftPostVisitRevisionIfEligible({
     customerId: svc.customer_id,
     serviceRecordId: record.id,

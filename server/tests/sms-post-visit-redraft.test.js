@@ -428,9 +428,22 @@ describe('findPostVisitRedraftCandidates (read-only discovery helper)', () => {
     );
     expect(page1.where).toHaveBeenCalledWith('status', 'completed');
     expect(page1.whereRaw).toHaveBeenCalledWith("COALESCE(structured_notes->>'backfill', 'false') <> 'true'");
-    expect(page1.whereRaw).toHaveBeenCalledWith("COALESCE(structured_notes->>'visitOutcome', 'completed') <> 'incomplete'");
+    expect(page1.whereRaw).toHaveBeenCalledWith("COALESCE(structured_notes->>'visitOutcome', 'completed') NOT IN ('incomplete', 'customer_declined')");
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ customerId: 'cust-3', serviceRecordId: 'rec-3', smsLogId: 'sms-in-4' });
+  });
+
+  test('triggerOnVisitComplete skips customer_declined closeouts before any draft work', () => {
+    const { triggerOnVisitComplete } = require('../services/sms-post-visit-redraft');
+    const db = require('../models/db');
+    db.mockClear();
+    triggerOnVisitComplete({
+      isBackfillCompletion: false,
+      isIncompleteVisit: false,
+      svc: { customer_id: 'cust-declined', scheduled_date: '2026-11-27' },
+      record: { id: 'rec-dec', structured_notes: { visitOutcome: 'customer_declined' } },
+    });
+    expect(db).not.toHaveBeenCalled();
   });
 });
 
