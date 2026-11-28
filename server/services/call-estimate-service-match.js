@@ -132,30 +132,44 @@ function askedLinesForPromise(commitment, callRow) {
   return callRow?.v2_extraction_status === 'valid' && sameFiling ? askedServiceLines(callRow.ai_extraction_enriched) : [];
 }
 
-// ALL distinct coarse service lines the call asked to have quoted (primary +
-// secondary_categories + multi-line specific_service_name such as "Pest Control
-// + Lawn Care"). Used with `estimatesCoverAskedLines` so a Pest-only estimate
-// never prematurely closes a Pest + Lawn quote promise, while Pest + Lawn (in
-// one bundle OR two separate estimates) closes it cleanly.
+// Required coarse service lines the call explicitly asked to have quoted:
+// - Single-line primary categories keep `[primary]` unless `specific_service_name`
+//   explicitly names 2+ service lines (e.g. "Pest Control + Lawn Care"), so
+//   incidental `secondary_categories` chatter (like call 5f7d3fc9: primary
+//   `lawn_care`, secondary `pest_general`, catalog "Lawn Insect Control") never
+//   keeps a satisfied lawn quote promise open.
+// - Explicit bundles (`bundled_waveguard`) collect all lines from
+//   `specific_service_name` and mapped `secondary_categories`.
 function askedServiceLinesRequired(stored) {
   let v2 = stored;
   if (typeof v2 === 'string') { try { v2 = JSON.parse(v2); } catch { return []; } }
   const sr = v2 && typeof v2 === 'object' ? v2.service_request : null;
   if (!sr || typeof sr !== 'object') return [];
+  const rawPrimary = String(sr.primary_service_category || '').toLowerCase();
+  const primary = lineOfV2Category(rawPrimary);
+  const named = typeof sr.specific_service_name === 'string' && sr.specific_service_name.trim()
+    ? linesOfServiceName(sr.specific_service_name)
+    : [];
   const out = new Set();
-  const primary = lineOfV2Category(sr.primary_service_category);
-  if (primary) out.add(primary);
-  if (Array.isArray(sr.secondary_categories)) {
-    for (const sec of sr.secondary_categories) {
-      const mapped = lineOfV2Category(sec);
-      if (mapped) out.add(mapped);
-    }
-  }
-  if (typeof sr.specific_service_name === 'string' && sr.specific_service_name.trim()) {
-    const named = linesOfServiceName(sr.specific_service_name);
-    if (!primary || named.length > 1) {
+  if (primary) {
+    out.add(primary);
+    if (named.length > 1) {
       for (const line of named) out.add(line);
     }
+    return [...out];
+  }
+  if (rawPrimary === 'bundled_waveguard') {
+    for (const line of named) out.add(line);
+    if (Array.isArray(sr.secondary_categories)) {
+      for (const sec of sr.secondary_categories) {
+        const mapped = lineOfV2Category(sec);
+        if (mapped) out.add(mapped);
+      }
+    }
+    return [...out];
+  }
+  if (named.length >= 1) {
+    for (const line of named) out.add(line);
   }
   return [...out];
 }

@@ -206,13 +206,14 @@ function formatAgreedPriceLabel(agreedPrice) {
 }
 
 // Did this call confirm/book an appointment? Under owner ruling 2026-09-24
-// (the $300 flea booking), an agreed price on a booked call ALWAYS suppresses
-// estimator drafting so no conflicting estimate draft competes with the booking.
+// (the $300 flea booking), an agreed price on a confirmed booked call ALWAYS
+// suppresses estimator drafting so no conflicting estimate draft competes with
+// the booking. Uses the confirmed booking status only (not a proposed slot).
 function hasConfirmedBookingOnCall(extracted = null, v2Extraction = null) {
   if (extracted?.appointment_confirmed === true) return true;
   const sched = v2Extraction?.scheduling;
   if (!sched || typeof sched !== 'object') return false;
-  return sched.status === 'confirmed' || sched.agent_committed_booking === true;
+  return sched.status === 'confirmed';
 }
 
 /**

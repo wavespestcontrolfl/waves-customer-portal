@@ -20,7 +20,8 @@ describe('PR C1b: Unbooked written-quote-promised exception for verbal price quo
   test('ALWAYS suppresses drafting when a visit is confirmed/booked on the call (2026-09-24 ruling preserved)', () => {
     expect(hasConfirmedBookingOnCall({ appointment_confirmed: true }, null)).toBe(true);
     expect(hasConfirmedBookingOnCall({}, { scheduling: { status: 'confirmed' } })).toBe(true);
-    expect(hasConfirmedBookingOnCall({}, { scheduling: { status: 'proposed', agent_committed_booking: true } })).toBe(true);
+    // Unconfirmed proposed slot is NOT a confirmed booking (must not leave caller with neither booking nor draft)
+    expect(hasConfirmedBookingOnCall({}, { scheduling: { status: 'proposed', agent_committed_booking: true } })).toBe(false);
 
     expect(shouldSuppressDraftForAgreedPrice({
       agreedPrice: agreed,
@@ -34,7 +35,7 @@ describe('PR C1b: Unbooked written-quote-promised exception for verbal price quo
       quotePromised: true,
       extracted: { appointment_confirmed: false },
       v2Extraction: { scheduling: { status: 'proposed', agent_committed_booking: true } },
-    })).toBe(true);
+    })).toBe(false);
   });
 
   test('ALWAYS suppresses drafting when no written quote was promised', () => {
@@ -87,9 +88,13 @@ describe('PR C1b: Unbooked written-quote-promised exception for verbal price quo
 describe('PR C1b: Multi-service and exact estimate coverage matching', () => {
   const v2 = (primary, extra = {}) => ({ service_request: { primary_service_category: primary, ...extra } });
 
-  test('askedServiceLinesRequired captures primary + secondary categories + multi-line bundle names', () => {
-    expect(askedServiceLinesRequired(v2('pest_general', { secondary_categories: ['lawn_care'] }))).toEqual(['pest', 'lawn']);
+  test('askedServiceLinesRequired expands explicit bundles / multi-line names while preserving single-line Lawn Insect Control (call 5f7d3fc9)', () => {
+    // Incidental secondary_categories chatter on a single-service ask does NOT block lawn quote closure
+    expect(askedServiceLinesRequired(v2('lawn_care', { secondary_categories: ['pest_general'], specific_service_name: 'Lawn Insect Control' }))).toEqual(['lawn']);
+    // Explicit bundle or multi-line catalog name requires ALL asked lines
+    expect(askedServiceLinesRequired(v2('bundled_waveguard', { secondary_categories: ['pest_general', 'lawn_care'] })).sort()).toEqual(['lawn', 'pest']);
     expect(askedServiceLinesRequired(v2('bundled_waveguard', { specific_service_name: 'Pest Control + Lawn Care' })).sort()).toEqual(['lawn', 'pest']);
+    expect(askedServiceLinesRequired(v2('pest_general', { specific_service_name: 'Pest Control + Lawn Care' })).sort()).toEqual(['lawn', 'pest']);
     expect(askedServiceLinesRequired(v2('tree_shrub'))).toEqual(['tree_shrub']);
     expect(askedServiceLinesRequired(v2('flea_tick'))).toEqual(['pest']);
     expect(askedServiceLinesRequired(v2('wdo_inspection'))).toEqual(['termite']);
@@ -125,9 +130,9 @@ describe('PR C1b: Multi-service and exact estimate coverage matching', () => {
   });
 
   test('askedRequiredLinesForPromise respects filing generation and human edit fences', () => {
-    const ext = JSON.stringify(v2('pest_general', { secondary_categories: ['lawn_care'] }));
+    const ext = JSON.stringify(v2('bundled_waveguard', { secondary_categories: ['pest_general', 'lawn_care'] }));
     const call = { v2_extraction_status: 'valid', processing_generation: 4, ai_extraction_enriched: ext };
-    expect(askedRequiredLinesForPromise({ processing_generation: 4, source: 'ai', human_state: null }, call)).toEqual(['pest', 'lawn']);
+    expect(askedRequiredLinesForPromise({ processing_generation: 4, source: 'ai', human_state: null }, call).sort()).toEqual(['lawn', 'pest']);
     expect(askedRequiredLinesForPromise({ processing_generation: 3, source: 'ai', human_state: null }, call)).toEqual([]);
     expect(askedRequiredLinesForPromise({ processing_generation: 4, human_state: 'edited' }, call)).toEqual([]);
   });
