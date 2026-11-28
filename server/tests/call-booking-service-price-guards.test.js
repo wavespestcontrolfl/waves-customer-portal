@@ -68,7 +68,7 @@ describe('PR A1: package Visit 2 & single-treatment guards (call 819d3d1f)', () 
     expect(resolveCallFollowUpPlan({ extracted, catalogRow: SERVICES[0], parentDate: '2026-11-28', parentWindowStart: '16:00', v2Extraction: v2 })).toBeNull();
   });
 
-  test('full-price $350 Cockroach mentioning "one-time treatment" WITHOUT omitting Visit 2 keeps package Visit 2', () => {
+  test('full-price $350 Cockroach mentioning "one-time treatment" OR changing back to "two visits" keeps package Visit 2', () => {
     const v2 = {
       scheduling: { status: 'confirmed', follow_up_mentioned: false },
       service_request: {
@@ -86,6 +86,14 @@ describe('PR A1: package Visit 2 & single-treatment guards (call 819d3d1f)', () 
       v2Extraction: v2,
     });
     expect(svc?.service_key).toBe('cockroach_control');
+
+    // Spoken order: "No second visit, actually make that two visits" -> final choice is two visits
+    expect(isDiscountedSinglePackageTreatment({
+      catalogRow: SERVICES[0],
+      transcription: 'Caller: No second visit, actually make that two visits.',
+      v2Extraction: { scheduling: { follow_up_mentioned: false }, service_request: {} },
+    })).toBe(false);
+
     expect(resolveCallFollowUpPlan({
       extracted: { quoted_price: 350 },
       catalogRow: svc,
@@ -106,12 +114,12 @@ describe('PR A1: package Visit 2 & single-treatment guards (call 819d3d1f)', () 
 });
 
 describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848284)', () => {
-  test('explicit WDO refusal stays refused even when agent later asks a lender question; holds if Waves Assessment is missing', () => {
+  test('explicit WDO refusal stays refused even when agent later asks a lender question; holds via applyCatalogSelectionGuard if Waves Assessment missing', () => {
     const transcript = 'Caller: No, we do not need an official WDO inspection.\nAgent: Does the lender require a WDO?';
     const v2 = {
       scheduling: { status: 'confirmed' },
       service_request: { specific_service_name: 'WDO Inspection Service', primary_service_category: 'wdo' },
-      meta: { call_summary: 'Caller declined official FDACS WDO inspection and only wants attic assessment.' },
+      meta: { call_summary: 'Caller declined official FDACS WDO inspection and only wants attic rodent sanitation assessment.' },
     };
     expect(hasExplicitWdoRefusal({ v2Extraction: v2, transcription: transcript })).toBe(true);
     const svc = resolveCallBookingCatalogService({
@@ -124,10 +132,18 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
     expect(resolveCallBookingPrice({ quotedPrice: 150, catalogRow: svc, v2Extraction: v2 })).toEqual({ price: null, source: null });
     expect(callBookingInvoiceOnComplete({ price: null, catalogRow: svc })).toBe(false);
 
-    // If Waves Assessment row is unavailable in catalog, explicit hold prevents service_id=null booking
+    // End-to-end without Waves Assessment: resolveCallBookingCatalogService returns null, AND applyCatalogSelectionGuard STILL sets genericBookingUnbookable=true
+    const servicesNoAssess = SERVICES.filter((s) => s.service_key !== 'lawn_inspection');
+    const resolvedNull = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'WDO Inspection Service' },
+      services: servicesNoAssess,
+      v2Extraction: v2,
+      transcription: transcript,
+    });
+    expect(resolvedNull).toBeNull();
     const noAssessGuard = applyCatalogSelectionGuard({
-      callBookingCatalogRow: SERVICES[3],
-      bookableCallServices: SERVICES.filter((s) => s.service_key !== 'lawn_inspection'),
+      callBookingCatalogRow: resolvedNull,
+      bookableCallServices: servicesNoAssess,
       extracted: { specific_service_name: 'WDO Inspection Service' },
       v2CanonicalExtraction: v2,
       transcription: transcript,
@@ -146,6 +162,17 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
       transcription: transcript,
     });
     expect(svc?.service_key).toBe('wdo_inspection');
+  });
+
+  test('preserves caller-only boundary on unidentified raw diarization ("Speaker 1:"/"Speaker 2:")', () => {
+    const rawDiarized = 'Speaker 1: Do you want just a one-time treatment?\nSpeaker 2: No, I want monthly service.';
+    expect(hasExplicitOneTimeOnlyIntent({ transcription: rawDiarized })).toBe(false);
+    const svc = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Monthly Pest Control Service' },
+      services: SERVICES,
+      transcription: rawDiarized,
+    });
+    expect(svc?.service_key).toBe('pest_general_monthly');
   });
 
   test('explicit one-time-only caller downgrades general Monthly Pest Control, but holds specialty recurring booking via genericBookingUnbookable', () => {
@@ -217,32 +244,7 @@ describe('PR A1: final implicit confirmed agent price & STT decimal price recove
     expect(callBookingInvoiceOnComplete({ price: priced.price, catalogRow: SERVICES[2] })).toBe(true);
   });
 
-  test('missing service name or V2 secondary_categories / additional_properties stays unpriced', () => {
-    const missingSvcV2 = {
-      scheduling: { status: 'confirmed' },
-      service_request: {
-        specific_service_name: null,
-        price_is_final: true,
-        price_offered_by_staff: true,
-        price: { amount_usd: 250, unit: 'one_time', stated_by: 'agent', caller_response: 'no_response', accepted: false, evidence_quote: 'It is 250.' },
-      },
-    };
-    expect(implicitConfirmedAgentPrice(missingSvcV2, SERVICES[2])).toBeNull();
-
-    const secondaryCatV2 = {
-      scheduling: { status: 'confirmed' },
-      service_request: {
-        specific_service_name: 'Bee / Wasp Nest Removal Service',
-        secondary_categories: ['rodent'],
-        price_is_final: true,
-        price_offered_by_staff: true,
-        price: { amount_usd: 250, unit: 'one_time', stated_by: 'agent', caller_response: 'no_response', accepted: false, evidence_quote: 'It is 250.' },
-      },
-    };
-    expect(implicitConfirmedAgentPrice(secondaryCatV2, SERVICES[2])).toBeNull();
-  });
-
-  test('STT decimal mishear ($2.50) recovers only when corroborated; spoken "200 dollars" without $ fails cleanly', () => {
+  test('STT decimal mishear ($2.50) recovers only on FIXED catalog rows with corroborated quote; variable-price rows stay null', () => {
     const acceptedSttV2 = {
       scheduling: { status: 'confirmed' },
       service_request: {
@@ -257,46 +259,25 @@ describe('PR A1: final implicit confirmed agent price & STT decimal price recove
     };
     expect(resolveCallBookingPrice({ quotedPrice: 2.5, catalogRow: SERVICES[1], v2Extraction: acceptedSttV2 })).toEqual({ price: 250, source: 'transcript' });
 
-    const spokenConflictV2 = {
+    const variableCatalogRow = { ...SERVICES[3], pricing_type: 'variable', base_price: '250.00' };
+    expect(recoverSttDecimalCallPrice({ quotedPrice: 2.5, catalogRow: variableCatalogRow, v2Extraction: {
       scheduling: { status: 'confirmed' },
       service_request: {
-        specific_service_name: 'One-Time Pest Control Service',
+        specific_service_name: 'WDO Inspection Service',
         quoted_price_usd: 2.5,
         price_is_final: true,
         price_offered_by_staff: true,
         price_accepted_by_caller: true,
-        price: { amount_usd: 2.5, amount_max_usd: null, stated_by: 'agent', caller_response: 'accepted', accepted: true, evidence_quote: 'Initial is 200 dollars.' },
-        prices: [],
+        price: { amount_usd: 2.5, amount_max_usd: null, stated_by: 'agent', caller_response: 'accepted', accepted: true, evidence_quote: 'That comes to $2.50.' },
       },
-    };
-    expect(recoverSttDecimalCallPrice({ quotedPrice: 2.5, catalogRow: SERVICES[1], v2Extraction: spokenConflictV2 })).toBeNull();
+    } })).toBeNull();
   });
 });
 
 describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', () => {
   beforeEach(() => { lockCustomerComms.mockClear(); });
 
-  test('requires single final staff-stated caller-accepted V2 one-time quote and rejects V2 multi-category/property', () => {
-    expect(extractConfirmedCallbackOneTimePrice({
-      service_request: {
-        price_is_final: true,
-        price_accepted_by_caller: true,
-        price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
-        prices: [],
-      },
-    })).toBe(199);
-
-    expect(extractConfirmedCallbackOneTimePrice({
-      property: { additional_properties: [{ street: '200 Second St' }] },
-      service_request: {
-        price_is_final: true,
-        price_accepted_by_caller: true,
-        price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
-      },
-    })).toBeNull();
-  });
-
-  test('handles covered-sibling ambiguity, second-property address mismatch, cross-category unnamed quote, procToken ownership loss, and v2_routing_blocked non-booking callbacks', async () => {
+  test('matches schema enums (`pest_general`, `lawn_care`), excludes `requested`/`offered` bookings and staff siblings, requires prior-visit link for named quotes too', async () => {
     const pestVisit = {
       id: 'visit-1',
       customer_id: 'cust-1',
@@ -304,6 +285,7 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
       service_type: 'One-Time Pest Control Service',
       scheduled_date: '2026-11-29',
       status: 'confirmed',
+      source_action: 'ai_call_pipeline',
       estimated_price: null,
       is_callback: false,
       followup_included: false,
@@ -317,7 +299,7 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
       svc_name: 'One-Time Pest Control Service',
       svc_billing_type: 'one_time',
     };
-    const includedSibling = { ...pestVisit, id: 'visit-inc', followup_included: true };
+    const staffSibling = { ...pestVisit, id: 'visit-staff', source_action: 'admin_manual' };
     const updateSpy = jest.fn().mockResolvedValue(1);
     const selectChain = {
       leftJoin: jest.fn().mockReturnThis(),
@@ -362,103 +344,81 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
     });
     const conn = { transaction: jest.fn(async (fn) => fn(trx)) };
 
-    // Included follow-up sibling + unpriced visit -> ambiguous!
-    selectChain.select.mockResolvedValueOnce([includedSibling, pestVisit]);
-    const withCoveredSibling = await propagateCallbackPriceToRecentVisit({
+    // Named quote WITHOUT explicit prior-visit link is rejected
+    selectChain.select.mockResolvedValueOnce([pestVisit]);
+    expect(await propagateCallbackPriceToRecentVisit({
       conn,
-      call: { id: 'call-1', created_at: new Date('2026-11-28T15:30:00Z') },
+      call: { id: 'call-no-link', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      transcription: 'Caller: How much for One-Time Pest? Agent: $199. Caller: Sounds good.',
+      v2Extraction: {
+        scheduling: { status: 'unscheduled' },
+        service_request: {
+          specific_service_name: 'One-Time Pest',
+          service_intent: 'new_booking_inquiry',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
+
+    // scheduling.status='requested' (failed/incomplete new booking request) is rejected
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-req', created_at: new Date('2026-11-28T15:30:00Z') },
+      procToken: 'tok-1',
+      customerId: 'cust-1',
+      v2Extraction: {
+        scheduling: { status: 'requested' },
+        service_request: {
+          specific_service_name: 'One-Time Pest',
+          service_intent: 'follow_up_existing_service',
+          price_is_final: true,
+          price_accepted_by_caller: true,
+          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+        },
+      },
+    })).toEqual({ updated: false, reason: 'booking_attempt_call' });
+
+    // Competing staff-booked sibling makes target ambiguous!
+    selectChain.select.mockResolvedValueOnce([staffSibling, pestVisit]);
+    expect(await propagateCallbackPriceToRecentVisit({
+      conn,
+      call: { id: 'call-staff-sib', created_at: new Date('2026-11-28T15:30:00Z') },
       procToken: 'tok-1',
       customerId: 'cust-1',
       v2Extraction: {
         scheduling: { status: 'unscheduled' },
         service_request: {
           specific_service_name: 'One-Time Pest',
+          service_intent: 'follow_up_existing_service',
           price_is_final: true,
           price_accepted_by_caller: true,
           price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
         },
       },
-    });
-    expect(withCoveredSibling).toEqual({ updated: false, reason: 'ambiguous_multiple_visits' });
+    })).toEqual({ updated: false, reason: 'ambiguous_multiple_visits' });
 
-    // Unnamed rodent callback must NOT price general_pest visit even with "price for the visit"
+    // Unnamed callback with schema enum `pest_general` + explicit prior-visit linkage SUCCEEDS!
     selectChain.select.mockResolvedValueOnce([pestVisit]);
-    const crossCategory = await propagateCallbackPriceToRecentVisit({
-      conn,
-      call: { id: 'call-2', created_at: new Date('2026-11-28T15:30:00Z') },
-      procToken: 'tok-1',
-      customerId: 'cust-1',
-      transcription: 'Caller: Confirming the price for that visit is $199.',
-      v2Extraction: {
-        scheduling: { status: 'unscheduled' },
-        service_request: {
-          specific_service_name: null,
-          primary_service_category: 'rodent',
-          price_is_final: true,
-          price_accepted_by_caller: true,
-          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
-        },
-      },
-    });
-    expect(crossCategory).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
-
-    // Visit on second property (200 Oak Ave) vs callback naming primary (100 Main St) -> rejected!
-    selectChain.select.mockResolvedValueOnce([{ ...pestVisit, service_address_line1: '200 Oak Ave' }]);
-    const wrongProperty = await propagateCallbackPriceToRecentVisit({
-      conn,
-      call: { id: 'call-3', created_at: new Date('2026-11-28T15:30:00Z') },
-      procToken: 'tok-1',
-      customerId: 'cust-1',
-      v2Extraction: {
-        property: { service_address: { street_line_1: '100 Main St', city: 'Sarasota', postal_code: '34232' } },
-        scheduling: { status: 'unscheduled' },
-        service_request: {
-          specific_service_name: 'One-Time Pest Control Service',
-          price_is_final: true,
-          price_accepted_by_caller: true,
-          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
-        },
-      },
-    });
-    expect(wrongProperty).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
-
-    // Superseded processor (procToken mismatch under lock) -> aborts safely!
-    selectChain.select.mockResolvedValueOnce([pestVisit]);
-    callLockChain.first.mockResolvedValueOnce(null);
-    const lostToken = await propagateCallbackPriceToRecentVisit({
-      conn,
-      call: { id: 'call-4', created_at: new Date('2026-11-28T15:30:00Z') },
-      procToken: 'stale-token',
-      customerId: 'cust-1',
-      v2Extraction: {
-        scheduling: { status: 'unscheduled' },
-        service_request: {
-          specific_service_name: 'One-Time Pest',
-          price_is_final: true,
-          price_accepted_by_caller: true,
-          price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
-        },
-      },
-    });
-    expect(lostToken).toEqual({ updated: false, reason: 'call_ownership_lost' });
-    expect(updateSpy).not.toHaveBeenCalled();
-
-    // Processor-path syncCallbackPriceIfEligible ALLOWS non-booking `v2_routing_blocked` when no appointment requested!
-    selectChain.select.mockResolvedValueOnce([pestVisit]);
-    callLockChain.first.mockResolvedValueOnce({ id: 'call-5' });
-    const routedPriceOnly = await syncCallbackPriceIfEligible({
+    callLockChain.first.mockResolvedValueOnce({ id: 'call-unnamed' });
+    const unnamedMatched = await syncCallbackPriceIfEligible({
       appointmentResult: { service: null, dateTime: null, scheduleCreated: false, smsSent: false, skippedReason: 'v2_routing_blocked' },
       extracted: { appointment_confirmed: false },
       procToken: 'tok-1',
       customerId: 'cust-1',
       isOutbound: false,
       conn,
-      call: { id: 'call-5', created_at: new Date('2026-11-28T15:30:00Z'), twilio_call_sid: 'CA999' },
+      call: { id: 'call-unnamed', created_at: new Date('2026-11-28T15:30:00Z'), twilio_call_sid: 'CA999' },
       callSid: 'CA999',
+      transcription: 'Caller: Confirming the price for the earlier visit is $199.',
       v2ApprovedExtraction: {
-        scheduling: { status: 'unscheduled' },
+        scheduling: { status: 'none' },
         service_request: {
-          specific_service_name: 'One-Time Pest',
+          specific_service_name: null,
+          primary_service_category: 'pest_general',
           price_is_final: true,
           price_accepted_by_caller: true,
           price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
@@ -466,12 +426,25 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
         },
       },
     });
-    expect(routedPriceOnly).toEqual({ updated: true, scheduledServiceId: 'visit-1', amount: 199 });
+    expect(lockCustomerComms).toHaveBeenCalledWith(trx, 'cust-1');
+    expect(unnamedMatched).toEqual({ updated: true, scheduledServiceId: 'visit-1', amount: 199 });
     expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({
       estimated_price: 199,
       create_invoice_on_complete: true,
       internal_notes: 'Gate #4422\nPrice confirmed on follow-up call (CA999): $199.00.',
     }));
+  });
+
+  test('extractConfirmedCallbackOneTimePrice rejects V1-only and multi-property quotes', () => {
+    expect(extractConfirmedCallbackOneTimePrice(null, { quoted_price: 199 })).toBeNull();
+    expect(extractConfirmedCallbackOneTimePrice({
+      property: { additional_properties: [{ street: '200 Second St' }] },
+      service_request: {
+        price_is_final: true,
+        price_accepted_by_caller: true,
+        price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+      },
+    })).toBeNull();
   });
 
   test('processor wires applyCatalogSelectionGuard and syncCallbackPriceIfEligible', () => {

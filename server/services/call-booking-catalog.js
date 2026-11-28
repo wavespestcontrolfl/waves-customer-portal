@@ -792,7 +792,7 @@ function hasExplicitOneTimeOnlyIntent({ extracted = {}, v2Extraction = null, tra
   const sr = v2Extraction?.service_request;
   if (sr?.service_intent === 'recurring_membership_inquiry' || sr?.billing_choice) return false;
   const callerText = transcription ? callerOnlyText(transcription) : '';
-  const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText || transcription });
+  const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
   if (!combined || !ONE_TIME_ONLY_INTENT_RE.test(combined)) return false;
   return !recurringIntentEvidence(transcription || combined);
 }
@@ -804,17 +804,29 @@ function followUpExplicitlyDiscussed(extracted = {}, v2Extraction = null) {
   return Boolean(extracted?.follow_up_date_time && /^\d{4}-\d{2}-\d{2}/.test(String(extracted.follow_up_date_time).trim()));
 }
 
+function lastRegexMatchIndex(re, text) {
+  const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let lastIdx = -1;
+  let m;
+  while ((m = scan.exec(text))) {
+    lastIdx = m.index;
+    if (scan.lastIndex === m.index) scan.lastIndex += 1;
+  }
+  return lastIdx;
+}
+
 function resolvePackageVisitCountChoice(combined) {
   let finalChoice = null;
-  for (const rawClause of String(combined || '').split(/[.!?\n;]+/)) {
+  for (const rawClause of String(combined || '').split(/[.!?\n,;]+/)) {
     const clause = rawClause.trim();
     if (!clause || QUESTION_OR_CHECK_RE.test(clause)) continue;
-    const withoutNegTwo = clause.replace(NEGATED_TWO_VISIT_RE, ' ');
-    if (TWO_VISIT_EXPLICIT_RE.test(withoutNegTwo)) finalChoice = 'two';
-    if (!NEGATED_SINGLE_TREATMENT_RE.test(clause)
-      && (FOLLOWUP_OMITTED_RE.test(clause) || SINGLE_TREATMENT_EXPLICIT_RE.test(clause))) {
-      finalChoice = 'single';
-    }
+    const withoutNegTwo = clause.replace(NEGATED_TWO_VISIT_RE, (m) => ' '.repeat(m.length));
+    const twoIdx = lastRegexMatchIndex(TWO_VISIT_EXPLICIT_RE, withoutNegTwo);
+    const singleIdx = NEGATED_SINGLE_TREATMENT_RE.test(clause)
+      ? -1
+      : Math.max(lastRegexMatchIndex(FOLLOWUP_OMITTED_RE, clause), lastRegexMatchIndex(SINGLE_TREATMENT_EXPLICIT_RE, clause));
+    if (twoIdx > singleIdx) finalChoice = 'two';
+    else if (singleIdx > twoIdx) finalChoice = 'single';
   }
   return finalChoice;
 }
@@ -886,6 +898,18 @@ function hasSpecialtyOneTimeHold({ callBookingCatalogRow, bookableCallServices =
   return hasExplicitOneTimeOnlyIntent({ extracted, v2Extraction, transcription });
 }
 
+function hasWdoMissingAssessmentHold({ callBookingCatalogRow, bookableCallServices = [], extracted = {}, v2Extraction = null, transcription = '' } = {}) {
+  if (callBookingCatalogRow || bookableCallServices.some(isAssessmentCatalogRow)) return false;
+  const rawPick = findServiceByName(bookableCallServices, extracted.specific_service_name)
+    || findServiceByName(bookableCallServices, extracted.matched_service)
+    || findServiceByName(bookableCallServices, extracted.requested_service)
+    || matchingKeywordRows(callBookingResolutionHaystack(extracted, transcription), bookableCallServices)[0]
+    || null;
+  const namedWdo = isWdoCatalogRow(rawPick)
+    || /\bwdo\b/i.test(String(extracted.specific_service_name || extracted.matched_service || ''));
+  return Boolean(namedWdo && hasExplicitWdoRefusal({ extracted, v2Extraction, transcription }));
+}
+
 function applyCatalogSelectionGuard({
   callBookingCatalogRow, bookableCallServices = [], extracted = {}, v2ApprovedExtraction = null, v2CanonicalExtraction = null, transcription = '', genericBookingUnbookable = false,
 } = {}) {
@@ -893,7 +917,8 @@ function applyCatalogSelectionGuard({
   const row = resolveWdoDeclinedCatalogFallback({
     callBookingCatalogRow, bookableCallServices, extracted, v2Extraction: effectiveV2, transcription,
   });
-  const wdoReplacementMissing = isWdoCatalogRow(callBookingCatalogRow) && !row;
+  const wdoReplacementMissing = (isWdoCatalogRow(callBookingCatalogRow) && !row)
+    || hasWdoMissingAssessmentHold({ callBookingCatalogRow: row, bookableCallServices, extracted, v2Extraction: effectiveV2, transcription });
   const specialtyHold = hasSpecialtyOneTimeHold({
     callBookingCatalogRow: row, bookableCallServices, extracted, v2Extraction: effectiveV2, transcription,
   });
@@ -1043,9 +1068,9 @@ function evidenceQuoteConfirmsRawAmount(evidence, raw, scaled) {
 
 // Recover STT hundred-dollar decimal mishears ("$2.50" -> $250, "$3.50" -> $350)
 // ONLY when scalar, structured entry, and evidence agree for ONE final accepted
-// staff quote tied to the booked catalog service, with no multi-service/property noise.
+// staff quote tied to a FIXED catalog row within ±30% range (or explicit hundred-dollar wording).
 function recoverSttDecimalCallPrice({ quotedPrice, catalogRow, v2Extraction = null } = {}) {
-  if (!catalogRow || catalogRow.billing_type !== 'one_time') return null;
+  if (!catalogRow || catalogRow.billing_type !== 'one_time' || catalogRow.pricing_type !== 'fixed') return null;
   const sr = v2Extraction ? v2Extraction.service_request : null;
   const entries = v2StructuredPriceEntries(sr);
   const entry = entries.length === 1 ? entries[0] : null;

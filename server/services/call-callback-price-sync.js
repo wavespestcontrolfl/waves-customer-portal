@@ -3,21 +3,20 @@
 /**
  * Propagate an agreed one-time price confirmed on a follow-up call back onto
  * the customer's recent un-invoiced call-booked visit (within 60 minutes), when
- * the follow-up call was not itself an active/failed booking attempt (call 73b3b240 -> f391c6b9).
+ * the follow-up call was NOT an active/incomplete booking attempt (call 73b3b240 -> f391c6b9).
  *
  * Rules:
  * - Requires V2 extraction with ONE final, staff-stated, caller-accepted one-time price
  *   (no V1 fallback, no unaccepted/tentative amounts, no multi-service/multi-property quotes).
- * - Excludes active/failed/held booking calls (scheduling.status === 'confirmed' or confirmed_start_at
- *   or failed/held appointmentResult; ignores bare `v2_routing_blocked` when no appointment was requested).
- * - Fetches ALL plausible recent future visits (including priced, callback, included follow-up, and
- *   recurring rows) and matches against visit-level service + visit-level address/property FIRST,
- *   before checking billing eligibility.
- * - Unnamed callbacks (`specific_service_name` absent) require BOTH explicit prior-visit pricing linkage
- *   AND compatible `primary_service_category` (never cross-category, never without service link).
- * - Locks the call row (`processing_token = procToken`) AND the target `scheduled_services` row with
- *   `FOR UPDATE` inside a customer-comms-locked transaction and rechecks ownership, customer,
- *   current service_id catalog row, visit address, eligibility, and 0 invoices BEFORE updating.
+ * - Excludes ALL active or unsuccessful booking requests (`confirmed`, `requested`, `offered`,
+ *   `reschedule_requested`, `ambiguous`, or `v2_routing_blocked` when a date/appointment existed).
+ * - Fetches ALL plausible recent future visits (including priced, staff-booked, callback,
+ *   included follow-up, and recurring rows) BEFORE checking billing/source eligibility.
+ * - Requires BOTH explicit prior-visit pricing linkage AND compatible service/category
+ *   (exact catalog ID/alias or canonical schema `primary_service_category` e.g. `pest_general`, `lawn_care`)
+ *   plus visit-level address/property agreement.
+ * - Locks `call_log` (`processing_token = procToken`) AND `scheduled_services` (`FOR UPDATE`) inside
+ *   a customer-comms-locked transaction, rechecking everything under lock before enabling invoicing.
  */
 
 const logger = require('./logger');
@@ -36,14 +35,18 @@ const { normalizeServiceKey } = require('../config/recurring-pest-programs');
 const { statesNewAddress } = require('./call-triage-flags');
 
 const CALLBACK_PRICE_WINDOW_MS = 60 * 60 * 1000;
-const EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE = /\b(?:price|quote|rate|total|cost|payment)\s+(?:for|on|of)\s+(?:the|that|my|our|earlier|this)\s+(?:visit|appointment|booking|service)\b|\bconfirm(?:ing)?\s+(?:the\s+)?(?:\$?\d[\d,.]*\s+)?(?:price|quote|total)\s+(?:for|on|of)\s+(?:that|the|today'?s|earlier)\s+(?:visit|appointment|booking|service)\b/i;
+const CALL_BOOKED_SOURCE_ACTIONS = new Set(['ai_call_pipeline', 'ai_call_pipeline_followup']);
+const BOOKING_ATTEMPT_STATUSES = new Set(['confirmed', 'requested', 'offered', 'reschedule_requested', 'ambiguous']);
+const EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE = /\b(?:price|quote|rate|total|cost|payment)\s+(?:for|on|of)\s+(?:the|that|my|our|earlier|this)\s+(?:visit|appointment|booking|service)\b|\bconfirm(?:ing)?\s+(?:the\s+)?(?:\$?\d[\d,.]*\s+)?(?:price|quote|total)\s+(?:for|on|of)\s+(?:that|the|today'?s|earlier)\s+(?:visit|appointment|booking|service)\b|\bearlier\s+(?:visit|appointment|booking)\b/i;
 
 const CATEGORY_KEY_PATTERNS = {
+  pest_general: /pest|cockroach|ant|spider|silverfish/i,
   general_pest: /pest|cockroach|ant|spider|silverfish/i,
   rodent: /rodent|rat|mice|mouse|trapping/i,
   wdo: /wdo|wood_destroying/i,
   termite: /termite/i,
   mosquito: /mosquito/i,
+  lawn_care: /lawn|turf|ornamental|tree/i,
   lawn: /lawn|turf|ornamental|tree/i,
   wildlife: /wildlife|trapping|exclusion/i,
 };
@@ -122,13 +125,9 @@ function requestedMatchesVisitExactly(requestedName, visitRow, catalogRows = [])
   return Boolean(resolved && String(resolved.id) === String(visitRow.service_id));
 }
 
-function callbackMatchesVisitService(v2Extraction, visitRow, transcription = '', { customer = null, catalogRows = [] } = {}) {
-  if (hasCompetingPropertyOrMultiWork(v2Extraction, visitRow, customer)) return false;
+function hasExplicitPriorVisitLink(v2Extraction, transcription) {
   const sr = v2Extraction?.service_request || {};
-  const requestedName = String(sr.specific_service_name || '').trim();
-  if (requestedName) return requestedMatchesVisitExactly(requestedName, visitRow, catalogRows);
-
-  if (!categoryCompatibleWithVisit(sr.primary_service_category, visitRow)) return false;
+  if (sr.service_intent === 'follow_up_existing_service') return true;
   const contextText = [
     sr.price?.evidence_quote,
     v2Extraction?.meta?.call_summary,
@@ -138,8 +137,19 @@ function callbackMatchesVisitService(v2Extraction, visitRow, transcription = '',
   return EXPLICIT_PRIOR_VISIT_PRICE_LINK_RE.test(contextText);
 }
 
+function callbackMatchesVisitService(v2Extraction, visitRow, transcription = '', { customer = null, catalogRows = [] } = {}) {
+  if (hasCompetingPropertyOrMultiWork(v2Extraction, visitRow, customer)) return false;
+  if (!hasExplicitPriorVisitLink(v2Extraction, transcription)) return false;
+
+  const sr = v2Extraction?.service_request || {};
+  const requestedName = String(sr.specific_service_name || '').trim();
+  if (requestedName) return requestedMatchesVisitExactly(requestedName, visitRow, catalogRows);
+  return categoryCompatibleWithVisit(sr.primary_service_category, visitRow);
+}
+
 function isVisitRowEligibleForPricing(row, { customerId = null, minDate = null } = {}) {
   if (!row || row.estimated_price != null) return false;
+  if (!CALL_BOOKED_SOURCE_ACTIONS.has(row.source_action)) return false;
   if (customerId && String(row.customer_id) !== String(customerId)) return false;
   if (minDate && row.scheduled_date && String(row.scheduled_date).slice(0, 10) < minDate) return false;
   if (!['pending', 'confirmed'].includes(row.status)) return false;
@@ -158,7 +168,7 @@ function isBookingAttemptCall(v2Extraction, appointmentResult, extracted = {}) {
     if (appointmentResult.dateTime || extracted?.appointment_confirmed) return true;
   }
   const sched = v2Extraction?.scheduling;
-  return Boolean(sched && (sched.status === 'confirmed' || sched.confirmed_start_at));
+  return Boolean(sched && (BOOKING_ATTEMPT_STATUSES.has(sched.status) || sched.confirmed_start_at || sched.proposed_start_at));
 }
 
 async function loadLockedVisitDetails(trx, lockedRow) {
@@ -193,7 +203,7 @@ async function lockAndVerifyVisitCandidate(trx, candidateId, { call, procToken, 
   const lockedRow = await trx('scheduled_services')
     .where({ id: candidateId })
     .forUpdate()
-    .first('id', 'customer_id', 'service_id', 'service_type', 'scheduled_date', 'status',
+    .first('id', 'customer_id', 'service_id', 'service_type', 'scheduled_date', 'status', 'source_action',
       'estimated_price', 'is_callback', 'followup_included', 'is_recurring', 'recurring_parent_id',
       'property_id', 'service_address_line1', 'service_address_line2', 'service_address_city',
       'service_address_zip', 'internal_notes');
@@ -245,8 +255,8 @@ async function propagateCallbackPriceToRecentVisit({
       .where({ id: customerId })
       .first('id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
 
-    // Fetch ALL plausible recent future visits BEFORE filtering out priced or covered/recurring
-    // visits, so confirming an already-priced or included visit never spills onto an unpriced sibling.
+    // Fetch ALL recent future visits (including staff-booked, priced, covered, and recurring rows)
+    // BEFORE filtering eligibility so competing siblings prevent misattribution.
     const candidates = await trx('scheduled_services as ss')
       .leftJoin('services as s', 'ss.service_id', 's.id')
       .leftJoin('customer_properties as cp', 'ss.property_id', 'cp.id')
@@ -254,11 +264,10 @@ async function propagateCallbackPriceToRecentVisit({
       .where('ss.customer_id', customerId)
       .whereIn('ss.status', ['pending', 'confirmed'])
       .where('ss.scheduled_date', '>=', todayET)
-      .whereIn('ss.source_action', ['ai_call_pipeline', 'ai_call_pipeline_followup'])
       .whereRaw('COALESCE(cl.created_at, ss.created_at) >= ?', [windowStartAt])
       .whereRaw('COALESCE(cl.created_at, ss.created_at) <= ?', [callAt])
       .orderByRaw('COALESCE(cl.created_at, ss.created_at) DESC')
-      .select('ss.id', 'ss.customer_id', 'ss.service_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status',
+      .select('ss.id', 'ss.customer_id', 'ss.service_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status', 'ss.source_action',
         'ss.estimated_price', 'ss.is_callback', 'ss.followup_included', 'ss.is_recurring', 'ss.recurring_parent_id',
         'ss.property_id', 'ss.service_address_line1', 'ss.service_address_line2', 'ss.service_address_city', 'ss.service_address_zip',
         'cp.address_line1 as prop_line1', 'cp.address_line2 as prop_line2', 'cp.city as prop_city', 'cp.state as prop_state', 'cp.zip as prop_zip',
