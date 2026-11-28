@@ -25673,8 +25673,17 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
 
 // The series anchor + accepted-estimate provenance for an on-site switch.
 // Shared by the preview and the supersede/undo writes so "is this a legit
-// post-accept switch?" has one answer. Returns { ok, visit, anchor,
-// estimateId } or { ok: false, status, blockReason }.
+function parseEstimateDataJson(raw) {
+  if (!raw) return null;
+  if (typeof raw !== 'string') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function estimatePrepayNoPercent(estimateData) {
+  return estimateData
+    ? require('../services/estimate-converter').estimateHasNoYear1PrepayPercent(estimateData)
+    : false;
+}
 async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   const visit = await conn('scheduled_services')
     .where({ id: scheduledServiceId })
@@ -25739,7 +25748,7 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   try {
     estimate = await conn('estimates')
       .where({ id: anchor.source_estimate_id })
-      .first('id', 'status', 'accepted_at');
+      .first('id', 'status', 'accepted_at', 'estimate_data');
   } catch (err) {
     logger.warn(`[schedule:prepay-switch] estimate lookup failed for ${anchor.id}: ${err.message} — refusing`);
     return { ok: false, status: 409, blockReason: 'couldn’t confirm the linked quote’s status — refresh and try again' };
@@ -25747,12 +25756,14 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   if (!estimate || !estimate.accepted_at || String(estimate.status || '').toLowerCase() !== 'accepted') {
     return { ok: false, status: 409, blockReason: 'is handled by the linked quote — accept it as annual prepay from the estimate instead' };
   }
+  const estimateData = parseEstimateDataJson(estimate.estimate_data);
   return {
     ok: true,
     visit,
     anchor,
     customerId: String(anchor.customer_id || visit.customer_id || ''),
     estimateId: String(anchor.source_estimate_id),
+    estimateData,
     visitIds: seriesIds,
   };
 }
@@ -25893,6 +25904,7 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // supersede match is bound to, so only ITS accept-minted invoice can be
     // replaced.
     let anchorEstimateId = null;
+    let anchorEstimateData = null;
     if (scheduledServiceId) {
       const visit = await conn('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -25935,6 +25947,7 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         if (!target.ok) return blocked(target.blockReason);
         isAcceptedSwitch = true;
         anchorEstimateId = target.estimateId;
+        anchorEstimateData = target.estimateData;
         supersedeVisitIds = target.visitIds;
       }
       // Fail CLOSED on an unreadable add-on count (Codex #3161 r2 P2):
@@ -26279,7 +26292,13 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
       .filter((li) => RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
       .reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
     const unwaivedSetupFee = directSetupFee > 0 ? directSetupFee : supersededRodentSetup;
-    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
+    const pricing = computeSeriesPrepayPricing({
+      perVisit,
+      visitsPerYear,
+      planClass,
+      unwaivedSetupFee,
+      noYear1PrepayPercent: estimatePrepayNoPercent(anchorEstimateData),
+    });
     // payPage: a bait-station setup is carried onto the prepay, never waived,
     // which the two-option block does not explain. Those plans switch through
     // the office.

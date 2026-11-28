@@ -194,6 +194,16 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey, requeste
   return { added: false, updatedInputs, reason: 'unsupported_service' };
 }
 
+function savedServiceKnobReplayOverrides(estData) {
+  const knobReplay = require('./estimate-tree-shrub-knob-replay');
+  const mistingKnobs = knobReplay.mistingKnobSignalForReplay(estData);
+  return {
+    ...require('./estimate-flea-size-replay').fleaSizeReplayOverrides(estData),
+    ...(mistingKnobs ? { mistingPricingKnobs: mistingKnobs } : {}),
+    ...knobReplay.termiticideReplayOverrides(estData),
+  };
+}
+
 async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
   const serviceKey = normalizeRequestedServiceKey(requestedService);
   const serviceLabel = requestedServiceLabel(serviceKey);
@@ -251,13 +261,19 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
   for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyWdoFlat', 'legacyOneTimePestBuffer', 'legacyPestAboveTable', 'legacyWholeHomeSizing', 'legacyLawnOneLane', 'legacySpecialty1126', 'specialty1126CurrentServices', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay']) {
     if (savedRules[key] !== undefined) updatedInputs[key] = savedRules[key];
   }
+  // Preserve the original quote's Year-1 prepay decision explicitly (boolean so
+  // an unstamped pre-gate quote keeps 5% terms even after gate rollout).
+  updatedInputs.year1PrepayNoPercent = savedRules.year1PrepayNoPercent === true;
   // The service being added was never quoted: it prices under the current rules, the existing lines keep theirs.
   updatedInputs.addedServiceKeys = [serviceKey];
 
   try {
-    // A quoted flea package keeps the size rule it was sent under (estimate-flea-size-replay); the signal rides the engine call
-    // only, so the stored draft inputs stay clean. The area add-on and termite knobs are not replayed on this path.
-    const v1Result = generateEstimate({ ...updatedInputs, ...require('./estimate-flea-size-replay').fleaSizeReplayOverrides(estData) });
+    // Existing flea, misting, and termiticide lines keep the quote-time knobs/surcharges they were priced with;
+    // these ride the engine call only so stored inputs stay clean.
+    const v1Result = generateEstimate({
+      ...updatedInputs,
+      ...savedServiceKnobReplayOverrides(estData),
+    });
     const legacyResult = mapV1ToLegacyShape(v1Result);
     const newMonthly = Number(legacyResult?.recurring?.monthlyTotal || 0);
     const newAnnual = Number(legacyResult?.recurring?.annualAfterDiscount || newMonthly * 12);
@@ -267,7 +283,7 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
     const draftEstimateData = removeSendSnapshotPricingBundle({
       ...estData,
       // The replay-only price-rule keys ride the saved result's stamp, never the stored inputs.
-      inputs: (({ addedServiceKeys: _a, legacyPricingRules: _l, legacyTwoStoryRoof: _t, legacyWdoFlat: _wf, legacyOneTimePestBuffer: _w, legacyPestAboveTable: _pa, legacyWholeHomeSizing: _wh, legacyLawnOneLane: _ll, legacySpecialty1126: _s, specialty1126CurrentServices: _y, oneTimePestCurrentServices: _o, currentRulesServices: _c, palmMinPerVisitReplay: _p, ...rest }) => rest)(updatedInputs),
+      inputs: (({ addedServiceKeys: _a, legacyPricingRules: _l, legacyTwoStoryRoof: _t, legacyWdoFlat: _wf, legacyOneTimePestBuffer: _w, legacyPestAboveTable: _pa, legacyWholeHomeSizing: _wh, legacyLawnOneLane: _ll, legacySpecialty1126: _s, specialty1126CurrentServices: _y, oneTimePestCurrentServices: _o, currentRulesServices: _c, palmMinPerVisitReplay: _p, year1PrepayNoPercent: _yp, ...rest }) => rest)(updatedInputs),
       result: legacyResult,
       baseMonthly: newBaseMonthly > 0 ? newBaseMonthly : (estData?.baseMonthly || 0),
       onetimeTotalBase: newOneTime,
