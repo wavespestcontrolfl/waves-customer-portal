@@ -67,12 +67,12 @@ const OFFICE_SLUGS = ['bradenton-fl', 'sarasota-fl', 'venice-fl', 'parrish-fl'];
 // signup-runner location id → office slug. The runner's CITY_TO_LOCATION collapses
 // every SWFL city (incl. service-area-only ones like North Port) to one of these
 // four location ids (join key: googlePlaceId — waves-offices.ts / locations.js).
-const LOCATION_TO_OFFICE_SLUG = {
-  bradenton: 'bradenton-fl',
-  parrish: 'parrish-fl',
-  sarasota: 'sarasota-fl',
-  venice: 'venice-fl',
-};
+const LOCATION_TO_OFFICE_SLUG = new Map([
+  ['bradenton', 'bradenton-fl'],
+  ['parrish', 'parrish-fl'],
+  ['sarasota', 'sarasota-fl'],
+  ['venice', 'venice-fl'],
+]);
 
 const URL_PATH_OFFICE_RULES = [
   { slug: 'bradenton-fl', re: /(?:^|[-_/])bradenton(?:$|[-_/])/ },
@@ -103,11 +103,13 @@ const NON_OFFICE_CITY_RE = SERVICE_AREA_CITY_PATTERN
 function urlHostAndPath(rawUrl) {
   let u;
   try { u = new URL(rawUrl); } catch { return null; }
+  if (u.protocol !== 'https:' || /%2f|%5c/i.test(u.pathname)) return null;
   let decodedPath;
   try { decodedPath = decodeURIComponent(u.pathname); } catch { return null; }
   return {
     host: u.hostname.toLowerCase().replace(/^www\./, ''),
     path: decodedPath.toLowerCase().replace(/\s+/g, '-').replace(/\/+$/, ''),
+    search: u.search,
   };
 }
 
@@ -131,7 +133,7 @@ function officeSlugForRow(location, rawUrl) {
   const pathMatches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   if (pathMatches.length > 1) return null;
 
-  const stored = location && location !== 'default' ? LOCATION_TO_OFFICE_SLUG[location] || null : null;
+  const stored = location && location !== 'default' ? LOCATION_TO_OFFICE_SLUG.get(location) || null : null;
   if (location && location !== 'default' && !stored) return null;
 
   if (explicit) {
@@ -186,14 +188,11 @@ function allowedHostRule(host) {
  * and no exclusion override.
  */
 function sameAsRejectReason(rawUrl) {
-  let u;
-  try { u = new URL(rawUrl); } catch { return 'invalid'; }
-  if (u.protocol !== 'https:') return 'invalid';
-  const host = u.hostname.toLowerCase().replace(/^www\./, '');
-  const path = u.pathname.toLowerCase().replace(/\/+$/, '');
-  const hostPathRe = allowedHostRule(host);
-  if (!hostPathRe || SAMEAS_EXCLUDED_PAGES.has(host + path)) return 'excluded';
-  if (u.search || !hostPathRe.test(path)) return 'not_profile';
+  const hp = urlHostAndPath(rawUrl);
+  if (!hp) return 'invalid';
+  const hostPathRe = allowedHostRule(hp.host);
+  if (!hostPathRe || SAMEAS_EXCLUDED_PAGES.has(hp.host + hp.path)) return 'excluded';
+  if (hp.search || !hostPathRe.test(hp.path)) return 'not_profile';
   return null;
 }
 
@@ -215,17 +214,15 @@ async function getVerifiedProfilesByOffice() {
   let refused = 0;
   for (const r of rows) {
     const raw = String(r.live_url || '').trim();
-    if (!/^https:\/\/\S+$/.test(raw)) continue;
     const noFrag = raw.split('#')[0];
     const base = noFrag.split('?')[0];
     if (sameAsRejectReason(base)) { refused++; continue; }
     const hp = urlHostAndPath(base);
-    if (!hp) { refused++; continue; }
     const key = `${hp.host}${hp.path}`;
     const entry = byNormalized.get(key) || { claims: new Set(), resolved: new Set(), urls: new Set() };
     byNormalized.set(key, entry);
     if (r.location && r.location !== 'default') {
-      entry.claims.add(LOCATION_TO_OFFICE_SLUG[r.location] || `unknown:${r.location}`);
+      entry.claims.add(LOCATION_TO_OFFICE_SLUG.get(r.location) || `unknown:${r.location}`);
     }
     // Query variants participate only in cross-office conflict checks; only
     // query-free URLs (with any #fragment stripped) may resolve or ship.
@@ -235,8 +232,7 @@ async function getVerifiedProfilesByOffice() {
       if (slug) entry.resolved.add(slug);
     }
   }
-  const byOffice = {};
-  for (const slug of OFFICE_SLUGS) byOffice[slug] = new Set();
+  const byOffice = Object.fromEntries(OFFICE_SLUGS.map((slug) => [slug, new Set()]));
   for (const entry of byNormalized.values()) {
     if (!entry.urls.size) { refused++; continue; }
     const [slug] = entry.resolved;

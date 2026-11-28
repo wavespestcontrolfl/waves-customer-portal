@@ -87,8 +87,9 @@ describe('sameAsRejectReason', () => {
     expect(sameAsRejectReason('https://citysquares.com/articles/waves-pest-control-sarasota')).toBe('not_profile');
   });
 
-  test('non-https or unparseable URL is invalid', () => {
+  test('non-https, encoded separator, or unparseable URL is invalid', () => {
     expect(sameAsRejectReason('http://citysquares.com/b/waves-pest-control-venice-26858800')).toBe('invalid');
+    expect(sameAsRejectReason('https://nextdoor.com/pages/waves-pest-control-sarasota%2Fposts%2F123')).toBe('invalid');
     expect(sameAsRejectReason('not a url')).toBe('invalid');
   });
 });
@@ -136,6 +137,8 @@ describe('getVerifiedProfilesByOffice', () => {
       { live_url: 'https://citysquares.com/b/waves-pest-control-sarasota-99999', location: 'bradenton' },
       // Non-profile Nextdoor post mentioning waves and sarasota -> rejected
       { live_url: 'https://nextdoor.com/p/waves-pest-control-sarasota-fl/', location: null },
+      // Inherited prototype property name as location -> safely dropped without throwing
+      { live_url: 'https://citysquares.com/b/waves-pest-control-33333', location: 'constructor' },
       // Explicit non-default location on allowlisted host with non-conflicting URL
       { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: 'venice' },
       // Cityless profile claimed by multiple offices -> omitted from both
