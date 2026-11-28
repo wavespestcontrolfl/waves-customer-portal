@@ -10951,7 +10951,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
 
 
-        <footer className="sr-footer">
+        <ServiceReportFooter live={mode === 'live'}>
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
           {/* Owner ask 2026-09-28: every report links to the public Products &
               Safety page. The footer renders on every report, so assessment-
@@ -10982,10 +10982,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               hash chain, and a chain over only a hidden photo (e.g. the gauge
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
-        </footer>
+        </ServiceReportFooter>
       </CustomerColumn>
     </div>
   );
+}
+
+function ServiceReportFooter({ live, children }) {
+  const Tag = live ? 'div' : 'footer';
+  return <Tag className="sr-footer">{children}</Tag>;
 }
 
 function reportDataUrl(token, mode, pinnedAssessment) {

@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { createContext, useContext, useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { isNativeApp, hasSessionToken, nativePlatform } from '../native/platform';
 import { authenticateBiometric, NEEDS_PHONE_CODE } from '../native/biometric';
 import { registerBackButtonHandler, minimizeOrExitAndroidApp } from '../native/nativeBackButton';
@@ -43,6 +43,7 @@ const GLASS_ORBS = [
   ['62%', '22%', 460, 'rgba(56,170,225,.34)'],
   ['22%', '62%', 420, 'rgba(240,165,0,.18)'],
   ['72%', '74%', 340, 'rgba(4,57,94,.28)'],
+  ['44%', '40%', 220, 'rgba(120,200,255,.28)'],
 ];
 
 const LOCK_KEYFRAMES = `
@@ -368,7 +369,7 @@ export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
   // but marks ownership: if a lazy page's useGlassSurface mounts while the
   // lock is up, applyGlassScene overwrites the value, and cleanup sees the
   // attribute is no longer ours and leaves the page's theme in place.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!locked) return undefined;
     const html = document.documentElement;
     if (html.hasAttribute('data-glass-theme')) return undefined;
@@ -457,7 +458,7 @@ export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
                   position: 'relative', width: '100%', minHeight: 52,
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                   borderRadius: 999, border: 'none', cursor: 'pointer',
-                  fontFamily: FONTS.ui, fontSize: 17, fontWeight: 600,
+                  fontFamily: FONTS.ui, fontSize: 16, fontWeight: 600,
                   // fallbacks only — the data-glass-accent rules repaint these
                   background: COLORS.yellow, color: COLORS.glassNavy,
                   opacity: checking || signingOut ? 0.65 : 1,

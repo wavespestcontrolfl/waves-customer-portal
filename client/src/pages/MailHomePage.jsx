@@ -374,7 +374,7 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged, o
     return (
       <BrandCard style={{ marginTop: SP.md }}>
         {notice ? <p role="alert" style={noticeStyle}>{notice}</p> : null}
-        <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>Call us to pick a time</h2>
+        <h2 style={{ ...docHeading(2), marginBottom: SP.sm }}>Call us to pick a time</h2>
         <CallButton />
       </BrandCard>
     );
@@ -395,7 +395,7 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged, o
     const fieldError = (key) => (fieldErrors[key] ? <p id={`home-book-${key}-error`} role="alert" style={fieldErrorStyle}>{fieldErrors[key]}</p> : null);
     return (
       <BrandCard style={{ marginTop: SP.md }}>
-        <h2 style={{ ...docHeading(3), marginBottom: SP.xxs }}>
+        <h2 style={{ ...docHeading(2), marginBottom: SP.xxs }}>
           {dayLongLabel(picked.date)}, {slotLabel(picked)}
         </h2>
         <p style={{ margin: 0, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
@@ -432,18 +432,18 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged, o
   const dayOffers = times.offers.filter((o) => o.date === day);
   return (
     <BrandCard style={{ marginTop: SP.md }}>
-      <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>Pick your first visit</h2>
+      <h2 style={{ ...docHeading(2), marginBottom: SP.sm }}>Pick your first visit</h2>
       {notice ? <p role="alert" style={noticeStyle}>{notice}</p> : null}
       <div role="group" aria-label="Day" style={{ display: 'flex', gap: SP.xs, overflowX: 'auto', paddingBottom: SP.xxs }}>
         {days.map((d) => (
-          <button key={d} type="button" aria-pressed={d === day} onClick={() => setDay(d)} style={chipStyle(d === day)}>
+          <button key={d} type="button" data-glass={d === day ? undefined : 'chip'} aria-pressed={d === day} onClick={() => setDay(d)} style={chipStyle(d === day)}>
             {dayChipLabel(d)}
           </button>
         ))}
       </div>
       <div role="group" aria-label="Time" style={{ marginTop: SP.sm, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: SP.xs }}>
         {dayOffers.map((o) => (
-          <button key={`${o.date}-${o.start_time}-${o.slot_sig}`} type="button" onClick={() => { setNotice(null); setPicked(o); }} style={slotStyle}>
+          <button key={`${o.date}-${o.start_time}-${o.slot_sig}`} type="button" data-glass="chip" onClick={() => { setNotice(null); setPicked(o); }} style={slotStyle}>
             {slotLabel(o)}
           </button>
         ))}
@@ -512,7 +512,7 @@ export default function MailHomePage() {
           <>
             {/* AGENTS.md "Per application" price copy: the per-application price is the price; the month average sits
                 beneath it, smaller. A quarterly plan is 4 applications a year. */}
-            <div data-testid="application-price" style={{ fontSize: 44, fontWeight: FW.bold, lineHeight: LH.display, color: DOC.ink, letterSpacing: '-0.02em' }}>
+            <div data-testid="application-price" style={{ fontSize: FS.h1, fontWeight: FW.bold, lineHeight: LH.display, color: DOC.ink, letterSpacing: '-0.02em' }}>
               {formatMoney(perApplication(cardPrice.annual))}
             </div>
             <p style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
@@ -545,7 +545,7 @@ export default function MailHomePage() {
       {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} onPriceChanged={() => setPriceStale(true)} onBookedLower={(booked) => setBookedPrice({ token, price: booked })} /> : null}
 
       <BrandCard style={{ marginTop: SP.md }}>
-        <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>What the plan includes</h2>
+        <h2 style={{ ...docHeading(2), marginBottom: SP.sm }}>What the plan includes</h2>
         <ul style={{ margin: 0, paddingLeft: SP.lg, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
           {PLAN_LINES.map((line) => (
             <li key={line} style={{ marginTop: SP.xs }}>{line}</li>

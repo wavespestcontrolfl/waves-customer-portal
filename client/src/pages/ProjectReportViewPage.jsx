@@ -789,7 +789,7 @@ export default function ProjectReportViewPage() {
 
         {/* Closing strip — owner ruling 2026-07-16: every report ends with the
             service report's footer line, not the Text Us / Call Us CTA. */}
-        <footer style={{ marginTop: 20, padding: '16px 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, textAlign: 'center' }}>
+        <div style={{ marginTop: 20, padding: '16px 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, textAlign: 'center' }}>
           Questions about today&apos;s service? Ask Waves in your portal or call {WAVES_PHONE_DISPLAY}.
           {/* Owner ask 2026-09-28: every report links to the public Products &
               Safety page; the closing strip renders on every project report. */}
@@ -798,7 +798,7 @@ export default function ProjectReportViewPage() {
             See every product we use and our safety protocol
           </a>.
           {' '}This report is provided for your records.
-        </footer>
+        </div>
 
       </CustomerColumn>
     </div>

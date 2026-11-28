@@ -43,7 +43,7 @@ const TERMS_URL = 'https://wavespestcontrol.com/terms-of-service/';
 // the footer renders identically whether or not the theme is mounted).
 const GLASS_INK = '#04395E';
 const GLASS_BODY = 'rgba(12, 21, 40, 0.7)';
-const GLASS_MUTED = 'rgba(12, 21, 40, 0.52)';
+const GLASS_MUTED = '#3F4A65';
 
 // Exported for reuse (CardPage) — single source of the official profiles;
 // don't fork another copy of this list.
@@ -100,10 +100,10 @@ function StoreBadges({ ctaColor }) {
       {/* Badges sit side by side (owner: inline, not stacked); flexWrap
           stacks them only when the column is too narrow for both. */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', justifyContent: 'center' }}>
-        <a href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download on the App Store" style={{ display: 'inline-block' }}>
+        <a href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download on the App Store" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: 44 }}>
           <AppStoreBadgeSvg fill={GLASS_INK} />
         </a>
-        <a href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Get it on Google Play" style={{ display: 'inline-block' }}>
+        <a href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Get it on Google Play" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: 44 }}>
           <GooglePlayBadgeSvg fill={GLASS_INK} />
         </a>
       </div>
@@ -133,7 +133,7 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginBottom: 16 }}>
           {SOCIAL_ICON_PATHS.map(s => (
             <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={s.name} style={{
-              width: 36, height: 36, borderRadius: '50%',
+              width: 44, height: 44, borderRadius: '50%',
               background: CUSTOMER_SURFACE.chrome, border: `1px solid ${CUSTOMER_SURFACE.border}`, color: B.navy,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               textDecoration: 'none',
@@ -276,7 +276,7 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
         {socials.map(s => (
           <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" title={s.name} aria-label={s.name} style={{
-            width: 36, height: 36, borderRadius: '50%',
+            width: 44, height: 44, borderRadius: '50%',
             background: socialBg, color: socialFg,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             textDecoration: 'none',

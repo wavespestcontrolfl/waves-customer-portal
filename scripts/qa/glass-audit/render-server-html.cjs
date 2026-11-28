@@ -272,6 +272,17 @@ function renderNewsletterLanding() {
     'newsletter-feedback-thanks-positive': R('post /feedback/:token/:reaction', 'Thanks — that helps! 🌊', { resolved: positive }),
   };
   for (const [name, { heading, bodyHtml }] of Object.entries(pages)) write(name, renderConfirmPage(heading, bodyHtml));
+
+  // Public email-resubscribe confirmation landing (GET /api/public/email-resubscribe/:token).
+  const resubCopy = require(path.join(root, 'server/services/email-resubscribe-copy'));
+  const resubBody = `
+    <p>${resubCopy.PAGE.confirmBody(`<span class="email">${emailAddr}</span>`)}</p>
+    <form method="POST" action="/api/public/email-resubscribe/${tokenSafe}">
+      <button type="submit" class="btn">${resubCopy.PAGE.confirmButton}</button>
+    </form>
+    <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">${resubCopy.PAGE.confirmNote}</p>
+  `;
+  write('email-resubscribe', renderConfirmPage(resubCopy.PAGE.confirmHeading, resubBody));
 }
 
 fs.mkdirSync(outDir, { recursive: true });
