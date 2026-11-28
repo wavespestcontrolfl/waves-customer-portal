@@ -2214,13 +2214,12 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
   const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000, mixingOrder, bermudaMixingOrder, mixRequired, bermudaRequired } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
-  const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
-  const procedureTank = procedureCalibrationTank(calibrations, facts.rig, facts.technicianId, carrierGalPer1000);
+  const tank = procedureCalibrationTank(calibrations, facts.rig, facts.technicianId, carrierGalPer1000);
   const procedureEntries = [
     { name: facts.serviceType, serviceKey: facts.serviceKey, procedure, lines: lines.filter((l) => !l.source) },
     ...addons.map((addon) => ({ name: addon.name, serviceKey: addon.serviceKey, procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
   ];
-  attachMixCalibrationWarnings(procedureEntries, procedureTank, facts.rig, systems);
+  attachMixCalibrationWarnings(procedureEntries, tank, facts.rig, systems);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
   const lineProducts = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];
   const products = mergeSprayCheckProducts(lineProducts, procedureEntries, catalog);
@@ -2325,7 +2324,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
         .leftJoin('services as s', 'ss.service_id', 's.id')
         .where('ss.id', serviceId)
         .select(
-          'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
+          'ss.customer_id', 'ss.technician_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
           'ss.followup_source_service_id', 'ss.recurring_parent_id', 'ss.recurring_ongoing', 'ss.area_addon_scope',
           // The primary line's catalog identity, by the card's own rule.
           dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
@@ -2364,7 +2363,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   const [rigs, systems] = await Promise.all([loadRigCalibrations(dbh), equipmentSystemId ? loadRigSystems(dbh, { strict: true }) : []]);
   const pickedRig = equipmentSystemId ? rigOptions(systems).find((r) => r.equipmentSystemId === equipmentSystemId) || null : null;
   if (equipmentSystemId && !pickedRig) return null;
-  const tank = tankFromCalibrations(pickedRig ? viewerRows(rigRows(rigs, { equipmentSystemId }), technicianId) : rigRows(rigs, rigAssignment(svc)), lawnPlan?.plan?.mixCalculator?.carrierGalPer1000);
+  const tank = mixTankForRequest(rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback: lawnPlan?.plan?.mixCalculator?.carrierGalPer1000 });
   const volume = pickedRig ? pickedRig.tankCapacityGal : gallons;
   // The lawn plan governs every product it names (rate, blocks, approvals)
   // even when a non-lawn add-on's line names it too — Iron Plus on a lawn
@@ -2538,9 +2537,11 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
 
 // Reuse the tank calculator's carrier-volume and one-spray area-cap checks for every
 // procedure mix row (including Tree & Shrub fieldGuide.mixRates) when an appointment names an assigned sprayer rig.
-const SPRAY_VOL_SPEC_RE = /(?:\b(at\s+least|at\s+most|no\s+more\s+than|up\s+to|min(?:imum)?|max(?:imum)?)(?:\s+of)?\s+|(?<![\d.]))(\d+(?:\.\d+)?)\s*(?:(?:finished|mixed|diluted)\s+)?gal(?:lon)?s?\s+(?:of\s+(?:mix|water|finished\s+spray|spray)\s+)?(?:per|for)\s+(\d+(?:,\d+)?)\s*sq\.?\s*ft/ig;
-const MAX_VOL_QUAL_RE = /^(?:at\s+most|no\s+more\s+than|up\s+to|max(?:imum)?)$/i;
-const MIN_VOL_QUAL_RE = /^(?:at\s+least|min(?:imum)?)$/i;
+const SQFT_PER_ACRE = 43560;
+const SPRAY_VOL_SPEC_RE = /(?:(\b(?:at\s+least|at\s+most|no\s+more\s+than|up\s+to|min(?:imum)?|max(?:imum)?|about|approx(?:\.|imately)?|around)(?:\s+of)?\s+|~\s*)|(?<![\d.]))(\d+(?:\.\d+)?)\s*(?:(?:finished|mixed|diluted)\s+)?gal(?:lon)?s?\s+(?:of\s+(?:mix|water|finished\s+spray|spray)\s+)?(?:per|for)\s+(?:(\d+(?:,\d+)?)\s*sq\.?\s*ft|(acre)\b)/ig;
+const MAX_VOL_QUAL_RE = /^(?:at\s+most|no\s+more\s+than|up\s+to|max(?:imum)?)(?:\s+of)?$/i;
+const MIN_VOL_QUAL_RE = /^(?:at\s+least|min(?:imum)?)(?:\s+of)?$/i;
+const APPROX_VOL_QUAL_RE = /^(?:about|approx(?:\.|imately)?|around|~)$/i;
 const roundDbPrecision = (v) => Math.round(Number(v) * 1000) / 1000;
 const SPRAYER_KEY_ALIASES = { bg: 'bg_1_gal', flowzone: 'flowzone_4_gal', rig: 'rig_100_gal' };
 const normalizeSprayerKey = (key) => SPRAYER_KEY_ALIASES[key] || key;
@@ -2555,19 +2556,25 @@ function procedureCalibrationTank(calibrations, rig, technicianId, fallbackCarri
   return tankFromCalibrations(scoped, fallbackCarrierGalPer1000);
 }
 
+function mixTankForRequest(rigs, { pickedRig, equipmentSystemId, technicianId, svc, fallback }) {
+  if (pickedRig) return tankFromCalibrations(viewerRows(rigRows(rigs, { equipmentSystemId }), technicianId), fallback);
+  return procedureCalibrationTank(rigs, rigAssignment(svc), svc.technician_id || technicianId || null, fallback);
+}
+
 function parseSprayVolumeSpecs(text) {
-  const out = { exact: null, min: null, max: null };
+  const out = { exact: null, min: null, max: null, approx: null };
   const str = String(text || '');
   SPRAY_VOL_SPEC_RE.lastIndex = 0;
   let m;
   while ((m = SPRAY_VOL_SPEC_RE.exec(str)) !== null) {
     const gal = Number(m[2]);
-    const sqft = Number(String(m[3]).replace(/,/g, ''));
+    const sqft = m[4] ? SQFT_PER_ACRE : Number(String(m[3]).replace(/,/g, ''));
     if (!(gal > 0 && sqft > 0)) continue;
     const per1000 = roundDbPrecision((gal * 1000) / sqft);
     const qual = String(m[1] || '').trim();
     if (MAX_VOL_QUAL_RE.test(qual)) out.max = out.max == null ? per1000 : Math.min(out.max, per1000);
     else if (MIN_VOL_QUAL_RE.test(qual)) out.min = out.min == null ? per1000 : Math.max(out.min, per1000);
+    else if (APPROX_VOL_QUAL_RE.test(qual)) out.approx = out.approx ?? per1000;
     else if (out.exact == null) out.exact = per1000;
   }
   return out;
@@ -2620,10 +2627,13 @@ function attachFieldGuideWarnings(procedures, { blocks, catalog, products, spray
         || fieldGuideLineProduct(name, products);
       const verdict = sprayCheck.verdicts.find(item => item.productId === row?.id);
       const baseWarning = fieldGuideMixWarning({ blocks, row, verdict, labelSource: row ? labelSources[row.id] : null });
-      const calWarnings = mixRows
-        .filter((mr) => mr.product === product.name && Array.isArray(mr.calibrationWarnings))
-        .flatMap((mr) => mr.calibrationWarnings);
-      const parts = [...new Set([baseWarning, ...calWarnings].filter(Boolean))];
+      const rowWarnings = mixRows
+        .filter((mr) => mr.product === product.name)
+        .flatMap((mr) => [mr.labelWarning, ...(Array.isArray(mr.calibrationWarnings) ? mr.calibrationWarnings : [])]);
+      const rawParts = [baseWarning, ...rowWarnings].filter(Boolean);
+      const parts = rawParts.filter(
+        (s, i) => !rawParts.some((other, j) => j !== i && (other === s ? j < i : other.includes(s))),
+      );
       if (parts.length) product.mixWarning = parts.join(' · ');
     }
   }

@@ -3851,5 +3851,92 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const sharedCal = [{ id: 'cal-shared', equipment_system_id: 'sys-fz', technician_id: null, system_name: 'FlowZone #1', carrier_gal_per_1000: 1, tank_capacity_gal: 4 }];
     expect(jobCard._test.procedureCalibrationTank(sharedCal, { equipmentSystemId: 'sys-fz', calibrationId: null }, 'tech-a')).toMatchObject({ source: 'rig', carrierGalPer1000: 1 });
     expect(jobCard._test.procedureCalibrationTank(otherTechCals, { equipmentSystemId: 'sys-fz', calibrationId: null }, 'tech-b')).toMatchObject({ source: 'rig', carrierGalPer1000: 1 });
+
+    // Approximate spray volumes ("about 1.5 gal per 1,000 sq ft") stay distinct from exact requirements:
+    // 1.55 gal/1,000 under Crosscheck's 1 fl oz cap stays clean while 2.0 gal/1,000 triggers the explicit area cap.
+    const crosscheckRow = () => ({
+      product: 'LESCO Crosscheck Plus',
+      sprayers: ['bg_1_gal', 'flowzone_4_gal'],
+      perGallon: { amount: 0.625, unit: 'fl oz' },
+      sprayVolume: 'about 1.5 gal per 1,000 sq ft',
+      limit: '1 fl oz per 1,000 sq ft at most; 7 days between applications',
+    });
+    const approxOk = { mixRates: [crosscheckRow()] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: approxOk, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 1.55 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(approxOk.mixRates[0].calibrationWarnings).toBeUndefined();
+
+    const approxOverCap = { mixRates: [crosscheckRow()] };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: approxOverCap, lines: [] }],
+      { source: 'rig', systemName: 'FlowZone #1', tankCapacityGal: 4, carrierGalPer1000: 2 },
+      { equipmentSystemId: 'sys-fz' },
+      [{ id: 'sys-fz', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: 4 }],
+    );
+    expect(approxOverCap.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('allows no more than 1 fl oz per 1,000 sq ft in one spray'),
+    ]);
+
+    // Per-acre carrier minimums (DiPel: "At least 50 gal of mix per acre" ≈ 1.148 gal/1,000 sq ft) warn below and pass above.
+    const dipelRow = () => ({
+      product: 'DiPel PRO DF',
+      dose: '0.2 to 0.7 oz per 1,000 sq ft',
+      limit: 'Measure by area, not by gallons sprayed. At least 50 gal of mix per acre.',
+    });
+    const dipelLow = { fieldGuide: { mixRates: [dipelRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: dipelLow, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 1 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(dipelLow.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('below the label minimum of 1.15 gal per 1,000 sq ft'),
+    ]);
+    const dipelOk = { fieldGuide: { mixRates: [dipelRow()] } };
+    jobCard._test.attachMixCalibrationWarnings(
+      [{ procedure: dipelOk, lines: [] }],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 1.5 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(dipelOk.fieldGuide.mixRates[0].calibrationWarnings).toBeUndefined();
+  });
+
+  test('buildJobCard and mixForProduct both ignore another technician calibration on a system-only assignment and carry field-guide label warnings into product details', async () => {
+    const dbFor = (tables) => {
+      const dbh = (t) => {
+        const table = String(t).split(' as ')[0];
+        const chain = {};
+        for (const m of ['join', 'leftJoin', 'where', 'andWhere', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'select', 'orderByRaw', 'orderBy', 'limit', 'modify']) chain[m] = () => chain;
+        chain.first = () => Object.assign(Promise.resolve((tables[table] || [])[0] ?? null), { catch: async () => (tables[table] || [])[0] ?? null });
+        chain.catch = (fn) => Promise.resolve(tables[table] || []).catch(fn);
+        chain.then = (res, rej) => Promise.resolve(tables[table] || []).then(res, rej);
+        return chain;
+      };
+      dbh.raw = (sql) => sql;
+      return dbh;
+    };
+    const otherCal = [{ id: 'cal-b', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 2, tank_capacity_gal: '110.00' }];
+    const systems = [{ id: 'sys-1', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }];
+    const oil = { id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', epa_reg_number: '48813-1', default_rate: '0.5-1.0', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const dbh = dbFor({
+      scheduled_services: [{ id: 'svc1', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-1', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [oil],
+      product_aliases: [],
+      equipment_calibrations: otherCal,
+      equipment_systems: systems,
+      scheduled_service_addons: [],
+    });
+    const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(card.tank.source).toBeNull();
+    expect(card.protocol.procedure.fieldGuide.products.tritek.mixWarning).toContain('Protocol dilution exceeds verified catalog label rate');
+    const calc = await jobCard.mixForProduct('oil', 4, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(calc.tank.source).toBeNull();
   });
 });
