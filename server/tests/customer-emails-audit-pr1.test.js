@@ -274,6 +274,8 @@ describe('Customer emails audit PR 1 regressions', () => {
       }));
       expect(htmlToPlainText('Intro<p>Next block</p><table><tr><td>10</td><td>20</td></tr><tr><td>30</td><td>40</td></tr></table>'))
         .toBe('Intro\nNext block\n10 20\n30 40');
+      expect(htmlToPlainText('<div style="display:none">Secret preheader</div><span hidden>Hidden text</span><p><a href="https://portal.wavespestcontrol.com/app"><img src="badge.png" alt="Download app" /></a></p><img src="banner.png" alt="Spring offer" />'))
+        .toBe('Download app (https://portal.wavespestcontrol.com/app)\nSpring offer');
     } finally {
       if (prevPw === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;
       else process.env.GOOGLE_SMTP_PASSWORD = prevPw;

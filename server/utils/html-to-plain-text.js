@@ -8,10 +8,19 @@ const BLOCK_TAGS = new Set([
 const CELL_TAGS = new Set(['td', 'th']);
 const QUOTE_CLASS_RE = /\b(?:gmail_quote|yahoo_quoted)\b/i;
 const SIGNATURE_CLASS_RE = /\bgmail_signature\b/i;
+const HIDDEN_STYLE_RE = /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b/i;
+
+function hasAttr(node, name) {
+  return (node.attrs || []).some((a) => a.name === name);
+}
 
 function attrValue(node, name) {
   const attr = (node.attrs || []).find((a) => a.name === name);
   return attr ? String(attr.value || '').trim() : '';
+}
+
+function isHiddenNode(node) {
+  return hasAttr(node, 'hidden') || HIDDEN_STYLE_RE.test(attrValue(node, 'style'));
 }
 
 function isQuoteContainer(node, tag) {
@@ -60,6 +69,31 @@ function renderCell(node, out) {
   out.push(cell);
 }
 
+function renderSpecialTag(node, tag, out) {
+  if (tag === 'br') { out.push('\n'); return true; }
+  if (tag === 'img') {
+    const alt = attrValue(node, 'alt');
+    if (alt) {
+      if (!endsWith(out, /[\s\n]$/)) out.push(' ');
+      out.push(alt);
+    }
+    return true;
+  }
+  if (tag === 'a') { out.push(renderAnchor(node)); return true; }
+  if (CELL_TAGS.has(tag)) { renderCell(node, out); return true; }
+  if (isQuoteContainer(node, tag)) {
+    const quoted = renderChildren(node);
+    if (quoted) out.push(`\n${quoted.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')}\n`);
+    return true;
+  }
+  if (isSignatureContainer(node)) {
+    const sig = renderChildren(node);
+    if (sig) out.push(`\n--\n${sig}\n`);
+    return true;
+  }
+  return false;
+}
+
 function collectText(node, out) {
   if (!node) return;
   if (node.nodeName === '#text') {
@@ -67,20 +101,8 @@ function collectText(node, out) {
     return;
   }
   const tag = String(node.tagName || '').toLowerCase();
-  if (SKIP_TAGS.has(tag)) return;
-  if (tag === 'br') { out.push('\n'); return; }
-  if (tag === 'a') { out.push(renderAnchor(node)); return; }
-  if (CELL_TAGS.has(tag)) { renderCell(node, out); return; }
-  if (isQuoteContainer(node, tag)) {
-    const quoted = renderChildren(node);
-    if (quoted) out.push(`\n${quoted.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')}\n`);
-    return;
-  }
-  if (isSignatureContainer(node)) {
-    const sig = renderChildren(node);
-    if (sig) out.push(`\n--\n${sig}\n`);
-    return;
-  }
+  if (SKIP_TAGS.has(tag) || isHiddenNode(node)) return;
+  if (renderSpecialTag(node, tag, out)) return;
   if (BLOCK_TAGS.has(tag) && !endsWith(out, /\n$/)) out.push('\n');
   for (const child of node.childNodes || []) collectText(child, out);
   if (BLOCK_TAGS.has(tag) && !endsWith(out, /\n$/)) out.push('\n');
