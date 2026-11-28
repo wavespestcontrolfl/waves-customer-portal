@@ -238,10 +238,14 @@ async function isManualChargeAlreadyLogged(lockOutcome, customerId, eventType) {
 async function claimManualReceiptDelivery(customer, paymentId, lockOutcome) {
   if (!customer?.phone) return false;
   if (!lockOutcome?.hasCallerKey || !lockOutcome?.replayed || !paymentId) return true;
-  const q = db('sms_messages');
+  const q = db('messaging_audit_log');
   if (!q || typeof q.where !== 'function' || typeof q.whereRaw !== 'function') return !lockOutcome.replayed;
   const existing = await q
-    .whereRaw("metadata->>'source' = 'admin_manual_charge' AND metadata->>'paymentId' = ?", [String(paymentId)])
+    .where({ customer_id: customer.id, channel: 'sms', purpose: 'payment_receipt' })
+    .whereRaw(
+      "blocked_code IS NULL AND sent_at IS NOT NULL AND metadata->>'source' = 'admin_manual_charge' AND metadata->>'paymentId' = ?",
+      [String(paymentId)],
+    )
     .first('id');
   return !existing;
 }

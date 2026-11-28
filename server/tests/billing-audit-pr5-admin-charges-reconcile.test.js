@@ -759,7 +759,7 @@ describe('Round-4 charge-now idempotency & replay dedupe', () => {
             return state.priorPayment ? { ...state.priorPayment } : null;
           }
           if (table === 'autopay_log') return state.autopayLogRow ? { ...state.autopayLogRow } : null;
-          if (table === 'sms_messages') return state.smsMessageRow ? { ...state.smsMessageRow } : null;
+          if (table === 'messaging_audit_log') return state.smsMessageRow ? { ...state.smsMessageRow } : null;
           return null;
         }),
       };
