@@ -16,11 +16,13 @@ const { renderAnnualPlanPdf } = require('../services/pdf/annual-plan-pdf');
 router.use(noStore);
 const db = require('../models/db');
 const { projectReportPathForProject } = require('../services/project-report-links');
+const { isServiceRecordProjectReportHeld } = require('../services/project-report-hold');
 const {
   getProjectType,
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
   projectRecordedFeeValues,
+  resolveProjectRecordedFeeValues,
   projectTypeHasInternalFindingKeys,
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
@@ -637,7 +639,7 @@ async function signedContractCount(customerId) {
 // neither consumes a page slot nor counts toward the total (codex #6363 r33
 // P2). `scope` (a contact session): the primary property's visits only
 // (codex r16 P1) — the holder's other saved homes are not theirs to read.
-function completedServiceReportsQuery(customerId, serviceRecordCols, scope = null) {
+function completedServiceReportsQuery(customerId, serviceRecordCols, scope = null, projectCols = {}) {
   let query = applyCustomerVisibleServiceRecordFilter(db('service_records')
     .where({ 'service_records.customer_id': customerId, 'service_records.status': 'completed' }));
   if (scope) {
@@ -651,6 +653,46 @@ function completedServiceReportsQuery(customerId, serviceRecordCols, scope = nul
       this.whereNull('service_records.completion_source')
         .orWhereNot('service_records.completion_source', 'project_completion');
     });
+  }
+  if (serviceRecordCols.structured_notes) {
+    query = query.whereRaw("COALESCE(service_records.structured_notes->>'reportHeld', 'false') <> 'true'");
+  }
+  if (projectCols.report_hold_status) {
+    const clauses = ['p.service_record_id = service_records.id'];
+    if (serviceRecordCols.scheduled_service_id) {
+      clauses.push('(service_records.scheduled_service_id IS NOT NULL AND p.scheduled_service_id = service_records.scheduled_service_id)');
+    }
+    if (serviceRecordCols.structured_notes) {
+      clauses.push("(NULLIF(service_records.structured_notes->>'projectId', '') IS NOT NULL AND p.id::text = service_records.structured_notes->>'projectId')");
+    }
+    query = query.whereRaw(
+      `NOT EXISTS (SELECT 1 FROM projects p WHERE p.report_hold_status IN ('held', 'releasing') AND (${clauses.join(' OR ')}))`,
+    );
+  }
+  return query;
+}
+
+function visibleStoredDocumentsQuery(customerId, serviceRecordCols = {}, projectCols = {}) {
+  let query = db('customer_documents').where({ 'customer_documents.customer_id': customerId });
+  if (serviceRecordCols.structured_notes && projectCols.report_hold_status) {
+    const holdClauses = ['p.service_record_id = sr.id'];
+    if (serviceRecordCols.scheduled_service_id) {
+      holdClauses.push('(sr.scheduled_service_id IS NOT NULL AND p.scheduled_service_id = sr.scheduled_service_id)');
+    }
+    holdClauses.push("(NULLIF(sr.structured_notes->>'projectId', '') IS NOT NULL AND p.id::text = sr.structured_notes->>'projectId')");
+    query = query.whereRaw(
+      `(customer_documents.document_type <> 'service_report'
+        OR customer_documents.linked_service_record_id IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM service_records sr
+          WHERE sr.id = customer_documents.linked_service_record_id
+            AND (
+              COALESCE(sr.structured_notes->>'typedReportDelivery', 'auto_send') <> 'auto_send'
+              OR COALESCE(sr.structured_notes->>'reportHeld', 'false') = 'true'
+              OR EXISTS (SELECT 1 FROM projects p WHERE p.report_hold_status IN ('held', 'releasing') AND (${holdClauses.join(' OR ')}))
+            )
+        ))`,
+    );
   }
   return query;
 }
@@ -787,15 +829,35 @@ function groupDocumentsByType(allDocs) {
 // — and nothing at all when the report rule withholds from this contact. The
 // total counts the same scoped reports (codex r18 P2): the holder's other
 // homes' reports are neither listed nor counted.
+async function unsuppressedServiceReports(services) {
+  const visible = [];
+  for (const svc of services) {
+    if (!(await serviceRecordReportSuppressed(svc, db))) visible.push(svc);
+  }
+  return visible;
+}
+
+async function unsuppressedStoredDocs(docs) {
+  const visible = [];
+  for (const doc of docs) {
+    if (!(await storedDocReportSuppressed(doc, db))) visible.push(doc);
+  }
+  return visible;
+}
+
 async function listContactServiceReports(req, res) {
   if (await contactReportsWithheld(req)) return res.json({ documents: {}, total: 0 });
   const page = documentPageBounds(req.query);
-  const serviceRecordCols = await db('service_records').columnInfo().catch(() => ({}));
+  const [serviceRecordCols, projectCols] = await Promise.all([
+    db('service_records').columnInfo().catch(() => ({})),
+    db('projects').columnInfo().catch(() => ({})),
+  ]);
   const scope = await contactRecordScope(req);
-  const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols, scope), page);
-  const reports = await serviceReportEntries(services, { contactOnly: true });
-  const [{ count }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols, scope).count('service_records.id as count');
-  return res.json({ documents: groupDocumentsByType(reports), total: parseInt(count, 10) });
+  const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols, scope, projectCols), page);
+  const visibleServices = await unsuppressedServiceReports(services);
+  const reports = await serviceReportEntries(visibleServices, { contactOnly: true });
+  const [{ count }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols, scope, projectCols).count('service_records.id as count');
+  return res.json({ documents: groupDocumentsByType(reports), total: Math.max(0, parseInt(count, 10) || 0) });
 }
 
 // =========================================================================
@@ -806,21 +868,22 @@ router.get('/', authenticate, async (req, res, next) => {
     if (req.contactSession) return await listContactServiceReports(req, res);
     const page = documentPageBounds(req.query);
 
-    // Get uploaded/static documents
-    const docs = await db('customer_documents')
-      .where({ customer_id: req.customerId })
-      .orderBy('created_at', 'desc')
-      .limit(page.limit)
-      .offset(page.offset);
-
     const [serviceRecordCols, projectCols] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('projects').columnInfo().catch(() => ({})),
     ]);
 
+    // Get uploaded/static documents (excluding held/suppressed linked visit reports)
+    const rawDocs = await visibleStoredDocumentsQuery(req.customerId, serviceRecordCols, projectCols)
+      .orderBy('created_at', 'desc')
+      .limit(page.limit)
+      .offset(page.offset);
+    const docs = await unsuppressedStoredDocs(rawDocs);
+
     // Auto-generated service_report entries for completed services
-    const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols), page);
-    const autoGenDocs = await serviceReportEntries(services, { docs });
+    const services = await selectServiceReportPage(completedServiceReportsQuery(req.customerId, serviceRecordCols, null, projectCols), page);
+    const visibleServices = await unsuppressedServiceReports(services);
+    const autoGenDocs = await serviceReportEntries(visibleServices, { docs });
 
     // Signed agreements, authorizations and forms (customer_contracts).
     const contractDocs = await signedContractDocuments(req.customerId, page);
@@ -892,6 +955,9 @@ router.get('/', authenticate, async (req, res, next) => {
       };
       const label = typeLabels[p.project_type] || getProjectType(p.project_type)?.label || 'Project';
       const viewUrl = await projectReportPathForProject(db, p, p);
+      const pFeeValues = projectTypeHasInternalFindingKeys(p.project_type)
+        ? await resolveProjectRecordedFeeValues(p)
+        : [];
       // Compliance certificates belong in the Compliance category, not
       // Service Reports — they live in the permit folder and are referenced
       // by lenders, building inspectors, and the property owner long after
@@ -912,7 +978,7 @@ router.get('/', authenticate, async (req, res, next) => {
           ? (() => {
             const safe = redactInspectionFeeCuesForType(p.title, p.project_type);
             return projectTypeHasInternalFindingKeys(p.project_type)
-              ? redactSpecificAmounts(safe, projectRecordedFeeValues(p))
+              ? redactSpecificAmounts(safe, pFeeValues)
               : safe;
           })()
           : null)
@@ -936,10 +1002,9 @@ router.get('/', authenticate, async (req, res, next) => {
     // docs + completed-service reports + project reports); the handful of
     // page-level skips (internal-only typed reports, linked-doc dedup) make
     // this a slight upper bound, which the label tolerates.
-    const [{ count: storedDocCount }] = await db('customer_documents')
-      .where({ customer_id: req.customerId })
-      .count('id as count');
-    const [{ count: serviceReportCount }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols)
+    const [{ count: storedDocCount }] = await visibleStoredDocumentsQuery(req.customerId, serviceRecordCols, projectCols)
+      .count('customer_documents.id as count');
+    const [{ count: serviceReportCount }] = await completedServiceReportsQuery(req.customerId, serviceRecordCols, null, projectCols)
       .count('service_records.id as count');
     const contractCount = await signedContractCount(req.customerId);
 
@@ -955,7 +1020,7 @@ router.get('/', authenticate, async (req, res, next) => {
       }
     }
     const allDocs = [...formattedDocs, ...autoGenDocs, ...projectDocs, ...annualPlanDocs, ...contractDocs];
-    const totalOnFile = parseInt(storedDocCount, 10) + parseInt(serviceReportCount, 10) + projectDocs.length + annualPlanDocs.length + contractCount;
+    const totalOnFile = (parseInt(storedDocCount, 10) || 0) + (parseInt(serviceReportCount, 10) || 0) + projectDocs.length + annualPlanDocs.length + contractCount;
 
     res.json({ documents: groupDocumentsByType(allDocs), total: totalOnFile });
   } catch (err) {
@@ -985,6 +1050,35 @@ router.get('/annual-plan/:id', authenticate, async (req, res, next) => {
     next(err);
   }
 });
+
+// Shared report-suppression predicate for legacy PDF generation, share-link
+// minting, and public /shared/:token rendering: blocks both non-auto_send
+// typed reports (internal_only / disabled) and WDO projects whose report
+// payment hold is still active (B-58).
+async function serviceRecordReportSuppressed(service, database = db) {
+  let notes = {};
+  try {
+    notes = typeof service?.structured_notes === 'string'
+      ? JSON.parse(service.structured_notes)
+      : (service?.structured_notes || {});
+  } catch { notes = {}; }
+  if (notes.typedReportDelivery && notes.typedReportDelivery !== 'auto_send') return true;
+  return isServiceRecordProjectReportHeld(notes, database, {
+    serviceRecordId: service?.id || null,
+    scheduledServiceId: service?.scheduled_service_id || null,
+    serviceType: service?.service_type || null,
+    reportTemplateVersion: service?.report_template_version || null,
+  });
+}
+
+async function storedDocReportSuppressed(doc, database = db) {
+  if (!doc || doc.document_type !== 'service_report' || !doc.linked_service_record_id) return false;
+  const linked = await database('service_records')
+    .where({ id: doc.linked_service_record_id })
+    .first('id', 'scheduled_service_id', 'report_template_version', 'structured_notes');
+  if (!linked) return false;
+  return serviceRecordReportSuppressed(linked, database);
+}
 
 // =========================================================================
 // GET /api/documents/service-report/:serviceRecordId — auto-generate PDF
@@ -1016,17 +1110,11 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
 
     if (!service) return res.status(404).json({ error: 'Service record not found' });
 
-    // internal_only typed completions (Phase-1b shadow) are admin-review
-    // only — this authenticated fallback generator must refuse them too,
-    // since the portal client falls back here exactly when reportUrl is
-    // suppressed. 404 (not 403) so the record's existence isn't signposted.
-    let reportNotes = {};
-    try {
-      reportNotes = typeof service.structured_notes === 'string'
-        ? JSON.parse(service.structured_notes)
-        : (service.structured_notes || {});
-    } catch { reportNotes = {}; }
-    if (reportNotes.typedReportDelivery && reportNotes.typedReportDelivery !== 'auto_send') {
+    // internal_only typed completions (Phase-1b shadow) and payment-held WDO
+    // project records (B-58) are withheld — this authenticated fallback
+    // generator must refuse them too. 404 (not 403) so the record's existence
+    // isn't signposted.
+    if (await serviceRecordReportSuppressed(service, db)) {
       return res.status(404).json({ error: 'Service record not found' });
     }
 
@@ -1126,7 +1214,9 @@ router.get('/:id/download', authenticate, async (req, res, next) => {
       .where({ id: req.params.id, customer_id: req.customerId })
       .first();
 
-    if (!doc) return res.status(404).json({ error: 'Document not found' });
+    if (!doc || await storedDocReportSuppressed(doc, db)) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
 
     return redirectToStoredDocument(doc, res);
   } catch (err) {
@@ -1158,24 +1248,20 @@ router.post('/share/:id', authenticate, async (req, res, next) => {
         .first()
         .catch(() => null);
       if (!svc) return res.status(404).json({ error: 'Document not found' });
-      // Suppressed typed reports (internal_only shadow / disabled kill
-      // switch) are not shareable either — ownership alone isn't enough,
-      // or a crafted share request mints a public PDF link for a record
-      // every other customer surface hides.
-      let shareNotes = {};
-      try {
-        shareNotes = typeof svc.structured_notes === 'string'
-          ? JSON.parse(svc.structured_notes)
-          : (svc.structured_notes || {});
-      } catch { shareNotes = {}; }
-      if (shareNotes.typedReportDelivery && shareNotes.typedReportDelivery !== 'auto_send') {
+      // Suppressed typed reports (internal_only / disabled) and payment-held
+      // WDO project records (B-58) are not shareable either — ownership alone
+      // isn't enough, or a crafted share request mints a public PDF link for
+      // a record every other customer surface hides.
+      if (await serviceRecordReportSuppressed(svc, db)) {
         return res.status(404).json({ error: 'Document not found' });
       }
     } else {
       const doc = await db('customer_documents')
         .where({ id: docId, customer_id: req.customerId })
         .first();
-      if (!doc) return res.status(404).json({ error: 'Document not found' });
+      if (!doc || await storedDocReportSuppressed(doc, db)) {
+        return res.status(404).json({ error: 'Document not found' });
+      }
       if (!storedDocumentHasFile(doc)) {
         return res.status(409).json({ error: 'This document does not have a downloadable file yet.' });
       }
@@ -1262,15 +1348,9 @@ router.get('/shared/:token', sharedDocLimiter, async (req, res, next) => {
         .first();
       if (!service) return res.status(404).json({ error: 'Document not found' });
 
-      // Defense in depth: even a previously-minted share link must not
-      // render a suppressed typed report (internal_only / disabled).
-      let sharedNotes = {};
-      try {
-        sharedNotes = typeof service.structured_notes === 'string'
-          ? JSON.parse(service.structured_notes)
-          : (service.structured_notes || {});
-      } catch { sharedNotes = {}; }
-      if (sharedNotes.typedReportDelivery && sharedNotes.typedReportDelivery !== 'auto_send') {
+      // Defense in depth: even a previously-minted share link must not render
+      // a suppressed typed report or a payment-held WDO project record (B-58).
+      if (await serviceRecordReportSuppressed(service, db)) {
         return res.status(404).json({ error: 'Document not found' });
       }
 
@@ -1307,7 +1387,9 @@ router.get('/shared/:token', sharedDocLimiter, async (req, res, next) => {
       const doc = await db('customer_documents')
         .where({ id: link.document_id, customer_id: link.customer_id })
         .first();
-      if (!doc) return res.status(404).json({ error: 'Document not found' });
+      if (!doc || await storedDocReportSuppressed(doc, db)) {
+        return res.status(404).json({ error: 'Document not found' });
+      }
       return redirectToStoredDocument(doc, res);
     }
 

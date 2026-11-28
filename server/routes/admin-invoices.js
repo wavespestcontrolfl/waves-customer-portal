@@ -3422,6 +3422,15 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       logger.warn(`[admin-invoices:apply-credit] annual prepay activation failed: ${err.message}`);
     }
 
+    await require('../services/invoice-issued-closeout')
+      .closeOutVisitForIssuedInvoice({
+        invoiceId: id,
+        trigger: 'paid',
+        actorTechnicianId: req.technicianId,
+        actorRole: req.techRole,
+      })
+      .catch((err) => logger.warn(`[admin-invoices:apply-credit] visit closeout failed: ${err.message}`));
+
     await db('activity_log').insert({
       customer_id: covered.customer_id,
       action: 'invoice_marked_prepaid',
@@ -3569,6 +3578,15 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
             const err = new Error(lockedRefusal); err.statusCode = 409; err.isOperational = true; throw err;
           }
         }
+
+        // B-33: lock linked WDO projects (canonical invoices → projects order)
+        // and refuse reversing a prepaid invoice once its held FDACS report
+        // has started releasing or been delivered.
+        await require('../services/project-report-hold').assertNoReleasedWdoReportHoldForInvoice(
+          trx,
+          id,
+          { lock: true, action: 'reverse_prepaid', when: isPrepaid },
+        );
 
         const { balanceAfter } = await CustomerCredit.postCreditMovement({
           customerId: locked.customer_id,

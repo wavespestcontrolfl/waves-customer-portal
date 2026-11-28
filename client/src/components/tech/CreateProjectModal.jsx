@@ -1,5 +1,6 @@
 import { renderWithDidYouMean } from '../admin/DidYouMean';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { wdoFeeIsExplicitZero } from '@waves/report-redaction';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -219,25 +220,53 @@ function formatStructureType(customer) {
   return '';
 }
 
-// The WDO fee seed for a schedule row — the inspection line's OWN net price,
-// or nothing. estimatedPrice is the visit's final total: on a single-line
-// visit that IS the inspection's net, but with billable add-ons it includes
-// their dollars too, and the auto-invoice bills findings.inspection_fee as a
-// single WDO line — a group total would fold add-on dollars into the fee
-// (Codex P1 r2). The primary line's own net isn't on the schedule payloads
-// (primaryLinePrice is the pre-discount base, and an appointment-level
-// discount's allocation isn't visible client-side), so with billable add-ons
-// we seed nothing and the tech enters the fee.
-export function wdoFeeSeedFromVisit(service) {
-  const addons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
-  const hasBillableAddon = addons.some((a) => a?.hasBillablePrice === true || Number(a?.estimatedPrice ?? a?.basePrice ?? a?.price ?? 0) > 0);
-  if (hasBillableAddon) return '';
-  return service?.estimatedPrice ?? '';
+// The WDO fee seed for a schedule row — the inspection line's OWN booked price,
+// or nothing. estimatedPrice is the visit's final total: on a single-line visit
+// that IS the inspection's net, while with billable add-ons it includes their
+// dollars too (Codex P1 r2). When billable add-ons exist and there is no
+// appointment-level discount, primaryLinePrice carries the booked WDO line
+// price ($150-$275) so the tech isn't left with a blank field that would fall
+// back to $250; if primaryLinePrice is absent or an appointment-level discount
+// applies across add-ons, seed nothing so the tech enters the exact fee.
+const ADDON_SEED_PRICE_KEYS = ['estimatedPrice', 'estimated_price', 'basePrice', 'base_price', 'price'];
+
+function addonSeedPrice(addon) {
+  if (!addon) return 0;
+  for (const key of ADDON_SEED_PRICE_KEYS) {
+    const raw = addon[key];
+    if (raw === null || raw === undefined || raw === '' || typeof raw === 'boolean') continue;
+    const val = Number(raw);
+    if (Number.isFinite(val) && val >= 0) return val;
+  }
+  return 0;
 }
 
-function wdoFeeIsExplicitZero(value) {
-  const match = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
-  return match != null && Number(match[1]) === 0;
+function sumAddonSeedPrices(addons) {
+  if (!Array.isArray(addons)) return 0;
+  return addons.reduce((sum, addon) => sum + addonSeedPrice(addon), 0);
+}
+
+function unDiscountedPrimarySeed(service, primary) {
+  const discounted = Number(service.discountAmount || service.discount_amount || 0) > 0
+    || Number(service.primaryLineDiscount || service.primary_line_discount || 0) > 0;
+  if (discounted) return '';
+  return Number.isFinite(primary) && primary > 0 ? primary : '';
+}
+
+export function wdoFeeSeedFromVisit(service) {
+  if (!service) return '';
+  const addons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
+  if (addons.some((a) => a?.hasBillablePrice === true && addonSeedPrice(a) <= 0)) return '';
+  const addonTotal = sumAddonSeedPrices(addons);
+  const primary = Number(service.primaryLinePrice ?? service.primary_line_price);
+  const rawEst = service.estimatedPrice ?? service.estimated_price;
+  if (addonTotal <= 0) {
+    if (rawEst != null && rawEst !== '') return rawEst;
+    return unDiscountedPrimarySeed(service, primary);
+  }
+  const est = Number(rawEst);
+  if (!unDiscountedPrimarySeed(service, primary) || rawEst == null || rawEst === '' || !Number.isFinite(est)) return '';
+  return Math.round((primary + addonTotal) * 100) === Math.round(est * 100) ? primary : '';
 }
 
 // The sign step's held send — the same legs as the Reports page drawer (ProjectsPage

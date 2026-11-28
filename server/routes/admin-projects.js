@@ -37,6 +37,7 @@ const {
   redactSpecificAmounts,
   resolveFeeValuesForScrub,
   projectRecordedFeeValues,
+  resolveProjectRecordedFeeValues,
   projectArchivedFeeValues,
   projectTypeHasInternalFindingKeys,
   projectTypeFreeTextKeys,
@@ -96,7 +97,12 @@ const { acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES } = require('..
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { recordAuditEvent } = require('../services/audit-log');
-const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('../services/wdo-inspection-fee');
+const {
+  resolveWdoInspectionFee,
+  wdoFeeIsExplicitZero,
+  parseWdoFeeAmount,
+  loadLinkedWdoVisit,
+} = require('../services/wdo-inspection-fee');
 const { wdoReportHoldLive, isEnabled } = require('../config/feature-gates');
 const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
 const { isReportHeld, REPORT_UNSHARED_SQL, reportLinkShared } = require('../services/project-report-hold');
@@ -318,13 +324,28 @@ function isAdmin(req) {
 // sweep (wdo_signature IS NOT NULL); a portal send sets sent_at, so only a
 // report with no portal send and no earlier mark qualifies.
 const MARK_SENT_OUTSIDE_NOTE_MAX = 500;
+const PROJECT_SEND_STALE_MS = 10 * 60 * 1000;
+
+function projectDeliverySendingActive(project) {
+  if (String(project?.delivery_status || '') !== 'sending') return false;
+  const claimedAtMs = project?.updated_at ? new Date(project.updated_at).getTime() : NaN;
+  if (!Number.isFinite(claimedAtMs)) return true;
+  return Date.now() - claimedAtMs <= PROJECT_SEND_STALE_MS;
+}
+
+function addSentOutsideClaimGuard(query, project) {
+  if ('sent_outside_portal_at' in project && !project.sent_outside_portal_at) {
+    query.whereNull('sent_outside_portal_at');
+  }
+}
 
 function markSentOutsideBlock(project) {
   if (project.project_type !== 'wdo_inspection') return { code: 'not_wdo_report', error: 'Only a WDO report can be marked as sent another way' };
   if (project.wdo_signature == null) return { code: 'not_signed', error: 'The WDO report is not signed yet' };
-  if (project.sent_at) return { code: 'already_sent', error: 'This report was already sent through the portal' };
+  if (project.sent_at || project.status === 'sent') return { code: 'already_sent', error: 'This report was already sent through the portal' };
   if (project.sent_outside_portal_at) return { code: 'already_marked', error: 'This report is already marked as sent another way' };
   if (project.report_hold_status === 'releasing') return { code: 'release_in_progress', error: 'The paid report is being sent right now. Give it a moment, then refresh.' };
+  if (projectDeliverySendingActive(project)) return { code: 'send_in_progress', error: 'This report is being sent right now. Give it a moment, then refresh.' };
   return null;
 }
 
@@ -2569,6 +2590,7 @@ function loadWdoSignature(project) {
     signedAt: sig.signed_at || null,
     contentHash: sig.content_hash || null,
     photoSetHash: sig.photo_set_hash || null,
+    feeValues: Array.isArray(sig.fee_values) ? sig.fee_values : null,
     contentStale: Boolean(sig.content_stale),
   };
 }
@@ -2594,7 +2616,7 @@ function loadWdoFilings(project) {
 // Captured onto the signature at sign time and recomputed at every
 // send/stamp, so a signed-then-edited report can never be emitted as a
 // signed FDACS-13645.
-function wdoContentHash(project) {
+function wdoContentHash(project, feeValues = null) {
   const stable = (value) => {
     if (Array.isArray(value)) return value.map(stable);
     if (value && typeof value === 'object') {
@@ -2610,7 +2632,7 @@ function wdoContentHash(project) {
     // including the recorded-value pass (codex #2817)
     findings: stable(stripInternalFindingKeys(parseFindings(project), {
       redactValues: true,
-      feeValues: projectRecordedFeeValues(project),
+      feeValues: Array.isArray(feeValues) ? feeValues : projectRecordedFeeValues(project),
       freeTextKeys: projectTypeFreeTextKeys('wdo_inspection'),
     }) || {}),
     project_date: normalizeDateOnly(project.project_date),
@@ -2622,11 +2644,12 @@ function wdoContentHash(project) {
 // content it was captured against? Legacy signatures (captured before content
 // hashing) carry no hash and are honored unless a findings edit has explicitly
 // flagged them stale (refreshWdoSignatureStaleness on PUT /:id).
-function wdoSignatureFreshness(project) {
+function wdoSignatureFreshness(project, feeValues = null) {
   const signature = loadWdoSignature(project);
   if (!signature) return { signed: false, fresh: false, signature: null };
+  const effectiveFeeValues = Array.isArray(feeValues) ? feeValues : signature.feeValues;
   const fresh = !signature.contentStale
-    && (!signature.contentHash || signature.contentHash === wdoContentHash(project));
+    && (!signature.contentHash || signature.contentHash === wdoContentHash(project, effectiveFeeValues));
   return { signed: true, fresh, signature };
 }
 
@@ -2705,12 +2728,13 @@ async function refreshWdoSignatureStaleness(req, before, after, { connection = d
   let sig = after.wdo_signature;
   if (typeof sig === 'string') { try { sig = JSON.parse(sig); } catch { sig = null; } }
   if (!sig || !sig.image) return null;
-  const newHash = wdoContentHash(after);
+  const sigFeeValues = Array.isArray(sig.fee_values) ? sig.fee_values : null;
+  const newHash = wdoContentHash(after, sigFeeValues);
   const stale = sig.content_hash
     ? sig.content_hash !== newHash
     // Legacy signature: no hash to verify a revert against, so once stale it
     // stays stale until the licensee re-signs.
-    : (Boolean(sig.content_stale) || wdoContentHash(before) !== newHash);
+    : (Boolean(sig.content_stale) || wdoContentHash(before, sigFeeValues) !== newHash);
   if (Boolean(sig.content_stale) === stale) return stale;
   await connection('projects').where({ id: after.id }).update({
     wdo_signature: JSON.stringify({ ...sig, content_stale: stale }),
@@ -3050,7 +3074,8 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
     // The photo set the signature was captured against: a filing is only ever re-used for the same signature
     // revision (signed_at) and the same photo set, not just the same findings.
     photo_set_hash: signature?.photoSetHash || null,
-    content_hash: wdoContentHash(project),
+    fee_values: signature?.feeValues || null,
+    content_hash: wdoContentHash(project, signature?.feeValues || null),
     // The archived binary was rendered through the customer-safe scrub
     // (buildWdoReportPDFBuffer applies customerSafeFindings) — the public
     // /fdacs-pdf gate uses this to distinguish a clean modern archive from a
@@ -3066,36 +3091,74 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
   };
 }
 
+const PROJECT_INVOICE_NON_REUSABLE_STATUSES = ['void', 'paid', 'disputed', ...TERMINAL_INVOICE_STATUSES];
+const PROJECT_INVOICE_ALREADY_BILLED_STATUSES = ['paid', 'prepaid', 'processing', 'disputed'];
+const PROJECT_INVOICE_NON_SENDABLE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'sending', 'disputed'];
+
+function alreadyBilledProjectError(inv) {
+  const isDisputed = String(inv?.status || '').toLowerCase() === 'disputed';
+  const message = isDisputed
+    ? `Invoice ${inv.invoice_number} is disputed and cannot be sent or re-billed until the dispute is resolved. Nothing was sent.`
+    : `This visit is already billed on invoice ${inv.invoice_number} (${inv.status}). Nothing was sent.`;
+  const err = new Error(message);
+  err.code = isDisputed ? 'invoice_disputed' : 'already_billed';
+  err.invoiceId = inv.id;
+  err.invoiceNumber = inv.invoice_number;
+  return err;
+}
+
+function nonSendableProjectInvoicePayload(invoice) {
+  if (invoice.status === 'disputed') {
+    return {
+      error: 'Cannot send a disputed invoice — resolve the dispute first.',
+      code: 'invoice_disputed',
+      invoice_id: invoice.id,
+    };
+  }
+  return { error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id };
+}
+
 function isReusableInvoice(inv) {
-  // Terminal invoices are never reuse candidates (codex #3344 r9-round
-  // pre-push): every payment route rejects refunded/cancelled invoices, so
-  // reusing one links the project to a dead bill and blocks the
-  // replacement the in-lock re-checks deliberately allow. 'paid' stays
-  // excluded because reuse means "send for collection" — the already-billed
-  // guard owns settled invoices.
-  return inv && !['void', 'paid', ...TERMINAL_INVOICE_STATUSES].includes(inv.status);
+  // Terminal and disputed invoices are never reuse candidates (codex #3344
+  // r9-round pre-push; B-48): every payment route rejects refunded/cancelled/
+  // disputed invoices, so reusing one links the project to a dead or disputed
+  // bill. 'paid' stays excluded because reuse means "send for collection" —
+  // the already-billed guard owns settled/disputed invoices.
+  return inv && !PROJECT_INVOICE_NON_REUSABLE_STATUSES.includes(inv.status);
 }
 
 const WDO_INVOICE_LINE_DESCRIPTION = 'WDO Inspection (FDACS-13645 Wood-Destroying Organisms Inspection Report)';
+
+async function resolveWdoFeeForProject(project, database = db, { existingDraftAmount = null } = {}) {
+  const findings = parseFindings(project);
+  if (parseWdoFeeAmount(findings.inspection_fee) !== null) {
+    return resolveWdoInspectionFee(findings);
+  }
+  const scheduledService = await loadLinkedWdoVisit(project, database);
+  return resolveWdoInspectionFee(findings, { scheduledService, fallbackFee: existingDraftAmount });
+}
 
 // If a reused invoice is still the auto-created WDO draft (untouched: draft
 // status, our title + single WDO line item) and the resolved fee has since
 // changed (the tech edited inspection_fee between the dry-run
 // and the send), reprice its line item so we never bill the stale amount. A
-// manually edited invoice (different title/lines) is left untouched.
-async function maybeRepriceWdoDraft(invoice, project) {
+// manually edited invoice (different title/lines) is left untouched, and a
+// blank/prose inspection_fee never overwrites an existing positive draft with
+// the $250 fallback.
+async function maybeRepriceWdoDraft(invoice, project, { database = db } = {}) {
   if (!invoice || invoice.status !== 'draft' || String(invoice.title || '') !== 'WDO Inspection') return invoice;
   let items = invoice.line_items;
   if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = null; } }
   if (!Array.isArray(items) || items.length !== 1) return invoice;
   if (!String(items[0].description || '').startsWith('WDO Inspection (FDACS')) return invoice;
 
-  const fee = resolveWdoInspectionFee(parseFindings(project));
+  const existingAmount = Number(items[0].amount ?? items[0].unit_price);
+  const fee = await resolveWdoFeeForProject(project, database, { existingDraftAmount: existingAmount });
   // Never reprice a draft down to $0 — a no-charge WDO is refused before any
   // reuse path runs (wdo_no_charge guard); this is defense in depth for any
   // future caller that skips that guard.
   if (fee <= 0) return invoice;
-  if (Number(items[0].amount ?? items[0].unit_price) === fee) return invoice;
+  if (existingAmount === fee) return invoice;
   try {
     const updated = await InvoiceService.update(invoice.id, {
       line_items: [{ description: WDO_INVOICE_LINE_DESCRIPTION, quantity: 1, unit_price: fee, amount: fee }],
@@ -3262,6 +3325,27 @@ async function lockProjectForInvoiceResolve(trx, project) {
   return locked || {};
 }
 
+async function findAlreadyBilledProjectInvoice(conn, project, linkedInvoiceId) {
+  const clauses = [
+    linkedInvoiceId ? { col: 'id', val: linkedInvoiceId } : null,
+    project.scheduled_service_id ? { col: 'scheduled_service_id', val: project.scheduled_service_id } : null,
+    project.service_record_id ? { col: 'service_record_id', val: project.service_record_id } : null,
+  ].filter(Boolean);
+  if (!clauses.length) return null;
+  const row = await conn('invoices')
+    .where({ customer_id: project.customer_id })
+    .whereIn('status', PROJECT_INVOICE_ALREADY_BILLED_STATUSES)
+    .where(function billedLinkage() {
+      for (const c of clauses) this.orWhere({ [c.col]: c.val });
+    })
+    .orderBy('created_at', 'desc')
+    .first();
+  if (!row || !PROJECT_INVOICE_ALREADY_BILLED_STATUSES.includes(String(row.status || '').toLowerCase())) {
+    return null;
+  }
+  return row;
+}
+
 async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false, holdRequested = false }) {
   // No-charge WDO (owner ruling 2026-07-15, #2751 follow-up): an explicit $0
   // inspection fee means nothing is billed for this visit. Refuse the
@@ -3276,8 +3360,20 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     throw err;
   }
   if (invoiceId) {
+    const blocked = await findAlreadyBilledProjectInvoice(db, project, project.invoice_id);
+    if (blocked) {
+      await persistProjectInvoiceLink(project, blocked.id);
+      throw alreadyBilledProjectError(blocked);
+    }
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
+    if (PROJECT_INVOICE_ALREADY_BILLED_STATUSES.includes(String(explicit.status || '').toLowerCase())) {
+      const explicitMatchesProject = String(explicit.id) === String(project.invoice_id || '')
+        || (project.scheduled_service_id && String(explicit.scheduled_service_id || '') === String(project.scheduled_service_id))
+        || (project.service_record_id && String(explicit.service_record_id || '') === String(project.service_record_id));
+      if (explicitMatchesProject) await persistProjectInvoiceLink(project, explicit.id);
+      throw alreadyBilledProjectError(explicit);
+    }
     // A held send links its invoice only when the hold is armed (armReportHold writes the link under the project
     // lock, after every hold check): a refused held send never relinks the project.
     if (!holdRequested) await persistProjectInvoiceLink(project, explicit.id);
@@ -3295,9 +3391,17 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
   // drafts (there's no DB uniqueness backstop on projects.invoice_id). A FOR UPDATE
   // lock makes the loser block until the winner commits the link, then re-read it
   // and reuse the same invoice. The lock is released on commit.
-  return db.transaction(async (trx) => {
+  const resolved = await db.transaction(async (trx) => {
     const locked = await lockProjectForInvoiceResolve(trx, project);
     const linkedInvoiceId = locked.invoice_id || project.invoice_id;
+
+    // 0. Check disputed/paid/processing invoices on the project or visit FIRST
+    //    so an older draft on the same visit can never bypass a disputed link.
+    const alreadyBilled = await findAlreadyBilledProjectInvoice(trx, project, linkedInvoiceId);
+    if (alreadyBilled) {
+      await persistProjectInvoiceLink(project, alreadyBilled.id, trx);
+      throw alreadyBilledProjectError(alreadyBilled);
+    }
 
     // 1. Reuse the invoice already recorded on the project (covers ad-hoc
     //    projects with no service linkage, and the dry-run → send → resend path).
@@ -3305,7 +3409,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       const prior = await trx('invoices').where({ id: linkedInvoiceId, customer_id: project.customer_id }).first();
       if (isReusableInvoice(prior)) {
         project.invoice_id = linkedInvoiceId;
-        return { invoice: await maybeRepriceWdoDraft(prior, project), created: false };
+        return { invoice: prior, created: false, needsReprice: true };
       }
     }
 
@@ -3314,11 +3418,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     if (project.scheduled_service_id || project.service_record_id) {
       const linked = await trx('invoices')
         .where({ customer_id: project.customer_id })
-        // Same terminal exclusion as the in-lock re-check below (codex
-        // #3344 r9-round pre-push): without it a refunded/cancelled
-        // invoice is adopted HERE and returned before the guarded
-        // recheck ever runs.
-        .whereNotIn('status', ['void', 'paid', ...TERMINAL_INVOICE_STATUSES])
+        .whereNotIn('status', PROJECT_INVOICE_NON_REUSABLE_STATUSES)
         .where(function invoiceLinkage() {
           if (project.scheduled_service_id) this.orWhere({ scheduled_service_id: project.scheduled_service_id });
           if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
@@ -3327,42 +3427,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .first();
       if (linked) {
         await persistProjectInvoiceLink(project, linked.id, trx);
-        return { invoice: await maybeRepriceWdoDraft(linked, project), created: false };
-      }
-    }
-
-    // 2b. Don't re-bill an already-billed visit. The reuse checks above skip
-    //     'paid'/'void' (and a paid invoice isn't reusable), so without this an
-    //     admin who previews/resends a report whose invoice was already PAID would
-    //     fall through to step 3 and mint a fresh draft + pay link for the same
-    //     completed visit — a duplicate bill the later non-sendable-status guard
-    //     can't catch (it only sees the new 'draft'). A paid OR in-flight ('processing',
-    //     ACH) invoice linked to this project or the same scheduled-service /
-    //     service-record means the work is settled or settling, so block the send
-    //     with a 409 and surface the existing invoice. ('void' is intentionally
-    //     excluded — a cancelled invoice should be re-billable.)
-    const billedLinkClauses = [
-      linkedInvoiceId ? { col: 'id', val: linkedInvoiceId } : null,
-      project.scheduled_service_id ? { col: 'scheduled_service_id', val: project.scheduled_service_id } : null,
-      project.service_record_id ? { col: 'service_record_id', val: project.service_record_id } : null,
-    ].filter(Boolean);
-    if (billedLinkClauses.length) {
-      const alreadyBilled = await trx('invoices')
-        .where({ customer_id: project.customer_id })
-        .whereIn('status', ['paid', 'processing'])
-        .where(function billedLinkage() {
-          for (const c of billedLinkClauses) this.orWhere({ [c.col]: c.val });
-        })
-        .orderBy('created_at', 'desc')
-        .first();
-      if (alreadyBilled) {
-        // Record the link so the UI can point at the settled invoice.
-        await persistProjectInvoiceLink(project, alreadyBilled.id, trx);
-        const err = new Error(`This visit is already billed on invoice ${alreadyBilled.invoice_number} (${alreadyBilled.status}). Nothing was sent.`);
-        err.code = 'already_billed';
-        err.invoiceId = alreadyBilled.id;
-        err.invoiceNumber = alreadyBilled.invoice_number;
-        throw err;
+        return { invoice: linked, created: false, needsReprice: true };
       }
     }
 
@@ -3386,7 +3451,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // preview of the fee/total instead; `created: true` so the confirm dialog
       // still reads "Create and send", and the real send below does the create.
       // A held send prices from the LOCKED row: a fee changed to $0 since the preflight bills nothing, so no draft.
-      const fee = resolveWdoInspectionFee(parseFindings(holdRequested && 'findings' in locked ? locked : project));
+      const feeSource = holdRequested && 'findings' in locked ? { ...project, findings: locked.findings } : project;
+      const fee = await resolveWdoFeeForProject(feeSource, trx);
       if (holdRequested && fee === 0) {
         throw holdRefusal(422, 'wdo_no_charge', 'This WDO inspection is now recorded as no charge ($0 inspection fee). Nothing was sent. Use "Send report".');
       }
@@ -3491,12 +3557,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // pre-lock pass could only see project.scheduled_service_id.
       const lockedReuse = await trx('invoices')
         .where({ customer_id: project.customer_id })
-        // Terminal invoices are NOT adoption candidates (codex r7 P1) —
-        // adopting a refunded/cancelled invoice would link the project to
-        // a dead bill and block the replacement the shared mint paths
-        // deliberately allow. THE shared terminal filter (r8), plus 'paid'
-        // — a paid invoice is the lockedBilled check's business below.
-        .whereNotIn('status', ['void', 'paid', ...TERMINAL_INVOICE_STATUSES])
+        // Terminal and disputed invoices are NOT adoption candidates (codex r7 P1; B-48).
+        .whereNotIn('status', PROJECT_INVOICE_NON_REUSABLE_STATUSES)
         .where(function invoiceLinkage() {
           this.orWhere({ scheduled_service_id: scheduledServiceId });
           if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
@@ -3505,11 +3567,11 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .first();
       if (lockedReuse) {
         await persistProjectInvoiceLink(project, lockedReuse.id, trx);
-        return { invoice: await maybeRepriceWdoDraft(lockedReuse, project), created: false };
+        return { invoice: await maybeRepriceWdoDraft(lockedReuse, project, { database: trx }), created: false };
       }
       const lockedBilled = await trx('invoices')
         .where({ customer_id: project.customer_id })
-        .whereIn('status', ['paid', 'processing'])
+        .whereIn('status', PROJECT_INVOICE_ALREADY_BILLED_STATUSES)
         .where(function billedLinkage() {
           this.orWhere({ scheduled_service_id: scheduledServiceId });
           if (project.service_record_id) this.orWhere({ service_record_id: project.service_record_id });
@@ -3518,11 +3580,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
         .first();
       if (lockedBilled) {
         await persistProjectInvoiceLink(project, lockedBilled.id, trx);
-        const err = new Error(`This visit is already billed on invoice ${lockedBilled.invoice_number} (${lockedBilled.status}). Nothing was sent.`);
-        err.code = 'already_billed';
-        err.invoiceId = lockedBilled.id;
-        err.invoiceNumber = lockedBilled.invoice_number;
-        throw err;
+        throw alreadyBilledProjectError(lockedBilled);
       }
     }
     const built = scheduledServiceId
@@ -3597,6 +3655,13 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     await persistProjectInvoiceLink(project, builtInvoice.id, trx);
     return { invoice: builtInvoice, created: true };
   });
+  // Reprice reused WDO drafts AFTER releasing the project lock so InvoiceService.update
+  // never takes invoices FOR UPDATE while this transaction holds projects FOR UPDATE
+  // (preserving canonical invoices -> projects lock order with voidInvoice).
+  if (resolved?.needsReprice) {
+    return { invoice: await maybeRepriceWdoDraft(resolved.invoice, project), created: false };
+  }
+  return resolved;
 }
 
 // Normalize an invoice's line_items into an array for PDF rendering — the
@@ -3736,6 +3801,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // A report held (or being released) since the read above sends only through the release: this plain send
     // must not claim it.
     if ('report_hold_status' in project) sendClaimQuery.whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')");
+    addSentOutsideClaimGuard(sendClaimQuery, project);
     if (confirmedFirstSend) sendClaimQuery.whereNull('sent_at').whereRaw("status IS DISTINCT FROM 'sent'");
     const sendClaim = await sendClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: sendClaimToken, updated_at: db.fn.now() });
@@ -4496,7 +4562,7 @@ async function resumableReleaseFiling(project, invoice) {
   const channels = typeof project.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project.delivery_channels;
   const filing = channels?.release_filing;
   const signature = loadWdoSignature(project);
-  if (!filing?.s3_key || filing.invoice_id !== invoice.id || filing.content_hash !== wdoContentHash(project)
+  if (!filing?.s3_key || filing.invoice_id !== invoice.id || filing.content_hash !== wdoContentHash(project, loadWdoSignature(project)?.feeValues || null)
     || (filing.signed_at ?? null) !== (signature?.signedAt ?? null)
     || (filing.photo_set_hash ?? null) !== (signature?.photoSetHash ?? null)) return null;
   const object = await s3.send(new GetObjectCommand({ Bucket: config.s3.bucket, Key: filing.s3_key }));
@@ -4555,14 +4621,22 @@ async function restoreHeldVisitReportLink(project, reportPath, portalAttached, d
     .whereRaw("structured_notes->>'projectId' = ?", [String(project.id)])
     .update({
       structured_notes: db.raw(
-        "coalesce(structured_notes, '{}'::jsonb) || jsonb_build_object('portalAttached', ?::boolean, 'projectReport', jsonb_build_object('token', ?::text, 'url', ?::text, 'tokenOnly', ?::boolean))",
-        [Boolean(portalAttached), project.report_token, portalAttached ? (reportPath || null) : null, !portalAttached],
+        "coalesce(structured_notes, '{}'::jsonb) || jsonb_build_object('portalAttached', ?::boolean, 'projectReport', jsonb_build_object('token', ?::text, 'url', ?::text, 'tokenOnly', ?::boolean), 'reportHeld', false, 'projectTitle', ?::text)",
+        [Boolean(portalAttached), project.report_token, portalAttached ? (reportPath || null) : null, !portalAttached, project.title || null],
       ),
-      // The paid report's recommendations join the visit note the held completion wrote without them (a note
-      // someone has since edited is left as it is).
-      technician_notes: db.raw('CASE WHEN technician_notes IS NOT DISTINCT FROM ? THEN ? ELSE technician_notes END', [
-        completionTechnicianNotes(project, { reportHeld: true }), completionTechnicianNotes(project),
-      ]),
+      // The paid report's recommendations join the visit note the held completion wrote without them
+      // (match both the new 'Project completed.' placeholder and legacy 'Project completed: <title>'
+      // notes written before B-58, while preserving staff-edited notes).
+      technician_notes: db.raw(
+        'CASE WHEN technician_notes IS NOT DISTINCT FROM ? OR technician_notes IS NOT DISTINCT FROM ? THEN ? ELSE technician_notes END',
+        [
+          completionTechnicianNotes(project, { reportHeld: true }),
+          project.title
+            ? `Project completed: ${redactProjectTitleForWrite(project.title, project.project_type, await resolveProjectRecordedFeeValues(project, database))}`
+            : 'Project completed.',
+          completionTechnicianNotes(project),
+        ],
+      ),
     });
 }
 
@@ -5046,6 +5120,7 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
     if (!parsed.ok) return res.status(parsed.status).json({ error: parsed.error, ...(parsed.code ? { code: parsed.code } : {}) });
 
     const applicator = await resolveProjectApplicator(project);
+    const feeValues = await resolveProjectRecordedFeeValues(project);
     const signature = {
       image: parsed.image,
       content_type: parsed.contentType,
@@ -5054,10 +5129,11 @@ router.post('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) => 
       attestation: String(req.body?.attestation || 'I certify I performed this inspection and the findings are accurate.').trim().slice(0, 500),
       signed_at: new Date().toISOString(),
       signed_by_tech_id: req.technicianId || null,
+      fee_values: feeValues,
       // Binds the signature to the content it attests — the send gates
       // recompute this hash and refuse to stamp if findings/project_date
       // changed after signing (the licensee must re-sign).
-      content_hash: wdoContentHash(project),
+      content_hash: wdoContentHash(project, feeValues),
     };
 
     // The FDACS-13645 requires the licensee's printed name AND ID-card number,
@@ -5142,6 +5218,39 @@ router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) =
 // message, no email, no filing archive, and sent_at stays NULL.
 // Body: { note? } (trimmed, max 500 characters).
 // ---------------------------------------------------------------------------
+function buildMarkSentOutsideUpdate(trx, locked, { technicianId, note }) {
+  const hasHoldColumns = 'report_hold_status' in locked;
+  const hasDeliveryColumns = 'delivery_status' in locked;
+  const query = trx('projects')
+    .where({ id: locked.id, project_type: 'wdo_inspection' })
+    .whereNotNull('wdo_signature')
+    .whereNull('sent_at')
+    .whereNull('sent_outside_portal_at');
+  if ('status' in locked) query.whereRaw("status IS DISTINCT FROM 'sent'");
+  // Not while a portal /send or /send-with-invoice holds an active send claim
+  // (a crashed >10m claim can be superseded, mirroring the send routes).
+  if (hasDeliveryColumns) {
+    query.where((q) => q
+      .whereRaw("delivery_status IS DISTINCT FROM 'sending'")
+      .orWhereRaw("updated_at < now() - interval '10 minutes'"));
+  }
+  // Not while a held report is being sent (the release, automatic or by staff, is its one sender).
+  if (hasHoldColumns) query.whereRaw("coalesce(report_hold_status, '') <> 'releasing'");
+  const patch = {
+    sent_outside_portal_at: db.fn.now(),
+    sent_outside_portal_by: technicianId || null,
+    sent_outside_portal_note: note || null,
+    // Clear any stale crashed send claim we just superseded so the row never stays 'sending'.
+    ...(hasDeliveryColumns && String(locked.delivery_status || '') === 'sending'
+      ? { delivery_status: 'failed', delivery_claim_token: null }
+      : {}),
+    // A report held until paid that went out another way must not be sent again when it is paid: decided
+    // on the row as the update sees it, so a hold armed after the read above is released too.
+    ...(hasHoldColumns ? heldReleaseFieldsInSql('sent_outside') : {}),
+  };
+  return query.update(patch).returning(['sent_outside_portal_at', 'sent_outside_portal_by', 'sent_outside_portal_note']);
+}
+
 router.post('/:id/mark-sent-outside', requireAdmin, async (req, res, next) => {
   try {
     const rawNote = req.body?.note;
@@ -5151,53 +5260,39 @@ router.post('/:id/mark-sent-outside', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: `note must be ${MARK_SENT_OUTSIDE_NOTE_MAX} characters or fewer` });
     }
 
-    const project = await db('projects').where({ id: req.params.id }).first();
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    const blocked = markSentOutsideBlock(project);
-    if (blocked) return res.status(409).json(blocked);
+    // Lock the project row FOR UPDATE before reading send/hold state and
+    // writing sent_outside_portal_at, preventing a race against an in-flight
+    // /send or /send-with-invoice delivery claim (B-47).
+    const outcome = await db.transaction(async (trx) => {
+      const locked = await trx('projects').where({ id: req.params.id }).forUpdate().first();
+      if (!locked) return { notFound: true };
+      const blocked = markSentOutsideBlock(locked);
+      if (blocked) return { blocked };
 
-    // One update guarded by the same state test, with the audit row in the same
-    // transaction: a racing portal send or a second click matches no row.
-    const updated = await db.transaction(async (trx) => {
-      // The hold columns exist on migrated databases only (the row read above shows which): the condition and the
-      // release fields go in together, so an older schema never sees a hold column.
-      const hasHoldColumns = 'report_hold_status' in project;
-      const query = trx('projects')
-        .where({ id: project.id, project_type: 'wdo_inspection' })
-        .whereNotNull('wdo_signature')
-        .whereNull('sent_at')
-        .whereNull('sent_outside_portal_at');
-      // Not while a held report is being sent (the release, automatic or by staff, is its one sender).
-      if (hasHoldColumns) query.whereRaw("coalesce(report_hold_status, '') <> 'releasing'");
-      const rows = await query
-        .update({
-          sent_outside_portal_at: db.fn.now(),
-          sent_outside_portal_by: req.technicianId || null,
-          sent_outside_portal_note: note || null,
-          // A report held until paid that went out another way must not be sent again when it is paid: decided
-          // on the row as the update sees it, so a hold armed after the read above is released too.
-          ...(hasHoldColumns ? heldReleaseFieldsInSql('sent_outside') : {}),
-        })
-        .returning(['sent_outside_portal_at', 'sent_outside_portal_by', 'sent_outside_portal_note']);
+      const rows = await buildMarkSentOutsideUpdate(trx, locked, { technicianId: req.technicianId, note });
       const row = Array.isArray(rows) ? rows[0] : null;
-      if (!row) return null;
+      if (!row) return { stateChanged: true };
       await recordAuditEvent({
         actor_type: 'technician',
         actor_id: req.technicianId || null,
         action: 'wdo.report_marked_sent_outside',
         resource_type: 'project',
-        resource_id: project.id,
-        metadata: { customer_id: project.customer_id || null, note: note || null },
+        resource_id: locked.id,
+        metadata: { customer_id: locked.customer_id || null, note: note || null },
         ip_address: req.ip || null,
         user_agent: req.headers?.['user-agent'] || null,
         critical: true,
         trx,
       });
-      return row;
+      return { project: locked, updated: row };
     });
-    if (!updated) {
+
+    if (outcome.notFound) return res.status(404).json({ error: 'Project not found' });
+    if (outcome.blocked) return res.status(409).json(outcome.blocked);
+    if (outcome.stateChanged) {
       return res.status(409).json({ code: 'state_changed', error: 'The report changed while you were marking it. Reload and check.' });
     }
+    const { project, updated } = outcome;
 
     // Unconditionally: a hold armed after the read above was released by the same write, and its bells are answered.
     await require('../services/project-report-hold').closeReleaseFailedBell(project.id);
@@ -5708,8 +5803,8 @@ function heldInvoiceSmsHandoff({ customerId, phone, projectId, invoiceId, delive
         const fence = await heldPayLinkFence(trx, { customerId, projectId, invoiceId, deliveryClaimToken, invoiceClaimToken });
         if (fence.code === 'COLLECTION_HOLD') return { ok: false, code: 'COLLECTION_HOLD', reason: 'collection_hold', retryable: false };
         if (fence.code) return refused;
-        // paid from the email meanwhile (or voided): no second request to pay
-        if (['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'].includes(String(fence.live.status || '').toLowerCase())
+        // paid from the email meanwhile (or voided/disputed): no second request to pay
+        if (['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled', 'disputed'].includes(String(fence.live.status || '').toLowerCase())
           || !(require('../services/invoice-helpers').invoiceAmountDue(fence.live) > 0)) return refused;
         dispatched = true;
         return dispatch(trx);
@@ -6030,11 +6125,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       holdRequested,
     });
 
-    // Match the canonical invoice non-sendable statuses (invoice.js): don't
-    // push another pay link for an invoice that's paid, void, mid-send, or has
-    // a bank payment (ACH) already in flight ('processing').
-    if (['paid', 'prepaid', 'void', 'processing', 'sending'].includes(invoice.status)) {
-      return res.status(409).json({ error: `Cannot send a ${invoice.status} invoice`, invoice_id: invoice.id });
+    // Match the canonical invoice non-sendable statuses (invoice.js; B-48): don't
+    // push another pay link for an invoice that's paid, void, mid-send, disputed,
+    // or has a bank payment (ACH) already in flight ('processing').
+    if (PROJECT_INVOICE_NON_SENDABLE_STATUSES.includes(invoice.status)) {
+      return res.status(409).json(nonSendableProjectInvoicePayload(invoice));
     }
     if (await holdInvoiceRefused(res, invoice, hold)) return;
 
@@ -6185,6 +6280,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if ('report_hold_status' in project) {
       deliveryClaimQuery.whereRaw(SEND_CLAIM_HOLD_EXCLUSION[String(Boolean(holdRequested))]);
     }
+    addSentOutsideClaimGuard(deliveryClaimQuery, project);
     const deliveryClaimRows = await deliveryClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: deliveryClaimToken, updated_at: db.fn.now() });
     if (!deliveryClaimRows) {
@@ -6628,9 +6724,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (err?.code === 'invoice_build_failed') {
       return res.status(422).json({ error: err.message, code: err.code });
     }
-    // The visit is already billed on a paid/in-flight invoice — block the
-    // duplicate send with a 409 and point at the existing invoice.
-    if (err?.code === 'already_billed') {
+    // The visit is already billed on a paid/in-flight/disputed invoice — block
+    // the duplicate send with a 409 and point at the existing invoice.
+    if (['already_billed', 'invoice_disputed'].includes(err?.code)) {
       return res.status(409).json({ error: err.message, code: err.code, invoice_id: err.invoiceId, invoice_number: err.invoiceNumber });
     }
     // No-charge WDO ($0 fee): nothing to bill — the operator sends the
@@ -7183,6 +7279,11 @@ router._private = {
   completeProjectBackedService,
   dropStaleCertTreatmentDate,
   resolveWdoInspectionFee,
+  resolveWdoFeeForProject,
+  maybeRepriceWdoDraft,
+  markSentOutsideBlock,
+  nonSendableProjectInvoicePayload,
+  alreadyBilledProjectError,
   wdoAddendumPhotoCaption,
   wdoFeeIsExplicitZero,
 };

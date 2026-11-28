@@ -1346,20 +1346,48 @@ function projectArchivedFeeValues(project) {
       values.push(snap && typeof snap === 'object' && snap.inspection_fee != null
         ? snap.inspection_fee
         : '');
+      if (Array.isArray(filing?.fee_values)) {
+        for (const v of filing.fee_values) {
+          if (v != null && v !== '') values.push(String(v));
+        }
+      }
     }
   }
   return values;
 }
 
-function projectRecordedFeeValues(project) {
+function projectRecordedFeeValues(project, { scheduledService = null, extraValues = [] } = {}) {
   const findings = parseJsonish(project?.findings);
   // The live entry ALWAYS contributes — an absent fee bills at the flat
   // default just like a blank one, so it must count as digit-free in the
   // resolve step even when archived filings carry numeric fees
   // (codex #2817 r31).
-  const values = [findings?.inspection_fee ?? ''];
+  const rawLiveFee = findings?.inspection_fee ?? '';
+  const isWdo = project?.project_type === 'wdo_inspection';
+  const parsedLiveFee = isWdo ? require('./wdo-inspection-fee').parseWdoFeeAmount(rawLiveFee) : null;
+  // Treat non-numeric WDO prose (e.g. "2nd inspection") as blank ('') so
+  // resolveFeeValuesForScrub still adds the $250 default fallback alongside
+  // any booked visit or historical values (B-25 / Codex P1).
+  const values = [isWdo && parsedLiveFee === null ? '' : rawLiveFee];
+  if (scheduledService && project?.project_type === 'wdo_inspection') {
+    const { bookedWdoVisitFee } = require('./wdo-inspection-fee');
+    const booked = bookedWdoVisitFee(scheduledService);
+    if (booked !== null) values.push(String(booked));
+  }
+  if (Array.isArray(extraValues) && extraValues.length) values.push(...extraValues);
   values.push(...projectArchivedFeeValues(project));
   return resolveFeeValuesForScrub(values);
+}
+
+async function resolveProjectRecordedFeeValues(project, database = require('../models/db')) {
+  if (!project) return [];
+  const findings = parseJsonish(project.findings);
+  const { parseWdoFeeAmount, loadLinkedWdoVisit } = require('./wdo-inspection-fee');
+  let scheduledService = null;
+  if (project.project_type === 'wdo_inspection' && parseWdoFeeAmount(findings?.inspection_fee) === null) {
+    scheduledService = await loadLinkedWdoVisit(project, database);
+  }
+  return projectRecordedFeeValues(project, { scheduledService });
 }
 
 // Deep cue detection over a findings object (or JSON string of one).
@@ -1515,6 +1543,7 @@ module.exports = {
   redactSpecificAmounts,
   resolveFeeValuesForScrub,
   projectRecordedFeeValues,
+  resolveProjectRecordedFeeValues,
   projectArchivedFeeValues,
   findingsContainFeeCue,
   filingBinaryMayDiscloseFee,

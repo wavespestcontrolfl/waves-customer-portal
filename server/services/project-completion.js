@@ -177,11 +177,11 @@ function positiveMoney(value) {
 }
 
 function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {}, project = null } = {}) {
-  // WDO owns a flat/default inspection fee independent of legacy appointment
-  // pricing. This shares the canonical resolver with invoice creation so a
-  // blank fee bills $250, a custom fee wins, and an explicit zero stays comped.
+  // WDO resolves the tech-entered fee first (explicit $0 stays comped), then
+  // the linked visit's booked WDO size/construction price ($150-$275), before
+  // falling back to the $250 default — sharing one resolver with invoice minting.
   if (project?.project_type === 'wdo_inspection') {
-    return resolveWdoInspectionFee(parseJsonObject(project.findings));
+    return resolveWdoInspectionFee(parseJsonObject(project.findings), { scheduledService });
   }
   const estimated = positiveMoney(scheduledService.estimated_price);
   if (estimated > 0) return estimated;
@@ -343,7 +343,7 @@ async function resolveProjectCompletionBilling({
   };
 }
 
-function projectCompletionNotes({ project, profile, portalAttached, reportPath }) {
+function projectCompletionNotes({ project, profile, portalAttached, reportPath, reportHeld = false, scheduledService = null }) {
   return {
     projectCompletion: true,
     projectId: project.id,
@@ -353,9 +353,10 @@ function projectCompletionNotes({ project, profile, portalAttached, reportPath }
     // scrub without refetching the project (codex #2817). Fee-carrying
     // types only.
     ...(projectTypeHasInternalFindingKeys(project.project_type)
-      ? { feeValues: projectRecordedFeeValues(project) }
+      ? { feeValues: projectRecordedFeeValues(project, { scheduledService }) }
       : {}),
-    projectTitle: project.title || null,
+    projectTitle: reportHeld ? null : (project.title || null),
+    ...(reportHeld ? { reportHeld: true } : {}),
     completionMode: profile.completionMode || null,
     portalVisibility: profile.portalVisibility || null,
     portalAttachPolicy: profile.portalAttachPolicy || null,
@@ -418,8 +419,9 @@ function projectFollowupSuggestion({
 }
 
 // The visit-history note a project completion writes (service_records.technician_notes, which the customer's service
-// history returns). A report held for payment keeps its recommendations out until the paid release writes them.
-function completionTechnicianNotes(project, { reportHeld = false } = {}) {
+// history returns). A report held for payment keeps its title and recommendations out until the paid release writes them.
+function completionTechnicianNotes(project, { reportHeld = false, scheduledService = null } = {}) {
+  if (reportHeld) return 'Project completed.';
   // The recommendation copied here lands in service_records.technician_notes,
   // which the authenticated portal service-history API returns verbatim — so
   // a legacy narrative that predates the create/PUT write guard gets its
@@ -432,14 +434,14 @@ function completionTechnicianNotes(project, { reportHeld = false } = {}) {
   const scrubCompletionText = (text) => {
     let safe = redactInspectionFeeCuesForType(String(text), project.project_type);
     if (projectTypeHasInternalFindingKeys(project.project_type)) {
-      const feeValues = projectRecordedFeeValues(project);
+      const feeValues = projectRecordedFeeValues(project, { scheduledService });
       if (feeValues.length) safe = redactSpecificAmounts(safe, feeValues);
     }
     return safe;
   };
   return [
     project.title ? `Project completed: ${scrubCompletionText(project.title)}` : 'Project completed.',
-    project.recommendations && !reportHeld ? scrubCompletionText(project.recommendations) : '',
+    project.recommendations ? scrubCompletionText(project.recommendations) : '',
   ].filter(Boolean).join('\n\n');
 }
 
@@ -456,12 +458,14 @@ function buildServiceRecordInsert({
   const serviceDate = normalizeDateOnly(project.project_date)
     || normalizeDateOnly(scheduledService.scheduled_date)
     || etDateString();
-  const notes = completionTechnicianNotes(project, { reportHeld });
+  const notes = completionTechnicianNotes(project, { reportHeld, scheduledService });
   const structuredNotes = projectCompletionNotes({
     project,
     profile,
     portalAttached,
     reportPath,
+    reportHeld,
+    scheduledService,
   });
 
   const recordInsert = {
@@ -591,42 +595,27 @@ async function createProjectFollowupAlert({
   };
 }
 
-function buildServiceRecordProjectCompletionUpdate({
-  serviceRecord = {},
-  project,
-  profile,
-  serviceRecordCols = {},
-  lifecycleUpdates = {},
-  portalAttached = false,
-  reportPath = null,
-  nowValue = null,
-}) {
-  const structuredNotes = projectCompletionNotes({
-    project,
-    profile,
-    portalAttached,
-    reportPath,
-  });
-  const existingStructuredNotes = parseJsonObject(serviceRecord.structured_notes);
-  const existingServiceData = parseJsonObject(serviceRecord.service_data);
-  const update = {
-    status: 'completed',
-  };
-
-  if (serviceRecordCols.structured_notes) {
-    update.structured_notes = serializeJsonb({
-      ...existingStructuredNotes,
-      ...structuredNotes,
-    });
+async function hydrateWdoVisitAddons(database, project, scheduledService) {
+  if (project.project_type !== 'wdo_inspection'
+    || Array.isArray(scheduledService.service_addons)
+    || Array.isArray(scheduledService.serviceAddons)) {
+    return scheduledService;
   }
+  const addons = await database('scheduled_service_addons')
+    .where({ scheduled_service_id: scheduledService.id })
+    .select('estimated_price', 'base_price')
+    .catch(() => []);
+  return { ...scheduledService, service_addons: Array.isArray(addons) ? addons : [] };
+}
+
+function populateServiceRecordDeliveryColumns(update, serviceRecord, project, serviceRecordCols, nowValue) {
   if (serviceRecordCols.completion_source) update.completion_source = 'project_completion';
   if (serviceRecordCols.protocol_defaults_used) update.protocol_defaults_used = false;
-  // Fill-if-absent on a re-completion: a record created before the line was
-  // stamped at insert gets the same frozen verdict (pre-push codex P1).
   if (serviceRecordCols.service_line && !serviceRecord.service_line && serviceRecord.service_type) {
     update.service_line = detectServiceLine(serviceRecord.service_type);
   }
   if (serviceRecordCols.service_data) {
+    const existingServiceData = parseJsonObject(serviceRecord.service_data);
     update.service_data = serializeJsonb({
       ...existingServiceData,
       ...projectServiceData(project),
@@ -638,11 +627,56 @@ function buildServiceRecordProjectCompletionUpdate({
   if (serviceRecordCols.report_html_storage_key) update.report_html_storage_key = null;
   if (serviceRecordCols.map_svg_storage_key) update.map_svg_storage_key = null;
   if (serviceRecordCols.updated_at && nowValue) update.updated_at = nowValue;
+}
 
+function buildServiceRecordProjectCompletionUpdate({
+  serviceRecord = {},
+  scheduledService = null,
+  project,
+  profile,
+  serviceRecordCols = {},
+  lifecycleUpdates = {},
+  portalAttached = false,
+  reportPath = null,
+  reportHeld,
+  nowValue = null,
+}) {
+  const structuredNotes = projectCompletionNotes({
+    project,
+    profile,
+    portalAttached,
+    reportPath,
+    reportHeld: Boolean(reportHeld),
+    scheduledService,
+  });
+  const existingStructuredNotes = parseJsonObject(serviceRecord.structured_notes);
+  const update = { status: 'completed' };
+  if (serviceRecordCols.structured_notes) {
+    update.structured_notes = serializeJsonb({
+      ...existingStructuredNotes,
+      ...structuredNotes,
+    });
+  }
+  populateServiceRecordDeliveryColumns(update, serviceRecord, project, serviceRecordCols, nowValue);
   return {
     ...pickExistingColumns(lifecycleUpdates, serviceRecordCols),
     ...pickExistingColumns(update, serviceRecordCols),
   };
+}
+
+async function linkCompletedProjectInvoice(knex, link) {
+  if (!link) return;
+  await knex('invoices')
+    .where({ id: link.invoiceId })
+    .whereNull('service_record_id')
+    .update({
+      service_record_id: link.serviceRecordId,
+      technician_id: link.technicianId,
+      updated_at: knex.fn.now(),
+    })
+    .catch((err) => {
+      logger.warn(`[project-completion] invoice link failed for ${link.invoiceId}: ${err.message}`);
+    });
 }
 
 async function completeProjectBackedService({
@@ -667,6 +701,7 @@ async function completeProjectBackedService({
   // leaves the replaced appointment linked; completing it performs no
   // visit). GH codex #3996 r2 P2 ×2.
   let postCommitConsumption = null;
+  let postCommitInvoiceLink = null;
   const result = await knex.transaction(async (trx) => {
     // Project row FIRST (codex #3344 r9 P2): the combined report/invoice
     // send (resolveOrCreateProjectInvoice) holds the project FOR UPDATE and
@@ -709,7 +744,7 @@ async function completeProjectBackedService({
       };
     }
 
-    const scheduledService = await trx('scheduled_services as s')
+    let scheduledService = await trx('scheduled_services as s')
       .leftJoin('customers as c', 's.customer_id', 'c.id')
       .where({ 's.id': project.scheduled_service_id })
       .first(
@@ -729,6 +764,7 @@ async function completeProjectBackedService({
       err.status = 400;
       throw err;
     }
+    scheduledService = await hydrateWdoVisitAddons(trx, project, scheduledService);
     if (String(scheduledService.customer_id) !== String(project.customer_id)) {
       const err = new Error('Project customer does not match linked scheduled service');
       err.status = 400;
@@ -944,12 +980,14 @@ async function completeProjectBackedService({
       if (freshRecord) serviceRecord = freshRecord;
       const update = buildServiceRecordProjectCompletionUpdate({
         serviceRecord,
+        scheduledService,
         project: { ...project, report_token: token },
         profile,
         serviceRecordCols,
         lifecycleUpdates,
         portalAttached,
         reportPath,
+        reportHeld,
         nowValue: trx.fn.now(),
       });
       // The customer's booking words freeze with the completion
@@ -1028,14 +1066,15 @@ async function completeProjectBackedService({
       followup: followupSuggestion,
       trx,
     });
+    // Defer the best-effort invoice service_record_id link until after commit so
+    // project closeout never acquires an invoices row lock while holding projects
+    // FOR UPDATE (preserves global invoices -> projects lock order).
     if (billing.invoice?.id && serviceRecord?.id && !billing.invoice.service_record_id) {
-      await trx('invoices').where({ id: billing.invoice.id }).update({
-        service_record_id: serviceRecord.id,
-        technician_id: scheduledService.technician_id || billing.invoice.technician_id || null,
-        updated_at: trx.fn.now(),
-      }).catch((err) => {
-        logger.warn(`[project-completion] invoice link failed for ${billing.invoice.id}: ${err.message}`);
-      });
+      postCommitInvoiceLink = {
+        invoiceId: billing.invoice.id,
+        serviceRecordId: serviceRecord.id,
+        technicianId: scheduledService.technician_id || billing.invoice.technician_id || null,
+      };
     }
 
     if (scheduledService.status !== 'completed') {
@@ -1096,6 +1135,8 @@ async function completeProjectBackedService({
       completionProfile: profile,
     };
   });
+
+  await linkCompletedProjectInvoice(knex, postCommitInvoiceLink);
 
   // A performed project closeout of a street-level hold's visit confirms its address (the shared
   // transition stamped it); release the hold now. A no-op for every other visit; best-effort.
@@ -1168,7 +1209,7 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
     };
   }
 
-  const scheduledService = await knex('scheduled_services as s')
+  let scheduledService = await knex('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where({ 's.id': project.scheduled_service_id })
     .first(
@@ -1197,6 +1238,7 @@ async function buildProjectCloseoutPreview(projectId, knex = db) {
       canClose: false,
     };
   }
+  scheduledService = await hydrateWdoVisitAddons(knex, project, scheduledService);
 
   const customer = {
     id: scheduledService.customer_id,

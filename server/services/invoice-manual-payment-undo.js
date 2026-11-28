@@ -132,6 +132,13 @@ const AFTER_PAYMENT_PROBES = [
     message: 'Reminders for this invoice were paused before the payment, so it cannot be undone here. Ask for help.',
     sql: 'SELECT 1 FROM invoice_followup_sequences WHERE invoice_id = :invoiceId AND (paused_reason IS NOT NULL OR paused_by_admin_id IS NOT NULL)',
   },
+  // GATE_WDO_REPORT_HOLD: once the 60s sweep (or staff release) starts sending or has delivered the held
+  // FDACS-13645 report for this invoice, the legal deliverable is out — the payment cannot be undone here.
+  {
+    code: 'wdo_report_released',
+    message: 'The WDO report held for this invoice was already released or is being sent, so this payment cannot be undone here.',
+    sql: "SELECT 1 FROM projects WHERE invoice_id = :invoiceId AND (report_hold_status IN ('releasing', 'released') OR report_hold_released_at IS NOT NULL)",
+  },
 ];
 
 // Only for a part payment: a plan set up after it was sized from the remainder, which undoing would leave short.
@@ -288,6 +295,9 @@ async function undoManualPayment(invoiceId, { reason, paymentId, undoneBy = 'adm
     await lockInvoiceReceiptClaim(trx, invoiceId);
     const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!locked) throw refusal(404, 'Invoice not found');
+    // Lock any project bound to this invoice (after invoices, matching armReportHold / release lock order)
+    // so the 60s WDO hold-release sweep cannot start sending the held report while this undo commits.
+    await require('./project-report-hold').findWdoReportHoldStateForInvoice(trx, invoiceId, { lock: true });
     const { refusal: refused, marker, payment, isPart } = await manualPaymentUndoRefusal(trx, locked);
     if (refused) throw refusal(409, refused.message, { code: refused.code });
     // The caller confirmed the payment it was shown. Another operator may have undone it and recorded a different one since.

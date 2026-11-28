@@ -360,8 +360,13 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
       + 'inspection document. Do NOT summarize, read from, or characterize it — tell the caller the office will '
       + 'provide the document itself and can answer questions about it.';
   }
-  const { suppressesCustomerArtifacts } = require('../../routes/services');
-  if (suppressesCustomerArtifacts(structured)) {
+  const { isServiceRecordArtifactSuppressed } = require('../portal-service-history');
+  if (await isServiceRecordArtifactSuppressed(structured, db, {
+    serviceRecordId: record.id,
+    scheduledServiceId: record.scheduled_service_id,
+    serviceType: record.service_type,
+    reportTemplateVersion: record.report_template_version,
+  })) {
     return `A visit is on file for ${speakDate(record.service_date) || 'that date'}, but its detailed report is not `
       + 'released for customer delivery. Do NOT describe findings or products. Offer to have the office follow up '
       + 'with the report.';

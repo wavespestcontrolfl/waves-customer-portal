@@ -40,7 +40,7 @@ const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
   redactSpecificAmounts,
-  projectRecordedFeeValues,
+  resolveProjectRecordedFeeValues,
   projectTypeFreeTextKeys,
 } = require('../project-types');
 
@@ -561,9 +561,16 @@ function resolveApplicator({ project = {}, findings = {} }) {
  *   load has no `tech_name`, so callers resolve the technician and pass it in;
  *   we fall back to the project/findings only if it's omitted.
  */
-async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride, signature, photos = [] } = {}) {
+async function resolveWdoPdfFeeValues(project, feeValuesOverride, signature) {
+  if (Array.isArray(feeValuesOverride)) return feeValuesOverride;
+  if (Array.isArray(signature?.feeValues)) return signature.feeValues;
+  return resolveProjectRecordedFeeValues(project);
+}
+
+async function buildWdoReportPDFBuffer({ project, customer, applicator: applicatorOverride, signature, photos = [], feeValues: feeValuesOverride = null } = {}) {
   if (!project) throw new Error('project required for WDO report PDF');
-  const findings = customerSafeFindings(project.findings, projectRecordedFeeValues(project));
+  const feeValues = await resolveWdoPdfFeeValues(project, feeValuesOverride, signature);
+  const findings = customerSafeFindings(project.findings, feeValues);
   const resolved = resolveApplicator({ project, findings });
   const applicator = {
     name: clean(applicatorOverride?.name) || resolved.name,
@@ -631,7 +638,7 @@ async function buildWdoReportPDFBuffer({ project, customer, applicator: applicat
   if (Array.isArray(photos) && photos.length) {
     await appendPhotoAddendum(pdfDoc, {
       photos,
-      feeValues: projectRecordedFeeValues(project),
+      feeValues,
       propertyAddress: clean(textValues['Address of Property Inspected']),
     }).catch((err) => {
       logger.warn(`[wdo-pdf] photo addendum failed for project ${project.id}: ${err.message}`);

@@ -415,6 +415,62 @@ function redactSpecificAmounts(text, values) {
   return str;
 }
 
+// Strict WDO inspection_fee parser shared across server billing and the client
+// create/sign modal (no lookbehinds — browser-safe for Safari < 16.4).
+// Rejects negative amounts, ambiguous ranges / multiple dollar figures, and
+// non-currency prose digits (ordinals, percentages, measurements, dates).
+// Prefers an explicit currency-marked amount ($/USD/dollars) so notes like
+// "2nd inspection $175" or "0% discount $175" resolve to 175 rather than 2 or 0.
+const WDO_FEE_THOUSANDS_RE = /^\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?$/;
+const WDO_FEE_DECIMAL_RE = /^(?:\d+(?:\.\d{1,2})?|\.\d{1,2})$/;
+const WDO_NEGATIVE_CURRENCY_RE = /(?:^|[^\w])-\s*(?:US\$|USD|\$)\s*(?:\d|\.\d)|(?:US\$|USD|\$)\s*-\s*(?:\d|\.\d)|\(\s*(?:US\$|USD|\$)\s*(?!0+(?:\.0+)?\s*(?:\)|[^.\d]))(?:\d|\.\d)|(?:^|[^\w])-\s*(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*(?:dollars?|usd)\b|\(\s*(?!0+(?:\.0+)?\s*(?:dollars?|usd)\b)(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*(?:dollars?|usd)\b/i;
+const WDO_CURRENCY_TOKEN_RE = /(?:US\$|USD|\$)\s*(\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)|(\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*(?:dollars?|usd)\b/gi;
+const WDO_CURRENCY_RANGE_AFTER_RE = /(?:US\$|USD|\$)\s*(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*(?:[-–—/]|to\b|through\b|thru\b|or\b)\s*(?:US\$|USD|\$)?\s*(?:\d|\.\d)/i;
+const WDO_CURRENCY_RANGE_BEFORE_RE = /^\s*(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*(?:[-–/]|to\b|through\b|thru\b|or\b)\s*(?:(?:US\$|USD|\$)\s*(?:\d|\.\d)|(?:\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)\s*(?:dollars?|usd)\b)/i;
+const WDO_BARE_LEADING_RE = /^(\d+(?:,+\d+)*(?:\.\d+)?|\.\d+)(.*)$/;
+const WDO_BARE_NON_FEE_TAIL_RE = /^(?:%|\.\d|st\b|nd\b|rd\b|th\b|[a-z]|[:/]\d|[-–/]\s*(?:US\$|USD|\$)?\s*(?:\d|\.\d)|\s*(?:[-–—/+]|to\b|through\b|thru\b|or\b|and\b)\s*(?:US\$|USD|\$)?\s*(?:\d|\.\d)|\s+(?:%|sq\.?\s*ft\b|sqft\b|square\b|feet\b|foot\b|ft\b|acres?\b|stor(?:y|ies)\b|days?\b|weeks?\b|months?\b|years?\b|hours?\b|minutes?\b|mins?\b|am\b|pm\b))/i;
+
+function parseWdoMoneyToken(token) {
+  if (!token) return null;
+  const valid = token.includes(',') ? WDO_FEE_THOUSANDS_RE.test(token) : WDO_FEE_DECIMAL_RE.test(token);
+  if (!valid) return null;
+  const amount = Number(token.replace(/,/g, ''));
+  return Number.isFinite(amount) && amount >= 0 ? amount : null;
+}
+
+function parseWdoFeeAmount(value) {
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? value : null;
+  const raw = String(value ?? '').trim();
+  if (!raw || WDO_NEGATIVE_CURRENCY_RE.test(raw)) return null;
+  const currencyMatches = [];
+  WDO_CURRENCY_TOKEN_RE.lastIndex = 0;
+  let match;
+  while ((match = WDO_CURRENCY_TOKEN_RE.exec(raw)) !== null) {
+    const tail = raw.slice(match.index + match[0].length, match.index + match[0].length + 2);
+    if (/^(?:%|\.\d)/.test(tail)) return null;
+    currencyMatches.push(match[1] || match[2]);
+  }
+  if (currencyMatches.length > 0) {
+    if (currencyMatches.length > 1 || WDO_CURRENCY_RANGE_AFTER_RE.test(raw) || WDO_CURRENCY_RANGE_BEFORE_RE.test(raw)) {
+      return null;
+    }
+    return parseWdoMoneyToken(currencyMatches[0]);
+  }
+  const bare = raw.match(WDO_BARE_LEADING_RE);
+  if (!bare) return null;
+  if (bare[2] && WDO_BARE_NON_FEE_TAIL_RE.test(bare[2])) return null;
+  return parseWdoMoneyToken(bare[1]);
+}
+
+function parseWdoFee(value) {
+  const amount = parseWdoFeeAmount(value);
+  return amount !== null && amount > 0 ? amount : 0;
+}
+
+function wdoFeeIsExplicitZero(value) {
+  return parseWdoFeeAmount(value) === 0;
+}
+
 module.exports = {
   INTERNAL_FINDING_KEYS,
   redactInspectionFeeCues,
@@ -422,4 +478,7 @@ module.exports = {
   redactSpecificAmounts,
   resolveFeeValuesForScrub,
   WDO_DEFAULT_INSPECTION_FEE,
+  parseWdoFeeAmount,
+  parseWdoFee,
+  wdoFeeIsExplicitZero,
 };

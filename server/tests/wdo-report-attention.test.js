@@ -109,7 +109,7 @@ describe('findAttentionItems — held reports that nobody is releasing', () => {
     // failing over and over, invoice gone, or one that can no longer settle
     expect(has('where', 'p.report_hold_attempts', '>=', 5)).toBe(true);
     expect(has('orWhereNull', 'i.id')).toBe(true);
-    expect(has('orWhereIn', 'i.status', ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible'])).toBe(true);
+    expect(has('orWhereIn', 'i.status', ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible', 'disputed'])).toBe(true);
     // an invoice still in draft a day later (the customer has nothing to pay)
     expect(has('where', 'i.status', 'draft')).toBe(true);
     expect(log.find((l) => l[0] === 'where' && l[1] === 'i.updated_at')[3]).toEqual(new Date('2026-11-01T12:00:00Z'));

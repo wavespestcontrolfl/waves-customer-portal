@@ -93,6 +93,8 @@ function chain(overrides = {}) {
     whereNull: jest.fn().mockReturnThis(),
     whereNotNull: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
+    orWhereRaw: jest.fn().mockReturnThis(),
+    forUpdate: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -163,17 +165,39 @@ describe('POST /:id/mark-sent-outside', () => {
     ['not a WDO report', { project_type: 'termite_treatment' }, 'not_wdo_report'],
     ['not signed', { wdo_signature: null }, 'not_signed'],
     ['already sent through the portal', { sent_at: '2026-10-21T10:00:00Z' }, 'already_sent'],
+    ['already sent by status', { status: 'sent' }, 'already_sent'],
     ['already marked', { sent_outside_portal_at: '2026-10-22T10:00:00Z' }, 'already_marked'],
+    ['release in progress', { report_hold_status: 'releasing' }, 'release_in_progress'],
+    ['portal send in flight (B-47)', { delivery_status: 'sending', updated_at: new Date().toISOString() }, 'send_in_progress'],
+    ['portal send in flight with unknown updated_at (B-47)', { delivery_status: 'sending', updated_at: null }, 'send_in_progress'],
   ])('409 when the report is %s', async (_label, over, code) => {
-    const { write } = wire({ current: baseProject(over) });
+    const { read, write } = wire({ current: baseProject(over) });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { note: 'x' });
       const body = await res.json();
       expect(res.status).toBe(409);
       expect(body.code).toBe(code);
     });
+    expect(read.forUpdate).toHaveBeenCalledTimes(1);
     expect(write.update).not.toHaveBeenCalled();
     expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('a stale (>10 min) crashed delivery_status=sending claim can be marked sent outside and is cleared (B-47)', async () => {
+    const staleAt = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const { read, write } = wire({
+      current: baseProject({ status: 'in_progress', delivery_status: 'sending', updated_at: staleAt }),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { note: 'Sent by email' });
+      expect(res.status).toBe(200);
+    });
+    expect(read.forUpdate).toHaveBeenCalledTimes(1);
+    expect(write.whereRaw).toHaveBeenCalledWith("status IS DISTINCT FROM 'sent'");
+    expect(write.update.mock.calls[0][0]).toMatchObject({
+      delivery_status: 'failed',
+      delivery_claim_token: null,
+    });
   });
 
   test('404 for an unknown project', async () => {

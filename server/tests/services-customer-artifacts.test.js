@@ -73,4 +73,48 @@ describe('customer services visit note', () => {
     db.mockImplementation((table) => (table === 'service_records' ? chain([row('sr-2', REVIEWED)]) : chain([])));
     expect((await call('/:id', { params: { id: 'sr-2' } })).notes).toBe(BODY);
   });
+
+  test('withholds staged photos and completion notes for a held WDO project until released (B-58)', async () => {
+    const heldWdoRecord = {
+      id: 'sr-wdo-1',
+      customer_id: 'cust-1',
+      service_date: '2026-11-27',
+      service_type: 'WDO Inspection',
+      technician_notes: 'Project completed: Secret Termite Findings',
+      structured_notes: JSON.stringify({
+        projectCompletion: true,
+        projectId: 'proj-wdo-1',
+        projectType: 'wdo_inspection',
+        projectTitle: 'Secret Termite Findings',
+        reportHeld: true,
+      }),
+      service_data: null,
+      completion_source: 'project_completion',
+    };
+    const fakePhotos = [{ id: 'ph-1', photo_type: 'evidence', caption: 'Evidence', s3_key: 'k/1.jpg' }];
+    let holdStatus = 'held';
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return chain([heldWdoRecord]);
+      if (table === 'projects') return chain([{ report_hold_status: holdStatus }]);
+      if (table === 'service_photos') return chain(fakePhotos);
+      return chain([]);
+    });
+
+    const heldDetail = await call('/:id', { params: { id: 'sr-wdo-1' } });
+    expect(heldDetail.photos).toEqual([]);
+    expect(heldDetail.notes).toBeNull();
+
+    const heldList = await call('/', {});
+    expect(heldList.services[0].photoCount).toBe(0);
+    expect(heldList.services[0].notes).toBeNull();
+    expect(heldList.services[0].reportAvailable).toBe(false);
+
+    // Once payment releases the hold, staged photos unlock normally.
+    holdStatus = 'released';
+    const PhotoService = require('../services/photos');
+    PhotoService.getViewUrl.mockResolvedValue('https://example.invalid/photo-1.jpg');
+    const releasedDetail = await call('/:id', { params: { id: 'sr-wdo-1' } });
+    expect(releasedDetail.photos).toHaveLength(1);
+    expect(releasedDetail.photos[0].id).toBe('ph-1');
+  });
 });

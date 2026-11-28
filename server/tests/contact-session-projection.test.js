@@ -19,6 +19,7 @@ jest.mock('../services/portal-service-history', () => ({
   listPortalServiceHistory: jest.fn(),
   parseJsonObject: () => ({}),
   suppressesCustomerArtifacts: () => false,
+  isServiceRecordArtifactSuppressed: jest.fn(async () => false),
   scopeRecordsToProperty: jest.fn((q) => q),
 }));
 jest.mock('../services/celsius-application-count', () => ({ celsiusApplicationsThisYear: jest.fn(async () => 1) }));
