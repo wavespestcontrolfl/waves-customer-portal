@@ -66,7 +66,10 @@ jest.mock('../services/sms-template-renderer', () => ({
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => Promise.resolve('Hi there')) }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({}));
-jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
+jest.mock('../services/billing-helpers', () => ({
+  ...jest.requireActual('../services/billing-helpers'),
+  isBillingDayMatch: jest.fn(() => true),
+}));
 jest.mock('../services/stripe', () => ({
   charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
 }));

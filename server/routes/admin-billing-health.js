@@ -225,10 +225,9 @@ function buildOneTimeChargeIdempotencyKey(req, customerId, chargeAmount) {
 }
 
 async function isManualChargeAlreadyLogged(lockOutcome, customerId, eventType) {
-  if (lockOutcome?.replayed) return true;
-  if (!lockOutcome?.hasCallerKey || !lockOutcome.payment?.id) return false;
+  if (!lockOutcome?.payment?.id) return Boolean(lockOutcome?.replayed);
   const q = db('autopay_log');
-  if (!q || typeof q.where !== 'function') return false;
+  if (!q || typeof q.where !== 'function') return Boolean(lockOutcome?.replayed);
   const existing = await q
     .where({ customer_id: customerId, payment_id: lockOutcome.payment.id, event_type: eventType })
     .first('id');
@@ -238,13 +237,11 @@ async function isManualChargeAlreadyLogged(lockOutcome, customerId, eventType) {
 async function claimManualReceiptDelivery(customer, paymentId, lockOutcome) {
   if (!customer?.phone) return false;
   if (!lockOutcome?.hasCallerKey || !paymentId) return true;
-  if (lockOutcome.replayed) return false;
   const q = db('sms_messages');
-  if (!q || typeof q.where !== 'function') return true;
+  if (!q || typeof q.where !== 'function') return !lockOutcome.replayed;
   const existing = await q
     .whereRaw("metadata->>'source' = 'admin_manual_charge' AND metadata->>'paymentId' = ?", [String(paymentId)])
-    .first('id')
-    .catch(() => null);
+    .first('id');
   return !existing;
 }
 
@@ -253,10 +250,28 @@ async function findRecordedCallerKeyedPayment(customerId, idempotencyKey) {
   if (!q || typeof q.where !== 'function' || typeof q.whereRaw !== 'function') return null;
   return q
     .where({ customer_id: customerId })
-    .whereIn('status', ['paid', 'processing'])
+    .whereIn('status', ['paid', 'processing', 'refunded', 'partially_refunded', 'disputed'])
     .whereRaw("metadata->>'idempotency_key' = ?", [idempotencyKey])
-    .first()
-    .catch(() => null);
+    .orderBy('created_at', 'desc')
+    .first();
+}
+
+function recordedPaymentBaseCents(payment) {
+  if (!payment) return null;
+  if (payment.base_amount_cents != null && Number.isFinite(Number(payment.base_amount_cents))) {
+    return Math.round(Number(payment.base_amount_cents));
+  }
+  let meta = payment.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  if (meta && meta.base_amount != null && Number.isFinite(Number(meta.base_amount))) {
+    return Math.round(Number(meta.base_amount) * 100);
+  }
+  if (payment.amount != null && Number.isFinite(Number(payment.amount))) {
+    return Math.round(Number(payment.amount) * 100);
+  }
+  return null;
 }
 
 // Inside the billing lock, just before the dues charge: re-read customer state
@@ -477,7 +492,33 @@ async function runExplicitChargeInLock(req, { customerId, chargeAmount, desc, se
     // BEFORE calling Stripe so late retries after Stripe's 24h key TTL never
     // mint a duplicate PaymentIntent.
     const existing = await findRecordedCallerKeyedPayment(customerId, idempotencyKey);
-    if (existing) return { payment: existing, hasCallerKey: true, replayed: true };
+    if (existing) {
+      if (['refunded', 'partially_refunded', 'disputed'].includes(existing.status)) {
+        return {
+          response: {
+            status: 409,
+            body: {
+              error: 'A prior charge using this idempotency key was refunded or disputed. Generate a new idempotency key to charge again.',
+              code: 'IDEMPOTENCY_KEY_RETIRED',
+            },
+          },
+        };
+      }
+      const existingBaseCents = recordedPaymentBaseCents(existing);
+      const expectedBaseCents = Math.round(Number(chargeAmount) * 100);
+      if (existingBaseCents !== null && existingBaseCents !== expectedBaseCents) {
+        return {
+          response: {
+            status: 409,
+            body: {
+              error: 'This idempotency key was already used for a different charge amount. Generate a new idempotency key.',
+              code: 'IDEMPOTENCY_AMOUNT_MISMATCH',
+            },
+          },
+        };
+      }
+      return { payment: existing, hasCallerKey: true, replayed: true };
+    }
   }
   try {
     const metadata = hasCallerKey
@@ -581,7 +622,9 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     }
 
     // An accepted bank payment is not evidence of a completed charge.
-    if (payment?.status !== 'paid') return res.json({ success: true, payment });
+    if (payment?.status !== 'paid') {
+      return res.json({ success: true, payment, ...(lockOutcome.replayed ? { idempotent_replay: true } : {}) });
+    }
 
     // Send receipt SMS
     let receiptUrl = null;
@@ -622,7 +665,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       }
     }
 
-    res.json({ success: true, payment });
+    res.json({ success: true, payment, ...(lockOutcome.replayed ? { idempotent_replay: true } : {}) });
   } catch (err) { next(err); }
 });
 

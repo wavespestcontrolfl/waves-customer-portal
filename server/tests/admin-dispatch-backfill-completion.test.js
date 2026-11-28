@@ -2630,7 +2630,7 @@ describe('completion route wiring (source contracts)', () => {
     // visit's CURRENT customer — reassignment never inherits consent.
     expect(verdictSource).toMatch(/apptCardOneTimeCharge = !!laneRow && !holdRow\s*\n\s*&& String\(laneRow\.customer_id\) === String\(svc\.customer_id\);/);
     // One-time visits only, never the other explicit billing lanes.
-    expect(verdictSource).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& svc\.is_recurring !== true/);
+    expect(verdictSource).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& !isRecurringLineageVisit\(svc\)/);
     // The per-application acceptance-fee fallback and the setup-fee
     // allowances never widen this lane's cap. GATE_STAMPED_ZERO_FREE
     // (owner ruling 2026-09-28) adds a guard ahead of the fee fallback: a

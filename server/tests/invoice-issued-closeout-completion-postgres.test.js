@@ -91,11 +91,13 @@ describe('source contracts', () => {
   test('every hand-payment writer reaches the closeout: /payments/reconcile after its commit, the prepaid receipt on both the newly-paid and already-paid legs (GitHub r4 P1)', () => {
     const reconcile = fs.readFileSync(path.join(__dirname, '../routes/admin-payments-reconcile.js'), 'utf8');
     const commitAt = reconcile.indexOf('txResult = await db.transaction(async (trx) => {');
-    const closeoutAt = reconcile.indexOf("closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null })");
+    const closeoutHelperAt = reconcile.indexOf("closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: technicianId || null })");
+    const sideEffectsCallAt = reconcile.indexOf('await runPostReconcileSideEffects(invoice,');
     expect(commitAt).toBeGreaterThan(-1);
-    expect(closeoutAt).toBeGreaterThan(commitAt);
+    expect(closeoutHelperAt).toBeGreaterThan(-1);
+    expect(sideEffectsCallAt).toBeGreaterThan(commitAt);
     // …and after the conflict / zero-row refusals, never on a refused reconcile.
-    expect(closeoutAt).toBeGreaterThan(reconcile.indexOf("while reconciling — no changes applied"));
+    expect(sideEffectsCallAt).toBeGreaterThan(reconcile.indexOf("while reconciling — no changes applied"));
     const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const fn = schedule.slice(schedule.indexOf('async function generatePrepaidReceiptForService('), schedule.indexOf('// POST /api/admin/schedule/:id/prepaid'));
     expect(fn).toMatch(/closeOutVisitForIssuedInvoice\(\{ invoiceId: invoice\.id, trigger: 'paid', actorTechnicianId, actorRole \}\)/);

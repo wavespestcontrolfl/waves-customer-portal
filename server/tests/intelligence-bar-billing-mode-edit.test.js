@@ -1251,7 +1251,7 @@ describe('Codex round 11 on #6118: no per-visit charge is projected; a visit wit
 
     test('the invoice shape is asked through the cron\'s lookup (findLiveStampedDuesInvoice), narrowed to processing; a plain processing payment still refuses', async () => {
       const lane = require('fs').readFileSync(require.resolve('../services/billing-lane.js'), 'utf8');
-      expect(lane).toContain("processingOnly ? ['processing'] : ['paid', 'prepaid', 'processing']");
+      expect(lane).toMatch(/processingOnly\s*\n?\s*\?\s*\['processing'\]\s*\n?\s*:\s*\(settledOnly \? \['paid', 'prepaid'\] : \['paid', 'prepaid', 'processing'\]\)/);
       const card = require('fs').readFileSync(require.resolve('../services/intelligence-bar/billing-mode-change.js'), 'utf8');
       expect(card).toContain("findLiveStampedDuesInvoice(dbh, customerId, period.monthKey, { openInvoiceCovers: false, processingOnly: true })");
       mockState.customer = { ...MONTHLY };

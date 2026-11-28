@@ -713,3 +713,156 @@ describe('B-56b: admin-invoices apply-credit & send hardening', () => {
     });
   });
 });
+
+// ============================================================================
+// Round-4 charge-now idempotency key retirement, amount mismatch & replay dedupe
+// ============================================================================
+describe('Round-4 charge-now idempotency & replay dedupe', () => {
+  let router;
+  let state;
+  let chargeOneTime;
+  let sendCustomerMessage;
+  let logAutopay;
+
+  beforeAll(() => {
+    jest.resetModules();
+    state = {
+      customer: {
+        id: 'cust-1',
+        active: true,
+        deleted_at: null,
+        payer_id: null,
+        billing_mode: 'monthly_membership',
+        waveguard_tier: 'Core',
+        monthly_rate: 79,
+        billing_day: 1,
+        phone: '+19415550100',
+      },
+      priorPayment: null,
+      failPaymentLookup: false,
+      autopayLogRow: null,
+      smsMessageRow: null,
+    };
+    const dbMock = jest.fn((table) => {
+      const conds = [];
+      const q = {
+        where(a, b, c) { conds.push([a, b, c]); return q; },
+        andWhere(a, b, c) { conds.push([a, b, c]); return q; },
+        whereIn(col, vals) { conds.push(['whereIn', col, vals]); return q; },
+        whereNull() { return q; },
+        whereRaw(sql, bindings) { conds.push(['whereRaw', sql, bindings]); return q; },
+        orderBy() { return q; },
+        first: jest.fn(async () => {
+          if (table === 'customers') return { ...state.customer };
+          if (table === 'payments') {
+            if (state.failPaymentLookup) throw new Error('payments read failed');
+            return state.priorPayment ? { ...state.priorPayment } : null;
+          }
+          if (table === 'autopay_log') return state.autopayLogRow ? { ...state.autopayLogRow } : null;
+          if (table === 'sms_messages') return state.smsMessageRow ? { ...state.smsMessageRow } : null;
+          return null;
+        }),
+      };
+      return q;
+    });
+    dbMock.raw = jest.fn((sql, b) => ({ sql, b }));
+
+    chargeOneTime = jest.fn(async () => ({ id: 'pay-new', status: 'paid', amount: 50, metadata: {} }));
+    sendCustomerMessage = jest.fn(async () => ({ sent: true }));
+    logAutopay = jest.fn(async () => null);
+
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../middleware/admin-auth', () => ({
+      adminAuthenticate: (req, _res, next) => { req.technicianId = 'admin-1'; req.techRole = 'admin'; next(); },
+      requireAdmin: (_req, _res, next) => next(),
+      requireTechOrAdmin: (_req, _res, next) => next(),
+    }));
+    jest.doMock('../services/stripe', () => ({ charge: jest.fn(), chargeOneTime }));
+    jest.doMock('../utils/customer-billing-lock', () => ({
+      withCustomerBillingLock: jest.fn(async (_cid, fn) => fn()),
+    }));
+    jest.doMock('../services/retry-collectibility', () => ({
+      hasUnresolvedSiblingStripeOutcome: jest.fn(async () => ({ blocked: false })),
+      deriveMonthlyChargeIdempotencyKey: jest.fn(),
+    }));
+    jest.doMock('../services/billing-lane', () => ({
+      ...jest.requireActual('../services/billing-lane'),
+      findLiveStampedDuesInvoice: jest.fn(async () => null),
+    }));
+    jest.doMock('../services/autopay-log', () => ({ logAutopay, getRecent: jest.fn(async () => []) }));
+    jest.doMock('../services/payment-failed-alert-close', () => ({ closePaymentFailedAlertsForMonthlyDues: jest.fn() }));
+    jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage }));
+    jest.doMock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn(async () => 'Receipt') }));
+    jest.doMock('../services/prepaid-pi-guard', () => ({ neutralizeOpenPaymentIntent: jest.fn(async () => ({ ok: true })) }));
+
+    router = require('../routes/admin-billing-health');
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    state.priorPayment = null;
+    state.failPaymentLookup = false;
+    state.autopayLogRow = null;
+    state.smsMessageRow = null;
+  });
+
+  test('returns 409 IDEMPOTENCY_KEY_RETIRED on refunded/disputed prior key and 409 IDEMPOTENCY_AMOUNT_MISMATCH on amount change', async () => {
+    await withServer('/api/admin', router, async (baseUrl) => {
+      state.priorPayment = {
+        id: 'pay-refunded', status: 'refunded', base_amount_cents: 5000, amount: 50,
+        payment_method: 'card', stripe_payment_intent_id: 'pi_old', stripe_charge_id: 'ch_old', metadata: {},
+      };
+      const retiredRes = await fetch(`${baseUrl}/api/admin/customers/cust-1/charge-now`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'key-retired' },
+        body: JSON.stringify({ amount: 50, description: 'Retry refunded key' }),
+      });
+      expect(retiredRes.status).toBe(409);
+      await expect(retiredRes.json()).resolves.toMatchObject({ code: 'IDEMPOTENCY_KEY_RETIRED' });
+
+      state.priorPayment = {
+        id: 'pay-paid', status: 'paid', base_amount_cents: 5000, amount: 50,
+        payment_method: 'card', stripe_payment_intent_id: 'pi_ok', stripe_charge_id: 'ch_ok', metadata: {},
+      };
+      const mismatchRes = await fetch(`${baseUrl}/api/admin/customers/cust-1/charge-now`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'key-paid' },
+        body: JSON.stringify({ amount: 75, description: 'Changed amount' }),
+      });
+      expect(mismatchRes.status).toBe(409);
+      await expect(mismatchRes.json()).resolves.toMatchObject({ code: 'IDEMPOTENCY_AMOUNT_MISMATCH' });
+      expect(chargeOneTime).not.toHaveBeenCalled();
+    });
+  });
+
+  test('fails closed on prior payment lookup DB error and deduplicates replay log/SMS when already recorded', async () => {
+    await withServer('/api/admin', router, async (baseUrl) => {
+      state.failPaymentLookup = true;
+      const errRes = await fetch(`${baseUrl}/api/admin/customers/cust-1/charge-now`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'key-db-err' },
+        body: JSON.stringify({ amount: 50 }),
+      });
+      expect(errRes.status).toBe(500);
+      expect(chargeOneTime).not.toHaveBeenCalled();
+
+      state.failPaymentLookup = false;
+      state.priorPayment = {
+        id: 'pay-paid-2', status: 'paid', base_amount_cents: 5000, amount: 50,
+        payment_method: 'card', stripe_payment_intent_id: 'pi_ok2', stripe_charge_id: 'ch_ok2', metadata: {},
+      };
+      state.autopayLogRow = { id: 'log-1' };
+      state.smsMessageRow = { id: 'sms-1' };
+      const replayRes = await fetch(`${baseUrl}/api/admin/customers/cust-1/charge-now`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'key-replay' },
+        body: JSON.stringify({ amount: 50, send_receipt: true }),
+      });
+      expect(replayRes.status).toBe(200);
+      await expect(replayRes.json()).resolves.toMatchObject({ idempotent_replay: true });
+      expect(logAutopay).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+});

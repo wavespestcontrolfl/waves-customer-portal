@@ -958,9 +958,10 @@ router.put('/cards/:id/default', async (req, res, next) => {
         await trx('payment_methods')
           .where({ customer_id: req.customerId })
           .update({ is_default: false });
+        const preserveSelfAutopay = Boolean(priorAutopay && String(priorAutopay.id) === String(card.id));
         await trx('payment_methods')
           .where({ id: card.id })
-          .update({ is_default: true });
+          .update({ is_default: true, ...(preserveSelfAutopay ? {} : { autopay_enabled: false }) });
       }
 
       return {

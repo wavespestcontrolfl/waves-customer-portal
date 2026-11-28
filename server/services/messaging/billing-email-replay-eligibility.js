@@ -21,10 +21,11 @@ async function prechargeRefusal(meta, database) {
   if (meta.charge_date <= etDateString()) return refused('charge-date-passed');
   if (meta.charge_date > etDateString(addETDays(new Date(), 3))) return refused('charge-date-not-due');
 
+  const [chargeYear, chargeMonth, chargeDay] = meta.charge_date.split('-').map(Number);
   const customer = await database('customers').where({ id: meta.customer_id }).first();
   if (!customer || customer.deleted_at || customer.active !== true || customer.autopay_enabled !== true
     || !(Number(customer.monthly_rate) > 0) || resolveBillingLane(customer).mode !== 'monthly_membership'
-    || !billingDaysForDate(new Date(`${meta.charge_date}T12:00:00Z`)).includes(Number(customer.billing_day))
+    || !billingDaysForDate(chargeYear, chargeMonth, chargeDay).includes(Number(customer.billing_day))
     || isPaused(customer, new Date(`${meta.charge_date}T12:00:00Z`))) {
     return refused('precharge-no-longer-eligible');
   }
