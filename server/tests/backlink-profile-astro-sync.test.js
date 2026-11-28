@@ -118,6 +118,9 @@ describe('getVerifiedProfilesByOffice', () => {
       { live_url: 'https://nextdoor.com/p/waves-pest-control-sarasota-fl/', location: null },
       // Explicit non-default location on allowlisted host with non-conflicting URL
       { live_url: 'https://citysquares.com/b/waves-pest-control-99999', location: 'venice' },
+      // Cityless profile claimed by multiple offices -> omitted from both
+      { live_url: 'https://citysquares.com/b/waves-pest-control-88888', location: 'venice' },
+      { live_url: 'https://citysquares.com/b/waves-pest-control-88888/', location: 'sarasota' },
     ]);
 
     const offices = await getVerifiedProfilesByOffice();

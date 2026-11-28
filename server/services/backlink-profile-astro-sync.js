@@ -204,8 +204,7 @@ async function getVerifiedProfilesByOffice() {
     .whereNotNull('live_url')
     .select('live_url', db.raw("quality_signals->>'location' as location"));
 
-  const byOffice = {};
-  for (const slug of OFFICE_SLUGS) byOffice[slug] = new Set();
+  const byNormalized = new Map();
   let dropped = 0;
   let refused = 0;
   for (const r of rows) {
@@ -214,6 +213,25 @@ async function getVerifiedProfilesByOffice() {
     if (sameAsRejectReason(url)) { refused++; continue; }
     const slug = officeSlugForRow(r.location, url);
     if (!slug) { dropped++; continue; }
+    const hp = urlHostAndPath(url);
+    const key = hp ? `${hp.host}${hp.path}` : url.toLowerCase();
+    let entry = byNormalized.get(key);
+    if (!entry) {
+      entry = { offices: new Map() };
+      byNormalized.set(key, entry);
+    }
+    if (!entry.offices.has(slug)) entry.offices.set(slug, url);
+  }
+  const byOffice = {};
+  for (const slug of OFFICE_SLUGS) byOffice[slug] = new Set();
+  for (const entry of byNormalized.values()) {
+    // A single profile URL claimed by multiple offices is ambiguous (brand/shared
+    // listing), so omit it from every office's LocalBusiness sameAs.
+    if (entry.offices.size !== 1) {
+      dropped += entry.offices.size;
+      continue;
+    }
+    const [[slug, url]] = entry.offices.entries();
     byOffice[slug].add(url);
   }
   if (dropped) logger.warn(`[backlink-sync] dropped ${dropped} listing(s) with an unknown or ambiguous office location`);
