@@ -115,13 +115,25 @@ function formatVisitBrief(row) {
   };
 }
 
+function positiveAmount(raw) {
+  if (raw == null || raw === '') return null;
+  const num = Number(raw);
+  return Number.isFinite(num) && num > 0 ? Math.round(num * 100) / 100 : null;
+}
+
 function formatEstimateBrief(row) {
-  const rawTotal = row.onetime_total ?? row.monthly_total ?? row.annual_total;
-  const num = rawTotal != null && rawTotal !== '' ? Number(rawTotal) : null;
+  const onetime = positiveAmount(row.onetime_total);
+  const monthly = positiveAmount(row.monthly_total);
+  const annual = positiveAmount(row.annual_total);
+  const parts = [];
+  if (onetime != null) parts.push(`$${onetime} one-time`);
+  if (monthly != null) parts.push(`$${monthly}/mo`);
+  if (annual != null) parts.push(`$${annual}/yr`);
   return {
     service: cleanSnippet(row.service_interest, 80) || 'Estimate',
     status: String(row.status || 'open').trim().toLowerCase(),
-    amount: Number.isFinite(num) && num > 0 ? Math.round(num * 100) / 100 : null,
+    totals: { onetime, monthly, annual },
+    price_summary: parts.length ? parts.join(' + ') : null,
   };
 }
 
@@ -276,10 +288,14 @@ async function loadCachedCatalog(conn, now) {
   return rows;
 }
 
+const EXPLICITLY_FREE_SERVICE_KEYS = new Set(['lawn_inspection']);
+
 function formatCatalogPriceRow(row) {
   const num = row.base_price != null && row.base_price !== '' ? Number(row.base_price) : null;
   const validNum = Number.isFinite(num) && num >= 0 ? Math.round(num * 100) / 100 : null;
-  const isFree = validNum === 0;
+  const key = String(row.service_key || '').toLowerCase();
+  // Variable rows can store base_price=0 as a library placeholder — never label those "Free".
+  const isFree = (row.pricing_type === 'free') || (row.pricing_type === 'fixed' && validNum === 0 && EXPLICITLY_FREE_SERVICE_KEYS.has(key));
   const isFixed = row.pricing_type === 'fixed' && validNum !== null && validNum > 0;
   return {
     name: cleanSnippet(row.short_name || row.name, 70),
@@ -333,16 +349,20 @@ function slotsFromAssist(assist) {
   return assist.times.split(';').map((s) => s.trim()).filter(Boolean).slice(0, MAX_ROUTE_SLOTS);
 }
 
+function isValidCoord(value) {
+  if (value == null || String(value).trim() === '') return false;
+  const n = Number(value);
+  return Number.isFinite(n) && n !== 0;
+}
+
 function resolveSinglePropertyPin(account, properties, assistFacts, addressMatcher) {
   // Null properties = lookup failed → fail closed. >1 active property = ambiguous → withhold.
   if (!account || !Array.isArray(properties) || properties.length > 1) return null;
   if (assistFacts?.place_withdrawn) return null;
   const target = properties.length === 1 ? properties[0] : account;
   if (statesDifferentProperty(target, assistFacts, addressMatcher)) return null;
-  const lat = Number(target.latitude);
-  const lng = Number(target.longitude);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) return null;
-  return { lat, lng, cacheTarget: properties.length === 1 ? `prop:${target.id}` : `cust:${account.id}` };
+  if (!isValidCoord(target.latitude) || !isValidCoord(target.longitude)) return null;
+  return { lat: Number(target.latitude), lng: Number(target.longitude), cacheTarget: properties.length === 1 ? `prop:${target.id}` : `cust:${account.id}` };
 }
 
 async function resolveRouteSlots({ account, properties, assist, assistFacts, now, deps }) {
@@ -355,8 +375,8 @@ async function resolveRouteSlots({ account, properties, assist, assistFacts, now
   const pin = resolveSinglePropertyPin(account, properties, assistFacts, deps.addressMatchesCustomer);
   if (!pin) return [];
 
-  const today = etDateString(now);
-  const cacheKey = `${pin.cacheTarget}|${today}`;
+  const todayDay = etDateString(now);
+  const cacheKey = `${pin.cacheTarget}|${todayDay}`;
   const hit = slotsCache.get(cacheKey);
   if (hit && now.getTime() - hit.at < SLOTS_TTL_MS && now.getTime() >= hit.at) {
     return hit.slots;
@@ -371,12 +391,14 @@ async function resolveRouteSlots({ account, properties, assist, assistFacts, now
     const availability = await booking.buildBookingAvailability({
       lat: pin.lat,
       lng: pin.lng,
-      duration: config.default_duration_minutes || 60,
+      duration: config.slot_duration_minutes || config.default_duration_minutes || 60,
       rangeFrom: etDateString(addETDays(now, minDays)),
       rangeTo: etDateString(addETDays(now, maxDays)),
       config,
-      today,
+      // buildBookingAvailability expects a Date instance for `today` (passes it to etDateString).
+      today: now,
       expandOpenDays: true,
+      bestSlotCount: MAX_ROUTE_SLOTS,
       surface: 'voice',
       // Hard zero-spend guard: skips paid road-distance and weather provider calls.
       paidLookups: false,
@@ -401,21 +423,22 @@ const TIME_CUE_RE = /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|morning|aft
 const ACCESS_CUE_RE = /\b(?:gate|code|lockbox|dogs?|pets?|cats?|fence|backyard|hoa|guard|knock|ring|call\s+(?:before|when|ahead))\b/i;
 
 function hasSpokenOrStoredAddress(ctx) {
-  const { account, assistFacts, allText } = ctx;
+  const { account, assistFacts, callerText } = ctx;
   if (assistFacts?.place_withdrawn) return false;
   if (account?.address_line1 && account?.zip) return true;
   if (assistFacts?.address_line1 && (assistFacts?.city || assistFacts?.zip)) return true;
-  return SPOKEN_STREET_RE.test(allText);
+  return SPOKEN_STREET_RE.test(callerText);
 }
 
+// Every caller-fact item requires stored account/assist facts or CALLER speech (never an unanswered staff question).
 const CHECKLIST_RULES = Object.freeze([
   { key: 'name', label: 'Name', test: (c) => Boolean(c.customer?.name || c.account?.first_name || SPOKEN_NAME_RE.test(c.callerText)) },
   { key: 'address', label: 'Address', test: hasSpokenOrStoredAddress },
-  { key: 'email', label: 'Email', test: (c) => EMAIL_RE.test(String(c.account?.email || '')) || EMAIL_RE.test(c.allText) || SPOKEN_EMAIL_RE.test(c.allText) },
+  { key: 'email', label: 'Email', test: (c) => EMAIL_RE.test(String(c.account?.email || '')) || EMAIL_RE.test(c.callerText) || SPOKEN_EMAIL_RE.test(c.callerText) },
   { key: 'scope', label: 'Pest / Scope', test: (c) => Boolean(c.assist?.intent || c.assistFacts?.service || c.catalogPrices.length) },
   { key: 'price_quoted', label: 'Price Quoted', test: (c) => PRICE_SPOKEN_RE.test(c.staffText) },
-  { key: 'time_preference', label: 'Time Preference', test: (c) => Boolean(c.assistFacts?.when) || (DAY_CUE_RE.test(c.allText) && TIME_CUE_RE.test(c.allText)) },
-  { key: 'access_notes', label: 'Gate / Pet Notes', test: (c) => Boolean(c.prefs?.pets_secured_plan || c.prefs?.special_instructions || c.prefs?.chemical_sensitivities || ACCESS_CUE_RE.test(c.allText)) },
+  { key: 'time_preference', label: 'Time Preference', test: (c) => Boolean(c.assistFacts?.when) || (DAY_CUE_RE.test(c.callerText) && TIME_CUE_RE.test(c.callerText)) },
+  { key: 'access_notes', label: 'Gate / Pet Notes', test: (c) => Boolean(c.prefs?.pets_secured_plan || c.prefs?.special_instructions || c.prefs?.chemical_sensitivities || ACCESS_CUE_RE.test(c.callerText)) },
 ]);
 
 function joinSpeakerLines(lines, predicate) {
@@ -431,7 +454,6 @@ function buildCallChecklist({ customer, account, prefs, assist, assistFacts, lin
     assist,
     assistFacts,
     catalogPrices: Array.isArray(catalogPrices) ? catalogPrices : [],
-    allText: joinSpeakerLines(safeLines, () => true),
     staffText: joinSpeakerLines(safeLines, (l) => l?.speaker === 'staff'),
     callerText: joinSpeakerLines(safeLines, (l) => l?.speaker !== 'staff'),
   };
@@ -472,7 +494,9 @@ async function buildLiveCallCopilot(input, deps) {
       loadEvidenceLines(callObj.twilio_call_sid || null, opts.lines, conn),
     ]);
     const intent = String(Object(opts.assist).intent || '');
-    const catalogPrices = matchCatalogPrices(`${intent}\n${joinSpeakerLines(evidenceLines, () => true)}`, catalogRows);
+    // Match catalog prices from CALLER speech and confirmed assist intent only (never staff screening questions).
+    const callerSpeech = joinSpeakerLines(evidenceLines, (l) => l?.speaker !== 'staff');
+    const catalogPrices = matchCatalogPrices(`${intent}\n${callerSpeech}`, catalogRows);
     const routeSlots = await resolveRouteSlots({
       account: bundle.account, properties: bundle.properties, assist: opts.assist, assistFacts, now, deps: cfg,
     });

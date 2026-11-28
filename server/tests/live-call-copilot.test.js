@@ -80,12 +80,20 @@ beforeEach(() => {
 });
 
 describe('matchCatalogPrices (full-catalog affirmative-only lookup)', () => {
-  test('surfaces fixed prices cleanly and marks variable rows as variable (never quoting a stale base anchor)', () => {
-    const wdo = matchCatalogPrices('Need a WDO inspection for real estate closing', CATALOG);
+  test('surfaces fixed prices cleanly, labels variable $0 placeholder rows as variable (never Free), and keeps explicitly free Waves Assessment free', () => {
+    const withPlaceholder = [
+      ...CATALOG,
+      { id: 'svc-9', service_key: 'rodent_exclusion', name: 'Rodent Exclusion Service', short_name: 'Rodent Exclusion', base_price: 0, pricing_type: 'variable', billing_type: 'one_time', default_duration_minutes: 60 },
+    ];
+    const wdo = matchCatalogPrices('Need a WDO inspection for real estate closing', withPlaceholder);
     expect(wdo).toEqual([
       { name: 'WDO Inspection', price: null, pricing_type: 'variable', billing_type: 'one_time', duration_minutes: 60 },
       { name: 'Waves Assessment', price: 0, pricing_type: 'free', billing_type: 'one_time', duration_minutes: 30 },
     ]);
+
+    const rodent = matchCatalogPrices('Hearing rats in the attic', withPlaceholder);
+    const excl = rodent.find((r) => r.name === 'Rodent Exclusion');
+    expect(excl).toMatchObject({ price: null, pricing_type: 'variable' });
 
     const roach = matchCatalogPrices('Caller says they have german roaches in the kitchen', CATALOG);
     expect(roach.map((r) => ({ name: r.name, price: r.price, kind: r.pricing_type }))).toEqual([
@@ -145,7 +153,7 @@ describe('buildCallChecklist (7-item live missing-info checklist)', () => {
     expect(byKey(withdrawn).scope).toBe(true);
   });
 
-  test('detects spoken street, email, time preference, and pet/gate cues on new prospect calls', () => {
+  test('detects spoken caller details while keeping unanswered staff questions open', () => {
     const list = buildCallChecklist({
       customer: null,
       account: null,
@@ -153,7 +161,7 @@ describe('buildCallChecklist (7-item live missing-info checklist)', () => {
       assist: null,
       assistFacts: null,
       lines: [
-        { speaker: 'caller', text: 'My name is Jordan, address is 410 Oakwood Ln, email is jordan@gmail.com, we have a dog behind the gate.' },
+        { speaker: 'caller', text: 'My name is Jordan, address is 410 Oakwood Ln, email is jordan@gmail.com, we have a dog behind the gate, Tuesday morning works.' },
         { speaker: 'staff', text: 'We can come Tuesday at 10 AM for $200.' },
       ],
       catalogPrices: [{ name: 'One-Time Pest', price: 200 }],
@@ -166,6 +174,28 @@ describe('buildCallChecklist (7-item live missing-info checklist)', () => {
       price_quoted: true,
       time_preference: true,
       access_notes: true,
+    });
+
+    const unansweredStaff = buildCallChecklist({
+      customer: null,
+      account: null,
+      prefs: null,
+      assist: null,
+      assistFacts: null,
+      lines: [
+        { speaker: 'staff', text: 'Do you have a gate or pets? Can we come Tuesday morning? What is your email at gmail?' },
+        { speaker: 'caller', text: 'Hold on let me check with my spouse.' },
+      ],
+      catalogPrices: [],
+    });
+    expect(byKey(unansweredStaff)).toEqual({
+      name: false,
+      address: false,
+      email: false,
+      scope: false,
+      price_quoted: false,
+      time_preference: false,
+      access_notes: false,
     });
   });
 });
@@ -227,7 +257,11 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
     });
 
     expect(resolveBookingCoords).not.toHaveBeenCalled();
-    expect(buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({ paidLookups: false }));
+    expect(buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
+      today: expect.any(Date),
+      bestSlotCount: 2,
+      paidLookups: false,
+    }));
     expect(result.brief).toMatchObject({
       stage: 'active_customer',
       tier: 'Gold',
@@ -235,7 +269,7 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
       lawn_sqft: 2400,
       lot_sqft: 8500,
       next_visit: { date: '2026-12-01', service: 'Quarterly Pest Control', window: '9-11 AM' },
-      open_estimates: [{ service: 'Mosquito Control', status: 'sent', amount: 85 }],
+      open_estimates: [{ service: 'Mosquito Control', status: 'sent', totals: { onetime: null, monthly: 85, annual: null }, price_summary: '$85/mo' }],
       recent_48h: { calls: 2, texts: 3 },
     });
     expect(result.brief.home_sqft).toBeUndefined();
@@ -283,6 +317,28 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
       { address_line1: '123 Oakwood Ave', zip: '34202' },
       () => false,
     )).toBe(true);
+
+    // Missing/null latitude with valid longitude must fail closed (Number(null)===0 must not pass).
+    resetCaches();
+    const missingLatDb = makeFakeDb({
+      account: { ...baseAccount, latitude: null, longitude: -82.5748 },
+      properties: [{ id: 'prop-1', address_line1: '123 Maplewood Rd', latitude: null, longitude: -82.5748 }],
+    });
+    const missingLatRes = await buildLiveCallCopilot({
+      call: { id: 'call-nolat', customer_id: 'cust-1' },
+      customer: { id: 'cust-1', name: 'Casey Sample' },
+      meta: {},
+      lines: [
+        { speaker: 'staff', text: 'Any German roaches?' },
+        { speaker: 'caller', text: 'No, just ants.' },
+      ],
+      assist: null,
+    }, { db: missingLatDb, isEnabled: () => true, addressMatchesCustomer: () => true, booking: { loadBookingConfig: jest.fn(), buildBookingAvailability } });
+    expect(missingLatRes.route_slots).toEqual([]);
+    expect(buildBookingAvailability).not.toHaveBeenCalled();
+    // Staff screening question ("Any German roaches?") must not trigger Cockroach Treatment.
+    expect(missingLatRes.catalog_prices.some((p) => p.name === 'Cockroach Treatment')).toBe(false);
+    expect(missingLatRes.catalog_prices[0].name).toBe('One-Time Pest');
   });
 
   test('preserves checklist evidence from earlier utterances on long calls (>15 lines)', async () => {

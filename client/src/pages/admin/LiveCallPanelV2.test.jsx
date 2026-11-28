@@ -200,7 +200,7 @@ describe("LiveCallPanelV2", () => {
           lawn_sqft: 2400,
           lot_sqft: 8500,
           next_visit: { date: "2026-12-01", service: "Quarterly Pest Control", window: "9-11 AM" },
-          open_estimates: [{ service: "Mosquito Control", status: "sent", amount: 85 }],
+          open_estimates: [{ service: "Mosquito Control", status: "sent", price_summary: "$85/mo" }],
           recent_48h: { calls: 1, texts: 2 },
           property_notes: ["Pets: Dog inside"],
         },
@@ -221,7 +221,7 @@ describe("LiveCallPanelV2", () => {
     expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("active customer · WaveGuard Gold");
     expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("2,400 sq ft lawn");
     expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("Next visit: 2026-12-01 Quarterly Pest Control (9-11 AM)");
-    expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("Open estimate: Mosquito Control ($85) [sent]");
+    expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("Open estimate: Mosquito Control ($85/mo) [sent]");
     expect(screen.getByTestId("live-call-catalog-prices")).toHaveTextContent("Bee/Wasp Removal: $250");
     expect(screen.getByTestId("live-call-catalog-prices")).toHaveTextContent("Quarterly Pest: Variable (use engine)");
     expect(screen.getByTestId("live-call-route-slots")).toHaveTextContent("Tue Dec 1 at 9 AM · Wed Dec 2 at 11 AM");

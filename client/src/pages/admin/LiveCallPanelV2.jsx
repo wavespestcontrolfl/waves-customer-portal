@@ -198,7 +198,7 @@ function CallerBriefBlock({ brief }) {
       )}
       {estimates.length > 0 && (
         <div className="text-zinc-700">
-          {`Open estimate: ${estimates.map((e) => `${e.service}${e.amount ? ` ($${e.amount})` : ""} [${e.status}]`).join(" · ")}`}
+          {`Open estimate: ${estimates.map((e) => `${e.service}${e.price_summary ? ` (${e.price_summary})` : ""} [${e.status}]`).join(" · ")}`}
         </div>
       )}
       {notes.length > 0 && <div className="text-zinc-600">{notes.join(" · ")}</div>}
