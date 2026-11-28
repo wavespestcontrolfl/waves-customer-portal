@@ -3,7 +3,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useState, useEffect } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
-import { CustomerColumn } from '../components/brand';
+import { CustomerColumn, PublicStateCard } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -64,8 +64,11 @@ export default function RatePage() {
   if (loading) return (
     <Page>
       <div style={{ textAlign: 'center', padding: 48 }}>
-        <style>{`@media (prefers-reduced-motion: reduce) { [data-rate-spinner] { animation: none !important; } }`}</style>
-        <div data-rate-spinner="" style={{ width: 32, height: 32, border: `3px solid ${CARD_BORDER}`, borderTopColor: COLORS.glassNavy, borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
+        <style>{`
+          @keyframes wavesRateSpin { to { transform: rotate(360deg); } }
+          @media (prefers-reduced-motion: reduce) { [data-rate-spinner] { animation: none !important; } }
+        `}</style>
+        <div data-rate-spinner="" style={{ width: 32, height: 32, border: `3px solid ${CARD_BORDER}`, borderTopColor: COLORS.glassNavy, borderRadius: '50%', animation: 'wavesRateSpin .7s linear infinite', margin: '0 auto 14px' }} />
         <span style={{ fontSize: 14, color: MUTED }}>Loading...</span>
       </div>
     </Page>
@@ -84,12 +87,16 @@ export default function RatePage() {
   );
 
   if (error === 'notfound') return (
-    <Page>
-      <div role="alert" style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 16, lineHeight: 1.5 }}>
-        <p>This link may have expired or already been used.</p>
-        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.glassNavy, fontWeight: 700, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
-      </div>
-    </Page>
+    <Scene>
+      <CustomerColumn style={{ position: 'relative', zIndex: 1 }}>
+        <PublicStateCard state="not-found" title="This link isn&rsquo;t available" contact="none">
+          <p style={{ margin: '0 0 16px' }}>This link may have expired or already been used.</p>
+          <a href="https://wavespestcontrol.com" data-glass-accent="" data-glass-size="primary" style={{ ...primaryActionStyle, padding: '0 20px' }}>
+            Visit wavespestcontrol.com
+          </a>
+        </PublicStateCard>
+      </CustomerColumn>
+    </Scene>
   );
 
   // The 1-10 rating is retired (owner ruling 2026-09-29): a thank-you and ONE
@@ -98,7 +105,7 @@ export default function RatePage() {
   // stands alone.
   return (
     <Page>
-      <div style={{ textAlign: 'center', padding: '20px 0' }}>
+      <div style={{ textAlign: 'center', padding: '12px 0' }}>
         {!data?.alreadySubmitted && (
           techPhotoUrl ? (
             <img
@@ -113,7 +120,7 @@ export default function RatePage() {
             </div>
           )
         )}
-        <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>Thank you!</div>
+        <h1 style={{ margin: '0 0 8px' }}>Thank you!</h1>
         {data?.reviewUrl ? (
           <>
             {showRetry && (
@@ -153,10 +160,7 @@ function Page({ children }) {
   return (
     <Scene>
       <div data-glass="card" style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 8, border: `1px solid ${CARD_BORDER}`, boxShadow: 'none', overflow: 'hidden', marginTop: 'clamp(20px, 8dvh, 64px)' }}>
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${CARD_BORDER}`, display: 'flex', justifyContent: 'center' }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, display: 'block' }} />
-        </div>
-        <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>
+        <div style={{ padding: '28px clamp(16px, 5vw, 24px) 24px' }}>
           {children}
         </div>
       </div>

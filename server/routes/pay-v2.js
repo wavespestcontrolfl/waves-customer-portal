@@ -19,7 +19,10 @@ const {
   CONSENT_VERSION_METADATA_KEY, consentVersionStaleResponse, renderedConsentVersionIsCurrent,
 } = require('../services/payment-method-consent-text');
 const logger = require('../services/logger');
-const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
+const {
+  assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer,
+  isInvoiceCollectibleStatus, invoiceAmountDue, invoiceHeldForChemicalReview,
+} = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
@@ -355,10 +358,11 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
   return true;
 }
 
-// Collectibility, withdrawn packet invoice and account credit that settles the whole invoice.
+// Collectibility, withdrawn packet invoice, chemical add-on review hold, and account credit that settles the whole invoice.
 async function zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, database }) {
   if (!isInvoiceCollectibleStatus(invoice.status)) return true;
   if (invoiceWithdrawnFromCustomer(invoice)) return true;
+  if (invoiceHeldForChemicalReview(invoice)) return true;
   const creditCovers = creditWillCoverAnchor != null ? creditWillCoverAnchor : await invoiceCreditWouldFullyCover(invoice, { database });
   return !!creditCovers;
 }
@@ -1374,15 +1378,15 @@ router.post('/:token/confirm', async (req, res, next) => {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
     if (await rejectIfInvoiceCollectionPending(invoice, res, { recordExistingPayment: true })) return;
-    if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
+    if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status).toLowerCase())) {
       try {
         assertInvoiceCollectible(invoice);
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }
     }
-    if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
-    if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
+    const settledError = { paid: 'Invoice already paid', prepaid: 'Invoice is already prepaid' }[invoice.status];
+    if (settledError) return res.status(400).json({ error: settledError });
     // UNCONDITIONAL (codex r25 P1): the assertion above runs only for the
     // terminal statuses, and a withdrawn invoice is by construction not one of
     // them — it keeps `sent`/`viewed`/`overdue` so the homeowner's existing
@@ -1394,8 +1398,13 @@ router.post('/:token/confirm', async (req, res, next) => {
     // payment for a replayed PI).
     try {
       assertInvoiceNotWithdrawnFromCustomer(invoice);
+      if (invoiceHeldForChemicalReview(invoice)) {
+        const err = new Error('This invoice is held for office billing review of a chemical area add-on');
+        err.code = 'INVOICE_CHEMICAL_ADDON_HOLD';
+        throw err;
+      }
     } catch (err) {
-      return res.status(400).json({ error: err.message });
+      return res.status(400).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
     if (invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {

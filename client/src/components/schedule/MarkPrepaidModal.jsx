@@ -5,9 +5,10 @@
 //
 // Mobile-first layout — stays inside the admin V2 system (Tailwind zinc ramp).
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from '../ui';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -20,7 +21,19 @@ function adminFetch(path, options = {}) {
       ...(options.headers || {}),
     },
   }).then(async (r) => {
-    if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      let msg = `HTTP ${r.status}`;
+      if (text) {
+        try {
+          const parsed = JSON.parse(text);
+          msg = parsed?.error || parsed?.message || text;
+        } catch {
+          msg = text;
+        }
+      }
+      throw new Error(msg);
+    }
     return r.json();
   });
 }
@@ -158,6 +171,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
   const [note, setNote] = useState(() => service?.prepaidNote || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const savingRef = useRef(false);
 
   // Optional "email a paid receipt" — single visit only, gated behind the
   // prepaid-receipt flag (fails closed). Default on; hidden in series mode.
@@ -187,41 +201,54 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
 
   // Once the prepayment has saved (even if the optional receipt couldn't send),
   // ANY dismiss — backdrop, ×, or Done — must refresh the parent, or the schedule
-  // keeps showing the stale pre-save visit. Before a save, dismiss just closes.
-  const dismiss = () => (savedWithNote ? onSaved?.() : onClose?.());
+  // keeps showing the stale pre-save visit. Before a save, dismiss just closes,
+  // unless a save request is currently in flight.
+  const dismiss = () => {
+    if (saving || savingRef.current) return;
+    if (savedWithNote) onSaved?.();
+    else onClose?.();
+  };
 
   async function handleSave() {
+    if (savingRef.current || saving) return;
     if (!Number.isFinite(amt) || amt < 0) {
       setError('Enter a valid amount');
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     setError(null);
     setReceiptNote(null);
-    try {
-      const result = await adminFetch(`/admin/schedule/${service.id}/prepaid`, {
-        method: 'POST',
-        body: JSON.stringify({
-          amount: amt,
-          method,
-          note: note.trim() || null,
-          applyToSeries: applyToSeries || undefined,
-          emailReceipt: wantsReceipt || undefined,
-        }),
-      });
-      // The prepayment saved. If a receipt was requested but didn't go out,
-      // keep the modal open to explain why; dismissing still refreshes the list.
-      if (wantsReceipt && result?.receipt && !result.receipt.sent) {
-        setReceiptNote(receiptReasonText(result.receipt));
-        setSavedWithNote(true);
+    await holdReloadWhileSending('mark-prepaid', async () => {
+      try {
+        const result = await adminFetch(`/admin/schedule/${service.id}/prepaid`, {
+          method: 'POST',
+          body: JSON.stringify({
+            amount: amt,
+            method,
+            note: note.trim() || null,
+            applyToSeries: applyToSeries || undefined,
+            emailReceipt: wantsReceipt || undefined,
+          }),
+        });
+        // The prepayment saved. If a receipt was requested but didn't go out,
+        // keep the modal open to explain why; dismissing still refreshes the list.
+        if (wantsReceipt && result?.receipt && !result.receipt.sent) {
+          setReceiptNote(receiptReasonText(result.receipt));
+          setSavedWithNote(true);
+          savingRef.current = false;
+          setSaving(false);
+          return;
+        }
+        savingRef.current = false;
         setSaving(false);
-        return;
+        onSaved?.();
+      } catch (e) {
+        setError(e.message || 'Failed to save');
+        savingRef.current = false;
+        setSaving(false);
       }
-      onSaved?.();
-    } catch (e) {
-      setError(e.message || 'Failed to save');
-      setSaving(false);
-    }
+    });
   }
 
   return (
@@ -241,8 +268,9 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           <button
             type="button"
             onClick={dismiss}
+            disabled={saving}
             aria-label="Close"
-            className="flex items-center justify-center rounded-full bg-white border border-hairline border-zinc-200 u-focus-ring"
+            className="flex items-center justify-center rounded-full bg-white border border-hairline border-zinc-200 u-focus-ring disabled:opacity-50"
             style={{ width: 44, height: 44, flexShrink: 0, fontSize: 18, lineHeight: 1 }}
           >
             ×

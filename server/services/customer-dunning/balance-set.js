@@ -149,6 +149,7 @@ const ANCHOR_HOLD_BY_REASON = Object.freeze({
   not_collectible: 'balance_incomplete',
   nothing_due: 'balance_incomplete',
   customer_changed: 'balance_incomplete',
+  chemical_addon_hold: 'balance_incomplete',
   payer_billed: 'payer_anchor',
   withdrawn: 'payer_anchor',
   deposit_settlement: 'anchor_reconciliation',

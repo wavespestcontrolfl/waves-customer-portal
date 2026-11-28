@@ -245,5 +245,10 @@ async function loadPromiseLevels(conn, ids, now = new Date(), { sameDateOnly = t
   return new Map([...facts].map(([id, fact]) => [id, fact.level]));
 }
 
+// Shared W20 night-run policy (owner 2026-11-26): day-only confirmations are NOT frozen
+// before the 72h reminder; only explicit time-window promises freeze the slot.
+const NIGHT_FREEZE_ANY_PROMISE = false;
+
 module.exports = {
+  NIGHT_FREEZE_ANY_PROMISE,
   earliestToldOnDate, loadToldVisitIds, loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf, readSnapshot };

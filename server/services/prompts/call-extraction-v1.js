@@ -661,16 +661,23 @@ const APS_PROMPT_HASH = `${PROMPT_VERSION}a-${_apsContractHash}`;
 // order and channel, so its calls are their own cohorts. The version columns are full at 30
 // characters (see above), so the mark is again ONE letter inside the leading token: `s` for
 // the system layout, `b` for the system layout with the agent-proposed-slot block (both).
-// Each hash is over that cohort's own rendered contract: system part, user template, schema.
-const _systemContractHash = (opts) => {
+// OpenAI and Anthropic have always sent `system` on their native system/instructions channel,
+// so SYSTEM_PROMPT_HASH / SYSTEM_APS_PROMPT_HASH remain unchanged for them. Gemini switched
+// from user-content folding to native `systemInstruction`, so Gemini system-layout calls carry
+// their own channel-stamped hash (GEMINI_SYSTEM_PROMPT_HASH / GEMINI_SYSTEM_APS_PROMPT_HASH)
+// so pre-systemInstruction Gemini rows cannot mix into the new Gemini cohort.
+const _systemContractHash = (opts, { geminiSystemChannel = false } = {}) => {
   const parts = buildExtractionPromptParts('', '', '', opts);
+  const channelStamp = geminiSystemChannel ? '\nchannel:gemini=systemInstruction' : '';
   return crypto.createHash('sha256')
-    .update(`${parts.system}\n\u0000\n${parts.user}\n${JSON.stringify(modelOutputSchema)}`)
+    .update(`${parts.system}\n\u0000\n${parts.user}\n${JSON.stringify(modelOutputSchema)}${channelStamp}`)
     .digest('hex')
     .slice(0, 12);
 };
 const SYSTEM_PROMPT_HASH = `${PROMPT_VERSION}s-${_systemContractHash({})}`;
 const SYSTEM_APS_PROMPT_HASH = `${PROMPT_VERSION}b-${_systemContractHash({ agentProposedSlotCommitment: true })}`;
+const GEMINI_SYSTEM_PROMPT_HASH = `${PROMPT_VERSION}s-${_systemContractHash({}, { geminiSystemChannel: true })}`;
+const GEMINI_SYSTEM_APS_PROMPT_HASH = `${PROMPT_VERSION}b-${_systemContractHash({ agentProposedSlotCommitment: true }, { geminiSystemChannel: true })}`;
 function extractionPromptVersion(bookableServiceNames, opts = {}) {
   const names = Array.isArray(bookableServiceNames)
     ? bookableServiceNames.filter(Boolean)
@@ -681,8 +688,11 @@ function extractionPromptVersion(bookableServiceNames, opts = {}) {
   // versions are byte-identical.
   // The same strict === true as the builders, so a gate-off version is byte-identical.
   const aps = opts.agentProposedSlotCommitment === true;
+  const geminiSystem = opts.systemLayout === true && opts.provider === 'gemini';
   const base = opts.systemLayout === true
-    ? (aps ? SYSTEM_APS_PROMPT_HASH : SYSTEM_PROMPT_HASH)
+    ? (geminiSystem
+      ? (aps ? GEMINI_SYSTEM_APS_PROMPT_HASH : GEMINI_SYSTEM_PROMPT_HASH)
+      : (aps ? SYSTEM_APS_PROMPT_HASH : SYSTEM_PROMPT_HASH))
     : (aps ? APS_PROMPT_HASH : PROMPT_HASH);
   if (!names.length) return base;
   const catalogHash = crypto.createHash('sha256')
@@ -702,4 +712,6 @@ module.exports = {
   APS_PROMPT_HASH,
   SYSTEM_PROMPT_HASH,
   SYSTEM_APS_PROMPT_HASH,
+  GEMINI_SYSTEM_PROMPT_HASH,
+  GEMINI_SYSTEM_APS_PROMPT_HASH,
 };

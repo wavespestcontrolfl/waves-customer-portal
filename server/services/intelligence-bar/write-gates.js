@@ -52,6 +52,10 @@ const FULL_ACCESS_TWO_STEP_TOOL_NAMES = new Set([
   // The general admin edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): a
   // reviewed list of small internal edits, owner login only, always a card.
   'propose_admin_edit',
+  // The Same family link (IB gap #27) names TWO customer profiles, and a request's task establishes at most one
+  // customer target, so only the owner login (owner-direct) can carry both; another admin login is never offered it.
+  'link_customer_family',
+  'unlink_customer_family',
 ]);
 
 // General admin reads (owner ruling 2026-10-12, GATE_IB_GENERAL_READ):
@@ -142,6 +146,9 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // set_customer_bill_to (owner ruling 2026-10-21, IB gap #9): the customer page's Bill-To save, run in
   // process behind a card; a self-pay customer only, sends nothing.
   'set_customer_bill_to',
+  // set_customer_service_contact (IB gap #28): the customer page's contact editor save, run in process behind a
+  // card; sends nothing.
+  'set_customer_service_contact',
   // Agent Review drafts (owner ask 2026-10-28, gap 7, GATE_IB_AGENT_REVIEW_DRAFTS): the composer's Use Draft send, run in process behind
   // a card. approve and revise TEXT the customer (always a card, owner login included); ignore sends nothing.
   'approve_agent_review_draft',
@@ -151,6 +158,10 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // Email page's Unblock, run in process behind a card; each sends nothing.
   'resolve_dispatch_alert',
   'unblock_sender',
+  // link_customer_family / unlink_customer_family (IB gap #27): the customer page's Same family Link and Unlink, run in
+  // process behind a card; each sends nothing and changes no price.
+  'link_customer_family',
+  'unlink_customer_family',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.

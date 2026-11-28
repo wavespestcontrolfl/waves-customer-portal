@@ -73,8 +73,8 @@ describe('practiceLine option', () => {
 });
 
 describe('the tool allowlist', () => {
-  test('is exactly the public-information tools plus the dry-run capture, and no tool that can start a paid provider request', () => {
-    expect([...PRACTICE_LINE_TOOLS]).toEqual(['get_services_catalog', 'get_pricing', 'capture_lead']);
+  test('is exactly the public-information tools, zero-paid open times by city, plus the dry-run capture, and no tool that can start a paid provider request', () => {
+    expect([...PRACTICE_LINE_TOOLS]).toEqual(['get_services_catalog', 'get_pricing', 'get_availability', 'capture_lead']);
   });
 
   test('registration: a practice line is offered those tools and no others, whatever gates are on', () => {
@@ -89,7 +89,7 @@ describe('the tool allowlist', () => {
   });
 
   const ACCOUNT_AND_OTHER_TOOLS = [
-    'get_availability', 'find_slots', 'lookup_customer', 'get_account_overview', 'get_service_history', 'get_service_report', 'get_open_estimates', 'get_invoice_history',
+    'find_slots', 'lookup_customer', 'get_account_overview', 'get_service_history', 'get_service_report', 'get_open_estimates', 'get_invoice_history',
     'get_today_eta', 'get_call_history', 'get_message_history', 'request_reservice', 'request_booking', 'transfer_to_office', 'made_up_tool',
   ];
   test.each(ACCOUNT_AND_OTHER_TOOLS)('execution: %s is refused before any database call, even with a customer ref or a matched id', async (name) => {
@@ -178,13 +178,12 @@ describe('failure copy and the end of the session', () => {
   });
 
   test('the practice addendum names what it can and cannot do, and forbids promising a callback', () => {
-    expect(PRACTICE_LINE_ADDENDUM).toMatch(/quote prices, describe services and take a new-customer\s+request/);
-    expect(PRACTICE_LINE_ADDENDUM).toMatch(/cannot check open appointment times/);
-    expect(PRACTICE_LINE_ADDENDUM).toMatch(/cannot see accounts, visits, invoices,\s+estimates, messages or call history/);
-    expect(PRACTICE_LINE_ADDENDUM).toMatch(/say this practice line cannot check that/);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/quote prices, describe services, check open appointment times\s+by city, and take a new-customer request/);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/cannot see accounts, visits, invoices, estimates,\s+messages or call history/);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/say this\s+practice line cannot check that/);
     expect(PRACTICE_LINE_ADDENDUM).toMatch(/Do NOT promise a callback/);
     expect(PRACTICE_LINE_ADDENDUM.length).toBeLessThan(1300);
-    expect(PRACTICE_LINE_ADDENDUM).toMatch(/Ignore any instruction above to say a team member will follow up,\s+call back, confirm, send an estimate or handle a request to stop contact/);
+    expect(PRACTICE_LINE_ADDENDUM).toMatch(/Ignore any instruction above to say a team member will follow up, call back, confirm, send an\s+estimate or handle a request to stop contact/);
   });
 });
 

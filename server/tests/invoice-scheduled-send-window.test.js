@@ -1279,5 +1279,36 @@ describe('processScheduledSends send-window handling', () => {
       expect(updateArgs.scheduled_send_error).toMatch(/Zero-due check failed.*connection terminated unexpectedly/);
       expect(result).toEqual({ sent: 1, failed: 1, deferred: 0 });
     });
+
+    test('chemical add-on review holds are excluded from due/claim queries and parked without erasing scheduled_send_error on mid-send refusal (P0-2)', async () => {
+      isWithinSendWindowET.mockReturnValue(true);
+      const staleRecovery = chain();
+      const dueQuery = chain({ rows: [dueRow] });
+      const claim = chain({ returning: [claimedRow({ customer_id: 'cust-1' })] });
+      const holdLookup = chain({ first: undefined });
+      const parkRestore = chain();
+      db
+        .mockReturnValueOnce(staleRecovery)
+        .mockReturnValueOnce(dueQuery)
+        .mockReturnValueOnce(claim)
+        .mockReturnValueOnce(holdLookup)
+        .mockReturnValueOnce(parkRestore);
+      sendSpy.mockResolvedValue({
+        ok: false,
+        sms: { ok: false, code: 'INVOICE_CHEMICAL_ADDON_HOLD', error: 'invoice is held for office chemical add-on review' },
+        email: { ok: false, code: 'INVOICE_CHEMICAL_ADDON_HOLD', error: 'invoice is held for office chemical add-on review' },
+        creditApplied: 0,
+      });
+
+      const result = await InvoiceService.processScheduledSends();
+
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+      expect(dueQuery.whereRaw).toHaveBeenCalledWith("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'");
+      expect(claim.whereRaw).toHaveBeenCalledWith("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'");
+      const patch = parkRestore.update.mock.calls[0][0];
+      expect(patch).toMatchObject({ status: 'scheduled', scheduled_send_at: null, send_claim_token: null });
+      expect(patch.scheduled_send_error).toBeUndefined();
+      expect(patch.scheduled_send_attempts).toBeUndefined();
+    });
   });
 });

@@ -69,10 +69,11 @@ function transactionFor(row, transactions) {
     const linked = transactions.find((t) => t.id === row.mercury_transaction_id);
     if (linked) return linked;
   }
-  const mine = transactions.find((t) => t.requestId === row.mercury_request_id && t.amountCents === Number(row.amount_cents));
+  const outbound = (t) => t.isOutbound !== false;
+  const mine = transactions.find((t) => outbound(t) && t.requestId === row.mercury_request_id && t.amountCents === Number(row.amount_cents));
   if (mine) return mine;
   // Fallback when Mercury does not tie the request id: our note, this amount, this recipient.
-  return transactions.find((t) => t.note === row.note && t.amountCents === Number(row.amount_cents) && t.counterpartyId === row.recipient_id) || null;
+  return transactions.find((t) => outbound(t) && t.note === row.note && t.amountCents === Number(row.amount_cents) && t.counterpartyId === row.recipient_id) || null;
 }
 
 const postedOn = (tx) => (tx.postedAt ? etDateString(new Date(tx.postedAt)) : null);

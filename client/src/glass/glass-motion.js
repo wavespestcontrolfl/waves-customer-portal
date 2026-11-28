@@ -4,7 +4,7 @@ import { useLayoutEffect } from 'react';
 // Class-only estimate materials share the same lifecycle as native glass tags.
 const MATERIALS = [
   '[data-glass]', '[data-glass-accent]', '[data-glass-scrim]',
-  '.gc-freq-btn', '.gc-mbb', '.gc-mbb-btn', '.gc-proof', '.gc-gr-card',
+  '.gc-freq-btn', '.gc-mbb', '.gc-mbb-btn', '.gc-proof', '.gc-rm-card',
   '.gc-scarcity', '.gc-section-cta', '.gc-slot-priority', '.gc-slot-rain', '.gc-tech-chip',
 ];
 const SELECTOR = [

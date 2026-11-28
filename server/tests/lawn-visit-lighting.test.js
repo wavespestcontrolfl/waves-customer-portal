@@ -49,7 +49,7 @@ describe('visit assessment gate off: byte-identical to before', () => {
     expect(input.promptFor()).toEqual({ version: 'lawn-visit-v1', system: input.SYSTEM_PROMPT, schema: input.RESPONSE_SCHEMA, digest: input.PROMPT_DIGEST });
     expect(input.promptFor({ shotList: true }).version).toBe('lawn-visit-v1-shot-list');
     expect(input.promptFor({ lighting: false })).toEqual(input.promptFor());
-    expect(input.PROMPT_DIGEST).toBe(sha(input.SYSTEM_PROMPT, '\n', JSON.stringify(input.RESPONSE_SCHEMA)));
+    expect(input.PROMPT_DIGEST).toBe(sha(input.SYSTEM_PROMPT, '\n', JSON.stringify(input.RESPONSE_SCHEMA), '\n', input.GEMINI_SYSTEM_CHANNEL));
     for (const text of [input.SYSTEM_PROMPT, input.SHOT_LIST_SYSTEM_PROMPT, JSON.stringify(input.RESPONSE_SCHEMA), JSON.stringify(input.SHOT_LIST_RESPONSE_SCHEMA)]) {
       expect(text).not.toMatch(/LIGHT IN THE PHOTOS|hard_shadows|full_sun/);
     }
@@ -93,7 +93,7 @@ describe('visit assessment gate on: the light read', () => {
     expect(input.SHOT_LIST_LIGHTING_PROMPT_VERSION).toBe(shotVariant.version);
     const digests = [input.PROMPT_DIGEST, input.SHOT_LIST_PROMPT_DIGEST, variant.digest, shotVariant.digest];
     expect(new Set(digests).size).toBe(4);
-    expect(variant.digest).toBe(sha(variant.system, '\n', JSON.stringify(variant.schema)));
+    expect(variant.digest).toBe(sha(variant.system, '\n', JSON.stringify(variant.schema), '\n', input.GEMINI_SYSTEM_CHANNEL));
     const photos = [photo('a'), photo('b')];
     const args = { photos, photoZones: ['front', null], visionContext: { season: 'peak' } };
     expect(input.contextHash({ ...args, lighting: true })).not.toBe(input.contextHash(args));

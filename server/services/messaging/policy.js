@@ -107,6 +107,7 @@ const MESSAGE_PURPOSES = [
   'retention',
   'marketing',
   'marketing_seasonal',
+  'lead_promotional_followup',
   'internal_briefing',
   'support_resolution',
   // Recruiting comms (GATE_RECRUITING_COMMS), audience 'applicant' only.
@@ -497,6 +498,19 @@ const PURPOSE_POLICY = {
     prefsColumn: 'seasonal_tips',
     minIdentityTrust: 'phone_matches_customer',
     requireIds: ['customerId'],
+  },
+  // Scheduled promotional follow-up for unquoted phone-only residential leads
+  // (GATE_NEW_LEAD_DRIP_EXTENDED). Requires explicit stored promotional opt-in
+  // (`notification_prefs.marketing_offers === true` + SMS-capable `marketing_channel`)
+  // bound to the destination phone and enforces marketing_offers centrally.
+  lead_promotional_followup: {
+    allowEmoji: false,
+    allowExactPrice: false,
+    maxSegments: 2,
+    requireConsent: 'marketing',
+    prefsColumn: 'marketing_offers',
+    minIdentityTrust: 'phone_matches_customer',
+    requireIds: ['customerId', 'leadId'],
   },
   internal_briefing: {
     allowEmoji: true,

@@ -197,7 +197,7 @@ describe('PUT /:id/update-details — date/window move', () => {
       windowStart: '10:00',
       windowEnd: '11:00',
       excludeServiceIds: ['svc-1'],
-      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
     }));
   });
 
@@ -663,7 +663,7 @@ describe('POST / — admin create', () => {
       date: '2099-07-03',
       windowStart: '10:00',
       windowEnd: '11:00',
-      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
     }));
   });
 
@@ -768,7 +768,7 @@ describe('POST / — admin create', () => {
     // Every generated timed row was probed on its own date.
     for (const d of ['2099-07-03', ...generatedDates]) {
       expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-        db: trx, date: d, windowStart: '10:00', windowEnd: '11:00', excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+        db: trx, date: d, windowStart: '10:00', windowEnd: '11:00', excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
       }));
     }
     expect(inserts.map((d) => d.scheduled_date)).toEqual(['2099-07-03', ...generatedDates]);
@@ -835,7 +835,7 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
     // Each generated timed child probed on its own date, excluding the parent.
     for (const d of spawnDates) {
       expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-        db: trx, date: d, windowStart: '09:00', windowEnd: '10:00', excludeServiceIds: ['svc-1'], excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+        db: trx, date: d, windowStart: '09:00', windowEnd: '10:00', excludeServiceIds: ['svc-1'], excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
       }));
     }
     expect(inserts.map((d) => d.scheduled_date)).toEqual(spawnDates);
@@ -895,7 +895,7 @@ describe('PUT /:id/update-details — recurrence paths lock + probe every destin
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
       db: trx, date: '2099-07-15', windowStart: '09:00', windowEnd: '10:00',
       excludeServiceIds: expect.arrayContaining(['svc-1', 'child-1']),
-      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
     }));
     // The move itself committed despite the clash.
     expect(childWrites.map((d) => d.scheduled_date)).toEqual(['2099-07-15']);

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../components/AddressAutocomplete', () => ({ default: () => null }));
 
-import { TeamTab } from './TimeTrackingPage';
+import { TeamTab } from './staff/TeamTab';
 
 // GATE_TECH_SHIFT_HOURS (owner 2026-11-19, page item D4): the Team tab "Shift
 // hours" row (a start and an end time), shown only when the server says the

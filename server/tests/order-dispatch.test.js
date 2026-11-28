@@ -27,6 +27,8 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: jest.fn(async () => ({ email: 'a@b.c', password: 'x', accountNumber: '123' })) }));
+// The open-request alert's own SQL runs against Postgres (autobuy-retry-postgres.test.js); here only the wiring is checked.
+jest.mock('../services/procurement/stale-request-alert', () => ({ syncStaleRequestAlerts: jest.fn(async () => ({ stale: 0, closed: 0 })) }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({
   vendorPricingFor: jest.fn(async () => mockState.pricing),
@@ -42,12 +44,13 @@ const mockState = { request: null, vendor: null, product: null, pricing: null, l
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
+    for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify', 'limit']) q[m] = () => q;
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
     q.where = (w) => { q._where = w; return q; };
     q.whereRaw = (sql, bindings) => { (q._raws = q._raws || []).push([sql, bindings]); return q; };
     q.first = async (...cols) => {
       if (cols[0] === 'vo.status') return mockState.liveAutoOrderAfterBell && mockState.bellRung ? mockState.liveAutoOrderAfterBell : mockState.liveAutoOrder; // findLiveAutoOrder's aliased join (a claim landing after the hand-off bell: liveAutoOrderAfterBell)
+      if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status' && q._where?.restock_request_id) return mockState.requestLedger || null; // settleRequestLedgerBells (preserveOutstanding) locked row
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's locked ledger read
       // deliverBell's locked version read: the row's CURRENT bell is the one being delivered (the park's / the pending row's), unless a test replaced it (bellStampMiss).
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'evidence') { const pending = mockState.pendingBells.find((r) => r.id === q._where?.id); return { id: q._where?.id, evidence: { bell: { v: mockState.bellStampMiss ? 'replaced' : (pending?.evidence?.bell?.v ?? mockState.currentBellV ?? null) } } }; }
@@ -67,6 +70,7 @@ jest.mock('../models/db', () => {
       return null;
     };
     q.sum = () => q;
+    q.pluck = async () => mockState.receivedOrders || [];
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
     q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && row.status && mockState.parkThrowsOnce) { mockState.parkThrowsOnce = false; throw new Error('park lost connection'); } if (table === 'vendor_orders' && typeof row.evidence === 'string') { try { const v = JSON.parse(row.evidence).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } } mockState.updates.push({ table, row, ...(q._raws ? { raws: q._raws } : {}) }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
@@ -79,7 +83,7 @@ jest.mock('../models/db', () => {
       return [saved];
     };
     q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }), merge: () => ({ whereRaw: () => ({ returning }), returning }) }), returning }; };
-    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : (table.startsWith('product_restock_requests') ? (mockState.dispatchable || []) : [])).then(ok, err);
+    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : (table.startsWith('product_restock_requests') ? (mockState.dispatchable || []) : table === 'product_inventory_movements' ? (mockState.countRows || []) : [])).then(ok, err);
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
@@ -160,12 +164,59 @@ test('placed: claim first, then ledger placed + request ordered + audit, no bell
   expect(r.status).toBe('placed');
   expect(r.externalOrderNumber).toBe('SM-1');
   expect(mockState.ledgerRows[0]).toMatchObject({ status: 'placing', adapter: 'stickermule', restock_request_id: 'req-1' });
-  expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500 });
+  expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500, since: null, countedAt: null, receivedOrders: [] });
   expect(a.place).toHaveBeenCalledWith(expect.objectContaining({ vendorSku: '4242', quantity: 500, quoteCents: 31400 }));
   expect(ledgerStatus()).toBe('placed');
   expect(requestStatus()).toBe('ordered');
   expect(auditVendorOrder).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', amount_cents: 31400, external_order_number: 'SM-1' }));
   expect(notify).not.toHaveBeenCalled();
+});
+
+test('bindingQuote returning an outstanding order parks vendor_order_outstanding before cap reservation', async () => {
+  mockState.countRows = [{ id: 'm1', movement_type: 'correction', metadata: { source: 'owner_count', countedAt: '2026-11-17T09:00:00Z' }, created_at: new Date('2026-11-18T12:00:00Z') }];
+  mockState.receivedOrders = ['SM-5'];
+  mockState.request = { ...baseRequest(), created_at: new Date('2026-11-20T15:00:00Z') };
+  const a = {
+    ...mockAdapter(),
+    preSubmitTotal: 'history',
+    bindingQuote: jest.fn(async () => ({ cents: 31400, source: 'order SM-7', outstanding: { number: 'SM-7', why: 'coming' } })),
+  };
+  try {
+    const r = await run(a);
+    expect(a.bindingQuote).toHaveBeenCalledWith({ vendorSku: '4242', quantity: 500, since: '2026-11-20T15:00:00.000Z', countedAt: '2026-11-17T09:00:00.000Z', receivedOrders: ['SM-5'] });
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'vendor_order_outstanding' });
+    expect(a.place).not.toHaveBeenCalled();
+    const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'needs_review')?.row;
+    expect(JSON.parse(parked.evidence)).toMatchObject({ outstandingOrder: { number: 'SM-7', why: 'coming' } });
+    expect(parked.error).toMatch(/^vendor_order_outstanding: Sticker Mule order SM-7 holds item 4242/);
+  } finally {
+    Object.assign(mockState, { countRows: null, receivedOrders: null });
+  }
+});
+
+test('failed history lookup persists unreadable outstandingOrder evidence and preserveOutstanding keeps it locked from sweep hand-off', async () => {
+  const a = {
+    ...mockAdapter(),
+    preSubmitTotal: 'history',
+    bindingQuote: jest.fn(async () => { throw new Error('HTTP 504 timeout'); }),
+  };
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'failed', reason: 'adapter_error' });
+  const parked = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status === 'failed')?.row;
+  expect(JSON.parse(parked.evidence)).toMatchObject({ outstandingOrder: { number: null, why: 'unreadable' } });
+
+  const dbFn = require('../models/db');
+  mockState.requestLedger = { id: 'ledger-1', status: 'failed', placed_at: null, evidence: { outstandingOrder: { number: null, why: 'unreadable' } } };
+  mockState.updates = [];
+  try {
+    const out = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1', { preserveOutstanding: true }));
+    expect(out).toEqual({ preserved: 'vendor_order_outstanding' });
+    expect(mockState.updates.filter((u) => u.table === 'notifications' || u.table === 'vendor_orders')).toHaveLength(0);
+    // Normal manual receive/cancel (preserveOutstanding false) still settles the parked bell.
+    const manual = await dbFn.transaction((trx) => dispatch.settleRequestLedgerBells(trx, 'req-1'));
+    expect(manual).toEqual({ settled: true });
+    expect(mockState.updates.some((u) => u.table === 'notifications')).toBe(true);
+  } finally { mockState.requestLedger = null; }
 });
 
 test('a conflicting claim skips without calling the adapter', async () => {
@@ -998,10 +1049,10 @@ test('monthly sum counts only placing reservations and dispatched rows', async (
   const dbFn = require('../models/db');
   const seen = [];
   const orig = dbFn.getMockImplementation();
-  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { q.where = (...a) => { seen.push(a); if (typeof a[0] === 'function') { const inner = { where: (...b) => { seen.push(['inner', ...b]); return inner; }, orWhereNotNull: (...b) => { seen.push(['inner', 'orWhereNotNull', ...b]); return inner; } }; a[0].call(inner); } return q; }; } return q; });
+  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { q.where = (...a) => { seen.push(a); if (typeof a[0] === 'function') { const inner = { where: (...b) => { seen.push(['inner', ...b]); return inner; }, orWhereRaw: (...b) => { seen.push(['inner', 'orWhereRaw', ...b]); return inner; } }; a[0].call(inner); } return q; }; } return q; });
   try {
     await dispatch.monthlySpentCents(dbFn, { now: new Date(), excludeId: 'x' });
-    expect(seen).toEqual(expect.arrayContaining([['inner', 'status', 'placing'], ['inner', 'orWhereNotNull', 'placed_at']]));
+    expect(seen).toEqual(expect.arrayContaining([['inner', 'status', 'placing'], ['inner', 'orWhereRaw', expect.stringMatching(/vendor_orders\.placed_at IS NOT NULL OR split_part\(COALESCE\(vendor_orders\.error, ''\), ':', 1\) IN \('ambiguous_after_submit'/)]]));
   } finally { dbFn.mockImplementation(orig); }
 });
 
@@ -1085,13 +1136,13 @@ describe('a pre-submit park for a vendor that is never auto-ordered sends staff 
     expect(notify).toHaveBeenLastCalledWith('system', HEADLINE, WHY, expect.objectContaining({ detail: `${evidence.bell.title}\n${evidence.bell.body}` }));
   });
 
-  test('a vendor the dispatcher does place for keeps the plain hand-off', async () => {
+  test('a vendor the dispatcher does place for: a park before the click says the robot stopped; buy it and press Mark Ordered, or press Cancel', async () => {
     const refused = Object.assign(new Error('account has 0 payment methods; exactly one is required'), { refuse: 'no_payment' });
     expect(await run(mockAdapter({ place: jest.fn(async () => { throw refused; }) }))).toMatchObject({ status: 'needs_review', reason: 'no_payment' });
     expect(alert()).toMatchObject({
-      headline: 'Inventory — order Yard sign sticker by hand',
-      why: 'The auto-order did not go through; order it manually, then mark the restock request ordered.',
-      detail: expect.stringMatching(/ The restock request stays open — order manually, then mark it ordered\.$/),
+      headline: expect.stringMatching(/^Inventory — Yard sign sticker auto-order stopped/),
+      why: 'No order was sent; buy it and press Mark Ordered, or press Cancel for a fresh check.',
+      detail: expect.stringMatching(/The robot stopped before buying: account has 0 payment methods; exactly one is required\. Buy it yourself and press Mark Ordered, or press Cancel and the next morning check opens a fresh request\.$/),
     });
     expect(alert().detail).not.toMatch(/account first/);
   });
@@ -1440,3 +1491,42 @@ test('in the fertilizer blackout the claim holds a product whose N shows only in
   expect(r.skipped).toBe('fertilizer_blackout');
 });
 
+
+describe('price on file passed to an adapter that checks it', () => {
+  test('exact in millionths of a dollar: $1.0060 stays 1006000, a price under half a cent is never 0, none stays null', () => {
+    expect(dispatch.priceMicros('1.0060')).toBe(1006000);
+    expect(dispatch.priceMicros(47)).toBe(47000000);
+    expect(dispatch.priceMicros('0.0040')).toBe(4000);
+    expect(dispatch.priceMicros('0.0000001')).toBe(1);
+    expect(dispatch.priceMicros(0)).toBeNull();
+    expect(dispatch.priceMicros(null)).toBeNull();
+    expect(dispatch.priceMicros('x')).toBeNull();
+  });
+
+  test('place gets priceOnFileMicros from the eligible price row (price_amount first), only when the adapter checks prices', async () => {
+    mockState.pricing = { vendor_sku: '4242', price: '314.00', price_amount: '313.9950', quantity: '500' };
+    const checks = mockAdapter({ checksPrice: true });
+    await run(checks);
+    expect(checks.place).toHaveBeenCalledWith(expect.objectContaining({ priceOnFileMicros: 313995000 }));
+    const plain = mockAdapter();
+    await run(plain);
+    expect(plain.place.mock.calls[0][0]).not.toHaveProperty('priceOnFileMicros');
+  });
+});
+
+describe('open-request alert wiring (runVendorOrderDispatch)', () => {
+  const { syncStaleRequestAlerts } = require('../services/procurement/stale-request-alert');
+  beforeEach(() => syncStaleRequestAlerts.mockClear());
+
+  test('the server run (reconcile) syncs the alerts once; the Mac run (reconcile false) leaves them to it', async () => {
+    await dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV });
+    expect(syncStaleRequestAlerts).toHaveBeenCalledTimes(1);
+    await dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV, reconcile: false });
+    expect(syncStaleRequestAlerts).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failed alert write turns the run red but does not stop the dispatch', async () => {
+    syncStaleRequestAlerts.mockRejectedValueOnce(new Error('alert not persisted'));
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV })).rejects.toThrow('open-request alerts failed: alert not persisted');
+  });
+});

@@ -120,21 +120,26 @@ function createClient({ fetchImpl = globalThis.fetch, env = process.env, timeout
     createdAt: r.createdAt || null,
     memo: typeof r.memo === 'string' ? r.memo : null,
   });
-  const transactionOf = (t) => ({
-    id: String(t.id || ''),
-    status: String(t.status || ''),
-    amountCents: Math.abs(CENTS(t.amount)),
-    counterpartyId: t.counterpartyId == null ? null : String(t.counterpartyId),
-    createdAt: t.createdAt || null,
-    postedAt: t.postedAt || null,
-    failedAt: t.failedAt || null,
-    note: typeof t.note === 'string' ? t.note : null,
-    externalMemo: typeof t.externalMemo === 'string' ? t.externalMemo : null,
-    requestId: t.requestId == null ? null : String(t.requestId),
-    // A refund, return or reversal tied to this transaction (Mercury's relation kinds name it).
-    hasReturn: Array.isArray(t.relatedTransactions)
-      && t.relatedTransactions.some((rel) => /return|refundtofailed|failedpaymenttopaymentrefund/i.test(String(rel && rel.relationKind))),
-  });
+  const transactionOf = (t) => {
+    const signed = CENTS(t.amount);
+    return {
+      id: String(t.id || ''),
+      status: String(t.status || ''),
+      amountCents: Math.abs(signed),
+      signedAmountCents: signed,
+      isOutbound: signed < 0,
+      counterpartyId: t.counterpartyId == null ? null : String(t.counterpartyId),
+      createdAt: t.createdAt || null,
+      postedAt: t.postedAt || null,
+      failedAt: t.failedAt || null,
+      note: typeof t.note === 'string' ? t.note : null,
+      externalMemo: typeof t.externalMemo === 'string' ? t.externalMemo : null,
+      requestId: t.requestId == null ? null : String(t.requestId),
+      // A refund, return or reversal tied to this transaction (Mercury's relation kinds name it).
+      hasReturn: Array.isArray(t.relatedTransactions)
+        && t.relatedTransactions.some((rel) => /return|refundtofailed|failedpaymenttopaymentrefund/i.test(String(rel && rel.relationKind))),
+    };
+  };
 
   return {
     configured: Boolean(config),

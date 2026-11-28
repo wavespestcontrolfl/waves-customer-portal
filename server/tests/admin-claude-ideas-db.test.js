@@ -72,10 +72,11 @@ maybeDescribe('send an idea to Claude (live Postgres)', () => {
         was: { who: null, severity: null },
       },
     });
-    // Not in the bell; in Claude's queue (needs-me lists it under Claude).
+    // Not in the bell; in Claude's queue (needs-me lists it under Claude only with fullAccess).
     expect(await inBell(row.id)).toBe(false);
     const { listNeedsMe } = require('../services/needs-me');
-    const listed = (await listNeedsMe({ who: 'claude', role: 'admin' })).items.find((i) => i.id === row.id);
+    expect((await listNeedsMe({ who: 'claude', role: 'admin' })).items.find((i) => i.id === row.id)).toBeUndefined();
+    const listed = (await listNeedsMe({ who: 'claude', role: 'admin', fullAccess: true })).items.find((i) => i.id === row.id);
     expect(listed).toEqual(expect.objectContaining({ who: 'claude', sent: true }));
   });
 

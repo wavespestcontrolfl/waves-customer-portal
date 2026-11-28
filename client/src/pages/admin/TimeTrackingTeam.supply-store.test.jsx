@@ -19,7 +19,7 @@ vi.mock('../../components/AddressAutocomplete', () => ({
   ),
 }));
 
-import { TeamTab } from './TimeTrackingPage';
+import { TeamTab } from './staff/TeamTab';
 
 const BASE_TECH = {
   id: 'tech-1', name: 'River Tech', email: 'river@example.com', role: 'technician',

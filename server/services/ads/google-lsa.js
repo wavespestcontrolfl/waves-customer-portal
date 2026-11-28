@@ -240,14 +240,11 @@ function rebuildWindow(now = new Date()) {
 // campaign Google removed reads paused, and its last days of cost still come in.
 const CHANNEL_FILTER = "campaign.advertising_channel_type = 'LOCAL_SERVICES'";
 
-// Google can also run Local Services inside a Performance Max campaign. Its
-// leads are in local_services_lead like any other, but API v23 has no field
-// that tells such a campaign from a normal Performance Max one, so its cost
-// cannot be read here. Leads of both kinds against the cost of one would show
-// a cost per lead that is too low, so the run stops before it writes: in
-// readCampaigns for a campaign that is not removed, and in readDays for a
-// removed one that still has numbers inside the window.
-const PERFORMANCE_MAX_REFUSAL = 'this sync reads standalone Local Services campaigns only, so nothing was written';
+// Google can also run Local Services alongside a Performance Max campaign. We
+// still sync standalone LOCAL_SERVICES campaigns and leads (never bricking the
+// sync), while logging a clear warning and flagging `performanceMaxPresent` so
+// operators know CPL may include leads attributed from Performance Max.
+const PERFORMANCE_MAX_WARNING = 'standalone Local Services metrics still synced; Performance Max cost is excluded';
 
 async function readCampaigns(customer) {
   const all = await customer.query(`
@@ -262,17 +259,17 @@ async function readCampaigns(customer) {
   }
   const performanceMax = all.filter((r) => PERFORMANCE_MAX.has(r.campaign?.advertising_channel_type) && !REMOVED.has(r.campaign?.status));
   if (performanceMax.length) {
-    throw new Error(`the account has ${performanceMax.length} Performance Max campaign(s); ${PERFORMANCE_MAX_REFUSAL}`);
+    logger.warn(`[google-lsa] account has ${performanceMax.length} active/paused Performance Max campaign(s); ${PERFORMANCE_MAX_WARNING}`);
   }
-  return all.filter((r) => LOCAL_SERVICES.has(r.campaign?.advertising_channel_type));
+  const lsaCampaigns = all.filter((r) => LOCAL_SERVICES.has(r.campaign?.advertising_channel_type));
+  lsaCampaigns.performanceMaxPresent = performanceMax.length > 0;
+  return lsaCampaigns;
 }
 
 // The account's cost and leads per day inside the window.
 async function readDays(customer, { since, until }) {
-  // Google leaves out a campaign-day on which every selected metric is zero, so
-  // any row here is a Performance Max campaign (removed ones included) that ran
-  // inside the window. Impressions and clicks are selected too: a day that
-  // served at no cost can still have brought a lead.
+  // Check whether a Performance Max campaign ran inside the window (warn only,
+  // never abort the standalone Local Services sync).
   const performanceMaxDays = await customer.query(`
     SELECT campaign.id, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros
     FROM campaign
@@ -281,7 +278,7 @@ async function readDays(customer, { since, until }) {
     LIMIT 1
   `);
   if (performanceMaxDays.length) {
-    throw new Error(`a Performance Max campaign ran in the account between ${since} and ${until}; ${PERFORMANCE_MAX_REFUSAL}`);
+    logger.warn(`[google-lsa] a Performance Max campaign ran in the account between ${since} and ${until}; ${PERFORMANCE_MAX_WARNING}`);
   }
 
   const metricRows = await customer.query(`
@@ -310,7 +307,7 @@ async function readDays(customer, { since, until }) {
     WHERE local_services_lead.creation_date_time >= '${since} 00:00:00'
       AND local_services_lead.creation_date_time <= '${until} 23:59:59'
   `);
-  return { metricsByDay: sumMetricsByDay(metricRows), leadsByDay: tallyLeadsByDay(leadRows) };
+  return { metricsByDay: sumMetricsByDay(metricRows), leadsByDay: tallyLeadsByDay(leadRows), performanceMaxPresent: performanceMaxDays.length > 0 };
 }
 
 // The row this sync owns for the account: found by the mark only, never by a
@@ -325,18 +322,39 @@ function accountRow(account) {
 
 // The account row and its days, in one transaction. Returns the number of day
 // rows written.
-async function writeRows(account, existing, campaigns, { metricsByDay, leadsByDay }, { since, until }) {
+async function writeRows(account, existing, campaigns, { metricsByDay, leadsByDay, performanceMaxPresent: daysPMax = false }, { since, until }) {
   // Google owns the status and the budget, and the sync owns the type (the Ads
   // page puts the row on the "Local Service Ads" card by it; a row edited
   // while another account was being read gets it back here). The name is
   // written once, at insert: PUT /campaigns/:id lets the office rename the row,
   // and a nightly overwrite would undo that.
-  const state = { ...accountState(campaigns), campaign_type: CAMPAIGN_TYPE, updated_at: new Date() };
+  const pmaxPresent = Boolean(campaigns.performanceMaxPresent || daysPMax);
+  const existingMeta = existing?.metadata && typeof existing.metadata === 'object'
+    ? existing.metadata
+    : (typeof existing?.metadata === 'string' ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })() : {});
+  const insertMeta = { ...existingMeta, [ACCOUNT_KEY]: account };
+  if (pmaxPresent) insertMeta.performance_max_present = true;
+  else delete insertMeta.performance_max_present;
+  const metaChanged = Boolean(existingMeta.performance_max_present) !== pmaxPresent;
+  const baseState = {
+    ...accountState(campaigns),
+    campaign_type: CAMPAIGN_TYPE,
+    updated_at: new Date(),
+  };
   let written = 0;
   await db.transaction(async (trx) => {
     let campaignId = existing?.id;
     if (existing) {
-      await trx('ad_campaigns').where({ id: campaignId }).update(state);
+      // Atomic jsonb key merge/remove so concurrent admin metadata edits are never clobbered.
+      const updateState = {
+        ...baseState,
+        ...(metaChanged ? {
+          metadata: pmaxPresent
+            ? db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ performance_max_present: true })])
+            : db.raw("COALESCE(metadata, '{}'::jsonb) - 'performance_max_present'"),
+        } : {}),
+      };
+      await trx('ad_campaigns').where({ id: campaignId }).update(updateState);
     } else {
       campaignId = uuidv4();
       await trx('ad_campaigns').insert({
@@ -344,8 +362,8 @@ async function writeRows(account, existing, campaigns, { metricsByDay, leadsByDa
         platform: PLATFORM,
         platform_campaign_id: account,
         campaign_name: DISPLAY_NAME,
-        ...state,
-        metadata: JSON.stringify({ [ACCOUNT_KEY]: account }),
+        ...baseState,
+        metadata: JSON.stringify(insertMeta),
         created_at: new Date(),
       });
     }

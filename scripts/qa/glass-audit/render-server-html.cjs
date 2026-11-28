@@ -263,7 +263,7 @@ function renderNewsletterLanding() {
     'newsletter-unsubscribe-invalid': R('get /unsubscribe/:token', 'Link expired or invalid.', { email: '' }),
     'newsletter-unsubscribed': R('post /unsubscribe/:token', "You're unsubscribed.", { sub, email: emailAddr }),
     'newsletter-unsubscribed-invalid': R('post /unsubscribe/:token', "You're unsubscribed.", { sub: null, email: '' }),
-    'newsletter-quiz-confirm': R('get /quiz/:token/:quizId/:answer', 'One tap to confirm.', { label: ans.label, tokenSafe, quizIdSafe: encodeURIComponent(quizSvc.DEFAULT_QUIZ_ID), answerSafe: encodeURIComponent(ans.key) }),
+    'newsletter-quiz-confirm': R('get /quiz/:token/:quizId/:answer', 'One tap to confirm.', { label: ans.label, tokenSafe, quizIdSafe: encodeURIComponent(quizSvc.DEFAULT_QUIZ_ID), answerSafe: encodeURIComponent(ans.key), quiz, pollVote: false }, ['picked', 'lead', 'buttonText', 'smallLine']),
     'newsletter-quiz-thanks': R('post /quiz/:token/:quizId/:answer', "Thanks — we've got you.", { quiz, landingLine: quiz.landingLine, bookLabel: quiz.bookLabel, bookUrl: quizSvc.quizBookingUrl(quizSvc.DEFAULT_QUIZ_ID) }),
     'newsletter-quiz-thanks-nocta': R('post /quiz/:token/:quizId/:answer', "Thanks — we've got you.", { quiz: quietQuiz, landingLine: quietQuiz.landingLine, bookLabel: quietQuiz.bookLabel, bookUrl: quizSvc.quizBookingUrl(quietQuizId) }),
     'newsletter-feedback-needs-work': R('get /feedback/:token/:reaction', 'Ouch — help us fix it.', { pick: `${needsWork.emoji} ${needsWork.label}`, reaction: needsWork, formAction: `/api/public/newsletter/feedback/${tokenSafe}/${needsWork.key}` }, ['options']),
@@ -272,6 +272,70 @@ function renderNewsletterLanding() {
     'newsletter-feedback-thanks-positive': R('post /feedback/:token/:reaction', 'Thanks — that helps! 🌊', { resolved: positive }),
   };
   for (const [name, { heading, bodyHtml }] of Object.entries(pages)) write(name, renderConfirmPage(heading, bodyHtml));
+
+  const escapeFn = typeof escapeHtml === 'function'
+    ? escapeHtml
+    : (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  write('email-resubscribe', renderResubscribeLanding(renderConfirmPage, escapeFn, emailAddr, tokenSafe));
+}
+
+function renderResubscribeLanding(renderConfirmPage, escapeFn, emailAddr, tokenSafe) {
+  const acorn = require('acorn');
+  const walk = require('acorn-walk');
+  const vm = require('vm');
+  const routePath = path.join(root, 'server/routes/public-email-resubscribe.js');
+  const src = fs.readFileSync(routePath, 'utf8');
+  const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script' });
+
+  let confirmFormSrc = null;
+  let bodyExprSrc = null;
+  walk.simple(ast, {
+    VariableDeclarator(node) {
+      if (node.id?.type === 'Identifier' && node.id.name === 'confirmForm' && node.init) {
+        confirmFormSrc = src.slice(node.init.start, node.init.end);
+      }
+    },
+    CallExpression(node) {
+      const isGetToken =
+        node.callee?.type === 'MemberExpression' &&
+        node.callee.object?.name === 'router' &&
+        node.callee.property?.name === 'get' &&
+        node.arguments[0]?.type === 'Literal' &&
+        node.arguments[0].value === '/:token';
+      if (!isGetToken) return;
+      const handler = node.arguments[node.arguments.length - 1];
+      walk.simple(handler, {
+        CallExpression(inner) {
+          if (
+            inner.callee?.type === 'Identifier' &&
+            inner.callee.name === 'page' &&
+            inner.arguments.length >= 4 &&
+            inner.arguments[1]?.type === 'Literal' &&
+            inner.arguments[1].value === 200
+          ) {
+            bodyExprSrc = src.slice(inner.arguments[3].start, inner.arguments[3].end);
+          }
+        },
+      });
+    },
+  });
+
+  if (!confirmFormSrc || !bodyExprSrc) {
+    throw new Error('Failed to extract confirmForm or GET /:token body from public-email-resubscribe.js');
+  }
+
+  const copySvc = require(path.join(root, 'server/services/email-resubscribe-copy'));
+  const sandbox = {
+    PAGE: copySvc.PAGE,
+    escapeHtml: escapeFn,
+    req: { params: { token: tokenSafe } },
+    request: { email: emailAddr },
+    confirmForm: null,
+    __resubBody: '',
+  };
+  const ctx = vm.createContext(sandbox);
+  vm.runInContext(`confirmForm = (${confirmFormSrc}); __resubBody = (${bodyExprSrc});`, ctx);
+  return renderConfirmPage(copySvc.PAGE.confirmHeading, sandbox.__resubBody);
 }
 
 fs.mkdirSync(outDir, { recursive: true });

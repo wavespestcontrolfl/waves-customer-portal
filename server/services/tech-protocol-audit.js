@@ -24,6 +24,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { recordAuditEvent } = require('./audit-log');
 const { etDateString } = require('../utils/datetime-et');
 const { PERFORMED_OUTCOME_SQL, VISIT_IS_CALLBACK_SQL } = require('./callback-credit');
 const { detectServiceLine } = require('./service-report/service-line-configs');
@@ -300,10 +301,13 @@ async function signedPhotoUrl(s3Key) {
   }
 }
 
-// The mark a visit shows: counted (audit), or an old mark that no longer counts (needsRecheck).
+// The mark a visit shows: counted (audit), or an old mark that no longer counts (needsRecheck + priorAudit context).
 function auditState(a, counted) {
   if (!a) return { audit: null, needsRecheck: false };
-  return counted ? { audit: { result: a.result, note: a.note, auditedAt: a.audited_at }, needsRecheck: false } : { audit: null, needsRecheck: true };
+  const summary = { result: a.result, note: a.note, auditedAt: a.audited_at };
+  return counted
+    ? { audit: summary, needsRecheck: false }
+    : { audit: null, needsRecheck: true, priorAudit: summary };
 }
 
 // What the owner compares with the protocol, for the sampled records: the evidence (loadEvidence) with signed photo
@@ -344,6 +348,7 @@ async function visitDetails(sampled, countedIds, conn = db) {
       photos: await Promise.all(e.photoRows.slice(0, MAX_PHOTOS_PER_VISIT).map(async (p) => ({
         id: p.id, type: p.type, caption: p.caption, url: p.key ? await signedPhotoUrl(p.key) : null,
       }))),
+      photosTruncated: e.photoRows.length > MAX_PHOTOS_PER_VISIT,
       evidenceFingerprint: fingerprint,
       ...auditState(mark, showsAsCounted),
     });
@@ -425,6 +430,22 @@ async function saveMark({ scheduledServiceId, technicianId, month, recordId, evi
              reviewed_record_id = EXCLUDED.reviewed_record_id, evidence_fingerprint = EXCLUDED.evidence_fingerprint
       RETURNING scheduled_service_id, result, note, audited_at`,
     [visit.technician_id, visit.scheduled_service_id, visit.month, result, text || null, auditedBy || null, visit.record_id, evidenceFingerprintV2(evidence)]);
+    await recordAuditEvent({
+      actor_type: 'admin',
+      actor_id: auditedBy || null,
+      action: 'tech_protocol_audit.marked',
+      resource_type: 'tech_protocol_audit',
+      resource_id: visit.scheduled_service_id,
+      metadata: {
+        technician_id: visit.technician_id,
+        audit_month: visit.month,
+        record_id: visit.record_id,
+        result,
+        has_note: Boolean(text),
+      },
+      critical: true,
+      trx,
+    });
     return { scheduledServiceId: rows[0].scheduled_service_id, result: rows[0].result, note: rows[0].note, auditedAt: rows[0].audited_at };
   });
 }

@@ -285,7 +285,7 @@ html[data-glass-theme] [data-glass]:focus-visible {
   outline-offset: 3px;
   box-shadow: 0 0 0 5px rgba(var(--accent), 0.18), 0 16px 48px rgba(4, 57, 94, 0.16) !important;
 }
-html[data-glass-theme] :is(button, a, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])):not([data-glass]):focus-visible {
+html[data-glass-theme] :is(button, a, summary, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])):not([data-glass]):focus-visible {
   outline: 2px solid rgba(var(--accent), 0.9) !important;
   outline-offset: 2px !important;
 }
@@ -354,10 +354,10 @@ html[data-glass-theme] [data-glass-accent]:disabled {
 
 /* ---------- payment dialogs ---------- */
 /* Modals carry the strongest glass — the user is making the decision here,
-   so the surface gets more opacity for focus (master-prompt modal ratios). */
+   so the surface stays opaque enough (0.90-0.95) that underlying cards never
+   bleed through on iOS/WebKit while keeping frosted depth (audit UI-02). */
 html[data-glass-theme] [data-glass="modal"] {
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.28)),
-    rgba(255, 255, 255, 0.5) !important;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.9)) !important;
   backdrop-filter: blur(36px) saturate(190%) !important;
   -webkit-backdrop-filter: blur(36px) saturate(190%) !important;
   border: 1px solid rgba(255, 255, 255, 0.75) !important;
@@ -650,7 +650,11 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass="soft"]:hover,
   html[data-glass-theme] [data-glass="chip"],
   html[data-glass-theme] [data-glass="chip"]:hover,
-  html[data-glass-theme] [data-glass="chip"]:active {
+  html[data-glass-theme] [data-glass="chip"]:active,
+  html[data-glass-theme] .sr-cell,
+  html[data-glass-theme] .applied-product-card,
+  html[data-glass-theme] .sr-shell .sr-grid-3,
+  html[data-glass-theme] .waves-print-root [data-glass-clear] {
     background: rgba(255, 255, 255, 0.93) !important;
     border-color: #7C8DA0 !important; /* opaque: the translucent white border vanishes on the solid surface */
   }
@@ -679,9 +683,18 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass="soft"]:hover,
   html[data-glass-theme] [data-glass="chip"],
   html[data-glass-theme] [data-glass="chip"]:hover,
-  html[data-glass-theme] [data-glass="chip"]:active {
+  html[data-glass-theme] [data-glass="chip"]:active,
+  html[data-glass-theme] .sr-cell,
+  html[data-glass-theme] .applied-product-card,
+  html[data-glass-theme] .sr-shell .sr-grid-3,
+  html[data-glass-theme] .waves-print-root [data-glass-clear] {
     background: rgba(255, 255, 255, 0.93) !important;
     border-color: #7C8DA0 !important; /* opaque: the translucent white border vanishes on the solid surface */
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  html[data-glass-theme] [data-glass-scrim] {
+    background: rgba(15, 23, 42, 0.72) !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
@@ -706,6 +719,10 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass="soft"],
   html[data-glass-theme] [data-glass="chip"],
   html[data-glass-theme] [data-glass-accent],
+  html[data-glass-theme] .sr-cell,
+  html[data-glass-theme] .applied-product-card,
+  html[data-glass-theme] .sr-shell .sr-grid-3,
+  html[data-glass-theme] .waves-print-root [data-glass-clear],
   /* The estimate page builds its cards from `.gc-*` classes rather than the
      `data-glass` attributes, so forced colours left it rendering glass over
      the user's own palette (G-10). Enumerated rather than `[class*="gc-"]`:
@@ -730,6 +747,11 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
     box-shadow: none !important;
+  }
+  html[data-glass-theme] [data-glass-scrim] {
+    background: Canvas !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
   }
   html[data-glass-theme] [data-glass]::before,
   html[data-glass-theme] [data-glass]::after,

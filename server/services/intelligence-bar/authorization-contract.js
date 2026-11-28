@@ -183,12 +183,17 @@ CURATED_PREVIEW_TOOL_NAMES.add('create_invoice');
 CURATED_PREVIEW_TOOL_NAMES.add('compose_email');
 // set_customer_bill_to: its card lines come from its own preview (bill-to-tools.js cardLines). It sends nothing.
 CURATED_PREVIEW_TOOL_NAMES.add('set_customer_bill_to');
+// set_customer_service_contact: its card lines come from its own preview (service-contact-tools.js cardLines). It sends nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('set_customer_service_contact');
 // The Agent Review draft cards: their card lines come from their own preview (agent-review-tools.js cardLines).
 for (const name of ['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft']) CURATED_PREVIEW_TOOL_NAMES.add(name);
 // resolve_dispatch_alert / unblock_sender: card lines come from their own previews (dispatch-alert-tools.js and
 // unblock-sender-tools.js cardLines). Neither sends anything.
 CURATED_PREVIEW_TOOL_NAMES.add('resolve_dispatch_alert');
 CURATED_PREVIEW_TOOL_NAMES.add('unblock_sender');
+// link_customer_family / unlink_customer_family: card lines come from their own previews (family-link-tools.js cardLines). They send nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('link_customer_family');
+CURATED_PREVIEW_TOOL_NAMES.add('unlink_customer_family');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -277,11 +282,14 @@ const ACTION_LABELS = {
   create_invoice: 'Create a draft invoice (sends nothing)',
   compose_email: 'Send a new email',
   set_customer_bill_to: 'Set a customer\'s Bill-To payer (sends nothing)',
+  set_customer_service_contact: 'Add, change or remove a customer\'s contact (sends nothing)',
   approve_agent_review_draft: 'Send an Agent Review draft as written',
   revise_agent_review_draft: 'Send an edited Agent Review draft',
   ignore_agent_review_draft: 'Dismiss an Agent Review draft (sends nothing)',
   resolve_dispatch_alert: 'Resolve a dispatch alert (sends nothing)',
   unblock_sender: 'Unblock an email sender (sends nothing)',
+  link_customer_family: 'Link two customer profiles as the same family (sends nothing)',
+  unlink_customer_family: 'Unlink a customer profile from its family (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -1002,6 +1010,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'set_customer_bill_to' && preview?.preview === true) {
     for (const line of require('./bill-to-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
+  // set_customer_service_contact: the change, every contact after it, who gets emails and texts, and that nothing is sent.
+  if (toolName === 'set_customer_service_contact' && preview?.preview === true) {
+    for (const line of require('./service-contact-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
   // The Agent Review draft cards: the exact text, the recipient (name and masked number) and the message it answers.
   if (['approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft'].includes(toolName) && preview?.preview === true) {
     for (const line of require('./agent-review-tools').cardLines(toolName, preview)) push(line.kind, line.text);
@@ -1013,6 +1025,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // unblock_sender: the address or domain, when and why it was blocked, its block count and every effect of the unblock.
   if (toolName === 'unblock_sender' && preview?.preview === true) {
     for (const line of require('./unblock-sender-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // link_customer_family / unlink_customer_family: both profiles, the family before and after, and every effect.
+  if (['link_customer_family', 'unlink_customer_family'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./family-link-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_estimate: the estimate, the masked recipients, the channel, the exact message and the totals.
   if (toolName === 'send_estimate' && preview?.preview === true) {

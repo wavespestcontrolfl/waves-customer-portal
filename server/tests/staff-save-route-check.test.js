@@ -63,7 +63,7 @@ describe('staffSaveRouteWarnings', () => {
     expect(occupancy.findConflictingVisits).toHaveBeenCalledTimes(1);
     expect(occupancy.findConflictingVisits).toHaveBeenCalledWith({
       db: conn, date: '2099-01-15', windowStart: '10:00', windowEnd: '11:00', excludeServiceIds: ['svc-1'],
-      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
       arrivalWindow: { serviceId: 'svc-1', roads: 'cache' },
     });
   });

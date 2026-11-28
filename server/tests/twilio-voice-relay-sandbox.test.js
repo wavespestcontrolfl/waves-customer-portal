@@ -230,9 +230,9 @@ describe('POST /relay-sandbox', () => {
     // relay — a sandbox caller is transcribed like any other (codex r3 P1),
     // and a runner's digits sent at answer are collected, not dropped
     // (codex r6 P1).
-    expect(xml).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Gather [^>]*><Play>https:\/\/[^<]+\.mp3<\/Play><\/Gather>/);
+    expect(xml).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Gather [^>]*><Play>https:\/\/portal\.example\.com\/audio\/waves-greeting-notice\.wav<\/Play><\/Gather>/);
     expect(xml).toMatch(/<Gather [^>]*numDigits="2"/);
-    expect(xml).toMatch(/<Gather [^>]*timeout="3"/);
+    expect(xml).toMatch(/<Gather [^>]*timeout="6"/);
     expect(xml).toContain(`action="${RELAY_SANDBOX_CELL_ACTION}"`);
     expect(xml.indexOf('<Gather')).toBeLessThan(xml.indexOf('<Connect'));
     expect(xml).toContain(`<Connect action="${RELAY_COMPLETE_ACTION_SANDBOX.replace('?', '?')}"`);
@@ -414,7 +414,7 @@ describe('POST /relay-sandbox', () => {
       return { xml: res.body, meta };
     };
     // The answer document every caller got before the gate: the cell <Gather> with Twilio's default finish key.
-    const UNCHANGED_GATHER = '<Gather input="dtmf" numDigits="2" timeout="3" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST"><Play>';
+    const UNCHANGED_GATHER = '<Gather input="dtmf" numDigits="2" timeout="6" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST"><Play>';
     const expectUnchangedDocument = (xml) => {
       expect(xml).toContain(UNCHANGED_GATHER);
       expect(xml).toContain('</Gather><Connect');
@@ -445,7 +445,7 @@ describe('POST /relay-sandbox', () => {
     test('gate on: a recorded document has no finish key, so no key press can skip the disclosure and reach the recording', async () => {
       process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
       const { xml } = await answer();
-      expect(xml).toContain(`<Gather input="dtmf" numDigits="2" timeout="3" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST" finishOnKey=""><Play>`);
+      expect(xml).toContain(`<Gather input="dtmf" numDigits="2" timeout="6" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST" finishOnKey=""><Play>`);
       // the only route to the recording inside this document is the end of the <Gather>
       expect(xml).toMatch(new RegExp(`</Play></Gather>${SANDBOX_RECORDING}<Connect`));
       expect(xml.split('<Gather')).toHaveLength(2);
@@ -598,7 +598,7 @@ describe('POST /relay-sandbox/cell', () => {
     expect(res.body).toContain(`action="${RELAY_COMPLETE_ACTION_SANDBOX}"`);
     // A digit interrupted the disclosure nested in the answer <Gather>; the
     // continuation replays it in full BEFORE the relay (codex r7 P1).
-    expect(res.body).toMatch(/<Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect[ >]/);
+    expect(res.body).toMatch(/<Response><Play>https:\/\/portal\.example\.com\/audio\/waves-greeting-notice\.wav<\/Play><Connect[ >]/);
     // The selected cell lands on the row before the relay opens, so a profile
     // Twilio rejects at setup is still attributable (codex r7 P2).
     expect(where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-sb-5' });
@@ -639,9 +639,9 @@ describe('POST /relay-sandbox/cell', () => {
       await handlerFor('/relay-sandbox/cell')(req, res);
       return { xml: res.body, first };
     };
-    const RECORDED = new RegExp(`<Response><Play>https://[^<]+\\.mp3</Play>${SANDBOX_RECORDING}<Connect[ >]`);
+    const RECORDED = new RegExp(`<Response><Play>https://portal\\.example\\.com/audio/waves-greeting-notice\\.wav</Play>${SANDBOX_RECORDING}<Connect[ >]`);
     const expectRelayNotRecorded = (xml) => {
-      expect(xml).toMatch(/<Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect[ >]/); // the caller still gets the relay
+      expect(xml).toMatch(/<Response><Play>https:\/\/portal\.example\.com\/audio\/waves-greeting-notice\.wav<\/Play><Connect[ >]/); // the caller still gets the relay
       expect(xml).not.toMatch(/<Start|<Recording/);
     };
 
@@ -894,7 +894,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     // Twilio's own stop at 600 s, on the fake client
     expect(mockCalls).toHaveBeenCalledWith('CA-sb-live');
     expect(mockCallUpdate).toHaveBeenCalledWith({ timeLimit: 600 });
-    expect(res.body).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect action="\/api\/webhooks\/twilio\/relay-sandbox\/live-complete">/);
+    expect(res.body).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Play>https:\/\/portal\.example\.com\/audio\/waves-greeting-notice\.wav<\/Play><Connect action="\/api\/webhooks\/twilio\/relay-sandbox\/live-complete">/);
     const url = res.body.match(/<Stream url="([^"]+)"/)[1];
     expect(url).toMatch(/^wss:\/\/portal\.example\.com\/ws\/voice-live\/CA-sb-live\/[0-9a-z]+\.\d+\.[0-9a-f]{16}\.[0-9a-f]+$/);
     expect(url).not.toContain('?');
@@ -942,7 +942,7 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
       return res.body;
     };
     const xml = await render(true);
-    expect(xml).toMatch(new RegExp(`^<\\?xml version="1.0" encoding="UTF-8"\\?><Response><Play>https://[^<]+\\.mp3</Play>${SANDBOX_RECORDING}<Connect action="/api/webhooks/twilio/relay-sandbox/live-complete"><Stream `));
+    expect(xml).toMatch(new RegExp(`^<\\?xml version="1.0" encoding="UTF-8"\\?><Response><Play>https://portal\\.example\\.com/audio/waves-greeting-notice\\.wav</Play>${SANDBOX_RECORDING}<Connect action="/api/webhooks/twilio/relay-sandbox/live-complete"><Stream `));
     expect(xml.split('<Recording')).toHaveLength(2);
     expect(xml).not.toMatch(/recordingStatusCallback/i);
     // Not stamped at answer: the staff number on this callback changes nothing.
@@ -1084,6 +1084,327 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     await handlerFor('/relay-sandbox/live-complete')({ body: { CallSid: 'CA-prod', To: '+19415550188' } }, res);
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.body).toContain('<Hangup/>');
+  });
+});
+
+describe('POST /relay-sandbox direct GPT-Live Marin default (GATE_VOICE_GPT_LIVE_TEST=true)', () => {
+  // Mocks BOTH transactions used on direct /relay-sandbox answer:
+  //   1) call_log insert/adopt + recording stamp
+  //   2) voice_gpt_live_ledger release/budget/claim + call_log gpt_live stamp
+  function primeDirectLive({ existing = undefined, source = VOICE_RELAY_SANDBOX_SOURCE, usd = 0, claimed = true } = {}) {
+    const insert = jest.fn().mockResolvedValue([]);
+    const adoptUpdate = jest.fn().mockResolvedValue(1);
+    const ownedFirst = jest.fn(async () => (source == null ? undefined : { source }));
+    const outerUpdate = jest.fn().mockResolvedValue(1);
+    const outerWhere = jest.fn(() => ({ first: ownedFirst, update: outerUpdate }));
+    db.mockImplementation(() => ({ where: outerWhere }));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+
+    // Transaction #1: call_log row upsert
+    const callLogFirst = jest.fn().mockResolvedValue(existing);
+    const callLogWhere = jest.fn(() => ({ first: callLogFirst, update: adoptUpdate }));
+    const trx1 = jest.fn(() => ({ where: callLogWhere, insert }));
+    trx1.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+
+    // Transaction #2: voice_gpt_live_ledger + call_log gpt_live stamp
+    const spent = jest.fn(async () => ({ usd }));
+    const ledgerInsert = jest.fn(() => ledger);
+    const returning = jest.fn(async () => (claimed ? [{ call_sid: 'CA-sb-direct' }] : []));
+    const release = jest.fn(async () => 0);
+    const ledger = {
+      first: spent, insert: ledgerInsert, onConflict: jest.fn(() => ledger), ignore: jest.fn(() => ledger), returning,
+      whereNull: jest.fn(() => ledger), whereRaw: jest.fn(() => ledger), update: release,
+    };
+    const stampUpdate = jest.fn().mockResolvedValue(1);
+    const stampTb = { where: jest.fn(() => stampTb), whereRaw: jest.fn(() => stampTb), update: stampUpdate };
+    const trx2 = jest.fn((table) => (table === 'voice_gpt_live_ledger' ? ledger : stampTb));
+    trx2.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    trx2.fn = { now: () => 'NOW()' };
+
+    let txCount = 0;
+    db.transaction = jest.fn(async (fn) => {
+      txCount += 1;
+      return fn(txCount === 1 ? trx1 : trx2);
+    });
+    return { insert, adoptUpdate, outerUpdate, ledgerInsert, stampUpdate, trx1, trx2 };
+  }
+
+  beforeEach(() => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.TWILIO_AUTH_TOKEN = 'test-token';
+    process.env.TWILIO_ACCOUNT_SID = 'AC-test';
+  });
+  afterEach(() => {
+    delete process.env.GATE_VOICE_GPT_LIVE_TEST;
+    delete process.env.GATE_VOICE_SANDBOX_RECORDING;
+    delete process.env.VOICE_SANDBOX_GREETING_URL;
+    delete process.env.VOICE_SANDBOX_MENU_DEFAULT;
+    delete process.env.TWILIO_AUTH_TOKEN;
+    delete process.env.TWILIO_ACCOUNT_SID;
+    delete process.env.TWILIO_SIGNATURE_VALIDATION;
+  });
+
+  test('signed call connects straight to GPT-Live Marin (cell 71) with one remastered WAV disclosure and no <Gather>', async () => {
+    const { insert, ledgerInsert, stampUpdate } = primeDirectLive();
+    const req = twilioReq('/relay-sandbox', { CallSid: 'CA-sb-direct', From: '+19415550100', To: SANDBOX, CallStatus: 'ringing' });
+    const res = mockRes();
+    await handlerFor('/relay-sandbox')(req, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><Response><Play>https:\/\/portal\.example\.com\/audio\/waves-greeting-notice\.wav<\/Play><Connect action="\/api\/webhooks\/twilio\/relay-sandbox\/live-complete"><Stream url="wss:\/\/portal\.example\.com\/ws\/voice-live\/CA-sb-direct\/[^"?]+"\/><\/Connect><\/Response>$/);
+    expect(res.body).not.toContain('<Gather');
+    expect(res.body).not.toContain('<ConversationRelay');
+    expect(res.body).not.toContain('<Recording');
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(ledgerInsert).toHaveBeenCalledWith({ call_sid: 'CA-sb-direct', reserved_usd: PER_CALL_RESERVE_USD });
+    const stamp = JSON.parse(stampUpdate.mock.calls[0][0].metadata.bindings[0]).gpt_live;
+    expect(stamp).toMatchObject({ cell: '71', voice: 'marin', reserved_usd: PER_CALL_RESERVE_USD });
+    expect(mockCalls).toHaveBeenCalledWith('CA-sb-direct');
+    expect(mockCallUpdate).toHaveBeenCalledWith({ timeLimit: 600 });
+  });
+
+  test('VOICE_SANDBOX_GREETING_URL overrides the practice disclosure URL; invalid non-https values fall back safely', async () => {
+    process.env.VOICE_SANDBOX_GREETING_URL = 'https://cdn.example.com/custom-notice.wav';
+    primeDirectLive();
+    let res = mockRes();
+    await handlerFor('/relay-sandbox')(twilioReq('/relay-sandbox', { CallSid: 'CA-sb-url1', From: '+19415550100', To: SANDBOX }), res);
+    expect(res.body).toContain('<Play>https://cdn.example.com/custom-notice.wav</Play>');
+
+    process.env.VOICE_SANDBOX_GREETING_URL = 'http://insecure.example.com/notice.wav';
+    primeDirectLive();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')(twilioReq('/relay-sandbox', { CallSid: 'CA-sb-url2', From: '+19415550100', To: SANDBOX }), res);
+    expect(res.body).toContain('<Play>https://portal.example.com/audio/waves-greeting-notice.wav</Play>');
+  });
+
+  test('unsigned or tampered delivery fails closed BEFORE any DB write, ledger write, or Twilio REST call', async () => {
+    for (const mode of ['log', 'disabled', 'enforce']) {
+      process.env.TWILIO_SIGNATURE_VALIDATION = mode;
+      const tampered = twilioReq('/relay-sandbox', { CallSid: 'CA-sb-direct', From: '+19415550100', To: SANDBOX });
+      tampered.body.From = '+19415559999';
+      for (const req of [twilioReq('/relay-sandbox', { CallSid: 'CA-sb-direct', From: '+19415550100', To: SANDBOX }, { signed: false }), tampered]) {
+        primeDirectLive();
+        mockCallUpdate.mockClear();
+        const res = mockRes();
+        await handlerFor('/relay-sandbox')(req, res);
+        expect(res.body).toContain('not available right now');
+        expect(res.body).not.toContain('<Stream');
+        expect(db.transaction).not.toHaveBeenCalled();
+        expect(mockCallUpdate).not.toHaveBeenCalled();
+      }
+    }
+    delete process.env.TWILIO_AUTH_TOKEN;
+    primeDirectLive();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox')(twilioReq('/relay-sandbox', { CallSid: 'CA-sb-direct', From: '+19415550100', To: SANDBOX }), res);
+    expect(res.body).toContain('not available right now');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('signed call over a foreign-sourced call_log row refuses 403 before reserving budget', async () => {
+    const { ledgerInsert } = primeDirectLive({ existing: { id: 9, source: 'twilio_voice' }, source: 'twilio_voice' });
+    const res = mockRes();
+    await handlerFor('/relay-sandbox')(twilioReq('/relay-sandbox', { CallSid: 'CA-foreign', From: '+19415550100', To: SANDBOX }), res);
+    expect(res.statusCode).toBe(403);
+    expect(res.body).not.toContain('<Stream');
+    expect(ledgerInsert).not.toHaveBeenCalled();
+  });
+
+  test('GATE_VOICE_SANDBOX_RECORDING records an A-attested staff call AFTER the disclosure and BEFORE the Stream; non-staff and budget-refused calls are never recorded', async () => {
+    process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+    primeDirectLive();
+    let res = mockRes();
+    await handlerFor('/relay-sandbox')(twilioReq('/relay-sandbox', { CallSid: 'CA-sb-staff', From: STAFF_PHONE, To: SANDBOX, StirVerstat: A_ATTESTED }), res);
+    expect(res.body).toMatch(new RegExp(`^<\\?xml version="1.0" encoding="UTF-8"\\?><Response><Play>https://portal\\.example\\.com/audio/waves-greeting-notice\\.wav</Play>${SANDBOX_RECORDING}<Connect action="/api/webhooks/twilio/relay-sandbox/live-complete"><Stream `));
+    expect(res.body).not.toMatch(/recordingStatusCallback/i);
+
+    // Non-staff caller: connects to Marin without recording.
+    primeDirectLive();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')(twilioReq('/relay-sandbox', { CallSid: 'CA-sb-pub', From: '+19415550100', To: SANDBOX, StirVerstat: A_ATTESTED }), res);
+    expect(res.body).toContain('</Play><Connect action="/api/webhooks/twilio/relay-sandbox/live-complete">');
+    expect(res.body).not.toMatch(/<Start|<Recording/);
+
+    // Budget exhausted: spoken notice + hangup, no recording.
+    primeDirectLive({ usd: 5 });
+    res = mockRes();
+    await handlerFor('/relay-sandbox')(twilioReq('/relay-sandbox', { CallSid: 'CA-sb-cap', From: STAFF_PHONE, To: SANDBOX, StirVerstat: A_ATTESTED }), res);
+    expect(res.body).toContain('budget is used up');
+    expect(res.body).not.toMatch(/<Start|<Recording|<Stream/);
+  });
+
+  test('relay not attached stamps relay_failed and refuses without touching the budget ledger', async () => {
+    const { outerUpdate, ledgerInsert } = primeDirectLive();
+    isRelayAttached.mockImplementation(() => false);
+    const res = mockRes();
+    await handlerFor('/relay-sandbox')(twilioReq('/relay-sandbox', { CallSid: 'CA-sb-off', From: '+19415550100', To: SANDBOX }), res);
+    expect(res.body).toContain('not attached');
+    expect(res.body).not.toContain('<Stream');
+    expect(outerUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', call_outcome: 'relay_failed' }));
+    expect(ledgerInsert).not.toHaveBeenCalled();
+  });
+
+  test('selectable initial-webhook test entry points remain callable: ?cell=72 selects Delta, ?mode=menu renders the keypad <Gather>, and ?cell=09 connects directly to Flux', async () => {
+    // ?cell=72 -> direct GPT-Live Delta (signed over the full URL including query string)
+    const deltaPrime = primeDirectLive();
+    const deltaReq = twilioReq('/relay-sandbox?cell=72', { CallSid: 'CA-sb-delta', From: '+19415550100', To: SANDBOX });
+    deltaReq.query = { cell: '72' };
+    let res = mockRes();
+    await handlerFor('/relay-sandbox')(deltaReq, res);
+    expect(res.body).toContain('<Stream url="wss://portal.example.com/ws/voice-live/CA-sb-delta/');
+    expect(res.body).not.toContain('<Gather');
+    expect(JSON.parse(deltaPrime.stampUpdate.mock.calls[0][0].metadata.bindings[0]).gpt_live).toMatchObject({ cell: '72', voice: 'delta' });
+
+    // Unsigned ?cell=72 still fails closed before any DB write
+    primeDirectLive();
+    const unsignedDelta = twilioReq('/relay-sandbox?cell=72', { CallSid: 'CA-sb-delta-u', From: '+19415550100', To: SANDBOX }, { signed: false });
+    unsignedDelta.query = { cell: '72' };
+    res = mockRes();
+    await handlerFor('/relay-sandbox')(unsignedDelta, res);
+    expect(res.body).toContain('not available right now');
+    expect(db.transaction).not.toHaveBeenCalled();
+
+    // ?mode=menu -> preserves the 2-digit <Gather> keypad menu even with GATE_VOICE_GPT_LIVE_TEST=true,
+    // and its <Gather> action still routes DTMF 72 (Delta) and 09 (Flux) through /relay-sandbox/cell.
+    primeInsert();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-menu', From: '+19415550100', To: SANDBOX }, query: { mode: 'menu' } }, res);
+    expect(res.body).toContain('<Gather input="dtmf" numDigits="2" timeout="6" action="/api/webhooks/twilio/relay-sandbox/cell"');
+    expect(res.body).toContain('<ConversationRelay');
+    expect(res.body).not.toContain('<Stream');
+
+    // VOICE_SANDBOX_MENU_DEFAULT=true -> unchanged webhook URL (no query string) renders the DTMF <Gather> menu
+    // for automated keypad runners while keeping GATE_VOICE_GPT_LIVE_TEST=true for 71/72 selection.
+    process.env.VOICE_SANDBOX_MENU_DEFAULT = 'true';
+    primeInsert();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-runner', From: '+19415550100', To: SANDBOX } }, res);
+    expect(res.body).toContain('<Gather input="dtmf" numDigits="2" timeout="6" action="/api/webhooks/twilio/relay-sandbox/cell"');
+    expect(res.body).not.toContain('<Stream');
+    // Follow the runner's normal dialing path: digits 09 reach /relay-sandbox/cell and select Flux.
+    const cellBuilder = { where: jest.fn(() => cellBuilder), first: jest.fn(async () => ({ source: VOICE_RELAY_SANDBOX_SOURCE })), update: jest.fn().mockResolvedValue(1) };
+    db.mockImplementation(() => cellBuilder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    res = mockRes();
+    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-runner', To: SANDBOX, Digits: '09' } }, res);
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="flux_partials_probe_v1" />');
+    delete process.env.VOICE_SANDBOX_MENU_DEFAULT;
+
+    // ?cell=09 -> direct ConversationRelay profile with one full disclosure clip, no <Gather>, and static profile-ID logging (no raw query text)
+    primeInsert();
+    logger.info.mockClear();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-flux', From: '+19415550100', To: SANDBOX }, query: { cell: '09' } }, res);
+    expect(res.body).toMatch(/^<\?xml version="1\.0" encoding="UTF-8"\?><Response><Play>https:\/\/portal\.example\.com\/audio\/waves-greeting-notice\.wav<\/Play><Connect /);
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="flux_partials_probe_v1" />');
+    expect(res.body).not.toContain('<Gather');
+    expect(JSON.stringify(logger.info.mock.calls)).toContain('flux_partials_probe_v1');
+
+    // Unknown/PII ?cell= value is ignored (falls back to default Marin) and never logged.
+    primeDirectLive();
+    logger.info.mockClear();
+    const piiReq = twilioReq('/relay-sandbox?cell=9415559999%0Asecret', { CallSid: 'CA-sb-pii', From: '+19415550100', To: SANDBOX });
+    piiReq.query = { cell: '9415559999\nsecret' };
+    res = mockRes();
+    await handlerFor('/relay-sandbox')(piiReq, res);
+    expect(res.body).toContain('<Stream url="wss://portal.example.com/ws/voice-live/CA-sb-pii/');
+    expect(JSON.stringify(logger.info.mock.calls)).not.toMatch(/9415559999|secret/);
+  });
+
+  test('mounted validateTwilioSignature enforces 403 empty / 500 missing-token before /relay-sandbox runs, while log/disabled modes hit the route spoken refusal', async () => {
+    const { validateTwilioSignature } = require('../middleware/twilio-signature');
+    const runMounted = async (req) => {
+      const res = {
+        statusCode: 200,
+        body: '',
+        ended: false,
+        status: jest.fn(function status(code) { this.statusCode = code; return this; }),
+        type: jest.fn(function type() { return this; }),
+        send: jest.fn(function send(b) { this.body = b; return this; }),
+        end: jest.fn(function end() { this.ended = true; return this; }),
+      };
+      let nextCalled = false;
+      validateTwilioSignature(req, res, () => { nextCalled = true; });
+      if (nextCalled) await handlerFor('/relay-sandbox')(req, res);
+      return { res, nextCalled };
+    };
+
+    // Enforce mode + unsigned -> empty 403 before handler runs
+    process.env.TWILIO_SIGNATURE_VALIDATION = 'enforce';
+    primeDirectLive();
+    const badSig = twilioReq('/relay-sandbox', { CallSid: 'CA-sb-mw1', From: '+19415550100', To: SANDBOX }, { signed: false });
+    badSig.method = 'POST';
+    badSig.path = '/relay-sandbox';
+    const r403 = await runMounted(badSig);
+    expect(r403.nextCalled).toBe(false);
+    expect(r403.res.statusCode).toBe(403);
+    expect(r403.res.ended).toBe(true);
+    expect(r403.res.body).toBe('');
+    expect(db.transaction).not.toHaveBeenCalled();
+
+    // Enforce mode + missing TWILIO_AUTH_TOKEN -> 500 empty TwiML before handler runs
+    delete process.env.TWILIO_AUTH_TOKEN;
+    primeDirectLive();
+    const r500 = await runMounted(badSig);
+    expect(r500.nextCalled).toBe(false);
+    expect(r500.res.statusCode).toBe(500);
+    expect(r500.res.body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    expect(db.transaction).not.toHaveBeenCalled();
+
+    // Log mode + unsigned -> reaches route handler, which refuses with spoken TwiML before any DB write
+    process.env.TWILIO_AUTH_TOKEN = 'test-token';
+    process.env.TWILIO_SIGNATURE_VALIDATION = 'log';
+    primeDirectLive();
+    const rLog = await runMounted(badSig);
+    expect(rLog.nextCalled).toBe(true);
+    expect(rLog.res.statusCode).toBe(200);
+    expect(rLog.res.body).toContain('not available right now');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('explicit ?cell= overrides VOICE_SANDBOX_MENU_DEFAULT=true, and ?cell=99 stays on ConversationRelay even without VOICE_RELAY_SANDBOX_ATTRS', async () => {
+    process.env.VOICE_SANDBOX_MENU_DEFAULT = 'true';
+    // Explicit ?cell=72 overrides VOICE_SANDBOX_MENU_DEFAULT=true -> direct Delta
+    const deltaPrime = primeDirectLive();
+    const deltaReq = twilioReq('/relay-sandbox?cell=72', { CallSid: 'CA-sb-ov72', From: '+19415550100', To: SANDBOX });
+    deltaReq.query = { cell: '72' };
+    let res = mockRes();
+    await handlerFor('/relay-sandbox')(deltaReq, res);
+    expect(res.body).toContain('<Stream url="wss://portal.example.com/ws/voice-live/CA-sb-ov72/');
+    expect(res.body).not.toContain('<Gather');
+    expect(JSON.parse(deltaPrime.stampUpdate.mock.calls[0][0].metadata.bindings[0]).gpt_live).toMatchObject({ cell: '72', voice: 'delta' });
+
+    // Explicit ?cell=09 overrides VOICE_SANDBOX_MENU_DEFAULT=true -> direct Flux
+    primeInsert();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-ov09', From: '+19415550100', To: SANDBOX }, query: { cell: '09' } }, res);
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).not.toContain('<Gather');
+
+    // Explicit ?cell=99 with VOICE_RELAY_SANDBOX_ATTRS absent/invalid -> stays on ConversationRelay (production fallback), NEVER GPT-Live Marin
+    delete process.env.VOICE_SANDBOX_MENU_DEFAULT;
+    delete process.env.VOICE_RELAY_SANDBOX_ATTRS;
+    const { ledgerInsert } = primeDirectLive();
+    primeInsert();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-99-empty', From: '+19415550100', To: SANDBOX }, query: { cell: '99' } }, res);
+    expect(res.body).toContain('<ConversationRelay');
+    expect(res.body).not.toContain('<Stream');
+    expect(res.body).not.toContain('<Gather');
+    expect(ledgerInsert).not.toHaveBeenCalled();
+  });
+
+  test('gate off: ?cell=71 and ?cell=72 both keep the documented <Gather> response (never bypassing Gather)', async () => {
+    delete process.env.GATE_VOICE_GPT_LIVE_TEST;
+    for (const code of ['71', '72', '09']) {
+      primeInsert();
+      const res = mockRes();
+      await handlerFor('/relay-sandbox')({ body: { CallSid: `CA-sb-off-${code}`, From: '+19415550100', To: SANDBOX }, query: { cell: code } }, res);
+      expect(res.body).toContain('<Gather input="dtmf" numDigits="2" timeout="6" action="/api/webhooks/twilio/relay-sandbox/cell"');
+      expect(res.body).toContain('<ConversationRelay');
+      expect(res.body).not.toContain('<Stream');
+    }
   });
 });
 

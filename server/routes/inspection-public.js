@@ -1014,6 +1014,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
       zoneFunnelCity: zoneInputs.city,
       zoneFunnelCustomerCity: fallbackCity === undefined ? await listFallbackCity(db, customer, address, coords) : fallbackCity,
     } : {}),
+    mintSignedOffers: false,
   });
 }
 
@@ -3110,6 +3111,8 @@ router._internals = {
   // own catalog, window, availability, slot match, commit and success shape.
   ASSESSMENT_EXPECTED_IDENTITY,
   addressDisplay,
+  customerAddressFields,
+  zoneFunnelInputs,
   maskPhone,
   serviceAreaFailure,
   bookingRange,

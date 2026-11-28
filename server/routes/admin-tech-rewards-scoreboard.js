@@ -13,7 +13,9 @@
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const scoreboard = require('../services/tech-rewards-scoreboard');
+const scores = require('../services/tech-rewards-scores');
 const { getYearStatement } = require('../services/tech-rewards-year-statement');
 
 const router = express.Router();
@@ -23,6 +25,10 @@ router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }
 
 function fail(res, err, what) {
   if (err instanceof scoreboard.ScoreboardError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof scores.TechRewardsScoresError) {
+    const status = err.code === 'NOT_FOUND' ? 404 : 400;
+    return res.status(status).json({ error: err.message, code: err.code });
+  }
   logger.error(`[admin-tech-rewards-scoreboard] ${what} failed (${err.code || err.name || 'error'})`);
   return res.status(500).json({ error: `Could not ${what}.` });
 }
@@ -31,6 +37,43 @@ router.get('/', async (req, res) => {
   try {
     res.json({ technicians: await scoreboard.listTechnicians() });
   } catch (err) { fail(res, err, 'list technicians'); }
+});
+
+router.get('/owner-ratings', requireFullAccess, async (req, res) => {
+  try {
+    res.json(await scores.listOwnerRatings(req.query.month));
+  } catch (err) { fail(res, err, 'load owner ratings'); }
+});
+
+router.put('/owner-ratings', requireFullAccess, async (req, res) => {
+  try {
+    const rating = await scores.saveOwnerRating({
+      technicianId: req.body?.technicianId,
+      month: req.body?.month,
+      rating: req.body?.rating,
+      note: req.body?.note,
+      ratedBy: req.technicianId,
+    });
+    res.json({ rating });
+  } catch (err) { fail(res, err, 'save the owner rating'); }
+});
+
+router.get('/settings', requireFullAccess, async (req, res) => {
+  try {
+    res.json(await scores.listSettings());
+  } catch (err) { fail(res, err, 'load score settings'); }
+});
+
+router.post('/settings', requireFullAccess, async (req, res) => {
+  try {
+    const settings = await scores.saveSettings({
+      weights: req.body?.weights,
+      cutLines: req.body?.cutLines,
+      effectiveFrom: req.body?.effectiveFrom,
+      preserveBaseline: true,
+    }, req.technicianId);
+    res.status(201).json({ settings });
+  } catch (err) { fail(res, err, 'save score settings'); }
 });
 
 router.get('/:technicianId', async (req, res) => {

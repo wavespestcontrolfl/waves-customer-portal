@@ -19997,6 +19997,56 @@ router.delete('/:id/prepaid', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+async function buildValidatedCheckoutExtraLines(extras, baseAmount) {
+  const extraLines = extras
+    .map((e) => {
+      const quantity = Number(e?.quantity) || 1;
+      const rawUnitPrice = Number(e?.unit_price) || 0;
+      const rawAmount = Number(e?.amount) || 0;
+      const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (quantity !== 0 ? rawAmount / quantity : 0);
+      const lineAmount = rawAmount || quantity * unit_price;
+      return {
+        description: String(e?.description || '').slice(0, 200),
+        quantity,
+        unit_price,
+        amount: lineAmount,
+        category: e?.category ? String(e.category).slice(0, 100) : null,
+        discount_id: e?.discount_id ? String(e.discount_id) : null,
+      };
+    })
+    .filter((e) => e.description && Number.isFinite(e.unit_price));
+  const invoiceExtraLines = [];
+  const extraServicesSubtotal = extraLines
+    .filter((e) => Number(e.amount) > 0)
+    .reduce((sum, e) => sum + Number(e.amount), 0);
+  const extraDiscountBase = Math.max(0, baseAmount + extraServicesSubtotal);
+  for (const e of extraLines) {
+    if (Number(e.amount) < 0 && e.discount_id) {
+      const discount = await loadInvoiceDiscount(e.discount_id);
+      const resolved = calculateDiscountDollars(discount, extraDiscountBase, discount.amount);
+      const submittedDollars = Math.round(Math.abs(Number(e.amount) || 0) * 100) / 100;
+      const dollars = Math.min(submittedDollars, resolved.dollars);
+      if (!(dollars > 0)) continue;
+      invoiceExtraLines.push({
+        description: e.description || discount.name || 'Discount',
+        quantity: 1,
+        unit_price: -dollars,
+        amount: -dollars,
+        category: e.category,
+        discount_id: discount.id,
+        discount_type: discount.discount_type,
+        discount_amount: Number(discount.amount) || 0,
+        discount_dollars: dollars,
+        use_stored_discount: true,
+        stored_discount_source: 'validated_checkout',
+      });
+    } else {
+      invoiceExtraLines.push(e);
+    }
+  }
+  return invoiceExtraLines;
+}
+
 // POST /api/admin/schedule/:id/invoice — mint an invoice BEFORE the visit is
 // marked complete. Used by "Charge now" so the tech can run Tap-to-Pay at the
 // door before finishing the service report. The completion handler later
@@ -20318,52 +20368,12 @@ router.post('/:id/invoice', async (req, res, next) => {
     // the check entirely — byte-identical to before.
     const expectedDiscountStacking = req.body?.expected_discount_stacking;
     const extras = Array.isArray(req.body?.extraLineItems) ? req.body.extraLineItems : [];
-    const extraLines = extras
-      .map((e) => {
-        const quantity = Number(e?.quantity) || 1;
-        const rawUnitPrice = Number(e?.unit_price) || 0;
-        const rawAmount = Number(e?.amount) || 0;
-        const unit_price = rawUnitPrice !== 0 ? rawUnitPrice : (quantity !== 0 ? rawAmount / quantity : 0);
-        const amount = rawAmount || quantity * unit_price;
-        return {
-          description: String(e?.description || '').slice(0, 200),
-          quantity,
-          unit_price,
-          amount,
-          category: e?.category ? String(e.category).slice(0, 100) : null,
-          discount_id: e?.discount_id ? String(e.discount_id) : null,
-        };
-      })
-      .filter((e) => e.description && Number.isFinite(e.unit_price));
-    const invoiceExtraLines = [];
-    const extraServicesSubtotal = extraLines
-      .filter((e) => Number(e.amount) > 0)
-      .reduce((sum, e) => sum + Number(e.amount), 0);
-    const extraDiscountBase = Math.max(0, amount + extraServicesSubtotal);
-    for (const e of extraLines) {
-      if (Number(e.amount) < 0 && e.discount_id) {
-        const discount = await loadInvoiceDiscount(e.discount_id);
-        const resolved = calculateDiscountDollars(discount, extraDiscountBase, discount.amount);
-        const submittedDollars = Math.round(Math.abs(Number(e.amount) || 0) * 100) / 100;
-        const dollars = Math.min(submittedDollars, resolved.dollars);
-        if (!(dollars > 0)) continue;
-        invoiceExtraLines.push({
-          description: e.description || discount.name || 'Discount',
-          quantity: 1,
-          unit_price: -dollars,
-          amount: -dollars,
-          category: e.category,
-          discount_id: discount.id,
-          discount_type: discount.discount_type,
-          discount_amount: Number(discount.amount) || 0,
-          discount_dollars: dollars,
-          use_stored_discount: true,
-          stored_discount_source: 'validated_checkout',
-        });
-      } else {
-        invoiceExtraLines.push(e);
-      }
+    // P0-6: Technicians may collect at the server-calculated visit total only —
+    // never add custom services, negative lines, or discounts during checkout.
+    if (extras.length > 0 && isTechnicianRequest(req)) {
+      return res.status(403).json({ error: 'Only admins can add extra items or discounts during checkout.' });
     }
+    const invoiceExtraLines = await buildValidatedCheckoutExtraLines(extras, amount);
 
     const extrasTotal = invoiceExtraLines.reduce((s, e) => s + e.amount, 0);
     if (!(amount > 0) && extrasTotal <= 0) {
@@ -24896,7 +24906,9 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
       try {
         const facts = await PrevisitBrief.deterministicVisitFacts(svc, undefined, { pastVisits: true, customerAsked: true });
-        if (facts.customer_asked) customerAskedBound = true;
+        const addonPrompt = await require('../services/tech-addon-prompt').techAddonPromptFacts(svc, db).catch(() => null);
+        if (addonPrompt) facts.addon_prompt = addonPrompt;
+        if (facts.customer_asked || facts.addon_prompt) customerAskedBound = true;
         // Re-verify the assignment AFTER the facts queries (Codex P1 on
         // #3638): they run outside the atomic ownership-scoped fetch
         // above, so a dispatch reassignment during them would otherwise

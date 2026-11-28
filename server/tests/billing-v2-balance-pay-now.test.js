@@ -26,9 +26,11 @@ jest.mock('../services/stripe', () => ({}));
 jest.mock('../config/stripe-config', () => ({}));
 jest.mock('../services/payment-lifecycle-email', () => ({}));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 
 const { isEnabled } = require('../config/feature-gates');
+const PayerService = require('../services/payer');
 
 // Programmable table results, set per test.
 const tableResults = {
@@ -123,6 +125,8 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     tableResults.openInvoiceRows = [];
     tableResults.lastOpenInvoicesCalls = null;
     isEnabled.mockImplementation(() => true);
+    PayerService.resolveForInvoice.mockReset();
+    PayerService.resolveForInvoice.mockResolvedValue(null);
   });
 
   test('gate on: open invoices map to tokenized /pay links with cents-safe amounts', async () => {

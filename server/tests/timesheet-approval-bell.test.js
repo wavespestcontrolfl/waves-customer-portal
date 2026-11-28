@@ -6,6 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/time-tracking', () => ({ computeWeeklySummary: jest.fn(), computeDailySummary: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(), isKnownOwnerPhone: jest.fn() }));
 jest.mock('../utils/scheduled-cron', () => ({ schedule: jest.fn() }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/admin-alert-compose', () => ({
   ...jest.requireActual('../services/admin-alert-compose'),
   raiseAdminAlert: jest.fn(),
@@ -26,17 +27,18 @@ const { initTimeTrackingCrons } = require('../services/time-tracking-crons');
 // A chainable query: every builder method returns itself, the awaited and .first() result is `rows` / its head.
 function chain(rows) {
   const q = {};
-  for (const m of ['where', 'whereRaw', 'select', 'leftJoin']) q[m] = jest.fn(() => q);
+  for (const m of ['where', 'whereRaw', 'select', 'leftJoin', 'distinct']) q[m] = jest.fn(() => q);
   q.first = jest.fn(async () => rows[0]);
   q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return q;
 }
 
-// Fake the tables the Monday body reads: two active techs that both worked the week.
+// Fake the tables the Monday body reads: two techs that both worked the week.
 function fakeTables() {
   db.mockImplementation((table) => {
     if (table === 'technicians') return chain([{ id: 't1', name: 'Tech One' }, { id: 't2', name: 'Tech Two' }]);
-    if (table === 'time_entry_daily_summary') return chain([{ id: 'd1' }]);
+    if (table === 'time_entry_daily_summary') return chain([{ id: 'd1', technician_id: 't1' }, { id: 'd2', technician_id: 't2' }]);
+    if (table === 'time_entries') return chain([{ technician_id: 't1' }, { technician_id: 't2' }]);
     throw new Error(`unexpected table ${table}`);
   });
 }

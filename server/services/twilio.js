@@ -1922,9 +1922,24 @@ const TwilioService = {
       return await require('./property-notification-prefs').prefsForVisit(row, customerId, scheduledServiceId, source);
     } catch (err) {
       try {
-        await require('./notification-service').notifyAdmin('appointment', 'Appointment text not sent',
-          `The ${source.replace(/_/g, ' ')} text for visit ${scheduledServiceId} could not be sent: the property's notification settings were unreadable. Please contact the customer.`,
-          { dedupeKey: `property-prefs-unreadable:${scheduledServiceId}:${source}`, metadata: { scheduledServiceId, customerId, source } });
+        const { raiseAdminAlert } = require('./admin-alert-compose');
+        const rawLabel = String(source || 'appointment').replace(/_/g, ' ').replace(/\blegacy\b/i, '').replace(/\s+/g, ' ').trim();
+        const sourceLabel = rawLabel && rawLabel.length <= 24 ? rawLabel : 'appointment';
+        await raiseAdminAlert('appointment', {
+          area: 'Schedule',
+          action: 'contact customer after blocked visit text',
+          why: `The ${sourceLabel} text was not sent because the property notification settings could not be read.`,
+          severity: 'needs-you',
+          link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+          subject: scheduledServiceId ? { type: 'visit', id: String(scheduledServiceId) } : { type: 'customer', id: String(customerId) },
+          doneWhen: 'customer_contacted',
+          who: 'person',
+        }, {
+          bell: true,
+          dedupeKey: `property-prefs-unreadable:${scheduledServiceId}:${source}`,
+          detail: `The ${String(source || 'appointment').replace(/_/g, ' ')} text for visit ${scheduledServiceId} could not be sent: the property's notification settings were unreadable. Please contact the customer.`,
+          metadata: { scheduledServiceId, customerId, source },
+        });
       } catch (bellErr) {
         logger.error(`[twilio] unreadable-property bell failed for ${scheduledServiceId}: ${bellErr.message}`);
       }
@@ -2192,13 +2207,28 @@ const TwilioService = {
           trackUrl: trackUrl || longTrackUrl,
           idempotencyKey: `appointment.en_route:${trackToken || customerId}`,
         });
-        // A HELD email (preferences unreadable at the provider handoff) has
-        // no retry lane on this path — bell the office so an email-only
-        // service contact is not silently skipped (GitHub codex #4299 r4 P1).
-        if (res?.held) {
-          await require('./notification-service').notifyAdmin('appointment', 'En-route email not sent',
-            `The en-route email for visit ${scheduledServiceId || customerId} could not be sent: notification preferences were unreadable. Please contact the customer.`,
-            { dedupeKey: `en-route-email-held:${scheduledServiceId || customerId}`, metadata: { scheduledServiceId, customerId } })
+        // A HELD email due to unreadable preferences has no retry lane on this
+        // path — bell the office so an email-only service contact is not
+        // silently skipped (GitHub codex #4299 r4 P1). Intentional holds
+        // (street_level_hold / visit_on_hold / move_hold) deliberately block
+        // delivery and must not ask staff to contact the customer.
+        if (res?.held && res.reason === 'preferences_unavailable') {
+          const { raiseAdminAlert } = require('./admin-alert-compose');
+          await raiseAdminAlert('appointment', {
+            area: 'Schedule',
+            action: 'contact customer after held en-route email',
+            why: 'Notification preferences could not be read, so the en-route email was not sent.',
+            severity: 'needs-you',
+            link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+            subject: scheduledServiceId ? { type: 'visit', id: String(scheduledServiceId) } : { type: 'customer', id: String(customerId) },
+            doneWhen: 'customer_contacted',
+            who: 'person',
+          }, {
+            bell: true,
+            dedupeKey: `en-route-email-held:${scheduledServiceId || customerId}`,
+            detail: `The en-route email for visit ${scheduledServiceId || customerId} could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            metadata: { scheduledServiceId, customerId },
+          })
             .catch((bellErr) => logger.error(`[twilio] en-route email hold bell failed for ${customerId}: ${bellErr.message}`));
         }
         return res;

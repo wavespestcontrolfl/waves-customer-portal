@@ -9,6 +9,7 @@ const appListeners = vi.hoisted(() => []);
 vi.mock('../native/platform', () => ({
   isNativeApp: () => true,
   hasSessionToken: () => true,
+  nativePlatform: () => 'ios',
 }));
 vi.mock('../native/biometric', () => ({
   NEEDS_PHONE_CODE: 'needs-phone-code',
@@ -40,7 +41,7 @@ function appState(isActive) {
 
 async function renderUnlocked() {
   render(
-    <BiometricGate>
+    <BiometricGate graceMs={0}>
       <input data-testid="camera" type="file" accept="image/*" capture="environment" style={{ display: 'none' }} />
     </BiometricGate>,
   );

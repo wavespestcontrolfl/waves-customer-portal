@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../components/AddressAutocomplete', () => ({ default: () => null }));
 
-import { TeamTab } from './TimeTrackingPage';
+import { TeamTab } from './staff/TeamTab';
 
 // GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25): the Team tab "Service lines" card,
 // shown only when the server marks the roster response.

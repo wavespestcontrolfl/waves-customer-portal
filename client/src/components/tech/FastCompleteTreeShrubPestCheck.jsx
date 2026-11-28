@@ -81,9 +81,11 @@ export function PestCheckSection({ state, locked, onRemoveBlocked }) {
       {evaluation.blockMessage && (
         <>
           <p className="tech-visit-muted tech-visit-status--warn" role="alert">{evaluation.blockMessage}</p>
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={() => onRemoveBlocked(evaluation.blockedRows)}>
-            Remove {evaluation.blockedLabel} from this visit
-          </Button>
+          {evaluation.blockedRows.length > 0 && evaluation.blockedLabel && (
+            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={() => onRemoveBlocked(evaluation.blockedRows)}>
+              Remove {evaluation.blockedLabel} from this visit
+            </Button>
+          )}
         </>
       )}
       {evaluation.noteMessages.map((message) => (

@@ -38,7 +38,9 @@ function bookedPayload(overrides = {}) {
   });
 }
 
-function renderPage(path = '/careers/interview/tok-123') {
+const TOKEN = 'a'.repeat(64);
+
+function renderPage(path = `/careers/interview/${TOKEN}`) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <Routes>
@@ -77,7 +79,7 @@ describe('CareersInterviewPage — open state', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     const [, bookCall] = fetchMock.mock.calls;
-    expect(bookCall[0]).toBe('/api/public/careers/interview/tok-123/book');
+    expect(bookCall[0]).toBe(`/api/public/careers/interview/${TOKEN}/book`);
     expect(JSON.parse(bookCall[1].body)).toEqual({ mode: 'phone', start: '2026-09-22T20:30:00.000Z' });
 
     expect(await screen.findByText(/You’re booked|You're booked/)).toBeInTheDocument();
@@ -164,7 +166,7 @@ describe('CareersInterviewPage — a lost booking response is re-read, not repor
     await pickAndConfirm();
 
     expect(await screen.findByText(/You’re booked|You're booked/)).toBeInTheDocument();
-    expect(fetchMock.mock.calls[2][0]).toBe('/api/public/careers/interview/tok-123');
+    expect(fetchMock.mock.calls[2][0]).toBe(`/api/public/careers/interview/${TOKEN}`);
     expect(screen.queryByText(/could not/i)).not.toBeInTheDocument();
   });
 
@@ -256,9 +258,30 @@ describe('CareersInterviewPage — withdraw', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Yes, withdraw' }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock.mock.calls[1][0]).toBe('/api/public/careers/interview/tok-123/withdraw');
+    expect(fetchMock.mock.calls[1][0]).toBe(`/api/public/careers/interview/${TOKEN}/withdraw`);
     expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST' });
 
     expect(await screen.findByText(/Thanks for letting us know/)).toBeInTheDocument();
+  });
+});
+
+describe('CareersInterviewPage — token guard, privacy meta & Spanish copy', () => {
+  it('rejects malformed or percent-encoded tokens without hitting the API', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage('/careers/interview/not-a-valid-token');
+    expect(await screen.findByText(/This interview link is no longer active/)).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('sets noindex and no-referrer meta tags and renders Spanish copy when language is es', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(openPayload({ language: 'es' }))));
+    const view = renderPage();
+    expect(await screen.findByText(/Hola Jordan/)).toBeInTheDocument();
+    expect(screen.getByText(/Todas las horas en hora del Este \(ET\)/)).toBeInTheDocument();
+    expect(document.head.querySelector('meta[name="robots"]').content).toMatch(/noindex/);
+    expect(document.head.querySelector('meta[name="referrer"]').content).toBe('no-referrer');
+    view.unmount();
+    expect(document.head.querySelector('meta[name="robots"]')).toBeNull();
   });
 });

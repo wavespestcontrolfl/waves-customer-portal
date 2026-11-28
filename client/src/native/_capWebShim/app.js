@@ -5,6 +5,7 @@ export const App = {
   removeAllListeners: async () => {},
   getInfo: async () => ({ name: 'web', version: '0', build: '0' }),
   getLaunchUrl: async () => undefined,
+  minimizeApp: async () => {},
   exitApp: async () => {},
 };
 export default { App };

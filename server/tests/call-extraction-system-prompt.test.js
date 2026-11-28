@@ -4,6 +4,7 @@
 const {
   buildExtractionPrompt, buildExtractionPromptParts, extractionPromptVersion,
   PROMPT_VERSION, PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH,
+  GEMINI_SYSTEM_PROMPT_HASH, GEMINI_SYSTEM_APS_PROMPT_HASH,
 } = require('../services/prompts/call-extraction-v1');
 
 const TRANSCRIPT = 'Agent: Waves Pest Control, how can I help?\nCaller: I have roaches in my kitchen.';
@@ -179,6 +180,53 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
     expect(SYSTEM_PROMPT_HASH).toMatch(/^v36s-[a-f0-9]{12}$/);
     expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v36b-[a-f0-9]{12}$/);
     expect(new Set([PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH]).size).toBe(4);
+  });
+
+  test('system-layout cohort hashes stay unchanged for OpenAI/Anthropic and split only Gemini onto its systemInstruction hash', () => {
+    const crypto = require('crypto');
+    const schema = require('../schemas/call-extraction.model-output.schema.json');
+    const legacyHash = (opts) => {
+      const parts = buildExtractionPromptParts('', '', '', opts);
+      return crypto.createHash('sha256')
+        .update(`${parts.system}\n\u0000\n${parts.user}\n${JSON.stringify(schema)}`)
+        .digest('hex')
+        .slice(0, 12);
+    };
+    const oldSysHash = legacyHash({});
+    const oldApsSysHash = legacyHash({ agentProposedSlotCommitment: true });
+    // OpenAI and Anthropic keep their existing system-layout hashes unchanged.
+    expect(SYSTEM_PROMPT_HASH).toBe(`${PROMPT_VERSION}s-${oldSysHash}`);
+    expect(SYSTEM_APS_PROMPT_HASH).toBe(`${PROMPT_VERSION}b-${oldApsSysHash}`);
+    expect(extractionPromptVersion(['General Pest Control'], { systemLayout: true, provider: 'openai' })).toContain(oldSysHash);
+    expect(extractionPromptVersion(['General Pest Control'], { systemLayout: true, provider: 'anthropic' })).toContain(oldSysHash);
+    // Gemini system-layout calls get their own channel-stamped hashes so pre-systemInstruction Gemini rows cannot mix in.
+    expect(GEMINI_SYSTEM_PROMPT_HASH).not.toBe(SYSTEM_PROMPT_HASH);
+    expect(GEMINI_SYSTEM_APS_PROMPT_HASH).not.toBe(SYSTEM_APS_PROMPT_HASH);
+    expect(extractionPromptVersion([], { systemLayout: true, provider: 'gemini' })).toBe(GEMINI_SYSTEM_PROMPT_HASH);
+    expect(extractionPromptVersion([], { systemLayout: true, agentProposedSlotCommitment: true, provider: 'gemini' })).toBe(GEMINI_SYSTEM_APS_PROMPT_HASH);
+    expect(extractionPromptVersion(['General Pest Control'], { systemLayout: true, provider: 'gemini' })).not.toContain(oldSysHash);
+    // Gate-off (combined single-message prompt) stays byte-identical for all providers including Gemini.
+    expect(extractionPromptVersion([], { systemLayout: false, provider: 'gemini' })).toBe(PROMPT_HASH);
+
+    const savedGate = process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+    process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = 'true';
+    try {
+      const { mainCohortVersions, apsCohortVersion } = require('../scripts/v2-promotion-readiness');
+      // When system layout is active, legacy gate-off PROMPT_HASH rows are excluded from main cohort checks.
+      expect(mainCohortVersions(['General Pest Control'], { provider: 'gemini' }))
+        .toEqual([extractionPromptVersion(['General Pest Control'], { systemLayout: true, provider: 'gemini' })]);
+      expect(mainCohortVersions(['General Pest Control'], { provider: 'gemini' })).not.toContain(PROMPT_HASH);
+      expect(mainCohortVersions(['General Pest Control'], { provider: 'openai' }))
+        .toEqual([extractionPromptVersion(['General Pest Control'], { systemLayout: true, provider: 'openai' })]);
+      expect(mainCohortVersions(['General Pest Control'], { provider: 'openai' })).not.toContain(PROMPT_HASH);
+      expect(apsCohortVersion([], { provider: 'openai' })).toBe(SYSTEM_APS_PROMPT_HASH);
+      expect(apsCohortVersion([], { provider: 'anthropic' })).toBe(SYSTEM_APS_PROMPT_HASH);
+      expect(apsCohortVersion([], { provider: 'gemini' })).toBe(GEMINI_SYSTEM_APS_PROMPT_HASH);
+      expect(apsCohortVersion([], { provider: 'gemini' })).not.toBe(SYSTEM_APS_PROMPT_HASH);
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+      else process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = savedGate;
+    }
   });
 
   test('the day/time conflict rule is in the one-message prompt, the system part and the gate-on prompts', () => {

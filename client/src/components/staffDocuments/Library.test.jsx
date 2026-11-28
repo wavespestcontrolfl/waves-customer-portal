@@ -69,7 +69,7 @@ test('the authored procedure uses Field presentation while staff controls remain
   expect(authored.querySelector('details#scope')).toHaveTextContent('1. Scope');
   expect(clauseNav.closest('.staff-document-reader-body')).toBeNull();
   expect(screen.getByLabelText('Version history').closest('.staff-document-reader-body')).toBeNull();
-  expect(screen.queryByAltText('Waves Pest Control')).not.toBeInTheDocument();
+  expect(screen.getByAltText('Waves Pest Control')).toBeInTheDocument();
 });
 
 test('historical policies retain acknowledgment exports and cannot accept a new signature', () => {
@@ -140,4 +140,25 @@ test('the required toggle is not offered to staff who cannot manage documents', 
   const detail = draft(); detail.version.content_hash = 'issued'; detail.current_version_id = 'v1';
   render(<DocumentReader {...props(detail)} manage={false} />);
   expect(screen.queryByLabelText('Required at onboarding')).not.toBeInTheDocument();
+});
+
+test('retrying a failed starters load re-fetches /starters and populates the draft picker', async () => {
+  let startersCalls = 0;
+  request.mockImplementation(path => {
+    if (path === '/people') return Promise.resolve({ self_id: 'admin-1', people: [], can_manage: true });
+    if (path === '/onboarding-status') return Promise.resolve({ people: [] });
+    if (path === '/starters') {
+      startersCalls += 1;
+      if (startersCalls === 1) return Promise.reject(new Error('Starters unavailable'));
+      return Promise.resolve({ starters: [{ key: 'pto', source: { title: 'PTO Policy' } }] });
+    }
+    return Promise.resolve({ documents: [] });
+  });
+  render(<MemoryRouter initialEntries={['/']}><Library manage /></MemoryRouter>);
+  expect(await screen.findByRole('alert')).toHaveTextContent('Starters unavailable');
+  expect(startersCalls).toBe(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByRole('option', { name: 'PTO Policy' })).toBeInTheDocument();
+  expect(startersCalls).toBe(2);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
