@@ -69,14 +69,16 @@ async function withStatementMoneyLock(statementId, fn, { database = db } = {}) {
 }
 
 const NON_SETTLEABLE_CHILD_STATUSES = [
-  'void', 'paid', 'prepaid', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'disputed', 'processing',
+  'void', 'paid', 'prepaid', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'disputed', 'processing', 'partial', 'partially_paid',
 ];
 
-async function prepareSettleableStatementChildren(database, statementId) {
+async function prepareSettleableStatementChildren(database, statementId, { lock = false } = {}) {
   const { invoiceHeldForChemicalReview } = require('./invoice-helpers');
-  const childRows = await database('invoices')
+  const childQ = database('invoices')
     .where({ payer_statement_id: statementId })
-    .whereNot('status', 'void')
+    .whereNot('status', 'void');
+  if (lock && typeof childQ.forUpdate === 'function') childQ.forUpdate();
+  const childRows = await childQ
     .select('id', 'invoice_number', 'customer_id', 'status', 'scheduled_send_error', 'visit_completion_packet_id');
   const blockedChild = (childRows || []).find((row) => (
     NON_SETTLEABLE_CHILD_STATUSES.includes(String(row?.status || '').toLowerCase())
@@ -90,7 +92,10 @@ async function prepareSettleableStatementChildren(database, statementId) {
     err.statementChildBlocked = true;
     throw err;
   }
-  return (childRows || []).filter((row) => row.visit_completion_packet_id != null);
+  return {
+    childCount: (childRows || []).length,
+    packetChildren: (childRows || []).filter((row) => row.visit_completion_packet_id != null),
+  };
 }
 
 async function assertStatementChildrenPayable(statementId, database = db) {
@@ -201,9 +206,9 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
 
   if (!Number.isFinite(amountCents)) throw new Error('settleStatementPaid: numeric amountCents required');
 
-  // Guard BEFORE mutating payer_statements (B-34): refuse settlement if ANY
-  // attached non-void child invoice is held or in a non-settleable status.
-  const packetChildren = await prepareSettleableStatementChildren(database, statementId);
+  // Guard BEFORE mutating payer_statements (B-34): lock and verify every
+  // attached non-void child invoice is settleable and not held.
+  const { childCount, packetChildren } = await prepareSettleableStatementChildren(database, statementId, { lock: true });
 
   // One settlement timestamp shared by the statement AND its children so a child's
   // paid_at is a true settlement marker (= statement.paid_at), not a per-row clock.
@@ -226,6 +231,12 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   }
   const childrenSettled = await cascadeQuery
     .update({ status: 'paid', paid_at: paidAt, updated_at: paidAt });
+  if (childCount > 0 && Number.isFinite(childrenSettled) && childrenSettled < childCount) {
+    const err = new Error(`Cannot settle statement S-${statementId}: expected to settle ${childCount} child invoice(s), settled ${childrenSettled}.`);
+    err.statusCode = 409;
+    err.statementChildBlocked = true;
+    throw err;
+  }
 
   await upsertStatementPaymentRecord(database, {
     statementId,

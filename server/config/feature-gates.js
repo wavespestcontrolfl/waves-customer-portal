@@ -9284,6 +9284,7 @@ function zelleBankReconcileLive(env = process.env) {
   const val = env.GATE_ZELLE_BANK_RECONCILE !== undefined
     ? env.GATE_ZELLE_BANK_RECONCILE
     : process.env.GATE_ZELLE_BANK_RECONCILE;
-  return env.NODE_ENV === 'test' ? val !== 'false' : val === 'true';
+  if (env.NODE_ENV === 'test') return val !== 'false';
+  return ['true', '1', 'on'].includes(String(val || '').trim().toLowerCase());
 }
 module.exports.zelleBankReconcileLive = zelleBankReconcileLive;

@@ -190,7 +190,7 @@ async function visitCoveredByPrepay(visit, customerId) {
     coverageRowsForTerm,
   } = require('./annual-prepay-renewals');
   if (!(db?.schema?.hasTable && await db.schema.hasTable('annual_prepay_terms'))) return { covered: false, hasTerms: false };
-  if (visit.annual_prepay_term_id && await annualPrepayCoversVisit(visit, db, { throwOnError: true })) {
+  if (await annualPrepayCoversVisit(visit, db, { throwOnError: true })) {
     return { covered: true, hasTerms: true };
   }
   const visitDate = dateOnlyString(visit.scheduled_date);

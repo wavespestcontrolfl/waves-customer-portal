@@ -107,7 +107,7 @@ async function getOrCreateOpenStatement({ payerId, termsSnapshot, database = db,
  * (Re-locking a row the same transaction already holds is a no-op.)
  */
 const EXCLUDED_STATEMENT_INVOICE_STATUSES = [
-  'void', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'paid', 'prepaid', 'disputed', 'processing',
+  'void', 'refunded', 'partially_refunded', 'canceled', 'cancelled', 'paid', 'prepaid', 'disputed', 'processing', 'partial', 'partially_paid',
 ];
 
 function applyCollectibleStatementChildFilter(query, alias = '') {
@@ -195,7 +195,11 @@ async function finalizeStatement(statementId, { database = db, date = new Date()
       if (typeof this.whereIn === 'function') this.whereIn('status', EXCLUDED_STATEMENT_INVOICE_STATUSES);
       if (typeof this.orWhereRaw === 'function') this.orWhereRaw("scheduled_send_error LIKE 'chemical_addon_review:%'");
     });
-    await detachQ.update({ payer_statement_id: null, updated_at: database.fn.now() });
+    await detachQ.update({
+      payer_statement_id: null,
+      payer_id: database.raw('COALESCE(payer_id, ?)', [stmt.payer_id]),
+      updated_at: database.fn.now(),
+    });
   }
 
   // Final rollup from attached non-void invoices while still open.
