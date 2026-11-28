@@ -256,22 +256,22 @@ function techSafeStructuredNotes(value) {
   return safe;
 }
 
-function techSafeServiceRecord(record) {
+function techSafeServiceRecord(record, knownCodes = null) {
   const safe = pickFields(record, TECH_360_SERVICE_FIELDS);
   const { redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
-  if (typeof safe.technician_notes === 'string') safe.technician_notes = redactFreeTextAccessCodes(safe.technician_notes);
-  if (typeof safe.notes === 'string') safe.notes = redactFreeTextAccessCodes(safe.notes);
+  if (typeof safe.technician_notes === 'string') safe.technician_notes = redactFreeTextAccessCodes(safe.technician_notes, knownCodes);
+  if (typeof safe.notes === 'string') safe.notes = redactFreeTextAccessCodes(safe.notes, knownCodes);
   if (record && Object.prototype.hasOwnProperty.call(record, 'structured_notes')) {
     safe.structured_notes = techSafeStructuredNotes(record.structured_notes);
   }
   return safe;
 }
 
-function techSafeScheduledService(service) {
+function techSafeScheduledService(service, knownCodes = null) {
   const safe = pickFields(service, TECH_360_SCHEDULED_FIELDS);
   if (typeof safe.notes === 'string') {
     const { redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
-    safe.notes = redactFreeTextAccessCodes(safe.notes);
+    safe.notes = redactFreeTextAccessCodes(safe.notes, knownCodes);
   }
   return safe;
 }
@@ -311,6 +311,8 @@ async function customerScheduledHistory(dbConn, customerId, { today = etDateStri
 }
 
 function techSafe360Payload(payload, { technicianId = null } = {}) {
+  const { collectStoredAccessCodes, redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
+  const knownCodes = collectStoredAccessCodes(payload.preferences, payload.customer);
   const out = { ...payload };
   for (const key of TECH_360_STRIPPED_KEYS) delete out[key];
   out.customer = { ...payload.customer };
@@ -321,13 +323,19 @@ function techSafe360Payload(payload, { technicianId = null } = {}) {
   if (payload.preferences) {
     out.preferences = AwayWatch.stripAwayWatchDates(payload.preferences);
     for (const field of TECH_360_STRIPPED_PREFERENCE_FIELDS) delete out.preferences[field];
+    if (typeof out.preferences.pets_secured_plan === 'string') {
+      out.preferences.pets_secured_plan = redactFreeTextAccessCodes(out.preferences.pets_secured_plan, knownCodes);
+    }
+    if (typeof out.preferences.pet_details === 'string') {
+      out.preferences.pet_details = redactFreeTextAccessCodes(out.preferences.pet_details, knownCodes);
+    }
   }
-  out.services = (payload.services || []).map(techSafeServiceRecord);
+  out.services = (payload.services || []).map((r) => techSafeServiceRecord(r, knownCodes));
   const ownOnly = (rows) => (technicianId
     ? (rows || []).filter((s) => String(s?.technician_id || '') === String(technicianId))
     : (rows || []));
-  out.scheduled = ownOnly(payload.scheduled).map(techSafeScheduledService);
-  out.upcomingScheduled = ownOnly(payload.upcomingScheduled).map(techSafeScheduledService);
+  out.scheduled = ownOnly(payload.scheduled).map((s) => techSafeScheduledService(s, knownCodes));
+  out.upcomingScheduled = ownOnly(payload.upcomingScheduled).map((s) => techSafeScheduledService(s, knownCodes));
   return out;
 }
 

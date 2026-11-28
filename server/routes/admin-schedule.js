@@ -454,6 +454,8 @@ const {
   loadTechPrimaryAccessIds,
   recheckTechFeedAccessRows,
   redactFreeTextAccessCodes,
+  collectStoredAccessCodes,
+  sameHomeForTechVisitPrefs,
   stripAccessCodePrefs,
   stripAccessCodesFromBriefBlock,
 } = require('../services/technician-visit-scope');
@@ -495,28 +497,40 @@ function pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds) {
   }
 }
 
-async function applyTechScheduleFeedRecheck(conn, req, candidates, { enriched, byTech, unassigned }) {
+const BILLING_FEED_ALERT_TYPES = new Set(['no_card_on_file', 'unbilled_visit']);
+
+async function applyTechScheduleFeedRecheck(conn, req, candidates, { enriched, byTech, unassigned, date = null }) {
   const droppedIds = await recheckTechFeedAccessRows(conn, req, candidates, (c, { lostWindow, lostPrimary }) => {
-    const safeNotes = lostWindow ? redactFreeTextAccessCodes(c.cleanedNotes) : c.cleanedNotes;
+    const knownCodes = collectStoredAccessCodes(c.prefs, c.visit);
+    const preservedBilling = Array.isArray(c.row.propertyAlerts)
+      ? c.row.propertyAlerts.filter((a) => a && BILLING_FEED_ALERT_TYPES.has(a.type))
+      : [];
+    const safeNotes = lostWindow ? redactFreeTextAccessCodes(c.cleanedNotes, knownCodes) : c.cleanedNotes;
     const keepNeighborhood = !lostWindow && (visitHasDirectPremiseStamp(c.visit) || !c.visit.source_estimate_id || !lostPrimary);
-    c.row.propertyAlerts = compilePropertyAlerts({
-      prefs: stripAccessCodePrefs(c.prefs),
-      notes: safeNotes,
-      genuinelyNew: c.genuinelyNew,
-      servicePreferences: c.visit.service_preferences,
-      normalizedServiceType: c.normalizedType,
-      neighborhoodGate: keepNeighborhood ? c.neighborhoodGate : null,
-      neighborhoodActions: keepNeighborhood && c.neighborhoodActions,
-    });
+    c.row.propertyAlerts = [
+      ...compilePropertyAlerts({
+        prefs: stripAccessCodePrefs(c.prefs, knownCodes),
+        notes: safeNotes,
+        genuinelyNew: c.genuinelyNew,
+        servicePreferences: c.visit.service_preferences,
+        normalizedServiceType: c.normalizedType,
+        neighborhoodGate: keepNeighborhood ? c.neighborhoodGate : null,
+        neighborhoodActions: keepNeighborhood && c.neighborhoodActions,
+      }),
+      ...preservedBilling,
+    ];
     if (!keepNeighborhood) delete c.row.neighborhoodGateActions;
     if (lostWindow) {
-      c.row.lastServiceNotes = redactFreeTextAccessCodes(c.row.lastServiceNotes);
-      c.row.lastLineServiceNotes = redactFreeTextAccessCodes(c.row.lastLineServiceNotes);
+      c.row.lastServiceNotes = redactFreeTextAccessCodes(c.row.lastServiceNotes, knownCodes);
+      c.row.lastLineServiceNotes = redactFreeTextAccessCodes(c.row.lastLineServiceNotes, knownCodes);
     }
   });
   if (droppedIds.size) {
     pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds);
     require('../services/visit-groups').visitSummariesForRows(enriched);
+    const legsToday = date === etDateString();
+    Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs')
+      .attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
   }
 }
 
@@ -7632,7 +7646,7 @@ router.get('/', async (req, res, next) => {
     // Final authorization + access-code recheck runs AFTER all enrichment,
     // closeout, roster, weather, and office-told awaits so reassigned visits
     // are removed and completed/changed stops never serialize raw credentials.
-    await applyTechScheduleFeedRecheck(db, req, techRecheckCandidates, { enriched, byTech, unassigned });
+    await applyTechScheduleFeedRecheck(db, req, techRecheckCandidates, { enriched, byTech, unassigned, date });
 
     res.json({
       date, services: enriched,
@@ -25113,7 +25127,11 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       // every brief gate off, and withholds the whole answer when the visit was lost during the read or the check cannot run.
       if (out && !out.editable) return payload;
       homeNoteLooked = true;
-      return out ? { ...payload, homeNote: { note: out.note, customerId: out.customerId } } : payload;
+      if (!out) return payload;
+      const safeNote = (isTechnicianRequest(req) && !allowTechBriefAccessCodes && typeof out.note?.body === 'string')
+        ? { ...out.note, body: redactFreeTextAccessCodes(out.note.body) }
+        : out.note;
+      return { ...payload, homeNote: { note: safeNote, customerId: out.customerId } };
     };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
@@ -25123,8 +25141,22 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const stripCodesFromBriefPayload = (payload) => {
       const next = { ...payload };
       delete next.awayWatch;
-      if (next.facts?.access) next.facts = { ...next.facts, access: stripAccessCodesFromBriefBlock(next.facts.access) };
-      if (next.brief?.access) next.brief = { ...next.brief, access: stripAccessCodesFromBriefBlock(next.brief.access) };
+      const briefCodes = [
+        ...Object.values(next.facts?.access?.codes || {}),
+        ...Object.values(next.brief?.access?.codes || {}),
+      ].flatMap((v) => {
+        const t = String(v || '').trim();
+        const s = t.replace(/^[#*]+|[#*]+$/g, '');
+        return [t, s].filter((x) => x.length >= 3);
+      });
+      if (next.facts?.access) next.facts = { ...next.facts, access: stripAccessCodesFromBriefBlock(next.facts.access, briefCodes) };
+      if (next.brief?.access) next.brief = { ...next.brief, access: stripAccessCodesFromBriefBlock(next.brief.access, briefCodes) };
+      if (typeof next.homeNote?.note?.body === 'string') {
+        next.homeNote = {
+          ...next.homeNote,
+          note: { ...next.homeNote.note, body: redactFreeTextAccessCodes(next.homeNote.note.body, briefCodes) },
+        };
+      }
       return next;
     };
     const finalRecheck = async (payload) => {
@@ -25197,7 +25229,13 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
 // holds the visit row locked in its own transaction, so a reassignment landing during the save refuses it. A stale save
 // (the note changed since the editor read it) is 409 with the current note. Staff only: no customer, report or token
 // route reads this table.
-const HOME_NOTE_VISIT_COLUMNS = ['scheduled_services.id', 'scheduled_services.customer_id'];
+const HOME_NOTE_VISIT_COLUMNS = [
+  'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+  'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
+  'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+  'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+  'scheduled_services.source_estimate_id',
+];
 const homeNoteVisitRefusal = (req, res) => (isTechnicianRequest(req)
   ? res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' })
   : res.status(404).json({ error: 'Scheduled service not found' }));
@@ -25216,8 +25254,15 @@ router.get('/:id/home-note', async (req, res, next) => {
     const stillOwned = await db('scheduled_services')
       .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
       .modify((q) => technicianCurrentVisitFilter(req, q))
-      .first('scheduled_services.id');
+      .first(HOME_NOTE_VISIT_COLUMNS);
     if (!stillOwned) return homeNoteVisitRefusal(req, res);
+    if (isTechnicianRequest(req) && typeof out?.note?.body === 'string') {
+      const mayReadCodes = technicianMayReadVisitAccessCodes(req, stillOwned)
+        && await sameHomeForTechVisitPrefs(db, req.technicianId, stillOwned.customer_id, stillOwned);
+      if (!mayReadCodes) {
+        out.note = { ...out.note, body: redactFreeTextAccessCodes(out.note.body) };
+      }
+    }
     HomeNote.sendHomeNote(res, out);
   } catch (err) { next(err); }
 });

@@ -64,6 +64,12 @@ describe('propertyPrefsMatchVisitHome', () => {
     expect(propertyPrefsMatchVisitHome({ property_id: null, service_address_line1: '100 Main St', service_address_city: 'Sarasota', service_address_zip: '34231' }, [], primary)).toBe(true);
   });
 
+  test('single active non-primary home fails closed so primary-home codes never release onto a secondary visit', () => {
+    const secondaryOnly = [{ id: 'h2', is_primary: false, address_line1: '200 Rental Ave', city: 'Sarasota', zip: '34231' }];
+    expect(propertyPrefsMatchVisitHome({ property_id: 'h2' }, secondaryOnly)).toBe(false);
+    expect(propertyPrefsMatchVisitHome({ property_id: null }, secondaryOnly)).toBe(false);
+  });
+
   test('multi-home customer matches ONLY visits stamped with the primary home', () => {
     const homes = [{ id: 'h1', is_primary: true }, { id: 'h2', is_primary: false }];
     expect(propertyPrefsMatchVisitHome({ property_id: 'h1' }, homes)).toBe(true);
@@ -73,16 +79,29 @@ describe('propertyPrefsMatchVisitHome', () => {
 });
 
 describe('stripAccessCodePrefs & stripAccessCodesFromBriefBlock', () => {
-  test('strips entry codes, access notes, special_instructions, and away_mode_until while retaining pets and chemical warnings', () => {
+  test('strips entry codes, access notes, special_instructions, and away_mode_until while scrubbing codes in pets_secured_plan', () => {
     const raw = {
       neighborhood_gate_code: '#1234', property_gate_code: '5678', garage_code: '9999', lockbox_code: '0000',
       access_notes: 'Side gate', side_gate_access: 'Left', parking_notes: 'Driveway',
       special_instructions: 'Lockbox 4321 behind planter', away_mode_until: '2026-12-30',
-      pet_details: '2 dogs', chemical_sensitivities: true,
+      pet_details: '2 dogs', pets_secured_plan: 'Dogs inside; use 5678 on side keypad #4499', chemical_sensitivities: true,
     };
     const stripped = stripAccessCodePrefs(raw);
-    expect(stripped).toEqual({ pet_details: '2 dogs', chemical_sensitivities: true });
+    expect(stripped.neighborhood_gate_code).toBeUndefined();
+    expect(stripped.pet_details).toBe('2 dogs');
+    expect(stripped.chemical_sensitivities).toBe(true);
+    expect(stripped.pets_secured_plan).not.toContain('5678');
+    expect(stripped.pets_secured_plan).not.toContain('4499');
     expect(raw.neighborhood_gate_code).toBe('#1234');
+  });
+
+  test('redactFreeTextAccessCodes scrubs bare PINs, keypad codes, action-verb PINs, and known codes without mangling street/sqft prose', () => {
+    const { redactFreeTextAccessCodes } = require('../services/technician-visit-scope');
+    expect(redactFreeTextAccessCodes('4821')).toBe('[redacted]');
+    expect(redactFreeTextAccessCodes('Try #4821 or 9912#')).not.toMatch(/4821|9912/);
+    expect(redactFreeTextAccessCodes('Enter 7352 at back door')).not.toContain('7352');
+    expect(redactFreeTextAccessCodes('Side box is 6140', ['6140'])).not.toContain('6140');
+    expect(redactFreeTextAccessCodes('2500 sq ft yard at 4867 Main St built 2024')).toBe('2500 sq ft yard at 4867 Main St built 2024');
   });
 
   test('strips codes, notes, specialInstructions, and gate/access/special/away alerts and redacts note alerts', () => {

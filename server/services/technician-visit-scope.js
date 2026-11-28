@@ -84,6 +84,7 @@ function propertyPrefsMatchVisitHome(visit, activeHomes, customerPrimaryAddress 
     return visitStampMatchesHome(visit, customerPrimaryAddress || visitCustomerPrimaryAddress(visit));
   }
   if (homes.length === 1) {
+    if (homes[0].is_primary !== true) return false;
     if (visit?.property_id && String(visit.property_id) !== String(homes[0].id)) return false;
     return visitStampMatchesHome(visit, homes[0]);
   }
@@ -94,7 +95,7 @@ function propertyPrefsMatchVisitHome(visit, activeHomes, customerPrimaryAddress 
 
 function resolvePrimaryHomeForTechVisit(visit, activeHomes, customerPrimaryAddress = null) {
   const homes = Array.isArray(activeHomes) ? activeHomes : [];
-  if (homes.length === 1) return homes[0];
+  if (homes.length === 1) return homes[0].is_primary === true ? homes[0] : null;
   if (homes.length > 1) return homes.find((h) => h.is_primary) || null;
   return customerPrimaryAddress || visitCustomerPrimaryAddress(visit);
 }
@@ -286,10 +287,56 @@ async function sameHomeForTechVisitPrefs(conn, techId, customerId, visit, custom
   );
 }
 
-function redactFreeTextAccessCodes(text) {
+const KEYPAD_PIN_RE = /(?:[#*]\s*\d{3,8}\b|\b\d{3,8}\s*[#*])/g;
+const ACTION_VERB_PIN_RE = /(\b(?:use|enter|punch|dial|press|try|type|input|key|combo|combination)\b[\s:#=-]{1,6})([#*]?\d{3,8}[#*]?)/gi;
+const BARE_PIN_ONLY_RE = /^\s*[#*]?(?!19\d\d\s*$)(?!20\d\d\s*$)\d{4,8}[#*]?\s*$/;
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function collectStoredAccessCodes(prefs = null, customer = null) {
+  const raw = [
+    prefs?.neighborhood_gate_code,
+    prefs?.property_gate_code,
+    prefs?.garage_code,
+    prefs?.lockbox_code,
+    customer?.gate_code,
+  ];
+  const out = new Set();
+  for (const val of raw) {
+    const trimmed = String(val || '').trim();
+    if (trimmed.length >= 3) out.add(trimmed);
+    const stripped = trimmed.replace(/^[#*]+|[#*]+$/g, '');
+    if (stripped.length >= 3) out.add(stripped);
+  }
+  return [...out];
+}
+
+function redactKnownAccessCodeValues(text, knownCodes) {
+  if (!Array.isArray(knownCodes) || !knownCodes.length) return text;
+  let out = text;
+  for (const code of knownCodes) {
+    const clean = String(code || '').trim();
+    if (clean.length < 3) continue;
+    const re = new RegExp(`(?<![A-Za-z0-9])${escapeRegex(clean)}(?![A-Za-z0-9])`, 'gi');
+    out = out.replace(re, '[redacted]');
+  }
+  return out;
+}
+
+function redactFreeTextAccessCodes(text, knownCodes = null) {
   if (text == null || text === '') return text;
   const { redactAccessCodes } = require('./context-aggregator');
-  return redactAccessCodes(String(text));
+  let out = redactAccessCodes(String(text));
+  out = redactKnownAccessCodeValues(out, knownCodes);
+  out = out
+    .replace(KEYPAD_PIN_RE, '[redacted]')
+    .replace(ACTION_VERB_PIN_RE, '$1[redacted]');
+  return out
+    .split(/([\n;|/])/)
+    .map((seg) => (BARE_PIN_ONLY_RE.test(seg) ? seg.replace(/[#*]?\d{4,8}[#*]?/, '[redacted]') : seg))
+    .join('');
 }
 
 const ACCESS_CODE_PREF_FIELDS = [
@@ -297,15 +344,28 @@ const ACCESS_CODE_PREF_FIELDS = [
   'access_notes', 'side_gate_access', 'parking_notes', 'special_instructions', 'away_mode_until',
 ];
 
-function stripAccessCodePrefs(prefs) {
+function stripAccessCodePrefs(prefs, knownCodes = null) {
   if (!prefs || typeof prefs !== 'object') return prefs;
+  const codes = [...collectStoredAccessCodes(prefs), ...(Array.isArray(knownCodes) ? knownCodes : [])];
   const copy = { ...prefs };
   for (const field of ACCESS_CODE_PREF_FIELDS) delete copy[field];
+  if (typeof copy.pets_secured_plan === 'string') {
+    copy.pets_secured_plan = redactFreeTextAccessCodes(copy.pets_secured_plan, codes);
+  }
+  if (typeof copy.pet_details === 'string') {
+    copy.pet_details = redactFreeTextAccessCodes(copy.pet_details, codes);
+  }
   return copy;
 }
 
-function stripAccessCodesFromBriefBlock(access) {
+function stripAccessCodesFromBriefBlock(access, knownCodes = null) {
   if (!access || typeof access !== 'object') return access;
+  const blockCodes = Object.values(access.codes || {}).flatMap((v) => {
+    const t = String(v || '').trim();
+    const s = t.replace(/^[#*]+|[#*]+$/g, '');
+    return [t, s].filter((x) => x.length >= 3);
+  });
+  const codes = [...blockCodes, ...(Array.isArray(knownCodes) ? knownCodes : [])];
   const nextAlerts = Array.isArray(access.alerts)
     ? access.alerts
       .filter((a) => {
@@ -316,9 +376,9 @@ function stripAccessCodesFromBriefBlock(access) {
         return true;
       })
       .map((a) => {
-        if (typeof a === 'string') return redactFreeTextAccessCodes(a);
-        if (a && typeof a === 'object' && a.type === 'note' && typeof a.text === 'string') {
-          return { ...a, text: redactFreeTextAccessCodes(a.text) };
+        if (typeof a === 'string') return redactFreeTextAccessCodes(a, codes);
+        if (a && typeof a === 'object' && typeof a.text === 'string') {
+          return { ...a, text: redactFreeTextAccessCodes(a.text, codes) };
         }
         return a;
       })
@@ -329,6 +389,8 @@ function stripAccessCodesFromBriefBlock(access) {
     accessNotes: null,
     parkingNotes: null,
     specialInstructions: null,
+    ...(typeof access.petsSecuredPlan === 'string' ? { petsSecuredPlan: redactFreeTextAccessCodes(access.petsSecuredPlan, codes) } : {}),
+    ...(typeof access.pets === 'string' ? { pets: redactFreeTextAccessCodes(access.pets, codes) } : {}),
     alerts: nextAlerts,
   };
 }
@@ -507,4 +569,4 @@ async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
   return !(await require('./payment-method-consents').autopayOptedOut(invoice.customer_id, { dbh: database }));
 }
 
-module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_CODE_ENDED_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly, technicianMayReadVisitAccessCodes, propertyPrefsMatchVisitHome, visitHasDirectPremiseStamp, visitMatchesPrimaryHomeForTechAccess, loadActiveHomesByCustomerIds, loadTechHomesByCustomerIds, loadTechPrimaryAccessIds, recheckTechFeedAccessRows, visitAllowsAccessCodes, isVisitLiveForTechAccess, sameHomeForTechVisitPrefs, redactFreeTextAccessCodes, stripAccessCodePrefs, stripAccessCodesFromBriefBlock };
+module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_CODE_ENDED_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly, technicianMayReadVisitAccessCodes, propertyPrefsMatchVisitHome, visitHasDirectPremiseStamp, visitMatchesPrimaryHomeForTechAccess, loadActiveHomesByCustomerIds, loadTechHomesByCustomerIds, loadTechPrimaryAccessIds, recheckTechFeedAccessRows, visitAllowsAccessCodes, isVisitLiveForTechAccess, sameHomeForTechVisitPrefs, collectStoredAccessCodes, redactFreeTextAccessCodes, stripAccessCodePrefs, stripAccessCodesFromBriefBlock };

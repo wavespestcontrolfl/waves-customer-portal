@@ -52,7 +52,7 @@ const DISPATCH_PREF_ALERT_FIELDS = [
   ['special_instructions', (v) => v],
 ];
 
-function buildDispatchPropertyAlerts(prefs, rawNotes, { redactNotes = false } = {}) {
+function buildDispatchPropertyAlerts(prefs, rawNotes, { redactNotes = false, knownCodes = null } = {}) {
   const alerts = [];
   if (prefs) {
     for (const [key, fmt] of DISPATCH_PREF_ALERT_FIELDS) {
@@ -68,7 +68,7 @@ function buildDispatchPropertyAlerts(prefs, rawNotes, { redactNotes = false } = 
     if (mowingAlert) alerts.push(mowingAlert);
   }
   const cleaned = stripSchedulerAuditText(rawNotes);
-  const displayNotes = redactNotes ? redactFreeTextAccessCodes(cleaned) : cleaned;
+  const displayNotes = redactNotes ? redactFreeTextAccessCodes(cleaned, knownCodes) : cleaned;
   if (displayNotes) alerts.push(displayNotes);
   return alerts;
 }
