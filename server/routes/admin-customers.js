@@ -3564,7 +3564,7 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
         .select(
           'id', 'status', 'token', 'service_interest', 'decline_reason',
           'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at',
+          'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at', 'expires_at', 'archived_at',
         ),
       db('messages')
         .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
@@ -3588,7 +3588,7 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
       total: estimates.length,
       accepted: accepted.length,
       declined: declined.length,
-      open: estimates.filter((e) => ['draft', 'sent', 'viewed'].includes(e.status)).length,
+      open: estimates.filter((e) => !e.archived_at && ['draft', 'sent', 'viewed'].includes(e.status)).length,
       conversionRate: decided > 0 ? Math.round((accepted.length / decided) * 100) / 100 : null,
       acceptedLifetimeMonthly: Math.round(acceptedLifetimeMonthly * 100) / 100,
     };
