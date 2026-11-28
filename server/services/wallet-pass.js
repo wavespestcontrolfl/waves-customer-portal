@@ -51,31 +51,6 @@ function firstNameOf(fullName) {
   return String(fullName || '').trim().split(/\s+/)[0] || '';
 }
 
-function formatPhoneDisplay(e164) {
-  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(String(e164 || ''));
-  return m ? `(${m[1]}) ${m[2]}-${m[3]}` : String(e164 || '');
-}
-
-function resolvePassContact(techLine, location) {
-  const phoneRaw = techLine?.number || location.phoneRaw;
-  const phone = techLine?.formatted || (techLine?.number ? formatPhoneDisplay(techLine.number) : location.phone);
-  return { phone, phoneRaw };
-}
-
-async function loadPassTechContext(technicianId) {
-  if (!technicianId) return { techName: null, techPhotoUrl: null, techLine: null };
-  const tech = await db('technicians')
-    .where({ id: technicianId })
-    .first('name', 'photo_url', 'photo_s3_key');
-  let techPhotoUrl = null;
-  if (tech) {
-    const { resolveTechPhotoUrl } = require('./tech-photo');
-    techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
-  }
-  const techLine = await require('./tech-line').lineForTechnician(technicianId);
-  return { techName: tech?.name || null, techPhotoUrl, techLine };
-}
-
 /**
  * Complete pass.json for the card — pure, unit-testable. Wallet renders the
  * QR itself from `barcodes`; colors carry the glass theme (passes are flat
@@ -86,7 +61,6 @@ function buildPassJson({
   customerFirstName,
   memberSinceYear,
   techName,
-  techLine = null,
   location,
   reviewUrl,
   referralUrl,
@@ -95,7 +69,6 @@ function buildPassJson({
   hasLeftGoogleReview = false,
 }) {
   const techFirst = firstNameOf(techName);
-  const { phone: contactPhone, phoneRaw: contactPhoneRaw } = resolvePassContact(techLine, location);
   // No NEXT VISIT on the static pass (Codex P2 #2592): without PassKit
   // update plumbing (webServiceURL/authenticationToken) the date would sit
   // stale in Wallet forever. Returns with the pass-update follow-up.
@@ -148,7 +121,7 @@ function buildPassJson({
       auxiliaryFields: [{
         key: 'contact',
         label: techFirst ? `TEXT OR CALL ${techFirst.toUpperCase()}` : 'TEXT OR CALL',
-        value: contactPhone,
+        value: location.phone,
       }],
       backFields: [
         // The pass is the pocket shortcut; the DESIGNED experience (glass,
@@ -162,14 +135,14 @@ function buildPassJson({
         {
           key: 'text',
           label: techFirst ? `TEXT ${techFirst.toUpperCase()}` : 'TEXT US',
-          value: contactPhone,
-          attributedValue: `<a href="sms:${contactPhoneRaw}">${contactPhone}</a>`,
+          value: location.phone,
+          attributedValue: `<a href="sms:${location.phoneRaw}">${location.phone}</a>`,
         },
         {
           key: 'call',
           label: techFirst ? `CALL ${techFirst.toUpperCase()}` : 'CALL US',
-          value: contactPhone,
-          attributedValue: `<a href="tel:${contactPhoneRaw}">${contactPhone}</a>`,
+          value: location.phone,
+          attributedValue: `<a href="tel:${location.phoneRaw}">${location.phone}</a>`,
         },
         {
           key: 'portal',
@@ -238,7 +211,18 @@ async function generateForToken(token) {
     .first('id', 'first_name', 'member_since', 'created_at', 'deleted_at', 'referral_code', 'has_left_google_review');
   if (!customer || customer.deleted_at) return null;
 
-  const { techName, techPhotoUrl, techLine } = await loadPassTechContext(card.technician_id);
+  let techName = null;
+  let techPhotoUrl = null;
+  if (card.technician_id) {
+    const tech = await db('technicians')
+      .where({ id: card.technician_id })
+      .first('name', 'photo_url', 'photo_s3_key');
+    techName = tech?.name || null;
+    if (tech) {
+      const { resolveTechPhotoUrl } = require('./tech-photo');
+      techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
+    }
+  }
 
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
 
@@ -253,7 +237,6 @@ async function generateForToken(token) {
     customerFirstName: customer.first_name,
     memberSinceYear: CardService.memberSinceYearET(customer),
     techName,
-    techLine,
     location,
     reviewUrl: card.review_short_url || card.review_target_url || location.googleReviewUrl,
     referralUrl,

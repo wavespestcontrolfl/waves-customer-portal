@@ -2,6 +2,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const fs = require('fs');
 const path = require('path');
+const PDFKit = require('pdfkit');
 const { PDFDocument } = require('pdf-lib');
 
 const { buildPassJson } = require('../services/wallet-pass');
@@ -38,8 +39,8 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     expect(src).toContain("'Cache-Control': 'no-store'");
   });
 
-  test('wallet-pass buildPassJson prefers techLine when active and falls back to location phone', () => {
-    const base = {
+  test('wallet-pass buildPassJson keeps stable office phone (never embeds a reassignable tech line)', () => {
+    const pass = buildPassJson({
       card: { id: 'card-1' },
       customerFirstName: 'Jordan',
       memberSinceYear: 2026,
@@ -49,20 +50,10 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
       referralUrl: 'https://portal.wavespestcontrol.com/r/JORDAN',
       portalUrl: 'https://portal.wavespestcontrol.com',
       cardUrl: 'https://portal.wavespestcontrol.com/card/tok1',
-    };
-    const withTechLine = buildPassJson({
-      ...base,
-      techLine: { number: '+19413529161', formatted: '(941) 352-9161' },
     });
-    expect(withTechLine.generic.auxiliaryFields[0].value).toBe('(941) 352-9161');
-    const textField = withTechLine.generic.backFields.find((f) => f.key === 'text');
-    const callField = withTechLine.generic.backFields.find((f) => f.key === 'call');
-    expect(textField.value).toBe('(941) 352-9161');
-    expect(textField.attributedValue).toContain('sms:+19413529161');
-    expect(callField.attributedValue).toContain('tel:+19413529161');
-
-    const fallback = buildPassJson(base);
-    expect(fallback.generic.auxiliaryFields[0].value).toBe('(941) 297-5749');
+    expect(pass.generic.auxiliaryFields[0].value).toBe('(941) 297-5749');
+    const cardField = pass.generic.backFields.find((f) => f.key === 'card');
+    expect(cardField.value).toBe('https://portal.wavespestcontrol.com/card/tok1');
   });
 
   test('card-public.js stamps X-Robots-Tag: noindex on all three token endpoints', () => {
@@ -138,35 +129,54 @@ describe('PR 2 server HTML, PDFs, compliance docs & Apple Wallet audit regressio
     }
   });
 
-  test('prep-guide-pdf paginates long paragraphs cleanly without colliding with the footer', async () => {
-    const longParagraph = Array.from({ length: 140 }, (_, i) => `Step ${i + 1}: clear baseboards, closets, and pet bowls before your Waves technician arrives.`).join(' ');
-    const buf = await new Promise((resolve, reject) => {
-      const chunks = [];
-      const res = {
-        setHeader() {},
-        write(c) { chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)); return true; },
-        end(c) { if (c) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)); resolve(Buffer.concat(chunks)); },
-        on() {}, once() {}, emit() {},
-      };
-      try {
-        renderPrepGuidePdf({
-          title: 'Flea Control Service Prep Guide',
-          blocks: [
-            { type: 'heading', content: 'Before we arrive' },
-            { type: 'paragraph', content: longParagraph },
-          ],
-          technicianName: 'Sam Rivera',
-          customerName: 'Alex Morgan',
-          propertyAddress: '500 Bay St, Bradenton, FL 34205',
-          fileName: 'prep-guide.pdf',
-        }, res);
-      } catch (err) {
-        reject(err);
-      }
-    });
+  test('prep-guide-pdf paginates long paragraphs cleanly without triggering automatic PDFKit page breaks', async () => {
+    const longParagraph = Array.from({ length: 240 }, (_, i) => `Step ${i + 1}: clear baseboards, closets, and pet bowls before your Waves technician arrives.`).join(' ');
+    const addPageStacks = [];
+    const origAddPage = PDFKit.prototype.addPage;
+    PDFKit.prototype.addPage = function patchedAddPage(...args) {
+      addPageStacks.push(new Error().stack || '');
+      return origAddPage.apply(this, args);
+    };
+    let buf;
+    try {
+      buf = await new Promise((resolve, reject) => {
+        const chunks = [];
+        const res = {
+          setHeader() {},
+          write(c) { chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)); return true; },
+          end(c) { if (c) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)); resolve(Buffer.concat(chunks)); },
+          on() {}, once() {}, emit() {},
+        };
+        try {
+          renderPrepGuidePdf({
+            title: 'Flea Control Service Prep Guide',
+            blocks: [
+              { type: 'heading', content: 'Before we arrive' },
+              { type: 'paragraph', content: longParagraph },
+            ],
+            technicianName: 'Sam Rivera',
+            customerName: 'Alex Morgan',
+            propertyAddress: '500 Bay St, Bradenton, FL 34205',
+            fileName: 'prep-guide.pdf',
+          }, res);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    } finally {
+      PDFKit.prototype.addPage = origAddPage;
+    }
     expect(buf.slice(0, 5).toString()).toBe('%PDF-');
     const parsed = await PDFDocument.load(buf);
-    expect(parsed.getPageCount()).toBeGreaterThanOrEqual(2);
+    expect(parsed.getPageCount()).toBeGreaterThanOrEqual(3);
+    // Page 1 is created in PDFDocument constructor; every subsequent page must
+    // come from prep-guide-pdf.js (never from PDFKit internal auto-pagination).
+    const continuationCalls = addPageStacks.slice(1);
+    expect(continuationCalls.length).toBe(parsed.getPageCount() - 1);
+    for (const stack of continuationCalls) {
+      expect(stack).toContain('prep-guide-pdf.js');
+      expect(stack).not.toContain('continueOnNewPage');
+    }
   });
 
   test('service-details-pdf emits continuation masthead on multi-page tables and wdo-report-pdf fits long continuation headers', async () => {

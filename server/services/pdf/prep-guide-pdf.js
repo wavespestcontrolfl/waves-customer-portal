@@ -95,34 +95,42 @@ function sectionHeading(doc, text) {
 
 function paragraph(doc, text) {
   if (!text) return;
-  doc.font('Helvetica').fontSize(9.5);
+  const setBodyFont = () => doc.font('Helvetica').fontSize(9.5);
+  setBodyFont();
   const fullH = Math.ceil(doc.heightOfString(text, { width: W, lineGap: 2 }));
   const pageCap = CONTENT_BOTTOM - 72;
   if (fullH <= pageCap) {
     ensureRoom(doc, fullH + 10);
-    doc.font('Helvetica').fontSize(9.5).fillColor(BODY)
-      .text(text, L, doc.y, { width: W, lineGap: 2 });
+    setBodyFont().fillColor(BODY).text(text, L, doc.y, { width: W, lineGap: 2 });
     doc.moveDown(0.55);
     return;
   }
-  // Very long paragraph: emit sentence/word chunks so no chunk crosses CONTENT_BOTTOM.
+  // Very long paragraph: emit word chunks with explicit 9.5pt font restoration
+  // before every measurement so continuation mastheads (9pt) never under-measure.
   const words = String(text).split(/\s+/);
   let chunk = '';
   for (const word of words) {
     const candidate = chunk ? `${chunk} ${word}` : word;
+    setBodyFont();
     const h = Math.ceil(doc.heightOfString(candidate, { width: W, lineGap: 2 }));
-    if (chunk && doc.y + h > CONTENT_BOTTOM - 8) {
-      doc.font('Helvetica').fontSize(9.5).fillColor(BODY).text(chunk, L, doc.y, { width: W, lineGap: 2 });
-      ensureRoom(doc, CONTENT_BOTTOM);
+    if (chunk && doc.y + h > CONTENT_BOTTOM - 10) {
+      setBodyFont().fillColor(BODY).text(chunk, L, doc.y, { width: W, lineGap: 2 });
+      footer(doc);
+      doc.addPage();
+      drawFieldContinuationMasthead(doc, { title: 'Service preparation guide · continued' });
+      chunk = word;
+    } else if (!chunk && doc.y + h > CONTENT_BOTTOM - 10) {
+      ensureRoom(doc, h + 10);
       chunk = word;
     } else {
       chunk = candidate;
     }
   }
   if (chunk) {
+    setBodyFont();
     const h = Math.ceil(doc.heightOfString(chunk, { width: W, lineGap: 2 }));
     ensureRoom(doc, h + 10);
-    doc.font('Helvetica').fontSize(9.5).fillColor(BODY).text(chunk, L, doc.y, { width: W, lineGap: 2 });
+    setBodyFont().fillColor(BODY).text(chunk, L, doc.y, { width: W, lineGap: 2 });
   }
   doc.moveDown(0.55);
 }
