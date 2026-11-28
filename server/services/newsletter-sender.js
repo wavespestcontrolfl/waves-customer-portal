@@ -2080,9 +2080,11 @@ async function processScheduledSends() {
       const pestInsider = row.newsletter_type === PEST_INSIDER_TYPE;
       // A reply-approved Pest Insider issue is never dispatched: planned Pest
       // Insider sends go through the auto-send path (GATE_PEST_INSIDER_AUTO_SEND),
-      // and a manual schedule has no proof_approved_at.
+      // and a manual schedule has no proof_approved_at. Return any legacy row to
+      // draft via the version-bound revert so it cannot hold a due-queue slot forever.
       if (row.proof_approved_at && pestInsider && !autoQueued) {
-        logger.warn(`[newsletter-scheduler] send ${row.id} is a reply-approved Pest Insider issue — leaving it scheduled`);
+        logger.warn(`[newsletter-scheduler] send ${row.id} is a reply-approved Pest Insider issue — returning to draft`);
+        await revertBlockedScheduledSend(row, 'an APPROVED reply does not dispatch a Waves Pest Insider issue; it goes out only through the planned schedule');
         continue;
       }
       // An issue an auto-send switch queued stays queued while that switch is

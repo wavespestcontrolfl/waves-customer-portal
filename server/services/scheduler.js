@@ -7917,7 +7917,7 @@ function initScheduledJobs() {
       Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush()),
     ]);
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'repeat-caller', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);
     });
   }, { timezone: 'America/New_York' });
 

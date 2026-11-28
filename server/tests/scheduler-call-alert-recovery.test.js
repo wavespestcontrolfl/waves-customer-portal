@@ -29,7 +29,7 @@ const { sweepPromiseChasers } = require('../services/promise-chaser-bell');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
-const SWEEPS = { missed: sweepMissedCalls, 'promise-chaser': sweepPromiseChasers };
+const SWEEPS = { 'missed-call': sweepMissedCalls, 'promise-chaser': sweepPromiseChasers };
 
 // The promise-chaser sweep is gate-checked before its cron lock (codex r9
 // P2), so these ticks run with its two gates on.
@@ -40,7 +40,7 @@ beforeEach(() => {
   isEnabled.mockImplementation(name => name === 'cronJobs' || PROMISE_CHASER_GATES.includes(name));
 });
 
-test.each(['missed', 'promise-chaser'])('one call-alert tick starts every sweep when %s recovery is still pending', async pending => {
+test.each(['missed-call', 'promise-chaser'])('one call-alert tick starts every sweep when %s recovery is still pending', async pending => {
   let rejectPending;
   const others = Object.entries(SWEEPS).filter(([key]) => key !== pending).map(([, fn]) => fn);
   const blocked = SWEEPS[pending];
@@ -58,7 +58,7 @@ test.each(['missed', 'promise-chaser'])('one call-alert tick starts every sweep 
   rejectPending(new Error('synthetic sweep failure'));
   await expect(running).resolves.toBeUndefined();
   expect(blocked).toHaveBeenCalledTimes(1);
-  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('synthetic sweep failure'));
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`[scheduler] ${pending} sweep failed: synthetic sweep failure`));
 });
 
 test.each(PROMISE_CHASER_GATES)('with %s off, the tick never takes the promise-chaser lock or calls its sweep', async (offGate) => {

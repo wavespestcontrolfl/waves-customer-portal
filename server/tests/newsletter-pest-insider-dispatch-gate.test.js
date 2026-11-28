@@ -73,12 +73,33 @@ afterAll(() => {
 });
 
 describe('processScheduledSends: reply-approved Pest Insider guard', () => {
-  test('a reply-approved Pest Insider issue is always left scheduled', async () => {
-    wireDue([APPROVED_INSIDER]);
+  test('a reply-approved Pest Insider issue is returned to draft and notifies staff once', async () => {
+    const updates = wireDue([APPROVED_INSIDER], { updated: 1 });
+    // Legacy reply-approved draft has no linked pest_insider_issues row (update returns 0),
+    // so revertBlockedScheduledSend sends the stopped-at-send-time notice directly.
+    db.mockImplementation((table) => {
+      const q = {};
+      ['where', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.limit = jest.fn(async () => [APPROVED_INSIDER]);
+      q.first = jest.fn(async () => undefined);
+      q.update = jest.fn(async (patch) => {
+        updates.push({ table, patch });
+        return table === 'pest_insider_issues' ? 0 : 1;
+      });
+      return q;
+    });
 
     await processScheduledSends();
 
     expect(mockValidateEventSelection).not.toHaveBeenCalled();
+    expect(updates).toContainEqual({
+      table: 'newsletter_sends',
+      patch: expect.objectContaining({ status: 'draft', scheduled_for: null, proof_approved_at: null }),
+    });
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      sendId: 'send-pi-1',
+      errors: ['Stopped at send time: an APPROVED reply does not dispatch a Waves Pest Insider issue; it goes out only through the planned schedule'],
+    }));
   });
 
   test('a Pest Insider issue scheduled by hand (no proof approval) is not held', async () => {
@@ -404,12 +425,15 @@ describe('processScheduledSends: a planned Waves Pest Insider issue (GATE_PEST_I
     expect(mockValidateEventSelection).toHaveBeenCalledTimes(1);
   });
 
-  test('a Pest Insider issue approved by an APPROVED reply is never dispatched by this switch', async () => {
+  test('a Pest Insider issue approved by an APPROVED reply is never dispatched by this switch and returns to draft', async () => {
     const updates = wireInsider([{ ...AUTO_QUEUED_INSIDER, proof_approval_email_id: 'email-1' }]);
 
     await processScheduledSends();
 
     expect(mockValidateEventSelection).not.toHaveBeenCalled();
-    expect(updates).toEqual([]);
+    expect(updates).toContainEqual({
+      table: 'newsletter_sends',
+      patch: expect.objectContaining({ status: 'draft', scheduled_for: null, proof_approved_at: null }),
+    });
   });
 });
