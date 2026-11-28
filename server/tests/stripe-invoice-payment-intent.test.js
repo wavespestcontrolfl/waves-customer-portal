@@ -133,6 +133,7 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       strictPendingPromoCredit: jest.fn(async () => 0),
       assertNoPendingPromoCode: jest.fn(async () => {}),
       invoiceIdsWithPendingPromo: jest.fn(async () => new Set()),
+      prelockPendingPromoDiscount: jest.fn(async () => {}),
       redeemAndApplyPromoCode: jest.fn(async () => 0),
     }));
   });
@@ -725,6 +726,7 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     const withPromoWaiting = (amount) => {
       const promo = {
         pendingPromoCredit: jest.fn(async () => amount),
+        prelockPendingPromoDiscount: jest.fn(async () => {}),
         // The real step posts the credit and draws it against the invoice.
         redeemAndApplyPromoCode: jest.fn(async () => {
           invoiceRow.credit_applied = String(amount);

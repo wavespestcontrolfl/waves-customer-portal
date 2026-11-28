@@ -939,7 +939,11 @@ const SETUP_RECOVERABLE_PI_STATUSES = new Set(
 
 async function lockCustomerBeforeAutoCreditSetup(trx, invoice, opts) {
   if (opts.skipAutoCredit || !invoice?.customer_id || invoice.payer_id) return;
-  if (!require('../config/feature-gates').isEnabled('autoApplyAccountCredit')) return;
+  const fg = require('../config/feature-gates');
+  if (!fg.isEnabled('autoApplyAccountCredit') && !fg.isEnabled('payPromoCode')) return;
+  // Preserve discount -> customer -> pay.combined.customer -> invoice across
+  // concurrent estimate-promo and pay-page promo redemptions.
+  await require('./invoice-promo-code').prelockPendingPromoDiscount(trx, invoice);
   let ownerId = String(invoice.customer_id);
   for (let attempt = 0; attempt < 4; attempt++) {
     await trx('customers').where({ id: ownerId }).forUpdate().first('id');
