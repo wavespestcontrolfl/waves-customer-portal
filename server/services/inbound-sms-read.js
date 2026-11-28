@@ -37,6 +37,7 @@ function nextMillisecondBoundary(date) {
 // or, since the bell opens the conversation, ?message=<MessageSid>
 // (notification-triggers.js sms_reply). Both mean "unlinked".
 const UNLINKED_BELL_LINK = '/admin/communications';
+const SMS_BELL_CATEGORIES = ['inbound_sms', 'new_lead'];
 const isUnlinkedBellLink = (qb, column = 'link') => qb.where((b) => b
   .where(column, UNLINKED_BELL_LINK).orWhere(column, 'like', `${UNLINKED_BELL_LINK}?message=%`));
 
@@ -62,7 +63,8 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
       // Match the bell's current target and preserve customer-linked bells.
       const bellCutoff = nextMillisecondBoundary(cutoff);
       const liveBell = () => isUnlinkedBellLink(NotificationService.scopeAdminFeedToRole(trx('notifications'), role)
-        .where({ recipient_type: 'admin', category: 'inbound_sms' }))
+        .where({ recipient_type: 'admin' })
+        .whereIn('category', SMS_BELL_CATEGORIES))
         .whereNull('read_at')
         .where('created_at', '<', bellCutoff)
         .whereRaw(
@@ -118,7 +120,8 @@ async function phonesWithLiveUnlinkedBell(candidateRows) {
     .whereRaw('COALESCE(l.from_phone, c.contact_phone) = ANY(?)', [candidatePhones])
     .whereExists(function liveBell() {
       isUnlinkedBellLink(this.select(1).from('notifications as n')
-        .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms' }), 'n.link')
+        .where({ 'n.recipient_type': 'admin' })
+        .whereIn('n.category', SMS_BELL_CATEGORIES), 'n.link')
         .whereNull('n.read_at')
         .whereRaw("n.metadata->'payload'->>'twilioSid' = m.twilio_sid");
     })
@@ -193,7 +196,7 @@ async function clearBacklogResetMarkers({ scope, ids, convs }) {
 // its bell as soon as it rings.
 async function markInboundSmsRead({
   messageIds = [], conversationIds = [], applicationId = null, replyMessageIds = null, replyEntryIds = [],
-  readBefore = null, adminUserId = null, role,
+  readBefore = null, adminUserId = null, role, spamTagLockKey = null,
 } = {}) {
   const ids = messageIds.filter((id) => typeof id === 'string' && id.trim());
   const convs = conversationIds.filter((id) => typeof id === 'string' && id.trim());
@@ -224,27 +227,68 @@ async function markInboundSmsRead({
   // 1. Strip backlog-reset markers across the request scope regardless of
   //    read state (rows the reset already read are exactly the ones a human
   //    is now looking at), on messages, legacy twins, and the thread's bells.
-  await clearBacklogResetMarkers({ scope, ids, convs });
+  if (!spamTagLockKey) {
+    await clearBacklogResetMarkers({ scope, ids, convs });
+  }
 
   // 2. The read itself (+ legacy mirror by twilio_sid).
   // A technician's read scope never touches hidden recruiting rows (PR
   // #4623): the display query hides them, so the write must too, or a
   // technician opening the customer part of a shared thread would clear the
   // owner's unread applicant reply.
-  const q = () => hideRecruitingThreadsFromNonAdmin(db('messages').where({ channel: 'sms', direction: 'inbound' }), { techRole: role }, 'message_type')
-    .andWhere(function unreadOnly() { this.where({ is_read: false }).orWhereNull('is_read'); })
-    .andWhere(scope);
-  // Reconcile every requested inbound SID, including already-read rows:
-  // a prior read can commit while its later bell reconciliation times out.
-  const scopedSids = (await db('messages').where({ channel: 'sms', direction: 'inbound' })
-    .andWhere(scope).whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
-  const mirrorSids = (await q().whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
-  const updated = await q().update({ is_read: true, read_at: now, read_by_admin_user_id: adminUserId || null, updated_at: now });
-  try {
-    await db('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
-      .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
-      .update({ is_read: true });
-  } catch (e) { logger.warn('[inbound-sms-read] sms_log read mirror failed', { code: e.code || 'unknown' }); }
+  let scopedSids = [];
+  let updated = 0;
+  if (spamTagLockKey) {
+    // Serialize spam-tag read writes under the same per-sender advisory lock as
+    // untagSpamSender and atomically recheck spam_verdict.enforced = true so an
+    // undo that ran in between cannot have its reopened texts re-marked read.
+    const locked = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms-spam-tag:${spamTagLockKey}`]);
+      const enforcedOnly = (qb) => qb.whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') = 'true'");
+      const lockedSids = (await enforcedOnly(trx('messages').where({ channel: 'sms', direction: 'inbound' }).andWhere(scope))
+        .whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
+      const updatedRows = await enforcedOnly(
+        hideRecruitingThreadsFromNonAdmin(trx('messages').where({ channel: 'sms', direction: 'inbound' }), { techRole: role }, 'message_type')
+          .andWhere(function unreadOnly() { this.where({ is_read: false }).orWhereNull('is_read'); })
+          .andWhere(scope),
+      ).update({ is_read: true, read_at: now, read_by_admin_user_id: adminUserId || null, updated_at: now }).returning('twilio_sid');
+      const mirrorSids = updatedRows.map((r) => r.twilio_sid).filter(Boolean);
+      if (mirrorSids.length) {
+        await trx.raw('SAVEPOINT sms_log_read_mirror');
+        try {
+          await trx('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
+            .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
+            .update({ is_read: true });
+          await trx.raw('RELEASE SAVEPOINT sms_log_read_mirror');
+        } catch (e) {
+          await trx.raw('ROLLBACK TO SAVEPOINT sms_log_read_mirror');
+          logger.warn('[inbound-sms-read] sms_log read mirror failed', { code: e.code || 'unknown' });
+        }
+      }
+      return { lockedSids, updatedCount: updatedRows.length };
+    });
+    scopedSids = locked.lockedSids;
+    updated = locked.updatedCount;
+    if (!updated && !scopedSids.length) {
+      return { updated: 0, notificationsCleared: 0 };
+    }
+    await clearBacklogResetMarkers({ scope, ids, convs });
+  } else {
+    const q = () => hideRecruitingThreadsFromNonAdmin(db('messages').where({ channel: 'sms', direction: 'inbound' }), { techRole: role }, 'message_type')
+      .andWhere(function unreadOnly() { this.where({ is_read: false }).orWhereNull('is_read'); })
+      .andWhere(scope);
+    // Reconcile every requested inbound SID, including already-read rows:
+    // a prior read can commit while its later bell reconciliation times out.
+    scopedSids = (await db('messages').where({ channel: 'sms', direction: 'inbound' })
+      .andWhere(scope).whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
+    const mirrorSids = (await q().whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
+    updated = await q().update({ is_read: true, read_at: now, read_by_admin_user_id: adminUserId || null, updated_at: now });
+    try {
+      await db('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
+        .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
+        .update({ is_read: true });
+    } catch (e) { logger.warn('[inbound-sms-read] sms_log read mirror failed', { code: e.code || 'unknown' }); }
+  }
 
   // 3. Bell cross-clear — only threads with nothing unread left, bells that
   //    existed at entry, through the notification service.
@@ -328,7 +372,10 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, exc
         .orWhereRaw("jsonb_exists(COALESCE(m.metadata, '{}'::jsonb), 'backlog_reset')")
         .orWhereIn('m.twilio_sid', function liveBells() {
           this.select(db.raw("n.metadata->'payload'->>'twilioSid'")).from('notifications as n')
-            .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms' }).whereNull('n.read_at');
+            .where({ 'n.recipient_type': 'admin' })
+            .whereIn('n.category', SMS_BELL_CATEGORIES)
+            .where((b) => b.where('n.category', 'inbound_sms').orWhere('n.link', 'like', `${UNLINKED_BELL_LINK}%`))
+            .whereNull('n.read_at');
         });
     })
     .whereRaw(`${receipt.effectiveCreatedAtSql} < ?`, [cutoff])

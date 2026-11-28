@@ -53,6 +53,7 @@ const VERIFIER_CALLS = {
   assertNoInvoiceChargeReconciliationPending: 'predicate',
   assertInvoiceDepositSettlementReady: 'predicate',
   assertPlanChoiceCounterpartPayable: 'plan-choice pair guard (B-22)',
+  assertNoPendingPromoCode: 'other-authority: pay-session promo redemption requires setup refresh; combinedEligibleSiblings excludes pending-promo siblings via invoiceIdsWithPendingPromo',
   // plain control flow / constructors that are not checks
   staleErr: 'refusal constructor', require: 'module load', Error: 'constructor', Set: 'constructor', Map: 'constructor',
   String: 'coercion', warn: 'logging', has: 'set lookup', get: 'map lookup', map: 'array', filter: 'array', sort: 'array',

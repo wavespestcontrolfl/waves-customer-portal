@@ -286,8 +286,7 @@ function sendExpectedFinalizeConflict(res, err) {
   res.status(409).json({
     error: err.message,
     staleBalance: !!err.staleBalance,
-    inProgress: !!err.inProgress,
-    planChoiceConflict: !!err.planChoiceConflict,
+    ...(err.planChoiceConflict ? { inProgress: !!err.inProgress, planChoiceConflict: true } : {}),
   });
   return true;
 }
@@ -809,7 +808,7 @@ router.get('/:token', async (req, res, next) => {
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
     // A read failure hides the block and never fails the page.
     const promoCode = await require('../services/invoice-promo-code')
-      .promoCodeViewForInvoice(data, { saveRequired: getSaveRequired })
+      .promoCodeViewForInvoice(data, { saveRequired: getSaveRequired, payerOwnedLive })
       .catch((err) => {
         logger.warn(`[pay-v2] promo code block suppressed for invoice ${data.id}: ${err.code || err.message}`);
         return null;
@@ -1298,7 +1297,9 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
     if (typeof req.body?.code !== 'string') return res.status(400).json({ error: 'invalid_code' });
     // The code is saved under the invoice row lock, the lock /setup holds
     // when it redeems it: an invoice that was paid, voided or moved to a
-    // payer meanwhile takes no code.
+    // payer meanwhile takes no code. Any open client-confirmable PI on the
+    // invoice is retired before returning 200 so another tab cannot confirm
+    // the pre-promo gross amount directly at Stripe before reload runs /setup.
     const outcome = await db.transaction(async (trx) => {
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
       if (!locked) return null;
@@ -1309,10 +1310,39 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
       if (await PayPlanChoice.planChoiceCounterpartConflict(locked, { conn: trx, inspectStripe: false })) {
         return { ok: false, reason: 'invalid_code' };
       }
-      return require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code }, trx);
+      const entered = await require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code, trackInsert: true }, trx);
+      return { ...entered, openPiId: locked.stripe_payment_intent_id || null };
     });
     if (!outcome) return notFound();
     if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
+    // Retire any pre-promo open PaymentIntent whenever the promo row is still
+    // unredeemed ('entered') — never on an already-redeemed row whose PI is
+    // already priced with the discount. Public 409 responses never expose PI IDs
+    // or upstream Stripe details.
+    if (outcome.openPiId && !outcome.applied?.credited) {
+      const { retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
+      const retireRefusal = await retireOpenPaymentIntentBeforeSettlement(
+        { id: invoice.id, stripe_payment_intent_id: outcome.openPiId },
+        { action: 'applying a promo code' },
+      );
+      if (retireRefusal) {
+        if (outcome.insertedNew) {
+          await db.transaction(async (cleanupTrx) => {
+            await cleanupTrx('invoices').where({ id: invoice.id }).forUpdate().first('id');
+            await cleanupTrx('invoice_promo_codes')
+              .where({ invoice_id: invoice.id, status: 'entered' })
+              .delete();
+          }).catch(() => {});
+        }
+        return res.status(409).json({
+          error: 'A payment is already in progress for this invoice — please wait a moment and refresh.',
+          code: 'payment_in_flight',
+        });
+      }
+      await db('invoices')
+        .where({ id: invoice.id, stripe_payment_intent_id: outcome.openPiId })
+        .update({ stripe_payment_intent_id: null });
+    }
     return res.json({ success: true, promoCode: { canEnter: false, applied: outcome.applied } });
   } catch (err) {
     logger.warn(`[pay-v2] promo-code failed (code=${err?.code || 'none'}, invoice=${invoiceId || 'unresolved'})`);
@@ -1422,6 +1452,22 @@ router.post('/:token/update-amount', async (req, res, next) => {
   }
 });
 
+function respondPayPhaseError(req, res, { invoice, phase, methodCategory, paymentIntentId, err }) {
+  if (err && err.statusCode === 409 && err.staleBalance) {
+    return res.status(409).json({ error: err.message, staleBalance: true });
+  }
+  logger.error(`[pay-v2] ${phase === 'quote' ? 'Quote' : 'Confirm'} error: ${err.message}`);
+  reportBillPaymentError(req, {
+    invoice,
+    phase,
+    methodCategory,
+    paymentIntentId,
+    error: err,
+    statusCode: 400,
+  });
+  return res.status(400).json({ error: err.message });
+}
+
 // =========================================================================
 // POST /api/pay/:token/quote — Get surcharge quote for a specific PM
 // =========================================================================
@@ -1448,16 +1494,13 @@ router.post('/:token/quote', async (req, res, next) => {
     const result = await StripeService.quoteInvoiceSurcharge(invoice.id, paymentMethodId);
     res.json(result);
   } catch (err) {
-    logger.error(`[pay-v2] Quote error: ${err.message}`);
-    reportBillPaymentError(req, {
+    respondPayPhaseError(req, res, {
       invoice,
       phase: 'quote',
       methodCategory: 'card',
       paymentIntentId: invoice?.stripe_payment_intent_id,
-      error: err,
-      statusCode: 400,
+      err,
     });
-    res.status(400).json({ error: err.message });
   }
 });
 

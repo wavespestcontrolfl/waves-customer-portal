@@ -243,12 +243,13 @@ describe('M5: the promise routes answer 404 for a customer outside the technicia
     expect(scope.technicianServicesCustomer).not.toHaveBeenCalled();
   });
 
-  test('gate off: a technician changes any promise, as before', async () => {
+  test('gate off: a technician is still scoped to own customers on promise mutations', async () => {
     tables({ callCustomer: OTHER_CUSTOMER_ID });
     await withServer(async (base) => {
-      expect((await send(base, 'PATCH', `/commitments/${COMMITMENT_ID}`, { action: 'dismiss' })).status).toBe(200);
+      expect((await send(base, 'PATCH', `/commitments/${COMMITMENT_ID}`, { action: 'dismiss' })).status).toBe(404);
     });
-    expect(scope.technicianServicesCustomer).not.toHaveBeenCalled();
+    expect(scope.technicianServicesCustomer).toHaveBeenCalledWith(expect.anything(), OTHER_CUSTOMER_ID);
+    expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
   });
 
   test('gate on: recording a promise on another customer\'s call, and acting on their proposal, are 404', async () => {
@@ -267,7 +268,7 @@ describe('M5: the promise routes answer 404 for a customer outside the technicia
     expect(proposals.applyProposal).not.toHaveBeenCalled();
   });
 
-  test('the feeds hand the technician\'s own-customer subquery to the readers; an admin and gate off pass none', async () => {
+  test('the feeds hand the technician\'s own-customer subquery unconditionally; only an admin passes none', async () => {
     await withServer(async (base) => {
       process.env.GATE_TECH_LOGIN_PRIVACY = 'true';
       for (const feed of ['/commitments/open', '/commitments/auto-closed', '/proposals']) {
@@ -283,9 +284,9 @@ describe('M5: the promise routes answer 404 for a customer outside the technicia
       global.__privacyRole = 'technician';
       delete process.env.GATE_TECH_LOGIN_PRIVACY;
       for (const feed of ['/commitments/open', '/commitments/auto-closed', '/proposals']) await send(base, 'GET', feed);
-      expect(commitments.listOpenCommitments.mock.calls.map((c) => c[1].customerScope)).toEqual([null, null]);
-      expect(commitments.listAutoClosedCommitments.mock.calls.map((c) => c[1].customerScope)).toEqual([null, null]);
-      expect(proposals.listProposals.mock.calls.map((c) => c[1].customerScope)).toEqual([null, null]);
+      expect(commitments.listOpenCommitments.mock.calls.map((c) => c[1].customerScope)).toEqual([null, 'own-customers-subquery']);
+      expect(commitments.listAutoClosedCommitments.mock.calls.map((c) => c[1].customerScope)).toEqual([null, 'own-customers-subquery']);
+      expect(proposals.listProposals.mock.calls.map((c) => c[1].customerScope)).toEqual([null, 'own-customers-subquery']);
     });
   });
 });

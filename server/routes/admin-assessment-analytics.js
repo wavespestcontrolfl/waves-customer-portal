@@ -252,11 +252,21 @@ router.get('/benchmarks', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const { technicianServicesCustomer } = require('../services/technician-visit-scope');
+
 // =========================================================================
 // GET /tech-context/:customerId — tech field knowledge surfacing
 // =========================================================================
 router.get('/tech-context/:customerId', requireTechOrAdmin, async (req, res, next) => {
   try {
+    if (!(await technicianServicesCustomer(req, req.params.customerId))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+    const customer = await db('customers')
+      .where({ id: req.params.customerId })
+      .whereNull('deleted_at')
+      .first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
     const context = await analytics.getTechFieldContext(req.params.customerId);
     res.json({ context });
   } catch (err) { next(err); }

@@ -26,7 +26,7 @@ const {
   canonicalSmsAddressProjectionSql,
 } = require('../services/sms-response-policy');
 const { loadPendingSmsConversations, NEEDS_REPLY_SINCE } = require('../services/sms-pending-conversations');
-const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
+const { resolveVerifiedOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
 const { etDateString, etParts } = require('../utils/datetime-et');
@@ -548,8 +548,16 @@ async function sendSmsHandler(req, res, next) {
     let outreachLeadId = null;
     reviewRequestEmail = req.body.reviewRequestEmail === true;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
-    const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
-    const media = mediaFromOutboundAttachments(mediaAttachments, cleanMediaUrls);
+    const hasRawMediaUrls = Array.isArray(mediaUrls) && mediaUrls.some((u) => typeof u === 'string' && u.trim());
+    const rawAttachments = Array.isArray(mediaAttachments) ? mediaAttachments : [];
+    if (hasRawMediaUrls && rawAttachments.length === 0) {
+      return res.status(400).json({ error: 'Raw mediaUrls are not supported; upload attachments via /attach' });
+    }
+    const resolvedMedia = await resolveVerifiedOutboundAttachments(rawAttachments);
+    if (resolvedMedia.error) {
+      return res.status(resolvedMedia.status || 400).json({ error: resolvedMedia.error });
+    }
+    const { media, mediaUrls: verifiedMediaUrls } = resolvedMedia;
     if (!to || (!cleanBody && media.length === 0)) {
       return res.status(400).json({ error: 'to and body or media required' });
     }
@@ -594,6 +602,9 @@ async function sendSmsHandler(req, res, next) {
     // recruiting row behind it is explicit customer context and keeps the
     // ordinary path (Codex r16 P1).
     const recruitingContext = await recruitingReplyContext(replyToMessageId, to);
+    if (recruitingContext?.conflict) {
+      return res.status(409).json({ error: recruitingContext.error, code: 'RECRUITING_PHONE_MISMATCH' });
+    }
     if (recruitingContext || (!trustedCustomerId && await isRecruitingPhone(to, undefined, { activeOnly: true }))) {
       // Bar only: this branch SENDS (RecruitingComms.sendOwnerReply) before any draft verification, claim or pin, and it settles
       // no Agent Review decision. An Agent Review draft never goes out on an applicant thread: refused before any send or write.
@@ -1355,8 +1366,8 @@ async function sendSmsHandler(req, res, next) {
         agentDraft: verifiedAgentDraft || undefined,
         suggestedReply: verifiedAgentDraft || undefined,
         fromNumber: providerCoordinationFromNumber || fromNumber || homeLineSender || undefined,
-        mediaUrls: cleanMediaUrls.length ? cleanMediaUrls : undefined,
-        allowMediaUrls: cleanMediaUrls.length > 0,
+        mediaUrls: verifiedMediaUrls.length ? verifiedMediaUrls : undefined,
+        allowMediaUrls: verifiedMediaUrls.length > 0,
         media,
         // Operator hand-typed (or edited) this body in the Comms composer —
         // exempt it from the stale-month guard so an intentional reference to
@@ -2400,14 +2411,19 @@ router.get('/log', async (req, res, next) => {
     // threads (no customer behind them) are office work.
     if (isTechnicianRequest(req)) query = query.whereIn('conversations.customer_id', technicianCustomerIdsSubquery(req, db));
 
-    // Exclude internal admin phone messages from either side of the conversation.
+    // Exclude internal admin phone messages from either side of the conversation,
+    // including resolved addresses from sms_log / message metadata when
+    // conversations.our_endpoint_id or contact_phone is NULL.
     for (const phone of ADMIN_PHONES) {
       query = query
-        .whereNot('conversations.our_endpoint_id', phone)
+        .where(b => b.whereNot('conversations.our_endpoint_id', phone)
+          .orWhereNull('conversations.our_endpoint_id'))
         .where(b => b.whereNot('conversations.contact_phone', phone)
           .orWhereNull('conversations.contact_phone'))
         .where(b => b.whereNot('customers.phone', phone)
-          .orWhereNull('customers.phone'));
+          .orWhereNull('customers.phone'))
+        .whereRaw(`COALESCE(${addressProjection.endpointSql}, '') <> ?`, [phone])
+        .whereRaw(`COALESCE(${addressProjection.contactPhoneSql}, '') <> ?`, [phone]);
     }
 
     // Exact contact match for a lead that has no customer record yet. Never
@@ -2811,6 +2827,19 @@ router.post('/messages/:id/like', async (req, res, next) => {
     if (reply.status >= 300) return res.status(reply.status).json(reply.json);
     // A suppressed send answers 200 with nothing delivered.
     if (verdict === 'not_sent') return res.status(422).json({ error: 'The thumbs-up was not sent, so the text has no like.' });
+    try {
+      const { markInboundSmsRead } = require('../services/inbound-sms-read');
+      const readBefore = target.createdAt ? new Date(target.createdAt) : new Date();
+      await markInboundSmsRead({
+        messageIds: [target.id],
+        conversationIds: target.conversationId ? [target.conversationId] : [],
+        readBefore,
+        adminUserId: req.technicianId,
+        role: req.techRole,
+      });
+    } catch (readErr) {
+      logger.warn('[communications] marking liked SMS read failed', { code: readErr?.code || 'unknown' });
+    }
     return res.json({ success: true, officeLike: officeLike.officeLikeForClient({ office_like: { ...claim, status: verdict } }) });
   } catch (err) { next(err); }
 });
@@ -2834,19 +2863,32 @@ router.get('/stats', requireAdmin, async (req, res, next) => {
     const { year, month } = etParts(new Date());
     const som = parseETDateTime(`${year}-${String(month).padStart(2, '0')}-01T00:00:00`).toISOString();
 
-    // Read from unified messages joined to conversations so we can filter
-    // out internal-admin-phone traffic on either endpoint side.
+    // Read from unified messages joined to conversations + linked sms_log so we
+    // filter out internal-admin-phone traffic using the exact same resolved
+    // addresses as /log (including rows identified solely by sms_log).
+    const statsLegacyLinkSql = canonicalSmsLegacyLinkSql({
+      messageAlias: 'messages', conversationAlias: 'conversations',
+    });
+    const statsAddressProjection = canonicalSmsAddressProjectionSql({
+      messageAlias: 'messages', conversationAlias: 'conversations',
+      customerAlias: 'customers', legacyAlias: 'sms_response',
+    });
     const baseSms = () => db('messages')
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+      .joinRaw(`LEFT JOIN LATERAL (
+        ${statsLegacyLinkSql}
+      ) sms_response ON true`)
       .where('messages.channel', 'sms')
       .where('messages.created_at', '>=', som);
 
     const excludeAdmin = (q) => {
       for (const phone of ADMIN_PHONES) {
-        q = q.whereNot('conversations.our_endpoint_id', phone)
+        q = q.where(b => b.whereNot('conversations.our_endpoint_id', phone).orWhereNull('conversations.our_endpoint_id'))
           .where(b => b.whereNot('conversations.contact_phone', phone).orWhereNull('conversations.contact_phone'))
-          .where(b => b.whereNot('customers.phone', phone).orWhereNull('customers.phone'));
+          .where(b => b.whereNot('customers.phone', phone).orWhereNull('customers.phone'))
+          .whereRaw(`COALESCE(${statsAddressProjection.endpointSql}, '') <> ?`, [phone])
+          .whereRaw(`COALESCE(${statsAddressProjection.contactPhoneSql}, '') <> ?`, [phone]);
       }
       return q;
     };
@@ -4372,11 +4414,35 @@ async function recruitingReplyContext(messageId, to) {
   if (!messageId || typeof messageId !== 'string') return null;
   const row = await db('messages')
     .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+    .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+    .leftJoin('job_applications', function joinApp() {
+      this.on(db.raw("job_applications.id::text = messages.metadata->>'job_application_id'"));
+    })
     .where('messages.id', messageId)
-    .first('messages.message_type', 'messages.metadata', 'conversations.contact_phone', 'conversations.our_endpoint_id');
+    .first(
+      'messages.message_type',
+      'messages.metadata',
+      'conversations.contact_phone',
+      'customers.phone as customer_phone',
+      db.raw("job_applications.contact_snapshot->>'phone' as application_phone"),
+      'conversations.our_endpoint_id',
+    );
   if (!row || !isRecruitingMessageType(row.message_type)) return null;
-  const rowPhone = normalizePhone(row.contact_phone);
-  if (!rowPhone || rowPhone !== normalizePhone(to)) return null;
+  const normalizedTo = normalizePhone(to);
+  const rowPhone = normalizePhone(row.contact_phone || row.customer_phone);
+  if (!normalizedTo || !rowPhone || rowPhone !== normalizedTo) return null;
+  // When contact_phone is null (customer-linked thread) or an application snapshot
+  // phone exists, verify the application's actual delivery phone matches `to` so
+  // sendOwnerReply can never deliver to a different phone after a profile edit.
+  // Return a conflict instead of null so callers refuse with 409 rather than
+  // falling through to the customer SMS pipeline when a customerId is present.
+  const appPhone = normalizePhone(row.application_phone);
+  if ((appPhone && appPhone !== normalizedTo) || (!row.contact_phone && !appPhone)) {
+    return {
+      conflict: true,
+      error: "This applicant's phone number changed — refresh the thread or reply from the recruiting queue.",
+    };
+  }
   const meta = parseJson(row.metadata, {});
   return { applicationId: meta.job_application_id || null, ourEndpointId: row.our_endpoint_id || null };
 }

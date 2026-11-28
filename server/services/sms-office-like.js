@@ -69,7 +69,7 @@ async function loadLikeTarget(dbi, messageId) {
   const row = await smsWithAddress(dbi)
     .where('m.id', messageId)
     .first(
-      'm.id', 'm.direction', 'm.body', 'm.created_at', 'm.twilio_sid', 'm.metadata', 'legacy.id as legacy_id',
+      'm.id', 'm.conversation_id', 'm.direction', 'm.body', 'm.created_at', 'm.twilio_sid', 'm.metadata', 'legacy.id as legacy_id',
       'c.customer_id', 'cu.phone as customer_phone', 'cu.deleted_at as customer_deleted_at',
       dbi.raw(`${projection.contactPhoneSql} AS contact_phone`),
       dbi.raw(`${projection.endpointSql} AS our_endpoint`),
@@ -81,6 +81,7 @@ async function loadLikeTarget(dbi, messageId) {
     && normalizePhone(contactPhone) && normalizePhone(contactPhone) === normalizePhone(row.customer_phone));
   return {
     id: row.id,
+    conversationId: row.conversation_id || null,
     direction: row.direction,
     body: row.body,
     createdAt: row.created_at,

@@ -312,7 +312,7 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
   // The rules name the call date twice. In the system layout the rules are static, so they
   // point at the date line of the user message instead of carrying the date itself.
   const todayRef = opts.systemLayout === true ? 'the "Call date in Eastern Time" given in the user message' : callDateET;
-  const who = 'You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties, plus the south-Hillsborough towns Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton, and Riverview).';
+  const who = 'You are an extraction engine for Waves Pest Control, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties, plus the south-Hillsborough towns Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton, and Riverview).';
   const callFacts = `Caller phone (from Twilio ANI): ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}${callTimeBlock}
 ${knownCallerBlock}${callerIdBlock}${callDirectionBlock}`;
