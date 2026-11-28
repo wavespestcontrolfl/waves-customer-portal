@@ -6209,10 +6209,16 @@ shape does not change; `quote_required` was already a possible answer.
 Returning customer setup fee (`GATE_RETURNING_SETUP_FEE_GAP`, owner
 2026-11-24, "make this a rule"; dark by default;
 `server/services/returning-setup-fee-waiver.js`): gate on, a contact the
-server matches to a customer whose plan lapsed, quoting a solo pest or a
-solo mosquito plan inside one plan cycle plus 30 days of that customer's
-last completed visit of the same plan (quarterly 121 days, bi-monthly 91,
-monthly 60), is quoted no WaveGuard setup fee. The response answers
+server matches to a customer whose plan lapsed at the quoted property,
+quoting a solo pest or a solo mosquito plan inside one plan cycle plus 30
+days of that customer's last completed visit of the same plan at that same
+property (quarterly 121 days, bi-monthly 91, monthly 60), is quoted no
+WaveGuard setup fee. Both active-plan deferral and completed visit history
+are scoped to the quoted property (by property id / normalized street,
+requiring a positive property match on completed visits), so a lapsed visit
+on Property A never waives the setup fee for a quote at Property B, and an
+active plan on Property A does not block a lapsed Property B from the
+returning waiver. The response answers
 `has_setup_fee: false` and omits `setup_fee_amount`, the answer an active
 member already gets, and the draft freezes `setupFeeQuote: { amount: 0,
 waived: 'returning_customer', kind: 'waveguard_membership' }`, which the

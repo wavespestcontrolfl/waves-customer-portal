@@ -3063,7 +3063,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     if (lane !== LANES.RED) {
       try {
         const Returning = require('../returning-setup-fee-waiver');
-        const history = await Returning.loadReturningVisitHistory(db, { customerId: trustedCustomer?.id });
+        const history = await Returning.loadReturningVisitHistory(db, { customerId: trustedCustomer?.id, address: quotedAddress });
         if (history) {
           const decided = structuredClone(engineResult);
           ({ waiver: returningSetupFeeWaiver } = Returning.mapWithReturningWaiver(

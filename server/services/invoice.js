@@ -6458,6 +6458,93 @@ async function reverseCreditAfterCancelledServiceVoid(voided, scheduledServiceId
   }
 }
 
+// Global lock order for InvoiceService.create inside an active transaction:
+//   (1) schedule.invoice.mint (advisory, hoisted before later advisory locks when linked + stamped/fee)
+//   (2) unminted_setup_fee_manual_billing:<estimateId> (advisory)
+//   (3) setup_fee_account:<customerId> (advisory)
+//   (4) customers row lock + (5) scheduled_services visit lock (acquireScheduledMintLockChain)
+// Acquiring every advisory lock BEFORE any customer/visit row lock eliminates ABBA deadlocks
+// between linked creates, unlinked fee-carrying creates, and the bell's Bill and send button.
+async function acquireInvoiceCreateLocks(database, { linkedScheduledServiceId, stampedEstimateIdInNotes, carriesFeeLine, customerId }) {
+  const mintMod = linkedScheduledServiceId ? require("./scheduled-invoice-mint") : null;
+  if (linkedScheduledServiceId && (stampedEstimateIdInNotes || carriesFeeLine) && typeof mintMod.acquireScheduledInvoiceMintLock === 'function') {
+    await mintMod.acquireScheduledInvoiceMintLock(database, linkedScheduledServiceId);
+  }
+  if (stampedEstimateIdInNotes) {
+    await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
+  }
+  if (carriesFeeLine) {
+    await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`setup_fee_account:${customerId}`]);
+  }
+  if (linkedScheduledServiceId) {
+    await mintMod.acquireScheduledMintLockChain(database, { scheduledServiceId: linkedScheduledServiceId, customerId });
+  }
+}
+
+async function claimSeriesIsRodentBait(conn, claimRecord) {
+  if (!claimRecord?.scheduled_service_id) return null;
+  const own = await conn("scheduled_services")
+    .where({ id: claimRecord.scheduled_service_id })
+    .first("id", "recurring_parent_id", "service_type", "service_id");
+  if (!own) return null;
+  const root = own.recurring_parent_id
+    ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
+    : own;
+  if (!root || (!root.service_type && !root.service_id)) return null;
+  const { authoritativeServiceKey, isRodentBaitProgramKey } = require("./secure-appointment-plans");
+  return isRodentBaitProgramKey(await authoritativeServiceKey(conn, root));
+}
+
+async function restoreWaveGuardSetupClaim(conn, invoiceRow, claimRecord, amount, label) {
+  // A deliberately REFUNDED WaveGuard fee stays resolved (no re-bill). A VOIDED
+  // invoice collected nothing: the fee is owed again, so put the stamp back
+  // (CAS onto NULL) for the next performed visit to bill. The claim is KEPT as
+  // provenance so un-voiding the invoice retires this stamp again
+  // (retireRodentSetupObligationForReinstatedInvoice, claim anchor).
+  if (String(invoiceRow.status || "").toLowerCase() !== "void" || !claimRecord.scheduled_service_id) {
+    logger.info(`[invoice] reversed invoice ${invoiceRow.id}: ${label} setup fee stays resolved (refunded; never re-armed)`);
+    return null;
+  }
+  const anchorId = claimRecord.scheduled_service_id;
+  const restamped = await conn("scheduled_services").where({ id: anchorId }).whereNull("pending_setup_fee")
+    .update({ pending_setup_fee: amount, updated_at: new Date() });
+  if (restamped !== 1) return null;
+  // A DEAD series (cancelled / completed, no live child) can never bill the
+  // restored stamp: hand it to the office now, tagged with this invoice so
+  // un-voiding it reconciles the handoff.
+  const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status");
+  if (!(await require("./secure-appointment-plans").seriesCanStillConsume(conn, anchorRow))) {
+    await require("./setup-fee-obligation").parkSetupFeeStampForOffice(conn, {
+      parentId: anchorId, rawAmount: amount, customerId: invoiceRow.customer_id,
+      estimateId: claimRecord.estimate_id || null,
+      origin: `voided invoice ${invoiceRow.id}; no visit left to bill it`,
+      alertContext: { sourceInvoiceId: String(invoiceRow.id) },
+    });
+  }
+  logger.info(`[invoice] voided invoice ${invoiceRow.id}: ${label} setup fee ($${amount.toFixed(2)}) owed again on series ${anchorId}`);
+  return { scheduledServiceId: anchorId, amount };
+}
+
+async function classifyClaimForReversal(conn, invoiceRow, claimRecord, setupLine) {
+  let billedSeries = null;
+  if (invoiceRow.scheduled_service_id) {
+    const billed = await conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id }).first("id", "recurring_parent_id");
+    billedSeries = billed?.recurring_parent_id || billed?.id || null;
+  }
+  const deferredByPaf = await require("./setup-fee-obligation").seriesSetupFeeDeferredByPaf(
+    conn,
+    [claimRecord.scheduled_service_id, billedSeries, invoiceRow.scheduled_service_id].filter(Boolean),
+    [claimRecord.estimate_id],
+  );
+  if (deferredByPaf) return { waveguard: true, isRodent: false, label: "pay-after-first-visit" };
+  const isRodent = await claimSeriesIsRodentBait(conn, claimRecord);
+  if (isRodent === false) return { waveguard: true, isRodent: false, label: "WaveGuard" };
+  if (!setupLine && require("./setup-fee-obligation").carriesWaveguardFeeLine(invoiceRow)) {
+    return { waveguard: true, isRodent: false, label: "WaveGuard" };
+  }
+  return { waveguard: false, isRodent, label: null };
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -6607,26 +6694,9 @@ const InvoiceService = {
     const carriesFeeLine = !!customerId && require('./setup-fee-obligation').carriesWaveguardFeeLine({ line_items: lineItems });
     if (linkedScheduledServiceId || stampedEstimateIdInNotes || carriesFeeLine) {
       if (database && database.isTransaction) {
-        if (linkedScheduledServiceId) {
-          // The SHARED lock chain (mint advisory lock → customer KEY SHARE →
-          // visit row FOR UPDATE + the never-ran status refusal), not a bare
-          // visit FOR UPDATE: this path is every linked create() caller that
-          // does not otherwise route through the chain (manual admin, project/
-          // WDO, prepay-switch undo, estimate converter). A cancellation that
-          // won the mint lock and committed while this waited must not be
-          // billed past (Codex #5244 r7), and the customer key-share must come
-          // BEFORE the visit lock — the invoice insert's customer FK would
-          // otherwise take it after, inverting the order the chain exists to
-          // hold against the extension accept (ABBA deadlock).
-          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
-          await acquireScheduledMintLockChain(database, { scheduledServiceId: linkedScheduledServiceId, customerId });
-        }
-        if (stampedEstimateIdInNotes) {
-          await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
-        }
-        if (carriesFeeLine) {
-          await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`setup_fee_account:${customerId}`]);
-        }
+        await acquireInvoiceCreateLocks(database, {
+          linkedScheduledServiceId, stampedEstimateIdInNotes, carriesFeeLine, customerId,
+        });
       } else if (typeof (database || db).transaction === 'function') {
         // Resolve the record link again INSIDE the transaction, before any
         // mint lock. A pre-transaction link never selects the guarded member.
@@ -12841,55 +12911,18 @@ const InvoiceService = {
     // already restores.
     const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
     if (termBacked) return null; // prepay lane — restored via the claims ledger / marker re-mint
-    // A pay-after-first-visit setup fee (GATE_PAF_SETUP_FEE) rides the same
-    // stamp + claim mechanism but is NOT a rodent obligation: a refunded
-    // claim-backed fee stays resolved. Provenance is resolved across the whole
-    // series (the claim's estimate, the anchor, the billed visit's series and
-    // every child, so an adopted appointment's estimate is found even when a
-    // sibling billed the fee).
+    // Every WaveGuard setup-fee claim — whether deferred by PAF or minted via
+    // /secure plan-choice on a Pest/Mosquito series — routes through the
+    // WaveGuard branch (refunded stays resolved; voided re-stamps or parks to
+    // office). Never let a non-rodent claim fall through into the rodent
+    // bait-station branch (which re-arms refunded fees and mints "Bait Station
+    // Setup" drafts on dead series).
+    let claimInfo = null;
     if (claimRecord) {
-      let billedSeries = null;
-      if (invoiceRow.scheduled_service_id) {
-        const billed = await conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id }).first("id", "recurring_parent_id");
-        billedSeries = billed?.recurring_parent_id || billed?.id || null;
+      claimInfo = await classifyClaimForReversal(conn, invoiceRow, claimRecord, setupLine);
+      if (claimInfo.waveguard) {
+        return restoreWaveGuardSetupClaim(conn, invoiceRow, claimRecord, amount, claimInfo.label);
       }
-      const deferredByPaf = await require("./setup-fee-obligation").seriesSetupFeeDeferredByPaf(
-        conn,
-        [claimRecord.scheduled_service_id, billedSeries, invoiceRow.scheduled_service_id].filter(Boolean),
-        [claimRecord.estimate_id],
-      );
-      if (deferredByPaf) {
-        // A deliberately REFUNDED fee stays resolved (no re-bill). A VOIDED
-        // invoice collected nothing: the fee is owed again, so put the stamp
-        // back (CAS onto NULL) for the next performed visit to bill. The claim
-        // is KEPT as provenance, so un-voiding the invoice retires this stamp
-        // again (retireRodentSetupObligationForReinstatedInvoice, claim anchor).
-        if (String(invoiceRow.status || "").toLowerCase() !== "void" || !claimRecord.scheduled_service_id) {
-          logger.info(`[invoice] reversed invoice ${invoiceRow.id}: pay-after-first-visit setup fee stays resolved (refunded; never re-armed)`);
-          return null;
-        }
-        const anchorId = claimRecord.scheduled_service_id;
-        const restamped = await conn("scheduled_services").where({ id: anchorId }).whereNull("pending_setup_fee")
-          .update({ pending_setup_fee: amount, updated_at: new Date() });
-        if (restamped !== 1) return null;
-        // A DEAD series (cancelled / completed, no live child) can never bill
-        // the restored stamp: hand it to the office now, tagged with this
-        // invoice so un-voiding it reconciles the handoff
-        // (retireRodentSetupObligationForReinstatedInvoice).
-        const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status");
-        if (!(await require("./secure-appointment-plans").seriesCanStillConsume(conn, anchorRow))) {
-          await require("./setup-fee-obligation").parkSetupFeeStampForOffice(conn, {
-            parentId: anchorId, rawAmount: amount, customerId: invoiceRow.customer_id,
-            estimateId: claimRecord.estimate_id || null,
-            origin: `voided invoice ${invoiceRow.id}; no visit left to bill it`,
-            alertContext: { sourceInvoiceId: String(invoiceRow.id) },
-          });
-        }
-        logger.info(`[invoice] voided invoice ${invoiceRow.id}: pay-after-first-visit setup fee ($${amount.toFixed(2)}) owed again on series ${anchorId}`);
-        return { scheduledServiceId: anchorId, amount };
-      }
-    }
-    if (claimRecord) {
       // A COMPLETION invoice writes a claim record too (crash-resume
       // evidence, admin-dispatch), consumed only AFTER a successful
       // re-stamp/re-bill (codex #3591 r53 local P0): an ambiguous or
@@ -12898,12 +12931,13 @@ const InvoiceService = {
       completionClaimToConsume = claimRecord.id;
     }
     const { authoritativeServiceKey } = require("./secure-appointment-plans");
-    // The claim's anchored series is provenance (codex #3591 r69 P1): the
-    // standard/invoice-mode accept mints record the exact rodent root, so an
-    // unattached invoice (or one attached to a non-rodent first visit) on a
-    // customer with several rodent series restores onto THAT root instead of
-    // paging on the account-wide scan's ambiguity.
-    let anchorId = claimRecord?.scheduled_service_id || null;
+    // The claim's anchored series is provenance (codex #3591 r69 P1) ONLY when
+    // verified as a rodent bait-station series (or a bait-station setup line
+    // with sparse anchor metadata): never treat a non-rodent series as a rodent
+    // anchor.
+    let anchorId = (claimInfo?.isRodent === true || (claimInfo?.isRodent === null && setupLine))
+      ? (claimRecord?.scheduled_service_id || null)
+      : null;
     if (!anchorId && invoiceRow.scheduled_service_id) {
       const own = await conn("scheduled_services")
         .where({ id: invoiceRow.scheduled_service_id })

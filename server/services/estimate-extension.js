@@ -170,6 +170,57 @@ async function fixedBidBlocksExtension(database, estimate) {
   } catch { return true; }
 }
 
+// B-41: extending an estimate past a returning customer's gap window (e.g. > 121 days)
+// must not carry forward a stale returning-customer setup-fee waiver. Re-evaluates and
+// strips stale waivers on the locked anchor (and any locked grouped siblings) inside the tx.
+async function stripAnchorReturningWaiverInTx(trx, { estimate, anchor, updates, strippedIds }) {
+  const { refreshReturningWaiverOnExtend, returningSetupFeeWaiverOf } = require('./returning-setup-fee-waiver');
+  let hydrated = anchor;
+  if (hydrated && returningSetupFeeWaiverOf(hydrated.estimate_data) && hydrated.customer_id === undefined) {
+    hydrated = {
+      ...hydrated,
+      ...(await trx('estimates').where({ id: estimate.id })
+        .first('customer_id', 'address', 'property_id', 'onetime_total', 'monthly_total', 'annual_total')),
+    };
+  }
+  const anchorRow = {
+    ...estimate,
+    ...hydrated,
+    id: estimate.id,
+  };
+  const anchorRes = await refreshReturningWaiverOnExtend(trx, anchorRow);
+  if (anchorRes.stripped && anchorRes.patch) {
+    Object.assign(updates, anchorRes.patch);
+    strippedIds.push(estimate.id);
+  }
+}
+
+async function stripExtendedSiblingReturningWaiversInTx(trx, { estimate, lockedGroup, updatedSiblingRows, strippedIds }) {
+  if (Array.isArray(updatedSiblingRows) && updatedSiblingRows.length === 0) return;
+  if (typeof updatedSiblingRows === 'number' && !(updatedSiblingRows > 0)) return;
+  const updatedIds = Array.isArray(updatedSiblingRows)
+    ? new Set(updatedSiblingRows.map((row) => (row && typeof row === 'object' ? row.id : row)).filter(Boolean))
+    : null;
+  const { refreshReturningWaiverOnExtend } = require('./returning-setup-fee-waiver');
+  const siblings = Array.isArray(lockedGroup)
+    ? lockedGroup.filter((row) => row && row.id !== estimate.id && !row.archived_at && !row.price_locked_at
+      && (!updatedIds || updatedIds.has(row.id)))
+    : [];
+  for (const sib of siblings) {
+    const sibRes = await refreshReturningWaiverOnExtend(trx, sib);
+    if (sibRes.stripped && sibRes.patch) {
+      await trx('estimates').where({ id: sib.id }).update({ ...sibRes.patch, updated_at: db.fn.now() });
+      strippedIds.push(sib.id);
+    }
+  }
+}
+
+function clearPricingCachesForIds(ids) {
+  if (!ids.length) return;
+  const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
+  for (const id of ids) clearEstimatePricingCache(id);
+}
+
 async function extendEstimate({ estimate, days, silent = false, entryPoint, workflow, smsMetadata = {} }) {
   if (!estimate || !estimate.id) throw validationError('Estimate not found');
   if (await fixedBidBlocksExtension(db, estimate)) {
@@ -280,16 +331,21 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // terminal (status + archived_at guards), or (c) reporting success over a
   // concurrent sweep flip (status guard). Zero rows → 409, callers surface
   // retry/failure.
+  const strippedReturningIds = [];
   await db.transaction(async (trx) => {
     let anchor;
+    let lockedGroup = null;
     if (estimate.estimate_group_id) {
       // Proposal saves and grouped sends take this lock before row locks.
       // Hold it through both writes so a new fixed hold cannot split the offer.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['estimate-group-send', String(estimate.estimate_group_id)]);
-      const locked = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id })
-        .orderBy('id').forUpdate().select('id', 'estimate_data', 'disposition', 'disposition_source');
-      anchor = locked.find((row) => row.id === estimate.id);
+      lockedGroup = await trx('estimates').where({ estimate_group_id: estimate.estimate_group_id })
+        .orderBy('id').forUpdate().select(
+          'id', 'status', 'archived_at', 'price_locked_at', 'customer_id', 'address', 'property_id',
+          'onetime_total', 'monthly_total', 'annual_total', 'estimate_data', 'disposition', 'disposition_source',
+        );
+      anchor = lockedGroup.find((row) => row.id === estimate.id);
     } else {
       // A generic proposal save can add a fixed hold after public preflight.
       // Judge the locked row before the write so refusal keeps its public
@@ -328,6 +384,9 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       err.code = 'FIXED_BID_VALIDITY';
       throw err;
     }
+    await stripAnchorReturningWaiverInTx(trx, {
+      estimate, anchor, updates, strippedIds: strippedReturningIds,
+    });
     const updated = await trx('estimates')
       .where({ id: estimate.id, status: estimate.status, estimate_group_id: estimate.estimate_group_id || null })
       .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
@@ -355,7 +414,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     // keep their terminal state. Atomic and SILENT — only the extended
     // estimate drives customer comms (one thread per group).
     if (estimate.estimate_group_id) {
-      await trx('estimates')
+      const updatedSiblingRows = await trx('estimates')
         .where({ estimate_group_id: estimate.estimate_group_id })
         .whereNot({ id: estimate.id })
         .whereNull('archived_at')
@@ -420,9 +479,13 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           competitor_price: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE competitor_price END`),
           decline_reason: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE decline_reason END`),
           updated_at: db.fn.now(),
-        });
+        }, ['id']);
+      await stripExtendedSiblingReturningWaiversInTx(trx, {
+        estimate, lockedGroup, updatedSiblingRows, strippedIds: strippedReturningIds,
+      });
     }
   });
+  clearPricingCachesForIds(strippedReturningIds);
 
   // Re-arm the ENGAGEMENT ENGINE's expiring lifecycle for the new deadline
   // too (codex 2736 r9): the engine's one-lifecycle enqueue guard and the
@@ -732,4 +795,5 @@ module.exports = {
   computeExtensionExpiry,
   extensionStatusUpdate,
   EXTENDABLE_STATUSES,
+  stripExtendedSiblingReturningWaiversInTx,
 };

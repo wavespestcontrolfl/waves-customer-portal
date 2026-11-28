@@ -3062,11 +3062,24 @@ function estimateOperatorSetupFeeWaived(estimateData = {}) {
 // acceptance's invoice/notes, and the acceptedSetupFeeAmount stamp — must
 // price through this resolver so an in-flight quote can never display one
 // fee and charge another after the constant changes.
+// Kind-aware WaveGuard membership setup-fee quote parser: ignores rodent
+// bait-station setup quotes (kind === 'rodent_bait_setup') so a $0 rodent
+// waiver can never zero out or replace a solo pest/mosquito WaveGuard fee on
+// either public display or converter/acceptance invoicing.
+function waveguardFrozenSetupFeeQuote(estimateData = {}) {
+  const quote = normalizeEstimateData(estimateData)?.setupFeeQuote;
+  if (!quote || typeof quote !== 'object') return null;
+  if (quote.kind === 'rodent_bait_setup') return null;
+  const raw = Number(quote.amount);
+  if (Number.isFinite(raw) && raw > 0) {
+    return { waived: false, amount: Math.round(raw * 100) / 100 };
+  }
+  return { waived: true, amount: 0 };
+}
+
 function frozenSetupFeeAmount(estimateData = {}) {
-  const raw = Number(normalizeEstimateData(estimateData)?.setupFeeQuote?.amount);
-  return (Number.isFinite(raw) && raw > 0)
-    ? Math.round(raw * 100) / 100
-    : WAVEGUARD_SETUP_FEE;
+  const frozen = waveguardFrozenSetupFeeQuote(estimateData);
+  return frozen && frozen.amount > 0 ? frozen.amount : WAVEGUARD_SETUP_FEE;
 }
 
 // Disclosed rodent bait-station setup (owner 2026-08-29): a non-member's
@@ -3131,8 +3144,8 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // Frozen wizard waiver: /public/quote/calculate persists setupFeeQuote on
   // the draft — amount 0 means the quote DISCLOSED no fee (active member at
   // quote time), and conversion must not re-add one the customer never saw.
-  const frozenQuote = normalizeEstimateData(estimateData)?.setupFeeQuote;
-  if (frozenQuote && !(Number(frozenQuote.amount) > 0)) return false;
+  const frozenQuote = waveguardFrozenSetupFeeQuote(estimateData);
+  if (frozenQuote?.waived) return false;
   // Existing customers never pay the WaveGuard setup again — mirrors the
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
@@ -9656,6 +9669,7 @@ module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttach
 module.exports.stampCombinedFirstApplicationInvoiceCoverage = stampCombinedFirstApplicationInvoiceCoverage;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
+module.exports.waveguardFrozenSetupFeeQuote = waveguardFrozenSetupFeeQuote;
 module.exports.estimateOperatorSetupFeeWaived = estimateOperatorSetupFeeWaived;
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;

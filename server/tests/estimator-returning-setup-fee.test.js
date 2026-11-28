@@ -177,7 +177,7 @@ describe('a call draft decides the returning-customer setup fee rule when it is 
     expect(result.lane).not.toBe(LANES.RED);
     // The visits read are the linked customer's.
     expect(mockHistory).toHaveBeenCalledTimes(1);
-    expect(mockHistory.mock.calls[0][1]).toEqual({ customerId: CUSTOMER_ID });
+    expect(mockHistory.mock.calls[0][1]).toEqual({ customerId: CUSTOMER_ID, address: ADDRESS });
     const { engineResult, returningSetupFeeWaiver, totals } = draftArgs();
     // The totals the draft stores were derived before the mark: they carry no setup fee, so they still agree
     // with the result stored beside them.
@@ -205,7 +205,7 @@ describe('a call draft decides the returning-customer setup fee rule when it is 
 
   test('an ambiguous phone match is not a link: nobody\'s visits are read and the fee stays', async () => {
     await run({ customerPhoneAmbiguous: true });
-    expect(mockHistory.mock.calls[0][1]).toEqual({ customerId: undefined });
+    expect(mockHistory.mock.calls[0][1]).toEqual({ customerId: undefined, address: ADDRESS });
     const { engineResult, returningSetupFeeWaiver } = draftArgs();
     expect(returningSetupFeeWaiver).toBeNull();
     expect(pestLine(engineResult).initialFee).toBeGreaterThan(0);

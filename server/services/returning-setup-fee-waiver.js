@@ -305,40 +305,216 @@ function decideReturningSetupFeeWaiver({ lastVisitKey, todayKey, visitsPerYear, 
   };
 }
 
+const VISIT_PROPERTY_COLUMNS = [
+  's.property_id', 's.source_estimate_id',
+  's.service_address_line1', 's.service_address_line2', 's.service_address_city', 's.service_address_zip',
+  'p.property_id as parent_property_id', 'p.source_estimate_id as parent_source_estimate_id',
+  'p.service_address_line1 as parent_service_address_line1',
+  'p.service_address_line2 as parent_service_address_line2',
+  'p.service_address_city as parent_service_address_city',
+  'p.service_address_zip as parent_service_address_zip',
+];
+
+async function resolveQuotedPropertyScope(database, customer, { address, propertyId }) {
+  const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+  const customerPrimaryStreet = customer
+    ? normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip)
+    : null;
+  let estimateStreet = address ? normalizedEstimateStreet(address) : null;
+  if (!estimateStreet && propertyId) {
+    const prop = await database('customer_properties').where({ id: propertyId })
+      .first('address_line1', 'address_line2', 'city', 'zip');
+    if (prop) estimateStreet = normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip);
+  }
+  if (!estimateStreet && !propertyId) return null;
+  return {
+    propertyId: propertyId ? String(propertyId) : null,
+    estimateStreet: estimateStreet || null,
+    customerPrimaryStreet: customerPrimaryStreet || null,
+  };
+}
+
+async function cachedPropertyStreet(database, propertyId, cache) {
+  const key = String(propertyId);
+  if (!cache.props.has(key)) {
+    const { normalizedStampedStreet } = require('./estimate-property-linkage');
+    const prop = await database('customer_properties').where({ id: propertyId })
+      .first('address_line1', 'address_line2', 'city', 'zip');
+    cache.props.set(key, prop
+      ? normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip) : null);
+  }
+  return cache.props.get(key) || null;
+}
+
+async function cachedEstimateRow(database, estimateId, cache) {
+  const key = String(estimateId);
+  if (!cache.ests.has(key)) {
+    const est = await database('estimates').where({ id: estimateId }).first('address', 'property_id');
+    cache.ests.set(key, est || null);
+  }
+  return cache.ests.get(key);
+}
+
+function stampedStreetForVisitOrParent(row) {
+  const { normalizedStampedStreet } = require('./estimate-property-linkage');
+  return normalizedStampedStreet(
+    row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip,
+  ) || normalizedStampedStreet(
+    row.parent_service_address_line1, row.parent_service_address_line2, row.parent_service_address_city, row.parent_service_address_zip,
+  );
+}
+
+async function resolveRowPropertyEvidence(database, row, cache) {
+  const { normalizedEstimateStreet, scopeKeysShareLocality } = require('./estimate-property-linkage');
+  const hasLocality = (k) => Boolean(k && scopeKeysShareLocality(k, k));
+  const directPropId = row.property_id || row.parent_property_id || null;
+  let street = stampedStreetForVisitOrParent(row);
+  if (!hasLocality(street) && directPropId) {
+    const propStreet = await cachedPropertyStreet(database, directPropId, cache);
+    if (propStreet && (!street || hasLocality(propStreet))) street = propStreet;
+  }
+  const sourceEstimateId = row.source_estimate_id || row.parent_source_estimate_id || null;
+  if (hasLocality(street) || !sourceEstimateId) return { propId: directPropId, street };
+  const est = await cachedEstimateRow(database, sourceEstimateId, cache);
+  const estStreet = est?.address ? normalizedEstimateStreet(est.address) : null;
+  return {
+    propId: directPropId || est?.property_id || null,
+    street: (estStreet && (!street || hasLocality(estStreet))) ? estStreet : street,
+  };
+}
+
+async function rowMatchesQuotedProperty(database, row, scope, cache, opts = {}) {
+  const { sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
+  const requirePositiveMatch = Boolean(opts && opts.requirePositiveMatch);
+  const directPropId = row.property_id || row.parent_property_id;
+  if (scope.propertyId && directPropId) return String(directPropId) === scope.propertyId;
+  const { propId, street } = await resolveRowPropertyEvidence(database, row, cache);
+  if (scope.propertyId && propId) return String(propId) === scope.propertyId;
+  const candidateStreet = street || (!requirePositiveMatch ? scope.customerPrimaryStreet : null);
+  if (!candidateStreet) return !street && !requirePositiveMatch;
+  return Boolean(
+    scope.estimateStreet
+    && sameScopeKey(candidateStreet, scope.estimateStreet)
+    && scopeKeysShareLocality(candidateStreet, scope.estimateStreet),
+  );
+}
+
+async function filterRowsToQuotedProperty(database, rows, scope, cache, opts) {
+  if (!scope) return rows;
+  const kept = [];
+  for (const row of rows) {
+    if (await rowMatchesQuotedProperty(database, row, scope, cache, opts)) kept.push(row);
+  }
+  return kept;
+}
+
+async function hasActivePlanAtQuotedAddress(database, customer, { address = null, propertyId = null } = {}) {
+  if (!customer?.id) return false;
+  const scope = await resolveQuotedPropertyScope(database, customer, { address, propertyId });
+  if (!scope) {
+    const { isMembershipCustomerRow } = require('./waveguard-existing-services');
+    return customer.active !== false && isMembershipCustomerRow(customer);
+  }
+  const cache = { props: new Map(), ests: new Map() };
+  return hasActivePlanAtQuotedProperty(database, customer.id, customer, scope, cache);
+}
+
+// Property-scoped active-plan check (B-21): an active plan on Property A must NOT block a lapsed
+// Property B from the returning-customer waiver, while an active plan on the quoted property itself
+// still defers to the existing-member waiver.
+async function hasActivePlanAtQuotedProperty(database, customerId, customer, scope, cache) {
+  const { isMembershipCustomerRow, isLiveObligationRow, TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
+  const { sameScopeKey, scopeKeysShareLocality } = require('./estimate-property-linkage');
+  const { etDateString } = require('../utils/datetime-et');
+  const accountHasActiveTier = Boolean(customer && customer.active !== false && isMembershipCustomerRow(customer));
+  // Non-members with live non-WaveGuard recurring visits (e.g. palm injection)
+  // are never covered by the existing-member waiver — check membership first (Codex P2).
+  if (!accountHasActiveTier) return false;
+  const today = etDateString();
+  const rawActiveRows = await database('scheduled_services as s')
+    .leftJoin('scheduled_services as p', 's.recurring_parent_id', 'p.id')
+    .where({ 's.customer_id': customerId })
+    .whereNotIn('s.status', TERMINAL_STATUSES)
+    .where(function legacyOrRecurring() {
+      this.where('s.is_recurring', true)
+        .orWhere(function legacyChild() {
+          this.whereNull('s.is_recurring').whereNotNull('s.recurring_parent_id');
+        });
+    })
+    .select(
+      's.id', 's.status', 's.scheduled_date', 's.is_recurring', 's.recurring_parent_id',
+      's.is_callback', 's.followup_included', 's.source',
+      ...VISIT_PROPERTY_COLUMNS,
+    );
+  const activeRows = (rawActiveRows || []).filter((r) => isPlanSeriesRow(r) && isLiveObligationRow(r, today));
+  const matchingActive = await filterRowsToQuotedProperty(database, activeRows, scope, cache);
+  if (matchingActive.length > 0) return true;
+  if (activeRows.length > 0) return false; // active plan rows exist only on other property(ies)
+  if (scope.customerPrimaryStreet && scope.estimateStreet
+    && !(sameScopeKey(scope.customerPrimaryStreet, scope.estimateStreet)
+      && scopeKeysShareLocality(scope.customerPrimaryStreet, scope.estimateStreet))) {
+    return false;
+  }
+  return true;
+}
+
 // The customer's newest performed plan visit of each plan family, as of today (ET): the rule's evidence. Null while
-// the gate is off, with no customer, or for an active member. THROWS on a read failure: the caller decides (a
-// staff save and its preview refuse, so the two never disagree; a customer's own quote keeps the fee).
-async function loadReturningVisitHistory(database, { customerId, now = new Date() } = {}) {
+// the gate is off, with no customer, or when the quoted property has an active plan. When address or propertyId
+// is provided, BOTH the active-plan check and completed visit history are scoped to that property (B-21).
+// THROWS on a read failure: the caller decides.
+async function loadReturningVisitHistory(database, { customerId, now = new Date(), address = null, propertyId = null } = {}) {
   if (!returningSetupFeeGapLive() || !customerId) return null;
   const { ownershipKeysForRow, isActivePlanCustomer } = require('./waveguard-existing-services');
-  // An account with an active plan is the existing-member waiver's (membershipSnapshot, checked again at accept).
-  // The rule never decides beside it: its stored answer would outlive the membership and waive the fee after the
-  // plan lapsed. Verified here, so every caller skips alike, and strictly: a failed lookup fails the read.
-  if (await isActivePlanCustomer(database, customerId, { strict: true })) return null;
+  const propertyCache = { props: new Map(), ests: new Map() };
+  let propertyScope = null;
+  if (address || propertyId) {
+    const customer = await database('customers').where({ id: customerId }).first();
+    propertyScope = await resolveQuotedPropertyScope(database, customer, { address, propertyId });
+    if (propertyScope) {
+      if (await hasActivePlanAtQuotedProperty(database, customerId, customer, propertyScope, propertyCache)) return null;
+    } else if (await isActivePlanCustomer(database, customerId, { strict: true })) {
+      return null;
+    }
+  } else if (await isActivePlanCustomer(database, customerId, { strict: true })) {
+    return null;
+  }
   const { etDateString } = require('../utils/datetime-et');
   const todayKey = etDateString(now);
   // No lower date bound and no row limit: a custom series can run longer than a year, and the decision
   // applies each series' own window. One customer's completed visits are a small set.
   // The catalog join is the one loadCatalogFieldsByRowId reads: qualifyingKeysForRow lets the linked catalog
   // identity outrank a stale service_type label ("Pest Control" linked to lawn_care_monthly is lawn).
-  const visitRows = await database('scheduled_services as s')
+  const rawVisitRows = await database('scheduled_services as s')
     .leftJoin('services as svc', 's.service_id', 'svc.id')
     .leftJoin('scheduled_services as p', 's.recurring_parent_id', 'p.id')
     .where({ 's.customer_id': customerId, 's.status': 'completed' })
-    .select(...VISIT_SERIES_COLUMNS, 's.service_type', 's.source', 's.service_key_snapshot', 'svc.service_key',
+    .select(...VISIT_SERIES_COLUMNS, ...VISIT_PROPERTY_COLUMNS, 's.service_type', 's.source', 's.service_key_snapshot', 'svc.service_key',
       'svc.name as service_name', 'svc.billing_type as catalog_billing_type', ...SERIES_COLUMNS,
       database.raw(LATEST_OUTCOME_SQL), database.raw(PERFORMED_DATE_SQL), database.raw(FROZEN_IDENTITY_SQL));
-  const scheduleLines = await database('scheduled_service_addons as a')
+  const rawScheduleLines = await database('scheduled_service_addons as a')
     .join('scheduled_services as s', 'a.scheduled_service_id', 's.id')
     .leftJoin('services as svc', 'a.service_id', 'svc.id')
     .leftJoin('scheduled_services as p', 's.recurring_parent_id', 'p.id')
     .where({ 's.customer_id': customerId, 's.status': 'completed' })
-    .select(...VISIT_SERIES_COLUMNS, 'a.service_name as service_type', 'a.recurring_pattern as line_pattern',
+    .select(...VISIT_SERIES_COLUMNS, ...VISIT_PROPERTY_COLUMNS, 'a.service_name as service_type', 'a.recurring_pattern as line_pattern',
       'a.recurring_interval_days as line_interval_days', 'a.recurring_nth as line_nth',
       'a.recurring_weekday as line_weekday', 's.source', 'a.service_key_snapshot', 'svc.service_key',
       'svc.name as service_name', 'svc.billing_type as catalog_billing_type', 'a.service_id as addon_service_id',
       ...SERIES_COLUMNS, database.raw(LATEST_OUTCOME_SQL), database.raw(PERFORMED_DATE_SQL),
       database.raw(FROZEN_IDENTITY_SQL));
+  const hasCustomerPropertyEvidence = Boolean(
+    propertyScope?.propertyId
+    || [...rawVisitRows, ...rawScheduleLines].some((r) => Boolean(
+      r.property_id || r.parent_property_id || r.source_estimate_id || r.parent_source_estimate_id || stampedStreetForVisitOrParent(r),
+    )),
+  );
+  const visitRows = await filterRowsToQuotedProperty(
+    database, rawVisitRows, propertyScope, propertyCache, { requirePositiveMatch: hasCustomerPropertyEvidence },
+  );
+  const scheduleLines = await filterRowsToQuotedProperty(
+    database, rawScheduleLines, propertyScope, propertyCache, { requirePositiveMatch: hasCustomerPropertyEvidence },
+  );
   const catalog = await frozenCatalogRows(database, visitRows);
   // A plan application can also ride as a recurring add-on line on another plan visit (mosquito on a lawn
   // visit). As the schedule reads a line (admin-schedule lineDueOnRecurringDate): an explicit one_time line is
@@ -374,16 +550,16 @@ async function loadReturningVisitHistory(database, { customerId, now = new Date(
       if (!lastByFamily[family]) lastByFamily[family] = { lastVisitKey: performedKey(row), cycleDays: row.cycle_days };
     }
   }
-  return { todayKey, lastByFamily };
+  return propertyScope ? { todayKey, lastByFamily, propertyScoped: true } : { todayKey, lastByFamily };
 }
 
 // A customer's own quote (the restart tap, the website quote): the read runs in a savepoint of the caller's
 // transaction, so a failed statement leaves that transaction usable, and a failed read answers null. The fee
 // stays: never a refusal on the customer's own tap, never a waiver on a failure.
-async function loadReturningVisitHistoryInSavepoint(trx, { customerId, now } = {}, logTag = '') {
+async function loadReturningVisitHistoryInSavepoint(trx, { customerId, now, address = null, propertyId = null } = {}, logTag = '') {
   if (!returningSetupFeeGapLive() || !customerId) return null;
   try {
-    return await trx.transaction((sp) => loadReturningVisitHistory(sp, { customerId, now }));
+    return await trx.transaction((sp) => loadReturningVisitHistory(sp, { customerId, now, address, propertyId }));
   } catch (err) {
     logger.warn(`${logTag} returning setup fee read skipped: ${err.message}`);
     return null;
@@ -526,6 +702,105 @@ function returningWaiverForUnpricedSave(estimateData, history, { answerHeld = fa
   return { waiver, stale: !waiver };
 }
 
+function parseEstimateDataObject(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return structuredClone(raw);
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch { return null; }
+}
+
+function addFeeToTotals(holder, fee) {
+  const year1 = Number(holder?.totals?.year1);
+  if (Number.isFinite(year1)) holder.totals.year1 = Math.round((year1 + fee) * 100) / 100;
+}
+
+function restoreFallbackSetupFeeOnData(data, row) {
+  const converter = require('./estimate-converter');
+  const lines = converter.recurringServicesFromEstimateData(data);
+  if (!feeLineOfPlan(lines)) return {};
+  const fee = Number(converter.WAVEGUARD_SETUP_FEE) || 99;
+  // Legacy estimates store recurring services at the top level with no
+  // `data.result`: keep oneTime/totals at the top level rather than creating
+  // an empty `data.result` that would hide `data.recurring` on display.
+  const holder = data.result && typeof data.result === 'object' ? data.result : data;
+  const oneTime = holder.oneTime && typeof holder.oneTime === 'object' ? holder.oneTime : null;
+  if (oneTime && Number(oneTime.membershipFee) > 0) return {};
+  const hasNestedTotal = oneTime && oneTime.total != null && oneTime.total !== '' && Number.isFinite(Number(oneTime.total));
+  const priorTotal = hasNestedTotal ? Number(oneTime.total) : Number(row?.onetime_total || 0);
+  const nextTotal = Math.round((priorTotal + fee) * 100) / 100;
+  holder.oneTime = oneTime
+    ? Object.assign(oneTime, { membershipFee: fee, total: nextTotal })
+    : { membershipFee: fee, total: nextTotal };
+  addFeeToTotals(holder, fee);
+  return { onetime_total: nextTotal };
+}
+
+async function returningWaiverStillValidAt(trx, row, data, now) {
+  const { etDateString } = require('../utils/datetime-et');
+  const todayKey = etDateString(now);
+  const storedGap = returningSetupFeeWaiverOf(data);
+  const converter = require('./estimate-converter');
+  const lines = converter.recurringServicesFromEstimateData(data);
+  if (returningSetupFeeGapLive() && row?.customer_id) {
+    const history = await loadReturningVisitHistoryInSavepoint(
+      trx,
+      { customerId: row.customer_id, now, address: row.address || null, propertyId: row.property_id || null },
+      '[estimate-extension]',
+    );
+    if (history) return Boolean(decideReturningSetupFeeWaiverForPlan(lines, history));
+  }
+  // Gate off, no linked customer, active member, or lookup skipped: only a stored gap
+  // that is still inside its own window AND with the gate live can stay valid.
+  if (!returningSetupFeeGapLive()) return false;
+  if (storedGap?.lastCompletedVisitDate && Number.isFinite(Number(storedGap.windowDays))) {
+    const gapNow = daysBetween(storedGap.lastCompletedVisitDate, todayKey);
+    return gapNow != null && gapNow >= 0 && gapNow <= Number(storedGap.windowDays);
+  }
+  return false;
+}
+
+async function recomputeTotalsAfterWaiverStrip(data, row, now) {
+  try {
+    const { serverRecomputeFromEstimateData } = require('./admin-estimate-persistence');
+    const reprice = await serverRecomputeFromEstimateData(data, {
+      now,
+      replaySavedPricingKnobs: true,
+      priorQualifyingServices: Array.isArray(data.priorQualifyingServices) ? data.priorQualifyingServices : [],
+      recurringCustomer: data.membershipSnapshot?.isExistingCustomer === true,
+    });
+    if (!reprice?.recomputed) return restoreFallbackSetupFeeOnData(data, row);
+    data.result = reprice.serverResult;
+    if (reprice.rawEngineResult) data.engineResult = reprice.rawEngineResult;
+    const totals = reprice.serverTotals || {};
+    const patch = {};
+    if (totals.monthlyTotal != null) patch.monthly_total = totals.monthlyTotal;
+    if (totals.annualTotal != null) patch.annual_total = totals.annualTotal;
+    const nextOneTime = totals.onetimeTotal ?? totals.oneTimeTotal;
+    if (nextOneTime != null) patch.onetime_total = nextOneTime;
+    return patch;
+  } catch (err) {
+    if (err?.status || err?.statusCode || err?.failClosed) throw err;
+    logger.warn(`[estimate-extension] recompute after stripping stale returning waiver failed for ${row?.id}: ${err.message}`);
+    return restoreFallbackSetupFeeOnData(data, row);
+  }
+}
+
+// Re-evaluate a returning-customer setup-fee waiver when an estimate is extended (B-41):
+// if the customer is now past the plan-cycle + 30-day window (e.g. > 121 days for quarterly),
+// strip the stale waiver, clear cached snapshot bundles, and recompute/restore the $99 fee.
+async function refreshReturningWaiverOnExtend(trx, row, { now = new Date() } = {}) {
+  const data = parseEstimateDataObject(row?.estimate_data);
+  if (!data || !holdsReturningSetupWaiver(data)) return { stripped: false, patch: null };
+  if (await returningWaiverStillValidAt(trx, row, data, now)) return { stripped: false, patch: null };
+  dropReturningSetupWaiver(data);
+  if (data.engineResult && typeof data.engineResult === 'object') delete data.engineResult.membershipSetupFeeWaived;
+  if (data.sendSnapshot && typeof data.sendSnapshot === 'object') delete data.sendSnapshot.pricingBundle;
+  const totalsPatch = await recomputeTotalsAfterWaiverStrip(data, row, now);
+  return { stripped: true, patch: { estimate_data: JSON.stringify(data), ...totalsPatch } };
+}
+
 module.exports = {
   GRACE_DAYS,
   returningSetupFeeGapLive,
@@ -546,5 +821,8 @@ module.exports = {
   dropReturningSetupWaiver,
   holdsReturningSetupWaiver,
   returningWaiverForUnpricedSave,
+  refreshReturningWaiverOnExtend,
+  restoreFallbackSetupFeeOnData,
+  hasActivePlanAtQuotedAddress,
   FROZEN_WAIVED_REASON,
 };

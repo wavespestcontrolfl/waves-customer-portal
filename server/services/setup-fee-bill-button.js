@@ -49,6 +49,7 @@ function metadataFacts(meta) {
   const parked = Array.isArray(meta.parkedVisitIds) ? meta.parkedVisitIds.map(String) : [];
   if (!visitId || parked.some((id) => id !== visitId)) return { refusal: office('More than one visit is unbilled on this estimate.') };
   if (meta.liveBesideInvoiceId) return { refusal: office('Another invoice is already on this visit.') };
+  if (meta.billButtonDraftInvoiceId) return { refusal: office('A draft invoice was already created from this alert.') };
   const covered = [meta.resolvedCovered === true, meta.feeCovered, meta.applicationCovered, meta.feeOnOpenInvoice,
     Number(meta.coveredFeeCents) > 0].some(Boolean);
   if (covered) return { refusal: office('Part of this bill is already covered.') };
@@ -104,22 +105,20 @@ async function recordsRefusal(facts) {
   return null;
 }
 
-// Taken first in the create transaction, before the card's customer FOR SHARE and visit lock: the customer row FOR
-// UPDATE. Every invoice insert for this customer takes KEY SHARE on that row (the foreign key), so no other writer's
-// invoice (a manual fee invoice on another visit or estimate, another tap) can commit between the scan below and
-// this draft's commit; each waits and then sees it.
-// Then the customer's live invoice rows FOR UPDATE (in id order): an office edit that adds a fee line to another
-// draft either commits first and is seen by the scan, or waits for this commit. Customer first, as an invoice send
-// takes it. Both waits are bounded (3 s): contention refuses retryably instead of risking a deadlock abort.
+// Taken first in the create transaction, before the card's customer FOR SHARE and visit lock: the account's setup-fee
+// advisory lock first (matching InvoiceService.create's global lock order so an unlinked fee invoice can never ABBA
+// deadlock on setup_fee_account vs customers), then the customer row FOR UPDATE, then the customer's live invoice
+// rows FOR UPDATE (in id order). Waits are bounded (3 s): lock timeout (55P03) or deadlock (40P01) refuses retryably.
 function customerPreLock(facts) {
   return async (trx) => {
     await trx.raw("SET LOCAL lock_timeout = '3s'");
     try {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`setup_fee_account:${facts.customerId}`]);
       await trx('customers').where({ id: facts.customerId }).forUpdate().first('id');
       await trx('invoices').where({ customer_id: facts.customerId })
         .whereNotIn('status', ['void', 'cancelled', 'canceled']).orderBy('id').forUpdate().select('id');
     } catch (err) {
-      if (err?.code === '55P03') {
+      if (err?.code === '55P03' || err?.code === '40P01') {
         throw Object.assign(new Error('This customer\'s invoices are being changed right now, so nothing was created. Try again in a minute'),
           { isOperational: true, statusCode: 409, code: 'IB_SCOPE_CHANGED' });
       }
@@ -214,7 +213,9 @@ async function feeCoverageRefusal(trx, facts) {
   // Any live invoice on the account (a draft included) that carries setup-fee or membership money.
   const { carriesWaveguardFeeLine } = require('./setup-fee-obligation');
   if (live.some((inv) => carriesWaveguardFeeLine(inv))) return 'A setup or membership fee (or its waiver) is already on an invoice for this account';
-  const settled = await require('./setup-fee-obligation').setupFeeSettledElsewhere(trx, { customerId: facts.customerId, expectedFeeCents: facts.feeCents });
+  const settled = await require('./setup-fee-obligation').setupFeeSettledElsewhere(trx, {
+    customerId: facts.customerId, expectedFeeCents: facts.feeCents, sourceEstimateId: facts.estimateId,
+  });
   if (settled?.settled || (settled?.partial || []).length || (settled?.open || []).length) return 'Setup fee money is already on this account';
   const Prepay = require('./annual-prepay-renewals');
   const term = await Prepay.coveredTermsAsOf(trx, null).where('t.source_estimate_id', facts.estimateId).first('t.id');
@@ -306,7 +307,26 @@ async function deliveryRefusal(customerId) {
   const suppressed = await db('messaging_suppression')
     .whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [digits.slice(-10)])
     .where('active', true).first('phone');
-  return suppressed ? office('Texts to this customer\'s phone are blocked.') : null;
+  if (suppressed) return office('Texts to this customer\'s phone are blocked.');
+  // A first send that would also mark an open lead won is refused by Step 2: check BEFORE creating the draft
+  // so we never mint an unsent draft deterministically whenever the customer has an open lead.
+  const leadTargets = await require('./lead-estimate-link').invoiceSentConversionTargets(customerId, db);
+  if (leadTargets?.unreadable) return office('Open leads for this customer could not be checked.');
+  return (leadTargets?.leadIds || []).length ? office('Sending this invoice would also mark an open lead won.') : null;
+}
+
+function stampPendingDraftOnAlert(facts) {
+  return async (trx, created) => {
+    if (!facts?.rowId || !created?.id) return;
+    const patch = {
+      billButtonDraftInvoiceId: String(created.id),
+      billButtonDraftInvoiceNumber: created.invoice_number || null,
+      billButtonSendState: 'send_pending',
+    };
+    await trx('notifications').where({ id: facts.rowId }).update({
+      metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
+    });
+  };
 }
 
 // Step 1: the create card's plan, refused unless it is exactly the plain case, then its commit on that plan.
@@ -323,7 +343,17 @@ async function createInvoice(facts) {
   if (plan._approved?.expectedTotalCents !== facts.applicationCents + facts.feeCents) {
     return { refusal: office('The invoice total differs from the amount on the button (tax or a discount applies).') };
   }
-  const created = await Create.commitDraftInvoice({ ...input, _verified_invoice_create_version: plan._version, _callerPreLock: customerPreLock(facts), _callerRecheck: coverageRecheck(facts) });
+  const created = await Create.commitDraftInvoice({
+    ...input,
+    _verified_invoice_create_version: plan._version,
+    _callerPreLock: customerPreLock(facts),
+    _callerRecheck: coverageRecheck(facts),
+    // Persist the draft id onto the alert inside the create transaction so a crash between create and send
+    // cannot let a sweep auto-resolve the bell from the unsent draft.
+    _callerPostCreate: stampPendingDraftOnAlert(facts),
+    // Defer the post-create alert reconcile until Step 2 finishes so an unsent draft never closes the bell as RESOLVED.
+    _deferSetupFeeReconcile: true,
+  });
   if (created.success) return { created };
   if (created.outcome_unknown) {
     return { refusal: { ok: false, code: 'unknown', message: 'The invoice may or may not have been created. Check the customer’s invoices before you try again.' } };
@@ -366,25 +396,22 @@ function sendVerify(facts) {
     // Another live invoice that now bills either charge (committed after the create released its locks): one on this
     // visit, or one with a WaveGuard fee line of any amount (a $0 line is a waiver). Or the fee settled elsewhere.
     const Fee = require('./setup-fee-obligation');
-    // The other live invoices FOR UPDATE (bounded wait): an office edit adding a fee line commits first and is read
-    // here, or waits until this send's claim commits.
-    // In a savepoint: a lock timeout rolls back only the savepoint, never the send claim's transaction.
+    // Non-blocking locks in a savepoint: the send claim already holds claimed.id FOR UPDATE, so waiting on
+    // setup_fee_account or another invoice row could form an ABBA cycle (40P01). pg_try_advisory_xact_lock and
+    // FOR UPDATE NOWAIT refuse contention immediately instead of deadlocking.
     let others;
     try {
       others = await database.transaction(async (sp) => {
-        await sp.raw("SET LOCAL lock_timeout = '3s'");
-        // The account's fee lock (an advisory lock, never the customer row: the text's sms_log insert on another
-        // connection needs KEY SHARE on that row). Every invoice create that carries a WaveGuard fee line takes it
-        // (InvoiceService.create, invoice.js), so a new fee invoice waits until this send's transaction ends.
-        await sp.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`setup_fee_account:${claimed.customer_id}`]);
-        const rows = await sp('invoices').where({ customer_id: claimed.customer_id }).whereNot('id', claimed.id)
-          .whereNotIn('status', ['void', 'cancelled', 'canceled']).orderBy('id').forUpdate()
+        const lockRes = await sp.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired', [`setup_fee_account:${claimed.customer_id}`]);
+        if (lockRes?.rows?.[0]?.acquired !== true) {
+          throw Object.assign(new Error('setup_fee_account busy'), { code: '55P03' });
+        }
+        return sp('invoices').where({ customer_id: claimed.customer_id }).whereNot('id', claimed.id)
+          .whereNotIn('status', ['void', 'cancelled', 'canceled']).orderBy('id').forUpdate().noWait()
           .select('id', 'notes', 'line_items', 'scheduled_service_id', 'service_record_id');
-        await sp.raw('SET LOCAL lock_timeout TO DEFAULT');
-        return rows;
       });
     } catch (err) {
-      if (err?.code !== '55P03') throw err;
+      if (err?.code !== '55P03' && err?.code !== '40P01') throw err;
       state.conflict = true;
       return 'Another invoice for this customer is being changed right now, so this one was not sent.';
     }
@@ -392,7 +419,9 @@ function sendVerify(facts) {
     const onVisit = others.some((inv) => String(inv.scheduled_service_id || '') === facts.visitId
       || String(inv.service_record_id || '') === facts.serviceRecordId
       || String(acceptedEstimateIdFromNotes(inv.notes) || '').toLowerCase() === facts.estimateId.toLowerCase());
-    const settled = await Fee.setupFeeSettledElsewhere(database, { customerId: claimed.customer_id, expectedFeeCents: facts.feeCents });
+    const settled = await Fee.setupFeeSettledElsewhere(database, {
+      customerId: claimed.customer_id, expectedFeeCents: facts.feeCents, sourceEstimateId: facts.estimateId,
+    });
     if (onVisit || others.some((inv) => Fee.carriesWaveguardFeeLine(inv)) || settled?.settled) {
       state.conflict = true;
       return 'Another invoice now bills this visit or the setup fee, so this one was not sent.';
@@ -444,40 +473,106 @@ function noSendNeededOutcome(number, sent) {
   return { ok: true, message: `Invoice ${number} was created. ${why}`, resolution: `Billed ${number} from the bell`, keepOpen: true };
 }
 
-// What the tap answers once the invoice exists (every outcome keeps the row open for the reconcile).
-async function sendOutcome(row, created, sent) {
-  const number = created.invoice_number || 'the new invoice';
-  if (sent?.outcome_unknown) return unknownSendOutcome(number, sent);
-  // Something else now covers part of this bill: the draft must not be sent as it is.
-  if (sent?.conflict) {
-    logger.warn(`[setup-fee-bill-button] alert ${row.id}: created ${created.invoice_id}, send refused: coverage changed`);
-    return {
-      ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; not sent (coverage changed)`,
-      message: `Invoice ${number} was created but not sent: ${sent.error || 'something else now covers part of it'} Reconcile it with the customer's other billing on the Invoices page before you send anything.`,
+async function clearPendingDraftOnAlert(row) {
+  if (!row?.id) return;
+  try {
+    await db('notifications').where({ id: row.id }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'billButtonDraftInvoiceId' - 'billButtonDraftInvoiceNumber' - 'billButtonSendState'"),
+    });
+  } catch (err) {
+    logger.warn(`[setup-fee-bill-button] could not clear pending draft marker on alert ${row.id}: ${err.message}`);
+  }
+}
+
+async function reconcileAfterBillButtonSend(row, facts, created) {
+  await clearPendingDraftOnAlert(row);
+  try {
+    await require('./setup-fee-alert-reconcile').reconcileSetupFeeAlert({
+      customerId: facts.customerId,
+      sourceEstimateId: facts.estimateId,
+      actorLabel: ` bill-button ${created.invoice_id}:`,
+    });
+  } catch (err) {
+    logger.error(`[setup-fee-bill-button] setup-fee alert reconcile failed after send of ${created.invoice_id}: ${err.message}`);
+  }
+}
+
+async function reopenAlertForUnsentDraft(row, created, message, sendState) {
+  try {
+    const NotificationService = require('./notification-service');
+    const number = created.invoice_number || 'the new invoice';
+    const bodyColumns = NotificationService.adminBodyColumns(
+      'billing',
+      `ACTION NEEDED: draft invoice ${number} was created from this alert but not sent. ${message}`,
+    );
+    const patch = {
+      resolvedCovered: false,
+      billButtonDraftInvoiceId: String(created.invoice_id),
+      billButtonDraftInvoiceNumber: created.invoice_number || null,
+      billButtonSendState: sendState,
     };
+    await db('notifications').where({ id: row.id }).update({
+      ...bodyColumns,
+      done_at: null,
+      done_by: null,
+      resolution: null,
+      read_at: null,
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
+    });
+  } catch (err) {
+    logger.warn(`[setup-fee-bill-button] could not reopen alert ${row?.id} for draft ${created?.invoice_id}: ${err.message}`);
   }
-  if (sentOk(sent)) {
-    logger.info(`[setup-fee-bill-button] alert ${row.id}: created and sent ${created.invoice_id}`);
-    return { ok: true, message: `Invoice ${number} for ${created.amount} was created and sent.`, resolution: `Billed and sent ${number} from the bell`, keepOpen: true };
-  }
-  // Sent nothing new, and needs nothing: already delivered, being delivered, credit covers it, or a scheduled
-  // pay-link text owns the delivery. Never ask for a manual send then.
-  if (sent?.success === true || sent?.code === 'invoice_send_queued') return noSendNeededOutcome(number, sent);
-  // The invoice exists (its notes retire this alert). Before asking for a manual send, read its delivery state:
-  // another send may have won meanwhile.
+}
+
+async function finalizeRefusedSend(row, created, sent, facts, number) {
   const now = await db('invoices').where({ id: created.invoice_id }).first('status', 'sent_at');
   if (!now || now.sent_at || now.status !== 'draft') {
+    await reconcileAfterBillButtonSend(row, facts, created);
     return {
       ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; send unconfirmed`, message: changedElsewhere(number),
     };
   }
   logger.warn(`[setup-fee-bill-button] alert ${row.id}: created ${created.invoice_id}, send ${sent?.code || 'not confirmed'}`);
-  return {
+  const out = {
     ok: true,
     message: `Invoice ${number} was created but not sent (${sent?.error || 'the send was refused'}). Send it from the Invoices page.`,
     resolution: `Billed ${number} from the bell; not sent`,
     keepOpen: true,
   };
+  await reopenAlertForUnsentDraft(row, created, out.message, sent?.code || 'send_refused');
+  return out;
+}
+
+// What the tap answers once the invoice exists: Step 1 deferred the alert reconcile until Step 2 finishes, so
+// only a confirmed/no-send-needed delivery resolves the bell; any unsent draft or unconfirmed send keeps/reopens
+// the bell naming the draft invoice number so staff are never silently told "RESOLVED — no action needed".
+async function sendOutcome(row, created, sent, facts) {
+  const number = created.invoice_number || 'the new invoice';
+  if (sent?.outcome_unknown) {
+    const out = unknownSendOutcome(number, sent);
+    if (sent.code === 'sent_elsewhere') await reconcileAfterBillButtonSend(row, facts, created);
+    else await reopenAlertForUnsentDraft(row, created, out.message, sent.code || 'unconfirmed');
+    return out;
+  }
+  if (sent?.conflict) {
+    logger.warn(`[setup-fee-bill-button] alert ${row.id}: created ${created.invoice_id}, send refused: coverage changed`);
+    const out = {
+      ok: true, keepOpen: true, resolution: `Billed ${number} from the bell; not sent (coverage changed)`,
+      message: `Invoice ${number} was created but not sent: ${sent.error || 'something else now covers part of it'} Reconcile it with the customer's other billing on the Invoices page before you send anything.`,
+    };
+    await reopenAlertForUnsentDraft(row, created, out.message, 'coverage_conflict');
+    return out;
+  }
+  if (sentOk(sent)) {
+    logger.info(`[setup-fee-bill-button] alert ${row.id}: created and sent ${created.invoice_id}`);
+    await reconcileAfterBillButtonSend(row, facts, created);
+    return { ok: true, message: `Invoice ${number} for ${created.amount} was created and sent.`, resolution: `Billed and sent ${number} from the bell`, keepOpen: true };
+  }
+  if (sent?.success === true || sent?.code === 'invoice_send_queued') {
+    await reconcileAfterBillButtonSend(row, facts, created);
+    return noSendNeededOutcome(number, sent);
+  }
+  return finalizeRefusedSend(row, created, sent, facts, number);
 }
 
 // Every outcome that created an invoice leaves the row to the stamped-invoice reconcile the create runs (keepOpen):
@@ -511,7 +606,7 @@ const buttonHandler = {
       logger.error(`[setup-fee-bill-button] send of ${created.invoice_id} failed (${err.code || err.name || 'error'})`);
       sent = { outcome_unknown: true };
     }
-    return sendOutcome(row, created, sent);
+    return sendOutcome(row, created, sent, facts);
   },
 };
 

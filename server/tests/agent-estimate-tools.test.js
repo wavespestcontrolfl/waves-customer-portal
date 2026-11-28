@@ -1538,6 +1538,57 @@ describe('Agent Estimate compute input boundary', () => {
     });
   });
 
+  test('B-41: compute_estimate applies returning-customer setup-fee waiver parity when GATE_RETURNING_SETUP_FEE_GAP is on', async () => {
+    process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const historySpy = jest.spyOn(Returning, 'loadReturningVisitHistory').mockResolvedValueOnce({
+      todayKey: '2026-11-24',
+      propertyScoped: true,
+      lastByFamily: { pest_control: { lastVisitKey: '2026-09-15', cycleDays: 91 } },
+    });
+    const soloPestEngine = {
+      lineItems: [{
+        service: 'pest_control', name: 'Pest Control', frequency: 'quarterly',
+        monthly: 45, monthlyAfterDiscount: 45, annual: 540, annualAfterDiscount: 540, initialFee: 99,
+      }],
+      summary: {
+        recurringMonthlyAfterDiscount: 45,
+        recurringAnnualAfterDiscount: 540,
+        recurringAnnualBeforeDiscount: 540,
+        oneTimeTotal: 0,
+        year1Total: 639,
+        waveGuardTier: 'Bronze',
+      },
+      waveGuard: { tier: 'Bronze' },
+    };
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: { id: 'lead-ret-1', customer_id: 'cust-ret-1', address: '100 Oak St, Testville, FL 34200' },
+      customer_account: { recognized: false, customer_id: 'cust-ret-1', existing_service_keys: [], current_services: [] },
+    });
+    mockGenerateEstimate.mockReturnValueOnce(soloPestEngine);
+    try {
+      const result = await executeEstimateTool('compute_estimate', {
+        leadId: 'lead-ret-1',
+        address: '100 Oak St, Testville, FL 34200',
+        homeSqFt: 2200,
+        lotSqFt: 12000,
+        services: { pest: { frequency: 'quarterly' } },
+      });
+      expect(historySpy).toHaveBeenCalledWith(expect.anything(), {
+        customerId: 'cust-ret-1',
+        address: '100 Oak St, Testville, FL 34200',
+      });
+      expect(result.returning_setup_fee_waiver).toEqual(expect.objectContaining({
+        rule: 'returning_customer_gap', family: 'pest_control', gapDays: 70, windowDays: 121,
+      }));
+      expect(soloPestEngine.membershipSetupFeeWaived).toBe(true);
+      expect(soloPestEngine.lineItems[0].initialFee).toBe(0);
+    } finally {
+      historySpy.mockRestore();
+      delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
+    }
+  });
+
   test('selects approved one-time and cockroach React presentations from priced lines', () => {
     expect(_private.presentationForServices(
       { oneTimePest: { urgency: 'NONE' } },

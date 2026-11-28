@@ -6515,7 +6515,10 @@ router.post('/calculate-estimate', async (req, res) => {
       const returningCustomerId = options?.existingCustomerId
         || (Returning.returningSetupFeeGapLive()
           ? await require('../services/admin-estimate-persistence').leadCustomerIdForPreview(database, lead) : null);
-      returningVisitHistory = await Returning.loadReturningVisitHistory(database, { customerId: returningCustomerId });
+      returningVisitHistory = await Returning.loadReturningVisitHistory(database, {
+        customerId: returningCustomerId,
+        ...(options?.address ? { address: options.address } : {}),
+      });
     } catch (historyErr) {
       return res.status(503).json({
         error: 'Visit history lookup is temporarily unavailable — please retry in a moment.',
@@ -6546,11 +6549,9 @@ router.post('/calculate-estimate', async (req, res) => {
     }
     const v1 = require('../services/estimate-flea-size-replay').generateWithFleaRecord(pricingEngine.generateEstimate, v1Input, fleaRecord);
     // The same zeroing the save-time recompute applies to a waived setup fee
-    // (initialFee is only the $99 WaveGuard setup), before the mapper sums it.
-    if (moveSetupFeeWaived && Array.isArray(v1?.lineItems)) {
-      for (const li of v1.lineItems) {
-        if (li && Number(li.initialFee) > 0) li.initialFee = 0;
-      }
+    // (pest initialFee + solo mosquito membershipSetupFeeWaived), before the mapper sums it.
+    if (moveSetupFeeWaived) {
+      Returning.waiveSetupFeeOnEngineResult(v1);
     }
     // The same decision the save-time recompute makes, on the same server-priced plan (a move's waiver already
     // covers the fee). The tool shows the reason; the dates are for an admin only (this router admits technicians).

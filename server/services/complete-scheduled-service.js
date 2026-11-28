@@ -12234,7 +12234,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const settledNowTerm = unmintedSetupFeeObligation
             ? await SetupFeeObligationNow.setupFeeSettledElsewhere(trx, {
               customerId: svc.customer_id, expectedFeeCents: termExpectedFeeCents,
-              visitDate: await SetupFeeObligationNow.settledVisitDate(trx, svc.id), lock: true,
+              visitDate: await SetupFeeObligationNow.settledVisitDate(trx, svc.id),
+              sourceEstimateId: svc.source_estimate_id, lock: true,
             })
             : { settled: false };
           const termFeeRows = [...new Map(
@@ -12502,6 +12503,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             customerId: svc.customer_id,
             expectedFeeCents: Math.round(Number(unmintedSetupFeeObligation.setupFee || 0) * 100),
             visitDate: await SetupFeeObligationFresh.settledVisitDate(trx, svc.id),
+            sourceEstimateId: unmintedSetupFeeObligation.estimateId,
             lock: true,
           });
           // A fee settled in the race window is treated as COVERED below, never as a reason to

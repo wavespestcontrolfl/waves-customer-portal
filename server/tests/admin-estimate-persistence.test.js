@@ -1279,7 +1279,9 @@ describe('admin estimate persistence', () => {
     test('a staff waiver stays a staff waiver: the rule adds no evidence to it', async () => {
       process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
       const stored = await save(
-        quoteBody(pestInputs, { operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner said so' } }), [pestVisit],
+        quoteBody(pestInputs, { operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner said so' } }),
+        [pestVisit],
+        { technician: { id: 'tech-1', role: 'admin' } },
       );
       expect(stored.operatorPriceAdjustment).toEqual({ waiveSetupFee: true, internalReason: 'owner said so' });
       expect(Number(stored.result.oneTime.membershipFee || 0)).toBe(0);
@@ -1320,11 +1322,12 @@ describe('admin estimate persistence', () => {
         .toBeNull();
     });
 
-    test('a replay of the stored answer keeps the mosquito fee out; a staff waiver keeps today\'s stored totals', async () => {
+    test('a replay of the stored answer and a staff waiver both clear the solo mosquito $99 fee from totals (B-20)', async () => {
       const at = { now: new Date('2026-11-24T17:00:00.000Z') };
       const plain = await serverRecomputeFromEstimateData({ engineInputs: mosquitoInputs }, at);
       const staff = await serverRecomputeFromEstimateData({ engineInputs: mosquitoInputs, operatorPriceAdjustment: { waiveSetupFee: true } }, at);
-      expect(staff.serverResult.oneTime).toEqual(plain.serverResult.oneTime);
+      expect(Number(staff.serverResult.oneTime.membershipFee || 0)).toBe(0);
+      expect(Number(staff.serverResult.oneTime.total)).toBe(Number(plain.serverResult.oneTime.total) - 99);
       const replay = await serverRecomputeFromEstimateData({
         engineInputs: mosquitoInputs,
         operatorPriceAdjustment: Returning.withReturningSetupWaiver(null, { rule: 'returning_customer_gap', family: 'mosquito', gapDays: 25, windowDays: 60 }),

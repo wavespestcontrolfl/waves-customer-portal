@@ -6169,8 +6169,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // SSR must show the same amount frozenSetupFeeAmount charges. An explicit
   // { amount: 0, waived } quote zeroes the fee outright (member waiver from
   // /calculate), same as the operator waiver.
-  const frozenQuoteFeeRaw = Number(estData?.setupFeeQuote?.amount);
-  const frozenQuoteFeeWaived = !!estData?.setupFeeQuote && !(frozenQuoteFeeRaw > 0);
+  const frozenQuote = require('../services/estimate-converter').waveguardFrozenSetupFeeQuote(estData);
+  const frozenQuoteFeeRaw = frozenQuote ? frozenQuote.amount : 0;
+  const frozenQuoteFeeWaived = Boolean(frozenQuote?.waived);
   const membershipFee = hasWaveGuardMembership && !operatorSetupFeeWaived && !frozenQuoteFeeWaived
     ? (frozenQuoteFeeRaw > 0
       ? frozenQuoteFeeRaw
@@ -18548,7 +18549,11 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     Returning.dropReturningSetupWaiver(parsedData);
     let returningVisitHistory = null;
     try {
-      returningVisitHistory = await Returning.loadReturningVisitHistory(db, { customerId: estimate.customer_id });
+      returningVisitHistory = await Returning.loadReturningVisitHistory(db, {
+        customerId: estimate.customer_id,
+        address: estimate.address,
+        propertyId: estimate.property_id,
+      });
     } catch (_) {
       return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
@@ -30411,6 +30416,50 @@ function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
     && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate);
 }
 
+function waveguardSetupFeeQuote(estData) {
+  const quote = estData?.setupFeeQuote;
+  if (!quote || typeof quote !== 'object' || quote.kind === 'rodent_bait_setup') return null;
+  return quote;
+}
+
+function setupFeeWaivedOnEstimateData(estData) {
+  return require('../services/estimate-converter').estimateOperatorSetupFeeWaived(estData)
+    || Boolean(require('../services/returning-setup-fee-waiver').returningSetupFeeWaiverOf(estData));
+}
+
+function fallbackWaveGuardSetupAmount(estData, storedOneTimeBreakdown, defaultFee) {
+  const nonRodentQuote = waveguardSetupFeeQuote(estData);
+  const frozenQuoteFee = Number(nonRodentQuote?.amount);
+  if (nonRodentQuote && !(frozenQuoteFee > 0)) return null;
+  const items = Array.isArray(storedOneTimeBreakdown?.items) ? storedOneTimeBreakdown.items : [];
+  const storedSetupRow = items.find((row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {}));
+  const storedSetupAmount = Number(storedSetupRow?.amount ?? storedSetupRow?.price);
+  const feeAmount = frozenQuoteFee > 0 ? frozenQuoteFee : (storedSetupAmount > 0 ? storedSetupAmount : defaultFee);
+  return { feeAmount, storedSetupRow };
+}
+
+function resolveFallbackWaveGuardSetupFee(estData, storedOneTimeBreakdown, defaultFee) {
+  const converter = require('../services/estimate-converter');
+  const services = estimateDataRecurringServices(estData);
+  if (!converter.recurringMixHasMembershipFeeService(services)) return { firstVisitFees: [], anchorLift: 0 };
+  if (estData?.membershipSnapshot?.isExistingCustomer || setupFeeWaivedOnEstimateData(estData)) {
+    return { firstVisitFees: [], anchorLift: 0 };
+  }
+  const prepayEligible = annualPrepayEligibleForEstimateData(estData);
+  if (!prepayEligible && !recurringMixHasSeasonalMosquito(services)) return { firstVisitFees: [], anchorLift: 0 };
+  const resolved = fallbackWaveGuardSetupAmount(estData, storedOneTimeBreakdown, defaultFee);
+  if (!resolved) return { firstVisitFees: [], anchorLift: 0 };
+  return {
+    firstVisitFees: [{
+      service: 'waveguard_setup',
+      amount: resolved.feeAmount,
+      label: 'WaveGuard setup',
+      waivedWithPrepay: prepayEligible,
+    }],
+    anchorLift: resolved.storedSetupRow ? 0 : resolved.feeAmount,
+  };
+}
+
 async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
@@ -30672,8 +30721,9 @@ async function buildPricingBundleInner(estimate) {
       // ONLY for legacy estimates with no frozen quote at all. An explicit
       // { amount: 0, waived } quote suppresses the card entirely (member
       // waiver: no fee was disclosed and none is charged).
-      const frozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
-      const frozenQuoteWaived = !!estData?.setupFeeQuote && !(frozenQuoteFee > 0);
+      const frozenQuote = require('../services/estimate-converter').waveguardFrozenSetupFeeQuote(estData);
+      const frozenQuoteFee = frozenQuote ? frozenQuote.amount : 0;
+      const frozenQuoteWaived = Boolean(frozenQuote?.waived);
       if (!frozenQuoteWaived) {
         firstVisitFees.push({
           service: 'waveguard_setup',
@@ -30714,13 +30764,14 @@ async function buildPricingBundleInner(estimate) {
       if (membershipFeeMixApplies && (annualPrepayEligible || seasonalSetupFeeDue) && !(v1.membershipFee > 0)) {
         // Frozen-quote waiver: no fee was disclosed, none may be added to
         // the anchor; frozen amount outranks live config when it exists
-        // (same rule as the fee card above).
-        const anchorFrozenFee = Number(estData?.setupFeeQuote?.amount);
-        if (estData?.setupFeeQuote && !(anchorFrozenFee > 0)) return rawV1OneTimeTotal;
-        // Returning customer inside one cycle + 30 days (GATE_RETURNING_SETUP_FEE_GAP): the save left the fee out
-        // of the stored totals and finalize strips the fee card, so the anchor must not add it back. A staff
-        // waiver keeps today's anchor.
-        if (require('../services/returning-setup-fee-waiver').returningSetupFeeWaiverOf(estData)) return rawV1OneTimeTotal;
+        // (same rule as the fee card above). Exclude rodent bait setup quotes.
+        const wgQuote = waveguardSetupFeeQuote(estData);
+        const anchorFrozenFee = Number(wgQuote?.amount);
+        if (wgQuote && !(anchorFrozenFee > 0)) return rawV1OneTimeTotal;
+        // Any server-verified setup-fee waiver (returning customer, staff, or move):
+        // the save left the fee out of stored totals and finalize strips the fee card,
+        // so the anchor must not add a phantom $99 back.
+        if (setupFeeWaivedOnEstimateData(estData)) return rawV1OneTimeTotal;
         const fee = anchorFrozenFee > 0 ? anchorFrozenFee : (Number(PEST.initialFee || 99) || 99);
         return Math.round(((Number(rawV1OneTimeTotal) || 0) + fee) * 100) / 100;
       }
@@ -30783,41 +30834,11 @@ async function buildPricingBundleInner(estimate) {
     // the fee (legacy solo pest baked it in; pre-rule solo mosquito did
     // not) — mirrors the v1 branch's membershipFee guard, so accept never
     // invoices a charge this page hid.
-    const fallbackFirstVisitFees = [];
-    let fallbackAnchorLift = 0;
-    const fallbackMixApplies = require('../services/estimate-converter')
-      .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
-    const fallbackPrepayEligible = annualPrepayEligibleForEstimateData(estData);
-    // Same seasonal-mosquito carve-out as the v1 branch: prepay-ineligible
-    // but the setup fee is still charged at accept, so the card must show.
-    const fallbackSeasonalFeeDue = fallbackMixApplies
-      && !fallbackPrepayEligible
-      && !estData?.membershipSnapshot?.isExistingCustomer
-      && recurringMixHasSeasonalMosquito(estimateDataRecurringServices(estData));
-    if (fallbackMixApplies && (fallbackPrepayEligible || fallbackSeasonalFeeDue)) {
-      const storedSetupRow = (Array.isArray(storedOneTimeBreakdown?.items) ? storedOneTimeBreakdown.items : [])
-        .find((row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {}));
-      const storedSetupAmount = Number(storedSetupRow?.amount ?? storedSetupRow?.price);
-      // Frozen wizard disclosure outranks both the stored snapshot row and
-      // live config — display must match the frozen-resolver charge. An
-      // explicit { amount: 0, waived } quote suppresses the card entirely.
-      const frozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
-      const frozenQuoteWaived = !!estData?.setupFeeQuote && !(frozenQuoteFee > 0);
-      const feeAmount = frozenQuoteFee > 0
-        ? frozenQuoteFee
-        : (storedSetupAmount > 0 ? storedSetupAmount : (Number(PEST.initialFee || 99) || 99));
-      if (!frozenQuoteWaived) {
-        fallbackFirstVisitFees.push({
-          service: 'waveguard_setup',
-          amount: feeAmount,
-          label: 'WaveGuard setup',
-          waivedWithPrepay: fallbackPrepayEligible,
-        });
-      }
-      // A waived quote must not lift the one-time anchor either — the fee is
-      // neither shown nor charged (same guard as the card push above).
-      if (!storedSetupRow && !frozenQuoteWaived) fallbackAnchorLift = feeAmount;
-    }
+    const { firstVisitFees: fallbackFirstVisitFees, anchorLift: fallbackAnchorLift } = resolveFallbackWaveGuardSetupFee(
+      estData,
+      storedOneTimeBreakdown,
+      Number(PEST.initialFee || 99) || 99,
+    );
     const payload = stampTreeShrubPalmCount(finalizePricingBundle(withManualDiscount({
       ...(legacyLawnRequote
         ? { quoteRequired: true, quoteRequiredReason: 'legacy_lawn_pricing_requote' }
@@ -30991,10 +31012,12 @@ async function buildPricingBundleInner(estimate) {
     && !estData?.membershipSnapshot?.isExistingCustomer
     && recurringMixHasSeasonalMosquito(engineRecurringServices);
   if (!oneTimeOnly && engineMembershipFeeMixApplies && (enginePrepayEligible || engineSeasonalFeeDue)) {
-    // Frozen wizard disclosure first — see the v1 branch. An explicit
-    // { amount: 0, waived } quote suppresses the card entirely.
-    const engineFrozenQuoteFee = Number(estData?.setupFeeQuote?.amount);
-    const engineFrozenQuoteWaived = !!estData?.setupFeeQuote && !(engineFrozenQuoteFee > 0);
+    // Frozen wizard disclosure first — see the v1 branch. Keep kind-aware
+    // resolution via waveguardFrozenSetupFeeQuote so rodent quotes never hide
+    // or misprice WaveGuard membership setup fees.
+    const frozenQuote = require('../services/estimate-converter').waveguardFrozenSetupFeeQuote(estData);
+    const engineFrozenQuoteFee = frozenQuote ? frozenQuote.amount : 0;
+    const engineFrozenQuoteWaived = Boolean(frozenQuote?.waived);
     if (!engineFrozenQuoteWaived) {
       engineFirstVisitFees.push({
         service: 'waveguard_setup',

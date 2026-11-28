@@ -485,6 +485,15 @@ async function recheckApprovedScope(conn, approved) {
   if (typeof approved.callerRecheck === 'function') await approved.callerRecheck(conn);
 }
 
+function callerHooksFromInput(input) {
+  return {
+    ...(typeof input._callerPreLock === 'function' ? { callerPreLock: input._callerPreLock } : {}),
+    ...(typeof input._callerRecheck === 'function' ? { callerRecheck: input._callerRecheck } : {}),
+    ...(typeof input._callerPostCreate === 'function' ? { callerPostCreate: input._callerPostCreate } : {}),
+    ...(input._deferSetupFeeReconcile === true ? { deferSetupFeeReconcile: true } : {}),
+  };
+}
+
 async function commitCreate(input) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_invoice_create_version);
   if (refused) return refused;
@@ -493,11 +502,7 @@ async function commitCreate(input) {
   const run = plan.mode === 'from_visit' ? invoices.createInvoiceFromServiceFromBar : invoices.createInvoiceFromBar;
   let result;
   try {
-    const callerHooks = {
-      ...(typeof input._callerPreLock === 'function' ? { callerPreLock: input._callerPreLock } : {}),
-      ...(typeof input._callerRecheck === 'function' ? { callerRecheck: input._callerRecheck } : {}),
-    };
-    result = await run({ body: plan._body, approved: { ...plan._approved, ...callerHooks } });
+    result = await run({ body: plan._body, approved: { ...plan._approved, ...callerHooksFromInput(input) } });
   } catch (err) {
     // A 409 from the visit route (a deposit would apply, the price moved) is thrown before anything is created.
     if (err?.status === 409) {
