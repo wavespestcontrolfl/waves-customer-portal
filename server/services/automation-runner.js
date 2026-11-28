@@ -18,7 +18,7 @@ const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { wrapServiceEmail, ensureLegalTextFooter, blockPalette, bodyIsDarkAware } = require('./email-template');
+const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
 const { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS, NEW_LEAD_EXTENDED_STEP_IDS } = require('./new-lead-drip-stops');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -530,8 +530,9 @@ function renderAutomationStepContent({ template, htmlBody, textBody, previewText
     ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from these emails.`
     : null;
   const preheader = previewText ? escapeHtml(substitute(previewText, customer)) : undefined;
+  const darkAwareBody = /\bclass\s*=\s*["'][^"']*\bdm-text\b/.test(String(htmlBody || ''));
   const html = rawHtml
-    ? wrapServiceEmail({ body: rawHtml, preheader, footerNote: unsubFooter, darkAwareBody: bodyIsDarkAware(htmlBody) })
+    ? wrapServiceEmail({ body: rawHtml, preheader, footerNote: unsubFooter, darkAwareBody })
     : '';
   const text = isNewsletterAutomation(template)
     ? ensureLegalTextFooter(rawText, { unsubscribeUrl })

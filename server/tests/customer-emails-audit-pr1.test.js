@@ -182,6 +182,16 @@ describe('Customer emails audit PR 1 regressions', () => {
     expect(legacy.html).toContain('class="dm-gold"');
     expect(legacy.html).toContain('class="dm-lightcard"');
     expect(legacy.html).not.toContain('class="dm-card"');
+
+    const mixed = renderAutomationStepContent({
+      template: { key: 'welcome_drip', name: 'Welcome' },
+      htmlBody: '<p style="color:#1a1a1a">Plain paragraph</p><a class="dm-gold" href="https://portal.wavespestcontrol.com/book">Book</a>',
+      textBody: 'Plain paragraph',
+      customer: { first_name: 'Taylor' },
+      asmGroupId: null,
+    });
+    expect(mixed.html).toContain('class="dm-lightcard"');
+    expect(mixed.html).not.toContain('class="dm-card"');
   });
 
   test('recruiting-comms renders inside Waves service shell with gold CTA and no off-brand green', () => {
