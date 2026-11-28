@@ -247,7 +247,9 @@ async function reconcileSetupFeeAlert({ customerId, sourceEstimateId, actorLabel
             const tElsewhere = await setupFeeSettledElsewhere(trx, { customerId: tCustomer, expectedFeeCents: tExpect, visitDate: await settledVisitDate(trx, tVisitIds[0]), lock: true });
             // Partial fee money paid on other invoices, once per invoice id.
             const tCovered = tLiveFeeCents + tRefundedFeeCents + partialElsewhereCents(tElsewhere.partial, tRows);
-            const tOpenFeeCents = partialElsewhereCents(tElsewhere.open, tRows);
+            const tOpenFeeCents = require('../config/feature-gates').setupFeeOpenInvoiceNoticeLive()
+              ? partialElsewhereCents(tElsewhere.open, tRows)
+              : 0;
             const tFeeProven = feeWaivedByTerm
               || tElsewhere.settled
               || (tExpect > 0

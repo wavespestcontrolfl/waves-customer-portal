@@ -524,7 +524,7 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       expect(adminSchedSrc).toContain('if (payPageInvoiceId) this.orWhere({ id: payPageInvoiceId });');
       // Locked enrollment hold check (invoice locked BEFORE customer) & preserved INVOICE_CHEMICAL_ADDON_HOLD code
       const payV2Src = fs.readFileSync(path.join(__dirname, '../routes/pay-v2.js'), 'utf8');
-      expect(payV2Src.match(/enrollmentInvoiceRefusal\(trx, invoice\.id, invoice\.customer_id\)/g)).toHaveLength(2);
+      expect(payV2Src.match(/enrollmentInvoiceRefusal\(trx, invoice\.id, invoice\.customer_id/g)).toHaveLength(2);
       const enrollFnStart = payV2Src.indexOf('async function enrollmentInvoiceRefusal');
       const enrollFnBody = payV2Src.slice(enrollFnStart, enrollFnStart + 900);
       expect(enrollFnBody.indexOf("trx('invoices')")).toBeGreaterThan(-1);
@@ -1013,6 +1013,23 @@ describe('Billing Audit PR 2 — chemical-review holds & completion invariants',
       expect(capturedUpdate.due_date).toBeTruthy();
       expect(capturedUpdate.due_date.__raw).toContain("status IN ('draft', 'scheduled', 'sending')");
       expect(capturedUpdate.due_date.__raw).toContain('due_date < ?::date THEN ?::date ELSE due_date END');
+    });
+
+    test('deduped delivery-recovery anchors due_date to original ET delivery timestamp and preserves due_date when unknown', () => {
+      const InvoiceService = require('../services/invoice');
+      const fakeDb = { raw: jest.fn((sql, bindings) => ({ __raw: sql, bindings })) };
+
+      const withOrig = InvoiceService._firstDeliveryDueDateUpdate(fakeDb, {
+        deduped: true,
+        smsEventVisibleAt: '2026-11-24T15:00:00Z',
+      });
+      expect(withOrig.due_date).toBeTruthy();
+      expect(withOrig.due_date.bindings).toEqual(['2026-11-24', '2026-11-24']);
+
+      const unknownOrig = InvoiceService._firstDeliveryDueDateUpdate(fakeDb, {
+        deduped: true,
+      });
+      expect(unknownOrig).toEqual({});
     });
   });
 });

@@ -6301,7 +6301,7 @@ const StripeService = {
           cardBrand,
           cardLastFour: cardLastFour || bankLastFour || null,
           receiptUrl,
-        }, { rejectHeldInvoices: !opts.allowChemicalReviewReconcile });
+        }, Object.assign({ rejectHeldInvoices: true }, opts));
         if (combinedOutcome.anchorPaymentRow) return combinedOutcome.anchorPaymentRow;
         // The anchor row can be absent only when its allocation share was
         // recorded as a residual (invoice raced terminal) — surface loudly.

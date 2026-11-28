@@ -50,17 +50,32 @@ function confirmErrorStatus(err) {
   return err && err.code === 'INVOICE_CHEMICAL_ADDON_HOLD' ? 409 : 400;
 }
 
-async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null) {
-  // Billing lock order: invoice FOR UPDATE → customer FOR UPDATE → packet/visit
-  // SHARE checks. Matches stripe-terminal.js & customer-credit.js so concurrent
-  // enrollment + terminal/credit transactions cannot deadlock on opposite lock
-  // order, and acquires customer FOR UPDATE before invoicePayerOwnedNow's SHARE
-  // lock so enrollConsentedMethod never deadlocks upgrading SHARE → UPDATE.
-  const liveInv = await trx('invoices').where({ id: invoiceId }).forUpdate().first('id', 'scheduled_send_error');
+function combinedAllocationInvoiceIds(pi) {
+  try {
+    const alloc = require('../services/pay-combined').parseCombinedAllocation(pi?.metadata);
+    return Array.isArray(alloc) ? alloc.map((a) => String(a.invoiceId)).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null, { extraInvoiceIds = [] } = {}) {
+  // Billing lock order: invoice(s) sorted by id FOR UPDATE → customer FOR UPDATE
+  // → packet/visit SHARE checks. Matches stripe-terminal.js, pay-combined.js,
+  // and webhookInvoiceRefusesEnrollment so concurrent enrollment + terminal/
+  // combined transactions cannot deadlock on opposite lock order, and covers
+  // every sibling invoice on a combined PaymentIntent.
+  const ids = [...new Set([
+    ...(invoiceId ? [String(invoiceId)] : []),
+    ...(Array.isArray(extraInvoiceIds) ? extraInvoiceIds.map((id) => String(id)) : []),
+  ].filter(Boolean))].sort();
+  const liveInvs = ids.length
+    ? await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate().select('id', 'scheduled_send_error')
+    : [];
   if (customerId) {
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
   }
-  if (liveInv && invoiceHeldForChemicalReview(liveInv)) {
+  if (liveInvs.some((inv) => invoiceHeldForChemicalReview(inv))) {
     return {
       status: 409,
       body: {
@@ -69,11 +84,14 @@ async function enrollmentInvoiceRefusal(trx, invoiceId, customerId = null) {
       },
     };
   }
-  if (await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoiceId, trx)) {
-    return {
-      status: 409,
-      body: { error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' },
-    };
+  const { invoicePayerOwnedNow } = require('../services/visit-completion-packets');
+  for (const id of ids) {
+    if (await invoicePayerOwnedNow(id, trx)) {
+      return {
+        status: 409,
+        body: { error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' },
+      };
+    }
   }
   return null;
 }
@@ -1786,7 +1804,9 @@ router.post('/:token/consent', async (req, res, next) => {
     let row;
     try {
       row = await db.transaction(async (trx) => {
-        consentRefusal = await enrollmentInvoiceRefusal(trx, invoice.id, invoice.customer_id);
+        consentRefusal = await enrollmentInvoiceRefusal(trx, invoice.id, invoice.customer_id, {
+          extraInvoiceIds: combinedAllocationInvoiceIds(pi),
+        });
         if (consentRefusal) throw PAYER_BILLED_ROLLBACK;
         const created = await ConsentService.recordConsent({
           customerId: invoice.customer_id,
