@@ -411,6 +411,7 @@ async function judgeShadowDrafts({ batchLimit = BATCH_LIMIT } = {}) {
         .andOnVal('ad.workflow', SUGGEST_WORKFLOW);
     })
     .whereNull('shadow_draft_judgments.id')
+    .whereRaw("COALESCE(message_drafts.draft_trigger, 'inbound') = 'inbound'")
     .where(function eligibleStatuses() {
       this.where('message_drafts.status', 'shadow')
         .orWhere(function correctedSuggestion() {
