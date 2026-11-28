@@ -1319,30 +1319,50 @@ async function reconcileSetupFeeAlertsForInvoices(invoicesOrIds) {
 }
 
 /**
- * Resolve the invoice (and its id) backing an ACH PaymentIntent, even after
- * saved-card failure resolution cleared invoices.stripe_payment_intent_id
- * (B-07). Shared by handleAchFailure and resetAchFailureStateForSucceededIntent.
+ * Resolve the invoice, invoice id, and payer-ownership status backing an ACH
+ * PaymentIntent, even after saved-card failure resolution cleared
+ * invoices.stripe_payment_intent_id (B-07). Shared by handleAchFailure and
+ * resetAchFailureStateForSucceededIntent.
+ *
+ * Fail closed on payer verification: honors payment.payer_id /
+ * metadata.payer_id directly, and returns `skipHomeownerAchReason` whenever a
+ * payer owns the debit, an invoice lookup fails, or a known invoice id cannot
+ * be loaded — so callers never mutate homeowner ACH state or message a
+ * homeowner for a debit whose payer cannot be verified.
  */
-async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice = null) {
-  let invoice = preResolvedInvoice || null;
-  const piId = paymentIntent?.id || null;
-  if (!invoice && piId) {
-    invoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null)
-      || await findInvoiceForPaymentIntent(paymentIntent).catch(() => null);
-  }
+async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice) {
   const ledgerId = ledgerInvoiceId(payment);
-  if (!invoice && ledgerId) {
-    invoice = await db('invoices').where({ id: ledgerId }).first().catch(() => null);
+  const directPayerId = payment.payer_id || parsePaymentMeta(payment).payer_id;
+  let invoice = preResolvedInvoice || null;
+  let lookupFailed = false;
+  if (!invoice && !directPayerId) {
+    try {
+      invoice = await db('invoices').where({ stripe_payment_intent_id: paymentIntent.id }).first()
+        || await findInvoiceForPaymentIntent(paymentIntent);
+      if (!invoice && ledgerId) {
+        invoice = await db('invoices').where({ id: ledgerId }).first();
+      }
+    } catch (err) {
+      lookupFailed = true;
+      logger.warn(`[stripe-webhook] ACH invoice lookup failed for PI ${paymentIntent.id}: ${err.message}`);
+    }
   }
-  const invoiceId = invoice?.id || ledgerId || paymentIntent?.metadata?.waves_invoice_id || null;
-  return { invoice, invoiceId };
+  const knownInvoiceId = ledgerId || (paymentIntent.metadata && paymentIntent.metadata.waves_invoice_id);
+  const invoiceId = (invoice ? invoice.id : knownInvoiceId) || null;
+  const payerId = directPayerId || (invoice && invoice.payer_id);
+  const unverifiable = lookupFailed || Boolean(knownInvoiceId && !invoice);
+  const skipHomeownerAchReason = payerId
+    ? `payer-billed (${payerId})`
+    : (unverifiable ? `invoice ${invoiceId} unverifiable` : null);
+  return { invoice, invoiceId, payerId: payerId || null, skipHomeownerAchReason };
 }
 
 /**
  * In-lock bounce-fence check shared by fee, combined, and single-invoice
  * charge.refunded lanes (B-01, B-06): returns true if refund.failed already
  * fenced `refundId` on any locked payment row's metadata.failed_refund_ids or
- * in the pre-settlement stripe_failed_refunds table.
+ * in the pre-settlement stripe_failed_refunds table. Uses `trx.schema` so the
+ * check stays on the transaction's own connection and cannot exhaust the pool.
  */
 async function isRefundFencedInTx(trx, refundId, lockedRows = []) {
   if (!refundId) return false;
@@ -1352,7 +1372,7 @@ async function isRefundFencedInTx(trx, refundId, lockedRows = []) {
     return Array.isArray(meta.failed_refund_ids) && meta.failed_refund_ids.includes(refundId);
   });
   if (rowFenced) return true;
-  if (await db.schema.hasTable('stripe_failed_refunds')) {
+  if (await trx.schema.hasTable('stripe_failed_refunds')) {
     const tableRow = await trx('stripe_failed_refunds')
       .where({ stripe_refund_id: refundId })
       .first('stripe_refund_id');
@@ -2483,9 +2503,9 @@ async function resetAchFailureStateForSucceededIntent(paymentIntent) {
         // the payer's payment row sits under the service customer's id but is
         // not the homeowner's bank account. (Symmetric to the handleAchFailure
         // guard.)
-        const { invoice: achInvoice } = await resolveAchInvoice(paymentIntent, payment);
-        if (achInvoice?.payer_id) {
-          logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
+        const { skipHomeownerAchReason } = await resolveAchInvoice(paymentIntent, payment);
+        if (skipHomeownerAchReason) {
+          logger.info(`[stripe-webhook] ACH success (PI ${piId}, ${skipHomeownerAchReason}) — not resetting homeowner ACH state`);
         } else {
           await db('ach_failure_log')
             .where({ customer_id: payment.customer_id, resolved: false })
@@ -3543,7 +3563,7 @@ async function handleChargeRefunded(charge) {
         // terminal refunded marker that replay-skips settlement.
         if (refundId) {
           try {
-            if (await db.schema.hasTable('stripe_failed_refunds')) {
+            if (await trx.schema.hasTable('stripe_failed_refunds')) {
               const fencedInLock = await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
               if (fencedInLock) {
                 logger.warn(`[stripe-webhook] fee refund ${refundId} already fenced as failed — no pre-settlement marker written`);
@@ -4119,25 +4139,39 @@ async function handleChargeRefunded(charge) {
     );
     let singleLockedRows = await trx('payments').where({ stripe_charge_id: chargeId }).forUpdate();
     if (!singleLockedRows.length && charge.payment_intent) {
-      singleLockedRows = await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).forUpdate();
+      // Processing-stage ACH rows carry stripe_payment_intent_id with
+      // stripe_charge_id NULL — adopt only charge-less rows for this PI so a
+      // reusable PI's prior charge row is never overwritten.
+      singleLockedRows = (await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).forUpdate())
+        .filter((row) => !row.stripe_charge_id);
     }
     if (await isRefundFencedInTx(trx, refundId, singleLockedRows)) {
       logger.warn(`[stripe-webhook] single-invoice refund ${refundId} on charge ${chargeId} was fenced as FAILED while waiting for the lock — skipping stamp + side effects`);
       refundFencedInLock = true;
       return null;
     }
+    // When we locked a processing-stage PI-only ACH row, stamp THAT row by id
+    // and attach stripe_charge_id (otherwise a full refund inserts a duplicate
+    // marker leaving the original 'processing', and a partial refund goes
+    // unrecorded). Partial refunds on an unsettled 'processing' ACH row keep
+    // status 'processing' until payment_intent.succeeded settles it.
+    const targetPiRow = singleLockedRows.find((r) => r.id && !r.stripe_charge_id);
+    const targetFilter = targetPiRow ? { id: targetPiRow.id } : { stripe_charge_id: chargeId };
+    const targetStatusRow = targetPiRow || singleLockedRows[0] || null;
+    const partialStatus = targetStatusRow?.status === 'processing' ? 'processing' : 'paid';
     await trx('payments')
-      .where({ stripe_charge_id: chargeId })
+      .where(targetFilter)
       .update({
-        status: isFullRefund ? 'refunded' : 'paid',
+        status: isFullRefund ? 'refunded' : partialStatus,
         refund_amount: cumulativeRefundAmountDollars,
         refund_status: isFullRefund ? 'full' : 'partial',
         stripe_refund_id: refundId,
+        ...(targetPiRow ? { stripe_charge_id: chargeId } : {}),
         // The ledger's refund time (Codex #4971 r6 P1: the termite renewal's
         // late-paid alert dates a parent's revocation by it).
         updated_at: trx.fn.now(),
       });
-    const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
+    const pmt = await trx('payments').where(targetFilter).first();
     let result = pmt;
     // Record this refund id as STAMPED (see metadataWithStampedRefund) so a
     // later bounce of it stays attributable even after newer stamps
@@ -4271,12 +4305,22 @@ async function handleChargeRefunded(charge) {
     // A combined charge refunds N per-invoice rows — the annual-prepay
     // sync must see EVERY refunded share, not the arbitrary first row
     // (codex r4 P1: a prepay invoice elsewhere in the allocation would
-    // keep active coverage on refunded money). Single-invoice charges
-    // have exactly one row, preserving the original behavior.
+    // keep active coverage on refunded money). Never fall back to a
+    // non-refunded row (B-01), and lock/recheck each row FOR UPDATE so a
+    // racing refund.failed bounce cannot be superseded by a stale clawback.
     const refundSyncRows = await db('payments')
       .where({ stripe_charge_id: chargeId, status: 'refunded' });
     for (const refundedRow of refundSyncRows) {
-      await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(refundedRow);
+      await db.transaction(async (syncTrx) => {
+        const annualPrepay = require('../services/annual-prepay-renewals');
+        await annualPrepay.acquireTermiteGateForCharge(syncTrx, { paymentIds: [refundedRow.id] });
+        const lockedRow = await syncTrx('payments').where({ id: refundedRow.id }).forUpdate().first();
+        if (!lockedRow || String(lockedRow.status || '').toLowerCase() !== 'refunded'
+          || (await isRefundFencedInTx(syncTrx, refundId, lockedRow))) {
+          return;
+        }
+        await annualPrepay.syncTermForRefundedPayment(lockedRow, syncTrx);
+      });
     }
   }
 
@@ -6011,13 +6055,13 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null, op
     // Resolves pre-passed invoice, PI-linked invoice, metadata fallback, or
     // payments.metadata.invoice_id so clearing stripe_payment_intent_id during
     // saved-card failure resolution never blinds these guards (B-07).
-    const { invoice: achInvoice, invoiceId: achInvoiceId } = await resolveAchInvoice(
+    const { invoiceId: achInvoiceId, skipHomeownerAchReason } = await resolveAchInvoice(
       paymentIntent,
       payment,
       opts?.invoice,
     );
-    if (achInvoice?.payer_id) {
-      logger.info(`[stripe-webhook] ACH failure on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — skipping homeowner ACH handling`);
+    if (skipHomeownerAchReason) {
+      logger.info(`[stripe-webhook] ACH failure (PI ${piId}, ${skipHomeownerAchReason}) — skipping homeowner ACH handling`);
       return;
     }
     // Codex #4971 r22 P1: a termite annual RENEWAL debit owns its own
@@ -9595,6 +9639,7 @@ module.exports._isMachineInitiatedPaymentIntent = isMachineInitiatedPaymentInten
 module.exports._isCustomerInitiatedPaymentIntent = isCustomerInitiatedPaymentIntent;
 module.exports.sweepUnacknowledgedAchProcessingAcks = sweepUnacknowledgedAchProcessingAcks;
 module.exports._handleAchFailure = handleAchFailure;
+module.exports._resetAchFailureStateForSucceededIntent = resetAchFailureStateForSucceededIntent;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
 module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;

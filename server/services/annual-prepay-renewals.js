@@ -238,10 +238,11 @@ let invoiceColsCache = null;
 // the process, so syncTermForInvoicePayment (and every other reader gated
 // on this) silently no-oped: a paid invoice left its term payment_pending
 // with no error anywhere.
-async function annualPrepayTableExists() {
+async function annualPrepayTableExists(conn = db) {
   if (tableExistsCache != null) return tableExistsCache;
   try {
-    tableExistsCache = await db.schema.hasTable('annual_prepay_terms');
+    const schema = conn && conn.schema ? conn.schema : db.schema;
+    tableExistsCache = await schema.hasTable('annual_prepay_terms');
   } catch (err) {
     logger.warn(`[annual-prepay] table detection failed: ${err.message}`);
     return false;
@@ -5908,7 +5909,7 @@ function renewalGateTermIds(term) {
 }
 
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
-  if (!(await annualPrepayTableExists())) return [];
+  if (!(await annualPrepayTableExists(conn))) return [];
   const invoice = typeof invoiceOrId === 'object'
     ? invoiceOrId
     : await conn('invoices').where({ id: invoiceOrId }).first('id', 'status', 'paid_at');
@@ -6280,7 +6281,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
 }
 
 async function syncTermForRefundedPayment(payment, conn = db) {
-  if (!(await annualPrepayTableExists()) || !payment) return [];
+  if (!(await annualPrepayTableExists(conn)) || !payment) return [];
   // Defensive guard (B-01): never unwind coverage for a payment row that is
   // not actually refunded (e.g. a parked partial or bounced refund that left
   // the row 'paid').

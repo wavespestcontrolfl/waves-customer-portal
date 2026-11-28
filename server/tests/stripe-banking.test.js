@@ -908,6 +908,58 @@ describe('stripe banking service', () => {
       expect(row.description).toContain(INV_2);
     });
 
+    test('keeps a parked combined partial refund unallocated while preserving the charge link (never lists full invoice shares)', async () => {
+      const sibling = {
+        id: 'pay-comb-sib',
+        customer_id: CUST_ID,
+        status: 'paid',
+        amount: '40.00',
+        stripe_charge_id: 'ch_comb_park',
+        stripe_refund_id: null,
+        metadata: JSON.stringify({ invoice_id: INV_2, combined_payment: true, combined_anchor_invoice_id: INV_1 }),
+      };
+      const anchor = {
+        id: 'pay-comb-anc',
+        customer_id: CUST_ID,
+        status: 'paid',
+        amount: '60.00',
+        stripe_charge_id: 'ch_comb_park',
+        stripe_refund_id: null,
+        metadata: JSON.stringify({ invoice_id: INV_1, combined_payment: true, combined_anchor_invoice_id: INV_1 }),
+      };
+      makePaymentsAndCustomersMock([sibling, anchor], [{ id: CUST_ID, first_name: 'Jordan', last_name: 'Taylor' }]);
+      stripeClient.refunds = {
+        retrieve: jest.fn(async () => ({ id: 're_comb_partial', charge: 'ch_comb_park', amount: 2500 })),
+      };
+
+      const txn = {
+        id: 'txn_comb_part',
+        type: 'refund',
+        reporting_category: 'refund',
+        source: 're_comb_partial',
+        amount: -2500,
+        fee: 0,
+        net: -2500,
+        description: 'REFUND',
+        created: 1770000250,
+      };
+      const maps = await service._resolveTxnLinkMaps([txn], stripeClient);
+      const row = service._txnRowFromStripe(txn, maps, null);
+
+      // Charge link preserved (anchor payment + customer), no single invoice assigned.
+      expect(row.payment_id).toBe('pay-comb-anc');
+      expect(row.customer_id).toBe(CUST_ID);
+      expect(row.customer_name).toBe('Jordan Taylor');
+      expect(row.invoice_id).toBeNull();
+      // Marked unallocated — must NOT list full charge shares ($60.00 / $40.00 → INV_1 / INV_2).
+      expect(row.description).toContain('combined refund unallocated');
+      expect(row.description).toContain('ch_comb_park');
+      expect(row.description).not.toContain(INV_1);
+      expect(row.description).not.toContain(INV_2);
+      expect(row.description).not.toContain('$60.00');
+      expect(row.description).not.toContain('$40.00');
+    });
+
     test('falls back to Stripe refund -> charge lookup for legacy unstamped refunds and ignores retrieve errors', async () => {
       const legacyPay = {
         id: 'pay-legacy-1',

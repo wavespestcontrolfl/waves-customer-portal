@@ -105,6 +105,24 @@ function assertLockedCustomerNotDeleted(lockedCustomer) {
   }
 }
 
+// Recheck on a FOR UPDATE locked payments row that a full refund committed by
+// StripeService._refundPayment has not since been reverted by a racing
+// refund.failed webhook (Codex P0): requires status === 'refunded', refundId
+// not fenced in metadata.failed_refund_ids, and refundId still stamped on the
+// row. Shared by both the credit-restore and annual-prepay clawback locks.
+function isPaymentStillRefundedFor(row, refundId) {
+  if (!row || String(row.status || '').toLowerCase() !== 'refunded') return false;
+  let meta = {};
+  try {
+    meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+  } catch { meta = {}; }
+  const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+  if (refundId && failedIds.includes(refundId)) return false;
+  if (!refundId) return true;
+  const stampedIds = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+  return row.stripe_refund_id === refundId || stampedIds.includes(refundId);
+}
+
 function isIncompatibleAttachedMethodError(err) {
   const message = String(err?.message || err?.raw?.message || '').toLowerCase();
   return message.includes('incompatible with the attached paymentmethod')
@@ -3887,7 +3905,13 @@ const StripeService = {
       // Return any applied account credit to the customer's balance — a full
       // refund gives back the cash, so the credit they used must return too
       // (else it stays consumed). Idempotent vs the charge.refunded webhook.
+      // Lock and recheck the payment row + refund id FOR UPDATE before
+      // mutating the invoice or unwinding coverage: a racing refund.failed
+      // webhook can revert the payment back to 'paid' after stampRefundOnPayment
+      // commits, and without this check we would terminalize a paid invoice
+      // and cancel live coverage on money Stripe kept.
       let refundedInvoice = null;
+      let refundReverted = false;
       try {
         refundedInvoice = await db('invoices')
           .where({ stripe_payment_intent_id: payment.stripe_payment_intent_id })
@@ -3898,32 +3922,44 @@ const StripeService = {
           // renewal charge could consume — same entry rule as the stamp.
           await db.transaction(async (trx) => {
             await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
+            const lockedPayment = await trx('payments').where({ id: paymentId }).forUpdate().first();
+            if (!isPaymentStillRefundedFor(lockedPayment, refund.id)) {
+              refundReverted = true;
+              logger.warn(`[stripe] refund ${refund.id} for payment ${paymentId} was reverted before credit restore (status=${lockedPayment?.status || 'missing'}) — skipping credit restore`);
+              return;
+            }
             return returnAppliedCreditOnRefund({ invoiceId: refundedInvoice.id, createdBy: 'system:refund' }, trx);
           });
         }
       } catch (creditErr) {
         logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);
       }
-      // Annual-prepay claw-back, AFTER the credit restore on purpose (B03):
-      // that restore terminalizes the invoice this PI owns to 'refunded'
-      // under its row lock, and a refunded invoice is refused by every
-      // replacement-settlement path — so the ownership read
-      // syncTermForRefundedPayment makes next cannot be flipped by a
-      // replacement payment before the term is cancelled. (The restore finds
-      // the invoice by this payment's PI, i.e. only an invoice it still
-      // owns.) A restore that throws is logged above and never skips this:
-      // the sync runs regardless, as it always has, just on a read that is
-      // then not pinned by the terminal status. Pass status: 'refunded'
-      // because stampRefundOnPayment already committed that transition above.
+      // Annual-prepay claw-back, AFTER the credit restore on purpose (B03) and
+      // serialized with handleRefundFailed on the payment row lock: re-locks
+      // and verifies the live payment still reflects this refund before
+      // calling syncTermForRefundedPayment(lockedPayment, trx) — never passing
+      // a fabricated status that could bypass the guard after a bounce.
       try {
-        await require('./annual-prepay-renewals').syncTermForRefundedPayment({ ...payment, status: 'refunded' });
+        await db.transaction(async (trx) => {
+          if (refundReverted) return;
+          await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
+          const lockedPayment = await trx('payments').where({ id: paymentId }).forUpdate().first();
+          if (!isPaymentStillRefundedFor(lockedPayment, refund.id)) {
+            refundReverted = true;
+            logger.warn(`[annual-prepay] refund ${refund.id} for payment ${paymentId} was reverted before prepay sync (status=${lockedPayment?.status || 'missing'}) — skipping coverage clawback`);
+            return;
+          }
+          await require('./annual-prepay-renewals').syncTermForRefundedPayment(lockedPayment, trx);
+        });
       } catch (syncErr) {
         logger.error(`[annual-prepay] refund sync failed for payment ${paymentId}: ${syncErr.message}`);
       }
       // Best-effort setup-fee alert reconcile after refund + prepay claw-back (B-43).
       // reconcileSetupFeeAlertForInvoice no-ops on null and catches its own errors.
       await Promise.resolve()
-        .then(() => require('./setup-fee-alert-reconcile').reconcileSetupFeeAlertForInvoice(refundedInvoice))
+        .then(() => (!refundReverted
+          ? require('./setup-fee-alert-reconcile').reconcileSetupFeeAlertForInvoice(refundedInvoice)
+          : undefined))
         .catch((reconcileErr) => {
           logger.error(`[setup-fee-reconcile] refund reconcile failed for payment ${paymentId}: ${reconcileErr.message}`);
         });

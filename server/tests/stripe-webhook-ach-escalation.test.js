@@ -209,6 +209,7 @@ jest.mock('../models/db', () => {
 const {
   _handleAchFailure: handleAchFailure,
   _handlePaymentIntentFailed: handlePaymentIntentFailed,
+  _resetAchFailureStateForSucceededIntent: resetAchFailureStateForSucceededIntent,
 } = require('../routes/stripe-webhook');
 // Real predicate — the whole point of the fallback fix is that this
 // starts returning the card after the flip.
@@ -819,5 +820,83 @@ describe('B-07: handleAchFailure resolves invoice even after saved-card failure 
     expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+  });
+
+  test('payment.payer_id (and metadata.payer_id) directly skips homeowner ACH handling even without an invoice row', async () => {
+    mockState.achEmailOn = true;
+    mockState.invoiceRow = null;
+    mockState.paymentRow = {
+      id: 'pay-direct-payer',
+      customer_id: 'cust-1',
+      payer_id: 'payer-77',
+      stripe_payment_intent_id: 'pi_direct_payer',
+    };
+
+    await handleAchFailure({ id: 'pi_direct_payer', metadata: {} }, 'R01', 'evt_direct_payer');
+
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+    expect(mockState.customerUpdates).toEqual([]);
+  });
+
+  test('invoice lookup DB error fails closed and skips homeowner ACH escalation and notices', async () => {
+    mockState.achEmailOn = true;
+    mockState.paymentRow = {
+      id: 'pay-db-err',
+      customer_id: 'cust-1',
+      stripe_payment_intent_id: 'pi_db_err',
+      metadata: JSON.stringify({ invoice_id: INV_UUID }),
+    };
+    mockState.invoiceLookup = () => { throw new Error('db connection reset'); };
+
+    await handleAchFailure({ id: 'pi_db_err', metadata: {} }, 'R01', 'evt_db_err');
+
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+    expect(mockState.customerUpdates).toEqual([]);
+  });
+
+  test('known invoice id that cannot be loaded fails closed and skips homeowner ACH handling', async () => {
+    mockState.achEmailOn = true;
+    mockState.paymentRow = {
+      id: 'pay-missing-inv',
+      customer_id: 'cust-1',
+      stripe_payment_intent_id: 'pi_missing_inv',
+      metadata: JSON.stringify({ invoice_id: INV_UUID }),
+    };
+    mockState.invoiceLookup = () => null;
+
+    await handleAchFailure({ id: 'pi_missing_inv', metadata: {} }, 'R01', 'evt_missing_inv');
+
+    expect(mockSendAchFailureNotice).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockHandleAutopayFailure).not.toHaveBeenCalled();
+    expect(mockState.customerUpdates).toEqual([]);
+  });
+
+  test('resetAchFailureStateForSucceededIntent honors payment.payer_id and fails closed on invoice lookup errors', async () => {
+    const db = require('../models/db');
+    const touchedTables = () => db.mock.calls.map(([t]) => t);
+
+    // Direct payment.payer_id → never resets ach_failure_log or customers.ach_status.
+    mockState.paymentRow = { id: 'pay-ok-payer', customer_id: 'cust-1', payer_id: 'payer-88', stripe_payment_intent_id: 'pi_ok_payer' };
+    await resetAchFailureStateForSucceededIntent({ id: 'pi_ok_payer', payment_method_types: ['us_bank_account'], metadata: {} });
+    expect(touchedTables()).not.toContain('ach_failure_log');
+    expect(touchedTables()).not.toContain('customers');
+
+    // Invoice lookup DB error → fails closed, never resets homeowner ACH state.
+    db.mockClear();
+    mockState.paymentRow = {
+      id: 'pay-ok-err',
+      customer_id: 'cust-1',
+      stripe_payment_intent_id: 'pi_ok_err',
+      metadata: JSON.stringify({ invoice_id: INV_UUID }),
+    };
+    mockState.invoiceLookup = () => { throw new Error('db timeout'); };
+    await resetAchFailureStateForSucceededIntent({ id: 'pi_ok_err', payment_method_types: ['us_bank_account'], metadata: {} });
+    expect(touchedTables()).not.toContain('ach_failure_log');
+    expect(touchedTables()).not.toContain('customers');
   });
 });

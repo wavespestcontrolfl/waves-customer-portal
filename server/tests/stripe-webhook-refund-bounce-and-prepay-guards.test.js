@@ -476,6 +476,192 @@ describe('B-06: single-invoice charge.refunded in-lock bounce fence', () => {
     expect(CustomerCredit.returnAppliedCreditOnRefund).not.toHaveBeenCalled();
     expect(triggerNotification).not.toHaveBeenCalled();
   });
+
+  test('unfenced FULL refund on a processing-stage PI-only ACH row stamps that row by id, attaches charge id, and inserts no duplicate', async () => {
+    payments.push({
+      id: 'pay-ach-full',
+      customer_id: CUST_1,
+      stripe_payment_intent_id: 'pi_ach_full',
+      stripe_charge_id: null,
+      amount: '100.00',
+      status: 'processing',
+      metadata: JSON.stringify({ invoice_id: INV_1 }),
+    });
+    invoices.push({
+      id: INV_1,
+      customer_id: CUST_1,
+      status: 'processing',
+      stripe_payment_intent_id: 'pi_ach_full',
+      stripe_charge_id: null,
+    });
+
+    await handleChargeRefunded({
+      id: 'ch_ach_full',
+      payment_intent: 'pi_ach_full',
+      amount: 10000,
+      amount_refunded: 10000,
+      refunded: true,
+      metadata: {},
+      refunds: { data: [{ id: 're_ach_full', amount: 10000, created: 1751000000 }] },
+    });
+
+    // No duplicate marker row inserted; original row stamped in place with charge id attached.
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({
+      id: 'pay-ach-full',
+      status: 'refunded',
+      stripe_charge_id: 'ch_ach_full',
+      stripe_refund_id: 're_ach_full',
+      refund_amount: 100,
+      refund_status: 'full',
+    });
+    expect(JSON.parse(payments[0].metadata).stamped_refund_ids).toEqual(['re_ach_full']);
+    expect(invoices[0].status).toBe('refunded');
+    expect(CustomerCredit.returnAppliedCreditOnRefund).toHaveBeenCalledWith({ invoiceId: INV_1, createdBy: 'system:refund_webhook' }, db);
+  });
+
+  test('unfenced PARTIAL refund on a processing-stage PI-only ACH row stamps that row by id, attaches charge id, and keeps status processing', async () => {
+    payments.push({
+      id: 'pay-ach-part',
+      customer_id: CUST_1,
+      stripe_payment_intent_id: 'pi_ach_part',
+      stripe_charge_id: null,
+      amount: '100.00',
+      status: 'processing',
+      metadata: JSON.stringify({ invoice_id: INV_1 }),
+    });
+    invoices.push({
+      id: INV_1,
+      customer_id: CUST_1,
+      status: 'processing',
+      stripe_payment_intent_id: 'pi_ach_part',
+      stripe_charge_id: null,
+    });
+
+    await handleChargeRefunded({
+      id: 'ch_ach_part',
+      payment_intent: 'pi_ach_part',
+      amount: 10000,
+      amount_refunded: 3500,
+      refunded: false,
+      metadata: {},
+      refunds: { data: [{ id: 're_ach_part', amount: 3500, created: 1751000000 }] },
+    });
+
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({
+      id: 'pay-ach-part',
+      status: 'processing',
+      stripe_charge_id: 'ch_ach_part',
+      stripe_refund_id: 're_ach_part',
+      refund_amount: 35,
+      refund_status: 'partial',
+    });
+    expect(JSON.parse(payments[0].metadata).stamped_refund_ids).toEqual(['re_ach_part']);
+    expect(invoices[0].status).toBe('processing');
+    expect(CustomerCredit.returnAppliedCreditOnRefund).not.toHaveBeenCalled();
+  });
+
+  test('in-lock bounce-fence check uses trx.schema.hasTable (never borrows a second pool connection via db.schema)', async () => {
+    payments.push({
+      id: 'pay-trx-schema',
+      customer_id: CUST_1,
+      stripe_payment_intent_id: 'pi_trx_schema',
+      stripe_charge_id: 'ch_trx_schema',
+      amount: '100.00',
+      status: 'paid',
+      metadata: JSON.stringify({ invoice_id: INV_1 }),
+    });
+    invoices.push({
+      id: INV_1,
+      customer_id: CUST_1,
+      status: 'paid',
+      stripe_payment_intent_id: 'pi_trx_schema',
+      stripe_charge_id: 'ch_trx_schema',
+    });
+    const trxHasTable = jest.fn(async () => true);
+    let insideTx = false;
+    db.schema = {
+      hasTable: jest.fn(async () => {
+        if (insideTx) throw new Error('db.schema.hasTable must not be called inside a transaction');
+        return true;
+      }),
+    };
+    db.transaction.mockImplementation(async (cb) => {
+      const trx = (table) => {
+        tableAccess.push(table);
+        if (table === 'payments') return memTable('payments', payments);
+        if (table === 'invoices') return memTable('invoices', invoices);
+        if (table === 'stripe_failed_refunds') return memTable('stripe_failed_refunds', failedRefunds);
+        return emptyTable();
+      };
+      trx.raw = db.raw;
+      trx.fn = db.fn;
+      trx.schema = { hasTable: trxHasTable };
+      trx.isTransaction = true;
+      insideTx = true;
+      try { return await cb(trx); } finally { insideTx = false; }
+    });
+    onLockAcquired = () => {
+      failedRefunds.push({ stripe_refund_id: 're_trx_fenced' });
+    };
+
+    await handleChargeRefunded({
+      id: 'ch_trx_schema',
+      payment_intent: 'pi_trx_schema',
+      amount: 10000,
+      amount_refunded: 10000,
+      refunded: true,
+      metadata: {},
+      refunds: { data: [{ id: 're_trx_fenced', amount: 10000, created: 1751000000 }] },
+    });
+
+    expect(trxHasTable).toHaveBeenCalledWith('stripe_failed_refunds');
+    expect(payments[0].status).toBe('paid');
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('post-commit prepay clawback skips when refund.failed reverts the payment row before the sync lock is acquired', async () => {
+    payments.push({
+      id: 'pay-post-bounce',
+      customer_id: CUST_1,
+      stripe_payment_intent_id: 'pi_post_bounce',
+      stripe_charge_id: 'ch_post_bounce',
+      amount: '100.00',
+      status: 'paid',
+      metadata: JSON.stringify({ invoice_id: INV_1 }),
+    });
+    invoices.push({
+      id: INV_1,
+      customer_id: CUST_1,
+      status: 'paid',
+      stripe_payment_intent_id: 'pi_post_bounce',
+      stripe_charge_id: 'ch_post_bounce',
+    });
+    let txCount = 0;
+    db.transaction.mockImplementation(async (cb) => {
+      txCount += 1;
+      if (txCount === 2) {
+        // Simulate refund.failed committing its revert before the prepay sync transaction locks the row.
+        payments[0].status = 'paid';
+        payments[0].metadata = JSON.stringify({ invoice_id: INV_1, failed_refund_ids: ['re_post_bounce'] });
+      }
+      return cb(db);
+    });
+
+    await handleChargeRefunded({
+      id: 'ch_post_bounce',
+      payment_intent: 'pi_post_bounce',
+      amount: 10000,
+      amount_refunded: 10000,
+      refunded: true,
+      metadata: {},
+      refunds: { data: [{ id: 're_post_bounce', amount: 10000, created: 1751000000 }] },
+    });
+
+    expect(txCount).toBeGreaterThanOrEqual(2);
+    expect(tableAccess.includes('annual_prepay_terms')).toBe(false);
+  });
 });
 
 describe('B-01: syncTermForRefundedPayment defensive guards', () => {

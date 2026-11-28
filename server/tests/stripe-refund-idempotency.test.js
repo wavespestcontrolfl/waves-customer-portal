@@ -46,7 +46,10 @@ describe('StripeService.refund', () => {
       refund_amount: null,
       status: 'paid',
     };
-    updatePayments = jest.fn().mockResolvedValue(1);
+    updatePayments = jest.fn(async (patch) => {
+      if (patch && patch.status) Object.assign(paymentRow, patch);
+      return 1;
+    });
     mockGateForCharge = jest.fn(async () => []);
     mockSessionGate = jest.fn(async (_keys, fn) => fn());
 
@@ -63,6 +66,7 @@ describe('StripeService.refund', () => {
 
     const paymentsQuery = {
       where: jest.fn(() => paymentsQuery),
+      forUpdate: jest.fn(() => paymentsQuery),
       first: jest.fn(async () => paymentRow),
       update: updatePayments,
     };
@@ -710,8 +714,62 @@ describe('StripeService.refund', () => {
       expect(invoicesQuery.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_abc' });
       expect(order).toEqual(['credit', 'sync', 'reconcile']);
       expect(statusSeenBySync).toBe('refunded');
-      expect(syncMock).toHaveBeenCalledWith(expect.objectContaining({ id: 'pay-1', stripe_payment_intent_id: 'pi_abc', status: 'refunded' }));
+      expect(syncMock).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'pay-1', stripe_payment_intent_id: 'pi_abc', status: 'refunded', stripe_refund_id: 're_1' }),
+        dbMock,
+      );
       expect(reconcileMock).toHaveBeenCalledWith(invoiceRow);
+    });
+
+    test('racing refund.failed before credit restore prevents invoice terminalization, coverage clawback, and setup-fee reconcile', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      // Simulate refund.failed reverting paymentRow back to paid after stampRefundOnPayment commits.
+      const baseTx = dbMock.transaction.getMockImplementation();
+      let txNum = 0;
+      dbMock.transaction.mockImplementation(async (cb) => {
+        txNum += 1;
+        if (txNum === 2) {
+          paymentRow.status = 'paid';
+          paymentRow.stripe_refund_id = null;
+          paymentRow.metadata = JSON.stringify({ failed_refund_ids: ['re_1'] });
+        }
+        return baseTx(cb);
+      });
+
+      const result = await StripeService.refund('pay-1', {});
+
+      expect(order).toEqual([]);
+      expect(invoiceRow.status).toBe('paid');
+      expect(creditMock).not.toHaveBeenCalled();
+      expect(syncMock).not.toHaveBeenCalled();
+      expect(reconcileMock).not.toHaveBeenCalled();
+      expect(result.refund_issued_amount).toBe(100);
+    });
+
+    test('racing refund.failed between credit restore and prepay sync skips coverage clawback and setup-fee reconcile', async () => {
+      stubInvoiceLookup(invoiceRow);
+      const StripeService = loadWithRecorders();
+      recordOrder();
+      const baseTx = dbMock.transaction.getMockImplementation();
+      let txNum = 0;
+      dbMock.transaction.mockImplementation(async (cb) => {
+        txNum += 1;
+        if (txNum === 3) {
+          paymentRow.status = 'paid';
+          paymentRow.stripe_refund_id = null;
+          paymentRow.metadata = JSON.stringify({ failed_refund_ids: ['re_1'] });
+          invoiceRow.status = 'paid';
+        }
+        return baseTx(cb);
+      });
+
+      await StripeService.refund('pay-1', {});
+
+      expect(order).toEqual(['credit']);
+      expect(syncMock).not.toHaveBeenCalled();
+      expect(reconcileMock).not.toHaveBeenCalled();
     });
 
     test('a setup-fee reconcile failure never masks the successful refund (B-43)', async () => {
