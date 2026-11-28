@@ -2182,6 +2182,12 @@ async function claimPause(move, today, now) {
 // items in the same transaction.
 async function settlePause(move, facts, { state, note = null, summary = null, why = null, left = [], house = null, stoppedSeries = [], now }) {
   return db.transaction(async (trx) => {
+    // Lock customer BEFORE customer_moves (matches archive's customer -> move
+    // lock order) so inserting activity_log (FK -> customers) cannot deadlock
+    // against a concurrent customer archive (PR #8786 Codex P2).
+    if (move.customer_id) {
+      await trx('customers').where({ id: move.customer_id }).forUpdate().first('id');
+    }
     const locked = await trx('customer_moves').where({ id: move.id }).forUpdate().first();
     if (!pauseStarted(locked) || locked.status !== facts.status
       || (dateOnlyString(locked.move_out_date) || null) !== facts.moveOut || !!locked.normalized_address !== facts.hasAddress) return 'not_due';
