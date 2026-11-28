@@ -38,6 +38,7 @@ function makeChain(table, route) {
   for (const m of methods) {
     q[m] = jest.fn((...args) => { q._calls.push([m, args]); return q; });
   }
+  q.modify = jest.fn((cb) => { if (typeof cb === 'function') cb(q); return q; });
   q.called = (m) => q._calls.some(([name]) => name === m);
   q.args = (m) => q._calls.find(([name]) => name === m)?.[1];
   q.then = (resolve, reject) => Promise.resolve().then(() => {

@@ -8412,7 +8412,8 @@ async function predictExtraTableCollisionFolds(database, read, winnerId, loserId
       .map((r) => String(r.discount_id)))].sort();
     if (sharedDiscounts.length) details[promoTable] = { shared_redeemed_discounts: sharedDiscounts };
   }
-  const activeReviewRows = (await read('review_sequences', ['id', 'customer_id', 'status']))
+  const rawReviewRows = await read('review_sequences', ['id', 'customer_id', 'status']);
+  const activeReviewRows = (Array.isArray(rawReviewRows) ? rawReviewRows : [])
     .filter((r) => r.status === 'active');
   const winSeqIds = activeReviewRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => String(r.id)).sort();
   const loseSeqIds = activeReviewRows.filter((r) => String(r.customer_id) === String(loserId)).map((r) => String(r.id)).sort();
