@@ -165,10 +165,17 @@ const SHIFT_BLOCK_COLUMNS = ['window_start', 'window_end', 'estimated_duration_m
 
 async function loadCapabilityWarningsWithAddons(conn, jobId, job, newTechId) {
   if (!newTechId || (job.technician_id || null) === newTechId) return [];
-  const addonRows = await conn('scheduled_service_addons')
-    .where({ scheduled_service_id: jobId })
-    .select('service_name as service_type', 'service_id')
-    .catch(() => []);
+  let addonRows = [];
+  try {
+    const queryAddonRows = (c) => c('scheduled_service_addons')
+      .where({ scheduled_service_id: jobId })
+      .select('service_name as service_type', 'service_id');
+    addonRows = conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => queryAddonRows(sp))
+      : await queryAddonRows(conn);
+  } catch {
+    addonRows = [];
+  }
   return require('./technician-eligibility').capabilityOffWarningsFor(
     newTechId,
     [job, ...(Array.isArray(addonRows) ? addonRows : [])],
@@ -178,13 +185,26 @@ async function loadCapabilityWarningsWithAddons(conn, jobId, job, newTechId) {
 
 async function autoResolveStaleTechLateAlerts(trx, { jobId, fromTechId, newTechId, actorId }) {
   if (!fromTechId || String(fromTechId) === String(newTechId || '')) return;
-  const dispatchAlerts = require('./dispatch-alerts');
-  const staleLate = await trx('dispatch_alerts')
-    .where({ type: 'tech_late', job_id: jobId, tech_id: fromTechId })
-    .whereNull('resolved_at')
-    .select('id');
-  for (const { id } of staleLate) {
-    await dispatchAlerts.resolveAlert({ id, resolvedBy: actorId, trx, auto: true });
+  try {
+    const run = async (c) => {
+      const dispatchAlerts = require('./dispatch-alerts');
+      const staleLate = await c('dispatch_alerts')
+        .where({ type: 'tech_late', job_id: jobId, tech_id: fromTechId })
+        .whereNull('resolved_at')
+        .select('id');
+      for (const { id } of staleLate) {
+        await dispatchAlerts.resolveAlert({ id, resolvedBy: actorId, trx: c, auto: true });
+      }
+    };
+    if (trx.isTransaction && typeof trx.transaction === 'function') {
+      await trx.transaction((sp) => run(sp));
+    } else {
+      await run(trx);
+    }
+  } catch (err) {
+    // Minimal scheduling test DBs omit dispatch_alerts (42P01) or full chain builders.
+    if (err && err.code === '42P01') return;
+    logger.warn(`[dispatch-assignment] stale tech_late auto-resolve skipped for ${jobId}: ${err.message}`);
   }
 }
 

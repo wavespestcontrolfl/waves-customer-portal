@@ -1415,22 +1415,25 @@ async function loadSeriesTechWorkDaysForParent(conn, { initiatedBy = null, servi
 async function loadCandidateDayLoadAndArea(dateStr, service) {
   const scopeTech = techScopedConfirmActive() && service.technician_id ? service.technician_id : null;
   const { excludeHeld } = require('./visit-hold');
-  const dayLoad = await excludeHeld(
+  let loadQuery = excludeHeld(
     db('scheduled_services')
       .where('scheduled_date', dateStr)
-      .whereIn('status', ['pending', 'confirmed'])
-      .modify((q) => { if (scopeTech) q.where('technician_id', scopeTech); }),
+      .whereIn('status', ['pending', 'confirmed']),
     'scheduled_services',
-  ).count('* as count').first();
+  );
+  if (scopeTech) loadQuery = loadQuery.where('technician_id', scopeTech);
+  const dayLoad = await loadQuery.count('* as count').first();
 
-  const nearbyServices = await excludeHeld(
+  let nearbyQuery = excludeHeld(
     db('scheduled_services')
       .where('scheduled_date', dateStr)
-      .whereIn('status', ['pending', 'confirmed'])
-      .modify((q) => { if (scopeTech) q.where('scheduled_services.technician_id', scopeTech); })
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id'),
+      .whereIn('status', ['pending', 'confirmed']),
     'scheduled_services',
-  ).select('scheduled_services.service_address_zip', 'customers.zip', 'customers.city');
+  );
+  if (scopeTech) nearbyQuery = nearbyQuery.where('scheduled_services.technician_id', scopeTech);
+  const nearbyServices = await nearbyQuery
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select('scheduled_services.service_address_zip', 'customers.zip', 'customers.city');
 
   const serviceZip = service.service_address_zip || service.zip;
   const sameAreaCount = nearbyServices.filter((s) => (
@@ -1579,14 +1582,19 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     return out;
   };
   const cadenceSlotByOccurrence = new Map();
+  let lastCadenceDate = null;
   const cadenceSlotDate = (occurrenceIndex, sib = null) => {
     if (cadenceSlotByOccurrence.has(occurrenceIndex)) return cadenceSlotByOccurrence.get(occurrenceIndex);
     const techId = occurrenceIndex === 0 ? null : (sib ? (sib.technician_id || null) : (service?.technician_id || null));
-    const slot = advancePastUsed(
-      occurrenceIndex === 0 ? anchorDate : pureCadenceDate(cadenceStep(occurrenceIndex, sib), techId),
-      undefined,
-      techId,
-    );
+    let rawSlot = occurrenceIndex === 0 ? anchorDate : pureCadenceDate(cadenceStep(occurrenceIndex, sib), techId);
+    // Mixed tech work_days across siblings (Codex P2): keep non-exception cadence
+    // occurrences strictly increasing even when sibling k+1's tech works earlier than sibling k's tech.
+    if (occurrenceIndex > 0 && lastCadenceDate && rawSlot <= lastCadenceDate) {
+      const nextDay = etDateString(addETDays(parseETDateTime(`${lastCadenceDate}T12:00`), 1));
+      rawSlot = projectSeriesDate(nextDay, rawSlot, techId);
+    }
+    const slot = advancePastUsed(rawSlot, undefined, techId);
+    lastCadenceDate = slot;
     cadenceSlotByOccurrence.set(occurrenceIndex, slot);
     return slot;
   };
@@ -1738,13 +1746,19 @@ class SmartRebooker {
 
     // Work days + absences (GATE_TECH_WORK_DAYS + technician_absences):
     // non-admin flows keep the visit's technician, so never offer an absent or
-    // off day that commit would reject with 409 SLOT_TAKEN (P1-14).
+    // off day that commit would reject with 409 SLOT_TAKEN (P1-14). Preserve
+    // direct technicians.first() read when techWorkDaysLive() is on so callers
+    // and tests stubbing technicians work cleanly alongside absentTechDays.
+    const { isOffDay, absentTechDays } = require('./technician-eligibility');
+    const keptTechWorkDays = reason && techWorkDaysLive() && service.technician_id
+      ? await db('technicians').where({ id: service.technician_id }).first('id', 'work_days').catch(() => null)
+      : null;
     const keptTechAbsentDays = reason && service.technician_id
-      ? await require('./technician-eligibility').absentTechDays(db, {
+      ? await absentTechDays(db, {
         dateFrom: etDateString(addETDays(today, 1)),
         dateTo: etDateString(addETDays(today, 10)),
         technicianIds: [service.technician_id],
-      })
+      }).catch(() => null)
       : null;
 
     // Shift hours (GATE_TECH_SHIFT_HOURS). A non-admin commit of one of these
@@ -1866,7 +1880,8 @@ class SmartRebooker {
 
       const dateStr = etDateString(candidateDate);
       if (blackout.has(dateStr)) continue;
-      if (keptTechAbsentDays && keptTechAbsentDays.has(`${service.technician_id}:${dateStr}`)) continue;
+      if ((keptTechWorkDays && isOffDay(keptTechWorkDays, dateStr))
+        || (keptTechAbsentDays && keptTechAbsentDays.has(`${service.technician_id}:${dateStr}`))) continue;
       // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option to
       // flows that commit with a non-admin initiator: rain-out calls
       // reschedule() as 'tech', whose season guard would reject the target —

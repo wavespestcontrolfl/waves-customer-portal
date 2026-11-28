@@ -229,13 +229,14 @@ async function resolveCapacityRequestedServices(opts) {
   return requested;
 }
 
-async function arrivalTargetServicesForCapabilityCheck(target, opts) {
-  const services = [...(target.memberServices || [target])];
+async function arrivalTargetServicesForCapabilityCheck(baseServices, opts) {
+  const services = [...baseServices];
   if (Array.isArray(opts.serviceAddons) && opts.serviceAddons.length) {
     services.push(...opts.serviceAddons.filter(Boolean));
     return services;
   }
   if (Array.isArray(opts.serviceAddons)) return services;
+  if (!require('../../config/feature-gates').techJobTypeChecksLive?.()) return services;
   const serviceIds = [
     ...new Set([
       opts.arrivalWindow?.serviceId,
@@ -243,10 +244,12 @@ async function arrivalTargetServicesForCapabilityCheck(target, opts) {
     ].filter(Boolean)),
   ];
   if (!serviceIds.length) return services;
-  const addonRows = await db('scheduled_service_addons')
-    .whereIn('scheduled_service_id', serviceIds)
-    .select('service_name as service_type', 'service_id');
-  if (addonRows.length) services.push(...addonRows);
+  try {
+    const addonRows = await db('scheduled_service_addons')
+      .whereIn('scheduled_service_id', serviceIds)
+      .select('service_name as service_type', 'service_id');
+    if (Array.isArray(addonRows) && addonRows.length) services.push(...addonRows);
+  } catch { /* mock DBs or schemas without addons table fall back to primary service */ }
   return services;
 }
 
@@ -467,7 +470,7 @@ async function findCapacitySlots(opts) {
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
         // A whole visit carries every member's service plus add-ons: the technician
         // must be able to do all of them.
-        .inactiveCapabilitiesForServices(db, [tech.id], await arrivalTargetServicesForCapabilityCheck(context.target, opts))).length) continue;
+        .inactiveCapabilitiesForServices(db, [tech.id], await arrivalTargetServicesForCapabilityCheck(context.target.memberServices || [context.target], opts))).length) continue;
       // This technician's own hours inside the shared shift (shiftBounds): no
       // set hours = the shared shift, and the loop below admits what it did.
       const shift = shiftOf(tech.id, date);

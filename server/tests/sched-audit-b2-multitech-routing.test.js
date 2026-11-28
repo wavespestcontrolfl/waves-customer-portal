@@ -73,6 +73,30 @@ describe('P0-7: series projection respects kept technician work_days without mut
     // Base closedDays object was never mutated (assertClosedDaysUnchanged safety).
     expect(baseClosed.weeklyDaysOff.size).toBe(0);
     expect([...baseClosed.dates]).toEqual(['2027-01-01']);
+
+    // Mixed tech work_days order invariant (Codex P2): weekly series where sibling 1
+    // (Tue-only, with Tue Jan 12 blacked out -> Jan 19) would overtake sibling 2
+    // (Mon-only, raw Jan 18) must remain strictly increasing (sibling 2 moves to Jan 25).
+    const mixedTechMap = new Map([
+      ['tech-tue', [2]],
+      ['tech-mon', [1]],
+    ]);
+    const mixedProjector = await makeSeriesProjector({
+      service: { scheduled_date: '2027-01-04', technician_id: 'tech-mon' },
+      parent: { recurring_pattern: 'weekly', technician_id: 'tech-mon', skip_weekends: false },
+      newDate: '2027-01-04',
+      seriesDateStr: '2027-01-04',
+      prefersNoWeekends: false,
+      closedDays: { dates: new Set(['2027-01-12']), weeklyDaysOff: new Set(), closedHolidays: new Set() },
+      techWorkDaysById: mixedTechMap,
+    });
+    const d0 = mixedProjector.projectOccurrenceDate(0, { scheduled_date: '2027-01-04', technician_id: 'tech-mon' });
+    const d1 = mixedProjector.projectOccurrenceDate(1, { scheduled_date: '2027-01-11', technician_id: 'tech-tue' });
+    const d2 = mixedProjector.projectOccurrenceDate(2, { scheduled_date: '2027-01-18', technician_id: 'tech-mon' });
+    expect(d0).toBe('2027-01-04');
+    expect(d1).toBe('2027-01-19');
+    expect(d2 > d1).toBe(true);
+    expect(d2).toBe('2027-01-25');
   });
 });
 
