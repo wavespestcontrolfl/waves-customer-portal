@@ -442,7 +442,83 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
+const {
+  isTechnicianRequest,
+  technicianCurrentVisitFilter,
+  technicianLiveVisitFilter,
+  technicianMayReadVisitAccessCodes,
+  visitHasDirectPremiseStamp,
+  visitMatchesPrimaryHomeForTechAccess,
+  loadActiveHomesByCustomerIds,
+  loadTechHomesByCustomerIds,
+  loadTechPrimaryAccessIds,
+  recheckTechFeedAccessRows,
+  redactFreeTextAccessCodes,
+  stripAccessCodePrefs,
+  stripAccessCodesFromBriefBlock,
+} = require('../services/technician-visit-scope');
+
+function redactTechFeedText(allowWindow, text) {
+  return allowWindow ? text : redactFreeTextAccessCodes(text);
+}
+
+function redactTechHistoryText(req, text) {
+  return isTechnicianRequest(req) ? redactFreeTextAccessCodes(text) : text;
+}
+
+function pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds) {
+  if (!droppedIds.size) return;
+  for (let i = enriched.length - 1; i >= 0; i -= 1) {
+    if (droppedIds.has(enriched[i].id)) enriched.splice(i, 1);
+  }
+  for (let i = unassigned.length - 1; i >= 0; i -= 1) {
+    if (droppedIds.has(unassigned[i].id)) unassigned.splice(i, 1);
+  }
+  for (const [key, tech] of Object.entries(byTech)) {
+    tech.services = tech.services.filter((s) => !droppedIds.has(s.id));
+    if (!tech.services.length) {
+      delete byTech[key];
+      continue;
+    }
+    tech.totalServices = tech.services.length;
+    tech.completedServices = tech.services.filter((s) => s.status === 'completed').length;
+    tech.estimatedServiceMinutes = tech.services.reduce((sum, s) => sum + (s.estimatedDuration || 30), 0);
+    tech.estimatedDriveMinutes = tech.services.length * 8;
+    const zones = {};
+    const materials = {};
+    tech.services.forEach((s) => {
+      zones[s.zone] = (zones[s.zone] || 0) + 1;
+      (s.materialsNeeded || []).forEach((m) => { materials[m.product || m] = true; });
+    });
+    tech.zones = zones;
+    tech.loadList = Object.keys(materials);
+  }
+}
+
+async function applyTechScheduleFeedRecheck(conn, req, candidates, { enriched, byTech, unassigned }) {
+  const droppedIds = await recheckTechFeedAccessRows(conn, req, candidates, (c, { lostWindow, lostPrimary }) => {
+    const safeNotes = lostWindow ? redactFreeTextAccessCodes(c.cleanedNotes) : c.cleanedNotes;
+    const keepNeighborhood = !lostWindow && (visitHasDirectPremiseStamp(c.visit) || !c.visit.source_estimate_id || !lostPrimary);
+    c.row.propertyAlerts = compilePropertyAlerts({
+      prefs: stripAccessCodePrefs(c.prefs),
+      notes: safeNotes,
+      genuinelyNew: c.genuinelyNew,
+      servicePreferences: c.visit.service_preferences,
+      normalizedServiceType: c.normalizedType,
+      neighborhoodGate: keepNeighborhood ? c.neighborhoodGate : null,
+      neighborhoodActions: keepNeighborhood && c.neighborhoodActions,
+    });
+    if (!keepNeighborhood) delete c.row.neighborhoodGateActions;
+    if (lostWindow) {
+      c.row.lastServiceNotes = redactFreeTextAccessCodes(c.row.lastServiceNotes);
+      c.row.lastLineServiceNotes = redactFreeTextAccessCodes(c.row.lastLineServiceNotes);
+    }
+  });
+  if (droppedIds.size) {
+    pruneDroppedTechRows(enriched, byTech, unassigned, droppedIds);
+    require('../services/visit-groups').visitSummariesForRows(enriched);
+  }
+}
 
 // Board/list scoping for technician tokens: the FULL current-assignment
 // predicate, not just technician_id — otherwise ?from=<years ago> or
@@ -6826,7 +6902,7 @@ router.get('/', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         // The primary address on file, for the rain step's stopForecastZone
         // (stampedAddressDiverges): kept on the row only, never in the response.
-        'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
+        'customers.address_line1 as customer_address_line1', 'customers.address_line2 as customer_address_line2', 'customers.city as customer_city', 'customers.zip as customer_zip',
         // Visit coordinates for map-centered tools (treatment-zone mapper):
         // stamped visit coords win; the customer mirror only backfills a
         // NON-divergent stamp — a divergent stamp with no coords must degrade
@@ -7003,6 +7079,12 @@ router.get('/', async (req, res, next) => {
     } catch { deferredPrepayCustomerIds = null; }
     // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
     const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
+    // For technicians, raw property access codes and away-mode dates follow
+    // access-code-capture.js#listForVisit: only active (non-completed/terminal)
+    // visits in [yesterday..tomorrow] ET at the matching home receive them.
+    const activeHomesByCustomer = await loadTechHomesByCustomerIds(db, req, services.map((s) => s.customer_id));
+    const techPrimaryAllowedIds = await loadTechPrimaryAccessIds(db, req, services, activeHomesByCustomer);
+    const techRecheckCandidates = [];
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -7052,14 +7134,24 @@ router.get('/', async (req, res, next) => {
       // Compiled by the shared helper (services/nextstop-alerts.js) so the
       // pre-visit brief's deterministic access block and this day feed can
       // never drift — the block moved verbatim, behavior 1:1.
+      // Primary-home property_preferences codes require BOTH visit-window
+      // eligibility AND a primary-home match; neighborhoodGateByVisit is
+      // already scoped to the visit's own property_id so secondary homes keep
+      // their own neighborhood gate entry while inside the visit window.
+      const allowTechVisitWindow = technicianMayReadVisitAccessCodes(req, s);
+      const allowTechPrimaryPrefs = !isTechnicianRequest(req) || (allowTechVisitWindow && techPrimaryAllowedIds.has(s.id));
+      const allowTechNeighborhood = !isTechnicianRequest(req)
+        || (allowTechVisitWindow && (visitHasDirectPremiseStamp(s) || !s.source_estimate_id || allowTechPrimaryPrefs));
+      const rowNeighborhoodGate = allowTechNeighborhood ? (neighborhoodGateByVisit.get(s.id) || null) : null;
+      const rowNeighborhoodActions = allowTechNeighborhood && gateActionVisits.has(s.id);
       const alerts = compilePropertyAlerts({
-        prefs,
-        notes: cleanedNotes,
+        prefs: allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs),
+        notes: redactTechFeedText(allowTechVisitWindow, cleanedNotes),
         genuinelyNew,
         servicePreferences: s.service_preferences,
         normalizedServiceType: normalizedType,
-        neighborhoodGate: neighborhoodGateByVisit.get(s.id) || null,
-        neighborhoodActions: gateActionVisits.has(s.id),
+        neighborhoodGate: rowNeighborhoodGate,
+        neighborhoodActions: rowNeighborhoodActions,
       });
 
       const zone = s.zone || getZone(s.city, s.zip);
@@ -7212,7 +7304,7 @@ router.get('/', async (req, res, next) => {
             });
           })
         : [];
-      return {
+      const row = {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
         ...(prepPhotosLive ? { customerSentPhotos: customerSentPhotosByServiceId.get(s.id) === true } : {}),
@@ -7350,7 +7442,7 @@ router.get('/', async (req, res, next) => {
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
-        ...(gateActionVisits.has(s.id) ? { neighborhoodGateActions: true } : {}),
+        ...(rowNeighborhoodActions ? { neighborhoodGateActions: true } : {}),
         ...(gateWaypointByVisit.has(s.id) ? { gateWaypoint: gateWaypointByVisit.get(s.id) } : {}),
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
@@ -7359,12 +7451,12 @@ router.get('/', async (req, res, next) => {
         // scheduler-audit filter is for scheduled_services.notes (where ops
         // sessions write audit trails), and would false-positive on genuine
         // tech prose like "No SMS sent because the phone is disconnected".
-        lastServiceNotes: previewText(lastService?.technician_notes),
+        lastServiceNotes: redactTechHistoryText(req, previewText(lastService?.technician_notes)),
         // Line-scoped last visit for the service dashboards (Protocol panel):
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: safeDate(lastLineService?.service_date),
         lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
-        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
+        lastLineServiceNotes: redactTechHistoryText(req, previewText(lastLineService?.technician_notes)),
         checkOutTime: s.check_out_time,
         // With checkInTime/checkOutTime: the drive line finds where the tech is now.
         enRouteAt: s.en_route_at || null,
@@ -7390,6 +7482,14 @@ router.get('/', async (req, res, next) => {
         visitId: s.visit_id || null,
         trackState: s.track_state || null,
       };
+      if (isTechnicianRequest(req)) {
+        techRecheckCandidates.push({
+          visit: s, row, prefs, cleanedNotes, genuinelyNew, normalizedType,
+          neighborhoodGate: rowNeighborhoodGate, neighborhoodActions: rowNeighborhoodActions,
+          hadWindow: allowTechVisitWindow, hadPrimary: allowTechPrimaryPrefs,
+        });
+      }
+      return row;
     }));
     require('../services/visit-groups').visitSummariesForRows(enriched);
     const visitIds = [...new Set(enriched.map((service) => service.visitId).filter(Boolean))];
@@ -7529,6 +7629,10 @@ router.get('/', async (req, res, next) => {
 
     await attachOfficeToldFields(req, enriched);
     stripTechOwnerOnlyMoney(req, enriched);
+    // Final authorization + access-code recheck runs AFTER all enrichment,
+    // closeout, roster, weather, and office-told awaits so reassigned visits
+    // are removed and completed/changed stops never serialize raw credentials.
+    await applyTechScheduleFeedRecheck(db, req, techRecheckCandidates, { enriched, byTech, unassigned });
 
     res.json({
       date, services: enriched,
@@ -24881,6 +24985,20 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.*');
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    // Technicians read raw property access codes and absence/Away Watch dates
+    // only on non-ended visits in [yesterday..tomorrow] ET at the matching home.
+    const checkTechBriefCodeEligibility = async (visitRow) => {
+      if (!isTechnicianRequest(req)) return true;
+      if (!technicianMayReadVisitAccessCodes(req, visitRow)) return false;
+      const homesMap = await loadActiveHomesByCustomerIds(db, [visitRow.customer_id]);
+      const homes = homesMap ? (homesMap.get(visitRow.customer_id) || []) : null;
+      let customerPrimary = null;
+      if (Array.isArray(homes) && homes.length === 0) {
+        customerPrimary = await db('customers').where({ id: visitRow.customer_id }).first('address_line1', 'address_line2', 'city', 'zip').catch(() => null);
+      }
+      return visitMatchesPrimaryHomeForTechAccess(db, visitRow, homes, customerPrimary);
+    };
+    const allowTechBriefAccessCodes = await checkTechBriefCodeEligibility(svc);
     const PrevisitBrief = require('../services/previsit-brief');
     // Every `{brief: null}` answer optionally carries a deterministic
     // `facts` block (access codes + last same-line visit's products) for
@@ -24941,7 +25059,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
             .update({ tech_seen_at: db.fn.now() })
             .catch((err) => logger.warn(`[admin-schedule] visit-prep tech_seen_at stamp failed for ${svc.id}: ${err.message}`));
         }
-        return { ...payload, facts };
+        const safeFacts = (!allowTechBriefAccessCodes && facts?.access)
+          ? { ...facts, access: stripAccessCodesFromBriefBlock(facts.access) }
+          : facts;
+        return { ...payload, facts: safeFacts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
         return payload;
@@ -24955,6 +25076,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const withAwayWatch = async (payload) => {
       const AwayWatch = require('../services/away-watch');
       if (!AwayWatch.awayWatchLive()) return payload;
+      // Absence/return dates follow the same visit-window + home eligibility
+      // rule as access codes so far-future or completed stops never expose
+      // when a customer's home stands empty.
+      if (isTechnicianRequest(req) && !allowTechBriefAccessCodes) return payload;
       let awayWatch = null;
       try {
         awayWatch = await AwayWatch.awayWatchCardLines(db, svc.id);
@@ -24995,15 +25120,33 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
     // customer the brief was built for (a merge changes the visit's customer while the technician stays assigned).
     // No longer so, or the check itself failing: the whole answer is withheld. All three gates off and no home note looked up: no extra read.
+    const stripCodesFromBriefPayload = (payload) => {
+      const next = { ...payload };
+      delete next.awayWatch;
+      if (next.facts?.access) next.facts = { ...next.facts, access: stripAccessCodesFromBriefBlock(next.facts.access) };
+      if (next.brief?.access) next.brief = { ...next.brief, access: stripAccessCodesFromBriefBlock(next.brief.access) };
+      return next;
+    };
     const finalRecheck = async (payload) => {
-      if (!(homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
+      const techHoldingCodes = isTechnicianRequest(req) && allowTechBriefAccessCodes;
+      if (!(techHoldingCodes || homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
       try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
-          .modify((q) => (customerAskedBound ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
+          .modify((q) => ((customerAskedBound || techHoldingCodes) ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
           .modify((q) => technicianCurrentVisitFilter(req, q))
-          .first('scheduled_services.id');
-        return stillOwned ? payload : { brief: null };
+          .first(
+            'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+            'scheduled_services.status', 'scheduled_services.scheduled_date', 'scheduled_services.property_id',
+            'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+            'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+            'scheduled_services.source_estimate_id',
+          );
+        if (!stillOwned) return { brief: null };
+        if (techHoldingCodes && !(await checkTechBriefCodeEligibility(stillOwned))) {
+          return stripCodesFromBriefPayload(payload);
+        }
+        return payload;
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief final recheck failed for ${svc.id}: ${err.message}`);
         return { brief: null };
@@ -25032,7 +25175,10 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return answer({ brief: null, stale: staleReason });
       }
     }
-    const served = { brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
+    const safeBrief = (!allowTechBriefAccessCodes && parsedBrief?.access)
+      ? { ...parsedBrief, access: stripAccessCodesFromBriefBlock(parsedBrief.access) }
+      : parsedBrief;
+    const served = { brief: safeBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at };
     // Facts ride along with EVERY served brief (gated): the WDO and
     // legacy shapes carry no access/last_visit at all, and even a served
     // visit brief's access block is a snapshot from the :19/:49 sweep —

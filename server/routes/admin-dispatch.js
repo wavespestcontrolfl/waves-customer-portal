@@ -27,7 +27,51 @@ const { techMoveRefusal, moveRefusalBody } = require('../services/scheduling/tec
 const { applyAssignable } = require('../services/technician-eligibility');
 const { seriesNoticeNameVars } = require('../services/placement-service-name');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, technicianVisitRowInScope } = require('../services/technician-visit-scope');
+const {
+  isTechnicianRequest,
+  technicianCurrentVisitFilter,
+  lockOwnedLiveVisit,
+  technicianVisitRowInScope,
+  technicianMayReadVisitAccessCodes,
+  loadActiveHomesByCustomerIds,
+  loadTechPrimaryAccessIds,
+  recheckTechFeedAccessRows,
+  redactFreeTextAccessCodes,
+  stripAccessCodePrefs,
+} = require('../services/technician-visit-scope');
+
+const DISPATCH_PREF_ALERT_FIELDS = [
+  ['neighborhood_gate_code', (v) => `Gate: ${v}`],
+  ['property_gate_code', (v) => `Yard gate: ${v}`],
+  ['garage_code', (v) => `Garage: ${v}`],
+  ['lockbox_code', (v) => `Lockbox: ${v}`],
+  ['pets_secured_plan', (v) => `Pet plan: ${v}`],
+  ['access_notes', (v) => v],
+  ['side_gate_access', (v) => `Side gate: ${v}`],
+  ['parking_notes', (v) => `Parking: ${v}`],
+  ['special_instructions', (v) => v],
+];
+
+function buildDispatchPropertyAlerts(alertPrefs, rawNotes, { redactNotes = false } = {}) {
+  const alerts = [];
+  if (alertPrefs) {
+    for (const [key, fmt] of DISPATCH_PREF_ALERT_FIELDS) {
+      if (alertPrefs[key]) alerts.push(fmt(alertPrefs[key]));
+    }
+    if (alertPrefs.pet_count > 0 || alertPrefs.pet_details) {
+      alerts.push(`🐾 ${alertPrefs.pet_details || `${alertPrefs.pet_count} pet(s)`}`);
+    }
+    if (alertPrefs.chemical_sensitivities) {
+      alerts.push(`⚠️ Chemical sensitivity: ${alertPrefs.chemical_sensitivity_details || 'yes'}`);
+    }
+    const mowingAlert = mowingAlertText(alertPrefs);
+    if (mowingAlert) alerts.push(mowingAlert);
+  }
+  const cleaned = stripSchedulerAuditText(rawNotes);
+  const displayNotes = redactNotes ? redactFreeTextAccessCodes(cleaned) : cleaned;
+  if (displayNotes) alerts.push(displayNotes);
+  return alerts;
+}
 
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
@@ -1531,6 +1575,10 @@ router.get('/:date?', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+        'customers.address_line1 as customer_address_line1',
+        'customers.address_line2 as customer_address_line2',
+        'customers.city as customer_city',
+        'customers.zip as customer_zip',
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.autopay_enabled', 'customers.autopay_paused_until',
         'customers.autopay_payment_method_id',
@@ -1542,6 +1590,11 @@ router.get('/:date?', async (req, res, next) => {
     // Truck-GPS time on site for the completed visits (one query); the visit card marks its source.
     const gpsOnSite = await loadGpsOnSiteMinutes(db, services.filter((s) => s.status === 'completed').map((s) => s.id));
     // Enrich with property preferences and last service
+    const activeHomesByCustomer = isTechnicianRequest(req)
+      ? await loadActiveHomesByCustomerIds(db, services.map((s) => s.customer_id))
+      : null;
+    const techPrimaryAllowedIds = await loadTechPrimaryAccessIds(db, req, services, activeHomesByCustomer);
+    const techRecheckCandidates = [];
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       // Any-line latest keeps the "Last:" card + new-customer detection
@@ -1630,29 +1683,18 @@ router.get('/:date?', async (req, res, next) => {
         .first('id', 'status', 'project_type', 'title', 'report_token', 'service_record_id', 'portal_visible')
         .catch(() => null);
 
-      // Build property notes
-      const alerts = [];
-      if (prefs?.neighborhood_gate_code) alerts.push(`Gate: ${prefs.neighborhood_gate_code}`);
-      if (prefs?.property_gate_code) alerts.push(`Yard gate: ${prefs.property_gate_code}`);
-      if (prefs?.garage_code) alerts.push(`Garage: ${prefs.garage_code}`);
-      if (prefs?.lockbox_code) alerts.push(`Lockbox: ${prefs.lockbox_code}`);
-      if (prefs?.pet_count > 0 || prefs?.pet_details) alerts.push(`🐾 ${prefs.pet_details || `${prefs.pet_count} pet(s)`}`);
-      if (prefs?.pets_secured_plan) alerts.push(`Pet plan: ${prefs.pets_secured_plan}`);
-      if (prefs?.chemical_sensitivities) alerts.push(`⚠️ Chemical sensitivity: ${prefs.chemical_sensitivity_details || 'yes'}`);
-      if (prefs?.access_notes) alerts.push(prefs.access_notes);
-      if (prefs?.side_gate_access) alerts.push(`Side gate: ${prefs.side_gate_access}`);
-      if (prefs?.parking_notes) alerts.push(`Parking: ${prefs.parking_notes}`);
-      if (prefs?.special_instructions) alerts.push(prefs.special_instructions);
-      // Mowing schedule — a cut right before/after an application undoes it,
-      // so the tech needs to know when the mower comes through.
-      const mowingAlert = mowingAlertText(prefs);
-      if (mowingAlert) alerts.push(mowingAlert);
-      // Ops sessions write scheduling-audit trails into notes; those are
-      // internal and never belong on the tech-facing alerts block.
-      const displayNotes = stripSchedulerAuditText(s.notes);
-      if (displayNotes) alerts.push(displayNotes);
+      // Build property notes — technicians receive raw entry codes only for
+      // non-ended visits in [yesterday..tomorrow] ET at the matching home.
+      const allowTechVisitWindow = technicianMayReadVisitAccessCodes(req, s);
+      const allowTechPrimaryPrefs = !isTechnicianRequest(req) || (allowTechVisitWindow && techPrimaryAllowedIds.has(s.id));
+      const alertPrefs = allowTechPrimaryPrefs ? prefs : stripAccessCodePrefs(prefs);
+      const alerts = buildDispatchPropertyAlerts(alertPrefs, s.notes, { redactNotes: !allowTechVisitWindow });
+      const rowNotes = allowTechVisitWindow ? (s.notes || '') : (redactFreeTextAccessCodes(s.notes || '') || '');
+      const rowLastNotes = isTechnicianRequest(req)
+        ? redactFreeTextAccessCodes(previewText(lastService?.technician_notes))
+        : previewText(lastService?.technician_notes);
 
-      return {
+      const row = {
         id: s.id,
         routeOrder: s.route_order,
         customerName: `${s.first_name} ${s.last_name}`,
@@ -1665,7 +1707,7 @@ router.get('/:date?', async (req, res, next) => {
         windowStart: s.window_start,
         windowEnd: s.window_end,
         status: s.status,
-        notes: s.notes || '',
+        notes: rowNotes,
         createdAt: s.created_at,
         technicianId: s.technician_id,
         technicianName: s.tech_name,
@@ -1752,12 +1794,14 @@ router.get('/:date?', async (req, res, next) => {
         // scheduler-audit filter is for scheduled_services.notes (where ops
         // sessions write audit trails), and would false-positive on genuine
         // tech prose like "No SMS sent because the phone is disconnected".
-        lastServiceNotes: previewText(lastService?.technician_notes),
+        lastServiceNotes: rowLastNotes,
         // Line-scoped last visit for the service dashboards (Protocol panel):
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: lastLineService?.service_date || null,
         lastLineServiceType: lastLineService?.service_type || null,
-        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
+        lastLineServiceNotes: isTechnicianRequest(req)
+          ? redactFreeTextAccessCodes(previewText(lastLineService?.technician_notes))
+          : previewText(lastLineService?.technician_notes),
         actualStartTime: s.actual_start_time,
         actualEndTime: s.actual_end_time,
         serviceTimeMinutes: s.service_time_minutes,
@@ -1767,13 +1811,37 @@ router.get('/:date?', async (req, res, next) => {
         }) : null,
         checkInTime: s.check_in_time || s.actual_start_time,
         checkOutTime: s.check_out_time || s.actual_end_time,
-        statusLog: statusLog.map(l => ({ status: l.status, at: l.at, notes: l.notes || null })),
+        statusLog: statusLog.map(l => ({
+          status: l.status,
+          at: l.at,
+          notes: allowTechVisitWindow ? (l.notes || null) : (redactFreeTextAccessCodes(l.notes) || null),
+        })),
       };
+      if (isTechnicianRequest(req)) {
+        techRecheckCandidates.push({
+          visit: s, row, prefs, hadWindow: allowTechVisitWindow, hadPrimary: allowTechPrimaryPrefs,
+        });
+      }
+      return row;
     }));
+
+    const droppedIds = await recheckTechFeedAccessRows(db, req, techRecheckCandidates, (candidate, { lostWindow }) => {
+      const safeNotes = lostWindow ? redactFreeTextAccessCodes(candidate.visit.notes || '') : candidate.visit.notes;
+      candidate.row.propertyAlerts = buildDispatchPropertyAlerts(stripAccessCodePrefs(candidate.prefs), safeNotes, { redactNotes: lostWindow });
+      if (lostWindow) {
+        candidate.row.notes = safeNotes || '';
+        candidate.row.lastServiceNotes = redactFreeTextAccessCodes(candidate.row.lastServiceNotes);
+        candidate.row.lastLineServiceNotes = redactFreeTextAccessCodes(candidate.row.lastLineServiceNotes);
+        if (Array.isArray(candidate.row.statusLog)) {
+          candidate.row.statusLog = candidate.row.statusLog.map((l) => ({ ...l, notes: redactFreeTextAccessCodes(l.notes) || null }));
+        }
+      }
+    });
+    const visibleEnriched = droppedIds.size ? enriched.filter((r) => !droppedIds.has(r.id)) : enriched;
 
     // Tech summary
     const techs = {};
-    enriched.forEach(s => {
+    visibleEnriched.forEach(s => {
       if (!s.technicianId) return;
       if (!techs[s.technicianId]) {
         techs[s.technicianId] = {
@@ -1786,7 +1854,7 @@ router.get('/:date?', async (req, res, next) => {
       if (s.status === 'completed') techs[s.technicianId].completedCount++;
     });
 
-    res.json({ date, services: enriched, techSummary: Object.values(techs) });
+    res.json({ date, services: visibleEnriched, techSummary: Object.values(techs) });
   } catch (err) { next(err); }
 });
 
@@ -4851,7 +4919,7 @@ router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
 const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 async function foreignSlotCheckRefusal(req) {
-  if (!isTechnicianRequest(req) || require('../config/feature-gates').techLoginPrivacyLive?.() !== true) return null;
+  if (!isTechnicianRequest(req)) return null;
   const targets = Array.isArray(req.body?.targets) ? req.body.targets : [];
   // Every id present anywhere in the body must be a canonical hyphenated UUID. checkSlots validates with Joi.guid(),
   // which also takes braced and unhyphenated forms (and Postgres reads them), so an id in another form must never
@@ -6955,15 +7023,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
 });
 
 // GET /api/admin/dispatch/weather/tomorrow
-// GATE_TECH_LOGIN_PRIVACY on: office only. The analysis lists every visit booked
-// tomorrow with customer name, phone and tier, and no technician screen calls it
-// (audit A1). A technician gets requireAdmin's refusal; gate off: unchanged.
-router.get('/weather/tomorrow', (req, res, next) => {
-  if (req.techRole !== 'admin' && require('../config/feature-gates').techLoginPrivacyLive?.() === true) {
-    return requireAdmin(req, res, next);
-  }
-  return next();
-}, async (req, res, next) => {
+// Office only: lists every visit booked tomorrow with customer name, phone and
+// tier; no technician screen calls it (audit A1).
+router.get('/weather/tomorrow', requireAdmin, async (req, res, next) => {
   try {
     const analysis = await ForecastAnalyzer.analyzeTomorrow();
     res.json(analysis);

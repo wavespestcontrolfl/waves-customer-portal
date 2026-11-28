@@ -124,6 +124,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   // GATE_ESTIMATE_LAWN_LIMITS: the server lists the grasses the office may flag only while the
   // gate is on (the keys are absent otherwise), so the section shows only then.
   const [otherGrassOptions, setOtherGrassOptions] = useState(null);
+  const [lawnSqftReadOnly, setLawnSqftReadOnly] = useState(false);
   // The county field was EDITED in this session. The save re-sends every
   // loaded field, so the server needs an explicit signal that the county
   // was reviewed for the current address — after a move, that review is
@@ -385,6 +386,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       profileHomeStampRef.current = d.irrigation_home_changed_at ?? null;
       setBermudaRemovalAvailable(d.bermudaRemovalAvailable === true);
       setOtherGrassOptions(d.lawnLimitsAvailable === true && Array.isArray(d.otherGrassOptions) ? d.otherGrassOptions : null);
+      setLawnSqftReadOnly(d.lawnSqftReadOnly === true);
       // Server returns { profile: row | null }. Coerce nulls to ''
       // so the form's controlled inputs don't drop to uncontrolled.
       const p = d.profile;
@@ -422,7 +424,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     // empty strings that fail numeric/date parsing on the server.
     const payload = {
       ...Object.fromEntries(
-        Object.entries(turfProfile).filter(([, v]) => v !== "" && v !== null),
+        Object.entries(turfProfile).filter(([k, v]) => v !== "" && v !== null && !(lawnSqftReadOnly && k === "lawn_sqft")),
       ),
       county_confirmed: countyTouched,
       grass_confirmed: grassTouched,
@@ -1117,11 +1119,15 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   help={
                     key === "county"
                       ? "Sets the watering-restriction jurisdiction. After an address change, re-enter it here to confirm it for the new home."
-                      : undefined
+                      : key === "lawn_sqft" && lawnSqftReadOnly
+                        ? "Managed by the office."
+                        : undefined
                   }
                 >
                   <Input
                     type={type}
+                    readOnly={key === "lawn_sqft" && lawnSqftReadOnly}
+                    disabled={key === "lawn_sqft" && lawnSqftReadOnly}
                     step={
                       type === "number" &&
                       (key === "soil_ph" || key === "annual_n_budget_target")

@@ -59,7 +59,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/customers/:id/contact-notification-prefs` | admin-customers |
 | GET | `/api/admin/customers/:id/estimates-summary` | admin-customers |
 | GET | `/api/admin/customers/:id/latest-scheduled-service` | admin-customers |
-| POST | `/api/admin/customers/at-address` | admin-customers |
 | GET | `/api/admin/discounts` | admin-discounts |
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
@@ -581,9 +580,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/lookup/satellite-ai` | admin-property-lookup |
 | GET | `/api/admin/needs-me` | admin-needs-me |
 | GET | `/api/admin/notification-events` | admin-notification-events |
-| GET | `/api/admin/requests` | admin-requests |
-| PATCH | `/api/admin/requests/:id` | admin-requests |
-| GET | `/api/admin/requests/:id/photos` | admin-requests |
 | GET | `/api/admin/review-requests` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/stats` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/review-requests/tech-voice-drafts` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |

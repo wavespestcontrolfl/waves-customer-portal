@@ -19,8 +19,319 @@ const { addETDays, etDateString } = require('../utils/datetime-et');
 const isTechnicianRequest = (req) => req.techRole === 'technician';
 
 const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
+const TECH_ACCESS_CODE_ENDED_STATUSES = ['completed', ...TECH_DEAD_ASSIGNMENT_STATUSES];
 const TECH_ACCESS_WINDOW_DAYS = 7;
 const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
+
+// Access codes and away-mode dates are only needed around the visit day
+// (yesterday through tomorrow, ET) and only while the visit is still to be
+// done — matching access-code-capture.js#listForVisit. Completed, terminal,
+// or far-future visits never release raw door/gate/lockbox codes or
+// away-mode dates to a technician.
+function technicianMayReadVisitAccessCodes(req, visit, { now = new Date() } = {}) {
+  if (!isTechnicianRequest(req)) return true;
+  if (!visit || !req.technicianId) return false;
+  if (String(visit.technician_id || '') !== String(req.technicianId)) return false;
+  const status = String(visit.status || 'pending').toLowerCase();
+  if (TECH_ACCESS_CODE_ENDED_STATUSES.includes(status)) return false;
+  const { dateOnly } = require('./visit-groups');
+  const visitDay = dateOnly(visit.scheduled_date);
+  if (!visitDay) return false;
+  return visitDay >= etDateString(addETDays(now, -1)) && visitDay <= etDateString(addETDays(now, 1));
+}
+
+function visitCustomerPrimaryAddress(visit) {
+  if (!visit || !visit.customer_address_line1) return null;
+  return {
+    address_line1: visit.customer_address_line1,
+    address_line2: visit.customer_address_line2 || null,
+    city: visit.customer_city || null,
+    zip: visit.customer_zip || null,
+  };
+}
+
+// Unit-aware check: if the visit carries a stamped service address (line1 or
+// line2), it MUST match the primary home's address before primary-home
+// property_preferences codes can be released. Fails closed when a visit has a
+// custom stamp but no primary address is available to compare against.
+function visitStampMatchesHome(visit, home) {
+  const hasStamp = Boolean(
+    String(visit?.service_address_line1 || '').trim()
+    || String(visit?.service_address_line2 || '').trim(),
+  );
+  if (!hasStamp) return true;
+  if (!home || !String(home.address_line1 || '').trim()) return false;
+  const { homesDiffer } = require('./customer-address-fanout');
+  const stamped = {
+    address_line1: visit.service_address_line1 || home.address_line1,
+    address_line2: visit.service_address_line2 ?? null,
+    city: visit.service_address_city || home.city || null,
+    zip: visit.service_address_zip || home.zip || null,
+  };
+  return !homesDiffer(stamped, home);
+}
+
+// property_preferences stores one row per customer (the primary home). When a
+// customer has multiple active homes, never serve primary-home access codes on
+// a visit to a secondary or unstamped home (fail closed). Even with zero or one
+// active home, a visit carrying a divergent service address or unit stamp fails
+// closed. activeHomes === null indicates a lookup failure -> fail closed.
+function propertyPrefsMatchVisitHome(visit, activeHomes, customerPrimaryAddress = null) {
+  if (activeHomes === null) return false;
+  const homes = Array.isArray(activeHomes) ? activeHomes : [];
+  if (homes.length === 0) {
+    if (visit?.property_id) return false;
+    return visitStampMatchesHome(visit, customerPrimaryAddress || visitCustomerPrimaryAddress(visit));
+  }
+  if (homes.length === 1) {
+    if (visit?.property_id && String(visit.property_id) !== String(homes[0].id)) return false;
+    return visitStampMatchesHome(visit, homes[0]);
+  }
+  const primary = homes.find((h) => h.is_primary);
+  if (!primary || !visit?.property_id || String(visit.property_id) !== String(primary.id)) return false;
+  return visitStampMatchesHome(visit, primary);
+}
+
+function resolvePrimaryHomeForTechVisit(visit, activeHomes, customerPrimaryAddress = null) {
+  const homes = Array.isArray(activeHomes) ? activeHomes : [];
+  if (homes.length === 1) return homes[0];
+  if (homes.length > 1) return homes.find((h) => h.is_primary) || null;
+  return customerPrimaryAddress || visitCustomerPrimaryAddress(visit);
+}
+
+function visitHasDirectPremiseStamp(visit) {
+  return Boolean(
+    visit?.property_id
+    || String(visit?.service_address_line1 || '').trim()
+    || String(visit?.service_address_line2 || '').trim(),
+  );
+}
+
+// Resolves unstamped estimate-backed visits via resolveVisitPropertyScope so an
+// estimate for a second home (or an unresolvable estimate) never releases
+// primary-home access codes even when the customer has 0 or 1 active property.
+async function visitMatchesPrimaryHomeForTechAccess(conn, visit, activeHomes, customerPrimaryAddress = null, caches = {}) {
+  if (!propertyPrefsMatchVisitHome(visit, activeHomes, customerPrimaryAddress)) return false;
+  if (visitHasDirectPremiseStamp(visit) || !visit?.source_estimate_id) return true;
+  const { resolveVisitPropertyScope, sameResolvedProperty } = require('./service-report/visit-property-scope');
+  const linkage = require('./estimate-property-linkage');
+  const scope = await resolveVisitPropertyScope(visit, conn, caches).catch(() => ({ key: null, hasEvidence: true }));
+  if (!scope || !scope.key) return false;
+  const primaryHome = resolvePrimaryHomeForTechVisit(visit, activeHomes, customerPrimaryAddress);
+  const primaryKey = primaryHome
+    ? linkage.normalizedStampedStreet(primaryHome.address_line1, primaryHome.address_line2, primaryHome.city, primaryHome.zip)
+    : null;
+  if (!primaryKey || linkage.scopeKeyLacksLocality(primaryKey)) return false;
+  return sameResolvedProperty(scope.key, primaryKey);
+}
+
+async function loadEstimateCacheForVisits(conn, visits) {
+  const ids = [...new Set((visits || [])
+    .filter((v) => !visitHasDirectPremiseStamp(v) && v?.source_estimate_id)
+    .map((v) => v.source_estimate_id))];
+  const estimateById = new Map();
+  if (!ids.length) return estimateById;
+  try {
+    const rows = await conn('estimates').whereIn('id', ids).select('id', 'address');
+    for (const id of ids) estimateById.set(id, null);
+    for (const row of rows || []) estimateById.set(row.id, row);
+  } catch {
+    for (const id of ids) estimateById.set(id, null);
+  }
+  return estimateById;
+}
+
+async function loadTechPrimaryAccessIds(conn, req, visits, activeHomesByCustomer) {
+  const allowed = new Set();
+  if (!isTechnicianRequest(req)) return allowed;
+  const estimateById = await loadEstimateCacheForVisits(conn, visits);
+  for (const v of visits || []) {
+    if (!technicianMayReadVisitAccessCodes(req, v)) continue;
+    const homes = activeHomesByCustomer ? (activeHomesByCustomer.get(v.customer_id) || []) : null;
+    if (await visitMatchesPrimaryHomeForTechAccess(conn, v, homes, null, { estimateById })) {
+      allowed.add(v.id);
+    }
+  }
+  return allowed;
+}
+
+async function loadActiveHomesByCustomerIds(conn, customerIds) {
+  const ids = [...new Set((customerIds || []).filter(Boolean))];
+  const map = new Map();
+  if (!ids.length) return map;
+  try {
+    const rows = await conn('customer_properties')
+      .whereIn('customer_id', ids)
+      .where({ active: true })
+      .select('id', 'customer_id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip');
+    for (const row of rows || []) {
+      if (!map.has(row.customer_id)) map.set(row.customer_id, []);
+      map.get(row.customer_id).push(row);
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+// Batch-loads active homes ONLY for technician requests (admins stay null/unscoped).
+async function loadTechHomesByCustomerIds(conn, req, customerIds) {
+  if (!isTechnicianRequest(req)) return null;
+  return loadActiveHomesByCustomerIds(conn, customerIds);
+}
+
+// Single predicate combining role, visit-day window, non-ended status, and
+// primary-home match for property_preferences access codes.
+function visitAllowsAccessCodes(req, visit, homesMap, customerPrimaryAddress = null) {
+  if (!isTechnicianRequest(req)) return true;
+  if (!technicianMayReadVisitAccessCodes(req, visit)) return false;
+  const homes = homesMap ? (homesMap.get(visit.customer_id) || []) : null;
+  return propertyPrefsMatchVisitHome(visit, homes, customerPrimaryAddress);
+}
+
+const VISIT_PREMISE_COLS = [
+  'property_id', 'service_address_line1', 'service_address_line2',
+  'service_address_city', 'service_address_zip', 'source_estimate_id',
+];
+
+function sameVisitPremisesAndDate(a, b) {
+  const { dateOnly } = require('./visit-groups');
+  if (dateOnly(a?.scheduled_date) !== dateOnly(b?.scheduled_date)) return false;
+  if (String(a?.customer_id || '') !== String(b?.customer_id || '')) return false;
+  return VISIT_PREMISE_COLS.every((col) => (a?.[col] ?? null) === (b?.[col] ?? null));
+}
+
+async function loadFreshTechFeedState(conn, req, candidates) {
+  const ids = candidates.map((c) => c.visit.id);
+  try {
+    const freshRows = await conn('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .whereIn('scheduled_services.id', ids)
+      .where('scheduled_services.technician_id', req.technicianId)
+      .whereNotIn('scheduled_services.status', TECH_DEAD_ASSIGNMENT_STATUSES)
+      .select(
+        'scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.technician_id',
+        'scheduled_services.status', 'scheduled_services.scheduled_date',
+        ...VISIT_PREMISE_COLS.map((c) => `scheduled_services.${c}`),
+        'customers.address_line1 as customer_address_line1',
+        'customers.address_line2 as customer_address_line2',
+        'customers.city as customer_city',
+        'customers.zip as customer_zip',
+      );
+    const freshById = new Map((freshRows || []).map((r) => [r.id, r]));
+    const freshHomes = await loadActiveHomesByCustomerIds(conn, candidates.map((c) => c.visit.customer_id));
+    const estimateById = await loadEstimateCacheForVisits(conn, [...freshById.values()]);
+    return { freshById, freshHomes, estimateById };
+  } catch {
+    return { freshById: null, freshHomes: null, estimateById: new Map() };
+  }
+}
+
+async function evaluateTechFeedCandidate(conn, req, candidate, { freshById, freshHomes, estimateById }) {
+  const fresh = freshById?.get(candidate.visit.id) || null;
+  const sameCustomer = fresh && String(fresh.customer_id) === String(candidate.visit.customer_id);
+  if (!sameCustomer || !technicianVisitRowInScope(req, fresh)) {
+    return { lostAssignment: true, lostWindow: true, lostPrimary: true };
+  }
+  const stillWindow = technicianMayReadVisitAccessCodes(req, fresh)
+    && sameVisitPremisesAndDate(candidate.visit, fresh);
+  let stillPrimary = false;
+  if (stillWindow && candidate.hadPrimary) {
+    const homes = freshHomes ? (freshHomes.get(fresh.customer_id) || []) : null;
+    stillPrimary = await visitMatchesPrimaryHomeForTechAccess(conn, fresh, homes, null, { estimateById });
+  }
+  const lostWindow = candidate.hadWindow && !stillWindow;
+  const lostPrimary = candidate.hadPrimary && !stillPrimary;
+  if (!lostWindow && !lostPrimary) return null;
+  return { lostAssignment: false, lostWindow: !stillWindow, lostPrimary };
+}
+
+async function recheckTechFeedAccessRows(conn, req, candidates, onRevoked) {
+  const droppedIds = new Set();
+  if (!isTechnicianRequest(req) || !candidates.length) return droppedIds;
+  const state = await loadFreshTechFeedState(conn, req, candidates);
+  for (const candidate of candidates) {
+    const flags = await evaluateTechFeedCandidate(conn, req, candidate, state);
+    if (!flags) continue;
+    if (flags.lostAssignment) droppedIds.add(candidate.visit.id);
+    onRevoked(candidate, flags);
+  }
+  return droppedIds;
+}
+
+async function isVisitLiveForTechAccess(conn, { visitId, techId, customerId, today, visit = null }) {
+  if (!techId) return true;
+  const q = conn('scheduled_services')
+    .where({ id: visitId, technician_id: techId, customer_id: customerId, scheduled_date: today })
+    .whereNotIn('status', TECH_ACCESS_CODE_ENDED_STATUSES);
+  if (visit) {
+    for (const col of VISIT_PREMISE_COLS) {
+      if (!(col in visit)) continue;
+      if (visit[col] == null) q.whereNull(col);
+      else q.where(col, visit[col]);
+    }
+  }
+  const row = await q.first('id');
+  return !!row;
+}
+
+async function sameHomeForTechVisitPrefs(conn, techId, customerId, visit, customerPrimaryAddress = null) {
+  if (!techId) return true;
+  const homesMap = await loadActiveHomesByCustomerIds(conn, [customerId]);
+  return visitMatchesPrimaryHomeForTechAccess(
+    conn,
+    visit,
+    homesMap ? (homesMap.get(customerId) || []) : null,
+    customerPrimaryAddress,
+  );
+}
+
+function redactFreeTextAccessCodes(text) {
+  if (text == null || text === '') return text;
+  const { redactAccessCodes } = require('./context-aggregator');
+  return redactAccessCodes(String(text));
+}
+
+const ACCESS_CODE_PREF_FIELDS = [
+  'neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code',
+  'access_notes', 'side_gate_access', 'parking_notes', 'special_instructions', 'away_mode_until',
+];
+
+function stripAccessCodePrefs(prefs) {
+  if (!prefs || typeof prefs !== 'object') return prefs;
+  const copy = { ...prefs };
+  for (const field of ACCESS_CODE_PREF_FIELDS) delete copy[field];
+  return copy;
+}
+
+function stripAccessCodesFromBriefBlock(access) {
+  if (!access || typeof access !== 'object') return access;
+  const nextAlerts = Array.isArray(access.alerts)
+    ? access.alerts
+      .filter((a) => {
+        const type = typeof a === 'object' ? a?.type : null;
+        const text = typeof a === 'string' ? a : (a?.text || '');
+        if (type === 'gate' || type === 'access' || type === 'special') return false;
+        if (type === 'service_pref' && /AWAY MODE/i.test(text)) return false;
+        return true;
+      })
+      .map((a) => {
+        if (typeof a === 'string') return redactFreeTextAccessCodes(a);
+        if (a && typeof a === 'object' && a.type === 'note' && typeof a.text === 'string') {
+          return { ...a, text: redactFreeTextAccessCodes(a.text) };
+        }
+        return a;
+      })
+    : access.alerts;
+  return {
+    ...access,
+    codes: { neighborhoodGate: null, propertyGate: null, garage: null, lockbox: null },
+    accessNotes: null,
+    parkingNotes: null,
+    specialInstructions: null,
+    alerts: nextAlerts,
+  };
+}
 
 // READ access: a current-or-recent assignment (completed allowed in window).
 function technicianCurrentVisitFilter(req, q) {
@@ -196,4 +507,4 @@ async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
   return !(await require('./payment-method-consents').autopayOptedOut(invoice.customer_id, { dbh: database }));
 }
 
-module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly };
+module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_CODE_ENDED_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly, technicianMayReadVisitAccessCodes, propertyPrefsMatchVisitHome, visitHasDirectPremiseStamp, visitMatchesPrimaryHomeForTechAccess, loadActiveHomesByCustomerIds, loadTechHomesByCustomerIds, loadTechPrimaryAccessIds, recheckTechFeedAccessRows, visitAllowsAccessCodes, isVisitLiveForTechAccess, sameHomeForTechVisitPrefs, redactFreeTextAccessCodes, stripAccessCodePrefs, stripAccessCodesFromBriefBlock };

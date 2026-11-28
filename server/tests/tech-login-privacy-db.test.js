@@ -302,13 +302,13 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
       });
     });
 
-    test('gate off: a technician still sees and changes any customer\'s promise, as before', async () => {
+    test('gate off: a technician still sees and changes only own-customer promises unconditionally', async () => {
       delete process.env.GATE_TECH_LOGIN_PRIVACY;
       await withServer(async (base) => {
         as(ids.techA, 'technician');
         const open = await (await req(base, 'GET', '/commitments/open?limit=200')).json();
-        expect(mine(open.commitments)).toEqual(expect.arrayContaining(['other', 'no-customer']));
-        expect((await req(base, 'PATCH', `/commitments/${ctx.promiseB}`, { action: 'dismiss' })).status).toBe(200);
+        expect(mine(open.commitments)).toEqual(['own']);
+        expect((await req(base, 'PATCH', `/commitments/${ctx.promiseB}`, { action: 'dismiss' })).status).toBe(404);
       });
     });
   });
