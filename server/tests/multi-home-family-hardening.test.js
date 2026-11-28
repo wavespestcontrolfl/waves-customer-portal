@@ -231,7 +231,7 @@ describe('Decision 2: office review alert when Same-Family drops below 2 active 
         who: 'person',
         subject: { type: 'customer', id: SURVIVOR },
         doneWhen: 'multi_home_discount_reviewed',
-        link: `/admin/customers/${SURVIVOR}`,
+        link: `/admin/customers?customerId=${SURVIVOR}`,
       }),
       expect.objectContaining({
         dedupeKey: `family-drop-below-two:${SURVIVOR}:${DEPARTED}`,

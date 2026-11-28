@@ -375,7 +375,7 @@ async function alertFamilyDropBelowTwo(conn, { formerMemberIds = [], departedCus
         doneWhen: 'multi_home_discount_reviewed',
         action: 'Review Multi-Home Discount after family change',
         why: `${name} now has under 2 active family homes (${reasonLabel}) with ${upcomingCount} discounted upcoming ${visitWord}.`,
-        link: `/admin/customers/${memberId}`,
+        link: `/admin/customers?customerId=${memberId}`,
       }, {
         dedupeKey: `family-drop-below-two:${memberId}:${departedCustomerId || reason}`,
         dedupeOpenOnly: true,
