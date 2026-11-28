@@ -65,7 +65,7 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
     expect(contentTokenMultiset(res.text)).toEqual(contentTokenMultiset(inverted));
   });
 
-  test('swaps inverted outbound transcript when Caller introduces themselves as calling from Waves', () => {
+  test('swaps inverted outbound and standard Waves greetings', () => {
     const outboundInverted = [
       'Agent: Hello?',
       'Caller: Hi, this is Jordan calling from Waves Pest Control about your Thursday visit.',
@@ -85,42 +85,30 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
     const stdRes = fixSwappedSpeakerRoles(standardWavesGreeting);
     expect(stdRes.swapped).toBe(true);
     expect(stdRes.text).toMatch(/^Agent: Waves Pest Control, this is Sarah\./);
+
+    const outboundWithCustomerQuestion = [
+      'Agent: Hello?',
+      'Caller: Hi, this is Jordan calling from Waves Pest Control, am I speaking with John?',
+      'Agent: Yes, this is John.',
+    ].join('\n');
+    const qRes = fixSwappedSpeakerRoles(outboundWithCustomerQuestion);
+    expect(qRes.swapped).toBe(true);
+    expect(qRes.text).toContain('Agent: Hi, this is Jordan calling from Waves Pest Control, am I speaking with John?');
   });
 
-  test('does NOT swap when caller asks "Is this Waves Pest Control?" or "Good morning, Waves Pest Control?" or quotes a greeting', () => {
-    const customerCheck = [
-      'Agent: Hello?',
-      'Caller: Hi, is this Waves Pest Control?',
-      'Agent: Yes it is, how can I help?',
-    ].join('\n');
-    expect(fixSwappedSpeakerRoles(customerCheck)).toEqual({ text: customerCheck, swapped: false, reason: null });
-
-    const morningQuestion = [
-      'Agent: Hello?',
-      'Caller: Good morning, Waves Pest Control?',
-      'Agent: Yes, speaking.',
-    ].join('\n');
-    expect(fixSwappedSpeakerRoles(morningQuestion)).toEqual({ text: morningQuestion, swapped: false, reason: null });
-
-    const customerMention = [
-      'Agent: Hello?',
-      'Caller: Good morning, Waves Pest Control treated my house yesterday.',
-      'Agent: Happy to check on that for you.',
-    ].join('\n');
-    expect(fixSwappedSpeakerRoles(customerMention)).toEqual({ text: customerMention, swapped: false, reason: null });
-
-    const customerGreetingWaves = [
-      'Agent: Hello?',
-      'Caller: Hi Waves, how can I help you?',
-      'Agent: Just checking in on your visit.',
-    ].join('\n');
-    expect(fixSwappedSpeakerRoles(customerGreetingWaves)).toEqual({ text: customerGreetingWaves, swapped: false, reason: null });
-
-    const normal = [
-      'Agent: Thank you for calling Waves Pest Control, this is Sarah.',
-      'Caller: Hi, I need lawn care.',
-    ].join('\n');
-    expect(fixSwappedSpeakerRoles(normal)).toEqual({ text: normal, swapped: false, reason: null });
+  test('does NOT swap on customer questions, third-person voicemail references, composite transcripts, or quoted greetings', () => {
+    const cases = [
+      'Agent: Hello?\nCaller: Hi, is this Waves Pest Control?\nAgent: Yes it is, how can I help?',
+      'Agent: Hello?\nCaller: Good morning, Waves Pest Control?\nAgent: Yes, speaking.',
+      'Agent: Hello?\nCaller: Good morning, Waves Pest Control treated my house yesterday.\nAgent: Happy to check on that for you.',
+      'Agent: Hello?\nCaller: Hi Waves, how can I help you?\nAgent: Just checking in on your visit.',
+      'Agent: Hello?\nCaller: Someone calling from Waves Pest Control left me a voicemail.\nAgent: Let me look up your account.',
+      'Agent: Thank you for calling Waves Pest Control, this is Sarah.\nCaller: Hi, I need lawn care.',
+      'Agent: How can I help today?\nCaller: Earlier the voicemail said thank you for calling Waves Pest Control and hung up.',
+    ];
+    for (const transcript of cases) {
+      expect(fixSwappedSpeakerRoles(transcript)).toEqual({ text: transcript, swapped: false, reason: null });
+    }
 
     const composite = [
       '[AI segment]',
@@ -128,20 +116,14 @@ describe('PR B1: Deterministic speaker-role swap guard', () => {
       'Agent: Hi I need help.',
     ].join('\n');
     expect(fixSwappedSpeakerRoles(composite)).toEqual({ text: composite, swapped: false, reason: 'composite_transcript' });
-
-    const quoted = [
-      'Agent: How can I help today?',
-      'Caller: Earlier the voicemail said thank you for calling Waves Pest Control and hung up.',
-    ].join('\n');
-    expect(fixSwappedSpeakerRoles(quoted)).toEqual({ text: quoted, swapped: false, reason: null });
   });
 });
 
-describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety, tech-safe & report-safe)', () => {
-  test('builds brief from schema-valid V2 pests_observed (location_on_property) and safety notes, stripping money, sales objections, phones, emails, and access codes', () => {
+describe('PR B1: Call-to-Truck Brief (100% of call bookings, report-safe & ANI-verified)', () => {
+  test('builds brief from schema-valid V2 pests_observed (location_on_property), keeps household/medical details out of public customer_request, and strips money/objections/PII/codes', () => {
     const brief = buildCallToTruckBrief({
       extracted: {
-        pain_points: 'too expensive; Ants around the koi pond. Quoted $250 one-time. Gate code is 4545#. Call (941) 555-0199 or test@example.com.',
+        pain_points: 'too expensive; Ants around the back patio. Quoted $250 one-time. Gate code is 4545#. Call (941) 555-0199 or test@example.com.',
         call_summary: 'The landlord will pay 200 per visit for One-Time Pest.',
       },
       v2Extraction: {
@@ -156,7 +138,7 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety
         },
         property: {
           no_spray_areas: 'koi pond',
-          chemical_sensitivity_note: 'Sensitive to strong odors',
+          chemical_sensitivity_note: 'Severe asthma sensitivity',
           household_children_or_elderly: 'Toddler in home',
         },
       },
@@ -164,42 +146,13 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety
       isReService: false,
     });
 
-    expect(brief).toBeTruthy();
-    expect(brief).toContain('No-spray areas: koi pond');
-    expect(brief).toContain('Sensitivity: Sensitive to strong odors');
-    expect(brief).toContain('Household: Toddler in home');
-    expect(brief).toContain('Pests: ghost ants (kitchen)');
-    expect(brief).toContain('Ants around the koi pond.');
-    expect(brief).not.toMatch(/too expensive|\$250|quoted|landlord|200 per visit|4545|941|555-0199|test@example\.com/i);
+    expect(brief).toBe('Pests: ghost ants (kitchen) | Ants around the back patio.');
+    // Household medical/sensitivity notes stay strictly in property_preferences (never published into forwardable customer_request)
+    expect(brief).not.toMatch(/asthma|toddler|koi pond|too expensive|\$250|quoted|landlord|200 per visit|4545|941|555-0199|test@example\.com/i);
     expect(brief.length).toBeLessThanOrEqual(MAX_BRIEF_CHARS);
   });
 
-  test('reserves fair-share space for ALL three safety notes even when each is 200 chars', () => {
-    const noSpray200 = `Organic vegetable beds along south fence ${'near citrus trees '.repeat(10)}`.slice(0, 200);
-    const sens200 = `Severe asthma sensitivity inside master bedroom ${'avoid interior aerosols '.repeat(10)}`.slice(0, 200);
-    const house200 = `Newborn infant and elderly parent at home ${'stay outside while drying '.repeat(10)}`.slice(0, 200);
-
-    const brief = buildCallToTruckBrief({
-      extracted: { pain_points: 'Ants on patio.' },
-      v2Extraction: {
-        property: {
-          no_spray_areas: noSpray200,
-          chemical_sensitivity_note: sens200,
-          household_children_or_elderly: house200,
-        },
-      },
-      isAssessmentBooking: false,
-      isReService: false,
-    });
-
-    expect(brief).toBeTruthy();
-    expect(brief.length).toBeLessThanOrEqual(MAX_BRIEF_CHARS);
-    expect(brief).toContain('No-spray areas:');
-    expect(brief).toContain('Sensitivity:');
-    expect(brief).toContain('Household:');
-  });
-
-  test('enforces GATE_CALL_ENRICH_CODES_REQUIRE_ANI before copying safety notes onto the job card', async () => {
+  test('enforces GATE_CALL_ENRICH_CODES_REQUIRE_ANI: unverified callers emit ONLY structured pest types or catalog service name', async () => {
     const priorGate = process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI;
     process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI = 'true';
     try {
@@ -212,21 +165,17 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety
         extracted: { pain_points: 'Please avoid spraying the nursery.' },
         v2Extraction: {
           service_request: { pests_observed: [{ pest_type: 'ghost_ants', location_on_property: 'kitchen' }] },
-          property: { no_spray_areas: 'backyard vegetable garden', chemical_sensitivity_note: 'odor sensitivity' },
         },
+        catalogServiceName: 'One-Time Pest Control Service',
         isAssessmentBooking: false,
         isReService: false,
       };
 
-      // Unverified caller ANI (spoken callback number mismatch) -> safety notes AND free-text pain_points/locations withheld; only structured pest type survives
       const unverified = await resolveCallToTruckBriefForBooking(mockConn, { ...baseInput, callerAni: '+19415559999' });
       expect(unverified).toBe('Pests: ghost ants');
-      expect(unverified).not.toContain('No-spray');
-      expect(unverified).not.toContain('Sensitivity');
       expect(unverified).not.toContain('nursery');
       expect(unverified).not.toContain('kitchen');
 
-      // Unverified caller ANI with no pests -> uses ONLY server catalog row name (never extraction free text like requested_service)
       const unverifiedNoPests = await resolveCallToTruckBriefForBooking(mockConn, {
         customerId: 'cust-1',
         callerAni: '+19415559999',
@@ -239,12 +188,8 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety
       expect(unverifiedNoPests).toBe('Requested: One-Time Pest Control Service');
       expect(unverifiedNoPests).not.toContain('back lawn');
 
-      // Verified primary-phone ANI -> safety notes and full pest location included
       const verified = await resolveCallToTruckBriefForBooking(mockConn, { ...baseInput, callerAni: '(941) 555-0100' });
-      expect(verified).toContain('No-spray areas: backyard vegetable garden');
-      expect(verified).toContain('Sensitivity: odor sensitivity');
-      expect(verified).toContain('Pests: ghost ants (kitchen)');
-      expect(verified).toContain('Please avoid spraying the nursery.');
+      expect(verified).toBe('Pests: ghost ants (kitchen) | Please avoid spraying the nursery.');
     } finally {
       if (priorGate === undefined) delete process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI;
       else process.env.GATE_CALL_ENRICH_CODES_REQUIRE_ANI = priorGate;
@@ -264,6 +209,7 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety
           pests_observed: [{ pest_type: 'termites', location_on_property: 'garage' }],
         },
       },
+      catalogServiceName: 'Waves Assessment',
       isAssessmentBooking: true,
       isReService: false,
     });
@@ -272,7 +218,7 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety
     expect(brief).not.toContain('Fumigation');
   });
 
-  test('screens out unrestricted billing chatter, PANs, and disallowed customer-report copy violations', () => {
+  test('caps at 400 chars and screens out billing chatter, PANs, and disallowed customer-report copy violations', () => {
     const billingOnly = buildCallToTruckBrief({
       extracted: {
         pain_points: 'The landlord will pay 200 per visit. Quoted $200.',
@@ -291,6 +237,10 @@ describe('PR B1: Call-to-Truck Brief (100% of call bookings, ANI-verified safety
       isReService: false,
     });
     expect(unsafeCopy).toBe('Ants on kitchen counter.');
-    expect(unsafeCopy).not.toContain('4111');
+
+    const longPain = `Heavy ant trails along patio. ${'Active foraging near perimeter beds. '.repeat(20)}`;
+    const capped = buildCallToTruckBrief({ extracted: { pain_points: longPain } });
+    expect(capped).toBeTruthy();
+    expect(capped.length).toBeLessThanOrEqual(MAX_BRIEF_CHARS);
   });
 });

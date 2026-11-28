@@ -18,26 +18,31 @@
 
 const COMPOSITE_MARKER_RE = /(?:^|\n)\s*(?:\[(?:AI|Live|Human|Transfer|Segment)\b[^\]]*\]|---{1,})/i;
 const SPEAKER_LINE_RE = /^(\s*)(Agent|Caller)(\s*:)(.*)$/i;
-const QUOTED_OR_CALLER_CHECK_RE = /\b(?:they\s+said|she\s+said|he\s+said|recording\s+said|voicemail\s+said|message\s+said|heard|is\s+this|am\s+i\s+speaking\s+with|did\s+i\s+reach|is\s+that|calling\s+for)\b/i;
+const QUOTED_SPEECH_RE = /\b(?:they|she|he|recording|voicemail|message|greeting|someone)\s+(?:said|says|mentioned|left|calling)\b|\bheard\b/i;
+const CALLER_CHECK_WAVES_RE = /\b(?:is\s+this|am\s+i\s+speaking\s+with|did\s+i\s+reach|is\s+that|calling\s+for)\s+waves\b/i;
 
 const STAFF_SELF_ID_PATTERNS = Object.freeze([
   /\b(?:thank(?:s|\s+you)\s+for\s+calling|welcome\s+to)\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
   /(?:^|[.!\n]\s*)waves(?:\s+pest(?:\s+control)?)?\s*[,.\-—]\s*(?:this\s+is\s+[a-z][a-z'-]{1,20}|my\s+name\s+is\s+[a-z][a-z'-]{1,20}|how\s+(?:can|may)\s+(?:i|we)\s+(?:help|assist)\s+you)\b/i,
   /\b(?:this\s+is|my\s+name\s+is|i['’]?m)\s+[a-z][a-z'-]{1,20}\s+(?:calling\s+)?(?:back\s+)?(?:with|from|at)\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
-  /\bcalling\s+(?:you\s+)?(?:back\s+)?from\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
+  /\b(?:i['’]?m|i\s+am|we['’]?re|we\s+are)\s+calling\s+(?:you\s+)?(?:back\s+)?from\s+waves(?:\s+pest(?:\s+control)?)?\b/i,
 ]);
+
+function sentenceHasStaffSelfId(sentence) {
+  const clean = String(sentence || '').trim();
+  if (!clean || QUOTED_SPEECH_RE.test(clean) || CALLER_CHECK_WAVES_RE.test(clean)) return false;
+  if (!STAFF_SELF_ID_PATTERNS.some((re) => re.test(clean))) return false;
+  // Allow trailing `?` on a self-ID sentence only when it is a staff offer or asking for the customer.
+  if (/\?\s*$/.test(clean) && !/\b(?:how\s+(?:can|may)\s+(?:i|we)\s+(?:help|assist)\s+you|am\s+i\s+speaking\s+with|is\s+[a-z][a-z'-]{1,20}\s+available)\b/i.test(clean)) {
+    return false;
+  }
+  return true;
+}
 
 function hasUnambiguousStaffSelfId(turnBody) {
   const body = String(turnBody || '').trim();
-  if (!body || QUOTED_OR_CALLER_CHECK_RE.test(body)) return false;
-  if (STAFF_SELF_ID_PATTERNS.some((re) => re.test(body))) {
-    // Allow trailing `?` ONLY on explicit staff offer ("...how can I help you?").
-    if (/\?\s*$/.test(body) && !/\bhow\s+(?:can|may)\s+(?:i|we)\s+(?:help|assist)\s+you\b/i.test(body)) {
-      return false;
-    }
-    return true;
-  }
-  return false;
+  if (!body || QUOTED_SPEECH_RE.test(body) || CALLER_CHECK_WAVES_RE.test(body)) return false;
+  return body.split(/(?<=[.!?])\s+|\n+/).some(sentenceHasStaffSelfId);
 }
 
 function collectLabeledTurns(lines) {
