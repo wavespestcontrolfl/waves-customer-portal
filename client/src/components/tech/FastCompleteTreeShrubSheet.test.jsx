@@ -535,6 +535,22 @@ describe('photos and the photo read', () => {
     expect(body.completionPhotos).toHaveLength(3);
   });
 
+  test('Away Watch visit requires 3 total photos, credits staged photos, and suppresses the 2-photo recommendation', async () => {
+    const request = makeRequest({ context: { ...CONTEXT, awayWatch: { requiredPhotos: 3, stagedPhotoCount: 1 } } });
+    await openSheet(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Good' }));
+    expect(screen.queryByText(/at least 2 photos recommended/)).toBeNull();
+    expect(screen.getByText('Away Watch visit: add at least 3 photos of the outside of the home (1 of 3 added).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    await addPhoto('Front beds', 'front.jpg');
+    expect(screen.getByText('Away Watch visit: add at least 3 photos of the outside of the home (2 of 3 added).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    await addPhoto('Back or side landscape', 'back.jpg');
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.completionPhotos).toHaveLength(2);
+  });
+
   test('photos go in the body as completionPhotos in slot order, not through the staged photo manager', async () => {
     const request = makeRequest();
     await openSheet(request);

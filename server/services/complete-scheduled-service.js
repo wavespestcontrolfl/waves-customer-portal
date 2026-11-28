@@ -172,6 +172,10 @@ function definedOrUndefined(value) {
   return value == null ? undefined : value;
 }
 
+function restoredArrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
 async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -6777,6 +6781,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
       const resumedStructuredNotes = parseJsonObject(record.structured_notes);
       treeShrubCloseoutSummary = resumedStructuredNotes.treeShrubCloseout || null;
+      treeShrubCloseoutWarnings = restoredArrayOrEmpty(resumedStructuredNotes.treeShrubCloseoutWarnings);
       servicePhotoVisit = resumedStructuredNotes.servicePhotoVisit || null;
       // An authorized correction can land after the packet committed its
       // records but before an effects replay. Its durable revision and notes

@@ -408,6 +408,7 @@ function contextFrom(data, service) {
     watchList: watchListFrom(data),
     pestCheck: objectOrNull(data?.pestCheck),
     neonicCap: objectOrNull(data?.neonicCap),
+    awayWatch: objectOrNull(data?.awayWatch),
     // The Wrap-up section is on when the server says so.
     wrapUp: data?.wrapUp === true,
     // Owner 2026-10-20: /complete takes this visit's stock below zero instead of refusing,
@@ -417,7 +418,7 @@ function contextFrom(data, service) {
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, bedSqft: null, monthProductHolds: [], watchList: null, pestCheck: null, neonicCap: null, wrapUp: false, stockAdvisory: false,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, bedSqft: null, monthProductHolds: [], watchList: null, pestCheck: null, neonicCap: null, awayWatch: null, wrapUp: false, stockAdvisory: false,
   visitIdentity: null, visit: null, lastVisit: {}, lastPalms: null, lastVisitPhotos: {},
 };
 
@@ -514,15 +515,25 @@ function StockNotices({ rows, checking, locked, onCheck }) {
   );
 }
 
-function missingRequirement({ form, rows, photoBusy, ctx, dictationPending }) {
+function awayWatchPhotoMissingReason(awayWatch, photoCount) {
+  const required = Number(awayWatch?.requiredPhotos) || 0;
+  if (!(required > 0)) return '';
+  const credited = (Number(awayWatch?.stagedPhotoCount) || 0) + photoCount;
+  if (credited >= required) return '';
+  return `Away Watch visit: add at least ${required} photos of the outside of the home (${credited} of ${required} added).`;
+}
+
+function missingRequirement({ form, rows, photoCount, photoBusy, ctx, dictationPending }) {
   const active = rows.filter((row) => row.active);
   const outOfStock = stockState(rows, ctx).hold;
   const missingAmount = active.find((row) => !hasAmount(row));
   const missingArea = active.find((row) => !hasBedArea(row));
+  const awayWatchMissing = awayWatchPhotoMissingReason(ctx.awayWatch, photoCount);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
     [photoBusy, 'Wait for the photo to finish loading.'],
+    [awayWatchMissing, awayWatchMissing],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [missingArea, missingArea && `Enter the treated square feet for ${missingArea.name}.`],
@@ -553,8 +564,11 @@ function complianceWarnings({ form, rows, ctx }) {
 
 function closeoutWarnings({ form, rows, slots, ctx, pestCheck, neonicCap }) {
   const warnings = [];
-  if (!slots.front_beds) warnings.push('Add a front beds photo (at least 2 photos recommended).');
-  if (!slots.back_landscape) warnings.push('Add a back or side landscape photo (at least 2 photos recommended).');
+  const hasAwayWatch = (Number(ctx.awayWatch?.requiredPhotos) || 0) > 0;
+  if (!hasAwayWatch) {
+    if (!slots.front_beds) warnings.push('Add a front beds photo (at least 2 photos recommended).');
+    if (!slots.back_landscape) warnings.push('Add a back or side landscape photo (at least 2 photos recommended).');
+  }
   warnings.push(...complianceWarnings({ form, rows, ctx }));
   if (pestCheck.evaluation.blockMessage) warnings.push(pestCheck.evaluation.blockMessage);
   for (const hold of neonicCap.holds || []) {
@@ -582,13 +596,43 @@ function palmValues(form) {
   };
 }
 
-function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {}, customerText }) {
-  const active = rows.filter((row) => row.active);
-  const applicationArea = inOptionOrder(AREA_OPTIONS, form.areas);
+function nutriRootFindingValues(form, active) {
+  if (!active.some((row) => flagsOf(row.product).nutriRoot) || !form.nutriRootBasis) return {};
+  const ref = String(form.nutriRootSoilTestReference || '').trim().slice(0, 240);
+  return {
+    nutriroot_application_basis: form.nutriRootBasis,
+    ...(form.nutriRootBasis === NUTRIROOT_SOIL_TEST_BASIS && ref ? { nutriroot_soil_test_reference: ref } : {}),
+  };
+}
+
+function structuredFindingsValues({ form, active, rows, ctx, applicationArea }) {
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
   const irac = active.some((row) => flagsOf(row.product).needsIracFrac);
   const manualIrac = needsManualIrac(rows, ctx);
   const iracValue = !irac ? '' : (manualIrac ? form.irac : 'Yes');
+  const spray = String(form.sprayGallons ?? '').trim();
+  return {
+    plant_groups: inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups),
+    ...(form.areas.size ? { areas_treated: applicationArea } : {}),
+    landscape_condition: form.condition,
+    ...(insect && form.pollinator ? { pollinator_status: form.pollinator } : {}),
+    // Yes when the app ran the rotation check (the context loaded its
+    // warnings); when manual confirmation was requested, send only what the
+    // tech actually selected so unconfirmed visits stay truthful.
+    ...(iracValue ? { irac_frac_logged: iracValue } : {}),
+    ...nutriRootFindingValues(form, active),
+    // Optional internal costing fact (project-types.js spray_mix_gallons);
+    // blank stays absent so the typed-findings validator never sees ''.
+    // Sent only while a LIQUID product is still on the visit (Codex #6398).
+    ...(hasLiquidApplication(active) && spray !== '' ? { spray_mix_gallons: spray } : {}),
+    // Optional internal palm facts (project-types.js palm_*), only with the Palms group on.
+    ...palmValues(form),
+  };
+}
+
+function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {}, customerText }) {
+  const active = rows.filter((row) => row.active);
+  const applicationArea = inOptionOrder(AREA_OPTIONS, form.areas);
   const result = previewCurrent ? preview.result : null;
   const watchItems = watchItemsBody(ctx.watchList, watchChoices, flaggedWatchKeys(ctx.watchList, result));
   return {
@@ -601,33 +645,7 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
     }),
     structuredFindings: {
       type: 'tree_shrub',
-      values: {
-        plant_groups: inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups),
-        ...(form.areas.size ? { areas_treated: applicationArea } : {}),
-        landscape_condition: form.condition,
-        ...(insect && form.pollinator ? { pollinator_status: form.pollinator } : {}),
-        // Yes when the app ran the rotation check (the context loaded its
-        // warnings); when manual confirmation was requested, send only what the
-        // tech actually selected so unconfirmed visits stay truthful.
-        ...(iracValue ? { irac_frac_logged: iracValue } : {}),
-        ...(active.some((row) => flagsOf(row.product).nutriRoot) && form.nutriRootBasis
-          ? { nutriroot_application_basis: form.nutriRootBasis }
-          : {}),
-        ...(active.some((row) => flagsOf(row.product).nutriRoot)
-          && form.nutriRootBasis === NUTRIROOT_SOIL_TEST_BASIS
-          && String(form.nutriRootSoilTestReference || '').trim()
-          ? { nutriroot_soil_test_reference: String(form.nutriRootSoilTestReference).trim().slice(0, 240) }
-          : {}),
-        // Optional internal costing fact (project-types.js spray_mix_gallons);
-        // blank stays absent so the typed-findings validator never sees ''.
-        // Sent only while a LIQUID product is still on the visit: the field
-        // hides when the last one is removed or switched to granular, and a
-        // hidden stale value must not record spray volume against products
-        // that applied no mix (Codex #6398).
-        ...(hasLiquidApplication(active) && String(form.sprayGallons ?? '').trim() !== '' ? { spray_mix_gallons: String(form.sprayGallons).trim() } : {}),
-        // Optional internal palm facts (project-types.js palm_*), only with the Palms group on.
-        ...palmValues(form),
-      },
+      values: structuredFindingsValues({ form, active, rows, ctx, applicationArea }),
     },
     completionPhotos: photos.map((photo, index) => ({
       data: photo.data,
@@ -785,7 +803,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const removeBlocked = (blockedRows) => blockedRows.forEach((row) => products.updateRow(row.productId, { active: false }));
   // Yearly neonicotinoid cap: no ctx.neonicCap (not loaded, or the read failed) = no line and no warning. Warning only — /complete does not refuse.
   const neonicCap = useMemo(() => evaluateNeonicCap(ctx.neonicCap, rows), [ctx.neonicCap, rows]);
-  const missingReason = missingRequirement({ form, rows, photoBusy: photos.busy, ctx, dictationPending });
+  const missingReason = missingRequirement({ form, rows, photoCount: photoList.length, photoBusy: photos.busy, ctx, dictationPending });
   const advisoryWarnings = closeoutWarnings({ form, rows, slots: photos.slots, ctx, pestCheck, neonicCap });
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
@@ -911,6 +929,13 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
           )}
           <FastCompleteWrapUp wrapUp={wrapUp} />
         </fieldset>
+        {advisoryWarnings.length > 0 && (
+          <div className="tech-visit-choice-section" data-testid="tree-shrub-closeout-warnings">
+            {advisoryWarnings.map((warning) => (
+              <p key={warning} className="tech-visit-muted tech-visit-status--warn" role="status">{warning}</p>
+            ))}
+          </div>
+        )}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
       <CompleteFooter
@@ -921,9 +946,6 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
         onSubmit={submit}
         coverProps={picker.coverProps}
       >
-        {advisoryWarnings.map((warning) => (
-          <p key={warning} className="tech-visit-muted tech-visit-status--warn" role="status">{warning}</p>
-        ))}
         <StockNotices rows={stockNotices} checking={checkingStock} locked={locked} onCheck={checkStock} />
         {stockRow && !locked && (
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" loading={checkingStock} onClick={checkStock}>Check stock</Button>

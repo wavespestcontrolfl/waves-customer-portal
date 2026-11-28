@@ -10742,44 +10742,38 @@ export function completionAddOnWarnings(service, rows, isIncompleteVisit = false
   ].filter(Boolean);
 }
 
+function companionPesticideComplianceWarning(schema, companionState, scope, paths) {
+  const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+  const missing = missingTypedPesticideCompliance(
+    schema.fields || [],
+    entry.values,
+    scope,
+    paths[schema.type] || null,
+  );
+  if (!missing.length) return null;
+  return `${schema.label || schema.type}: missing pesticide compliance details: ${missing.join(", ")}.`;
+}
+
 // Non-blocking Tree & Shrub pesticide compliance warnings for primary and
 // companion typed forms (owner ruling 2026-11-26: warn, never block closeout).
-export function completionPesticideComplianceWarnings({
-  isTypedFindings = false,
-  isIncompleteVisit = false,
-  typedFindingsSchema = null,
-  findingsValues = {},
-  companionSchemas = [],
-  companionState = {},
-  scope = {},
-  typedInsectEvidencePath = null,
-  companionInsectEvidencePaths = {},
-} = {}) {
-  if (isIncompleteVisit) return [];
+export function completionPesticideComplianceWarnings(input = {}) {
+  if (input.isIncompleteVisit) return [];
+  const scope = input.scope || {};
   const warnings = [];
-  if (isTypedFindings && typedFindingsSchema) {
+  if (input.isTypedFindings && input.typedFindingsSchema) {
     const missingPrimary = missingTypedPesticideCompliance(
-      typedFindingsSchema.fields || [],
-      findingsValues,
+      input.typedFindingsSchema.fields || [],
+      input.findingsValues || {},
       scope,
-      typedInsectEvidencePath,
+      input.typedInsectEvidencePath || null,
     );
-    if (missingPrimary.length) {
-      warnings.push(`Missing pesticide compliance details: ${missingPrimary.join(", ")}.`);
-    }
+    if (missingPrimary.length) warnings.push(`Missing pesticide compliance details: ${missingPrimary.join(", ")}.`);
   }
-  for (const schema of companionSchemas || []) {
-    const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
-    const label = schema.label || schema.type;
-    const missingCompanion = missingTypedPesticideCompliance(
-      schema.fields || [],
-      entry.values,
-      scope,
-      companionInsectEvidencePaths[schema.type] || null,
-    );
-    if (missingCompanion.length) {
-      warnings.push(`${label}: missing pesticide compliance details: ${missingCompanion.join(", ")}.`);
-    }
+  const companionState = input.companionState || {};
+  const paths = input.companionInsectEvidencePaths || {};
+  for (const schema of input.companionSchemas || []) {
+    const warning = companionPesticideComplianceWarning(schema, companionState, scope, paths);
+    if (warning) warnings.push(warning);
   }
   return warnings;
 }
