@@ -851,7 +851,9 @@ function enabledSequenceSteps(templateKey, client = db) {
   } else {
     const featureGates = require('../config/feature-gates');
     const stepsOn = featureGates.newLeadDripStepsLive?.() === true;
-    const extendedOn = featureGates.newLeadDripExtendedLive?.() === true;
+    // Steps 3 (Day 10, +120h) and 4 (Day 21, +264h) use relative delays after Step 2, so they
+    // require BOTH GATE_NEW_LEAD_DRIP_STEPS and GATE_NEW_LEAD_DRIP_EXTENDED to stay on schedule.
+    const extendedOn = stepsOn && featureGates.newLeadDripExtendedLive?.() === true;
     if (stepsOn) {
       query = client('automation_steps').where({ template_key: templateKey })
         .where((own) => {
@@ -859,10 +861,6 @@ function enabledSequenceSteps(templateKey, client = db) {
           if (extendedOn) own.orWhereIn('id', NEW_LEAD_EXTENDED_STEP_IDS);
         });
       if (!extendedOn) query = query.whereNotIn('id', NEW_LEAD_EXTENDED_STEP_IDS);
-    } else if (extendedOn) {
-      query = client('automation_steps').where({ template_key: templateKey })
-        .where((own) => { own.where('enabled', true).orWhereIn('id', NEW_LEAD_EXTENDED_STEP_IDS); })
-        .whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS);
     } else {
       query = client('automation_steps').where({ template_key: templateKey, enabled: true })
         .where((rest) => rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS))

@@ -5235,8 +5235,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // EVERY 15 MIN — Phone-only residential new-lead SMS follow-up drip (Day 2 & Day 5).
-  // Ships 100% DARK behind GATE_NEW_LEAD_DRIP_EXTENDED; no-op with zero queries while off.
+  // Ships 100% DARK behind GATE_NEW_LEAD_DRIP_EXTENDED; exits BEFORE acquiring DB lock while off.
   cron.schedule('*/15 * * * *', async () => {
+    if (require('../config/feature-gates').newLeadDripExtendedLive?.() !== true) return;
     try {
       await runExclusive('new-lead-phone-sms-drip', async () => {
         const { processPhoneOnlyLeadSmsDrip } = require('./new-lead-phone-sms-drip');

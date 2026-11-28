@@ -682,7 +682,7 @@ async function sendCustomerMessageCore(input) {
     // under that lock, then the lane's own providerPreSendCheck (its mutable
     // never-send checks) re-runs on the SAME held connection right after.
     || (input.audience === 'lead' && input.purpose === 'missed_call_followup'
-      && input.entryPoint === 'call_booking_link_text'
+      && ['call_booking_link_text', 'new_lead_phone_sms_drip'].includes(input.entryPoint)
       && typeof providerPreSendCheck === 'function')
     // Manual Leads-page compose (admin-leads.js POST /:id/send-sms, codex
     // #5018 r15 P2): staff can type any message, a manual consultation
