@@ -250,7 +250,6 @@ const CARD_PAYLOAD = {
 const digitalCard = {
   id: 'digital-card', family: 'card', surface: 'customer', role: 'public token', route: '/card/:token',
   url: `/card/${HEX64_A}`, ready: 'Your Waves technician', settle: 900,
-  sheet: { sheetH1Min: 22 },
   handle: ({ method, path }) => (method === 'GET' && path === `/api/card/${HEX64_A}` ? ok(CARD_PAYLOAD) : null),
   states: [
     { name: 'default' },

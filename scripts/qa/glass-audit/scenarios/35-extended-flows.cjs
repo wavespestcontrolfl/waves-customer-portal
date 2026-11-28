@@ -7,7 +7,7 @@
 //   /inspection/:token              ScheduleFlowPage.jsx (flow="inspection")
 //   /estimate/:token/assessment     ScheduleFlowPage.jsx (flow="assessment")
 
-const { addETDays, etDateString } = require('../../../../server/utils/datetime-et');
+const { addETDays, etDateString, parseETDateTime } = require('../../../../server/utils/datetime-et');
 
 const MOVE_TOKEN = '1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081'; // 48 hex
 const MAIL_HOME_TOKEN = '2233445566778899aabbccddeeff0011'; // 32 hex
@@ -22,6 +22,7 @@ const ok = (body) => ({ status: 200, body });
 const serverError = () => ({ status: 500, body: { error: 'glass-audit: simulated outage' } });
 
 const ymdOut = (days) => etDateString(addETDays(new Date(), days));
+const etIso = (ymd, hhmm) => parseETDateTime(`${ymd}T${hhmm}`).toISOString();
 const fullDateOf = (ymd) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', {
   weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC',
 });
@@ -135,7 +136,6 @@ module.exports = [
     url: `/careers/interview/${INTERVIEW_TOKEN}`,
     ready: 'Confirm interview time',
     settle: 900,
-    sheet: { sheetH1Min: 26 },
     handle: getOnly(`/api/public/careers/interview/${INTERVIEW_TOKEN}`, () => ok({
       first_name: 'Jordan',
       language: 'en',
@@ -145,8 +145,8 @@ module.exports = [
       timezone: 'America/New_York',
       booked: null,
       slots: [
-        { date: DAY1, start: `${DAY1}T14:00:00Z`, end: `${DAY1}T14:30:00Z`, label: `${shortDateOf(DAY1)}, 10:00 AM` },
-        { date: DAY1, start: `${DAY1}T15:00:00Z`, end: `${DAY1}T15:30:00Z`, label: `${shortDateOf(DAY1)}, 11:00 AM` },
+        { date: DAY1, start: etIso(DAY1, '10:00'), end: etIso(DAY1, '10:30'), label: `${shortDateOf(DAY1)}, 10:00 AM` },
+        { date: DAY1, start: etIso(DAY1, '11:00'), end: etIso(DAY1, '11:30'), label: `${shortDateOf(DAY1)}, 11:00 AM` },
       ],
     })),
     states: [
@@ -184,7 +184,6 @@ module.exports = [
     url: `/inspection/${INSPECT_TOKEN}`,
     ready: 'Free consultation',
     settle: 900,
-    sheet: { sheetH1Min: 30 },
     handle: getOnly(`/api/public/inspection/${INSPECT_TOKEN}`, () => ok({
       state: 'ok',
       lead: LEAD_FIXTURE,
@@ -207,7 +206,6 @@ module.exports = [
     url: `/estimate/${ASSESS_TOKEN}/assessment`,
     ready: 'Free Waves Assessment',
     settle: 900,
-    sheet: { sheetH1Min: 30 },
     handle: getOnly(`/api/public/estimate-assessment/${ASSESS_TOKEN}`, () => ok({
       state: 'ok',
       lead: LEAD_FIXTURE,
