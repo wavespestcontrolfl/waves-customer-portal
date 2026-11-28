@@ -1294,7 +1294,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     template,
     htmlBody: nudgeBody(step.html_body, nudge.decision, true),
     textBody: nudgeBody(step.text_body, nudge.decision, false),
-    previewText: step.preview_text || '',
+    previewText: nudgePreviewLine(step.preview_text, nudge.decision),
     customer: personal,
     asmGroupId,
     consultationHtml: consultationBlock.html,
@@ -1481,7 +1481,7 @@ async function testSequence({ templateKey, toEmail }) {
         template,
         htmlBody: nudgeBody(step.html_body, nudgeDecision, true),
         textBody: nudgeBody(step.text_body, nudgeDecision, false),
-        previewText: step.preview_text || '',
+        previewText: nudgePreviewLine(step.preview_text, nudgeDecision),
         customer: fake,
         asmGroupId,
       });

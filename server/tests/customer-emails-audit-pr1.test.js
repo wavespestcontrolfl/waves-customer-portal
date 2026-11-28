@@ -240,12 +240,12 @@ describe('Customer emails audit PR 1 regressions', () => {
         to: 'customer@example.com',
         subject: 'Update',
         heading: 'Service Update',
-        body: '<style>.x{display:none}</style><p>We finished your visit.</p>',
+        body: '<style>.x{display:none}</style><p>We finished your visit. <a href="https://portal.wavespestcontrol.com/details">See details</a>.</p>',
         ctaUrl: 'https://portal.wavespestcontrol.com/report/1',
         ctaLabel: 'View Report',
       });
       expect(sendMail).toHaveBeenCalledWith(expect.objectContaining({
-        text: 'Service Update\n\nWe finished your visit.\n\nView Report: https://portal.wavespestcontrol.com/report/1',
+        text: 'Service Update\n\nWe finished your visit. See details (https://portal.wavespestcontrol.com/details).\n\nView Report: https://portal.wavespestcontrol.com/report/1',
       }));
     } finally {
       if (prevPw === undefined) delete process.env.GOOGLE_SMTP_PASSWORD;

@@ -38,19 +38,35 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-function stripHtmlToText(html) {
-  return String(html || '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+function decodeBasicEntities(s) {
+  return String(s || '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
+    .replace(/&#39;/g, "'");
+}
+
+function formatPlainAnchor(_match, dbl, sgl, bare, inner) {
+  const href = decodeBasicEntities((dbl ?? sgl ?? bare ?? '').trim());
+  const label = decodeBasicEntities(inner.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
+  if (!href || /^(?:javascript|data):/i.test(href)) return label;
+  if (!label || label === href) return href;
+  return `${label} (${href})`;
+}
+
+function stripHtmlToText(html) {
+  const withLinks = String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi, formatPlainAnchor);
+  return decodeBasicEntities(
+    withLinks
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
+      .replace(/<[^>]+>/g, ''),
+  )
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }

@@ -91,6 +91,17 @@ function safeUrl(url) {
   return SAFE_URL_SCHEME.test(trimmed) ? trimmed : '#';
 }
 
+function safeImageUrl(url) {
+  const safe = safeUrl(url);
+  return /^(https?:\/\/|\/)/i.test(safe) ? safe : '';
+}
+
+function safeUnsubscribeHref(url) {
+  if (!url) return null;
+  if (url === ASM_UNSUBSCRIBE_URL || /^\{\{[a-zA-Z0-9_]+\}\}$/.test(url)) return url;
+  return escapeHtml(safeUrl(url));
+}
+
 // For suppressProviderErrorLog callers: strip anything address-shaped from a
 // provider error before it is persisted or audited (SendGrid 4xx bodies can
 // echo the recipient address).
@@ -427,9 +438,8 @@ function renderBlocks(blocks, payload) {
       // portal-hosted asset URL with no variable is fine too. Width is in CSS
       // px (capped to 100% on narrow screens); radius rounds screenshots
       // (badges pass radius 0). A missing/blank src renders nothing.
-      const rawSrc = renderInline(block.src, payload, { html: false }).trim();
-      const src = safeUrl(rawSrc);
-      if (src && /^(https?:\/\/|\/)/i.test(src)) {
+      const src = safeImageUrl(renderInline(block.src, payload, { html: false }));
+      if (src) {
         const width = Number(block.width) > 0 ? Math.round(Number(block.width)) : 240;
         const align = block.align === 'left' ? 'left' : block.align === 'right' ? 'right' : 'center';
         const radius = Number(block.radius) > 0 ? Math.round(Number(block.radius)) : 0;
@@ -829,11 +839,7 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // one stream ("referral emails", "these follow-ups") would understate it.
   // Only an admin preview/test passes a link for a service-stream template.
   const unsubScope = isMarketingSend(template, null) ? 'Waves marketing emails' : 'these emails';
-  const unsubHref = unsubscribeUrl
-    ? (unsubscribeUrl === ASM_UNSUBSCRIBE_URL || /^\{\{[a-zA-Z0-9_]+\}\}$/.test(unsubscribeUrl)
-      ? unsubscribeUrl
-      : escapeHtml(safeUrl(unsubscribeUrl)))
-    : null;
+  const unsubHref = safeUnsubscribeHref(unsubscribeUrl);
   const unsubFooterHtml = unsubHref
     ? `<a href="${unsubHref}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
     : null;
