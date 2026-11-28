@@ -159,6 +159,7 @@ function formatBriefStage(stage, tier) {
 }
 
 function formatCatalogPrice(item) {
+  if (item.pricing_type === "variable") return `${item.name}: Variable (use engine)`;
   if (item.price == null) return item.name;
   const num = Number(item.price);
   if (!Number.isFinite(num)) return item.name;
@@ -186,7 +187,8 @@ function CallerBriefBlock({ brief }) {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {stageLabel && <span className="font-medium capitalize text-zinc-900">{stageLabel}</span>}
         {brief.address && <span className="text-zinc-700">{brief.address}</span>}
-        {brief.home_sqft && <span className="text-zinc-500">{`${brief.home_sqft.toLocaleString()} sq ft`}</span>}
+        {brief.lawn_sqft && <span className="text-zinc-500">{`${brief.lawn_sqft.toLocaleString()} sq ft lawn`}</span>}
+        {brief.lot_sqft && <span className="text-zinc-500">{`${brief.lot_sqft.toLocaleString()} sq ft lot`}</span>}
         {touchLabel && <span className="text-zinc-500">{touchLabel}</span>}
       </div>
       {brief.next_visit && (

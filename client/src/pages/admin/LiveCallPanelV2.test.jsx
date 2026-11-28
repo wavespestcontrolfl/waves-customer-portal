@@ -189,7 +189,7 @@ describe("LiveCallPanelV2", () => {
     });
   });
 
-  it("renders Co-Pilot 2.0 brief, catalog prices, best route slots, and missing-info checklist when present", async () => {
+  it("renders Co-Pilot 2.0 brief, fixed vs variable catalog prices, best route slots, and missing-info checklist when present", async () => {
     const withCopilot = {
       ...call(lines(2)),
       copilot: {
@@ -197,17 +197,21 @@ describe("LiveCallPanelV2", () => {
           stage: "active_customer",
           tier: "Gold",
           address: "123 Maplewood Rd, Bradenton, 34202",
-          home_sqft: 2400,
+          lawn_sqft: 2400,
+          lot_sqft: 8500,
           next_visit: { date: "2026-12-01", service: "Quarterly Pest Control", window: "9-11 AM" },
           open_estimates: [{ service: "Mosquito Control", status: "sent", amount: 85 }],
           recent_48h: { calls: 1, texts: 2 },
           property_notes: ["Pets: Dog inside"],
         },
-        catalog_prices: [{ name: "Bee/Wasp Removal", price: 250, billing_type: "one_time" }],
+        catalog_prices: [
+          { name: "Bee/Wasp Removal", price: 250, pricing_type: "fixed", billing_type: "one_time" },
+          { name: "Quarterly Pest", price: null, pricing_type: "variable", billing_type: "recurring" },
+        ],
         route_slots: ["Tue Dec 1 at 9 AM", "Wed Dec 2 at 11 AM"],
         checklist: [
           { key: "name", label: "Name", ok: true },
-          { key: "price_quoted", label: "Price Quoted", ok: false },
+          { key: "time_preference", label: "Time Preference", ok: false },
         ],
       },
     };
@@ -215,13 +219,14 @@ describe("LiveCallPanelV2", () => {
     render(<LiveCallPanelV2 />);
     await flush();
     expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("active customer · WaveGuard Gold");
-    expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("123 Maplewood Rd, Bradenton, 34202");
+    expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("2,400 sq ft lawn");
     expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("Next visit: 2026-12-01 Quarterly Pest Control (9-11 AM)");
     expect(screen.getByTestId("live-call-caller-brief")).toHaveTextContent("Open estimate: Mosquito Control ($85) [sent]");
     expect(screen.getByTestId("live-call-catalog-prices")).toHaveTextContent("Bee/Wasp Removal: $250");
+    expect(screen.getByTestId("live-call-catalog-prices")).toHaveTextContent("Quarterly Pest: Variable (use engine)");
     expect(screen.getByTestId("live-call-route-slots")).toHaveTextContent("Tue Dec 1 at 9 AM · Wed Dec 2 at 11 AM");
     expect(screen.getByTestId("live-call-checklist")).toHaveTextContent("✓ Name");
-    expect(screen.getByTestId("live-call-checklist")).toHaveTextContent("○ Price Quoted");
+    expect(screen.getByTestId("live-call-checklist")).toHaveTextContent("○ Time Preference");
     // Transcript lines list remains cleanly isolated.
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
   });

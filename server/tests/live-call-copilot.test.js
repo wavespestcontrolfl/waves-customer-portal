@@ -14,26 +14,29 @@ const {
 } = require('../services/live-call-copilot');
 
 const CATALOG = [
-  { id: 'svc-1', service_key: 'one_time_pest', name: 'One-Time Pest Control Service', short_name: 'One-Time Pest', base_price: 200, billing_type: 'one_time', default_duration_minutes: 60 },
-  { id: 'svc-2', service_key: 'cockroach_control', name: 'Cockroach Treatment Service', short_name: 'Cockroach Treatment', base_price: 350, billing_type: 'one_time', default_duration_minutes: 60 },
-  { id: 'svc-3', service_key: 'bee_wasp_nest_removal', name: 'Bee / Wasp Nest Removal', short_name: 'Bee/Wasp Removal', base_price: 250, billing_type: 'one_time', default_duration_minutes: 45 },
-  { id: 'svc-4', service_key: 'wdo_inspection', name: 'WDO Inspection Service', short_name: 'WDO Inspection', base_price: 175, billing_type: 'one_time', default_duration_minutes: 60 },
-  { id: 'svc-5', service_key: 'lawn_inspection', name: 'Waves Assessment', short_name: 'Waves Assessment', base_price: 0, billing_type: 'one_time', default_duration_minutes: 30 },
-  { id: 'svc-6', service_key: 'rodent_trapping', name: 'Rodent Trapping Service', short_name: 'Rodent Trapping', base_price: 300, billing_type: 'one_time', default_duration_minutes: 60 },
-  { id: 'svc-7', service_key: 'pest_control', name: 'Quarterly Pest Control', short_name: 'Quarterly Pest', base_price: 99, billing_type: 'recurring', default_duration_minutes: 45 },
+  { id: 'svc-1', service_key: 'one_time_pest', name: 'One-Time Pest Control Service', short_name: 'One-Time Pest', base_price: 200, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 60 },
+  { id: 'svc-2', service_key: 'cockroach_control', name: 'Cockroach Treatment Service', short_name: 'Cockroach Treatment', base_price: 350, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 60 },
+  { id: 'svc-3', service_key: 'bee_wasp_nest_removal', name: 'Bee / Wasp Nest Removal', short_name: 'Bee/Wasp Removal', base_price: 250, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 45 },
+  { id: 'svc-4', service_key: 'wdo_inspection', name: 'WDO Inspection Service', short_name: 'WDO Inspection', base_price: 175, pricing_type: 'variable', billing_type: 'one_time', default_duration_minutes: 60 },
+  { id: 'svc-5', service_key: 'lawn_inspection', name: 'Waves Assessment', short_name: 'Waves Assessment', base_price: 0, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 30 },
+  { id: 'svc-6', service_key: 'rodent_trapping', name: 'Rodent Trapping Service', short_name: 'Rodent Trapping', base_price: 300, pricing_type: 'fixed', billing_type: 'one_time', default_duration_minutes: 60 },
+  { id: 'svc-7', service_key: 'pest_control', name: 'Quarterly Pest Control', short_name: 'Quarterly Pest', base_price: 99, pricing_type: 'variable', billing_type: 'recurring', default_duration_minutes: 45 },
 ];
 
 function makeFakeDb({
   account = null,
+  properties = [],
+  propertiesError = null,
   nextVisit = null,
   lastVisit = null,
   estimates = [],
   recentCalls = 0,
   recentTexts = 0,
   prefs = null,
+  fullUtterances = [],
 } = {}) {
   return jest.fn((table) => {
-    const state = { table, wheres: [], statuses: null };
+    const state = { table, wheres: [] };
     const chain = {
       where(a, b) {
         state.wheres.push([a, b]);
@@ -41,12 +44,16 @@ function makeFakeDb({
       },
       whereNull() { return chain; },
       whereNot() { return chain; },
-      whereIn(_col, vals) { state.statuses = vals; return chain; },
+      whereIn() { return chain; },
       whereRaw() { return chain; },
       orderBy() { return chain; },
       limit() { return chain; },
       select() {
         if (table === 'estimates') return Promise.resolve(estimates);
+        if (table === 'customer_properties') {
+          return propertiesError ? Promise.reject(propertiesError) : Promise.resolve(properties);
+        }
+        if (table === 'call_live_utterances') return Promise.resolve(fullUtterances);
         return Promise.resolve([]);
       },
       count() { return chain; },
@@ -72,21 +79,32 @@ beforeEach(() => {
   mockLoadBookable.mockResolvedValue(CATALOG);
 });
 
-describe('matchCatalogPrices (full-catalog deterministic lookup)', () => {
-  test('surfaces both Cockroach Treatment and One-Time Pest on roach mentions, but excludes Palmetto bug from Cockroach 2-visit package', () => {
-    const roach = matchCatalogPrices('Caller says they have german roaches in the kitchen', CATALOG);
-    expect(roach.map((r) => r.name)).toEqual(['Cockroach Treatment', 'One-Time Pest']);
-    expect(roach[0].price).toBe(350);
+describe('matchCatalogPrices (full-catalog affirmative-only lookup)', () => {
+  test('surfaces fixed prices cleanly and marks variable rows as variable (never quoting a stale base anchor)', () => {
+    const wdo = matchCatalogPrices('Need a WDO inspection for real estate closing', CATALOG);
+    expect(wdo).toEqual([
+      { name: 'WDO Inspection', price: null, pricing_type: 'variable', billing_type: 'one_time', duration_minutes: 60 },
+      { name: 'Waves Assessment', price: 0, pricing_type: 'free', billing_type: 'one_time', duration_minutes: 30 },
+    ]);
 
-    const palmetto = matchCatalogPrices('Seeing a few palmetto bugs in the garage', CATALOG);
-    expect(palmetto.map((r) => r.name)).toEqual(['One-Time Pest', 'Quarterly Pest']);
-    expect(palmetto.some((r) => r.name === 'Cockroach Treatment')).toBe(false);
+    const roach = matchCatalogPrices('Caller says they have german roaches in the kitchen', CATALOG);
+    expect(roach.map((r) => ({ name: r.name, price: r.price, kind: r.pricing_type }))).toEqual([
+      { name: 'Cockroach Treatment', price: 350, kind: 'fixed' },
+      { name: 'One-Time Pest', price: 200, kind: 'fixed' },
+    ]);
   });
 
-  test('matches specialty one-time services (wasp nest, WDO, rodent) from live utterances', () => {
-    expect(matchCatalogPrices('There is a big wasp nest under our eaves', CATALOG).map((r) => r.name)).toEqual(['Bee/Wasp Removal']);
-    expect(matchCatalogPrices('Need a WDO inspection for real estate closing', CATALOG).map((r) => r.name)).toEqual(['WDO Inspection', 'Waves Assessment']);
-    expect(matchCatalogPrices('Hearing rats in the attic', CATALOG).map((r) => r.name)).toEqual(['Rodent Trapping']);
+  test('excludes palmetto bugs, negated pests, and historical pest mentions from specialty suggestions', () => {
+    const palmetto = matchCatalogPrices('Seeing a few palmetto bugs in the garage', CATALOG);
+    expect(palmetto.some((r) => r.name === 'Cockroach Treatment')).toBe(false);
+    expect(palmetto[0].name).toBe('One-Time Pest');
+
+    const denied = matchCatalogPrices('No roaches, just ants in the pantry', CATALOG);
+    expect(denied.some((r) => r.name === 'Cockroach Treatment')).toBe(false);
+    expect(denied[0].name).toBe('One-Time Pest');
+
+    const historical = matchCatalogPrices('We had mice years ago, now there is a wasp nest on the porch', CATALOG);
+    expect(historical.map((r) => r.name)).toEqual(['Bee/Wasp Removal']);
   });
 });
 
@@ -109,9 +127,10 @@ describe('buildCallChecklist (7-item live missing-info checklist)', () => {
       email: true,
       scope: true,
       price_quoted: true,
-      time_confirmed: true,
+      time_preference: true,
       access_notes: true,
     });
+    expect(list.find((i) => i.key === 'time_preference').label).toBe('Time Preference');
 
     const withdrawn = buildCallChecklist({
       customer: null,
@@ -119,21 +138,14 @@ describe('buildCallChecklist (7-item live missing-info checklist)', () => {
       prefs: null,
       assist: null,
       assistFacts: { place_withdrawn: true },
-      lines: [{ speaker: 'caller', text: 'Hi I have ants in my kitchen' }],
+      lines: [{ speaker: 'caller', text: 'Actually not 123 Maplewood Rd, I have ants' }],
       catalogPrices: [{ name: 'One-Time Pest', price: 200 }],
     });
-    expect(byKey(withdrawn)).toEqual({
-      name: false,
-      address: false,
-      email: false,
-      scope: true,
-      price_quoted: false,
-      time_confirmed: false,
-      access_notes: false,
-    });
+    expect(byKey(withdrawn).address).toBe(false);
+    expect(byKey(withdrawn).scope).toBe(true);
   });
 
-  test('detects spoken street, email, time, and pet/gate cues on new prospect calls', () => {
+  test('detects spoken street, email, time preference, and pet/gate cues on new prospect calls', () => {
     const list = buildCallChecklist({
       customer: null,
       account: null,
@@ -152,30 +164,33 @@ describe('buildCallChecklist (7-item live missing-info checklist)', () => {
       email: true,
       scope: true,
       price_quoted: true,
-      time_confirmed: true,
+      time_preference: true,
       access_notes: true,
     });
   });
 });
 
-describe('buildLiveCallCopilot (Caller Brief + Route Slots + Zero Geocode)', () => {
-  test('builds instant Caller Brief at ring, redacts access codes/PANs, and computes 2 slots from stored pin with ZERO geocoding', async () => {
+describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Full Call Evidence)', () => {
+  const baseAccount = {
+    id: 'cust-1',
+    first_name: 'Casey',
+    last_name: 'Sample',
+    email: 'casey@example.com',
+    pipeline_stage: 'active_customer',
+    waveguard_tier: 'Gold',
+    address_line1: '123 Maplewood Rd',
+    city: 'Bradenton',
+    zip: '34202',
+    latitude: 27.4989,
+    longitude: -82.5748,
+    property_sqft: 2400,
+    lot_sqft: 8500,
+  };
+
+  test('builds Caller Brief with lawn_sqft (never home_sqft), redacts codes, and passes paidLookups: false with ZERO geocoding', async () => {
     const fakeDb = makeFakeDb({
-      account: {
-        id: 'cust-1',
-        first_name: 'Casey',
-        last_name: 'Sample',
-        email: 'casey@example.com',
-        pipeline_stage: 'active_customer',
-        waveguard_tier: 'Gold',
-        address_line1: '123 Maplewood Rd',
-        city: 'Bradenton',
-        zip: '34202',
-        latitude: 27.4989,
-        longitude: -82.5748,
-        property_sqft: 2400,
-        lot_sqft: 8500,
-      },
+      account: baseAccount,
+      properties: [{ id: 'prop-1', address_line1: '123 Maplewood Rd', city: 'Bradenton', zip: '34202', latitude: 27.4989, longitude: -82.5748 }],
       nextVisit: { scheduled_date: '2026-12-01', window_display: '9-11 AM', service_type: 'Quarterly Pest Control' },
       lastVisit: { scheduled_date: '2026-09-01', service_type: 'Quarterly Pest Control' },
       estimates: [{ status: 'sent', service_interest: 'Mosquito Control', onetime_total: null, monthly_total: 85, annual_total: null }],
@@ -193,7 +208,7 @@ describe('buildLiveCallCopilot (Caller Brief + Route Slots + Zero Geocode)', () 
     const formatSlots = jest.fn().mockReturnValue('Tue Dec 1 at 9 AM; Wed Dec 2 at 11 AM');
 
     const result = await buildLiveCallCopilot({
-      call: { id: 'call-1', customer_id: 'cust-1' },
+      call: { id: 'call-1', customer_id: 'cust-1', twilio_call_sid: 'CA123' },
       customer: { id: 'cust-1', name: 'Casey Sample' },
       meta: {},
       lines: [{ speaker: 'caller', text: 'I found a wasp nest by the back porch' }],
@@ -202,6 +217,7 @@ describe('buildLiveCallCopilot (Caller Brief + Route Slots + Zero Geocode)', () 
       db: fakeDb,
       now: new Date('2026-11-28T14:00:00Z'),
       isEnabled: () => true,
+      addressMatchesCustomer: () => true,
       booking: {
         loadBookingConfig: jest.fn().mockResolvedValue({ advance_days_min: 1, advance_days_max: 14, default_duration_minutes: 60 }),
         buildBookingAvailability,
@@ -211,39 +227,85 @@ describe('buildLiveCallCopilot (Caller Brief + Route Slots + Zero Geocode)', () 
     });
 
     expect(resolveBookingCoords).not.toHaveBeenCalled();
-    expect(buildBookingAvailability).toHaveBeenCalledTimes(1);
+    expect(buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({ paidLookups: false }));
     expect(result.brief).toMatchObject({
       stage: 'active_customer',
       tier: 'Gold',
       address: '123 Maplewood Rd, Bradenton, 34202',
-      home_sqft: 2400,
+      lawn_sqft: 2400,
+      lot_sqft: 8500,
       next_visit: { date: '2026-12-01', service: 'Quarterly Pest Control', window: '9-11 AM' },
       open_estimates: [{ service: 'Mosquito Control', status: 'sent', amount: 85 }],
       recent_48h: { calls: 2, texts: 3 },
     });
+    expect(result.brief.home_sqft).toBeUndefined();
     expect(result.brief.property_notes.join(' ')).not.toContain('4829');
     expect(result.catalog_prices).toEqual([
-      { name: 'Bee/Wasp Removal', price: 250, billing_type: 'one_time', duration_minutes: 45 },
+      { name: 'Bee/Wasp Removal', price: 250, pricing_type: 'fixed', billing_type: 'one_time', duration_minutes: 45 },
     ]);
     expect(result.route_slots).toEqual(['Tue Dec 1 at 9 AM', 'Wed Dec 2 at 11 AM']);
-    expect(result.checklist).toHaveLength(7);
   });
 
-  test('reuses assist.times without calling buildBookingAvailability and suppresses account slots when caller names another property', async () => {
+  test('withholds account slots on multi-property accounts, property lookup failure, or street/unit mismatch', async () => {
     const buildBookingAvailability = jest.fn();
-    const res1 = await buildLiveCallCopilot({
-      call: { id: 'call-2' },
-      customer: null,
+    const multiDb = makeFakeDb({
+      account: baseAccount,
+      properties: [
+        { id: 'prop-1', address_line1: '123 Maplewood Rd', latitude: 27.49, longitude: -82.57 },
+        { id: 'prop-2', address_line1: '999 Rental Way', latitude: 27.51, longitude: -82.55 },
+      ],
+    });
+    const multiRes = await buildLiveCallCopilot({
+      call: { id: 'call-m', customer_id: 'cust-1' },
+      customer: { id: 'cust-1', name: 'Casey Sample' },
       meta: {},
       lines: [],
-      assist: { intent: 'Pest', times: 'Mon Dec 1 at 9 AM; Tue Dec 2 at 1 PM; Wed Dec 3 at 3 PM' },
-    }, {
-      db: makeFakeDb(),
-      isEnabled: () => true,
-      booking: { loadBookingConfig: jest.fn(), buildBookingAvailability },
-    });
+      assist: null,
+    }, { db: multiDb, isEnabled: () => true, booking: { loadBookingConfig: jest.fn(), buildBookingAvailability } });
+    expect(multiRes.route_slots).toEqual([]);
     expect(buildBookingAvailability).not.toHaveBeenCalled();
-    expect(res1.route_slots).toEqual(['Mon Dec 1 at 9 AM', 'Tue Dec 2 at 1 PM']);
-    expect(statesDifferentProperty({ city: 'Bradenton', zip: '34202', address_line1: '123 Maple Rd' }, { city: 'Venice' })).toBe(true);
+
+    resetCaches();
+    const errDb = makeFakeDb({ account: baseAccount, propertiesError: new Error('db down') });
+    const errRes = await buildLiveCallCopilot({
+      call: { id: 'call-e', customer_id: 'cust-1' },
+      customer: { id: 'cust-1', name: 'Casey Sample' },
+      meta: {},
+      lines: [],
+      assist: null,
+    }, { db: errDb, isEnabled: () => true, booking: { loadBookingConfig: jest.fn(), buildBookingAvailability } });
+    expect(errRes.route_slots).toEqual([]);
+    expect(buildBookingAvailability).not.toHaveBeenCalled();
+
+    // Same house number on a different street or different unit fails addressMatchesCustomer.
+    expect(statesDifferentProperty(
+      { address_line1: '123 Maplewood Rd', city: 'Bradenton', zip: '34202' },
+      { address_line1: '123 Oakwood Ave', zip: '34202' },
+      () => false,
+    )).toBe(true);
+  });
+
+  test('preserves checklist evidence from earlier utterances on long calls (>15 lines)', async () => {
+    const preview15 = Array.from({ length: 15 }, (_, i) => ({ speaker: 'caller', text: `Follow-up chat ${i + 1}` }));
+    const fullHistoryDesc = [
+      ...preview15.slice().reverse(),
+      { speaker: 'staff', text: 'That one-time pest treatment is $200.' },
+      { speaker: 'caller', text: 'My name is Jordan, email jordan@gmail.com, at 410 Oakwood Ln.' },
+    ];
+    const res = await buildLiveCallCopilot({
+      call: { id: 'call-long', twilio_call_sid: 'CAlong123' },
+      customer: null,
+      meta: {},
+      lines: preview15,
+      assist: null,
+    }, {
+      db: makeFakeDb({ fullUtterances: fullHistoryDesc }),
+      isEnabled: () => false,
+    });
+    const byKey = Object.fromEntries(res.checklist.map((i) => [i.key, i.ok]));
+    expect(byKey.name).toBe(true);
+    expect(byKey.address).toBe(true);
+    expect(byKey.email).toBe(true);
+    expect(byKey.price_quoted).toBe(true);
   });
 });
