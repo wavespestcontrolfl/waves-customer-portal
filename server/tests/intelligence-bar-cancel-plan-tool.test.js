@@ -64,7 +64,7 @@ describe('cancel_plan past the 90-day refund window', () => {
 
   test('the end-of-coverage preview for the same term is still a normal card', async () => {
     mockPreview.mockResolvedValue({ ...PREVIEW, effectiveDate: 'end_of_coverage', prepay: { ...PREPAY, disposition: 'end_at_term' } });
-    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, effective_date: 'end_of_coverage' });
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, effective_date: 'end_of_coverage', reason_code: 'price' });
     expect(result.preview).toBe(true);
     expect(result.prepay).toEqual(expect.objectContaining({ disposition: 'end_at_term', endNowAvailable: false }));
   });
@@ -117,27 +117,34 @@ describe('cancel_plan unconfirmed', () => {
         templateChanges: [{ rootId: 'root-1', family: 'pest_control', label: 'Pest Control', field: 'estimated_price', source: 'own', before: 115.2, after: 128 }],
       },
     });
-    const preview = await executeTool('cancel_plan', { customer_id: CUSTOMER, families: ['lawn_care'] }, { technicianId: 'admin-1', isAdmin: true });
+    const preview = await executeTool('cancel_plan', { customer_id: CUSTOMER, families: ['lawn_care'], reason_code: 'price' }, { technicianId: 'admin-1', isAdmin: true });
     expect(preview.template_changes).toEqual([expect.objectContaining({ rootId: 'root-1', field: 'estimated_price', before: 115.2, after: 128 })]);
     const card = confirmationDisplayParams('cancel_plan', { customer_id: CUSTOMER }, preview);
     expect(card.visit_prices).toBe('Pest Control $115.2 → $128');
     expect(card.future_visit_prices).toBe('Pest Control future visits $115.2 → $128');
     // No template change: no line.
     mockPreview.mockResolvedValue(PREVIEW);
-    const plain = await executeTool('cancel_plan', { customer_id: CUSTOMER }, { technicianId: 'admin-1', isAdmin: true });
+    const plain = await executeTool('cancel_plan', { customer_id: CUSTOMER, reason_code: 'price' }, { technicianId: 'admin-1', isAdmin: true });
     expect(plain.template_changes).toEqual([]);
     expect(confirmationDisplayParams('cancel_plan', { customer_id: CUSTOMER }, plain)).not.toHaveProperty('future_visit_prices');
   });
 
-  test('a model-supplied confirmed:true is ignored by the route; the executor only honours the flag /confirm-action attaches — and defaults apply', async () => {
-    await executeTool('cancel_plan', { customer_id: CUSTOMER });
+  test('fresh cancellation without reason_code returns reason_code_required; repair retry stays exempt', async () => {
+    const missing = await executeTool('cancel_plan', { customer_id: CUSTOMER });
+    expect(missing.code).toBe('reason_code_required');
+    expect(missing.preview).toBeUndefined();
     expect(mockPreview).toHaveBeenCalledWith(expect.objectContaining({ families: [], effectiveDate: 'now', waiveLateFee: false, sendConfirmation: true, reasonCode: null, note: '' }));
+
+    mockPreview.mockResolvedValueOnce({ ...PREVIEW, repairRetry: true, reasonCode: null });
+    const retry = await executeTool('cancel_plan', { customer_id: CUSTOMER });
+    expect(retry.preview).toBe(true);
+    expect(retry.repair_retry).toBe(true);
   });
 
   test('a params-level confirmed:true WITHOUT the route-derived actionContext.confirmed still previews — never commits', async () => {
     // Closes the gate-off /execute and model-loop lanes: only /confirm-action
     // attaches BOTH input.confirmed and actionContext.confirmed.
-    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, confirmed: true }, { technicianId: 'admin-1', isAdmin: true });
+    const result = await executeTool('cancel_plan', { customer_id: CUSTOMER, reason_code: 'price', confirmed: true }, { technicianId: 'admin-1', isAdmin: true });
     expect(result.preview).toBe(true);
     expect(mockCommit).not.toHaveBeenCalled();
   });
@@ -183,7 +190,7 @@ describe('cancel_plan confirmed (server-derived)', () => {
 
   test('the pinned preview fingerprint travels into the commit (preview_changed enforcement)', async () => {
     mockPreview.mockResolvedValueOnce({ ...PREVIEW, previewFingerprint: 'f'.repeat(64) });
-    const preview = await executeTool('cancel_plan', { customer_id: CUSTOMER }, { technicianId: 'admin-1' });
+    const preview = await executeTool('cancel_plan', { customer_id: CUSTOMER, reason_code: 'price' }, { technicianId: 'admin-1' });
     expect(preview.preview_fingerprint).toBe('f'.repeat(64));
     mockCommit.mockResolvedValueOnce({
       requestId: 'req-3', processed: true, visitsPulled: 0, scope: [], remaining: [], tierBefore: null, tierAfter: null,

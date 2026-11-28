@@ -128,7 +128,7 @@ describe('r2-cancel-plan-and-offboarding-2: Stage=Churned must wind down billing
   });
 
   test('PUT /:id { pipelineStage: churned } leaves the row in the monthly-billing candidate set (EXPECTED: wound down)', async () => {
-    const response = await saveCustomer({ pipelineStage: 'churned', churnReason: 'moved' });
+    const response = await saveCustomer({ pipelineStage: 'churned', churnReason: 'moved', churnReasonCode: 'moving' });
     expect(response).toMatchObject({ status: 200, body: { success: true } });
     // Churn label was recorded...
     expect(mockState.locked).toMatchObject({ pipeline_stage: 'churned', churned_at: expect.any(String) });

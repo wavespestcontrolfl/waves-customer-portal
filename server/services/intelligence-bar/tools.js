@@ -317,7 +317,8 @@ Options:
 - prepay_disposition: "end_at_term" (with end_of_coverage) or "end_now_refund" (with now — records the unused-value refund and opens an office task; nothing is refunded automatically).
 - waive_late_fee: true to waive the scheduled-visit fee on pulled visits.
 - send_confirmation: default true — SMS + email to the customer. false = no customer communication.
-- reason_code / note: optional structured reason + free-text note recorded on the case.
+- reason_code: required for every new cancellation (ask the operator why the customer is cancelling before proposing; omit only when retrying a partially-failed cancellation).
+- note: optional free-text note recorded on the cancellation case.
 
 The first call returns a PREVIEW (before/after facts) and nothing changes; the operator commits from the confirmation card. Only proceed after the operator has named the customer explicitly.`,
     input_schema: {
@@ -2907,6 +2908,12 @@ async function cancelPlan(input, actionContext = {}) {
       return {
         error: 'Ending now is not offered: this plan started more than 90 days ago, so no refund is owed and the paid visits stay (owner rule). Propose End of paid coverage (effective_date end_of_coverage) instead.',
         code: 'end_now_past_refund_window',
+      };
+    }
+    if (!preview.repairRetry && !serviceInput.reasonCode) {
+      return {
+        error: 'Ask the operator why the customer is cancelling and pass reason_code before proposing this cancellation.',
+        code: 'reason_code_required',
       };
     }
     const impact = preview.impact || {};

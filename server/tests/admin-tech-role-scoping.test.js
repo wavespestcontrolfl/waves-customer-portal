@@ -495,7 +495,7 @@ describe('techSafe360Payload', () => {
       customer: {
         id: 'c1', firstName: 'Pat', phone: '941', tier: 'gold',
         monthlyRate: 89, annualValue: 1068, lifetimeRevenue: 5000, payerId: 'payer-1',
-        billingMode: 'invoice', pipelineStage: 'active_customer', leadScore: 90,
+        billingMode: 'invoice', pipelineStage: 'active_customer', churnReasonCode: 'price', leadScore: 90,
         crmNotes: 'internal', referralCode: 'WAVES-XYZ1',
         address: { line1: '1 Main' }, property: { type: 'residential' },
       },
@@ -684,7 +684,7 @@ describe('techSafeListRow', () => {
       id: 'c1', firstName: 'Pat', lastName: 'Lee', email: 'p@x.com', phone: '941',
       address: '1 Main St', tier: 'gold', monthlyRate: 89, propertyType: 'residential',
       lifetimeRevenue: 1234, balanceOwed: 50, cardsOnFile: 2, healthScore: 88,
-      pipelineStage: 'active_customer', leadScore: 90, leadSource: 'ads',
+      pipelineStage: 'active_customer', churnReasonCode: 'price', leadScore: 90, leadSource: 'ads',
       leadSourceDetail: 'ppc', landingPageUrl: 'https://x', lastContactDate: 'd',
       lastContactType: 'sms', nextFollowUp: 'd', lastRating: 9, tags: ['vip'],
     };

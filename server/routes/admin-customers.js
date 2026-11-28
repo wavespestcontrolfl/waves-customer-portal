@@ -84,7 +84,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // or CRM/marketing state.
 const TECH_LIST_STRIPPED_FIELDS = [
   'lifetimeRevenue', 'balanceOwed', 'overdueInvoiceCount', 'cardsOnFile', 'healthScore', 'healthGrade',
-  'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
+  'pipelineStage', 'churnReasonCode', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'lastContactType', 'nextFollowUp',
   'lastRating', 'tags',
   // The address of the customer's other home a search matched.
@@ -149,7 +149,7 @@ const TECH_360_STRIPPED_KEYS = [
 ];
 const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'payerId', 'billingMode', 'monthlyRate', 'annualValue', 'lifetimeRevenue',
-  'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
+  'pipelineStage', 'churnReasonCode', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'nextFollowUp', 'followUpNotes',
   'crmNotes', 'referralCode', 'hasLeftGoogleReview', 'reviewMarkedAt',
   // Billing pause: a failed-autopay state and its reason. Same class as
@@ -3952,7 +3952,6 @@ router.get('/:id', async (req, res, next) => {
         servicePauseReason: c.service_pause_reason || null,
         memberSince: c.member_since, active: c.active,
         pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
-        churnReason: c.churn_reason,
         churnReasonCode: c.churn_reason_code,
         leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
         landingPageUrl: c.landing_page_url,
@@ -4362,8 +4361,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
 function parseChurnReasonCodeInput(raw) {
   if (raw === undefined || raw === null || raw === '') return { ok: true, code: undefined };
-  const code = normalizeChurnReasonCode(raw);
+  const code = normalizeChurnReasonCode(raw, { allowUnclassified: false });
   return code ? { ok: true, code } : { ok: false, error: 'Invalid churnReasonCode' };
+}
+
+function assertFreshChurnTransitionReason(lockedStage, nextStage, churnReasonCode) {
+  if (nextStage === 'churned' && lockedStage !== 'churned' && !churnReasonCode) {
+    throw Object.assign(
+      new Error('A cancellation reason is required when marking a customer Churned.'),
+      { churnReasonRequired: true },
+    );
+  }
+}
+
+function sendChurnTxError(e, res) {
+  if (e && e.churnBlocked) { res.status(409).json(e.payload); return true; }
+  if (e && e.churnReasonRequired) { res.status(400).json({ error: e.message, code: 'churn_reason_required' }); return true; }
+  return false;
 }
 
 function applyStageChurnStamps(updates, before, body, churnReasonCode) {
@@ -4380,6 +4394,7 @@ function applyStageChurnStamps(updates, before, body, churnReasonCode) {
 }
 
 function reconcileLockedStageChurnStamps(updates, before, lockedBefore, body, churnReasonCode) {
+  assertFreshChurnTransitionReason(lockedBefore.pipeline_stage, updates.pipeline_stage, churnReasonCode);
   if (lockedBefore.pipeline_stage === before.pipeline_stage) return;
   for (const k of ['pipeline_stage_changed_at', 'churned_at', 'churn_reason', 'churn_reason_code', 'churn_episode_id', 'member_since']) {
     delete updates[k];
@@ -4957,7 +4972,7 @@ const customerUpdateHandler = async (req, res, next) => {
           if (applySessionRelease) await applySessionRelease();
         });
       } catch (e) {
-        if (e && e.churnBlocked) return res.status(409).json(e.payload);
+        if (sendChurnTxError(e, res)) return;
         if (e && e.customerNotFound) return res.status(404).json({ error: 'Customer not found' });
         if (e && e.billingRefusal) return res.status(400).json({ error: e.billingRefusal });
         if (e && e.code === '23505') {
@@ -5736,6 +5751,7 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
         const locked = await trx('customers').where({ id: req.params.id }).whereNull('deleted_at').forUpdate().first();
         if (!locked) throw Object.assign(new Error('Customer not found'), { customerNotFound: true });
         oldStage = locked.pipeline_stage;
+        assertFreshChurnTransitionReason(oldStage, stage, parsedChurnCode.code);
         const stageUpdates = {
           pipeline_stage: stage,
           ...stageLifecycleStamps(oldStage, stage, locked, {
@@ -5764,7 +5780,7 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
         await trx('customers').where({ id: req.params.id }).update(stageUpdates);
       });
     } catch (e) {
-      if (e && e.churnBlocked) return res.status(409).json(e.payload);
+      if (sendChurnTxError(e, res)) return;
       if (e && e.customerNotFound) return res.status(404).json({ error: 'Customer not found' });
       throw e;
     }

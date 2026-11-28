@@ -107,7 +107,7 @@ function assertRefusedOrWoundDown(label, status, snap) {
     const status = await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/customers/${seed.customerId}/stage`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ stage: 'churned', churnReason: 'moved' }),
+        body: JSON.stringify({ stage: 'churned', churnReason: 'moved', churnReasonCode: 'moving' }),
       });
       return res.status;
     });
@@ -119,7 +119,7 @@ function assertRefusedOrWoundDown(label, status, snap) {
     const status = await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/customers/${seed.customerId}`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ pipelineStage: 'churned', churnReason: 'moved' }),
+        body: JSON.stringify({ pipelineStage: 'churned', churnReason: 'moved', churnReasonCode: 'moving' }),
       });
       if (res.status !== 200) console.log('[repro] body', await res.text());
       return res.status;

@@ -29,6 +29,7 @@ const CSV_HEADERS = [
   'pipeline_stage',
   'churn_episode_id',
   'churned_at',
+  'stage_changed_at',
   'monthly_rate',
   'recognized_legacy_code',
   'case_reason_code',
@@ -51,6 +52,12 @@ function formatDateOnly(val) {
   return String(val).slice(0, 10);
 }
 
+function formatStageChangedAt(val) {
+  if (val == null || val === '') return '';
+  if (val instanceof Date) return val.toISOString();
+  return String(val).trim();
+}
+
 function buildExportCsv(rows) {
   const lines = [CSV_HEADERS.join(',')];
   for (const r of rows) {
@@ -64,6 +71,7 @@ function buildExportCsv(rows) {
       r.pipeline_stage || '',
       r.churn_episode_id || '',
       formatDateOnly(r.churned_at),
+      formatStageChangedAt(r.stage_changed_at ?? r.pipeline_stage_changed_at),
       r.monthly_rate != null ? Number(r.monthly_rate).toFixed(2) : '',
       recognizedLegacy,
       caseCode,
@@ -144,10 +152,20 @@ function validateAssignments(csvRows) {
       continue;
     }
     const episodeId = r.churn_episode_id || null;
-    const churnedAt = r.churned_at || null;
-    const pipelineStage = r.pipeline_stage || null;
-    if (!episodeId && !churnedAt) {
-      errors.push(`line ${r.__line}: missing churn_episode_id and churned_at guard for customer ${id}`);
+    const churnedAt = r.churned_at || '';
+    const pipelineStage = r.pipeline_stage || '';
+    const hasStageChangedCol = Object.prototype.hasOwnProperty.call(r, 'stage_changed_at');
+    const stageChangedAt = hasStageChangedCol ? String(r.stage_changed_at || '').trim() : null;
+    if (!['churned', 'dormant'].includes(pipelineStage)) {
+      errors.push(`line ${r.__line}: missing or invalid pipeline_stage "${pipelineStage}" for customer ${id}`);
+      continue;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(churnedAt)) {
+      errors.push(`line ${r.__line}: missing or invalid churned_at guard for customer ${id}`);
+      continue;
+    }
+    if (!episodeId && !hasStageChangedCol) {
+      errors.push(`line ${r.__line}: missing stage_changed_at guard column for episode-less customer ${id}`);
       continue;
     }
     accepted.push({
@@ -155,6 +173,7 @@ function validateAssignments(csvRows) {
       code,
       churnEpisodeId: episodeId,
       churnedAt,
+      stageChangedAt,
       pipelineStage,
       line: r.__line,
     });
@@ -162,6 +181,8 @@ function validateAssignments(csvRows) {
 
   return { accepted, errors };
 }
+
+const STAGE_CHANGED_UTC_SQL = "to_char(c.pipeline_stage_changed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as stage_changed_at";
 
 async function queryUnclassifiedRows(db, { months = 12 } = {}) {
   const clampedMonths = Math.max(1, Math.min(60, parseInt(months, 10) || 12));
@@ -201,6 +222,7 @@ async function queryUnclassifiedRows(db, { months = 12 } = {}) {
       'c.pipeline_stage',
       'c.churn_episode_id',
       db.raw(`${effectiveChurnDate} as churned_at`),
+      db.raw(STAGE_CHANGED_UTC_SQL),
       db.raw('COALESCE(c.churn_mrr, c.monthly_rate, 0) as monthly_rate'),
       'c.churn_reason',
       db.raw(matchedCaseSql),
@@ -209,27 +231,30 @@ async function queryUnclassifiedRows(db, { months = 12 } = {}) {
 }
 
 function episodeMatchesRow(item, row) {
-  if (item.pipelineStage && row.pipeline_stage !== item.pipelineStage) return false;
+  if (row.pipeline_stage !== item.pipelineStage) return false;
+  if (formatDateOnly(row.churned_at) !== String(item.churnedAt || '')) return false;
   if (item.churnEpisodeId) {
-    return String(row.churn_episode_id || '') === String(item.churnEpisodeId);
+    if (String(row.churn_episode_id || '') !== String(item.churnEpisodeId)) return false;
+  } else if (row.churn_episode_id != null) {
+    return false;
   }
-  // Legacy episode-less row: must still have NULL episode AND matching churn date.
-  if (row.churn_episode_id != null) return false;
-  return formatDateOnly(row.churned_at) === String(item.churnedAt || '');
+  if (item.stageChangedAt !== null && item.stageChangedAt !== undefined) {
+    const rowStamp = formatStageChangedAt(row.stage_changed_at ?? row.pipeline_stage_changed_at);
+    if (rowStamp !== String(item.stageChangedAt)) return false;
+  }
+  return true;
 }
 
 function bindEpisodeWhere(qb, item) {
-  if (item.pipelineStage) qb.where('pipeline_stage', item.pipelineStage);
-  else qb.whereIn('pipeline_stage', ['churned', 'dormant']);
-  if (item.churnEpisodeId) {
-    qb.where('churn_episode_id', item.churnEpisodeId);
-  } else {
-    qb.whereNull('churn_episode_id');
-    qb.whereRaw(
-      "COALESCE(churned_at, (pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date) = ?::date",
-      [item.churnedAt],
-    );
-  }
+  qb.where('pipeline_stage', item.pipelineStage);
+  qb.whereRaw(
+    "COALESCE(churned_at, (pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date) = ?::date",
+    [item.churnedAt],
+  );
+  if (item.churnEpisodeId) qb.where('churn_episode_id', item.churnEpisodeId);
+  else qb.whereNull('churn_episode_id');
+  if (item.stageChangedAt) qb.whereRaw('pipeline_stage_changed_at = ?::timestamptz', [item.stageChangedAt]);
+  else if (item.stageChangedAt === '') qb.whereNull('pipeline_stage_changed_at');
   return qb;
 }
 
@@ -245,6 +270,7 @@ async function applyAssignments(db, assignments, { confirm = false } = {}) {
       'pipeline_stage',
       'churn_episode_id',
       db.raw("COALESCE(churned_at, (pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date) as churned_at"),
+      db.raw("to_char(pipeline_stage_changed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as stage_changed_at"),
       'churn_reason_code',
     );
   const byId = new Map(existing.map((r) => [String(r.id), r]));

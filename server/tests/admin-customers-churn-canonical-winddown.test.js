@@ -121,7 +121,7 @@ const isoDaysAhead = (n) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOStr
     const status = await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/customers/${customerId}/stage`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ stage: 'churned' }),
+        body: JSON.stringify({ stage: 'churned', churnReasonCode: 'moving' }),
       });
       return res.status;
     });
@@ -150,7 +150,7 @@ const isoDaysAhead = (n) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOStr
       const status = await withServer(async (baseUrl) => {
         const res = await fetch(`${baseUrl}/admin/customers/${customerId}/stage`, {
           method: 'PUT', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ stage: 'churned' }),
+          body: JSON.stringify({ stage: 'churned', churnReasonCode: 'moving' }),
         });
         return res.status;
       });

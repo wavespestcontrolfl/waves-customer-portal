@@ -70,13 +70,14 @@ describe('stageLifecycleStamps churn_reason_code handling', () => {
 });
 
 describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
-  test('exports zero-PII CSV with episode identifiers and omits arbitrary free text', () => {
+  test('exports zero-PII CSV with episode identifiers + stage_changed_at and omits arbitrary free text', () => {
     const csv = buildExportCsv([
       {
         id: 'cust-1',
         pipeline_stage: 'churned',
         churn_episode_id: 'ep-1111',
         churned_at: '2026-09-12',
+        stage_changed_at: '2026-09-12T14:22:10.123456Z',
         monthly_rate: 79,
         churn_reason: 'Jane Doe 941-555-0199 =HYPERLINK("bad")',
         case_reason_code: 'moving_or_property_change',
@@ -86,6 +87,7 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
         pipeline_stage: 'dormant',
         churn_episode_id: null,
         churned_at: '2026-10-01',
+        stage_changed_at: '2026-10-01T15:00:00.000000Z',
         monthly_rate: 55.5,
         churn_reason: 'price',
         case_reason_code: null,
@@ -98,6 +100,7 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
     expect(parsed[0]).toMatchObject({
       customer_id: 'cust-1',
       churn_episode_id: 'ep-1111',
+      stage_changed_at: '2026-09-12T14:22:10.123456Z',
       recognized_legacy_code: '',
       suggested_code: 'moving',
       new_churn_reason_code: '',
@@ -105,36 +108,43 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
     expect(parsed[1]).toMatchObject({
       customer_id: 'cust-2',
       churn_episode_id: '',
+      stage_changed_at: '2026-10-01T15:00:00.000000Z',
       recognized_legacy_code: 'price',
       suggested_code: 'price',
     });
   });
 
-  test('validates filled assignments, requires episode/date guard, and rejects invalid/unclassified/duplicate rows', () => {
+  test('validates filled assignments, requires stage + churned_at + stage_changed_at guards, and rejects invalid/unclassified/duplicate rows', () => {
     const rows = [
-      { __line: 2, customer_id: 'c1', pipeline_stage: 'churned', churn_episode_id: 'ep-1', churned_at: '2026-09-01', new_churn_reason_code: 'price' },
-      { __line: 3, customer_id: 'c2', pipeline_stage: 'churned', churn_episode_id: '', churned_at: '2026-09-02', new_churn_reason_code: '' },
-      { __line: 4, customer_id: 'c3', pipeline_stage: 'dormant', churn_episode_id: '', churned_at: '2026-09-03', new_churn_reason_code: 'results_lawn' },
-      { __line: 5, customer_id: 'c4', pipeline_stage: 'churned', churn_episode_id: 'ep-4', churned_at: '2026-09-04', new_churn_reason_code: 'unclassified' },
-      { __line: 6, customer_id: 'c1', pipeline_stage: 'churned', churn_episode_id: 'ep-1', churned_at: '2026-09-01', new_churn_reason_code: 'moving' },
-      { __line: 7, customer_id: 'c5', pipeline_stage: 'churned', churn_episode_id: 'ep-5', churned_at: '2026-09-05', new_churn_reason_code: 'not_a_code' },
-      { __line: 8, customer_id: 'c6', pipeline_stage: 'churned', churn_episode_id: '', churned_at: '', new_churn_reason_code: 'price' },
+      { __line: 2, customer_id: 'c1', pipeline_stage: 'churned', churn_episode_id: 'ep-1', churned_at: '2026-09-01', stage_changed_at: '2026-09-01T12:00:00.000000Z', new_churn_reason_code: 'price' },
+      { __line: 3, customer_id: 'c2', pipeline_stage: 'churned', churn_episode_id: '', churned_at: '2026-09-02', stage_changed_at: '2026-09-02T12:00:00.000000Z', new_churn_reason_code: '' },
+      { __line: 4, customer_id: 'c3', pipeline_stage: 'dormant', churn_episode_id: '', churned_at: '2026-09-03', stage_changed_at: '2026-09-03T12:00:00.000000Z', new_churn_reason_code: 'results_lawn' },
+      { __line: 5, customer_id: 'c4', pipeline_stage: 'churned', churn_episode_id: 'ep-4', churned_at: '2026-09-04', stage_changed_at: '', new_churn_reason_code: 'unclassified' },
+      { __line: 6, customer_id: 'c1', pipeline_stage: 'churned', churn_episode_id: 'ep-1', churned_at: '2026-09-01', stage_changed_at: '2026-09-01T12:00:00.000000Z', new_churn_reason_code: 'moving' },
+      { __line: 7, customer_id: 'c5', pipeline_stage: 'churned', churn_episode_id: 'ep-5', churned_at: '2026-09-05', stage_changed_at: '', new_churn_reason_code: 'not_a_code' },
+      { __line: 8, customer_id: 'c6', pipeline_stage: 'churned', churn_episode_id: 'ep-6', churned_at: '', stage_changed_at: '', new_churn_reason_code: 'price' },
+      { __line: 9, customer_id: 'c7', pipeline_stage: '', churn_episode_id: 'ep-7', churned_at: '2026-09-07', stage_changed_at: '', new_churn_reason_code: 'price' },
+      { __line: 10, customer_id: 'c8', pipeline_stage: 'dormant', churn_episode_id: '', churned_at: '2026-09-08', new_churn_reason_code: 'price' },
     ];
     const { accepted, errors } = validateAssignments(rows);
     expect(accepted).toEqual([
-      { customerId: 'c1', code: 'price', churnEpisodeId: 'ep-1', churnedAt: '2026-09-01', pipelineStage: 'churned', line: 2 },
-      { customerId: 'c3', code: 'results', churnEpisodeId: null, churnedAt: '2026-09-03', pipelineStage: 'dormant', line: 4 },
+      { customerId: 'c1', code: 'price', churnEpisodeId: 'ep-1', churnedAt: '2026-09-01', stageChangedAt: '2026-09-01T12:00:00.000000Z', pipelineStage: 'churned', line: 2 },
+      { customerId: 'c3', code: 'results', churnEpisodeId: null, churnedAt: '2026-09-03', stageChangedAt: '2026-09-03T12:00:00.000000Z', pipelineStage: 'dormant', line: 4 },
     ]);
-    expect(errors).toHaveLength(4);
+    expect(errors).toHaveLength(6);
   });
 
-  test('applyAssignments defaults to dry-run, skips changed churn episodes, and only updates matching unclassified rows with --confirm', async () => {
+  test('applyAssignments defaults to dry-run, catches changed date on same episode ID and same-day rechurns on episode-less rows, and updates only exact matches on --confirm', async () => {
     const store = [
-      { id: 'c1', pipeline_stage: 'churned', churn_episode_id: 'ep-1', churned_at: '2026-09-01', churn_reason_code: null, deleted_at: null },
-      { id: 'c2', pipeline_stage: 'active_customer', churn_episode_id: null, churned_at: null, churn_reason_code: null, deleted_at: null },
-      { id: 'c3', pipeline_stage: 'dormant', churn_episode_id: null, churned_at: '2026-10-01', churn_reason_code: 'unclassified', deleted_at: null },
-      { id: 'c4', pipeline_stage: 'churned', churn_episode_id: 'ep-4', churned_at: '2026-09-10', churn_reason_code: 'moving', deleted_at: null },
-      { id: 'c5', pipeline_stage: 'churned', churn_episode_id: 'ep-new', churned_at: '2026-11-20', churn_reason_code: null, deleted_at: null },
+      { id: 'c1', pipeline_stage: 'churned', churn_episode_id: 'ep-1', churned_at: '2026-09-01', stage_changed_at: '2026-09-01T12:00:00.000000Z', churn_reason_code: null, deleted_at: null },
+      { id: 'c2', pipeline_stage: 'active_customer', churn_episode_id: null, churned_at: null, stage_changed_at: null, churn_reason_code: null, deleted_at: null },
+      { id: 'c3', pipeline_stage: 'dormant', churn_episode_id: null, churned_at: '2026-10-01', stage_changed_at: '2026-10-01T10:00:00.000000Z', churn_reason_code: 'unclassified', deleted_at: null },
+      { id: 'c4', pipeline_stage: 'churned', churn_episode_id: 'ep-4', churned_at: '2026-09-10', stage_changed_at: '2026-09-10T10:00:00.000000Z', churn_reason_code: 'moving', deleted_at: null },
+      { id: 'c5', pipeline_stage: 'churned', churn_episode_id: 'ep-new', churned_at: '2026-11-20', stage_changed_at: '2026-11-20T10:00:00.000000Z', churn_reason_code: null, deleted_at: null },
+      // Same episode ID retained across churned->dormant->churned, but churned_at moved:
+      { id: 'c6', pipeline_stage: 'churned', churn_episode_id: 'ep-6', churned_at: '2026-11-25', stage_changed_at: '2026-11-25T10:00:00.000000Z', churn_reason_code: null, deleted_at: null },
+      // Episode-less row reactivated and rechurned on the SAME Eastern date (later timestamp):
+      { id: 'c7', pipeline_stage: 'churned', churn_episode_id: null, churned_at: '2026-10-05', stage_changed_at: '2026-10-05T18:30:00.000000Z', churn_reason_code: null, deleted_at: null },
     ];
     const makeDb = () => {
       const runQuery = () => {
@@ -144,6 +154,8 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
         let episodeEq;
         let episodeNull = false;
         let dateRaw = null;
+        let stampRaw = null;
+        let stampNull = false;
         let onlyUnclassified = false;
         const q = {
           whereIn(col, vals) {
@@ -160,10 +172,12 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
           },
           whereNull(col) {
             if (col === 'churn_episode_id') episodeNull = true;
+            if (col === 'pipeline_stage_changed_at') stampNull = true;
             return q;
           },
-          whereRaw(_sql, binds) {
-            if (Array.isArray(binds) && binds[0]) dateRaw = binds[0];
+          whereRaw(sql, binds) {
+            if (String(sql).includes('pipeline_stage_changed_at = ?') && Array.isArray(binds)) stampRaw = binds[0];
+            else if (Array.isArray(binds) && binds[0]) dateRaw = binds[0];
             return q;
           },
           select() {
@@ -176,6 +190,8 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
               && (episodeEq === undefined || r.churn_episode_id === episodeEq)
               && (!episodeNull || r.churn_episode_id == null)
               && (!dateRaw || r.churned_at === dateRaw)
+              && (!stampRaw || r.stage_changed_at === stampRaw)
+              && (!stampNull || r.stage_changed_at == null)
               && (!onlyUnclassified || r.churn_reason_code == null || r.churn_reason_code === 'unclassified')
             ));
             for (const h of hits) Object.assign(h, patch);
@@ -193,12 +209,14 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
 
     const db = makeDb();
     const assignments = [
-      { customerId: 'c1', code: 'price', churnEpisodeId: 'ep-1', churnedAt: '2026-09-01', pipelineStage: 'churned' },
-      { customerId: 'c2', code: 'moving', churnEpisodeId: 'ep-2', churnedAt: '2026-09-02', pipelineStage: 'churned' },
-      { customerId: 'c3', code: 'seasonal_pause', churnEpisodeId: null, churnedAt: '2026-10-01', pipelineStage: 'dormant' },
-      { customerId: 'c4', code: 'results', churnEpisodeId: 'ep-4', churnedAt: '2026-09-10', pipelineStage: 'churned' },
-      { customerId: 'c5', code: 'competitor', churnEpisodeId: 'ep-old', churnedAt: '2026-09-15', pipelineStage: 'churned' },
-      { customerId: 'missing', code: 'other', churnEpisodeId: 'ep-x', churnedAt: '2026-09-20', pipelineStage: 'churned' },
+      { customerId: 'c1', code: 'price', churnEpisodeId: 'ep-1', churnedAt: '2026-09-01', stageChangedAt: '2026-09-01T12:00:00.000000Z', pipelineStage: 'churned' },
+      { customerId: 'c2', code: 'moving', churnEpisodeId: 'ep-2', churnedAt: '2026-09-02', stageChangedAt: '2026-09-02T12:00:00.000000Z', pipelineStage: 'churned' },
+      { customerId: 'c3', code: 'seasonal_pause', churnEpisodeId: null, churnedAt: '2026-10-01', stageChangedAt: '2026-10-01T10:00:00.000000Z', pipelineStage: 'dormant' },
+      { customerId: 'c4', code: 'results', churnEpisodeId: 'ep-4', churnedAt: '2026-09-10', stageChangedAt: '2026-09-10T10:00:00.000000Z', pipelineStage: 'churned' },
+      { customerId: 'c5', code: 'competitor', churnEpisodeId: 'ep-old', churnedAt: '2026-09-15', stageChangedAt: '2026-09-15T10:00:00.000000Z', pipelineStage: 'churned' },
+      { customerId: 'c6', code: 'financial', churnEpisodeId: 'ep-6', churnedAt: '2026-09-20', stageChangedAt: '2026-09-20T10:00:00.000000Z', pipelineStage: 'churned' },
+      { customerId: 'c7', code: 'other', churnEpisodeId: null, churnedAt: '2026-10-05', stageChangedAt: '2026-10-05T09:00:00.000000Z', pipelineStage: 'churned' },
+      { customerId: 'missing', code: 'other', churnEpisodeId: 'ep-x', churnedAt: '2026-09-20', stageChangedAt: '2026-09-20T10:00:00.000000Z', pipelineStage: 'churned' },
     ];
 
     const dry = await applyAssignments(db, assignments, { confirm: false });
@@ -209,6 +227,8 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
       { customerId: 'c2', reason: 'stage_is_active_customer' },
       { customerId: 'c4', reason: 'already_classified_moving' },
       { customerId: 'c5', reason: 'episode_changed' },
+      { customerId: 'c6', reason: 'episode_changed' },
+      { customerId: 'c7', reason: 'episode_changed' },
       { customerId: 'missing', reason: 'not_found' },
     ]);
     expect(store[0].churn_reason_code).toBeNull();
@@ -220,6 +240,8 @@ describe('export-unclassified-churn CLI helpers ($0 CSV workflow)', () => {
     expect(store[2].churn_reason_code).toBe('seasonal_pause');
     expect(store[3].churn_reason_code).toBe('moving');
     expect(store[4].churn_reason_code).toBeNull();
+    expect(store[5].churn_reason_code).toBeNull();
+    expect(store[6].churn_reason_code).toBeNull();
   });
 
   test('parseCliArgs parses export and apply flags cleanly', () => {
