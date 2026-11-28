@@ -1151,20 +1151,6 @@ const gates = {
   // allowlist, the eval harness, the benchmark runner) must use that.
   voiceRelayOpenai: process.env.GATE_VOICE_RELAY_OPENAI === 'true',
 
-  // Voice relay (Sandy) production INBOUND on an OpenAI model (owner
-  // ruling 2026-09-28: GPT-6 Luna after the benchmark). Ships DARK — off
-  // unless exactly 'true'. This is deliberately a SEPARATE gate from
-  // GATE_VOICE_RELAY_OPENAI above, which is already live in prod for the
-  // sandbox/eval lane alone: that gate must never be what opens production
-  // inbound to an OpenAI model. This map entry is for logGateStatus only;
-  // the canonical CALL-TIME reader is voiceRelayOpenaiInboundLive() below
-  // (strict 'true') — relay-conversation.js's resolveSessionModel reads it,
-  // at session construction, to decide whether a PRODUCTION inbound session
-  // may resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id. The
-  // shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only either
-  // way (collections-conversation.js shares it).
-  voiceRelayOpenaiInbound: process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true',
-
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
@@ -1682,13 +1668,6 @@ const gates = {
   // pattern.
   smsSealedEval: isProd ? process.env.GATE_SMS_SEALED_EVAL === 'true' : true,
 
-  // Sealed-exam AUTO-RUN — nightly sweep runs the exam for any drafter
-  // PROMPT_VERSION that lacks a completed run per leg (first baselines +
-  // every prompt bump). Spends LLM calls on its own, so it follows the
-  // auto-writer pattern: opt-in in EVERY environment, kill = unset.
-  // Spend rails: SEALED_EXAM_AUTO_MIN_ITEMS / SEALED_EXAM_AUTO_MAX_ITEMS.
-  smsSealedExamAutoRun: process.env.GATE_SMS_SEALED_EXAM_AUTORUN === 'true',
-
   // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
   // each draft_unsafe judgment into a fixed (harness surface × failure mode)
   // cell, and weekly parks a harness-patch PROPOSAL card when a cell
@@ -2196,9 +2175,6 @@ const gates = {
   // in 14 days (missed-call-bell.js isRepeatSilentCaller). On = bell row written,
   // no push, stamped repeat_quiet. Off = shadow: missed_call_spam_repeat_shadow.
   missedCallSpamRepeat: process.env.GATE_MISSED_CALL_SPAM_REPEAT === 'true',
-  // Admin bell when one number places 3+ inbound calls inside 3 hours
-  // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.
-  repeatCallerBell: process.env.GATE_REPEAT_CALLER_BELL === 'true',
   // Nightly self-audit: samples recent calls, strong-model re-read, drift
   // metrics to call_audit_findings; alerts ONLY on threshold breach.
   callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',
@@ -4623,15 +4599,6 @@ const gates = {
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 
-  // Pest Insider monthly proof-approval (email division fact register lane).
-  // Ships DARK: off unless exactly 'true'. The monthly autopilot that sent
-  // the proof (pest-insider-autopilot.js) was deleted as unused after #7191;
-  // the gate still decides whether a Pest Insider proof can be approved
-  // (newsletter-proof.js) or dispatched (newsletter-sender.js). This entry
-  // is for logGateStatus only; pestInsiderProofLive() reads
-  // GATE_PEST_INSIDER_PROOF at call time. Kill = unset: a Pest Insider
-  // proof cannot be approved or dispatched.
-  pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
   // Waves Pest Insider auto-send. Ships DARK: off unless exactly 'true'.
   // For logGateStatus only; pestInsiderAutoSendLive() reads
   // GATE_PEST_INSIDER_AUTO_SEND at call time.
@@ -5926,10 +5893,6 @@ function publicLlmSharedCapLive() {
   return process.env.GATE_PUBLIC_LLM_SHARED_CAP === 'true';
 }
 
-function pestInsiderProofLive() {
-  return process.env.GATE_PEST_INSIDER_PROOF === 'true';
-}
-
 // GATE_PEST_INSIDER_AUTO_SEND read at CALL time, strict `=== 'true'`, dark by
 // default. On: a Waves Pest Insider issue the planner built becomes a draft,
 // the proof step emails the owner an FYI copy and queues it for its Thursday
@@ -6140,23 +6103,6 @@ function relayUnbookedHandoffLive() {
 // stamped model_fallback_reason path applies unchanged.
 function voiceRelayOpenaiLive() {
   return process.env.GATE_VOICE_RELAY_OPENAI === 'true';
-}
-
-// GATE_VOICE_RELAY_OPENAI_INBOUND read at CALL time — ships DARK, off unless
-// exactly 'true' (owner ruling 2026-09-28: GPT-6 Luna for Sandy's inbound
-// phone agent after the benchmark). The ONE reader relay-conversation.js's
-// resolveSessionModel uses, at session construction, to decide whether a
-// PRODUCTION inbound session (sandbox === false, evalHarness === false) may
-// resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id — a
-// DELIBERATELY SEPARATE gate from voiceRelayOpenaiLive() above, which is
-// already live in prod for the sandbox/eval lane and must never be read as
-// authorizing production inbound. Off: production inbound rejects any
-// OpenAI override exactly as before this gate existed — byte-identical. On:
-// the model-switchboard's voice_relay row (inboundOverrideParse /
-// inboundOverrideAllowed) reads this same function so the Models tab shows
-// what production inbound actually resolves.
-function voiceRelayOpenaiInboundLive() {
-  return process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true';
 }
 
 // GATE_LEAD_INSPECTION_LINK read at CALL time — strict `=== 'true'`, same
@@ -7996,7 +7942,7 @@ function callRingFactLive() {
   return process.env.GATE_CALL_RING_FACT === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 // Own-line reader exports go BELOW the object export above: an assignment above it is replaced with the object and lost
 // (these three read undefined, so off, from #7911 and #7929 until 2026-11-18). feature-gates-own-line-exports.test.js checks it.
 // GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.

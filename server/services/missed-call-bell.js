@@ -299,7 +299,7 @@ const SILENT_METADATA_KEYS = [
   // The quiet rules' own stamps.
   'missed_call_spam_wave', 'missed_call_spam_wave_shadow', 'missed_call_spam_burst_shadow', 'missed_call_spam_repeat_shadow',
   'missed_call_screen_quiet_shadow', 'missed_call_text_spam_shadow',
-  // The staff repeat-caller alert, which counts calls only.
+  // Legacy stamps from the retired repeat-caller bell (historical call_log rows).
   'repeat_caller_claim', 'repeat_caller_alerted_at', 'repeat_caller_delivery_id',
 ];
 // The text-back's outcome, by value: only the values production's silent
@@ -732,7 +732,6 @@ function noOutcomeCustomerCall(row) {
   return Boolean(row.customer_id) && !row.answered_by && row.status === 'completed'
     && !(row.recording_sid || row.recording_url) && !AI_OUTCOMES.has(row.call_outcome);
 }
-// outcomeUnanswered stays one-argument: repeat-caller-bell passes it to Array.filter.
 function outcomeUnansweredFor(row) {
   return outcomeUnanswered(row) || noOutcomeCustomerCall(row);
 }
