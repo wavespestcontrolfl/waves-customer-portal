@@ -15663,6 +15663,8 @@ const CallRecordingProcessor = {
           currentCallCreatedAt: call.created_at,
           currentLeadSource: leadSource,
           referredByName,
+          callerFirstName: extracted.first_name,
+          callerLastName: extracted.last_name,
           isOutbound: isOutboundCall(call),
           twilioNumbers: TWILIO_NUMBERS,
         });
