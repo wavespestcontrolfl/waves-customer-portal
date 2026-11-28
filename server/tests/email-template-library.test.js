@@ -2866,6 +2866,10 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
         'https:unsubscribe',
         'https://-example.com/unsubscribe',
         'mailto:unsubscribe@example.com',
+        'http://127.0.0.1:5173/unsubscribe/demo',
+        'http://localhost:5173/unsubscribe/demo',
+        'http://[::1]:5173/unsubscribe/demo',
+        'http://10.0.0.1/unsubscribe/demo',
       ]) {
         setDbQueues({
           email_templates: [chain({ first: marketingTemplate() })],
@@ -2885,6 +2889,35 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
       }
     } finally {
       sendgrid.newsletterGroupId.mockReturnValue(101);
+    }
+
+    // With a configured ASM group, live marketing sends fall back to the ASM
+    // token instead of leaking a loopback unsubscribe URL.
+    for (const loopbackUrl of [
+      'http://127.0.0.1:5173/unsubscribe/demo',
+      'http://localhost:5173/unsubscribe/demo',
+    ]) {
+      const queuedMessage = { id: 'msg-loopback', status: 'queued', subject_snapshot: 'Monthly update' };
+      const queueInsert = chain({ returning: [queuedMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: marketingTemplate() })],
+        email_template_versions: [chain({ first: marketingVersion() })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, chain({ returning: [{ ...queuedMessage, status: 'sent' }] })],
+      });
+      sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-loopback' });
+      await EmailTemplates.sendTemplate({
+        templateKey: 'newsletter.monthly',
+        to: 'sam@example.com',
+        payload: { first_name: 'Sam' },
+        recipientType: 'subscriber',
+        unsubscribeUrl: loopbackUrl,
+      });
+      const sentCall = sendgrid.sendOne.mock.calls.at(-1)[0];
+      expect(sentCall.html).toContain('<%asm_group_unsubscribe_raw_url%>');
+      expect(sentCall.html).not.toContain(loopbackUrl);
+      expect(sentCall.text).toContain('Unsubscribe: <%asm_group_unsubscribe_raw_url%>');
+      expect(sentCall.text).not.toContain(loopbackUrl);
     }
   });
 
