@@ -506,7 +506,7 @@ describe('an agreed one-time job keeps its one-time service (owner 2026-11-22, G
   const TRANSCRIPT = [
     'Caller: Do you have anyone that could come out and spray today?',
     'Agent: One-time service is $250, but it varies.',
-    'Caller: Okay. I just signed up for a monthly service with another company that I do not even need.',
+    'Caller: Okay. Maybe we could look at monthly service too, let us book today.',
   ].join('\n');
   const price = (over = {}) => ({ amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent', tier_mentioned: null, prepay_term: null, ...over });
   // The validated V2 extraction: the service it named, what the call was about, and the prices of the call.
@@ -544,6 +544,16 @@ describe('an agreed one-time job keeps its one-time service (owner 2026-11-22, G
     expect(applyRecurringIntentDefault(oneTime(), TRANSCRIPT, [], false).specific_service_name).toBe('Monthly Pest Control Service');
     // Only `true` holds: an extraction handed over by mistake is not a hold.
     expect(applyRecurringIntentDefault(oneTime(), TRANSCRIPT, [], v2()).specific_service_name).toBe('Monthly Pest Control Service');
+  });
+
+  test('a competitor-provider cadence mention ("monthly service with another company") stays one-time even without the hold', () => {
+    const competitorTranscript = [
+      'Caller: Do you have anyone that could come out and spray today?',
+      'Agent: One-time service is $250, but it varies.',
+      'Caller: Okay. I just signed up for a monthly service with another company that I do not even need.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(oneTime(), competitorTranscript, [], false).specific_service_name)
+      .toBe('One-Time Pest Control Service');
   });
 
   test('V2 named a one-time service and staff priced one one-time job on the call: the service stays', () => {
