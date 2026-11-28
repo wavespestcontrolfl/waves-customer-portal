@@ -583,7 +583,7 @@ describe('B-42: Admin create/revise strips forged waivers & estimate-public fall
         now: new Date('2026-11-01T15:00:00Z'),
         address: '200 Pine St, Testville, FL 34200',
       });
-      expect(history).toEqual([]);
+      expect(history.lastByFamily).toEqual({});
       // Even when no active plan rows exist at all, a moved non-member at a new
       // address matching customerPrimaryStreet still excludes unstamped completed visits.
       customer.waveguard_tier = null;
@@ -593,7 +593,7 @@ describe('B-42: Admin create/revise strips forged waivers & estimate-public fall
         now: new Date('2026-11-01T15:00:00Z'),
         address: '100 Oak St, Testville, FL 34200',
       });
-      expect(historyNonMember).toEqual([]);
+      expect(historyNonMember).toBeNull();
     } finally {
       delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
     }
