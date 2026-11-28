@@ -2702,8 +2702,14 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     };
     dbh.raw = (sql) => sql;
     const out = await jobCard.mixForProduct('pz', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
-    expect(out).toMatchObject({ sprayVolumeGalPer1000: 0.6667, rigSprayGalPer1000: 1 });
+    expect(out).toMatchObject({ sprayVolumeGalPer1000: 0.667, rigSprayGalPer1000: 1 });
     expect(out.warnings.join(' ')).toMatch(/The card's rate is for 0\.67 gal per 1,000 sq ft\. Mist blower sprays 1/);
+    // A rig calibrated at DB precision 0.667 matches 1 gal per 1,500 sq ft cleanly in the tank calculator too.
+    rig.carrier_gal_per_1000 = 0.667;
+    const matched = await jobCard.mixForProduct('pz', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(matched.sprayVolumeGalPer1000).toBe(0.667);
+    expect(matched.rigSprayGalPer1000).toBeUndefined();
+    expect(matched.warnings.join(' ')).not.toMatch(/The card's rate is for/);
   });
 
   // Owner 2026-11-26: two services that each list the product only as "if needed" are rows of their own, with the full line text.
@@ -3738,5 +3744,46 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       { name: 'General Pest Control', serviceKey: 'pest_quarterly' },
       { name: 'Custom Exterior Add-On', serviceKey: 'tree_shrub_care' },
     ]);
+
+    // Tree & Shrub fieldGuide.mixRates rows map short sprayer keys ('bg'/'flowzone'/'rig') and warn on Acelepryn
+    // per-application limits and Distance IGR spray-volume mismatches, plus join spray-check verdicts.
+    const fgEntry = {
+      name: 'Tree & Shrub Care',
+      serviceKey: 'tree_shrub_care',
+      procedure: {
+        fieldGuide: {
+          mixRates: [{
+            product: 'Acelepryn Insecticide',
+            productId: 'cat-ace',
+            sprayers: ['bg', 'flowzone', 'rig'],
+            perGallon: { amount: 0.02, unit: 'fl oz', amountMax: 0.16 },
+            limit: 'At 16 fl oz per 100 gal, at most 2.3 gal of mix per 1,000 sq ft (0.37 fl oz of product per 1,000 sq ft per spray).',
+          }, {
+            product: 'Distance IGR',
+            productId: 'cat-dist',
+            sprayers: ['bg', 'flowzone', 'rig'],
+            perGallon: { amount: 0.06, unit: 'fl oz', amountMax: 0.08 },
+            limit: '5 gal of mix per 1,000 sq ft (100 gal treats 20,000 sq ft).',
+          }],
+        },
+      },
+      lines: [],
+    };
+    jobCard._test.attachMixCalibrationWarnings(
+      [fgEntry],
+      { source: 'rig', systemName: 'Truck Rig #1', tankCapacityGal: 110, carrierGalPer1000: 3 },
+      { equipmentSystemId: 'sys-truck' },
+      [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
+    );
+    expect(fgEntry.procedure.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining('allows no more than 0.37 fl oz per 1,000 sq ft in one spray'),
+    ]);
+    expect(fgEntry.procedure.fieldGuide.mixRates[1].calibrationWarnings).toEqual([
+      expect.stringContaining("The card's rate is for 5 gal per 1,000 sq ft"),
+    ]);
+    const fgProducts = jobCard._test.mergeSprayCheckProducts([], [fgEntry], [{ id: 'cat-ace', name: 'Acelepryn Insecticide' }]);
+    expect(fgProducts.map((p) => p.id)).toEqual(['cat-ace']);
+    jobCard._test.attachMixSprayVerdicts([fgEntry], [{ productId: 'cat-ace', verdict: 'caution', reason: 'Rain within 48 hours' }]);
+    expect(fgEntry.procedure.fieldGuide.mixRates[0].sprayCheck).toEqual({ verdict: 'caution', reason: 'Rain within 48 hours' });
   });
 });

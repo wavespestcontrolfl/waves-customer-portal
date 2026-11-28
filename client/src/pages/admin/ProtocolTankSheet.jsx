@@ -269,9 +269,10 @@ function mixingDirectionsText(item) {
   return "Mixing directions are not on file. Consult the product label.";
 }
 
-// Product-specific safety limits stay visible above the sheet; only seasonal, blackout, county/city
-// ordinance, and fertilizer-BMP rules collapse into "Seasonal & county rules" on screen (open on print).
-const SEASONAL_COUNTY_RULE_RE = /\b(?:blackout|ordinance|county|municipal|seasonal|north port|sarasota|manatee|charlotte|pinellas|hillsborough|bmp)\b/i;
+// Only rules whose own subject is a seasonal blackout or county/city ordinance collapse into
+// "Seasonal & county rules" on screen (and stay open on print). Product limits and general
+// safety rules (such as "Fertilizer safety: ...") always stay visible, even if they mention a county.
+const SEASONAL_COUNTY_RULE_RE = /^(?:(?:n(?:\s+and\s+p)?\s+)?blackout\b|(?:north port|sarasota|manatee|charlotte|pinellas|hillsborough)\b|[^:]*\b(?:seasonal|county|municipal)\s+(?:rule|restriction|blackout|ordinance|ban)\b)/i;
 
 function splitSafetyRules(safetyRules = []) {
   const productRules = [];

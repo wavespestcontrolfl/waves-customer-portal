@@ -159,3 +159,29 @@ it('a procedure without safety rules renders no Safety section', () => {
   render(<VisitProtocol card={card} D={D} onJobCard={() => {}} />);
   expect(screen.queryByText('Safety')).not.toBeInTheDocument();
 });
+
+it('shows assigned-sprayer calibration and spray warnings on Tree & Shrub field-guide mix rows', () => {
+  const guide = {
+    ...protocols.tree_shrub.visits[2].fieldGuide,
+    ...reference,
+    month: 'Mar',
+    mixRates: [{
+      product: 'Acelepryn Insecticide',
+      productId: 'p-ace',
+      where: 'Leaf-feeding caterpillars',
+      perGallon: { amount: 0.02, unit: 'fl oz', amountMax: 0.16 },
+      sprayers: ['bg', 'flowzone', 'rig'],
+      calibrationWarnings: ['Truck Rig #1 sprays 3 gal per 1,000 sq ft, exceeding the 0.37 fl oz per 1,000 sq ft one-spray limit.'],
+    }],
+  };
+  const guided = { ...procedure, fieldGuide: guide, safetyRules: protocols.tree_shrub.safety_rules };
+  const liveCard = {
+    ...card,
+    planBlocks: [],
+    products: [{ id: 'p-ace', name: 'Acelepryn Insecticide', verdict: 'caution', verdictReason: 'Rain forecast within 48 hours.' }],
+    protocol: { procedure: guided, addons: [] },
+  };
+  render(<VisitProtocol card={liveCard} D={D} onJobCard={() => {}} />);
+  expect(screen.getByText(/exceeding the 0\.37 fl oz per 1,000 sq ft one-spray limit/)).toBeVisible();
+  expect(screen.getByText(/Rain forecast within 48 hours/)).toBeVisible();
+});

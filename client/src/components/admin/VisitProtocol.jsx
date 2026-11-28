@@ -80,7 +80,7 @@ export default function VisitProtocol({ card, D, onJobCard }) {
       <p style={{ color: D.muted }}>{line.name}</p>
       {line.procedure ? <>
         {line.procedure.fieldGuide
-          ? <TreeShrubFieldGuide guide={line.procedure.fieldGuide} mode="tech" safetyRules={line.procedure.safetyRules} />
+          ? <TreeShrubFieldGuide guide={line.procedure.fieldGuide} mode="tech" safetyRules={line.procedure.safetyRules} products={Array.isArray(card.products) ? card.products : []} />
           : <ProcedureText procedure={line.procedure} D={D} products={Array.isArray(card.products) ? card.products : []} />}
         <button type="button" onClick={() => setSheet(line.procedure)} style={{ minHeight: 44, padding: '8px 16px', background: D.heading, color: D.white, border: `1px solid ${D.heading}` }}>Read SOP</button>
       </> : <p>{line.note || 'No published procedure is available for this booked service.'}</p>}
