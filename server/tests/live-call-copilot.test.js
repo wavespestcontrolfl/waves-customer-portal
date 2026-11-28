@@ -516,5 +516,31 @@ describe('buildLiveCallCopilot (Caller Brief, Route Slots, Zero Paid Lookups, Fu
       serviceLines: ['termite'],
       paidLookups: false,
     }));
+
+    // Multi-service request (pest + mosquito) with multiServiceBooking disabled withholds combined slots; enabled reserves combined 120 min
+    const multiDisabled = await buildLiveCallCopilot({
+      call: { id: 'call-scope-2', customer_id: 'cust-termite' },
+      customer: { id: 'cust-termite', name: 'Alex Termite' },
+      meta: {},
+      lines: [{ speaker: 'caller', text: 'We have ants inside and mosquitoes on the patio.' }],
+      assist: null,
+    }, { ...deps, isEnabled: (gate) => gate === 'selfBooking' });
+    expect(multiDisabled.route_slots).toEqual([]);
+
+    buildBookingAvailability.mockResolvedValueOnce({ slots: [{ date: '2026-12-03', window_start: '09:00', window_end: '11:00' }] });
+    const multiEnabled = await buildLiveCallCopilot({
+      call: { id: 'call-scope-3', customer_id: 'cust-termite' },
+      customer: { id: 'cust-termite', name: 'Alex Termite' },
+      meta: {},
+      lines: [{ speaker: 'caller', text: 'We have ants inside and mosquitoes on the patio.' }],
+      assist: null,
+    }, { ...deps, isEnabled: () => true });
+    expect(multiEnabled.route_slots).toEqual(['2026-12-03 09:00-11:00']);
+    expect(buildBookingAvailability).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      duration: 120,
+      serviceKey: 'mosquito+pest_control',
+      serviceLines: ['mosquito', 'general'],
+      paidLookups: false,
+    }));
   });
 });

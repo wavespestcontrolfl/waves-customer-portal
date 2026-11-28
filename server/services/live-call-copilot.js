@@ -31,6 +31,7 @@ const { loadBookableCallServices } = require('./call-booking-catalog');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { excludeHeld } = require('./visit-hold');
+const { lineForCatalogRow } = require('./auto-dispatch/service-category');
 
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 const BRIEF_TTL_MS = 60 * 1000;
@@ -300,18 +301,18 @@ function stripNegatedAndHistorical(text, termPattern) {
 
 const CATALOG_CUES = Object.freeze([
   { term: 'wdo|wood[\\s-]+destroying|real[\\s-]+estate\\s+inspection|closing\\s+inspection|termite\\s+letter', keys: ['wdo_inspection', 'lawn_inspection'], nameRe: /\b(?:wdo|assessment)\b/i, funnelKey: 'termite', serviceLine: 'termite' },
-  { term: 'german\\s+(?:cock)?roach(?:es)?|cockroach(?:es)?|roach(?:es)?', stripPalmetto: true, keys: ['cockroach_control', 'one_time_pest'], nameRe: /\b(?:cockroach|one[- ]time\s+pest)\b/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
-  { term: 'wasp(?:s|\\s*nest)?|hornets?|yellow\\s*jackets?|bee\\s*nest|beehives?|stinging\\s+insects?', keys: ['bee_wasp_nest_removal', 'stinging_insect'], nameRe: /\b(?:wasp|bee|hornet|nest)\b/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
-  { term: 'bed\\s*bugs?', keys: ['bed_bug_treatment', 'bed_bug'], nameRe: /\bbed\s*bug/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
-  { term: 'fleas?|ticks?', keys: ['flea_treatment', 'flea_tick'], nameRe: /\bflea/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
+  { term: 'german\\s+(?:cock)?roach(?:es)?|cockroach(?:es)?|roach(?:es)?', stripPalmetto: true, keys: ['cockroach_control', 'one_time_pest'], nameRe: /\b(?:cockroach|one[- ]time\s+pest)\b/i, funnelKey: 'pest_control', serviceLine: 'general' },
+  { term: 'wasp(?:s|\\s*nest)?|hornets?|yellow\\s*jackets?|bee\\s*nest|beehives?|stinging\\s+insects?', keys: ['bee_wasp_nest_removal', 'stinging_insect'], nameRe: /\b(?:wasp|bee|hornet|nest)\b/i, funnelKey: 'pest_control', serviceLine: 'general' },
+  { term: 'bed\\s*bugs?', keys: ['bed_bug_treatment', 'bed_bug'], nameRe: /\bbed\s*bug/i, funnelKey: 'pest_control', serviceLine: 'general' },
+  { term: 'fleas?|ticks?', keys: ['flea_treatment', 'flea_tick'], nameRe: /\bflea/i, funnelKey: 'pest_control', serviceLine: 'general' },
   { term: 'rats?|mice|mouse|rodents?|trapping|attic\\s+(?:droppings?|noise|rats?|mice)', keys: ['rodent_trapping', 'rodent_control', 'rodent_exclusion'], nameRe: /\brodent/i, funnelKey: 'rodent', serviceLine: 'exclusion' },
-  { term: 'bora[\\s-]?care', keys: ['bora_care'], nameRe: /\bbora[\s-]?care\b/i, funnelKey: 'bora_care', serviceLine: 'termite', minDuration: 90 },
-  { term: 'termites?|sentricon|swarmers?|mud\\s*tubes?|frass', keys: ['termite_bait', 'sentricon', 'lawn_inspection'], nameRe: /\b(?:termite|sentricon|assessment)\b/i, funnelKey: 'termite', serviceLine: 'termite', minDuration: 90 },
+  { term: 'bora[\\s-]?care', keys: ['bora_care'], nameRe: /\bbora[\s-]?care\b/i, funnelKey: 'bora_care', serviceLine: 'termite' },
+  { term: 'termites?|sentricon|swarmers?|mud\\s*tubes?|frass', keys: ['termite_bait', 'sentricon', 'lawn_inspection'], nameRe: /\b(?:termite|sentricon|assessment)\b/i, funnelKey: 'termite', serviceLine: 'termite' },
   { term: 'mosquito(?:es)?|no[- ]?see[- ]?ums?|misting', keys: ['mosquito_control', 'mosquito'], nameRe: /\bmosquito/i, funnelKey: 'mosquito', serviceLine: 'mosquito' },
-  { term: 'fire\\s*ants?|ant\\s*mounds?', keys: ['fire_ant_treatment', 'fire_ant'], nameRe: /\bfire\s*ant/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
-  { term: 'lawn|turf|weeds?|fertiliz\\w*|chinch\\s*bugs?|mole\\s*crickets?|st\\.?\\s*augustine|zoysia|sod|fungus', keys: ['lawn_care', 'lawn_fertilization', 'lawn_pest_knockdown'], nameRe: /\blawn\b/i, funnelKey: 'lawn_care', serviceLine: 'lawn_care' },
-  { term: 'trees?|shrubs?|palms?|ornamentals?|whitefl(?:y|ies)|spiraling', keys: ['tree_shrub', 'palm_injection'], nameRe: /\b(?:tree|shrub|palm)\b/i, funnelKey: 'tree_shrub', serviceLine: 'tree_shrub' },
-  { term: 'one[- ]?time|single\\s+treatment|just\\s+once|ghost\\s*ants?|sugar\\s*ants?|ants?|spiders?|palmetto\\s+bugs?|silverfish|earwigs?|general\\s+pest|pest\\s+control', keys: ['one_time_pest', 'pest_control', 'quarterly_pest'], nameRe: /\b(?:one[- ]time\s+pest|pest\s+control)\b/i, funnelKey: 'pest_control', serviceLine: 'pest_control' },
+  { term: 'fire\\s*ants?|ant\\s*mounds?', keys: ['fire_ant_treatment', 'fire_ant'], nameRe: /\bfire\s*ant/i, funnelKey: 'pest_control', serviceLine: 'general' },
+  { term: 'lawn|turf|weeds?|fertiliz\\w*|chinch\\s*bugs?|mole\\s*crickets?|st\\.?\\s*augustine|zoysia|sod|fungus', keys: ['lawn_care', 'lawn_fertilization', 'lawn_pest_knockdown'], nameRe: /\blawn\b/i, funnelKey: 'lawn_care', serviceLine: 'lawn' },
+  { term: 'trees?|shrubs?|palms?|ornamentals?|whitefl(?:y|ies)|spiraling', keys: ['tree_shrub', 'palm_injection'], nameRe: /\b(?:tree|shrub|palm)\b/i, funnelKey: 'tree_shrub', serviceLine: 'lawn' },
+  { term: 'one[- ]?time|single\\s+treatment|just\\s+once|ghost\\s*ants?|sugar\\s*ants?|ants?|spiders?|palmetto\\s+bugs?|silverfish|earwigs?|general\\s+pest|pest\\s+control', keys: ['one_time_pest', 'pest_control', 'quarterly_pest'], nameRe: /\b(?:one[- ]time\s+pest|pest\s+control)\b/i, funnelKey: 'pest_control', serviceLine: 'general' },
 ]);
 
 async function loadCachedCatalog(conn, now) {
@@ -387,30 +388,49 @@ function matchCatalogPrices(text, catalogRows) {
   return matchCatalogMatches(text, catalogRows).rows.map(({ row }) => formatCatalogPriceRow(row));
 }
 
+const FALLBACK_FUNNEL_DURATIONS = Object.freeze({
+  pest_control: 60, lawn_care: 60, mosquito: 60, tree_shrub: 60, termite: 90, rodent: 60, bora_care: 90,
+});
+
 function resolveSlotServiceContext(matches) {
-  const cues = matches?.cues || [];
-  const primary = matches?.rows?.[0] || null;
-  if (!cues.length && !primary) {
-    return { serviceKey: '', serviceIdentity: null, serviceLines: undefined, durationOverride: null, cacheKey: 'default' };
-  }
-  const uniqueFunnelKeys = [...new Set(cues.map((c) => c.funnelKey).filter(Boolean))];
-  const serviceKey = uniqueFunnelKeys.join('+');
-  const serviceLines = [...new Set(cues.map((c) => c.serviceLine).filter(Boolean))];
-  const rowDuration = Number(primary?.row?.default_duration_minutes) > 0 ? Number(primary.row.default_duration_minutes) : 0;
-  const cueMinDuration = cues.reduce((max, c) => Math.max(max, Number(c.minDuration) || 0), 0);
-  const durationOverride = Math.max(rowDuration, cueMinDuration) || null;
-  const usePrimaryIdentity = Boolean(primary?.row) && !(cueMinDuration >= 90 && primary.row.service_key === 'lawn_inspection');
-  const serviceIdentity = usePrimaryIdentity
-    ? { catalogServiceKey: primary.row.service_key || null, serviceType: primary.row.name || null }
+  const cues = Array.isArray(matches?.cues) ? matches.cues : [];
+  const rows = Array.isArray(matches?.rows) ? matches.rows.map((m) => m.row).filter(Boolean) : [];
+  const funnelKeys = [...new Set(cues.map((c) => c.funnelKey).filter(Boolean))].sort();
+  const rowLines = [...new Set(rows.map((row) => lineForCatalogRow(row)).filter(Boolean))];
+  const serviceLines = rowLines.length ? rowLines : [...new Set(cues.map((c) => c.serviceLine).filter(Boolean))];
+  const primaryRow = rows[0] || null;
+  const rowDuration = Number(primaryRow?.default_duration_minutes) || 0;
+  const isSingleSpecificRow = Boolean(primaryRow) && funnelKeys.length <= 1 && primaryRow.service_key !== 'lawn_inspection';
+  const serviceIdentity = isSingleSpecificRow
+    ? { catalogServiceKey: primaryRow.service_key || null, serviceType: primaryRow.name || null }
     : null;
-  const identityKey = (usePrimaryIdentity && primary?.row?.service_key) || serviceKey || 'default';
-  const linesKey = serviceLines.join('+') || 'any';
+  const rawServiceKey = funnelKeys.join('+');
   return {
-    serviceKey,
+    rawServiceKey,
+    funnelKeys,
     serviceIdentity,
     serviceLines: serviceLines.length ? serviceLines : undefined,
-    durationOverride,
-    cacheKey: `${identityKey}:${linesKey}:${durationOverride || 'cfg'}`,
+    rowDuration,
+    cacheKey: `${rawServiceKey || 'default'}:${serviceLines.join('+') || 'any'}:${rowDuration || 'cfg'}`,
+  };
+}
+
+function resolveRequestedSlotArgs(svc, config, booking, isEnabled) {
+  const keys = svc.funnelKeys || [];
+  if (keys.length > 1 && !isEnabled('multiServiceBooking')) return null;
+  const normalizedKey = typeof booking.normalizeBookingServiceKey === 'function'
+    ? booking.normalizeBookingServiceKey(svc.rawServiceKey)
+    : svc.rawServiceKey;
+  if (keys.length > 1 && !normalizedKey) return null;
+  const sumDuration = keys.reduce((acc, k) => acc + (FALLBACK_FUNNEL_DURATIONS[k] || 60), 0);
+  const duration = typeof booking.resolveBookingDuration === 'function'
+    ? booking.resolveBookingDuration(svc.rowDuration || null, config, normalizedKey)
+    : (sumDuration || svc.rowDuration || config.slot_duration_minutes || config.default_duration_minutes || 60);
+  return {
+    duration,
+    serviceKey: normalizedKey || undefined,
+    serviceIdentity: svc.serviceIdentity || undefined,
+    serviceLines: svc.serviceLines,
   };
 }
 
@@ -449,8 +469,9 @@ async function resolveRouteSlots({ account, properties, assist, assistFacts, cal
   if (!pin) return [];
 
   const todayDay = etDateString(now);
-  const svc = slotService || { serviceKey: '', serviceIdentity: null, serviceLines: undefined, durationOverride: null, cacheKey: 'default' };
-  const cacheKey = `${pin.cacheTarget}|${todayDay}|${svc.cacheKey}`;
+  const svc = slotService || { rawServiceKey: '', funnelKeys: [], serviceIdentity: null, serviceLines: undefined, rowDuration: 0, cacheKey: 'default' };
+  const multiFlag = isEnabled('multiServiceBooking') ? 'm1' : 'm0';
+  const cacheKey = `${pin.cacheTarget}|${todayDay}|${svc.cacheKey}|${multiFlag}`;
   const hit = slotsCache.get(cacheKey);
   if (hit && now.getTime() - hit.at < SLOTS_TTL_MS && now.getTime() >= hit.at) {
     return hit.slots;
@@ -460,16 +481,17 @@ async function resolveRouteSlots({ account, properties, assist, assistFacts, cal
     const booking = deps.booking || require('../routes/booking')._internals;
     const formatSlots = deps.formatSlots || require('./voice-agent/relay-tools').formatSlots;
     const config = await booking.loadBookingConfig();
+    const slotArgs = resolveRequestedSlotArgs(svc, config, booking, isEnabled);
+    if (!slotArgs) return [];
     const minDays = config.advance_days_min ?? 1;
     const maxDays = Math.min(config.advance_days_max ?? 14, 14);
-    const defaultDuration = config.slot_duration_minutes || config.default_duration_minutes || 60;
     const availability = await booking.buildBookingAvailability({
       lat: pin.lat,
       lng: pin.lng,
-      duration: svc.durationOverride || defaultDuration,
-      ...(svc.serviceKey ? { serviceKey: svc.serviceKey } : {}),
-      ...(svc.serviceIdentity ? { serviceIdentity: svc.serviceIdentity } : {}),
-      ...(svc.serviceLines ? { serviceLines: svc.serviceLines } : {}),
+      duration: slotArgs.duration,
+      ...(slotArgs.serviceKey ? { serviceKey: slotArgs.serviceKey } : {}),
+      ...(slotArgs.serviceIdentity ? { serviceIdentity: slotArgs.serviceIdentity } : {}),
+      ...(slotArgs.serviceLines ? { serviceLines: slotArgs.serviceLines } : {}),
       rangeFrom: etDateString(addETDays(now, minDays)),
       rangeTo: etDateString(addETDays(now, maxDays)),
       config,
