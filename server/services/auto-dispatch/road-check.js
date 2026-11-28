@@ -305,6 +305,91 @@ function settled(ranked, row, passed) {
   };
 }
 
+// Price an array of legs on real Google traffic; returns array of minutes or null if any leg has no Google answer.
+async function lookupGoogleLegs(legs, travel) {
+  if (!Array.isArray(legs) || !legs.length) return null;
+  await travel.preload(legs);
+  const mins = legs.map((leg) => travel.lookup(leg))
+    .map((a) => (a && a.source === 'google_traffic' && Number.isFinite(a.minutes) ? a.minutes : null));
+  return mins.some((m) => m == null) ? null : mins;
+}
+
+// Real-road drive of a 2-stop source day: home -> first -> second -> home.
+async function sourceDayRoadDrive(sourceLegs, travel) {
+  if (!sourceLegs) return null;
+  const { date, startMin, home, first, second } = sourceLegs;
+  const leg = (from, to) => ({ date, from, to, departureMin: startMin });
+  const mins = await lookupGoogleLegs([leg(home, first), leg(first, second), leg(second, home)], travel);
+  return mins ? round2(mins[0] + mins[1] + mins[2]) : null;
+}
+
+// Real-road added detour for a pair landing on the same destination day:
+// adjacent inserted stops change 4 legs; disjoint stops change two independent 3-leg detours.
+async function sameDestRoadAdded(destSpec, travel) {
+  if (!destSpec) return null;
+  const { date, startMin, adjacent, disjoint } = destSpec;
+  const leg = (from, to, dep = startMin) => ({ date, from, to, departureMin: dep });
+  if (adjacent) {
+    const { prev, first, second, next } = adjacent;
+    const mins = await lookupGoogleLegs([leg(prev, first), leg(first, second), leg(second, next), leg(prev, next)], travel);
+    return mins ? Math.max(0, round2(mins[0] + mins[1] + mins[2] - mins[3])) : null;
+  }
+  if (disjoint) {
+    const [a, b] = disjoint;
+    const mins = await lookupGoogleLegs([
+      leg(a.prev, a.stop, a.startMin), leg(a.stop, a.next, a.startMin), leg(a.prev, a.next, a.startMin),
+      leg(b.prev, b.stop, b.startMin), leg(b.stop, b.next, b.startMin), leg(b.prev, b.next, b.startMin),
+    ], travel);
+    return mins ? round2(Math.max(0, mins[0] + mins[1] - mins[2]) + Math.max(0, mins[3] + mins[4] - mins[5])) : null;
+  }
+  return null;
+}
+
+async function pairAddedRoadDrive(pair, travel) {
+  if (pair.sameDest) return sameDestRoadAdded(pair.sameDestRoadSpec, travel);
+  const detA = await roadDetour(pair.slotA, travel);
+  if (detA == null) return null;
+  const detB = await roadDetour(pair.slotB, travel);
+  if (detB == null) return null;
+  return round2(detA + detB);
+}
+
+/**
+ * Confirm the top qualifying 2-stop pair-clearing candidates on real Google roads.
+ * Fails closed when road checks are enabled and Google returns no answer (never
+ * commits a paired move on an unconfirmed straight-line estimate alone).
+ */
+async function confirmPairOnRoads(pairs, { sourceLegs, floor, config, travel }) {
+  if (!Array.isArray(pairs) || !pairs.length) return null;
+  if (!config || config.roadCheckEnabled !== true || !travel) {
+    return { pair: pairs[0], road: null };
+  }
+  try {
+    const sourceDrive = await sourceDayRoadDrive(sourceLegs, travel);
+    if (sourceDrive == null) return null;
+    for (const pair of pairs.slice(0, ROAD_CHECK_SLOTS)) {
+      const addedDrive = await pairAddedRoadDrive(pair, travel);
+      if (addedDrive == null) continue;
+      const saving = round2(sourceDrive - addedDrive);
+      if (saving >= floor) {
+        return {
+          pair,
+          road: {
+            source_drive_minutes: sourceDrive,
+            added_drive_minutes: addedDrive,
+            saving_minutes: saving,
+            source: 'google',
+          },
+        };
+      }
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[auto-dispatch] pair road check failed (fail closed): ${err.message}`);
+    return null;
+  }
+}
+
 // For the run's log line: how many route-matrix legs the run bought.
 function spendOf(travel) {
   return travel && typeof travel.diagnostics === 'function' ? travel.diagnostics().elements : 0;
@@ -316,6 +401,6 @@ function roadResultOf(cand) {
 }
 
 module.exports = {
-  ROAD_LEGS, ROAD_CHECK_SLOTS, roadLegsOf, createRunTravel, deferredToApply, pass1Travel, confirmOnRoads, roadResultOf, spendOf,
-  _internals: { ROAD_RESULT, roadDetour, roadSaving, legsFor, roadCheckBudget },
+  ROAD_LEGS, ROAD_CHECK_SLOTS, roadLegsOf, createRunTravel, deferredToApply, pass1Travel, confirmOnRoads, confirmPairOnRoads, roadResultOf, spendOf,
+  _internals: { ROAD_RESULT, roadDetour, roadSaving, legsFor, roadCheckBudget, sourceDayRoadDrive, sameDestRoadAdded },
 };

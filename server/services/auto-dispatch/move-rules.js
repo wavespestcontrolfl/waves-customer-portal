@@ -270,5 +270,5 @@ function normalBestOf(conflict, rows, service, config) {
 
 module.exports = {
   isUnplacedDueDate, isDayMove, driveSavingMinutes, moveGain, meetsDriveFloor, withinConflictCeiling, mustMove, rankCandidates,
-  isSundayDate, minutesRuleOk, minutesRuleFloor,
+  isSundayDate, minutesRuleOk, minutesRuleFloor, ownPreferenceScore,
 };

@@ -1429,7 +1429,7 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, isSamePlacement, scoreOnSharedModel, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, loadOccupiedSpansByDate, stopsForTechDay, slotTaken, canPlaceInRoute, serviceToRouteStop, planUnitPlacement, movedSiblings, candidateRouteOrder, isSamePlacement, scoreOnSharedModel, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };
 // Own lines: the day-replan job reads the same open/close bounds the after_hours filter uses.
