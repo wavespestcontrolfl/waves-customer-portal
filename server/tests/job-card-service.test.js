@@ -2702,12 +2702,13 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     };
     dbh.raw = (sql) => sql;
     const out = await jobCard.mixForProduct('pz', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
-    expect(out).toMatchObject({ sprayVolumeGalPer1000: 0.667, rigSprayGalPer1000: 1 });
+    expect(out).toMatchObject({ sprayVolumeGalPer1000: 0.6667, rigSprayGalPer1000: 1 });
     expect(out.warnings.join(' ')).toMatch(/The card's rate is for 0\.67 gal per 1,000 sq ft\. Mist blower sprays 1/);
-    // A rig calibrated at DB precision 0.667 matches 1 gal per 1,500 sq ft cleanly in the tank calculator too.
+    // A rig calibrated at DB precision 0.667 matches 1 gal per 1,500 sq ft cleanly in the tank calculator while keeping exact 6,000 sq ft coverage.
     rig.carrier_gal_per_1000 = 0.667;
     const matched = await jobCard.mixForProduct('pz', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
-    expect(matched.sprayVolumeGalPer1000).toBe(0.667);
+    expect(matched.sprayVolumeGalPer1000).toBe(0.6667);
+    expect(matched.coversSqft).toBe(6000);
     expect(matched.rigSprayGalPer1000).toBeUndefined();
     expect(matched.warnings.join(' ')).not.toMatch(/The card's rate is for/);
   });
@@ -3824,7 +3825,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
       [{ id: 'sys-truck', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: 110 }],
     );
     expect(aboveMax.fieldGuide.mixRates[0].calibrationWarnings).toEqual([
-      expect.stringContaining('above the label maximum of 4.5 gal per 1,000 sq ft'),
+      'Truck Rig #1 sprays 5 gal per 1,000 sq ft, above the label maximum of 4.5 gal per 1,000 sq ft. Use less water per 1,000 sq ft',
     ]);
 
     const belowMin = { fieldGuide: { mixRates: [minRow()] } };
@@ -4018,5 +4019,19 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     });
     const aceCalc = await jobCard.mixForProduct('ace', 4, { serviceId: 'svc4', dbh: aceDb, deps: { buildPlan: jest.fn(), protocols: aceProtocols }, now: new Date('2028-03-10T15:00:00Z') });
     expect(aceCalc.warnings.join(' ')).toContain('below the label minimum of 1 gal per 1,000 sq ft');
+
+    // Structured mixRates spray limits (e.g. Bora-Care's "up to 400 sq ft per gal" = 2.5 gal/1,000 minimum) also warn in the tank calculator.
+    const bora = { id: 'bora', name: 'Bora-Care', epa_reg_number: '64405-1', default_rate: '64', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const boraRig = [{ id: 'cal-bora', equipment_system_id: 'sys-bora', technician_id: 'tech-a', system_type: 'backpack', system_name: 'FlowZone #1', carrier_gal_per_1000: 2, tank_capacity_gal: '4.00' }];
+    const boraDb = dbFor({
+      scheduled_services: [{ id: 'svc5', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Bora-Care Wood Treatment', service_category: 'termite', assigned_equipment_system_id: 'sys-bora', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [bora],
+      product_aliases: [],
+      equipment_calibrations: boraRig,
+      equipment_systems: [{ id: 'sys-bora', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: '4.00' }],
+      scheduled_service_addons: [],
+    });
+    const boraCalc = await jobCard.mixForProduct('bora', 4, { serviceId: 'svc5', dbh: boraDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(boraCalc.warnings.join(' ')).toContain('below the label minimum of 2.5 gal per 1,000 sq ft');
   });
 });

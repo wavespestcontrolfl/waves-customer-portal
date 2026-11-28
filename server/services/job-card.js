@@ -2443,7 +2443,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   //     tech's hand, so it is not judged.
   const lineCarrier = lineCarrierOf(lineBand, protocolLine);
   const namedRig = Boolean(pickedRig || rigAssignment(svc).equipmentSystemId || rigAssignment(svc).calibrationId);
-  const rigCarrier = namedRig && tank.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? roundDbPrecision(tank.carrierGalPer1000) : null;
+  const rigCarrier = namedRig && tank.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
@@ -2551,13 +2551,15 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
 }
 
 // The spray volume (gal per 1,000 sq ft) a card's own label rate is stated over, or null when the band is not the card's.
-const lineCarrierOf = (band, line) => (band && (line?.labelUse || line?.statedVolume) && Number(line.carrier) > 0 ? roundDbPrecision(line.carrier) : null);
+const lineCarrierOf = (band, line) => (band && (line?.labelUse || line?.statedVolume) && Number(line.carrier) > 0 ? Number(line.carrier) : null);
+// Compare carrier rates at database precision (3 decimals) while keeping full precision for coverage math.
+const carriersDiffer = (a, b) => Boolean(a && b && Math.abs(roundDbPrecision(a) - roundDbPrecision(b)) > 1e-9);
 
-// The warning when the picked or assigned rig sprays another volume than the card's rate holds at. No tolerance: the card's volume is
-// the one volume at which the mix is the label amount (the difference guard is for float noise only).
+// The warning when the picked or assigned rig sprays another volume than the card's rate holds at. No tolerance beyond
+// DB calibration precision: the card's volume is the one volume at which the mix is the label amount.
 function rigVolumeWarning({ lineCarrier, rigCarrier, rigName, rigGalPer1000 }) {
-  if (!(lineCarrier && rigCarrier && Math.abs(rigCarrier - lineCarrier) > 1e-9)) return null;
-  return `The card's rate is for ${fmtGal(lineCarrier)} gal per 1,000 sq ft. ${rigName} sprays ${fmtGal(rigGalPer1000)}: the same mix would put down ${rigCarrier > lineCarrier ? 'more' : 'less'} than the label amount. Use a sprayer at the card's volume`;
+  if (!carriersDiffer(rigCarrier, lineCarrier)) return null;
+  return `The card's rate is for ${fmtGal(lineCarrier)} gal per 1,000 sq ft. ${rigName} sprays ${fmtGal(rigGalPer1000)}: the same mix would put down ${roundDbPrecision(rigCarrier) > roundDbPrecision(lineCarrier) ? 'more' : 'less'} than the label amount. Use a sprayer at the card's volume`;
 }
 
 // One per-gallon dose: the amount, the area the tank covers at the CARD's volume, and, when the rig sprays another volume, the area the
@@ -2565,7 +2567,7 @@ function rigVolumeWarning({ lineCarrier, rigCarrier, rigName, rigGalPer1000 }) {
 // The single dose and each conflicting service's row both come through here.
 function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
   const dose = buildPerGallonAmount(band, volume, lineCarrier);
-  const off = Boolean(lineCarrier && rigCarrier && Math.abs(rigCarrier - lineCarrier) > 1e-9);
+  const off = carriersDiffer(rigCarrier, lineCarrier);
   if (!off || dose.coversSqft == null) return dose;
   return { ...dose, labelCoversSqft: dose.coversSqft, coversSqft: Math.round((Number(volume) / rigCarrier) * 1000), rigSprayGalPer1000: rigCarrier };
 }
@@ -2621,20 +2623,25 @@ function parseSprayVolumeSpecs(text) {
   while ((m = SPRAY_VOL_SPEC_RE.exec(str)) !== null) {
     const gal = Number(m[2]);
     const sqft = m[4] ? SQFT_PER_ACRE : Number(String(m[3]).replace(/,/g, ''));
-    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, roundDbPrecision((gal * 1000) / sqft), String(m[1] || '').trim());
+    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, (gal * 1000) / sqft, String(m[1] || '').trim());
   }
   COVERAGE_SQFT_PER_GAL_RE.lastIndex = 0;
   while ((m = COVERAGE_SQFT_PER_GAL_RE.exec(str)) !== null) {
     const sqft = Number(String(m[2]).replace(/,/g, ''));
     const gal = m[3] ? Number(m[3]) : 1;
-    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, roundDbPrecision((gal * 1000) / sqft), String(m[1] || '').trim(), { reciprocal: true });
+    if (gal > 0 && sqft > 0) recordSprayVolumeSpec(out, (gal * 1000) / sqft, String(m[1] || '').trim(), { reciprocal: true });
   }
   return out;
 }
 
-function sprayVolumeBounds(row, line) {
-  const specs = { exact: line?.labelCarrierGalPer1000 ? roundDbPrecision(line.labelCarrierGalPer1000) : null, min: null, max: null };
-  for (const text of [row.sprayVolume, line?.raw, row.limit]) {
+function sprayVolumeBoundsForRows(mixRows, line) {
+  const specs = { exact: line?.labelCarrierGalPer1000 ? Number(line.labelCarrierGalPer1000) : null, min: null, max: null };
+  const texts = [
+    ...(mixRows || []).map((row) => row?.sprayVolume),
+    line?.raw,
+    ...(mixRows || []).map((row) => row?.limit),
+  ];
+  for (const text of texts) {
     const parsed = parseSprayVolumeSpecs(text);
     if (specs.exact == null && parsed.exact != null) specs.exact = parsed.exact;
     if (parsed.min != null) specs.min = specs.min == null ? parsed.min : Math.max(specs.min, parsed.min);
@@ -2643,12 +2650,20 @@ function sprayVolumeBounds(row, line) {
   return specs;
 }
 
+function areaCapForRows(mixRows, line) {
+  for (const row of mixRows || []) {
+    const cap = areaCapOf(row?.limit);
+    if (cap.areaCap) return cap;
+  }
+  return areaCapOf(line?.raw);
+}
+
 function rigVolumeBoundWarnings({ min, max, rigCarrier, rigName, rigGalPer1000 }) {
   const warnings = [];
-  if (max && rigCarrier > max + 1e-9) {
-    warnings.push(`${rigName} sprays ${fmtGal(rigGalPer1000)} gal per 1,000 sq ft, above the label maximum of ${fmtGal(max)} gal per 1,000 sq ft. Use less water per 1,000 sq ft or a lower rate`);
+  if (max && roundDbPrecision(rigCarrier) > roundDbPrecision(max) + 1e-9) {
+    warnings.push(`${rigName} sprays ${fmtGal(rigGalPer1000)} gal per 1,000 sq ft, above the label maximum of ${fmtGal(max)} gal per 1,000 sq ft. Use less water per 1,000 sq ft`);
   }
-  if (min && rigCarrier < min - 1e-9) {
+  if (min && roundDbPrecision(rigCarrier) < roundDbPrecision(min) - 1e-9) {
     warnings.push(`${rigName} sprays ${fmtGal(rigGalPer1000)} gal per 1,000 sq ft, below the label minimum of ${fmtGal(min)} gal per 1,000 sq ft. Use more water per 1,000 sq ft`);
   }
   return warnings;
@@ -2673,7 +2688,7 @@ function singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, ri
 
 function statedLabelVolume(raw) {
   const labelVol = /\bat the label volume of (\d+(?:\.\d+)?)\s*gal\b/i.exec(String(raw || ''));
-  return labelVol && Number(labelVol[1]) > 0 ? roundDbPrecision(Number(labelVol[1])) : null;
+  return labelVol && Number(labelVol[1]) > 0 ? Number(labelVol[1]) : null;
 }
 
 function entryMixRateRows(entry) {
@@ -2740,12 +2755,11 @@ function rigAppliesToMixRow(row, rigKey) {
 }
 
 function mixRowCarrierAndBand(row, line) {
-  const { exact: lineCarrier, min: minCarrier, max: maxCarrier } = sprayVolumeBounds(row, line);
+  const { exact: lineCarrier, min: minCarrier, max: maxCarrier } = sprayVolumeBoundsForRows([row], line);
   const lo = Number(row.perGallon?.amount || 0);
   const hi = Math.max(lo, Number(row.perGallon?.amountMax || 0));
   const band = lo > 0 && row.perGallon?.unit ? { lo, hi, unit: String(row.perGallon.unit) } : null;
-  const fromRow = areaCapOf(row.limit);
-  const capLine = fromRow.areaCap ? fromRow : areaCapOf(line?.raw);
+  const capLine = areaCapForRows([row], line);
   return { lineCarrier, minCarrier, maxCarrier, band, capLine };
 }
 
@@ -2768,7 +2782,7 @@ function attachMixCalibrationWarnings(entries, tank, rig, systems = []) {
   const hasNamedRig = Boolean(rig && (rig.equipmentSystemId || rig.calibrationId));
   if (!hasNamedRig || !tank) return;
   const assignedSys = rig.equipmentSystemId ? systems.find((s) => String(s.id) === String(rig.equipmentSystemId)) : null;
-  const rigCarrier = tank.source === 'rig' && tank.carrierGalPer1000 > 0 ? roundDbPrecision(tank.carrierGalPer1000) : null;
+  const rigCarrier = tank.source === 'rig' && tank.carrierGalPer1000 > 0 ? Number(tank.carrierGalPer1000) : null;
   const rigName = tank.systemName || assignedSys?.name || 'Assigned sprayer';
   const rigCtx = { rigCarrier, rigName, rigGalPer1000: rigCarrier || tank.carrierGalPer1000 };
   const rigKey = rigSprayerKey(tank, assignedSys, rigName);
@@ -2956,26 +2970,32 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // Every candidate whose lines name the product owns its rain rule (`owners`); the
   // first selected line governs the dose, else the first "if needed" one.
   const hits = candidates
-    .map((c) => ({ c, hit: resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null, isFollowup: c.isFollowup === true }).lines.find((l) => l.product.id === product.id) }))
-    .filter(({ hit }) => hit);
+    .map((c) => {
+      const resolved = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null, isFollowup: c.isFollowup === true });
+      const hit = resolved.lines.find((l) => String(l.product.id) === String(product.id)) || null;
+      const mixRows = entryMixRateRows(resolved).filter((row) => String(row.productId) === String(product.id));
+      return { c, hit, mixRows };
+    })
+    .filter(({ hit, mixRows }) => hit || mixRows.length);
   const owners = hits.map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
-  const selectedHits = hits.filter(({ hit }) => hit.selected !== false);
+  const lineHits = hits.filter(({ hit }) => hit);
+  const selectedHits = lineHits.filter(({ hit }) => hit.selected !== false);
   const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw, hit.selected === false));
-  // The spray volume a line states for its own rate: a label-use card's carrier, or the protocol text's "at the label volume of N gal"
-  // (the April Distance IGR line) or an exact "N gallon(s) per 1,000 sq ft". "At least / at most N gal" bounds are never read as exact.
-  const statedVolumeOf = (hit) => statedLabelVolume(hit.raw) || parseSprayVolumeSpecs(hit.raw).exact;
+  // The spray volume a line states for its own rate: a label-use card's carrier, the protocol text's "at the label volume of N gal",
+  // or the exact volume from the structured mix row / line prose.
+  const statedVolumeOf = (hit, mixRows = []) => statedLabelVolume(hit.raw) || sprayVolumeBoundsForRows(mixRows, hit).exact;
   // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
   // narrowed by the label band, as before.
   const conflictLinesOf = (list) => (servicesConflict(list, { rateOf, statedVolumeOf }) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {});
   const lineOf = (h) => {
-    const specs = parseSprayVolumeSpecs(h.hit.raw);
+    const specs = sprayVolumeBoundsForRows(h.mixRows, h.hit);
     const stated = h.hit.labelCarrierGalPer1000 ? null : (statedLabelVolume(h.hit.raw) || specs.exact);
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
       // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
       explicitDilution: lineRateIsDilution(h.hit.raw, h.hit.selected === false),
       // The line's own per-area limit for one spray (Acelepryn: no more than 0.37 fl oz per 1,000 sq ft), checked against the rig's volume.
-      ...areaCapOf(h.hit.raw),
+      ...areaCapForRows(h.mixRows, h.hit),
       ...(specs.min ? { minCarrier: specs.min } : {}),
       ...(specs.max ? { maxCarrier: specs.max } : {}),
       ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
@@ -2984,15 +3004,15 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
       ...(stated ? { carrier: stated, statedVolume: true } : {}),
     };
   };
-  if (!hits.length) return found(null, owners);
+  if (!lineHits.length) return found(null, owners);
   // Group the hits once. A chemical area add-on's dose is its booked rate over the area sold, not a tank amount, so its hits stay out of
   // the tank lines and ride as governedRows under their service names (a Tree & Shrub visit's own Snapshot beside a Bed Pre-Emergent
   // add-on keeps its tank amount). The tank lines that decide the amount are chosen once: the selected ones, else the "if needed" ones
   // (marked for confirmation), else, when every line is an area add-on, the hits themselves (a governed dose).
-  const tankLines = hits.filter((h) => !h.hit.governed);
+  const tankLines = lineHits.filter((h) => !h.hit.governed);
   const usable = tankLines.filter((h) => h.hit.selected !== false);
   const optional = tankLines.filter((h) => h.hit.selected === false);
-  const decisive = [usable, optional, hits].find((list) => list.length);
+  const decisive = [usable, optional, lineHits].find((list) => list.length);
   const [lead] = decisive;
   const governedRows = selectedHits.filter((h) => h.hit.governed).map((h) => ({ service: h.c.name, ...governedRateOf(h.hit.governed, h.c.scope) })).filter((row) => row.ratePer1000);
   // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
@@ -3038,7 +3058,7 @@ function servicesConflict(list, { rateOf, statedVolumeOf }) {
   if (list.length < 2) return false;
   const rates = new Set(list.map((h) => JSON.stringify(rateOf(h))));
   const mixed = list.some((h) => h.hit.selected === false) && list.some((h) => h.hit.selected !== false);
-  const volumes = new Set(list.map((h) => statedVolumeOf(h.hit) || h.hit.labelCarrierGalPer1000 || 0));
+  const volumes = new Set(list.map((h) => statedVolumeOf(h.hit, h.mixRows) || h.hit.labelCarrierGalPer1000 || 0));
   // Several "if needed" services that differ in target or restriction keep one row each, even at one concentration.
   const conditionalUses = list.filter((h) => h.hit.selected === false);
   const usesDiffer = conditionalUses.length > 1 && new Set(conditionalUses.map((h) => String(h.hit.raw || '').replace(/\s+/g, ' ').trim())).size > 1;
@@ -3110,7 +3130,7 @@ function buildPerGallonAmount(rate, gallons, carrierGalPer1000 = null) {
   if (!Number.isFinite(gal) || gal <= 0) return { amount: null, unit: rate.unit, reason: 'Pick a tank volume' };
   const round = (v) => Math.round(v * 10000) / 10000;
   const carrier = Number(carrierGalPer1000);
-  const bound = carrier > 0 && Number.isFinite(carrier) ? { sprayVolumeGalPer1000: carrier, coversSqft: Math.round((gal / carrier) * 1000) } : {};
+  const bound = carrier > 0 && Number.isFinite(carrier) ? { sprayVolumeGalPer1000: round(carrier), coversSqft: Math.round((gal / carrier) * 1000) } : {};
   return { amount: round(rate.lo * gal), amountMax: rate.hi > rate.lo ? round(rate.hi * gal) : null, unit: rate.unit, gallons: gal, basis: 'per_gallon', ...bound, reason: null };
 }
 
