@@ -214,6 +214,38 @@ async function checkoutTenderIsSoleMoney(trx, locked, paymentId) {
   return !other;
 }
 
+async function lockInvoiceOwnerCustomerFirst(trx, invoice) {
+  // Acquire customers FOR UPDATE BEFORE releaseCombinedSessionBeforeCollection
+  // (which takes pay.combined.customer + may write invoices in clearPaymentIntentStamps)
+  // so manual-payment, reconcile, and apply-credit all share the exact
+  // customer -> pay.combined.customer -> invoice lock hierarchy.
+  let ownerId = invoice.customer_id ? String(invoice.customer_id) : null;
+  let custRow = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    custRow = ownerId
+      ? await trx('customers').where({ id: ownerId }).forUpdate().first('id', 'payer_id')
+      : null;
+    const currentRow = await trx('invoices').where({ id: invoice.id }).first('customer_id');
+    const freshOwnerId = currentRow?.customer_id ? String(currentRow.customer_id) : null;
+    if (!freshOwnerId || freshOwnerId === ownerId) {
+      return { ownerId: freshOwnerId || ownerId, customer: custRow };
+    }
+    ownerId = freshOwnerId;
+  }
+  const ownerErr = new Error('The invoice ownership kept changing — try again');
+  ownerErr.statusCode = 409;
+  throw ownerErr;
+}
+
+function resolveSelfPayCustInLock(locked, prelocked) {
+  const lockedOwnerId = locked.customer_id ? String(locked.customer_id) : null;
+  if (!lockedOwnerId) return null;
+  if (prelocked && prelocked.ownerId === lockedOwnerId) return prelocked.customer;
+  const ownerErr = new Error('Invoice customer changed while recording payment — reload and try again');
+  ownerErr.statusCode = 409;
+  throw ownerErr;
+}
+
 async function recordManualPayment(id, {
   method,
   reference,
@@ -379,6 +411,8 @@ async function recordManualPayment(id, {
   // no longer says what was owed.
   let settledAmount = null;
   const updatedInvoice = await db.transaction(async (trx) => {
+    const prelocked = requireSelfPay ? await lockInvoiceOwnerCustomerFirst(trx, invoice) : null;
+    if (prelocked?.ownerId) invoice.customer_id = prelocked.ownerId;
     // Combined-session reservation INSIDE the collection transaction
     // (codex #3427 r30 P0, serialized r31 P0): the helper takes the
     // per-customer combined lock, re-reads the invoice under it, and
@@ -443,15 +477,10 @@ async function recordManualPayment(id, {
     // one connection and this trx on the other (DB_POOL_MAX floor is 2), so
     // a third acquire here would wait on itself.
     if (requireSelfPay) {
-      // Lock the payer-SOURCE rows the resolution reads (customers.payer_id,
-      // the visit's payer_id / self_pay_override) AND the payer rows they
-      // point at (an inactive payer resolves as self-pay; a concurrent
-      // re-activation must wait) so no reassignment can commit between this
-      // read and the paid flip. Lock order: invoice → customer → visit → payer.
-      // The visit lock is NOWAIT (Codex #3882 r4 P2): this is the first
-      // visit acquisition on the self-pay path, so a blocking wait here
-      // would recreate the invoice↔visit cycle the fence below avoids.
-      const cust = await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id', 'payer_id');
+      // The customer row was already locked BEFORE releaseCombinedSessionBeforeCollection
+      // (customer -> pay.combined.customer -> invoice -> visit -> payer). Verify ownership
+      // did not move underneath us, then lock visit (NOWAIT) and referenced payers.
+      const cust = resolveSelfPayCustInLock(locked, prelocked);
       const visit = locked.scheduled_service_id
         ? await lockVisitForSettlement(trx, locked.scheduled_service_id, ['id', 'payer_id'])
         : null;
