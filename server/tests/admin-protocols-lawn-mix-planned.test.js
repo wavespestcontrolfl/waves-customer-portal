@@ -529,18 +529,44 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
     expect(whereCalls).toContainEqual(['ec.equipment_system_id', 'sys-2']);
   });
 
-  test('an unresolved/superseded FlowZone calibration pin suppresses replacement FlowZone fills in getBackpackCalibration', async () => {
-    calibration = [];
-    backpackCalibration = [
-      { id: 'bp-replacement', equipment_system_id: 'bp-sys', technician_id: null, system_name: 'FlowZone Typhoon 3.0', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.5 },
-    ];
-    const sheetCal = await loadSheetCalibration(
+  test('an unresolved/superseded FlowZone calibration pin suppresses replacement and other-backpack FlowZone fills even when the pinned FlowZone has no active calibrations', async () => {
+    const otherFlowZone = { id: 'bp-other', equipment_system_id: 'bp-sys-2', technician_id: null, system_name: 'FlowZone Typhoon 3.0 #2', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.5 };
+    db.mockImplementation((table) => {
+      if (table === 'equipment_calibrations as ec') {
+        const q = readQuery([]);
+        let backpackOnly = false;
+        q.where = jest.fn((col, val) => { if (col === 'es.system_type' && val === 'backpack') backpackOnly = true; return q; });
+        const rows = () => (backpackOnly ? [otherFlowZone] : []);
+        q.first = jest.fn(async () => rows()[0] || null);
+        q.then = (res, rej) => Promise.resolve(rows()).then(res, rej);
+        q.catch = (rej) => Promise.resolve(rows()).catch(rej);
+        return q;
+      }
+      if (table === 'equipment_systems') {
+        let queriedId = null;
+        const q = readQuery([]);
+        q.where = jest.fn((arg) => { queriedId = arg?.id || null; return q; });
+        q.first = jest.fn(async () => (queriedId === 'bp-sys-1'
+          ? { system_type: 'backpack', tank_capacity_gal: 4, system_name: 'FlowZone Typhoon 3.0 #1' }
+          : { system_type: 'tank', tank_capacity_gal: 110, system_name: '110-Gallon Spray Tank #1' }));
+        return q;
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const fzPin = await loadSheetCalibration(
       { query: {}, admin: { role: 'admin' } },
-      { assigned_equipment_system_id: 'bp-sys', assigned_calibration_id: 'bp-old-superseded', technician_id: 'tech-a' },
+      { assigned_equipment_system_id: 'bp-sys-1', assigned_calibration_id: 'bp-old-superseded', technician_id: 'tech-a' },
     );
-    expect(sheetCal.calibration).toBeNull();
-    expect(sheetCal.calibrationScope.unresolvedPinRigId).toBe('bp-sys');
-    expect(await getBackpackCalibration(sheetCal.calibration, sheetCal.calibrationScope)).toBeNull();
+    expect(fzPin.calibration).toBeNull();
+    expect(fzPin.calibrationScope.unresolvedPinRigId).toBe('bp-sys-1');
+    expect(await getBackpackCalibration(fzPin.calibration, fzPin.calibrationScope)).toBeNull();
+
+    // A stale pin on a 110-gal truck tank still permits the independent 4-gal FlowZone spot column.
+    const truckPin = await loadSheetCalibration(
+      { query: {}, admin: { role: 'admin' } },
+      { assigned_equipment_system_id: 'tank-sys-1', assigned_calibration_id: 'tank-old-superseded', technician_id: 'tech-a' },
+    );
+    expect(await getBackpackCalibration(truckPin.calibration, truckPin.calibrationScope)).toEqual(otherFlowZone);
   });
 
   test('an unresolved calibration-only pin skips the alternate 110-gal tank fallback even when two tanks have different outputs', async () => {

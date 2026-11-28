@@ -3004,7 +3004,7 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
 // The checks that used to withhold a searched product's dose, in the old guard order, as warning text (owner 2026-11-26:
 // warned, never blocked). A chemical-group repeat is not here: it rides as rotationWarnings (owner 2026-10-09).
 const AREA_ADDON_NO_TANK = 'Area add-on — apply the label rate on the card over the area sold; no tank amount';
-const DIRECT_DOSE_NO_TANK = 'Dose directly per plant or area — see protocol dose below; no tank amount';
+const DIRECT_DOSE_NO_TANK = 'Apply directly — see protocol dose below; no tank amount';
 const NOT_TANK_MIX = 'Not a tank mix — apply as labeled';
 
 function isDirectDoseOnlyLine(protocolLine) {

@@ -841,9 +841,18 @@ const BIG_TANK_CAPACITY_GAL = 110;
 const isFlowZone4Gal = (row) => row.system_type === 'backpack' && Number(row.tank_capacity_gal) === 4 && /flow\s*zone/i.test(row.system_name || '');
 const newestTestFirst = (a, b) => (b.calibration_status === 'field_verified') - (a.calibration_status === 'field_verified')
   || new Date(b.calibrated_at || 0) - new Date(a.calibrated_at || 0);
+async function isFlowZoneSystem(equipmentSystemId) {
+  if (!equipmentSystemId || equipmentSystemId === '__unknown__') return true;
+  const sys = await db('equipment_systems')
+    .where({ id: equipmentSystemId })
+    .first('system_type', 'tank_capacity_gal', 'name as system_name')
+    .catch(() => null);
+  return !sys || isFlowZone4Gal(sys);
+}
+
 async function getBackpackCalibration(selected, scope = {}) {
   if (selected && isFlowZone4Gal(selected)) return selected;
-  if (scope.unresolvedPinRigId === '__unknown__') return null;
+  if (scope.unresolvedPinRigId && await isFlowZoneSystem(scope.unresolvedPinRigId)) return null;
   const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -853,12 +862,8 @@ async function getBackpackCalibration(selected, scope = {}) {
     .where('es.name', 'ilike', '%flow%zone%')
     .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
     .catch(() => []);
-  const backpacks = (rows || []).filter(isFlowZone4Gal);
-  if (scope.unresolvedPinRigId && backpacks.some((row) => String(row.equipment_system_id) === String(scope.unresolvedPinRigId))) {
-    return null;
-  }
-  return backpacks
-    .filter((row) => calibrationAllowedForScope(row, scope))
+  return (rows || [])
+    .filter((row) => isFlowZone4Gal(row) && calibrationAllowedForScope(row, scope))
     .sort(newestTestFirst)[0] || null;
 }
 
