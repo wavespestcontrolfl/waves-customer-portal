@@ -163,7 +163,8 @@ describe('visitMatchesPrimaryHomeForTechAccess & recheckTechFeedAccessRows', () 
     };
     const fakeDb = (table) => {
       const q = {
-        leftJoin: () => q, whereIn: () => q, where: () => q, whereNotIn: () => q, select: () => q,
+        leftJoin: () => q, whereIn: () => q, where: () => q, whereNotIn: () => q,
+        modify: (cb) => { cb(q); return q; }, select: () => q,
         then: (resolve) => {
           if (table === 'scheduled_services') {
             return Promise.resolve([

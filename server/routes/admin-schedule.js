@@ -25258,8 +25258,15 @@ router.get('/:id/home-note', async (req, res, next) => {
       .first(HOME_NOTE_VISIT_COLUMNS);
     if (!stillOwned) return homeNoteVisitRefusal(req, res);
     if (isTechnicianRequest(req)) {
+      let primaryAddress = null;
+      if (!stillOwned.property_id && !stillOwned.service_address_line1 && stillOwned.customer_id) {
+        primaryAddress = await db('customers')
+          .where({ id: stillOwned.customer_id })
+          .first('address_line1', 'address_line2', 'city', 'state', 'zip')
+          .catch(() => null);
+      }
       const mayReadCodes = technicianMayReadVisitAccessCodes(req, stillOwned)
-        && await sameHomeForTechVisitPrefs(db, req.technicianId, stillOwned.customer_id, stillOwned);
+        && await sameHomeForTechVisitPrefs(db, req.technicianId, stillOwned.customer_id, stillOwned, primaryAddress);
       if (!mayReadCodes) {
         out.editable = false;
         if (typeof out?.note?.body === 'string') {
