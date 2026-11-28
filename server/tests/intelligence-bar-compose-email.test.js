@@ -363,7 +363,7 @@ describe('the Email page route and the shared send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-email.js'), 'utf8');
     const start = source.indexOf("router.post('/send'");
     const route = source.slice(start, source.indexOf('\n});\n', start));
-    expect(route).toContain('await sendEmailMessage({ to, subject, body, threadId, inReplyTo })');
+    expect(route).toMatch(/await sendEmailMessage\(\{\s*to,\s*subject,\s*body,\s*threadId,\s*inReplyTo,\s*idempotencyKey\s*\}\)/);
     expect(route).toContain('res.status(status).json(json)');
     expect(route).toContain("res.status(400).json({ status: 'failed', error: 'to and body required' })");
   });

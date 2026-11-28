@@ -99,6 +99,7 @@ function installDb() {
       whereRaw() { return chain; },
       whereNull(key) { predicates.push((row) => row[key] == null); return chain; },
       first() { first = true; return chain; },
+      limit() { return chain; },
       select() { return chain; },
       forUpdate() { return chain; },
       count() { operation = 'count'; return chain; },

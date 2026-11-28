@@ -319,6 +319,19 @@ describe('estimateListQuery', () => {
     expect(all.calls.map(([name]) => name)).not.toContain('whereNull');
     expect(all.calls.map(([name]) => name)).not.toContain('whereNotNull');
   });
+
+  test('sentOnly includes accepted/declined rows even when sent_at is null (mid-flight acceptance/decline)', () => {
+    const outer = recorder();
+    const inner = recorder();
+    estimateListQuery(() => outer.q, { sentOnly: true });
+    const whereCallback = outer.calls.find(([name, arg]) => name === 'where' && typeof arg === 'function')?.[1];
+    expect(typeof whereCallback).toBe('function');
+    whereCallback.call(inner.q);
+    expect(inner.calls).toContainEqual(['whereNotNull', 'estimates.sent_at']);
+    const statusCall = inner.calls.find(([name]) => name === 'orWhereIn');
+    expect(statusCall[1]).toBe('estimates.status');
+    expect(statusCall[2]).toEqual(expect.arrayContaining(['scheduled', 'sending', 'send_failed', 'accepted', 'declined']));
+  });
 });
 
 describe('clickStatsByEstimateId (the click read the list route and the Call today push share)', () => {
