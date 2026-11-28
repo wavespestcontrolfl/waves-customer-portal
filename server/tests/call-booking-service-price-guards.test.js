@@ -209,6 +209,58 @@ describe('PR A1: WDO refusal & Monthly-on-one-time guards (calls adeff525, a6848
     expect(svc?.service_key).toBe('wdo_inspection');
   });
 
+  test('later acceptance of an explicit agent WDO offer clears an earlier refusal, while confirming a refusal or choosing informal check stays refused', () => {
+    const acceptedTranscript = [
+      'Caller: I do not need a WDO inspection.',
+      'Agent: Would you like us to book the WDO inspection for $250 after all?',
+      'Caller: Actually yes, please book it.',
+    ].join('\n');
+    const acceptedV2 = {
+      scheduling: { status: 'confirmed' },
+      service_request: {
+        specific_service_name: 'WDO Inspection Service',
+        quoted_price_usd: 250,
+        price_is_final: true,
+        price_accepted_by_caller: true,
+        price: { amount_usd: 250, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
+      },
+      meta: { call_summary: 'Caller initially declined WDO inspection, then booked it for $250.' },
+    };
+    expect(hasExplicitWdoRefusal({ v2Extraction: acceptedV2, transcription: acceptedTranscript })).toBe(false);
+    const bookedSvc = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'WDO Inspection Service', quoted_price: 250 },
+      services: SERVICES,
+      v2Extraction: acceptedV2,
+      transcription: acceptedTranscript,
+    });
+    expect(bookedSvc?.service_key).toBe('wdo_inspection');
+    expect(resolveCallBookingPrice({ quotedPrice: 250, catalogRow: bookedSvc, v2Extraction: acceptedV2 })).toEqual({ price: 250, source: 'transcript' });
+
+    // Confirming an agent's refusal recap must NOT clear the refusal
+    const confirmedRefusal = [
+      'Caller: I do not need a WDO inspection.',
+      'Agent: Okay, so no WDO inspection, just a regular visit?',
+      'Caller: Yes, that is right.',
+    ].join('\n');
+    expect(hasExplicitWdoRefusal({ transcription: confirmedRefusal })).toBe(true);
+
+    // Accepting with an informal-check qualifier must NOT clear the refusal
+    const informalQualifier = [
+      'Caller: I do not need a WDO inspection.',
+      'Agent: Would you like us to book the WDO inspection for $250 after all?',
+      'Caller: Yes, just the informal check please.',
+    ].join('\n');
+    expect(hasExplicitWdoRefusal({ transcription: informalQualifier })).toBe(true);
+
+    // Dual-choice agent offer ("WDO or free assessment") + bare "Yes" must stay refused
+    const dualChoice = [
+      'Caller: I do not need a WDO inspection.',
+      'Agent: Would you like us to book the WDO inspection or just a free assessment?',
+      'Caller: Yes, go ahead.',
+    ].join('\n');
+    expect(hasExplicitWdoRefusal({ transcription: dualChoice })).toBe(true);
+  });
+
   test('preserves caller-only boundary on unidentified raw diarization ("Speaker 1:"/"Speaker 2:")', () => {
     const rawDiarized = 'Speaker 1: Do you want just a one-time treatment?\nSpeaker 2: No, I want monthly service.';
     expect(hasExplicitOneTimeOnlyIntent({ transcription: rawDiarized })).toBe(false);

@@ -23,7 +23,7 @@ const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-d
 const logger = require('./logger');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
-const { recurringIntentEvidence, callerOnlyText } = require('./call-cadence-intent');
+const { recurringIntentEvidence, callerOnlyText, speakerTurns } = require('./call-cadence-intent');
 
 const BOOKABLE_SERVICE_COLUMNS = [
   'id',
@@ -384,6 +384,14 @@ const SINGLE_TREATMENT_EXPLICIT_RE = /\b(?:single\s+(?:\$\d[\d,.]*\s+)?(?:treatm
 const NEGATED_SINGLE_TREATMENT_RE = /\b(?:not|isn['’]?t|won['’]?t\s+be|(?:don['’]?t|do\s+not|didn['’]?t|did\s+not|doesn['’]?t|does\s+not|wouldn['’]?t|would\s+not)\s+(?:just\s+)?(?:want|need|prefer|do|book)|not\s+(?:want(?:ing)?|looking\s+for)|rather\s+not\s+(?:just\s+)?(?:do|get|have)|more\s+than|instead\s+of)\s+(?:just\s+|only\s+)?(?:a\s+|the\s+|one\s+)?(?:one[-\s]?time(?:\s+(?:visit|treatment|service))?|single\s+(?:\$\d[\d,.]*\s+)?(?:visit|treatment)|one\s+(?:\$\d[\d,.]*\s+)?(?:visit|treatment))\b/gi;
 const WDO_CLAUSE_REFUSAL_RE = /\b(?:(?:don['’]?t|do\s+not|didn['’]?t|did\s+not|doesn['’]?t|does\s+not|won['’]?t|will\s+not)\s+(?:want|need|require|get|do|order|book|schedule)|declin(?:e[ds]?|ing)|refus(?:e[ds]?|ing)|skip(?:p(?:ed|ing))?|without|rather\s+not|instead\s+of|no\s+need\s+for|not\s+looking\s+for|no|not)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|paperwork|certificate|service))?|termite\s+(?:letter|clearance(?:\s+letter)?|report|form)|wood[- ]destroying[- ]organism\s+(?:inspection|report|form|letter))\b/i;
 const WDO_CLAUSE_AFFIRM_RE = /\b(?:need|want|would\s+like|require[sd]?|book|schedule|order(?:ing)?|get(?:ting)?|do(?:ing)?)\s+(?:(?:a|an|the|any|official|formal|fdacs)\s+){0,3}(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|certificate))?|termite\s+(?:letter|clearance(?:\s+letter)?))\b/i;
+const WDO_TERM_RE = /\b(?:wdo(?:\s+(?:inspection|report|form|letter|clearance|paperwork|certificate|service))?|termite\s+(?:letter|clearance(?:\s+letter)?|report|form)|wood[- ]destroying[- ]organism(?:\s+(?:inspection|report|form|letter))?)\b/i;
+const WDO_OFFER_PROMPT_RE = /\b(?:would\s+you\s+like|do\s+you\s+want|want\s+(?:me|us)\s+to|should\s+(?:i|we)|shall\s+(?:i|we)|(?:can|could)\s+(?:i|we)\s+(?:book|schedule|add|order|include|set\s+up|go\s+ahead)|we\s+can\s+(?:book|schedule|add|order|include|set\s+up)|go\s+ahead\s+and\s+(?:book|schedule|add|order|include)|like\s+(?:me|us)\s+to\s+(?:book|schedule|add|order|include)|book(?:ing)?|schedul(?:e|ing)|add(?:ing)?|order(?:ing)?|includ(?:e|ing))\b/i;
+const AGENT_NEGATED_WDO_OFFER_RE = /\b(?:no|not|never|don't|do\s+not|doesn't|does\s+not|didn't|did\s+not|won't|will\s+not|skip(?:ping)?|without|instead\s+of|rather\s+than)\b[^.!?;,\n]{0,35}\b(?:book(?:ing)?|schedul(?:e|ing)|add(?:ing)?|order(?:ing)?|includ(?:e|ing)|wdo|termite\s+(?:letter|clearance|report|form)|wood[- ]destroying[- ]organism)\b/i;
+const WDO_ALTERNATIVE_OPTION_RE = /\b(?:assessment|informal|general\s+(?:check|inspection|visit)|regular\s+(?:check|inspection|visit)|visual\s+(?:check|inspection))\b/i;
+const WDO_AGENT_SPEAKER_RE = /^(?:agent|staff|rep|representative|operator|csr|waves|assistant|ai)$/i;
+const WDO_LENDER_CHECK_RE = /\b(?:does|do|did|will|would|is|are|can)\s+(?:the\s+)?(?:lender|bank|buyer|seller|realtor|agent|title|underwriter)\b/i;
+const WDO_OFFER_ACCEPT_RE = /(?:^|[.!?;,]\s*)(?:(?:actually|well|um|uh|hmm|oh|so|ok(?:ay)?|alright|all\s+right)[,.\s]+){0,3}(?:yes|yeah|yep|yup|sure|sounds\s+good|that\s+works|let's\s+do\s+(?:that|it)|go\s+ahead(?:\s+and\s+(?:book|schedule|add|do)\s+(?:it|that))?|please\s+(?:book|schedule|add|do)\s+(?:it|that)|(?:book|schedule|add|order)\s+(?:it|that)|sign\s+(?:me|us)\s+up|absolutely|definitely|perfect)\b/i;
+const WDO_ACCEPT_DISQUALIFIER_RE = /\b(?:no(?!\s+(?:problem|worries)\b)|not|never|nah|nope|don't|do\s+not|didn't|did\s+not|won't|will\s+not|can't|cannot|wouldn't|skip|pass|declin(?:e[ds]?|ing)|refus(?:e[ds]?|ing)|without|rather\s+not|instead|maybe\s+later|hold\s+off|think\s+about\s+it|check\s+with|ask\s+(?:my|the|our)|(?:just|only)\s+(?:a\s+|an\s+|the\s+)?(?:assessment|informal|general|visual|free|regular|basic))\b/i;
 const ONE_TIME_ONLY_INTENT_RE = /\b(?:(?:just|only)\s+(?:want(?:ed)?|need(?:ed)?|looking\s+for|do(?:ing)?)?\s*(?:a|the|this)?\s*one[- ]?time(?:\s+(?:treatment|service|visit|spray|job))?|one[- ]?time\s+(?:only|treatment|service|visit)|(?:just|only)\s+once|no\s+(?:ongoing|recurring|monthly|quarterly|plan|package|membership)|(?:don['’]?t|do\s+not|not)\s+(?:want(?:ing)?|need(?:ing)?|looking\s+for|interested\s+in)\s+(?:a\s+|an\s+)?(?:ongoing|recurring|monthly|quarterly|plan|package|membership|subscription))\b/i;
 const NEGATED_ONE_TIME_RE = /\b(?:not|no|never|without|rather\s+than|instead\s+of|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not|won['’]?t|will\s+not)\s+(?:want(?:ing)?|need(?:ing)?|looking\s+for))\s+(?:just\s+)?(?:a\s+|the\s+|this\s+)?one[- ]?time(?:\s+(?:treatment|service|visit|spray|job))?\b/gi;
 
@@ -793,16 +801,57 @@ function guardEvidenceText({ extracted = {}, v2Extraction = null, transcription 
 
 const QUESTION_OR_CHECK_RE = /\?$|\b(?:does|do|did|will|would|is|are|can)\s+(?:the\s+)?(?:lender|bank|buyer|seller|realtor|agent|title|underwriter)\b/i;
 
-function hasExplicitWdoRefusal({ extracted = {}, v2Extraction = null, transcription = '' } = {}) {
-  const callerText = transcription ? callerOnlyText(transcription) : '';
-  const combined = guardEvidenceText({ extracted, v2Extraction, transcription: callerText });
-  if (!combined) return false;
-  const clauses = combined.split(/(?<=\?)|[.!\n,;]+/).map((s) => s.trim()).filter(Boolean);
-  let refused = false;
+function scanWdoClauses(text, initialRefused = false) {
+  let refused = initialRefused;
+  const clauses = String(text || '').split(/(?<=\?)|[.!\n,;]+/).map((s) => s.trim()).filter(Boolean);
   for (const clause of clauses) {
     if (QUESTION_OR_CHECK_RE.test(clause)) continue;
     if (WDO_CLAUSE_REFUSAL_RE.test(clause)) refused = true;
     else if (refused && WDO_CLAUSE_AFFIRM_RE.test(clause)) refused = false;
+  }
+  return refused;
+}
+
+function isAgentWdoOfferBody(body) {
+  return body.split(/(?<=\?)|[.!\n;]+/).some((sentence) => (
+    !WDO_LENDER_CHECK_RE.test(sentence)
+    && WDO_TERM_RE.test(sentence)
+    && WDO_OFFER_PROMPT_RE.test(sentence)
+    && !AGENT_NEGATED_WDO_OFFER_RE.test(sentence)
+  ));
+}
+
+function updateAgentWdoOffer(prevOffered, turn) {
+  if (!turn || turn.speaker !== 'other' || !WDO_AGENT_SPEAKER_RE.test(turn.label)) return false;
+  const body = String(turn.text || '').replace(/^\s*[^:\n]+:\s*/, '').replace(/[‘’]/g, "'");
+  if (!body || WDO_CLAUSE_REFUSAL_RE.test(body) || WDO_ALTERNATIVE_OPTION_RE.test(body)) return false;
+  return isAgentWdoOfferBody(body) ? true : prevOffered;
+}
+
+function isWdoOfferAcceptance(callerBody) {
+  const normalized = String(callerBody || '').replace(/[‘’]/g, "'");
+  return Boolean(normalized) && !WDO_ACCEPT_DISQUALIFIER_RE.test(normalized) && WDO_OFFER_ACCEPT_RE.test(normalized);
+}
+
+function hasExplicitWdoRefusal({ extracted = {}, v2Extraction = null, transcription = '' } = {}) {
+  const metaText = guardEvidenceText({ extracted, v2Extraction, transcription: '' });
+  let refused = scanWdoClauses(metaText, false);
+  const turns = transcription ? speakerTurns(transcription) : [];
+  if (!turns.length) {
+    return transcription ? scanWdoClauses(transcription, refused) : refused;
+  }
+  let agentOfferedWdo = false;
+  for (const turn of turns) {
+    if (turn.speaker !== 'caller') {
+      agentOfferedWdo = updateAgentWdoOffer(agentOfferedWdo, turn);
+      continue;
+    }
+    const body = turn.text.replace(/^\s*(?:caller|customer)\s*:\s*/i, '');
+    const explicitlyRefused = scanWdoClauses(body, false);
+    if (explicitlyRefused) refused = true;
+    else if (refused && agentOfferedWdo && isWdoOfferAcceptance(body)) refused = false;
+    else refused = scanWdoClauses(body, refused);
+    agentOfferedWdo = false;
   }
   return refused;
 }
