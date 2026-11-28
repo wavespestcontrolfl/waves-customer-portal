@@ -119,12 +119,14 @@ describe('Customer emails audit PR 1 regressions', () => {
 
     const legacy = renderAutomationStepContent({
       template: { key: 'welcome_drip', name: 'Welcome' },
-      htmlBody: '<p>Legacy white body</p>',
+      htmlBody: '<p>Legacy white body</p>{{consultation_booking_block}}',
       textBody: 'Legacy white body',
       customer: { first_name: 'Taylor' },
       asmGroupId: null,
+      consultationHtml: '<a class="dm-gold" href="https://portal.wavespestcontrol.com/book">Book</a>',
     });
     expect(legacy.html).toContain('class="dm-lightcard"');
+    expect(legacy.html).not.toContain('class="dm-card"');
   });
 
   test('recruiting-comms renders inside Waves service shell with gold CTA and no off-brand green', () => {

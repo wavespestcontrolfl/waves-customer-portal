@@ -531,7 +531,7 @@ function renderAutomationStepContent({ template, htmlBody, textBody, previewText
     : null;
   const preheader = previewText ? escapeHtml(substitute(previewText, customer)) : undefined;
   const html = rawHtml
-    ? wrapServiceEmail({ body: rawHtml, preheader, footerNote: unsubFooter, darkAwareBody: bodyIsDarkAware(rawHtml) })
+    ? wrapServiceEmail({ body: rawHtml, preheader, footerNote: unsubFooter, darkAwareBody: bodyIsDarkAware(htmlBody) })
     : '';
   const text = isNewsletterAutomation(template)
     ? ensureLegalTextFooter(rawText, { unsubscribeUrl })
