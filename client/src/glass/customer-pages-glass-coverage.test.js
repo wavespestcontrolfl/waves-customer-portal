@@ -15,13 +15,18 @@ const ALLOWLIST = new Set(['CardPage']);
 
 describe('customer routes glass coverage', () => {
   it('every customer page component imported by App.jsx mounts useGlassSurface or EstimateGlassTheme', () => {
-    const imports = [...APP_SRC.matchAll(/const\s+(\w+)\s*=\s*lazyWithRetry\(\(\)\s*=>\s*import\(['"]\.\/pages\/([^'"]+)['"]\)/g)];
-    expect(imports.length).toBeGreaterThan(20);
-
-    const missing = [];
-    for (const [, symbol, relPath] of imports) {
+    const lazyImports = [...APP_SRC.matchAll(/const\s+(\w+)\s*=\s*lazyWithRetry\(\(\)\s*=>\s*import\(['"]\.\/pages\/([^'"]+)['"]\)/g)];
+    const eagerImports = [...APP_SRC.matchAll(/^import\s+(\w+)\s+from\s+['"]\.\/pages\/([^'"]+)['"];?/gm)];
+    const customerPages = [];
+    for (const [, symbol, relPath] of [...eagerImports, ...lazyImports]) {
       if (relPath.startsWith('admin/') || relPath.startsWith('tech/')) continue;
       if (symbol.startsWith('Admin') || symbol.startsWith('Tech')) continue;
+      customerPages.push([symbol, relPath]);
+    }
+    expect(customerPages.length).toBeGreaterThan(20);
+
+    const missing = [];
+    for (const [symbol, relPath] of customerPages) {
       if (ALLOWLIST.has(symbol)) continue;
       const file = path.join(PAGES_DIR, `${relPath}.jsx`);
       if (!fs.existsSync(file)) continue;

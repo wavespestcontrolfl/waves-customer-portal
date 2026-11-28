@@ -24,6 +24,29 @@ import './glass-theme.css';
 let sharedScene = null;
 let stillUsers = 0;
 
+const SCENE_HTML_BACKGROUND = [
+  'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
+  'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
+  'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
+  'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
+  'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
+  'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
+].join(',');
+
+function applySceneDom(html, scene) {
+  html.setAttribute('data-glass-theme', '');
+  // One scene for every customer page (owner 2026-09-03: invoices, receipts
+  // and statements look like the estimate — the quieter wash is gone).
+  html.style.background = SCENE_HTML_BACKGROUND;
+  document.body.style.setProperty('background', 'transparent', 'important');
+  if (scene.root) {
+    scene.root.style.position = 'relative';
+    scene.root.style.zIndex = '1';
+  }
+  if (!scene.orbs.isConnected) document.body.prepend(scene.orbs);
+  if (!scene.grain.isConnected) document.body.appendChild(scene.grain);
+}
+
 /**
  * Mounts the one scene: html attribute, mesh background, the parallax orbs
  * + film grain. Returns the orb container for pointer FX
@@ -33,32 +56,12 @@ let stillUsers = 0;
  */
 export function applyGlassScene({ motion = true } = {}) {
   const html = document.documentElement;
-  if (sharedScene && (!sharedScene.orbs?.isConnected || !html.hasAttribute('data-glass-theme'))) {
-    sharedScene = null;
-  }
   if (!sharedScene) {
     const prevHtmlBg = html.style.background;
     const prevBodyBg = document.body.style.background;
     const root = document.getElementById('root');
     const prevRootPosition = root ? root.style.position : '';
     const prevRootZIndex = root ? root.style.zIndex : '';
-
-    html.setAttribute('data-glass-theme', '');
-    // One scene for every customer page (owner 2026-09-03: invoices, receipts
-    // and statements look like the estimate — the quieter wash is gone).
-    html.style.background = [
-      'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
-      'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
-      'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
-      'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
-      'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
-      'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
-    ].join(',');
-    document.body.style.setProperty('background', 'transparent', 'important');
-    if (root) {
-      root.style.position = 'relative';
-      root.style.zIndex = '1';
-    }
 
     const orbs = document.createElement('div');
     orbs.className = 'glass-scene-orbs';
@@ -73,14 +76,12 @@ export function applyGlassScene({ motion = true } = {}) {
       .map((b) => `<div class="glass-orb" style="position:absolute;left:${b[0]};top:${b[1]};width:${b[2]};height:${b[2]};border-radius:50%;background:${b[3]};filter:blur(70px);will-change:transform;"></div>`)
       .join('')
       + '<div style="position:absolute;inset:-10%;background:radial-gradient(circle, rgba(4,57,94,.28) 0 1px, transparent 1.4px);background-size:24px 24px;opacity:.14;"></div>';
-    document.body.prepend(orbs);
 
     const grainSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncA type="linear" slope="0.055"/></feComponentTransfer></filter><rect width="180" height="180" filter="url(%23n)"/></svg>';
     const grain = document.createElement('div');
     grain.className = 'glass-scene-grain';
     grain.setAttribute('aria-hidden', 'true');
     grain.style.backgroundImage = `url("data:image/svg+xml;utf8,${encodeURIComponent(grainSvg).replace(/%2523/g, '%23')}")`;
-    document.body.appendChild(grain);
 
     sharedScene = {
       users: 0,
@@ -92,6 +93,11 @@ export function applyGlassScene({ motion = true } = {}) {
       prevRootPosition,
       prevRootZIndex,
     };
+    applySceneDom(html, sharedScene);
+  } else if (!sharedScene.orbs?.isConnected || !sharedScene.grain?.isConnected || !html.hasAttribute('data-glass-theme')) {
+    // Repair the active singleton in place so earlier consumers retain the
+    // original style snapshot and never tear down a later consumer's mount.
+    applySceneDom(html, sharedScene);
   }
 
   const scene = sharedScene;
@@ -103,7 +109,7 @@ export function applyGlassScene({ motion = true } = {}) {
     cleaned = true;
     detachMotion();
     scene.users = Math.max(0, scene.users - 1);
-    if (scene.users > 0) return;
+    if (scene.users > 0 || sharedScene !== scene) return;
     if (scene.orbs) scene.orbs.remove();
     if (scene.grain) scene.grain.remove();
     html.removeAttribute('data-glass-theme');
@@ -113,7 +119,7 @@ export function applyGlassScene({ motion = true } = {}) {
       scene.root.style.position = scene.prevRootPosition;
       scene.root.style.zIndex = scene.prevRootZIndex;
     }
-    if (sharedScene === scene) sharedScene = null;
+    sharedScene = null;
   };
   return { orbs: scene.orbs, cleanup };
 }

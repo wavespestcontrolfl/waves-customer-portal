@@ -137,6 +137,25 @@ describe('useGlassSurface', () => {
     unmount();
   });
 
+  it('repairs an externally detached scene in place without earlier unmounts tearing down the replacement', () => {
+    document.documentElement.style.background = 'rgb(250, 250, 250)';
+    const first = renderHook(() => useGlassSurface(true, { motion: false }));
+    document.querySelector('.glass-scene-orbs')?.remove();
+    document.documentElement.removeAttribute('data-glass-theme');
+
+    const second = renderHook(() => useGlassSurface(true, { motion: false }));
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.querySelector('.glass-scene-orbs')).not.toBeNull();
+
+    first.unmount();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
+    expect(document.querySelector('.glass-scene-orbs')).not.toBeNull();
+
+    second.unmount();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
+    expect(document.documentElement.style.background).toBe('rgb(250, 250, 250)');
+  });
+
 });
 
 describe('useGlassSurface motion: false (customer portal, motion audit 2026-11-02, owner pick 3A)', () => {
