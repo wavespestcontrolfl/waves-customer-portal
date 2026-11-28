@@ -5,7 +5,8 @@ const {
   CUSTOMER_PROMPT_COLUMNS,
   pickTechAddonPrompt,
   collectResidentialKeysOrNull,
-  loadOffCalendarOwnedKeys,
+  isRecurringAddonRow,
+  loadScopedOngoingRootRows,
   techAddonPromptFacts,
 } = require('../services/tech-addon-prompt');
 
@@ -67,11 +68,27 @@ const STAMPED_VISIT = {
   service_address_zip: '34231',
 };
 
+const PEST_LIVE_ROW = {
+  id: 'svc-1',
+  service_type: 'Quarterly Pest Control',
+  service_key: 'pest-quarterly',
+  service_category: 'pest',
+};
+
+const LAWN_LIVE_ROW = {
+  id: 'svc-2',
+  service_type: 'Lawn Care',
+  service_key: 'lawn-care',
+  service_category: 'lawn',
+};
+
 const BASE_DEPS = {
-  resolvedPropertyTypeBlocker: async () => null,
+  planStartBlocker: async () => 'has_plan',
   loadCatalogFieldsByRowId: async () => new Map([['svc-1', { service_key: 'pest-quarterly', service_category: 'pest' }]]),
-  loadOffCalendarOwnedKeys: async () => [],
-  loadOngoingSeriesOwnedKeys: async () => [],
+  loadScopedLiveRows: async () => [PEST_LIVE_ROW],
+  loadScopedOffCalendarRows: async () => [],
+  loadScopedOngoingRootRows: async () => [],
+  loadScopedVisitAddonKeys: async () => [],
   loadActivePrepayCoveredFamilies: async () => [],
   loadActivePlanHoldFamilies: async () => [],
 };
@@ -119,24 +136,24 @@ describe('pickTechAddonPrompt', () => {
 });
 
 describe('techAddonPromptFacts', () => {
-  test('returns Lawn Care prompt, checks deleted_at, uses primary streetScope, shared commercial classifier, and strictProbe ledger', async () => {
+  test('returns Lawn Care prompt, checks deleted_at, uses planStartBlocker, primary streetScope, and strictProbe ledger', async () => {
     const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const resolvedPropertyTypeBlocker = jest.fn(async () => null);
-    const loadScopedLiveOwnedKeys = jest.fn(async () => ['pest_control']);
+    const planStartBlocker = jest.fn(async () => 'has_plan');
+    const loadScopedLiveRows = jest.fn(async () => [PEST_LIVE_ROW]);
     const loadPlanComponents = jest.fn(async () => [{ family_key: 'pest_control', monthly_rate: 39 }]);
 
     const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
       ...BASE_DEPS,
-      resolvedPropertyTypeBlocker,
-      loadScopedLiveOwnedKeys,
+      planStartBlocker,
+      loadScopedLiveRows,
       loadPlanComponents,
     });
 
     expect(CUSTOMER_PROMPT_COLUMNS).toEqual(expect.arrayContaining(['service_paused_at', 'service_pause_reason', 'pipeline_stage', 'contact_role']));
     expect(dbh.deletedChecked.called).toBe(true);
-    expect(resolvedPropertyTypeBlocker).toHaveBeenCalledWith(dbh, 'cust-1', 'single_family');
+    expect(planStartBlocker).toHaveBeenCalledWith(dbh, 'cust-1');
     expect(prompt?.targetFamily).toBe('lawn_care');
-    expect(loadScopedLiveOwnedKeys).toHaveBeenCalledWith(dbh, 'cust-1', {
+    expect(loadScopedLiveRows).toHaveBeenCalledWith(dbh, 'cust-1', {
       streetScope: {
         estimateStreet: '100mainstreet|sarasota|34231',
         customerPrimaryStreet: '100mainstreet|sarasota|34231',
@@ -146,213 +163,144 @@ describe('techAddonPromptFacts', () => {
     expect(loadPlanComponents).toHaveBeenCalledWith(dbh, 'cust-1', { strictProbe: true });
   });
 
-  test('excludes churned customers and whole-account operator service holds (seriesCustomerSkipReason)', async () => {
+  test('excludes churned customers, whole-account operator holds, commercial accounts, and non-plan customers', async () => {
     for (const row of [
       { ...RESIDENTIAL_CUSTOMER, pipeline_stage: 'churned' },
       { ...RESIDENTIAL_CUSTOMER, service_paused_at: new Date('2026-11-20T00:00:00Z'), service_pause_reason: 'operator_hold' },
       { ...RESIDENTIAL_CUSTOMER, active: false },
     ]) {
       const dbh = makeFakeDb({ customerRow: row });
-      const loadScopedLiveOwnedKeys = jest.fn(async () => ['pest_control']);
+      const loadScopedLiveRows = jest.fn(async () => [PEST_LIVE_ROW]);
       const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
         ...BASE_DEPS,
-        loadScopedLiveOwnedKeys,
+        loadScopedLiveRows,
         loadPlanComponents: async () => [],
       });
       expect(prompt).toBeNull();
-      expect(loadScopedLiveOwnedKeys).not.toHaveBeenCalled();
+      expect(loadScopedLiveRows).not.toHaveBeenCalled();
     }
-  });
 
-  test('suppresses prompt for shared commercial property classification (hotels, property-manager condos), ANY populated building_use, or commercial catalog row', async () => {
-    const hotelDbh = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, property_type: 'hotel' } });
-    const hotelLoadKeys = jest.fn(async () => ['pest_control']);
-    const hotelPrompt = await techAddonPromptFacts(STAMPED_VISIT, hotelDbh, {
-      ...BASE_DEPS,
-      resolvedPropertyTypeBlocker: async () => 'commercial',
-      loadScopedLiveOwnedKeys: hotelLoadKeys,
-      loadPlanComponents: async () => [],
-    });
-    expect(hotelPrompt).toBeNull();
-    expect(hotelLoadKeys).not.toHaveBeenCalled();
-
-    for (const row of [
-      { ...RESIDENTIAL_CUSTOMER, building_use: 'nonresidential' },
-      { ...RESIDENTIAL_CUSTOMER, building_use: 'residential' },
-    ]) {
-      const dbh = makeFakeDb({ customerRow: row });
-      const loadScopedLiveOwnedKeys = jest.fn(async () => ['pest_control']);
+    for (const blocker of ['commercial', 'not_live', null]) {
+      const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
+      const loadScopedLiveRows = jest.fn(async () => [PEST_LIVE_ROW]);
       const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
         ...BASE_DEPS,
-        loadScopedLiveOwnedKeys,
+        planStartBlocker: async () => blocker,
+        loadScopedLiveRows,
         loadPlanComponents: async () => [],
       });
       expect(prompt).toBeNull();
-      expect(loadScopedLiveOwnedKeys).not.toHaveBeenCalled();
+      expect(loadScopedLiveRows).not.toHaveBeenCalled();
     }
-
-    const dbh = makeFakeDb({ customerRow: { ...RESIDENTIAL_CUSTOMER, property_type: null } });
-    const loadScopedLiveOwnedKeys = jest.fn(async () => ['pest_control']);
-    const prompt = await techAddonPromptFacts(
-      { ...STAMPED_VISIT, service_type: 'Pest Control' },
-      dbh,
-      {
-        ...BASE_DEPS,
-        loadCatalogFieldsByRowId: async () => new Map([['svc-1', { service_key: 'commercial-pest', catalog_name: 'Commercial Pest' }]]),
-        loadScopedLiveOwnedKeys,
-        loadPlanComponents: async () => [],
-      },
-    );
-    expect(prompt).toBeNull();
-    expect(loadScopedLiveOwnedKeys).not.toHaveBeenCalled();
   });
 
-  test('suppresses prompt when an ordinary live recurring row or off-calendar row at this premises is commercial', async () => {
-    expect(collectResidentialKeysOrNull([
-      { id: 'svc-live-comm', service_type: 'Pest Control', service_key: 'commercial-pest', catalog_name: 'Commercial Pest' },
-    ])).toBeNull();
+  test('includes recurring add-ons on scoped visits (respecting cadence) and suppresses duplicate pitch', async () => {
+    expect(isRecurringAddonRow({ recurring_pattern: 'quarterly' })).toBe(true);
+    expect(isRecurringAddonRow({ recurring_pattern: null })).toBe(true);
+    expect(isRecurringAddonRow({ recurring_pattern: 'one_time' })).toBe(false);
+    expect(isRecurringAddonRow({ recurring_pattern: 'none' })).toBe(false);
 
     const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const pLive = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+    const loadScopedVisitAddonKeys = jest.fn(async () => ['pest_control']);
+    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
       ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => null,
+      loadScopedLiveRows: async () => [LAWN_LIVE_ROW],
+      loadScopedVisitAddonKeys,
       loadPlanComponents: async () => [],
     });
-    expect(pLive).toBeNull();
+    expect(loadScopedVisitAddonKeys).toHaveBeenCalledWith(dbh, ['svc-2']);
+    expect(prompt).toBeNull();
+  });
 
-    const legacyCommercialRow = {
-      id: 'svc-legacy-comm',
+  test('applies recurring_template_overrides + catalog resolution on ongoing series roots', async () => {
+    const rootId = '11111111-1111-4111-8111-111111111111';
+    const lawnSvcId = '22222222-2222-4222-8222-222222222222';
+    const oldRoot = {
+      id: rootId,
       customer_id: 'cust-1',
-      service_type: 'Commercial Lawn Care',
-      scheduled_date: '2099-01-15',
-      status: 'scheduled',
-      source: 'recurring',
-      is_recurring: null,
-      recurring_parent_id: 'parent-1',
-      is_callback: false,
-      followup_included: false,
+      service_type: 'Quarterly Pest Control',
+      is_recurring: true,
+      recurring_ongoing: true,
+      recurring_parent_id: null,
       service_address_line1: '100 Main St',
       service_address_city: 'Sarasota',
       service_address_zip: '34231',
+      recurring_template_overrides: JSON.stringify({
+        service_type: 'Lawn Care',
+        service_id: lawnSvcId,
+      }),
     };
-    let callIdx = 0;
-    const offCalDb = () => {
-      const idx = callIdx++;
-      const q = {
-        where: () => q,
-        whereNull: () => q,
-        whereNotNull: () => q,
-        select: async () => (idx === 0 ? [legacyCommercialRow] : []),
-      };
-      return q;
+    const mockDb = (table) => {
+      if (table === 'scheduled_services') {
+        const q = {
+          columnInfo: async () => ({ recurring_ongoing: true, recurring_template_overrides: true }),
+          where: () => q,
+          whereNull: () => q,
+          whereIn: () => q,
+          pluck: async () => [rootId],
+          select: async () => [oldRoot],
+        };
+        return q;
+      }
+      if (table === 'services') {
+        const q = {
+          whereIn: () => q,
+          select: async () => [{ id: lawnSvcId, service_key: 'lawn-care', category: 'lawn', name: 'Lawn Care' }],
+        };
+        return q;
+      }
+      throw new Error(`Unexpected table: ${table}`);
     };
     const streetScope = {
       estimateStreet: '100mainstreet|sarasota|34231',
       customerPrimaryStreet: '100mainstreet|sarasota|34231',
       requireSharedLocality: true,
     };
-    const offCalResult = await loadOffCalendarOwnedKeys(offCalDb, 'cust-1', {
+    const resolved = await loadScopedOngoingRootRows(mockDb, 'cust-1', {
       streetScope,
-      catalogById: new Map(),
+      catalogById: new Map([[rootId, { service_key: 'pest-quarterly', service_category: 'pest' }]]),
     });
-    expect(offCalResult).toBeNull();
+    expect(collectResidentialKeysOrNull(resolved)).toEqual(['lawn_care']);
   });
 
-  test('suppresses prompt when paid annual prepay covers target family OR when prepay coverage family is unknown', async () => {
+  test('suppresses prompt on commercial row, paid prepay coverage, unattributed ledger, plan hold, or secondary property', async () => {
+    expect(collectResidentialKeysOrNull([
+      { id: 'svc-live-comm', service_type: 'Pest Control', service_key: 'commercial-pest', catalog_name: 'Commercial Pest' },
+    ])).toBeNull();
+
     const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const pCovered = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+    expect(await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      ...BASE_DEPS, loadActivePrepayCoveredFamilies: async () => ['lawn_care'], loadPlanComponents: async () => [],
+    })).toBeNull();
+    expect(await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      ...BASE_DEPS, loadActivePrepayCoveredFamilies: async () => null, loadPlanComponents: async () => [],
+    })).toBeNull();
+    expect(await techAddonPromptFacts(STAMPED_VISIT, dbh, {
       ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => ['pest_control'],
-      loadActivePrepayCoveredFamilies: async () => ['lawn_care'],
-      loadPlanComponents: async () => [],
-    });
-    expect(pCovered).toBeNull();
+      loadPlanComponents: async () => [{ family_key: 'unattributed', monthly_rate: 45 }],
+    })).toBeNull();
+    expect(await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      ...BASE_DEPS, loadActivePlanHoldFamilies: async () => ['lawn_care'], loadPlanComponents: async () => [],
+    })).toBeNull();
 
-    const pUnknown = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
-      ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => ['pest_control'],
-      loadActivePrepayCoveredFamilies: async () => null,
-      loadPlanComponents: async () => [],
-    });
-    expect(pUnknown).toBeNull();
-  });
-
-  test('suppresses prompt when an ongoing series root between visits covers the target family', async () => {
-    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
-      ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => ['pest_control'],
-      loadOngoingSeriesOwnedKeys: async () => ['lawn_care'],
-      loadPlanComponents: async () => [],
-    });
-    expect(prompt).toBeNull();
-  });
-
-  test('suppresses prompt when plan-rate ledger contains positive unattributed billed coverage', async () => {
-    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const prompt = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
-      ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => ['pest_control'],
-      loadPlanComponents: async () => [
-        { family_key: 'pest_control', monthly_rate: 39 },
-        { family_key: 'unattributed', monthly_rate: 45 },
-      ],
-    });
-    expect(prompt).toBeNull();
-  });
-
-  test('suppresses prompt when legacy off-calendar recurring visit or active plan hold covers target family', async () => {
-    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const p1 = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
-      ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => ['pest_control'],
-      loadOffCalendarOwnedKeys: async () => ['lawn_care'],
-      loadPlanComponents: async () => [],
-    });
-    expect(p1).toBeNull();
-
-    const p2 = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
-      ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => ['pest_control'],
-      loadActivePlanHoldFamilies: async () => ['lawn_care'],
-      loadPlanComponents: async () => [],
-    });
-    expect(p2).toBeNull();
-  });
-
-  test('suppresses prompt on secondary property so Field Lead never quotes the wrong address', async () => {
-    const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const loadScopedLiveOwnedKeys = jest.fn(async () => ['pest_control']);
     const secondaryVisit = {
       ...STAMPED_VISIT,
       service_address_line1: '999 Beach Rd',
       service_address_city: 'Venice',
       service_address_zip: '34285',
     };
-    const prompt = await techAddonPromptFacts(secondaryVisit, dbh, {
-      ...BASE_DEPS,
-      loadScopedLiveOwnedKeys,
-      loadPlanComponents: async () => [],
-    });
-    expect(prompt).toBeNull();
-    expect(loadScopedLiveOwnedKeys).not.toHaveBeenCalled();
+    expect(await techAddonPromptFacts(secondaryVisit, dbh, {
+      ...BASE_DEPS, loadPlanComponents: async () => [],
+    })).toBeNull();
   });
 
-  test('fails closed when ledger, catalog, prepay, or plan_holds lookup throws', async () => {
+  test('fails closed when ledger, catalog, prepay, or planStartBlocker throws', async () => {
     const dbh = makeFakeDb({ customerRow: RESIDENTIAL_CUSTOMER });
-    const p1 = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
-      ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => ['pest_control'],
-      loadPlanComponents: async () => { throw new Error('ledger unavailable'); },
-    });
-    expect(p1).toBeNull();
-
-    const p2 = await techAddonPromptFacts(STAMPED_VISIT, dbh, {
-      ...BASE_DEPS,
-      loadScopedLiveOwnedKeys: async () => ['pest_control'],
-      loadActivePrepayCoveredFamilies: async () => { throw new Error('prepay unavailable'); },
-      loadPlanComponents: async () => [],
-    });
-    expect(p2).toBeNull();
+    expect(await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      ...BASE_DEPS, loadPlanComponents: async () => { throw new Error('ledger down'); },
+    })).toBeNull();
+    expect(await techAddonPromptFacts(STAMPED_VISIT, dbh, {
+      ...BASE_DEPS, planStartBlocker: async () => { throw new Error('eligibility down'); },
+    })).toBeNull();
   });
 });

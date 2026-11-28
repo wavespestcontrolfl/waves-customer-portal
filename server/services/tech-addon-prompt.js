@@ -9,17 +9,19 @@
  * ruling 2026-11-21: never push Tree & Shrub or Termite).
  *
  * Hard constraints honored (delegating to Waves' canonical eligibility authorities):
+ *   - Account-wide commercial & liveness proof: `planStartBlocker` (`plan-start-eligibility.js`)
+ *     checks every commercial record on the account (property type, hotels/motels/churches,
+ *     property-manager condos, any populated `building_use`, saved properties, estimates, leads,
+ *     visits, visit add-ons, series templates, service reports, contracts, calls) and confirms
+ *     an active plan (`blocker === 'has_plan'`).
  *   - Customer lifecycle & holds: `seriesCustomerSkipReason` (`series-customer-eligibility.js`)
  *     excludes deleted, inactive, churned/former, and whole-account operator-paused accounts.
- *   - Commercial classification: `resolvedPropertyTypeBlocker` (`plan-start-eligibility.js`,
- *     covering hotels/motels/churches and property-manager condos), ANY populated `building_use`
- *     (won commercial proposals including HOA residential communities), `waveguard_tier`, visit
- *     catalog row, and every scoped live/off-calendar/ongoing/prepay row BEFORE reducing to keys.
- *   - Existing coverage: premises-scoped live recurring rows (`loadLiveRecurringObligationRows`),
- *     off-calendar legacy/null-status recurring rows, ongoing series roots between visits
- *     (`eligibleSeriesParentIds`), paid annual prepay coverage (`coveredTermsAsOf`, suppressing if
- *     any term's covered family cannot be determined), `plan-rate-ledger` (`strictProbe: true`,
- *     suppressing unattributed positive rates), and active `plan_holds`.
+ *   - Existing coverage at this premises: scoped live recurring rows (`loadLiveRecurringObligationRows`),
+ *     off-calendar legacy/null-status recurring rows, ongoing series roots with current
+ *     `recurring_template_overrides` + catalog resolution (`parseTemplateOverrides`), recurring
+ *     add-ons on scoped visits (`scheduled_service_addons`, respecting each add-on's cadence),
+ *     paid annual prepay coverage (`coveredTermsAsOf`, fail-closed on unknown family),
+ *     `plan-rate-ledger` (`strictProbe: true`, fail-closed on unattributed rate), and `plan_holds`.
  *   - ZERO prices, margins, discount percentages, or hardcoded tier claims (owner 2026-11-04).
  *   - Pre-fills the existing Field Lead modal (`Lawn` or `Pest`) so the office quotes it and
  *     credits the technician's seller commission (owner ruling 2026-11-09).
@@ -34,9 +36,10 @@ const {
 } = require('./waveguard-existing-services');
 const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
 const { eligibleSeriesParentIds } = require('./recurring-series-topup');
+const { parseTemplateOverrides } = require('./recurring-template-overrides');
 const { isCommercialServiceRow } = require('./self-booking-plan-sync');
 const { OFFER_LADDER } = require('./service-report/cross-sell');
-const { resolvedPropertyTypeBlocker } = require('./plan-start-eligibility');
+const { planStartBlocker } = require('./plan-start-eligibility');
 const { seriesCustomerSkipReason, SERIES_CUSTOMER_COLUMNS } = require('./series-customer-eligibility');
 const { coveredTermsAsOf } = require('./annual-prepay-renewals');
 const { loadComponents } = require('./plan-rate-ledger');
@@ -47,6 +50,9 @@ const {
   sameResolvedProperty,
   customerHasOnlyPrimaryPremises,
 } = require('./service-report/visit-property-scope');
+
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ONE_TIME_ADDON_PATTERNS = new Set(['one_time', 'none', 'once']);
 
 const PILLAR_PROMPTS = Object.freeze({
   lawn_care: Object.freeze({
@@ -78,12 +84,6 @@ const OFF_CALENDAR_COLS = Object.freeze([
   'property_id', 'source_estimate_id',
 ]);
 
-/**
- * Pure decision over canonical owned recurring keys + suppressed families (billed plan rates,
- * paid annual prepay coverage, and active plan holds). Returns a prompt descriptor ONLY when the
- * customer owns one pillar in OFFER_LADDER at this premises and neither owns nor is billed/paused
- * or prepaid on the other.
- */
 function pickTechAddonPrompt(ownedKeys, { isCommercial = false, planRateFamilies = [], heldFamilies = [], prepayFamilies = [] } = {}) {
   if (isCommercial || !Array.isArray(ownedKeys)) return null;
   const owned = new Set(ownedKeys);
@@ -96,21 +96,6 @@ function pickTechAddonPrompt(ownedKeys, { isCommercial = false, planRateFamilies
   return PILLAR_PROMPTS[target] ? { ...PILLAR_PROMPTS[target] } : null;
 }
 
-/**
- * Synchronous commercial account/visit marks (paired with async `resolvedPropertyTypeBlocker`
- * for shared commercial property + property-manager condo classification).
- */
-function isDirectlyCommercialVisit(customer, svc) {
-  return Boolean(String(customer.building_use || '').trim())
-    || String(customer.waveguard_tier || '').trim().toLowerCase() === 'commercial'
-    || isCommercialServiceRow(svc);
-}
-
-/**
- * Resolves a primary-premises streetScope for this visit, or null.
- * Secondary-property visits are suppressed because Field Lead saves leads at the customer's
- * primary address (never risk quoting the wrong property).
- */
 async function resolvePrimaryVisitStreetScope(svc, customer, dbh, deps = {}) {
   const primaryStreet = linkage.normalizedStampedStreet(
     customer.address_line1, customer.address_line2, customer.city, customer.zip,
@@ -144,13 +129,48 @@ function collectResidentialKeysOrNull(rows, catalogById = null) {
   return [...keys];
 }
 
-async function loadScopedLiveOwnedKeys(dbh, customerId, { streetScope }) {
-  const joined = await loadLiveRecurringObligationRows(dbh, customerId);
-  const scoped = await filterRowsToStreet(dbh, joined, streetScope);
-  return collectResidentialKeysOrNull(scoped);
+function isRecurringAddonRow(addon) {
+  const pattern = String(addon?.recurring_pattern || '').trim().toLowerCase();
+  if (pattern && ONE_TIME_ADDON_PATTERNS.has(pattern)) return false;
+  return true;
 }
 
-async function loadOffCalendarOwnedKeys(dbh, customerId, { streetScope, catalogById }) {
+/**
+ * Loads recurring add-ons attached to scoped recurring visits (respecting each add-on's
+ * cadence — explicit one-time add-ons do not count as recurring coverage).
+ */
+async function loadScopedVisitAddonKeys(dbh, visitIds) {
+  const ids = [...new Set((visitIds || []).filter(Boolean))];
+  if (!ids.length) return [];
+  const addons = await dbh('scheduled_service_addons as addon')
+    .leftJoin('services as svc', 'addon.service_id', 'svc.id')
+    .whereIn('addon.scheduled_service_id', ids)
+    .select(
+      'addon.service_name', 'addon.service_key_snapshot', 'addon.service_category_snapshot',
+      'addon.recurring_pattern', 'addon.recurring_interval_days',
+      'svc.service_key', 'svc.category as service_category', 'svc.name as catalog_name',
+    );
+  const keys = new Set();
+  for (const addon of addons || []) {
+    if (!isRecurringAddonRow(addon)) continue;
+    const normalized = {
+      service_type: addon.service_name,
+      service_key: addon.service_key || addon.service_key_snapshot || null,
+      service_category: addon.service_category || addon.service_category_snapshot || null,
+      catalog_name: addon.catalog_name || null,
+    };
+    if (isCommercialServiceRow(normalized)) return null;
+    for (const key of ownershipKeysForRow(normalized)) keys.add(key);
+  }
+  return [...keys];
+}
+
+async function loadScopedLiveRows(dbh, customerId, { streetScope }) {
+  const joined = await loadLiveRecurringObligationRows(dbh, customerId);
+  return filterRowsToStreet(dbh, joined, streetScope);
+}
+
+async function loadScopedOffCalendarRows(dbh, customerId, { streetScope, catalogById }) {
   const [legacy, noStatus] = await Promise.all([
     dbh('scheduled_services')
       .where({ customer_id: customerId })
@@ -166,25 +186,51 @@ async function loadOffCalendarOwnedKeys(dbh, customerId, { streetScope, catalogB
   const live = [...legacy, ...noStatus].filter((row) => isPlanSeriesRow(row) && isLiveObligationRow(row, today));
   if (!live.length) return [];
   const scoped = await filterRowsToStreet(dbh, live, streetScope);
-  return collectResidentialKeysOrNull(scoped, catalogById);
+  return scoped.map((row) => ({ ...row, ...(catalogById.get(row.id) || {}) }));
 }
 
-async function loadOngoingSeriesOwnedKeys(dbh, customerId, { streetScope, catalogById }) {
-  const parentIds = await eligibleSeriesParentIds(dbh, { customerId });
-  if (!parentIds?.length) return [];
-  const roots = await dbh('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereIn('id', parentIds)
-    .select(...OFF_CALENDAR_COLS);
-  const scoped = await filterRowsToStreet(dbh, roots, streetScope);
-  return collectResidentialKeysOrNull(scoped, catalogById);
+async function resolveSeriesRootTemplateRow(row, catalogById, overrideCatalogById) {
+  const overrides = parseTemplateOverrides(row.recurring_template_overrides);
+  if (!overrides) return { ...row, ...(catalogById.get(row.id) || {}) };
+  const merged = { ...row, ...overrides };
+  const svcCatalog = overrides.service_id && overrideCatalogById.get(overrides.service_id);
+  return {
+    ...merged,
+    service_key: svcCatalog?.service_key || overrides.service_key_snapshot || null,
+    service_category: svcCatalog?.category || overrides.service_category_snapshot || null,
+    catalog_name: svcCatalog?.name || null,
+  };
 }
 
 /**
- * Checks paid annual prepay terms still covering today or later (`coveredTermsAsOf`).
- * Returns covered family keys, or `null` (fail-closed suppression) if any active paid term
- * is commercial or its covered family cannot be determined.
+ * Loads ongoing series roots between visits (`eligibleSeriesParentIds`) and applies current
+ * `recurring_template_overrides` + catalog lookup so a series edited from Pest -> Lawn
+ * classifies under its current effective service.
  */
+async function loadScopedOngoingRootRows(dbh, customerId, { streetScope, catalogById }) {
+  const parentIds = await eligibleSeriesParentIds(dbh, { customerId });
+  if (!parentIds?.length) return [];
+  const cols = await dbh('scheduled_services').columnInfo();
+  const selectCols = cols.recurring_template_overrides
+    ? [...OFF_CALENDAR_COLS, 'recurring_template_overrides']
+    : [...OFF_CALENDAR_COLS];
+  const roots = await dbh('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereIn('id', parentIds)
+    .select(...selectCols);
+  const scoped = await filterRowsToStreet(dbh, roots, streetScope);
+  const overrideServiceIds = [...new Set(
+    scoped
+      .map((r) => parseTemplateOverrides(r.recurring_template_overrides)?.service_id)
+      .filter((id) => UUID_SHAPE.test(String(id || ''))),
+  )];
+  const overrideCatalogRows = overrideServiceIds.length
+    ? await dbh('services').whereIn('id', overrideServiceIds).select('id', 'service_key', 'category', 'name')
+    : [];
+  const overrideCatalogById = new Map(overrideCatalogRows.map((s) => [s.id, s]));
+  return Promise.all(scoped.map((row) => resolveSeriesRootTemplateRow(row, catalogById, overrideCatalogById)));
+}
+
 async function loadActivePrepayCoveredFamilies(dbh, customerId) {
   const terms = await coveredTermsAsOf(dbh, null)
     .where('t.customer_id', customerId)
@@ -210,11 +256,12 @@ async function loadActivePlanHoldFamilies(dbh, customerId) {
 }
 
 const DEFAULT_FACT_DEPS = Object.freeze({
-  resolvedPropertyTypeBlocker,
+  planStartBlocker,
   loadCatalogFieldsByRowId,
-  loadScopedLiveOwnedKeys,
-  loadOffCalendarOwnedKeys,
-  loadOngoingSeriesOwnedKeys,
+  loadScopedLiveRows,
+  loadScopedOffCalendarRows,
+  loadScopedOngoingRootRows,
+  loadScopedVisitAddonKeys,
   loadActivePrepayCoveredFamilies,
   loadPlanComponents: loadComponents,
   loadActivePlanHoldFamilies,
@@ -233,39 +280,41 @@ async function techAddonPromptFacts(svc, dbh, deps = {}) {
       .where({ id: svc.customer_id })
       .whereNull('deleted_at')
       .first(...CUSTOMER_PROMPT_COLUMNS);
-    if (seriesCustomerSkipReason(customer) || isDirectlyCommercialVisit(customer, svc)) return null;
+    if (seriesCustomerSkipReason(customer) || isCommercialServiceRow(svc)) return null;
 
-    const [propertyBlocker, catalogById] = await Promise.all([
-      d.resolvedPropertyTypeBlocker(dbh, svc.customer_id, customer.property_type),
+    const [blocker, catalogById] = await Promise.all([
+      d.planStartBlocker(dbh, svc.customer_id),
       d.loadCatalogFieldsByRowId(dbh, svc.customer_id),
     ]);
-    if (propertyBlocker || !catalogById) return null;
+    if (blocker !== 'has_plan' || !catalogById) return null;
     if (isCommercialServiceRow({ ...svc, ...(catalogById.get(svc.id) || {}) })) return null;
 
     const streetScope = await resolvePrimaryVisitStreetScope(svc, customer, dbh, deps);
     if (!streetScope) return null;
 
-    const [liveKeys, offCalKeys, ongoingKeys, prepayFamilies, planComponents, heldFamilies] = await Promise.all([
-      d.loadScopedLiveOwnedKeys(dbh, svc.customer_id, { streetScope }),
-      d.loadOffCalendarOwnedKeys(dbh, svc.customer_id, { streetScope, catalogById }),
-      d.loadOngoingSeriesOwnedKeys(dbh, svc.customer_id, { streetScope, catalogById }),
+    const [liveRows, offCalRows, ongoingRows, prepayFamilies, planComponents, heldFamilies] = await Promise.all([
+      d.loadScopedLiveRows(dbh, svc.customer_id, { streetScope }),
+      d.loadScopedOffCalendarRows(dbh, svc.customer_id, { streetScope, catalogById }),
+      d.loadScopedOngoingRootRows(dbh, svc.customer_id, { streetScope, catalogById }),
       d.loadActivePrepayCoveredFamilies(dbh, svc.customer_id),
       d.loadPlanComponents(dbh, svc.customer_id, { strictProbe: true }),
       d.loadActivePlanHoldFamilies(dbh, svc.customer_id),
     ]);
-    if (!liveKeys || !offCalKeys || !ongoingKeys || !prepayFamilies) return null;
+    const allScopedRows = [...(liveRows || []), ...(offCalRows || []), ...(ongoingRows || [])];
+    const visitKeys = collectResidentialKeysOrNull(allScopedRows);
+    const addonKeys = await d.loadScopedVisitAddonKeys(dbh, allScopedRows.map((r) => r.id));
+    if (!visitKeys || !addonKeys || !prepayFamilies) return null;
 
     const activeRates = (planComponents || []).filter((row) => Number(row.monthly_rate) > 0);
     if (activeRates.some((row) => !row.family_key || row.family_key === 'unattributed')) return null;
 
-    return pickTechAddonPrompt([...new Set([...liveKeys, ...offCalKeys, ...ongoingKeys])], {
+    return pickTechAddonPrompt([...new Set([...visitKeys, ...addonKeys])], {
       isCommercial: false,
       planRateFamilies: activeRates.map((row) => String(row.family_key)),
       heldFamilies,
       prepayFamilies,
     });
   } catch {
-    // Fail-closed: never pitch a service when ownership, holds, prepay, catalog, billing, or premises cannot be proved.
     return null;
   }
 }
@@ -276,9 +325,11 @@ module.exports = {
   pickTechAddonPrompt,
   resolvePrimaryVisitStreetScope,
   collectResidentialKeysOrNull,
-  loadScopedLiveOwnedKeys,
-  loadOffCalendarOwnedKeys,
-  loadOngoingSeriesOwnedKeys,
+  isRecurringAddonRow,
+  loadScopedVisitAddonKeys,
+  loadScopedLiveRows,
+  loadScopedOffCalendarRows,
+  loadScopedOngoingRootRows,
   loadActivePrepayCoveredFamilies,
   loadActivePlanHoldFamilies,
   techAddonPromptFacts,
