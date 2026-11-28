@@ -213,11 +213,13 @@ function fallbackParse(query, now) {
       : { dateFrom: null, dateTo: null, timeOfDay, understood: false };
   }
 
-  // Explicit weekday ("next tuesday", "on friday", "thursday") — never match a
-  // negated or excluded weekday ("except wednesday", "can't do next friday") on fallback.
-  const dayMatch = NEGATION_CONSTRAINT_RE.test(q)
-    ? null
-    : q.match(new RegExp(`\\b(next\\s+)?(${WEEKDAY_PATTERN})\\b`));
+  // Explicit weekday ("next tuesday", "on friday", "thursday") — require the
+  // whole phrase to match the deterministic grammar so ambiguous or negated
+  // requests ("Friday or Saturday morning", "can't do next friday") stay
+  // unresolved instead of silently collapsing to one day on fallback.
+  const dayMatch = canFastParseDeterministically(q) && !NEGATION_CONSTRAINT_RE.test(q)
+    ? q.match(new RegExp(`\\b(next\\s+)?(${WEEKDAY_PATTERN})\\b`))
+    : null;
   if (dayMatch) {
     return single(weekdayFrom(now, WEEKDAYS[dayMatch[2]], !!dayMatch[1]));
   }

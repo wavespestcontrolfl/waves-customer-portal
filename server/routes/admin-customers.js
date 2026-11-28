@@ -2045,7 +2045,7 @@ async function findAccountByContact(trx, {
     ? trx('customers')
       .whereRaw(
         exactUsPhone
-          ? "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)"
+          ? "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')"
           : "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?",
         exactUsPhone ? [digits, `1${digits}`] : [`%${digits}`],
       )

@@ -980,10 +980,12 @@ function consumedHandoffContactMatches(submitted, consumedCust) {
   return !!submittedEmail && submittedEmail === String(consumedCust?.email || '').trim().toLowerCase();
 }
 
+const EXACT_US_PHONE_SQL = "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')";
+
 function queryActiveCustomerByPhone(rawDigits) {
   const phone10 = normalizeUsPhoneLast10(rawDigits);
   const query = phone10
-    ? db('customers').whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)", [phone10, `1${phone10}`])
+    ? db('customers').whereRaw(EXACT_US_PHONE_SQL, [phone10, `1${phone10}`])
     : db('customers').whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [rawDigits]);
   return query
     .where(function () {
@@ -995,11 +997,15 @@ function queryActiveCustomerByPhone(rawDigits) {
 }
 
 async function findExistingCustomerForPhoneConfirm(phoneDigits, customerId) {
+  const phone10 = normalizeUsPhoneLast10(phoneDigits);
+  if (!phone10) return null;
+  const isUsMatch = (row) => !!row && (!row.phone || normalizeUsPhoneLast10(row.phone) === phone10);
   if (customerId) {
-    const matched = await queryActiveCustomerByPhone(phoneDigits).where('id', customerId).first();
-    if (matched) return matched;
+    const matched = await queryActiveCustomerByPhone(phone10).where('id', customerId).first();
+    if (isUsMatch(matched)) return matched;
   }
-  return queryActiveCustomerByPhone(phoneDigits).first();
+  const found = await queryActiveCustomerByPhone(phone10).first();
+  return isUsMatch(found) ? found : null;
 }
 
 async function resolveSelfBookingPhoneOwner(phoneDigits, customerId) {
@@ -1050,11 +1056,17 @@ router.get('/customer-lookup', async (req, res, next) => {
 
       // SECURITY: never disclose a customer's PII (name/email/address) on a
       // phone number alone — that lets anyone enumerate identities from a
-      // number they merely possess. Match the submitted address across all
-      // active profiles sharing this US phone (e.g. a legacy 10-digit row and
-      // an E.164 row) so an unmatched sibling never hides the real property.
+      // number they merely possess. Validate stored NANP numbers, match the
+      // submitted address across all shared-phone profiles, prefer exact unit
+      // matches via narrowCandidatesByUnit, and fail closed when multiple
+      // profiles remain ambiguous.
       const candidates = await queryActiveCustomerByPhone(digits).select(phoneCustomerFields);
-      customer = (candidates || []).find((row) => addressMatchesCustomer(row, address, zip, unit)) || null;
+      const addressMatched = (candidates || []).filter(
+        (row) => normalizeUsPhoneLast10(row.phone) === digits && addressMatchesCustomer(row, address, zip, unit),
+      );
+      const submittedUnit = unit || splitStreetLineUnit(address).unit;
+      const narrowed = narrowCandidatesByUnit(addressMatched, submittedUnit);
+      customer = narrowed.length === 1 ? narrowed[0] : null;
       // address_line2 is needed ABOVE for the unit-aware match but must not
       // be disclosed: a blank submitted unit stays compatible by design, so
       // phone + street knowledge would otherwise read back the apartment
@@ -1062,7 +1074,7 @@ router.get('/customer-lookup', async (req, res, next) => {
       // response carries the street only. The booking UI never consumes
       // either field from this response.
       if (customer) {
-        const { address_line2: _undisclosedUnit, ...publicCustomer } = customer;
+        const { address_line2: _undisclosedUnit, phone: _internalPhone, ...publicCustomer } = customer;
         publicCustomer.address_line1 = splitStreetLineUnit(publicCustomer.address_line1 || '').street
           || publicCustomer.address_line1;
         return res.json({ customer: publicCustomer });

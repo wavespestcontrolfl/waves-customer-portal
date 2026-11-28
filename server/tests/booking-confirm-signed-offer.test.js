@@ -1877,7 +1877,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(res).toMatchObject({ ok: false, status: 409 });
       expect(res.error).toMatch(/already on file/i);
       expect(whereRawCalls).toContainEqual({
-        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)",
+        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')",
         bindings: ['9415551234', '19415551234'],
       });
 
@@ -1924,7 +1924,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       });
       expect(res).toMatchObject({ accountId: 'acct-new', created: true });
       expect(whereRawCalls).toContainEqual({
-        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)",
+        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')",
         bindings: ['9415551234', '19415551234'],
       });
       expect(insertedAccounts).toHaveLength(1);
@@ -1978,7 +1978,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       await handler(req, res, jest.fn((err) => { if (err) throw err; }));
       expect(body.customer).toMatchObject({ id: 'cust-e164', first_name: 'Pat', email: 'pat@example.com' });
       expect(whereRawCalls).toContainEqual({
-        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)",
+        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')",
         bindings: ['9415551234', '19415551234'],
       });
 
@@ -1992,6 +1992,82 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         expect(badBody).toEqual({ customer: null });
         expect(whereRawCalls).toHaveLength(0);
       }
+    });
+
+    test('GET /api/booking/customer-lookup ignores stored foreign E.164 rows, prefers exact apartment unit, and fails closed on ambiguity', async () => {
+      const bookingRouter = require('../routes/booking');
+      const layer = bookingRouter.stack.find((l) => l.route?.path === '/customer-lookup' && l.route.methods.get);
+      const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+      let mockedRows = [];
+      db.mockImplementation((table) => {
+        if (table === 'customers') {
+          const q = {
+            whereRaw: jest.fn().mockReturnThis(),
+            where: jest.fn().mockReturnThis(),
+            andWhere: jest.fn().mockReturnThis(),
+            select: jest.fn().mockImplementation(async () => mockedRows),
+          };
+          return q;
+        }
+        throw new Error(`unexpected table ${table}`);
+      });
+
+      const runLookup = async (query) => {
+        let out;
+        const res = { json: jest.fn((payload) => { out = payload; return res; }) };
+        await handler({ query }, res, jest.fn((err) => { if (err) throw err; }));
+        return out;
+      };
+
+      // 1. A stored foreign E.164 number (+44 2234 5678 = 10 digits) must never match a US phone lookup.
+      mockedRows = [{
+        id: 'cust-foreign',
+        first_name: 'UK',
+        last_name: 'Owner',
+        email: 'uk@example.com',
+        phone: '+4422345678',
+        address_line1: '123 Main St',
+        address_line2: null,
+        city: 'Sarasota',
+        state: 'FL',
+        zip: '34231',
+      }];
+      expect(await runLookup({ phone: '4422345678', address: '123 Main St', zip: '34231' })).toEqual({ customer: null });
+
+      // 2. Shared-phone apartment disambiguation prefers exact unit match over a blank-unit sibling.
+      mockedRows = [
+        {
+          id: 'cust-blank-unit',
+          first_name: 'Pat',
+          last_name: 'Blank',
+          email: 'blank@example.com',
+          phone: '9415551234',
+          address_line1: '123 Main St',
+          address_line2: null,
+          city: 'Sarasota',
+          state: 'FL',
+          zip: '34231',
+        },
+        {
+          id: 'cust-apt-b',
+          first_name: 'Pat',
+          last_name: 'UnitB',
+          email: 'aptb@example.com',
+          phone: '+19415551234',
+          address_line1: '123 Main St',
+          address_line2: 'Apt B',
+          city: 'Sarasota',
+          state: 'FL',
+          zip: '34231',
+        },
+      ];
+      const exactUnit = await runLookup({ phone: '9415551234', address: '123 Main St Apt B', zip: '34231' });
+      expect(exactUnit.customer).toMatchObject({ id: 'cust-apt-b', first_name: 'Pat', last_name: 'UnitB' });
+      expect(exactUnit.customer.address_line2).toBeUndefined();
+      expect(exactUnit.customer.phone).toBeUndefined();
+
+      // 3. Ambiguous shared-phone profiles on the same street fail closed when unit does not uniquely narrow them.
+      expect(await runLookup({ phone: '9415551234', address: '123 Main St', zip: '34231' })).toEqual({ customer: null });
     });
   });
 });

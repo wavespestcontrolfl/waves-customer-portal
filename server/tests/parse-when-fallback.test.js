@@ -166,11 +166,19 @@ describe('parseWhen fast deterministic path and interactive AI policy', () => {
 
   it('fallbackParse does not collapse negated, boundary, or multi-date phrases to one day', () => {
     const nov27 = new Date('2026-11-27T17:00:00Z');
-    for (const phrase of ["Can't do Friday", "can't do next Friday", 'any day except 12/3', 'after 12/3', '12/3 or 12/4']) {
+    for (const phrase of ["Can't do Friday", "can't do next Friday", 'Friday or Saturday morning', 'any day except 12/3', 'after 12/3', '12/3 or 12/4']) {
       expect(fallbackParse(phrase, nov27)).toMatchObject({
         dateFrom: null, dateTo: null, understood: false,
       });
     }
+  });
+
+  it('keeps "Friday or Saturday morning" unresolved when AI times out', async () => {
+    const spy = jest.spyOn(llmCall, 'dispatchWithFallback').mockResolvedValueOnce({ ok: false, json: null });
+    const nov27 = new Date('2026-11-27T17:00:00Z');
+    const res = await parseWhen('Friday or Saturday morning', { now: nov27, minDaysOut: 1, maxDaysOut: 90, defaultWindowDays: 14 });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(res).toMatchObject({ source: 'fallback', understood: false, timeOfDay: 'morning', dateFrom: '2026-11-28', dateTo: '2026-12-11' });
   });
 });
 
