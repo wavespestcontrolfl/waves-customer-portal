@@ -70,6 +70,20 @@ describe("nextStepFor", () => {
     expect(nextStepFor({ metadata: { live_transcription: { early_summary: { text: EARLY, next_step: " ", promises: [] } } } })).toBeNull();
     expect(nextStepFor(null)).toBeNull();
   });
+
+  it("hides early-summary next_step and promises on spam or fulfilled calls (C2-29)", () => {
+    expect(nextStepFor(withNext({ processing_status: "spam" }))).toBeNull();
+    expect(nextStepFor(withNext({ disposition: "spam_discarded" }))).toBeNull();
+    expect(nextStepFor(withNext({ disposition: "booked" }))).toBeNull();
+    expect(nextStepFor(withNext({ ai_extraction: JSON.stringify({ is_spam: true }) }))).toBeNull();
+    expect(nextStepFor(withNext({ ai_extraction: JSON.stringify({ appointment_confirmed: true }) }))).toBeNull();
+    expect(nextStepFor(withNext({
+      metadata: {
+        ...withNext().metadata,
+        early_summary_fulfilled: true,
+      },
+    }))).toBeNull();
+  });
 });
 
 describe("CallLogTabV2 summary block", () => {

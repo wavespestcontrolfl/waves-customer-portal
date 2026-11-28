@@ -286,7 +286,7 @@ const FULL_ATTESTATION = 'TN-Validation-Passed-A';
 // staff acceptance, Sandy, or a key no silent call has) is no silent hang-up.
 const SILENT_COLUMNS = [
   'id', 'direction', 'from_phone', 'to_phone', 'twilio_call_sid', 'status', 'duration_seconds',
-  'answered_by', 'call_outcome', 'metadata', 'created_at', 'updated_at', 'call_recording_consent_disclaimer_played',
+  'answered_by', 'call_outcome', 'source', 'metadata', 'created_at', 'updated_at', 'call_recording_consent_disclaimer_played',
 ];
 // Counters whose database default is 0; a silent call leaves them at 0.
 const ZERO_COUNTER_COLUMNS = ['extraction_attempts', 'retranscribe_attempts', 'processing_generation'];
