@@ -2,6 +2,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import { useLocation, useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { lazyPanel } from '../components/LazyPanel';
+import { staffTab, trackStaffImport } from '../lib/staleChunkReload';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import { AccountHomeLink, signedInSafe } from '../components/brand/BackToAccount';
@@ -75,8 +76,14 @@ function createPreloadablePanel(loader, pick = (mod) => mod?.default) {
   const load = () => {
     if (resolved) return Promise.resolve({ default: resolved });
     if (!inflight) {
-      inflight = loader()
+      const runLoader = () => (typeof window !== 'undefined' && staffTab() ? trackStaffImport(loader) : loader());
+      inflight = runLoader()
         .then((mod) => {
+          // Preserve an undefined missing-module signal so lazyPanel shows its fallback cleanly.
+          if (!mod) {
+            inflight = null;
+            return mod;
+          }
           const Comp = pick(mod);
           if (Comp) resolved = Comp;
           return { default: Comp };
@@ -162,7 +169,7 @@ const LIVE_CHUNK_PRELOADERS = [
 ];
 
 async function preloadReportChunks(payload, effectiveMode) {
-  if (!payload || payload.error || payload.reportVersion !== 'service_report_v1') return;
+  if (!payload || payload.error || payload.reportVersion !== 'service_report_v1' || effectiveMode === 'sms_preview') return;
   if (effectiveMode === 'pdf') {
     await ServiceReportDocument.preload().catch(() => {});
     return;
@@ -173,7 +180,7 @@ async function preloadReportChunks(payload, effectiveMode) {
   if (tasks.length) await Promise.allSettled(tasks);
 }
 
-if (import.meta.env.MODE === 'test') {
+if (import.meta.env.MODE === 'test' && typeof window !== 'undefined') {
   if (!globalThis.__WAVES_TEST_WARMUP__) globalThis.__WAVES_TEST_WARMUP__ = [];
   globalThis.__WAVES_TEST_WARMUP__.push(Promise.allSettled([
     ServiceReportDocument.preload(),

@@ -16,9 +16,8 @@
 // in the page, and the plan, the next visit, the re-service card and the blog follow the lawn sections.
 
 import { cloneElement, useEffect, useState } from 'react';
-import { LawnLayoutSwitch } from './lawnLayoutRules';
-export { LawnLayoutSwitch };
 import ReportText, { reportSectionsForText } from '../ReportSections';
+import { PrintContext } from './lawnPrintContext';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import Icon from '../../Icon';
@@ -36,7 +35,6 @@ import {
   LawnTrends,
   LawnWateringBanner,
   MowingHeightGauge,
-  PrintContext,
   RainLast7DaysChart,
   ScoreRing,
   VisualDiagnosisCards,

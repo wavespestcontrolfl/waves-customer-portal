@@ -18,9 +18,6 @@ import { useState } from 'react';
 import { COLORS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import ReportText from '../ReportSections';
-import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from './fieldKeys';
-
-export { TERMITE_V2_DASHBOARD_FIELD_KEYS };
 
 // ── Surface tokens (shared with the pest / mosquito V2 surface) ─────────────────
 const TEXT = 'var(--text)';

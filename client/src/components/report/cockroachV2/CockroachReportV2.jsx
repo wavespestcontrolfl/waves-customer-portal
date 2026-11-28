@@ -8,9 +8,6 @@ import { COLORS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import Icon from '../../Icon';
 import ReportText from '../ReportSections';
-import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from './fieldKeys';
-
-export { COCKROACH_V2_DASHBOARD_FIELD_KEYS };
 
 const TEXT = 'var(--text)';
 const MUTED = 'var(--muted)';

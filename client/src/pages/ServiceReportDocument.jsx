@@ -5,8 +5,6 @@ import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/produ
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/fieldKeys';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/fieldKeys';
 import { sanitizeReentryCopy } from '../lib/sanitizeReentryCopy';
-
-export { sanitizeReentryCopy };
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
