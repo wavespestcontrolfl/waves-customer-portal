@@ -369,4 +369,72 @@ describe('invoice PDF wrapped discount labels in totalsBlock (B-39)', () => {
     expect(stampRow.page).toBe(1);
     expect(stampRow.y).toBeLessThanOrEqual(730);
   });
+
+  test('keeps Subtotal and TOTAL on the same page for a 15-row invoice with wrapped descriptions', async () => {
+    const lines = Array.from({ length: 15 }, (_, i) => ({
+      description: i < 12
+        ? `Comprehensive Interior & Exterior Perimeter Pest Control Service Visit #${i + 1} with Granular Barrier Application`
+        : `Standard Service Row ${i + 1}`,
+      quantity: 1,
+      unit_price: 20,
+      amount: 20,
+    }));
+    const calls = await captureCalls(() => buildInvoicePDFBuffer(invoice({
+      subtotal: 300,
+      discount_amount: 0,
+      total: 300,
+      line_items: lines,
+    })));
+    const subtotalRow = calls.find((c) => c.text === 'Subtotal');
+    const totalRow = calls.find((c) => c.text === 'TOTAL');
+    expect(subtotalRow).toBeDefined();
+    expect(totalRow).toBeDefined();
+    expect(subtotalRow.page).toBe(totalRow.page);
+    expect(totalRow.y).toBeLessThanOrEqual(730);
+  });
+
+  test('reserves room for the commercial recordkeeping note on a 13-row two-property commercial receipt', async () => {
+    const lines = Array.from({ length: 13 }, (_, i) => ({
+      description: `Commercial Pest Service Row ${i + 1}`,
+      quantity: 1,
+      unit_price: 25,
+      amount: 25,
+      property_id: i < 7 ? 'prop-a' : 'prop-b',
+      property_address: i < 7 ? '100 Main St, Bradenton, FL 34209' : '200 Oak Ave, Sarasota, FL 34236',
+    }));
+    const calls = await captureCalls(() => buildReceiptPDFBuffer(
+      invoice({
+        status: 'paid',
+        paid_at: new Date('2026-07-19T15:00:00Z'),
+        subtotal: 325,
+        discount_amount: 0,
+        total: 325,
+        line_items: lines,
+        customer: {
+          first_name: 'Pat',
+          last_name: 'Commercial',
+          address_line1: '100 Main St',
+          city: 'Bradenton',
+          state: 'FL',
+          zip: '34209',
+          property_type: 'commercial',
+        },
+      }),
+      {
+        amount: 325,
+        refund_amount: 0,
+        card_brand: 'visa',
+        card_last_four: '4242',
+        surcharge_amount_cents: 0,
+        surcharge_rate_bps: 0,
+        metadata: { invoice_id: 'inv-1' },
+      },
+    ));
+    const totalRow = calls.find((c) => c.text === 'TOTAL');
+    const noteRow = calls.find((c) => c.text.includes('Keep this receipt for your records.'));
+    expect(totalRow).toBeDefined();
+    expect(noteRow).toBeDefined();
+    expect(noteRow.page).toBe(totalRow.page);
+    expect(noteRow.y).toBeLessThanOrEqual(730);
+  });
 });

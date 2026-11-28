@@ -388,6 +388,7 @@ function invoiceBreakdownRows(invoice, customer = null) {
 // reserve their measured height so TOTAL never runs off the page.
 const TOTALS_ROW_HEIGHT = 14;
 const TOTALS_LABEL_WIDTH = 160;
+const TOTAL_SECTION_HEIGHT = (highlightTotal) => (highlightTotal ? 34 : 14);
 function totalsRowHeightFor(doc, label) {
   const labelHeight = doc.heightOfString(String(label || ''), { width: TOTALS_LABEL_WIDTH });
   return Math.max(TOTALS_ROW_HEIGHT, Math.ceil(labelHeight) + 4);
@@ -395,6 +396,7 @@ function totalsRowHeightFor(doc, label) {
 function totalsBlockHeight(doc, invoice, opts = {}) {
   const {
     highlightTotal = true, paidStamp = false, refundAmount = 0, customer = null, partPayments = false, surcharge = null,
+    trailingNoteHeight = 0,
   } = opts;
   const facts = invoiceTotalsFacts(invoice, customer);
   doc.save();
@@ -404,7 +406,7 @@ function totalsBlockHeight(doc, invoice, opts = {}) {
   for (const [label] of totalsRowsAboveTotal(facts, surcharge)) {
     height += totalsRowHeightFor(doc, label);
   }
-  height += 10 + (highlightTotal ? 20 : 0);
+  height += TOTAL_SECTION_HEIGHT(highlightTotal);
   const amountPaid = partPayments ? facts.amountPaid : 0;
   if (facts.creditApplied > 0) height += totalsRowHeightFor(doc, 'Account credit applied');
   if (amountPaid > 0) height += totalsRowHeightFor(doc, 'Paid so far');
@@ -418,6 +420,7 @@ function totalsBlockHeight(doc, invoice, opts = {}) {
     height += totalsRowHeightFor(doc, 'Refunded') + totalsRowHeightFor(doc, 'Net paid');
   }
   if (paidStamp) height += 46;
+  if (trailingNoteHeight > 0) height += trailingNoteHeight;
   doc.restore();
   return height;
 }
@@ -491,8 +494,8 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   for (const [label, value] of totalsRowsAboveTotal(facts, opts.surcharge)) row(label, value);
 
   // Reserve room for the separator rule and TOTAL line together so TOTAL and
-  // its dollar amount never split across pages.
-  y = ensureRoom(doc, y, highlightTotal ? 34 : 14);
+  // its dollar amount never split across pages (shared with totalsBlockHeight).
+  y = ensureRoom(doc, y, TOTAL_SECTION_HEIGHT(highlightTotal));
   y += 2;
   doc.save().moveTo(labelX - 10, y).lineTo(x + width, y).lineWidth(0.5).strokeColor(RULE).stroke().restore();
   y += 8;
@@ -661,7 +664,11 @@ function generateInvoicePDF(invoice, res) {
 
   const customerNotes = customerVisibleInvoiceNotes(invoice.notes);
   if (customerNotes) {
-    y += 10;
+    doc.save();
+    doc.fontSize(PDF_TYPE.body).font('Helvetica');
+    const notesH = doc.heightOfString(customerNotes, { width: W, lineGap: 3 });
+    doc.restore();
+    y = ensureRoom(doc, y + 10, 12 + notesH);
     doc.fontSize(PDF_TYPE.caption).font('Helvetica-Bold').fillColor(MUTED).text('NOTES', L, y, { characterSpacing: 1.2 });
     y += 12;
     doc.fontSize(PDF_TYPE.body).font('Helvetica').fillColor(BODY).text(customerNotes, L, y, { width: W, lineGap: 3 });
@@ -704,6 +711,18 @@ function generateReceiptPDF(invoice, payment, res) {
   let y = Math.max(yLeft, yRight) + 16;
   const surcharge = receiptSurchargeFacts(payment);
   const receiptInvoice = invoiceWithSurchargedTotal(invoice, surcharge);
+  // Commercial-only recordkeeping note. Most residential receipts don't
+  // need this boilerplate, but commercial accounts often want explicit
+  // language about keeping the receipt for accounting.
+  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
+  const commercialNoteText = `Keep this receipt for your records. For questions, reply to your receipt email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
+  let commercialNoteHeight = 0;
+  if (isCommercial) {
+    doc.save();
+    doc.fontSize(PDF_TYPE.caption).font('Helvetica');
+    commercialNoteHeight = 14 + Math.ceil(doc.heightOfString(commercialNoteText, { width: W, lineGap: 3 })) + 4;
+    doc.restore();
+  }
   const receiptTotalsOpts = {
     highlightTotal: true,
     paidStamp: !refundAmount,
@@ -711,18 +730,15 @@ function generateReceiptPDF(invoice, payment, res) {
     cashPaid,
     customer,
     surcharge,
+    trailingNoteHeight: commercialNoteHeight,
   };
   y = lineItemsTable(doc, invoice.line_items, L, y, W, totalsBlockHeight(doc, receiptInvoice, receiptTotalsOpts));
   y = totalsBlock(doc, receiptInvoice, L, y + 8, W, receiptTotalsOpts);
 
-  // Commercial-only recordkeeping note. Most residential receipts don't
-  // need this boilerplate, but commercial accounts often want explicit
-  // language about keeping the receipt for accounting.
-  const isCommercial = customer?.property_type === 'commercial' || customer?.property_type === 'business';
   if (isCommercial) {
-    y += 14;
+    y = ensureRoom(doc, y + 14, commercialNoteHeight - 14);
     doc.fontSize(PDF_TYPE.caption).font('Helvetica').fillColor(MUTED).text(
-      `Keep this receipt for your records. For questions, reply to your receipt email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+      commercialNoteText,
       L, y, { width: W, lineGap: 3 },
     );
   }
