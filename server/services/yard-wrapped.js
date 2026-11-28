@@ -27,7 +27,7 @@ const { isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('./visit-outcomes');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
-const { parseJsonObject, suppressesCustomerArtifacts, scopeRecordsToProperty } = require('./portal-service-history');
+const { parseJsonObject, isServiceRecordArtifactSuppressed, scopeRecordsToProperty } = require('./portal-service-history');
 const { lawnOverall } = require('./lawn-health-shared');
 
 const MIN_VISITS = 3;
@@ -132,7 +132,15 @@ function summarizeVisits(records) {
 // copy screen before it can reach a customer; visits whose report is held back
 // from the customer (internal-only typed completions) are skipped.
 async function readTreatedFor(database, records) {
-  const ids = records.filter((row) => !suppressesCustomerArtifacts(parseJsonObject(row.structured_notes))).map((row) => row.id);
+  const checks = await Promise.all(records.map(async (row) => (
+    await isServiceRecordArtifactSuppressed(parseJsonObject(row.structured_notes), database, {
+      serviceRecordId: row.id,
+      scheduledServiceId: row.scheduled_service_id,
+      serviceType: row.service_type,
+      reportTemplateVersion: row.report_template_version,
+    }) ? null : row.id
+  )));
+  const ids = checks.filter(Boolean);
   if (!ids.length) return [];
   const rows = await database('service_products').whereIn('service_record_id', ids).select('targets');
   const tally = new Map();
