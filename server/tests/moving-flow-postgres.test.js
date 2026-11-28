@@ -152,7 +152,7 @@ maybeDescribe('moving flow (live Postgres)', () => {
   test('the public view has only the allowed fields and the plan service names', async () => {
     const move = await Moves.openMoveForCustomer(customerId);
     const view = await Moves.publicMoveView(move);
-    expect(Object.keys(view).sort()).toEqual(['addressOnFile', 'firstName', 'moveInDate', 'moveOutDate', 'newCity', 'services', 'status', 'verdict']);
+    expect(Object.keys(view).sort()).toEqual(['addressOnFile', 'addressVersion', 'firstName', 'moveInDate', 'moveOutDate', 'newCity', 'services', 'status', 'verdict']);
     expect(view.firstName).toBe('Pat');
     expect(view.services).toEqual(['Lawn Care Service', 'Monthly Pest Control Service']);
     expect(JSON.stringify(view)).not.toMatch(/Old Street|Bradenton|555|@|\$/);

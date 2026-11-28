@@ -217,23 +217,47 @@ function clearedMovedHomeAccess() {
   return Object.fromEntries(MOVED_HOME_ACCESS_COLUMNS.map((col) => [col, null]));
 }
 
+async function runOptionalAccessClear(conn, fn) {
+  if (conn && typeof conn.transaction === 'function') {
+    return conn.transaction(async (sp) => fn(sp));
+  }
+  return fn(conn);
+}
+
 async function clearMovedHomeAccessDetails(customerId, conn = db, { retirePrimaryProperty = true, onlyIfMoved = true } = {}) {
   if (!customerId || !onlyIfMoved) return;
   try {
-    await conn('property_preferences').where({ customer_id: customerId }).update(clearedMovedHomeAccess());
+    await runOptionalAccessClear(conn, (sp) => sp('property_preferences').where({ customer_id: customerId }).update(clearedMovedHomeAccess()));
   } catch (err) {
-    logger.warn(`[address-fanout] property_preferences access clear skipped for ${customerId}: ${err.code || err.name || 'error'}`);
+    if (err?.code === '42703') {
+      try {
+        await runOptionalAccessClear(conn, async (sp) => {
+          const cols = await sp('information_schema.columns')
+            .where({ table_name: 'property_preferences' })
+            .pluck('column_name');
+          const available = new Set(cols || []);
+          const partial = Object.fromEntries(MOVED_HOME_ACCESS_COLUMNS.filter((c) => available.has(c)).map((c) => [c, null]));
+          if (Object.keys(partial).length) {
+            await sp('property_preferences').where({ customer_id: customerId }).update(partial);
+          }
+        });
+      } catch (fallbackErr) {
+        logger.warn(`[address-fanout] property_preferences access clear skipped for ${customerId}: ${fallbackErr.code || fallbackErr.name || 'error'}`);
+      }
+    } else {
+      logger.warn(`[address-fanout] property_preferences access clear skipped for ${customerId}: ${err.code || err.name || 'error'}`);
+    }
   }
   try {
-    await conn('customers').where({ id: customerId }).update({ gate_code: null, access_notes: null });
+    await runOptionalAccessClear(conn, (sp) => sp('customers').where({ id: customerId }).update({ gate_code: null, access_notes: null }));
   } catch (err) {
     logger.warn(`[address-fanout] legacy customer access clear skipped for ${customerId}: ${err.code || err.name || 'error'}`);
   }
   try {
-    await conn('customer_access_codes')
+    await runOptionalAccessClear(conn, (sp) => sp('customer_access_codes')
       .where({ customer_id: customerId, status: 'active', life: 'standing' })
       .whereNull('property_id')
-      .update({ status: 'retired', updated_at: new Date() });
+      .update({ status: 'retired', updated_at: new Date() }));
   } catch (err) {
     logger.warn(`[address-fanout] unstamped access code retire skipped for ${customerId}: ${err.code || err.name || 'error'}`);
   }

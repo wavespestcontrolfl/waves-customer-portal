@@ -138,8 +138,15 @@ function dataOf(estimate = row) {
 function estimateDatabase(table) {
   const filters = [];
   const builder = {};
-  const matches = () => (table === 'estimates' ? [row, ...groupRows] : table === 'call_log' ? callRows : [])
-    .filter((candidate) => filters.every((filter) => filter(candidate)));
+  const matches = () => {
+    if (table === 'estimates') return [row, ...groupRows];
+    if (table === 'call_log') return callRows;
+    if (table === 'customer_moves' && dataOf()?.move?.moveId === 'synthetic-move') {
+      return [{ id: 'synthetic-move', status: 'submitted', closed_reason: null, estimate_id: row.id, normalized_address: null }];
+    }
+    return [];
+  };
+  const filteredMatches = () => matches().filter((candidate) => filters.every((filter) => filter(candidate)));
   builder.where = jest.fn((key, value) => {
     if (typeof key === 'function') { key(builder); return builder; }
     for (const [field, expected] of Object.entries(typeof key === 'object' ? key : { [key]: value })) {
@@ -158,11 +165,11 @@ function estimateDatabase(table) {
   for (const method of ['whereRaw', 'orWhereRaw', 'orWhereNotNull', 'forUpdate', 'orderBy', 'limit', 'transacting']) builder[method] = jest.fn(() => builder);
   builder.orWhere = jest.fn((key) => { if (typeof key === 'function') key(builder); return builder; });
   builder.modify = jest.fn((callback) => { callback(builder); return builder; });
-  builder.first = jest.fn(async () => matches().length ? structuredClone(matches()[0]) : null);
-  builder.select = jest.fn(async () => matches().map((candidate) => structuredClone(candidate)));
+  builder.first = jest.fn(async () => filteredMatches().length ? structuredClone(filteredMatches()[0]) : null);
+  builder.select = jest.fn(async () => filteredMatches().map((candidate) => structuredClone(candidate)));
   builder.update = jest.fn(async (patch) => {
     mutations.push({ table, patch });
-    const targets = matches();
+    const targets = filteredMatches();
     if (!targets.length) return 0;
     // Every matched row takes the patch and the affected count comes back,
     // as knex reports it (the grouped delivery claim stamps every
