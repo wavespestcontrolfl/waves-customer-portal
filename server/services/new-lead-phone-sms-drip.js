@@ -36,6 +36,7 @@ const { CUSTOMER_STAGES } = require('./customer-stages');
 const { NON_LIVE_APPOINTMENT_STATUSES } = require('./estimate-conversion-guard');
 const { HUMAN_REPLY_TYPES, SENT_STATUSES } = require('./sms-suggest-mode');
 const { callVetoesForNumber } = require('./messaging/auto-text-holds');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 const STEP_1_ACTIVITY = 'phone_drip_sms_step_1';
 const STEP_2_ACTIVITY = 'phone_drip_sms_step_2';
@@ -276,22 +277,24 @@ async function leadShouldStop(conn, lead, { now = new Date(), checkCallVetoes = 
     return { stop: 'phone_already_in_drip', consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
   }
 
-  const recentSms = await conn('sms_log')
-    .where('created_at', '>=', lead.created_at)
-    .where((w) => {
-      if (lead.twilio_message_sid) w.whereRaw("COALESCE(twilio_sid, '') <> ?", [lead.twilio_message_sid]);
-    })
-    .where((w) => {
-      w.whereRaw("REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits])
-        .orWhereRaw("REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits]);
-    })
-    .where((w) => {
-      w.where('direction', 'inbound')
-        .orWhere((o) => o.where('direction', 'outbound')
-          .whereIn('message_type', ENGAGEMENT_OUTBOUND_TYPES)
-          .whereIn('status', [...SENT_STATUSES, 'scheduled', 'sending']));
-    })
-    .first('id');
+  const recentSmsQuery = excludeUnresolvedSendReservations(
+    conn('sms_log')
+      .where('created_at', '>=', lead.created_at)
+      .where((w) => {
+        if (lead.twilio_message_sid) w.whereRaw("COALESCE(twilio_sid, '') <> ?", [lead.twilio_message_sid]);
+      })
+      .where((w) => {
+        w.whereRaw("REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits])
+          .orWhereRaw("REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g') = ANY(?)", [matchDigits]);
+      })
+      .where((w) => {
+        w.where('direction', 'inbound')
+          .orWhere((o) => o.where('direction', 'outbound')
+            .whereIn('message_type', ENGAGEMENT_OUTBOUND_TYPES)
+            .whereIn('status', [...SENT_STATUSES, 'scheduled', 'sending']));
+      }),
+  );
+  const recentSms = await recentSmsQuery.first('id');
   if (recentSms) {
     return { stop: 'already_engaged', consentBasis: null, consentingCustomerId: null, matchedCustomerIds };
   }

@@ -723,16 +723,18 @@ describe('processPhoneOnlyLeadSmsDrip durability, consentingCustomerId forwardin
   });
 
   test('stops drip after staff or Lead Response Agent texts the lead (lead_outreach / lead_response)', async () => {
+    const smsLogQ = chain({ first: { id: 'sms-staff-outreach-1' } });
     const dbh = makeDb({
       customers: [chain({ result: [OPTED_IN_CUST] }), chain({ first: null })],
       estimates: [chain({ result: [] })],
       scheduled_services: [chain({ first: null })],
       invoices: [chain({ first: null })],
       new_lead_phone_drip_sends: [chain({ result: [] })],
-      sms_log: [chain({ first: { id: 'sms-staff-outreach-1' } })],
+      sms_log: [smsLogQ],
     });
     const res = await leadShouldStop(dbh, OPTED_IN_LEAD, { checkCallVetoes: NO_CALL_VETO });
     expect(res.stop).toBe('already_engaged');
+    expect(smsLogQ.whereRaw).toHaveBeenCalledWith(expect.stringContaining('review_ask_reservation'));
   });
 
   test('keyset-paginates using created_at::text without OFFSET so PostgreSQL microsecond precision is preserved', async () => {
