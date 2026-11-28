@@ -51,11 +51,7 @@ const CADENCE_LABELS = {
   monthly: 'monthly',
 };
 
-const CHART_W = 560;
-const CHART_H = 180;
-const CHART_PAD = { top: 14, right: 18, bottom: 30, left: 28 };
-const PLOT_W = CHART_W - CHART_PAD.left - CHART_PAD.right;
-const PLOT_H = CHART_H - CHART_PAD.top - CHART_PAD.bottom;
+const PLOT_HEIGHT_PX = 128;
 const Y_TICKS = [1, 2, 3, 4, 5];
 
 function formatAxisMonthYear(t) {
@@ -66,17 +62,19 @@ function formatAxisMonthYear(t) {
 
 function selectVisibleTickIndices(coords) {
   if (coords.length <= 2) return coords.map((_, i) => i);
-  const minGap = 72;
+  // Percentage spacing (>= 24% apart) keeps 14px HTML date labels from
+  // colliding even at a 280px mobile container width.
+  const minPctGap = 24;
   const chosen = [0];
   const lastIdx = coords.length - 1;
   for (let i = 1; i < lastIdx; i += 1) {
-    const prevX = coords[chosen[chosen.length - 1]].x;
-    const distToLast = coords[lastIdx].x - coords[i].x;
-    if (coords[i].x - prevX >= minGap && distToLast >= minGap) {
+    const prevX = coords[chosen[chosen.length - 1]].xPct;
+    const distToLast = coords[lastIdx].xPct - coords[i].xPct;
+    if (coords[i].xPct - prevX >= minPctGap && distToLast >= minPctGap) {
       chosen.push(i);
     }
   }
-  if (coords[lastIdx].x - coords[chosen[chosen.length - 1]].x >= 36) {
+  if (coords[lastIdx].xPct - coords[chosen[chosen.length - 1]].xPct >= 16) {
     chosen.push(lastIdx);
   } else if (chosen.length > 1) {
     chosen[chosen.length - 1] = lastIdx;
@@ -93,14 +91,15 @@ function buildHistoryChartGeometry(points) {
   const coords = points.map((p, index) => {
     const xRatio = spanT > 0 ? (p.t - minT) / spanT : index / lastIndex;
     const clampedScore = Math.max(0, Math.min(MAX_SCORE, p.score));
-    const x = Math.round((CHART_PAD.left + xRatio * PLOT_W) * 10) / 10;
-    const y = Math.round((CHART_PAD.top + (1 - clampedScore / MAX_SCORE) * PLOT_H) * 10) / 10;
-    return { x, y, t: p.t, score: p.score, label: formatAxisMonthYear(p.t) };
+    const yRatio = 1 - clampedScore / MAX_SCORE;
+    const xPct = Math.round((4 + xRatio * 92) * 10) / 10;
+    const yPct = Math.round((8 + yRatio * 84) * 10) / 10;
+    return { xPct, yPct, t: p.t, score: p.score, label: formatAxisMonthYear(p.t) };
   });
 
-  const linePath = coords.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ');
-  const baselineY = CHART_PAD.top + PLOT_H;
-  const areaPath = `${linePath} L ${coords[coords.length - 1].x} ${baselineY} L ${coords[0].x} ${baselineY} Z`;
+  const linePath = coords.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.xPct} ${pt.yPct}`).join(' ');
+  const baselineY = 92;
+  const areaPath = `${linePath} L ${coords[coords.length - 1].xPct} ${baselineY} L ${coords[0].xPct} ${baselineY} Z`;
   const tickIndices = selectVisibleTickIndices(coords);
 
   return { coords, linePath, areaPath, tickIndices, baselineY };
@@ -161,16 +160,14 @@ export function PressureHistoryChart({ history, cadence }) {
   return (
     <div ref={containerRef} style={{ marginTop: 18 }}>
       <style>{`
-        @keyframes wavesHistLineDraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+        @keyframes wavesHistReveal { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0% 0 0); } }
         @keyframes wavesHistFadeIn { from { opacity: 0; } to { opacity: 1; } }
-        .waves-hist-line--live { stroke-dasharray: 1; stroke-dashoffset: 0; animation: wavesHistLineDraw 0.9s cubic-bezier(.16,1,.3,1) both; }
-        .waves-hist-area--live { animation: wavesHistFadeIn 0.8s ease-out 0.15s both; }
-        .waves-hist-dot--live { animation: wavesHistFadeIn 0.45s ease-out 0.45s both; }
+        .waves-hist-reveal--live { animation: wavesHistReveal 0.85s cubic-bezier(.16,1,.3,1) both; }
+        .waves-hist-dot--live { animation: wavesHistFadeIn 0.45s ease-out 0.35s both; }
         @media (prefers-reduced-motion: reduce), print {
-          .waves-hist-line--live, .waves-hist-area--live, .waves-hist-dot--live {
+          .waves-hist-reveal--live, .waves-hist-dot--live {
             animation: none !important;
-            stroke-dasharray: none !important;
-            stroke-dashoffset: 0 !important;
+            clip-path: none !important;
             opacity: 1 !important;
           }
         }
@@ -181,92 +178,129 @@ export function PressureHistoryChart({ history, cadence }) {
         </div>
         <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted }}>{subtitle}</div>
       </div>
-      <div style={{
-        width: '100%', padding: '8px 6px 4px', boxSizing: 'border-box',
-        background: '#F7F5EE', border: '1px solid #E7E2D7', borderRadius: 12,
-      }}>
-        <svg
-          role="img"
-          aria-label={chartAriaLabel}
-          viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-          style={{ width: '100%', height: 'auto', display: 'block', overflow: 'visible' }}
-        >
-          <defs>
-            <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#04395E" stopOpacity="0.14" />
-              <stop offset="100%" stopColor="#04395E" stopOpacity="0.01" />
-            </linearGradient>
-          </defs>
-          {Y_TICKS.map((tick) => {
-            const y = Math.round((CHART_PAD.top + (1 - tick / MAX_SCORE) * PLOT_H) * 10) / 10;
-            return (
-              <g key={tick}>
-                <line
-                  x1={CHART_PAD.left}
-                  x2={CHART_W - CHART_PAD.right}
-                  y1={y}
-                  y2={y}
-                  stroke="#E7E2D7"
-                  strokeDasharray="2 4"
-                />
-                <text
-                  x={CHART_PAD.left - 8}
-                  y={y + 5}
-                  textAnchor="end"
-                  fontSize="14"
-                  fill={CUSTOMER_SURFACE.muted}
-                  style={{ fontFamily: "'Inter', system-ui, sans-serif" }}
+      <div
+        role="img"
+        aria-label={chartAriaLabel}
+        style={{
+          width: '100%', padding: '10px 10px 8px', boxSizing: 'border-box',
+          background: '#F7F5EE', border: '1px solid #E7E2D7', borderRadius: 12,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'stretch', gap: 6 }}>
+          {/* HTML axis labels keep a true >=14px size even on narrow 280px phones instead of scaling down with SVG viewBox */}
+          <div aria-hidden="true" style={{ position: 'relative', width: 16, height: PLOT_HEIGHT_PX, flexShrink: 0 }}>
+            {Y_TICKS.map((tick) => {
+              const yPct = Math.round((8 + (1 - tick / MAX_SCORE) * 84) * 10) / 10;
+              return (
+                <span
+                  key={tick}
+                  style={{
+                    position: 'absolute',
+                    right: 0,
+                    top: `${yPct}%`,
+                    transform: 'translateY(-50%)',
+                    fontSize: 14,
+                    lineHeight: 1,
+                    color: CUSTOMER_SURFACE.muted,
+                    fontFamily: "'Inter', system-ui, sans-serif",
+                  }}
                 >
                   {tick}
-                </text>
-              </g>
-            );
-          })}
-          <path
-            d={geometry.areaPath}
-            fill={`url(#${gradId})`}
-            className={entered ? 'waves-hist-area--live' : undefined}
-          />
-          <path
-            d={geometry.linePath}
-            fill="none"
-            stroke="#04395E"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            pathLength={1}
-            className={entered ? 'waves-hist-line--live' : undefined}
-          />
-          {geometry.coords.map((pt, index) => (
-            <circle
-              key={`${pt.t}-${index}`}
-              cx={pt.x}
-              cy={pt.y}
-              r="4.5"
-              fill="#FFFFFF"
-              stroke="#04395E"
-              strokeWidth="2"
-              className={entered ? 'waves-hist-dot--live' : undefined}
-            />
-          ))}
-          {geometry.tickIndices.map((idx, pos) => {
-            const pt = geometry.coords[idx];
-            const anchor = pos === 0 ? 'start' : pos === geometry.tickIndices.length - 1 ? 'end' : 'middle';
-            return (
-              <text
-                key={`${pt.t}-tick-${idx}`}
-                x={pt.x}
-                y={CHART_H - 6}
-                textAnchor={anchor}
-                fontSize="14"
-                fill={CUSTOMER_SURFACE.muted}
-                style={{ fontFamily: "'Inter', system-ui, sans-serif" }}
+                </span>
+              );
+            })}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ position: 'relative', width: '100%', height: PLOT_HEIGHT_PX }}>
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 100 100"
+                preserveAspectRatio="none"
+                style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'block', overflow: 'visible' }}
               >
-                {pt.label}
-              </text>
-            );
-          })}
-        </svg>
+                <defs>
+                  <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#04395E" stopOpacity="0.14" />
+                    <stop offset="100%" stopColor="#04395E" stopOpacity="0.01" />
+                  </linearGradient>
+                </defs>
+                {Y_TICKS.map((tick) => {
+                  const yPct = Math.round((8 + (1 - tick / MAX_SCORE) * 84) * 10) / 10;
+                  return (
+                    <line
+                      key={tick}
+                      x1="0"
+                      x2="100"
+                      y1={yPct}
+                      y2={yPct}
+                      stroke="#E7E2D7"
+                      strokeDasharray="2 4"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  );
+                })}
+                <g className={entered ? 'waves-hist-reveal--live' : undefined}>
+                  <path d={geometry.areaPath} fill={`url(#${gradId})`} />
+                  <path
+                    d={geometry.linePath}
+                    fill="none"
+                    stroke="#04395E"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </g>
+              </svg>
+              {geometry.coords.map((pt, index) => (
+                <span
+                  key={`${pt.t}-${index}`}
+                  data-testid="history-point"
+                  data-x={pt.xPct}
+                  data-y={pt.yPct}
+                  className={entered ? 'waves-hist-dot--live' : undefined}
+                  style={{
+                    position: 'absolute',
+                    left: `${pt.xPct}%`,
+                    top: `${pt.yPct}%`,
+                    transform: 'translate(-50%, -50%)',
+                    width: 9,
+                    height: 9,
+                    borderRadius: 999,
+                    background: '#FFFFFF',
+                    border: '2px solid #04395E',
+                    boxSizing: 'border-box',
+                    pointerEvents: 'none',
+                  }}
+                />
+              ))}
+            </div>
+            <div aria-hidden="true" style={{ position: 'relative', height: 22, marginTop: 4 }}>
+              {geometry.tickIndices.map((idx, pos) => {
+                const pt = geometry.coords[idx];
+                const tx = pos === 0 ? 'none' : pos === geometry.tickIndices.length - 1 ? 'translateX(-100%)' : 'translateX(-50%)';
+                return (
+                  <span
+                    key={`${pt.t}-tick-${idx}`}
+                    style={{
+                      position: 'absolute',
+                      left: `${pt.xPct}%`,
+                      top: 0,
+                      transform: tx,
+                      fontSize: 14,
+                      lineHeight: 1.2,
+                      whiteSpace: 'nowrap',
+                      color: CUSTOMER_SURFACE.muted,
+                      fontFamily: "'Inter', system-ui, sans-serif",
+                    }}
+                  >
+                    {pt.label}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       </div>
       {cadenceWord ? (
         <div style={{ marginTop: 8, fontSize: 14, color: CUSTOMER_SURFACE.muted, lineHeight: 1.45 }}>

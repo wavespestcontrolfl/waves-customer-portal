@@ -4385,7 +4385,7 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
   if (pendingTarget) {
     const areaLabel = String(pendingTarget.label || 'areas').toLowerCase();
     add(
-      `Keep people and pets off treated ${areaLabel} until dry.`,
+      `Follow your technician's timing and keep people and pets off wet treated ${areaLabel} until dry.`,
       data.dynamicContext?.reentry?.petAdvisory,
     );
   }

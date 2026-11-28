@@ -36,8 +36,8 @@ describe('PressureHistoryChart', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('renders an accessible SVG line chart sorted chronologically with cadence note', () => {
-    const { container } = render(
+  it('renders an accessible SVG line chart sorted chronologically with cadence note and 14px HTML axis labels', () => {
+    render(
       <PressureHistoryChart
         history={[
           { serviceDate: '2026-10-01', score: 1.2 },
@@ -47,9 +47,10 @@ describe('PressureHistoryChart', () => {
         cadence="quarterly"
       />,
     );
-    const svg = screen.getByRole('img', { name: /Score history across 2 visits from 2\.8 to 1\.2 out of 5\./i });
-    expect(svg).toBeInTheDocument();
-    expect(container.querySelectorAll('circle')).toHaveLength(2);
+    const chart = screen.getByRole('img', { name: /Score history across 2 visits from 2\.8 to 1\.2 out of 5\./i });
+    expect(chart).toBeInTheDocument();
+    expect(screen.getAllByTestId('history-point')).toHaveLength(2);
+    expect(screen.getByText("Jul '26")).toHaveStyle({ fontSize: '14px' });
     expect(screen.getByText('Last 2 quarterly visits')).toBeInTheDocument();
     expect(screen.getByText(/service cadence — quarterly\./i)).toBeInTheDocument();
   });
@@ -63,11 +64,14 @@ describe('PressureHistoryChart', () => {
         ]}
       />,
     );
-    const circles = container.querySelectorAll('circle');
-    expect(circles).toHaveLength(2);
-    circles.forEach((circle) => {
-      expect(Number.isFinite(Number(circle.getAttribute('cx')))).toBe(true);
-      expect(Number.isFinite(Number(circle.getAttribute('cy')))).toBe(true);
+    const points = screen.getAllByTestId('history-point');
+    expect(points).toHaveLength(2);
+    points.forEach((pt) => {
+      expect(Number.isFinite(Number(pt.dataset.x))).toBe(true);
+      expect(Number.isFinite(Number(pt.dataset.y))).toBe(true);
+    });
+    container.querySelectorAll('path').forEach((p) => {
+      expect(p.getAttribute('d')).not.toContain('NaN');
     });
   });
 });

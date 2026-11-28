@@ -171,6 +171,8 @@ describe('ReportViewPage report chrome helpers', () => {
       nowMs: Date.parse('2026-05-21T19:00:00.000Z'),
     });
     expect(pendingActions[0].label).toContain('treated interior');
+    expect(pendingActions[0].label).toMatch(/technician/i);
+    expect(pendingActions[0].label).toMatch(/wet treated/i);
     expect(pendingActions[0].label).toMatch(/until dry/i);
     expect(pendingActions[0].label).not.toMatch(/\d+:\d+|\b[ap]m\b/i);
 
