@@ -308,7 +308,7 @@ maybeDescribe('technician login privacy (live Postgres)', () => {
       await withServer(async (base) => {
         as(ids.techA, 'technician');
         const open = await (await req(base, 'GET', '/commitments/open?limit=200')).json();
-        expect(mine(open.commitments)).toEqual(['own']);
+        expect(mine(open.commitments)).toEqual(['callback-own', 'own']);
         expect((await req(base, 'PATCH', `/commitments/${ctx.promiseB}`, { action: 'dismiss' })).status).toBe(404);
       });
     });
