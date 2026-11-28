@@ -17,7 +17,14 @@
  */
 
 const mockStripeClient = {
-  paymentIntents: { retrieve: jest.fn(async (id) => ({ id, metadata: {} })) },
+  paymentIntents: {
+    retrieve: jest.fn(async (id) => ({
+      id,
+      latest_charge: typeof id === 'string' && id.startsWith('pi_') ? id.replace(/^pi_/, 'ch_') : null,
+      metadata: {},
+    })),
+  },
+  charges: { retrieve: jest.fn(async (id) => ({ id, status: 'failed' })) },
   refunds: { list: jest.fn() },
 };
 jest.mock('stripe', () => jest.fn(() => mockStripeClient));
@@ -176,7 +183,11 @@ beforeEach(() => {
   onLockAcquired = null;
   nextId = 1;
 
-  mockStripeClient.paymentIntents.retrieve.mockImplementation(async (id) => ({ id, metadata: {} }));
+  mockStripeClient.paymentIntents.retrieve.mockImplementation(async (id) => ({
+    id,
+    latest_charge: typeof id === 'string' && id.startsWith('pi_') ? id.replace(/^pi_/, 'ch_') : null,
+    metadata: {},
+  }));
   db.mockImplementation((table) => {
     tableAccess.push(table);
     if (table === 'payments') return memTable('payments', payments);

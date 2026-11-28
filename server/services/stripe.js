@@ -173,7 +173,10 @@ function reconcileLockedRefundTotals(lockedRow, lockedMeta, opts) {
     // preserve it rather than double-counting it after a sibling bounce.
     nextSurcharge = Math.min(surchargeCents, effPriorSurcharge);
   } else {
-    nextSurcharge = Math.min(surchargeCents, effPriorSurcharge + Math.max(0, refundAmtCents - (requestCents || 0)));
+    const surchargeDelta = requestCents === null
+      ? Math.max(0, surchargeCents - alreadyRefundedSurchargeCents)
+      : Math.max(0, refundAmtCents - requestCents);
+    nextSurcharge = Math.min(surchargeCents, effPriorSurcharge + surchargeDelta);
   }
   return { effTotal, effFull, nextSurcharge };
 }
@@ -4063,6 +4066,10 @@ const StripeService = {
       updated = await db('payments').where({ id: paymentId }).first();
     } catch (readErr) {
       logger.warn(`[stripe] refund post-update read failed for payment ${paymentId}: ${readErr.message}`);
+    }
+    const updatedFailedIds = parsePaymentMetaSafe(updated?.metadata).failed_refund_ids;
+    if (Array.isArray(updatedFailedIds) && updatedFailedIds.includes(refund.id)) {
+      thisRefundBounced = true;
     }
     if (thisRefundBounced) {
       logger.warn(`[stripe] Refund ${refund.id} for payment ${paymentId} bounced before completion — suppressing refund-issued email and surfacing bounce failure`);

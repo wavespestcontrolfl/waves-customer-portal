@@ -1363,6 +1363,13 @@ async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice, opt
   return { invoice, invoiceId, payerId: payerId || null, skipHomeownerAchReason };
 }
 
+function settledMetaFromCharge(charge) {
+  const settledSec = Number(charge?.balance_transaction?.created || charge?.created || 0);
+  if (!(settledSec > 0)) return { settledEventAtIso: null, settledPaymentDate: null };
+  const settledDate = new Date(settledSec * 1000);
+  return { settledEventAtIso: settledDate.toISOString(), settledPaymentDate: etDateString(settledDate) };
+}
+
 /**
  * Shared live-PI unwind classifier for bounced refunds on ACH rows that were
  * still `processing` (unsettled) when refunded. Used by both combined and
@@ -1370,69 +1377,62 @@ async function resolveAchInvoice(paymentIntent, payment, preResolvedInvoice, opt
  * an unsettled or failed ACH debit as `paid`.
  */
 async function resolveBouncedAchProcessingState(row, nextMeta, fallbackPiId) {
-  let wasStillProcessing = nextMeta.payment_state === 'processing' && !nextMeta.settled_event_at;
-  let debitAlreadyTerminal = false;
-  let settledNow = false;
-  let settledEventAtIso = null;
-  let settledPaymentDate = null;
-  if (!wasStillProcessing || row.status !== 'refunded') {
-    return { wasStillProcessing: false, debitAlreadyTerminal: false, settledNow, settledEventAtIso, settledPaymentDate };
-  }
+  const empty = { wasStillProcessing: false, debitAlreadyTerminal: false, settledNow: false, settledEventAtIso: null, settledPaymentDate: null };
+  if (nextMeta.payment_state !== 'processing' || nextMeta.settled_event_at || row.status !== 'refunded') return empty;
   const livePiId = row.stripe_payment_intent_id || fallbackPiId || null;
   const bounceStripeCheck = getStripe();
   if (!bounceStripeCheck) {
     throw new Error(`Refund bounce for PI ${livePiId || row.id} cannot verify the live debit (Stripe client unavailable); retry`);
   }
-  if (livePiId) {
-    const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(livePiId, {
-      expand: ['latest_charge.balance_transaction'],
-    });
-    if (!['processing', 'succeeded', 'requires_capture'].includes(liveBouncePi.status)) {
-      debitAlreadyTerminal = true;
-      wasStillProcessing = false;
-    } else if (liveBouncePi.status === 'succeeded') {
-      wasStillProcessing = false;
-      settledNow = true;
-      const latestCharge = liveBouncePi.latest_charge;
-      const settledSec = Number(latestCharge?.balance_transaction?.created || latestCharge?.created || 0);
-      if (settledSec > 0) {
-        const settledDate = new Date(settledSec * 1000);
-        settledEventAtIso = settledDate.toISOString();
-        settledPaymentDate = etDateString(settledDate);
-      }
-    }
+  if (!livePiId) return { ...empty, wasStillProcessing: true };
+  const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(livePiId, {
+    expand: ['latest_charge.balance_transaction'],
+  });
+  const latestCharge = liveBouncePi.latest_charge;
+  const latestChargeId = typeof latestCharge === 'string' ? latestCharge : (latestCharge?.id || null);
+  if (row.stripe_charge_id && latestChargeId && latestChargeId !== row.stripe_charge_id) {
+    const origCharge = await bounceStripeCheck.charges.retrieve(row.stripe_charge_id, { expand: ['balance_transaction'] });
+    if (origCharge.status === 'succeeded') return { ...empty, settledNow: true, ...settledMetaFromCharge(origCharge) };
+    return origCharge.status === 'pending' ? { ...empty, wasStillProcessing: true } : { ...empty, debitAlreadyTerminal: true };
   }
-  return { wasStillProcessing, debitAlreadyTerminal, settledNow, settledEventAtIso, settledPaymentDate };
+  if (liveBouncePi.status === 'succeeded') return { ...empty, settledNow: true, ...settledMetaFromCharge(latestCharge) };
+  return ['processing', 'requires_capture'].includes(liveBouncePi.status)
+    ? { ...empty, wasStillProcessing: true }
+    : { ...empty, debitAlreadyTerminal: true };
 }
 
 async function matchUnchargedProcessingRowForCharge(trx, charge, chargeId) {
-  if (!charge?.payment_intent) return [];
+  if (!charge?.payment_intent) return { rows: [], chargeMismatch: false };
   const candidates = (await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).forUpdate())
     .filter((row) => !row.stripe_charge_id);
-  if (candidates.length !== 1) return [];
+  if (candidates.length !== 1) return { rows: [], chargeMismatch: false };
   const stripeClient = getStripe();
-  if (!stripeClient) return [];
+  if (!stripeClient) return { rows: [], chargeMismatch: false };
   const livePi = await stripeClient.paymentIntents.retrieve(charge.payment_intent);
   const activeChargeId = typeof livePi?.latest_charge === 'string'
     ? livePi.latest_charge
     : (livePi?.latest_charge?.id || null);
-  // If a newer replacement charge is active on this reused PaymentIntent, do
-  // not adopt the uncharged row for an older charge's delayed refund.
-  if (activeChargeId && activeChargeId !== chargeId) return [];
-  return candidates;
+  // Require a positive match with the PaymentIntent's active charge before
+  // adopting an uncharged processing row; an older charge mismatch stops all
+  // payment/invoice mutations on the replacement debit.
+  if (activeChargeId && activeChargeId !== chargeId) {
+    return { rows: [], chargeMismatch: true };
+  }
+  if (!activeChargeId) return { rows: [], chargeMismatch: false };
+  return { rows: candidates, chargeMismatch: false };
 }
 
 async function restoreSingleInvoiceOnRefundBounce(trx, { linkedInvoice, paymentRow, rowId, nextMeta, achBounceState }) {
   const lockedInvoice = await trx('invoices').where({ id: linkedInvoice.id }).forUpdate().first();
   if (!lockedInvoice || lockedInvoice.status !== 'refunded') {
-    return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+    return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null, restoredFeeInvoiceId: null };
   }
   const { refundedPaymentOwnsInvoice } = require('../services/invoice-helpers');
   if (!refundedPaymentOwnsInvoice(lockedInvoice, {
     paymentIntentId: paymentRow?.stripe_payment_intent_id,
     chargeId: paymentRow?.stripe_charge_id,
   })) {
-    return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+    return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null, restoredFeeInvoiceId: null };
   }
   const duesRestore = await require('../services/invoice').prepareMembershipDuesRestore(trx, linkedInvoice.id, { exceptPaymentId: rowId });
   if (achBounceState.debitAlreadyTerminal) {
@@ -1445,22 +1445,23 @@ async function restoreSingleInvoiceOnRefundBounce(trx, { linkedInvoice, paymentR
       ach_processing_notified_at: null,
       updated_at: new Date(),
     });
-    if (!(reopened > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+    if (!(reopened > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null, restoredFeeInvoiceId: null };
     if (duesRestore) duesRestore.originalStatus = reopenedStatus;
     await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
-    return { duesRestore, invoiceRestored: linkedInvoice.invoice_number || linkedInvoice.id, restoredPaidInvoiceId: null };
+    return { duesRestore, invoiceRestored: linkedInvoice.invoice_number || linkedInvoice.id, restoredPaidInvoiceId: null, restoredFeeInvoiceId: linkedInvoice.id };
   }
   const updateFields = achBounceState.wasStillProcessing
     ? { status: 'processing', paid_at: null, updated_at: new Date() }
     : { status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() };
   const flipped = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).update(updateFields);
-  if (!(flipped > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null };
+  if (!(flipped > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null, restoredFeeInvoiceId: null };
   if (duesRestore) duesRestore.originalStatus = achBounceState.wasStillProcessing ? 'processing' : 'paid';
   await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
   return {
     duesRestore,
     invoiceRestored: linkedInvoice.invoice_number || linkedInvoice.id,
     restoredPaidInvoiceId: achBounceState.wasStillProcessing ? null : linkedInvoice.id,
+    restoredFeeInvoiceId: linkedInvoice.id,
   };
 }
 
@@ -4250,7 +4251,13 @@ async function handleChargeRefunded(charge) {
       // stripe_charge_id NULL — adopt only after verifying via Stripe that
       // this charge is the active attempt on the PI (never claiming a
       // replacement debit on a reused PI).
-      singleLockedRows = await matchUnchargedProcessingRowForCharge(trx, charge, chargeId);
+      const matched = await matchUnchargedProcessingRowForCharge(trx, charge, chargeId);
+      if (matched.chargeMismatch) {
+        logger.warn(`[stripe-webhook] refund ${refundId} for older charge ${chargeId} does not match active charge on reused PI ${charge.payment_intent} — skipping payment/invoice mutations`);
+        refundFencedInLock = true;
+        return null;
+      }
+      singleLockedRows = matched.rows;
     }
     if (await isRefundFencedInTx(trx, refundId, singleLockedRows)) {
       logger.warn(`[stripe-webhook] single-invoice refund ${refundId} on charge ${chargeId} was fenced as FAILED while waiting for the lock — skipping stamp + side effects`);
@@ -4552,6 +4559,7 @@ async function handleRefundFailed(refund) {
       const rowPiId = piId || payment.stripe_payment_intent_id || null;
       let resettleFencedPiId = null;
       const restored = [];
+      const restoredForFeeReconcile = [];
       const duesRestores = [];
       await db.transaction(async (trx) => {
         // Same per-charge lock as charge.refunded's combined branch (codex
@@ -4625,7 +4633,13 @@ async function handleRefundFailed(refund) {
             continue;
           }
           anyUnwound = true;
-          const { wasStillProcessing, debitAlreadyTerminal } = await resolveBouncedAchProcessingState(row, nextMeta, rowPiId);
+          const {
+            wasStillProcessing, debitAlreadyTerminal, settledNow, settledEventAtIso, settledPaymentDate,
+          } = await resolveBouncedAchProcessingState(row, nextMeta, rowPiId);
+          if (settledNow) {
+            nextMeta.payment_state = 'paid';
+            if (settledEventAtIso && !nextMeta.settled_event_at) nextMeta.settled_event_at = settledEventAtIso;
+          }
           await trx('payments').where({ id: row.id }).update({
             refund_amount: 0,
             refund_status: null,
@@ -4633,6 +4647,7 @@ async function handleRefundFailed(refund) {
             ...(row.status === 'refunded'
               ? {
                 status: debitAlreadyTerminal ? 'failed' : (wasStillProcessing ? 'processing' : 'paid'),
+                ...(settledPaymentDate ? { payment_date: settledPaymentDate } : {}),
                 ...(debitAlreadyTerminal ? { failure_reason: 'ACH debit terminated before settling (refund bounced afterwards)' } : {}),
               }
               : {}),
@@ -4666,6 +4681,7 @@ async function handleRefundFailed(refund) {
                 // The original comes back UNPAID (its debit never settled).
                 if (duesRestore) duesRestore.originalStatus = reopenedStatus;
                 duesRestores.push(duesRestore);
+                restoredForFeeReconcile.push(invId);
                 await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, invId);
               }
             }
@@ -4686,12 +4702,13 @@ async function handleRefundFailed(refund) {
                   // paid_at IS NULL as an outstanding balance (codex r11 P1)
                   // — restore the settlement timestamp with the status, from
                   // the ledger row's recorded settle time when available.
-                  paid_at: meta.settled_event_at || new Date().toISOString(),
+                  paid_at: nextMeta.settled_event_at || new Date().toISOString(),
                   updated_at: new Date(),
                 });
             if (flipped > 0) {
               if (duesRestore) duesRestore.originalStatus = wasStillProcessing ? 'processing' : 'paid';
               duesRestores.push(duesRestore);
+              restoredForFeeReconcile.push(invId);
             }
             if (flipped > 0) {
               // Leaving 'refunded' (codex #3591 r47 local P0): the money
@@ -4746,7 +4763,7 @@ async function handleRefundFailed(refund) {
           logger.error(`[stripe-webhook] annual-prepay resync after combined refund bounce failed for invoice ${restoredId}: ${syncErr.message}`);
         }
       }
-      await reconcileSetupFeeAlertsForInvoices(restored);
+      await reconcileSetupFeeAlertsForInvoices(restoredForFeeReconcile);
       // Bounced pre-settlement refund → the money never left after all. If
       // the PI actually succeeded (its settle was fenced into an orphan),
       // run the FULL succeeded lifecycle now — guard chain, allocation
@@ -4978,6 +4995,7 @@ async function handleRefundFailed(refund) {
   }
 
   let restoredInvoiceId = null;
+  let restoredFeeInvoiceId = null;
   let duesRestoreContext = null;
   await db.transaction(async (trx) => {
     if (feeUnwindLockKey) {
@@ -5101,6 +5119,7 @@ async function handleRefundFailed(refund) {
       if (restoredOutcome.duesRestore) duesRestoreContext = restoredOutcome.duesRestore;
       if (restoredOutcome.invoiceRestored) invoiceRestored = restoredOutcome.invoiceRestored;
       if (restoredOutcome.restoredPaidInvoiceId) restoredInvoiceId = restoredOutcome.restoredPaidInvoiceId;
+      if (restoredOutcome.restoredFeeInvoiceId) restoredFeeInvoiceId = restoredOutcome.restoredFeeInvoiceId;
     }
 
     // Operator signal: the reverts above are mechanical, but the remaining
@@ -5130,8 +5149,8 @@ async function handleRefundFailed(refund) {
     } catch (err) {
       logger.error(`[stripe-webhook] annual-prepay resync after refund bounce failed for invoice ${restoredInvoiceId}: ${err.message}`);
     }
-    await reconcileSetupFeeAlertsForInvoices([restoredInvoiceId]);
   }
+  await reconcileSetupFeeAlertsForInvoices([restoredFeeInvoiceId]);
   // A replacement dues invoice (or a collected month) that now sits beside the
   // restored original: voided if unpaid, otherwise an office alert (best effort).
   await require('../services/invoice').reconcileMembershipDuesRestore(duesRestoreContext);
