@@ -5,7 +5,7 @@
  *
  * Connects related calls and texts within a 48-hour customer episode using 100%
  * deterministic DB logic (zero extra LLM prompt tokens) and strictly delegates
- * triage card resolution to the repo's ONE authoritative mechanisms:
+ * every card/alert status write to the repo's ONE authoritative mechanism:
  * 1. Post-finalization, generation-fenced episode reconciliation:
  *    - Delegates Call 1 open address/name card resolution directly to
  *      `triage-auto-resolve.reconcileSiblingCallsNow` (inheriting all confirmed-unbooked,
@@ -13,16 +13,18 @@
  *    - Delegates Call 1 `customer_email_missing` settlement directly to
  *      `customer-email-fanout.resolveOpenEmailReviewCards` (never touching
  *      `email_unverified` / `email_invalid`).
- *    - Retires ONLY identifiable call-intake new-lead alerts tied to the booked `leadId`
- *      on confirmed/fulfilled non-re-service visits (including voicemail-first leads),
- *      with an atomic SQL `processing_generation` + released-token fence.
+ *    - Delegates open `new_lead` alert retirement directly to
+ *      `admin-alert-relevance.reconcileLeadAlertsNow` (inheriting `newLeadMovedOn`,
+ *      `done_by: 'relevance'`, `metadata.retired`, kill switch, and automatic re-arming
+ *      if a follow-up booking is later cancelled).
  * 2. Suppresses false "Quote asked by text" owed-quote bells ONLY when an inbound photo
  *    SMS is a delivery-only photo submission answering an inbound 48h call where `Agent:`
  *    explicitly requested photos (never suppressing questions, bids, ballparks, or mixed
  *    service/scheduling captions).
  * 3. Preserves first-touch `lead_source` across repeat or outbound callback calls within
  *    48h (comparing earlier tracking lines + linked lead attribution while verifying
- *    caller identity on shared lines and keeping an explicit spoken referral override).
+ *    caller identity across BOTH leads and calls on shared lines and keeping an explicit
+ *    spoken referral override).
  */
 
 const logger = require('./logger');
@@ -30,7 +32,6 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const { attributionForSourceType } = require('./ads/call-attribution');
-const { isReService } = require('./re-service');
 
 const EPISODE_WINDOW_HOURS = 48;
 const PHOTO_LOOKUP_TIMEOUT_MS = 800;
@@ -41,22 +42,6 @@ const ADDRESS_CONFLICT_HOLD_REASONS = Object.freeze(new Set([
   'address_unit_conflict',
   'second_service_address',
   'multi_property_call',
-]));
-
-// Only identifiable call-intake new-lead alerts (never website quote alerts from
-// public-quote.js or missed-callback alerts sharing metadata.leadId).
-const CALL_NEW_LEAD_ALERT_TITLES = Object.freeze([
-  'Untracked call lead',
-  'New call lead',
-  'New voicemail lead',
-]);
-
-// Confirmed or fulfilled booking states only (excludes pending, rescheduled, cancelled, skipped, no_show).
-const CONFIRMED_OR_FULFILLED_STATUSES = Object.freeze(new Set([
-  'confirmed',
-  'en_route',
-  'on_site',
-  'completed',
 ]));
 
 const GENERIC_LEAD_SOURCES = Object.freeze(new Set([
@@ -77,7 +62,6 @@ const DELIVERY_ONLY_PHOTO_CAPTION_RE = new RegExp(
 const NEGATED_PHOTO_REQUEST_RE = /\b(?:don'?t|do not|no need to|never|not|won'?t)\b[^.!?\n]{0,25}\b(?:text|send|shoot|email|message|snap)\b[^.!?\n]{0,40}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
 const AGENT_SELF_SEND_PHOTO_RE = /\b(?:i'?ll|i will|we'?ll|we will|let me|going to)\b[^.!?\n]{0,20}\b(?:text|send|shoot|email|message)\b[^.!?\n]{0,30}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
 const CALLER_DIRECTED_PHOTO_REQUEST_RE = /\b(?:can you|could you|would you|if you(?:'d| could| can| want to)?|please|go ahead and|feel free to|just|you can|want to|wanna)\s+(?:text|send|shoot|email|message|snap)\b[^.!?\n]{0,40}\b(?:pic(?:ture)?s?|photos?|images?)\b/i;
-const RESERVICE_LABEL_RE = /\b(?:re[- ]?service|callback\s+treatment|covered\s+re[- ]?service)\b/i;
 const MAX_DELIVERY_CAPTION_CHARS = 160;
 
 const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -127,107 +111,6 @@ async function findRecentEpisodeSiblingCalls(conn, {
   return q.select(...cols);
 }
 
-function isVisitReServiceRow(visit) {
-  if (!visit) return true;
-  if (visit.is_callback === true) return true;
-  if (isReService({ serviceType: visit.service_type })) return true;
-  if (RESERVICE_LABEL_RE.test(String(visit.service_type || ''))) return true;
-  return false;
-}
-
-// Fails CLOSED on missing catalog row or lookup error so a re-service / included
-// trap follow-up never retires an active new-lead alert.
-async function isConfirmedNonReServiceBooking(conn, bookedServiceId, customerId) {
-  if (!bookedServiceId || !customerId) return false;
-  try {
-    const visit = await conn('scheduled_services')
-      .where({ id: bookedServiceId, customer_id: customerId })
-      .first('id', 'status', 'is_callback', 'service_type', 'service_id');
-    if (!visit || isVisitReServiceRow(visit)) return false;
-    if (!CONFIRMED_OR_FULFILLED_STATUSES.has(String(visit.status || ''))) return false;
-    // Require a verified catalog service row before retiring a lead alert:
-    // a null service_id could hide a legacy included trap check / callback.
-    if (!visit.service_id) return false;
-    const svc = await conn('services')
-      .where({ id: visit.service_id })
-      .first('service_key', 'name');
-    if (!svc) return false;
-    if (isReService({ serviceKey: svc.service_key, serviceName: svc.name, serviceType: visit.service_type })
-      || RESERVICE_LABEL_RE.test(String(svc.name || ''))) {
-      return false;
-    }
-    return true;
-  } catch (err) {
-    logger.warn(`[call-episode] booking verification failed (fail-closed): ${err.code || err.name || 'db_error'}`);
-    return false;
-  }
-}
-
-function callSidMatchesBookedLead(sibling, leadIdStr, leadCallSid) {
-  if (!sibling?.twilio_call_sid) return false;
-  if (leadCallSid && String(sibling.twilio_call_sid) === String(leadCallSid)) return true;
-  const md = parseMaybeJson(sibling.metadata);
-  return Boolean(md && md.lead_id && String(md.lead_id) === leadIdStr);
-}
-
-// Retire ONLY identifiable call-intake new-lead alerts tied directly to the booked
-// `leadId` or its originating call SID (never website quote alerts from public-quote.js
-// or missed-callback alerts sharing metadata.leadId). Enforces an atomic SQL
-// `processing_generation` + released-token predicate inside the UPDATE.
-async function retireBookedLeadBells(conn, {
-  callId, procGeneration, bookedServiceId, customerId, leadId, siblings, anchor, since, resolvedAt,
-}) {
-  if (!leadId) return 0;
-  const leadIdStr = String(leadId);
-  const leadRow = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first('id', 'twilio_call_sid');
-  const leadCallSid = leadRow?.twilio_call_sid || null;
-  const matchingCallSids = [
-    ...new Set([
-      ...(leadCallSid ? [leadCallSid] : []),
-      ...(siblings || []).filter((s) => callSidMatchesBookedLead(s, leadIdStr, leadCallSid)).map((s) => s.twilio_call_sid),
-    ]),
-  ];
-
-  const now = resolvedAt || new Date();
-  const q = conn('notifications')
-    .whereNull('done_at')
-    .whereIn('category', ['new_lead', 'lead'])
-    .whereIn('title', CALL_NEW_LEAD_ALERT_TITLES)
-    .where('created_at', '>=', since)
-    .where('created_at', '<', anchor)
-    .where((qb) => {
-      qb.whereRaw("metadata->>'leadId' = ?", [leadIdStr]);
-      if (matchingCallSids.length) {
-        const placeholders = matchingCallSids.map(() => '?').join(', ');
-        qb.orWhereRaw(`metadata->>'callSid' IN (${placeholders})`, matchingCallSids);
-      }
-    });
-  if (callId && procGeneration != null && typeof q.whereExists === 'function') {
-    q.whereExists(function generationFence() {
-      this.from('call_log')
-        .where({ id: callId, processing_generation: procGeneration })
-        .whereNull('processing_token')
-        .select(1);
-    });
-  }
-  if (bookedServiceId && customerId && typeof q.whereExists === 'function') {
-    q.whereExists(function bookingEligibilityFence() {
-      this.from('scheduled_services')
-        .where({ id: bookedServiceId, customer_id: customerId })
-        .whereIn('status', [...CONFIRMED_OR_FULFILLED_STATUSES])
-        .whereRaw('COALESCE(is_callback, false) = false')
-        .select(1);
-    });
-  }
-  const count = await q.update({
-    done_at: now,
-    read_at: conn.raw('COALESCE(read_at, ?)', [now]),
-    done_by: 'call_episode_reconciliation',
-    resolution: 'Follow-up call booked appointment within 48h episode',
-  });
-  return Number(count || 0);
-}
-
 function hasAddressConflictHold(opts) {
   const reasons = Array.isArray(opts.bridgeNeedsConfirmation) ? opts.bridgeNeedsConfirmation : [];
   if (opts.streetLevelPending === true || opts.appointmentResult?.streetLevelPending === true
@@ -272,28 +155,23 @@ async function settleSiblingTriageCards(conn, { callId, customerId, priorCallIds
   return resolved;
 }
 
-async function maybeRetireBookedLeadBells(conn, { callId, customerId, siblings, anchor, since, resolvedAt, opts }) {
+// Delegates open `new_lead` alert retirement to `admin-alert-relevance.reconcileLeadAlertsNow`
+// so every retired alert carries `done_by: 'relevance'` + `metadata.retired` and automatically
+// re-arms if the follow-up booking is later cancelled (zero duplicate notification writers).
+async function maybeRetireBookedLeadBells(conn, { callId, resolvedAt, opts }) {
   const bookedServiceId = opts.bookedServiceId || opts.appointmentResult?.scheduledServiceId || null;
   const leadId = opts.leadId || null;
   if (!bookedServiceId || !leadId) return 0;
-  if (!(await isConfirmedNonReServiceBooking(conn, bookedServiceId, customerId))) return 0;
-  return retireBookedLeadBells(conn, {
-    callId,
-    procGeneration: opts.procGeneration,
-    bookedServiceId,
-    customerId,
-    leadId,
-    siblings,
-    anchor,
-    since,
-    resolvedAt,
-  });
+  if (!(await callGenerationStillCurrent(conn, callId, opts.procGeneration))) return 0;
+  const alertReconciler = opts.alertReconciler || require('./admin-alert-relevance').reconcileLeadAlertsNow;
+  const res = await alertReconciler({ leadId, now: resolvedAt });
+  return Number(res?.retired || 0);
 }
 
 // Post-finalization, generation-fenced episode reconciliation:
 // - Delegates Call 1 open address/name card resolution to triage-auto-resolve.reconcileSiblingCallsNow
 // - Delegates Call 1 customer_email_missing settlement to customer-email-fanout.resolveOpenEmailReviewCards
-// - Retires stale Call 1 call-intake new-lead alerts on confirmed non-re-service bookings
+// - Delegates booked-lead `new_lead` alert retirement to admin-alert-relevance.reconcileLeadAlertsNow
 // Best-effort & non-throwing by contract.
 async function reconcilePriorEpisodeOnCallCompletion(conn, opts = {}) {
   const empty = { cardsResolved: 0, bellsRetired: 0 };
@@ -306,7 +184,6 @@ async function reconcilePriorEpisodeOnCallCompletion(conn, opts = {}) {
 
     const anchor = anchorDate(opts.callCreatedAt || opts.call?.created_at);
     const resolvedAt = opts.resolvedAt ? anchorDate(opts.resolvedAt) : new Date();
-    const since = windowStartFrom(anchor);
     const siblings = await findRecentEpisodeSiblingCalls(conn, {
       customerId,
       currentCallId: callId,
@@ -317,7 +194,7 @@ async function reconcilePriorEpisodeOnCallCompletion(conn, opts = {}) {
       callId, customerId, priorCallIds, resolvedAt, opts,
     });
     const bellsRetired = await maybeRetireBookedLeadBells(conn, {
-      callId, customerId, siblings, anchor, since, resolvedAt, opts,
+      callId, resolvedAt, opts,
     });
     return { cardsResolved, bellsRetired };
   } catch (err) {
@@ -460,38 +337,47 @@ async function isAmbiguousSharedPhone(conn, digits) {
   return Array.isArray(matches) && matches.length > 1;
 }
 
+function trackingSourceForPriorCall(prior, twilioNumbers, callAt) {
+  const cfg = twilioNumbers.findByNumber(prior.to_phone);
+  if (!cfg) return null;
+  const resolved = twilioNumbers.getLeadSourceFromNumber(prior.to_phone);
+  if (!resolved || isGenericCallLeadSource(resolved.source)) return null;
+  return {
+    at: callAt,
+    source: resolved.source,
+    detail: resolved.detail || resolved.domain || cfg.domain || resolved.area || 'prior inbound call',
+  };
+}
+
 async function priorCallFirstTouchCandidate(conn, {
-  digits, currentCallId, since, anchor, twilioNumbers, leadByCallSid, callerIdentity,
+  digits, currentCallId, since, anchor, twilioNumbers, leadByCallSid, rejectedCallSids, callerIdentity,
 }) {
   if (!twilioNumbers || typeof twilioNumbers.findByNumber !== 'function') return null;
   const q = whereNotSandboxCall(conn('call_log'))
     .whereRaw("right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ?", [digits])
     .whereRaw("COALESCE(direction, '') NOT LIKE 'outbound%'")
     .whereNotIn('processing_status', ['spam'])
+    .whereRaw("COALESCE(metadata->>'no_attribution', 'false') <> 'true'")
     .where('created_at', '>=', since)
     .where('created_at', '<', anchor)
     .orderBy('created_at', 'asc')
     .limit(5);
   if (currentCallId) q.whereNot('id', currentCallId);
   const priorCalls = await q.select('twilio_call_sid', 'to_phone', 'created_at', 'ai_extraction');
+  const rejected = rejectedCallSids || new Set();
   for (const prior of priorCalls) {
+    const sid = prior.twilio_call_sid ? String(prior.twilio_call_sid) : null;
+    if (sid && rejected.has(sid)) continue;
     const ext = parseMaybeJson(prior.ai_extraction);
     if (identityConflictsWithCaller({ firstName: ext?.first_name, lastName: ext?.last_name }, callerIdentity)) {
+      if (sid) rejected.add(sid);
       continue;
     }
     const callAt = new Date(prior.created_at).getTime();
-    const linkedLead = prior.twilio_call_sid ? leadByCallSid.get(String(prior.twilio_call_sid)) : null;
+    const linkedLead = sid ? leadByCallSid.get(sid) : null;
     if (linkedLead) return { ...linkedLead, at: callAt };
-    const cfg = twilioNumbers.findByNumber(prior.to_phone);
-    if (!cfg) continue;
-    const resolved = twilioNumbers.getLeadSourceFromNumber(prior.to_phone);
-    if (resolved && !isGenericCallLeadSource(resolved.source)) {
-      return {
-        at: callAt,
-        source: resolved.source,
-        detail: resolved.detail || resolved.domain || cfg.domain || resolved.area || 'prior inbound call',
-      };
-    }
+    const tracked = trackingSourceForPriorCall(prior, twilioNumbers, callAt);
+    if (tracked) return tracked;
   }
   return null;
 }
@@ -509,14 +395,21 @@ async function priorLeadFirstTouchCandidates(conn, { digits, since, anchor, call
       'leads.created_at', 'leads.twilio_call_sid', 'leads.first_name', 'leads.last_name',
       'lead_sources.source_type', 'lead_sources.name',
     );
-  const list = (Array.isArray(rows) ? rows : [])
-    .map((row) => sourceFromLeadRow(row, callerIdentity))
-    .filter(Boolean);
+  const rejectedCallSids = new Set();
+  const list = [];
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    if (identityConflictsWithCaller({ firstName: row.first_name, lastName: row.last_name }, callerIdentity)) {
+      if (row.twilio_call_sid) rejectedCallSids.add(String(row.twilio_call_sid));
+      continue;
+    }
+    const item = sourceFromLeadRow(row, callerIdentity);
+    if (item) list.push(item);
+  }
   const byCallSid = new Map();
   for (const item of list) {
     if (item.callSid && !byCallSid.has(String(item.callSid))) byCallSid.set(String(item.callSid), item);
   }
-  return { earliest: list[0] || null, byCallSid };
+  return { list, byCallSid, rejectedCallSids };
 }
 
 function pickEarliestCandidate(candidates, fallback) {
@@ -528,9 +421,9 @@ function pickEarliestCandidate(candidates, fallback) {
 
 // Preserve first-touch acquisition lead_source across repeat or outbound callback calls
 // within 48h — even when Call 2 dials a different tracking line (e.g. Google Ads voicemail
-// followed by an inbound GBP call). Verifies caller identity and retains currentLeadSource
-// on shared lines or conflicting names; explicit spoken referral on Call 2 still wins.
-// Fail-open to currentLeadSource on any error.
+// followed by an inbound GBP call). Verifies caller identity across BOTH leads and calls
+// (retaining rejected SIDs so neither fallback inherits another caller's channel) and
+// preserves an explicit spoken referral override. Fail-open to currentLeadSource on error.
 async function resolveFirstTouchCallLeadSource(conn, opts = {}) {
   const fallback = opts.currentLeadSource || { source: 'phone_call' };
   if (opts.hasExplicitReferral || Boolean(opts.referredByName)) return fallback;
@@ -543,7 +436,7 @@ async function resolveFirstTouchCallLeadSource(conn, opts = {}) {
     const callerIdentity = { firstName: opts.callerFirstName || null, lastName: opts.callerLastName || null };
     const anchor = anchorDate(opts.currentCallCreatedAt);
     const since = windowStartFrom(anchor);
-    const { earliest: leadCand, byCallSid } = await priorLeadFirstTouchCandidates(conn, {
+    const { list: leadList, byCallSid, rejectedCallSids } = await priorLeadFirstTouchCandidates(conn, {
       digits, since, anchor, callerIdentity,
     });
     const callCand = await priorCallFirstTouchCandidate(conn, {
@@ -553,8 +446,10 @@ async function resolveFirstTouchCallLeadSource(conn, opts = {}) {
       anchor,
       twilioNumbers: opts.twilioNumbers || null,
       leadByCallSid: byCallSid,
+      rejectedCallSids,
       callerIdentity,
     });
+    const leadCand = leadList.find((item) => !item.callSid || !rejectedCallSids.has(String(item.callSid))) || null;
     return pickEarliestCandidate([callCand, leadCand], fallback);
   } catch (err) {
     logger.warn(`[call-episode] first-touch lead_source lookup skipped: ${err.code || err.name || 'db_error'}`);
@@ -573,8 +468,6 @@ module.exports = {
   isPhotoFollowUpToRecentCall,
   resolveFirstTouchCallLeadSource,
   _test: {
-    isVisitReServiceRow,
-    isConfirmedNonReServiceBooking,
     callGenerationStillCurrent,
     identityConflictsWithCaller,
   },

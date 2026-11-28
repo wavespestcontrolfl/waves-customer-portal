@@ -9,7 +9,6 @@ const {
   transcriptRequestedPhotos,
   isPhotoFollowUpToRecentCall,
   resolveFirstTouchCallLeadSource,
-  _test: { isVisitReServiceRow },
 } = require('../services/call-episode-reconciliation');
 const { EPISODE_SAFE_SWEEP_RULES } = require('../services/triage-auto-resolve');
 
@@ -21,19 +20,6 @@ function makeChain(result) {
     whereIn: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
-    whereExists: jest.fn((fn) => {
-      const sub = {
-        from: jest.fn().mockReturnThis(),
-        where: jest.fn().mockReturnThis(),
-        whereIn: jest.fn().mockReturnThis(),
-        whereNull: jest.fn().mockReturnThis(),
-        whereRaw: jest.fn().mockReturnThis(),
-        select: jest.fn().mockReturnThis(),
-      };
-      if (typeof fn === 'function') fn.call(sub);
-      return chain;
-    }),
-    from: jest.fn().mockReturnThis(),
     orWhere: jest.fn((arg) => { if (typeof arg === 'function') arg(chain); return chain; }),
     whereNotNull: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
@@ -42,7 +28,6 @@ function makeChain(result) {
     orderBy: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
     timeout: jest.fn().mockReturnThis(),
-    count: jest.fn().mockReturnThis(),
     select: jest.fn().mockResolvedValue(result),
     first: jest.fn().mockResolvedValue(Array.isArray(result) ? result[0] : result),
     update: jest.fn().mockResolvedValue(typeof result === 'number' ? result : 0),
@@ -67,17 +52,15 @@ describe('PR B2: 48h sibling lookup', () => {
   });
 });
 
-describe('PR B2: Post-finalization delegation to triage-auto-resolve, customer-email-fanout, and booked-lead bell retirement', () => {
-  test('delegates card settlement using actual resolution wall clock, enforces atomic SQL generation fence, and checks services table', async () => {
+describe('PR B2: Post-finalization delegation to triage-auto-resolve, customer-email-fanout, and admin-alert-relevance', () => {
+  test('delegates card settlement and booked-lead alert retirement to the authoritative services with wall-clock time', async () => {
     expect(EPISODE_SAFE_SWEEP_RULES.has('address_moot')).toBe(true);
     expect(EPISODE_SAFE_SWEEP_RULES.has('quiet_aged')).toBe(false);
     expect(EPISODE_SAFE_SWEEP_RULES.has('quote_fulfilled')).toBe(false);
 
     const triageReconciler = jest.fn().mockResolvedValue({ applied: 2 });
     const emailResolver = jest.fn().mockResolvedValue(1);
-    const bellWhereInCalls = [];
-    const bellWhereRawCalls = [];
-    let bellWhereExistsCalled = false;
+    const alertReconciler = jest.fn().mockResolvedValue({ skipped: false, scanned: 1, retired: 1 });
     const resolvedAt = new Date('2026-11-28T11:30:00Z');
 
     const conn = jest.fn((table) => {
@@ -89,33 +72,8 @@ describe('PR B2: Post-finalization delegation to triage-auto-resolve, customer-e
         return c;
       }
       if (table === 'customers') return makeChain({ id: 'cust-1', email: 'jane@example.com', active: true });
-      if (table === 'scheduled_services') return makeChain({ id: 'svc-2', status: 'confirmed', is_callback: false, service_type: 'One-Time Pest Control Service', service_id: 'cat-1' });
-      if (table === 'services') return makeChain({ service_key: 'one_time_pest', name: 'One-Time Pest Control Service' });
-      if (table === 'leads') return makeChain({ id: 'lead-1', twilio_call_sid: 'CA-call-1' });
-      if (table === 'notifications') {
-        const c = makeChain(1);
-        c.whereIn = jest.fn((col, vals) => { bellWhereInCalls.push({ col, vals }); return c; });
-        c.whereRaw = jest.fn((sql, bindings) => { bellWhereRawCalls.push({ sql, bindings }); return c; });
-        c.orWhereRaw = jest.fn((sql, bindings) => { bellWhereRawCalls.push({ sql, bindings }); return c; });
-        c.whereExists = jest.fn((fn) => {
-          bellWhereExistsCalled = true;
-          const sub = {
-            from: jest.fn().mockReturnThis(),
-            where: jest.fn().mockReturnThis(),
-            whereIn: jest.fn().mockReturnThis(),
-            whereNull: jest.fn().mockReturnThis(),
-            whereRaw: jest.fn().mockReturnThis(),
-            select: jest.fn().mockReturnThis(),
-          };
-          if (typeof fn === 'function') fn.call(sub);
-          return c;
-        });
-        c.update = jest.fn().mockResolvedValue(1);
-        return c;
-      }
       return makeChain([]);
     });
-    conn.raw = jest.fn((sql) => sql);
 
     const res = await reconcilePriorEpisodeOnCallCompletion(conn, {
       call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' },
@@ -128,6 +86,7 @@ describe('PR B2: Post-finalization delegation to triage-auto-resolve, customer-e
       bridgeNeedsConfirmation: [],
       triageReconciler,
       emailResolver,
+      alertReconciler,
     });
 
     expect(res).toEqual({ cardsResolved: 3, bellsRetired: 1 });
@@ -141,99 +100,59 @@ describe('PR B2: Post-finalization delegation to triage-auto-resolve, customer-e
       }),
       conn,
     );
-    expect(bellWhereExistsCalled).toBe(true);
-    expect(bellWhereInCalls).toContainEqual({
-      col: 'title',
-      vals: ['Untracked call lead', 'New call lead', 'New voicemail lead'],
-    });
-    expect(bellWhereRawCalls).toEqual([
-      { sql: "metadata->>'leadId' = ?", bindings: ['lead-1'] },
-      { sql: "metadata->>'callSid' IN (?)", bindings: ['CA-call-1'] },
-    ]);
+    expect(alertReconciler).toHaveBeenCalledWith({ leadId: 'lead-1', now: resolvedAt });
   });
 
   test('aborts reconciliation when processing_generation is stale or claim token is still held', async () => {
     const triageReconciler = jest.fn();
+    const alertReconciler = jest.fn();
     const conn = jest.fn(() => makeChain({ processing_generation: 8, processing_token: null }));
     const res = await reconcilePriorEpisodeOnCallCompletion(conn, {
       call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' },
       customerId: 'cust-1',
       leadId: 'lead-1',
       procGeneration: 7,
+      appointmentResult: { scheduledServiceId: 'svc-2' },
       triageReconciler,
+      alertReconciler,
     });
     expect(res).toEqual({ cardsResolved: 0, bellsRetired: 0 });
     expect(triageReconciler).not.toHaveBeenCalled();
+    expect(alertReconciler).not.toHaveBeenCalled();
   });
 
-  test('retires voicemail-first lead bell with no siblings, rejects rescheduled/re-service/rodent_trapping_followup/lookup-error visits, and honors address_unit_conflict hold', async () => {
-    expect(isVisitReServiceRow({ is_callback: true, service_type: 'Pest' })).toBe(true);
-    expect(isVisitReServiceRow({ is_callback: false, service_type: 'Covered Re-Service' })).toBe(true);
-    expect(isVisitReServiceRow({ is_callback: false, service_type: 'One-Time Pest Control' })).toBe(false);
+  test('delegates voicemail-first booked lead alerts with zero siblings and honors address_unit_conflict hold', async () => {
+    const alertReconciler = jest.fn().mockResolvedValue({ retired: 1 });
+    const makeConn = () => jest.fn((table) => {
+      if (table === 'call_log') {
+        const ch = makeChain([]);
+        ch.first = jest.fn().mockResolvedValue({ processing_generation: 2, processing_token: null });
+        return ch;
+      }
+      return makeChain([]);
+    });
 
-    const makeConn = (visitRow, serviceRow = { service_key: 'one_time_pest', name: 'One-Time Pest' }, serviceThrows = false) => {
-      const c = jest.fn((table) => {
-        if (table === 'call_log') {
-          const ch = makeChain([]);
-          ch.first = jest.fn().mockResolvedValue({ processing_generation: 2, processing_token: null });
-          return ch;
-        }
-        if (table === 'scheduled_services') return makeChain(visitRow);
-        if (table === 'services') {
-          const ch = makeChain(serviceRow);
-          if (serviceThrows) ch.first = jest.fn().mockRejectedValue(new Error('db down'));
-          return ch;
-        }
-        if (table === 'leads') return makeChain({ id: 'lead-vm', twilio_call_sid: 'CA-vm-1' });
-        if (table === 'notifications') {
-          const ch = makeChain(1);
-          ch.update = jest.fn().mockResolvedValue(1);
-          return ch;
-        }
-        return makeChain([]);
-      });
-      c.raw = jest.fn((sql) => sql);
-      return c;
-    };
+    await expect(reconcilePriorEpisodeOnCallCompletion(makeConn(), {
+      call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' },
+      customerId: 'cust-1',
+      leadId: 'lead-vm',
+      procGeneration: 2,
+      appointmentResult: { scheduledServiceId: 'svc-1' },
+      alertReconciler,
+    })).resolves.toEqual({ cardsResolved: 0, bellsRetired: 1 });
+    expect(alertReconciler).toHaveBeenCalledWith(expect.objectContaining({ leadId: 'lead-vm' }));
 
-    // Voicemail-first confirmed booking retires bell
-    await expect(reconcilePriorEpisodeOnCallCompletion(
-      makeConn({ id: 'svc-1', status: 'confirmed', is_callback: false, service_type: 'One-Time Pest', service_id: 'cat-1' }),
-      { call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' }, customerId: 'cust-1', leadId: 'lead-vm', procGeneration: 2, appointmentResult: { scheduledServiceId: 'svc-1' } },
-    )).resolves.toEqual({ cardsResolved: 0, bellsRetired: 1 });
-
-    // Rescheduled status does NOT retire bell
-    await expect(reconcilePriorEpisodeOnCallCompletion(
-      makeConn({ id: 'svc-2', status: 'rescheduled', is_callback: false, service_type: 'One-Time Pest', service_id: 'cat-1' }),
-      { call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' }, customerId: 'cust-1', leadId: 'lead-vm', procGeneration: 2, appointmentResult: { scheduledServiceId: 'svc-2' } },
-    )).resolves.toEqual({ cardsResolved: 0, bellsRetired: 0 });
-
-    // rodent_trapping_followup from services table does NOT retire bell
-    await expect(reconcilePriorEpisodeOnCallCompletion(
-      makeConn(
-        { id: 'svc-3', status: 'confirmed', is_callback: false, service_type: 'Follow-Up Visit', service_id: 'cat-rt' },
-        { service_key: 'rodent_trapping_followup', name: 'Rodent Trap Check' },
-      ),
-      { call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' }, customerId: 'cust-1', leadId: 'lead-vm', procGeneration: 2, appointmentResult: { scheduledServiceId: 'svc-3' } },
-    )).resolves.toEqual({ cardsResolved: 0, bellsRetired: 0 });
-
-    // Services table lookup error fails CLOSED (keeps alert open)
-    await expect(reconcilePriorEpisodeOnCallCompletion(
-      makeConn({ id: 'svc-4', status: 'confirmed', is_callback: false, service_type: 'Service', service_id: 'cat-1' }, null, true),
-      { call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' }, customerId: 'cust-1', leadId: 'lead-vm', procGeneration: 2, appointmentResult: { scheduledServiceId: 'svc-4' } },
-    )).resolves.toEqual({ cardsResolved: 0, bellsRetired: 0 });
-
-    // Null service_id fails CLOSED (requires verified catalog service row)
-    await expect(reconcilePriorEpisodeOnCallCompletion(
-      makeConn({ id: 'svc-5', status: 'confirmed', is_callback: false, service_type: 'Service', service_id: null }),
-      { call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' }, customerId: 'cust-1', leadId: 'lead-vm', procGeneration: 2, appointmentResult: { scheduledServiceId: 'svc-5' } },
-    )).resolves.toEqual({ cardsResolved: 0, bellsRetired: 0 });
-
-    // address_unit_conflict hold blocks bell retirement
-    await expect(reconcilePriorEpisodeOnCallCompletion(
-      makeConn({ id: 'svc-1', status: 'confirmed', is_callback: false, service_type: 'One-Time Pest', service_id: 'cat-1' }),
-      { call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' }, customerId: 'cust-1', leadId: 'lead-vm', procGeneration: 2, appointmentResult: { scheduledServiceId: 'svc-1' }, bridgeNeedsConfirmation: ['address_unit_conflict'] },
-    )).resolves.toEqual({ cardsResolved: 0, bellsRetired: 0 });
+    alertReconciler.mockClear();
+    await expect(reconcilePriorEpisodeOnCallCompletion(makeConn(), {
+      call: { id: 'call-2', created_at: '2026-11-28T10:00:00Z' },
+      customerId: 'cust-1',
+      leadId: 'lead-vm',
+      procGeneration: 2,
+      appointmentResult: { scheduledServiceId: 'svc-1' },
+      bridgeNeedsConfirmation: ['address_unit_conflict'],
+      alertReconciler,
+    })).resolves.toEqual({ cardsResolved: 0, bellsRetired: 0 });
+    expect(alertReconciler).not.toHaveBeenCalled();
   });
 });
 
@@ -273,7 +192,7 @@ describe('PR B2: Suppress false "Quote asked by text" on delivery-only photo SMS
 });
 
 describe('PR B2: Preserve first-touch lead_source across repeat calls & tracking lines with shared-line identity guard', () => {
-  test('preserves Call 1 Google Ads source for same caller, honors referrals, and refuses inheritance on shared lines or conflicting names', async () => {
+  test('preserves Call 1 Google Ads source for same caller, honors referrals, and blocks rejected lead SIDs from falling back to prior calls', async () => {
     expect(isGenericCallLeadSource('phone_call')).toBe(true);
     expect(isGenericCallLeadSource('phone_tracking')).toBe(true);
     expect(isGenericCallLeadSource('google_ads')).toBe(false);
@@ -303,14 +222,14 @@ describe('PR B2: Preserve first-touch lead_source across repeat calls & tracking
       twilioNumbers: fakeTwilioNumbers,
     })).resolves.toEqual({ source: 'google_ads', detail: 'Google Ads Bradenton' });
 
-    // Conflicting name on same phone -> retains currentLeadSource (does not inherit another person's channel)
-    const connConflictName = jest.fn((table) => {
+    // Conflicting named lead with EMPTY prior call ai_extraction -> rejected SID ALSO excludes the prior call fallback (Codex P2)
+    const connRejectedLeadEmptyCall = jest.fn((table) => {
       if (table === 'customers') return makeChain([]);
-      if (table === 'call_log') return makeChain([{ twilio_call_sid: 'CA-call-1', to_phone: '+19415551111', created_at: '2026-11-28T07:00:00Z', ai_extraction: { first_name: 'Bob', last_name: 'Jones' } }]);
+      if (table === 'call_log') return makeChain([{ twilio_call_sid: 'CA-call-1', to_phone: '+19415551111', created_at: '2026-11-28T07:00:00Z', ai_extraction: {} }]);
       if (table === 'leads') return makeChain([{ created_at: '2026-11-28T07:02:00Z', twilio_call_sid: 'CA-call-1', first_name: 'Bob', last_name: 'Jones', source_type: 'google_ads', name: 'Google Ads' }]);
       return makeChain([]);
     });
-    await expect(resolveFirstTouchCallLeadSource(connConflictName, {
+    await expect(resolveFirstTouchCallLeadSource(connRejectedLeadEmptyCall, {
       contactPhone: '+19415550199',
       currentCallId: 'call-2',
       currentCallCreatedAt: '2026-11-28T10:00:00Z',
@@ -320,14 +239,14 @@ describe('PR B2: Preserve first-touch lead_source across repeat calls & tracking
       twilioNumbers: fakeTwilioNumbers,
     })).resolves.toEqual({ source: 'google_business', area: 'Bradenton GBP' });
 
-    // Conflicting first name sharing the same surname -> retains currentLeadSource
-    const connConflictFirst = jest.fn((table) => {
+    // Conflicting prior call extraction with UNNAMED linked lead -> rejected call SID ALSO excludes the linked lead
+    const connRejectedCallUnnamedLead = jest.fn((table) => {
       if (table === 'customers') return makeChain([]);
       if (table === 'call_log') return makeChain([{ twilio_call_sid: 'CA-call-1', to_phone: '+19415551111', created_at: '2026-11-28T07:00:00Z', ai_extraction: { first_name: 'Bob', last_name: 'Smith' } }]);
-      if (table === 'leads') return makeChain([{ created_at: '2026-11-28T07:02:00Z', twilio_call_sid: 'CA-call-1', first_name: 'Bob', last_name: 'Smith', source_type: 'google_ads', name: 'Google Ads' }]);
+      if (table === 'leads') return makeChain([{ created_at: '2026-11-28T07:02:00Z', twilio_call_sid: 'CA-call-1', first_name: null, last_name: null, source_type: 'google_ads', name: 'Google Ads' }]);
       return makeChain([]);
     });
-    await expect(resolveFirstTouchCallLeadSource(connConflictFirst, {
+    await expect(resolveFirstTouchCallLeadSource(connRejectedCallUnnamedLead, {
       contactPhone: '+19415550199',
       currentCallId: 'call-2',
       currentCallCreatedAt: '2026-11-28T10:00:00Z',
