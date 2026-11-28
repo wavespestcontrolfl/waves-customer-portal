@@ -253,7 +253,11 @@ describe('check_existing_estimates customer-facing pricing units', () => {
         label: 'one-time setup fee',
         display: '$99 one-time setup fee',
       },
-      display: 'General Pest Control: $149 per application (4 applications/yr); plus $99 one-time setup fee',
+      priceSentences: [
+        'Your estimate lists General Pest Control at $149 per application, 4 applications a year.',
+        'Your estimate lists a one-time setup fee of $99.',
+      ],
+      display: 'Your estimate lists General Pest Control at $149 per application, 4 applications a year. Your estimate lists a one-time setup fee of $99.',
     });
     expect(JSON.stringify(out.estimates[0])).not.toContain('49.67');
   });
@@ -274,8 +278,9 @@ describe('check_existing_estimates customer-facing pricing units', () => {
     expect(out.estimates[0].pricing).toEqual({
       unit: 'one_time',
       amount: 295,
-      serviceLabels: ['Pest'],
-      display: '$295 one-time',
+      serviceLabel: 'Pest',
+      priceSentences: ['Your estimate lists Pest at $295 one-time.'],
+      display: 'Your estimate lists Pest at $295 one-time.',
     });
   });
 
@@ -298,8 +303,9 @@ describe('check_existing_estimates customer-facing pricing units', () => {
     expect(out.estimates[0].pricing).toEqual({
       unit: 'per_month',
       amount: 59,
-      serviceLabels: ['Pest'],
-      display: '$59 per month',
+      serviceLabel: 'Pest',
+      priceSentences: ['Your estimate lists Pest at $59 per month.'],
+      display: 'Your estimate lists Pest at $59 per month.',
     });
   });
 
@@ -365,8 +371,9 @@ describe('check_existing_estimates customer-facing pricing units', () => {
     expect(addonOut.estimates[0].pricing).toEqual({
       unit: 'per_application',
       amount: 125,
-      serviceLabels: ['web_sweep'],
-      display: '$125 per application',
+      serviceLabel: 'web_sweep',
+      priceSentences: ['Your estimate lists web_sweep at $125 per application.'],
+      display: 'Your estimate lists web_sweep at $125 per application.',
     });
 
     mockPricing.livePricing = {
@@ -500,19 +507,39 @@ describe('send_lead_response dispatch-boundary price verification', () => {
   const { verifyLeadSmsQuotedPrices } = require('../services/lead-estimate-pricing');
   const { estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
 
-  test('allows a draft matching current verified amount, unit, cadence, and service', async () => {
+  test('allows verbatim server-rendered priceSentences and rejects paraphrased, mixed, or appended unverified prices', async () => {
     mockPricing.perApplicationAverage = {
       model: { planMonthly: 49.67, services: [{ label: 'General Pest Control — 4 applications/yr', perApplication: 149, visits: 4, monthly: 49.67 }], credit: null },
       inputs: { oneTime: { amount: 99, setup: true } },
     };
     pages.push([row({ id: 'e-ok', monthly_total: '49.67', onetime_total: '99.00', service_interest: 'General Pest Control' })]);
     const res = await verifyLeadSmsQuotedPrices(
-      'Hello Pat! Your General Pest Control estimate is $149 per application (4 applications/yr), plus a $99 one-time setup fee.',
+      'Hello Pat! Your estimate lists General Pest Control at $149 per application, 4 applications a year. Your estimate lists a one-time setup fee of $99. Reply if you want to schedule.',
       mockDb,
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
     expect(res).toEqual({ ok: true, hasPrice: true });
+
+    // A verified sentence followed by an unverified second price ("Setup costs 199") is rejected.
+    pages.push([row({ id: 'e-extra', monthly_total: '49.67', onetime_total: '99.00', service_interest: 'General Pest Control' })]);
+    const extraPrice = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists General Pest Control at $149 per application, 4 applications a year. Setup costs 199.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(extraPrice).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
+
+    // Paraphrasing General Pest Control as Bed Bug Treatment is rejected.
+    pages.push([row({ id: 'e-bedbug', monthly_total: '49.67', onetime_total: '99.00', service_interest: 'General Pest Control' })]);
+    const bedBug = await verifyLeadSmsQuotedPrices(
+      'Hello Pat! Your estimate lists Bed Bug Treatment at $149 per application, 4 applications a year.',
+      mockDb,
+      { lead: { ...mockLead }, customer: { ...mockCustomer } },
+      { estimateDeliverableUnderGate },
+    );
+    expect(bedBug).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
   });
 
   test('rejects unit mismatch ($149 per month on a per-application estimate) and forbidden per-visit wording', async () => {
@@ -527,7 +554,7 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
-    expect(wrongUnit).toEqual({ ok: false, hasPrice: true, reason: 'price_or_service_mismatch' });
+    expect(wrongUnit).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
 
     pages.push([row({ id: 'e-u2', monthly_total: '49.67', onetime_total: '0.00', service_interest: 'General Pest Control' })]);
     const perVisit = await verifyLeadSmsQuotedPrices(
@@ -536,7 +563,7 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
-    expect(perVisit).toEqual({ ok: false, hasPrice: true, reason: 'forbidden_per_visit_unit' });
+    expect(perVisit).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
   });
 
   test('rejects service mismatch, cadence mismatch, unlabeled amounts, and setup-fee mislabeling', async () => {
@@ -551,7 +578,7 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
-    expect(wrongService).toEqual({ ok: false, hasPrice: true, reason: 'price_or_service_mismatch' });
+    expect(wrongService).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
 
     pages.push([row({ id: 'e-s2', monthly_total: '49.67', onetime_total: '99.00', service_interest: 'General Pest Control' })]);
     const wrongCadence = await verifyLeadSmsQuotedPrices(
@@ -560,7 +587,7 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
-    expect(wrongCadence).toEqual({ ok: false, hasPrice: true, reason: 'price_or_service_mismatch' });
+    expect(wrongCadence).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
 
     pages.push([row({ id: 'e-s3', monthly_total: '49.67', onetime_total: '99.00', service_interest: 'General Pest Control' })]);
     const unlabeled = await verifyLeadSmsQuotedPrices(
@@ -569,7 +596,7 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
-    expect(unlabeled).toEqual({ ok: false, hasPrice: true, reason: 'missing_price_unit' });
+    expect(unlabeled).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
 
     pages.push([row({ id: 'e-s4', monthly_total: '49.67', onetime_total: '99.00', service_interest: 'General Pest Control' })]);
     const setupAsTreatment = await verifyLeadSmsQuotedPrices(
@@ -578,7 +605,7 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
-    expect(setupAsTreatment).toEqual({ ok: false, hasPrice: true, reason: 'price_or_service_mismatch' });
+    expect(setupAsTreatment).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
 
     // Contradictory named cadence ("every two months" vs 4 applications/yr) is rejected.
     pages.push([row({ id: 'e-s5', monthly_total: '49.67', onetime_total: '0.00', service_interest: 'General Pest Control' })]);
@@ -588,10 +615,10 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
-    expect(wrongNamedCadence).toEqual({ ok: false, hasPrice: true, reason: 'price_or_service_mismatch' });
+    expect(wrongNamedCadence).toEqual({ ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' });
   });
 
-  test('rejects unrecognized currency/price wording ("USD 199", "costs 199") and unidentified one-time services', async () => {
+  test('rejects unrecognized currency/price wording ("USD 199", "costs 199"), closed/locked estimates, bundled one-time totals, and never-sent declined rows', async () => {
     const usdRes = await verifyLeadSmsQuotedPrices(
       'Hello Pat! Your treatment costs USD 199.',
       mockDb,
@@ -607,21 +634,51 @@ describe('send_lead_response dispatch-boundary price verification', () => {
       { lead: { ...mockLead }, customer: { ...mockCustomer } },
       { estimateDeliverableUnderGate },
     );
-    expect(costsRes).toEqual({ ok: false, hasPrice: true, reason: 'unrecognized_price_wording' });
+    expect(costsRes.ok).toBe(false);
+    expect(costsRes.hasPrice).toBe(true);
 
-    // Blank service_interest one-time estimate cannot authorize arbitrary service wording ("Termite").
+    // Closed/declined row never inherits current billing unit.
+    mockPricing.billsPerApplication = false;
+    pages.push([row({ id: 'e-declined', status: 'declined', monthly_total: '59.00', onetime_total: '0.00' })]);
+    const closedOut = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(closedOut.estimates[0].pricing).toBeUndefined();
+    expect(closedOut.estimates[0].pricingUnavailable).toBe('estimate_closed');
+
+    // Never-sent declined row (no sent_at, viewed_at, or firstDeliveredAt) is hidden completely.
+    pages.push([row({ id: 'e-never-sent', status: 'declined', sent_at: null, viewed_at: null, estimate_data: {} })]);
+    const neverSentOut = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(neverSentOut).toEqual({ hasEstimates: false, estimates: [], unviewableEstimates: 1 });
+
+    // Multi-item one-time bundle is withheld rather than quoted as one component.
     mockPricing.livePricing = {
-      bundle: { defaultServiceMode: 'one_time', anchorOneTimePrice: 295, frequencies: [], quoteRequired: false },
+      bundle: {
+        defaultServiceMode: 'one_time',
+        anchorOneTimePrice: 395,
+        oneTimeBreakdown: {
+          total: 395,
+          items: [
+            { kind: 'charge', label: 'Pest Cleanout', amount: 195 },
+            { kind: 'charge', label: 'Rodent Exclusion', amount: 200 },
+          ],
+        },
+        frequencies: [],
+        quoteRequired: false,
+      },
       snapshotHit: true,
     };
-    pages.push([row({ id: 'e-no-svc', monthly_total: '0.00', annual_total: '0.00', onetime_total: '295.00', service_interest: '' })]);
-    const unidSvc = await verifyLeadSmsQuotedPrices(
-      'Hello Pat! Your Termite treatment is $295 one-time.',
-      mockDb,
-      { lead: { ...mockLead }, customer: { ...mockCustomer } },
-      { estimateDeliverableUnderGate },
-    );
-    expect(unidSvc).toEqual({ ok: false, hasPrice: true, reason: 'price_or_service_mismatch' });
+    pages.push([row({ id: 'e-bundle', monthly_total: '0.00', annual_total: '0.00', onetime_total: '395.00' })]);
+    const bundleOut = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(bundleOut.estimates[0].pricing).toBeUndefined();
+    expect(bundleOut.estimates[0].pricingUnavailable).toBe('use_estimate_link');
+
+    // Stale explicit lead.estimate_id with conflicting recorded lead_id is rejected.
+    mockLead.estimate_id = 'e-stale-link';
+    explicitEstimateRow = row({ id: 'e-stale-link', estimate_data: { lead_id: 'l-other' } });
+    pages.push([explicitEstimateRow]);
+    const staleOut = await executeLeadTool('check_existing_estimates', { customer_id: 'c1' }, context);
+    expect(staleOut.estimates[0]).toMatchObject({
+      id: 'e-stale-link', pricingUnavailable: 'different_lead_estimate', token: null, viewUrl: null, viewUrlWithheld: 'different_lead_estimate',
+    });
   });
 
   test('passes texts without prices immediately without reading estimates', async () => {

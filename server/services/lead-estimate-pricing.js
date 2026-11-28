@@ -2,12 +2,12 @@
  * Customer-facing estimate pricing & SMS dispatch price verification for the
  * Lead Response Agent.
  *
- * Every amount exposed to the lead agent or sent in an automated lead SMS must
- * come from a delivered, viewable, authority-approved estimate bound to the
- * assigned lead, with its exact customer-facing billing unit (per application,
- * one-time, or verified preserved monthly membership) and verified service
- * identity. Any ambiguity, lookup failure, or mismatch fails closed and routes
- * to staff review.
+ * Mirrors payment-status-contract.js's verbatim-sentence contract:
+ *  - Only open, delivered, viewable, authority-approved estimates uniquely bound
+ *    to the assigned lead expose server-rendered `priceSentences`.
+ *  - Every outgoing lead SMS is verified at both pre-flight and locked send-time:
+ *    verified verbatim sentences from this lead's current estimate are stripped,
+ *    and any remaining currency/price/unit wording fails closed to staff review.
  */
 
 const logger = require('./logger');
@@ -23,35 +23,15 @@ const {
   estimateIsPriceLocked,
   resolveLivePricing,
 } = require('./estimate-proposal-billing');
-const { serviceKeysFromText } = require('./estimate-service-lines');
+const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 const VIEWABLE_LIMIT = 5;
 const VIEWABLE_PAGE = 15;
+const OPEN_QUOTABLE_STATUSES = new Set(['sent', 'viewed']);
 
-// Matches dollar/currency amounts ("$149", "USD 199", "US$199", "$1,250.50") or
-// number + currency/rate unit ("149 dollars", "149/mo", "149 per application").
-const PRICE_MENTION_RE = /(?:us)?\$\s*(\d[\d,]*(?:\.\d{1,2})?)|\busd\s+(\d[\d,]*(?:\.\d{1,2})?)\b|\b(\d[\d,]*(?:\.\d{1,2})?)\s*(?:dollars?|bucks|usd|\/\s*(?:mo(?:nth)?|yr|year|app(?:lication)?|visit|tx|treatment)|per\s+(?:month|mo|year|yr|application|app|visit|treatment|service)|a\s+(?:month|year|application|visit)|one[\s-]time)\b/gi;
-
-// Broad signal for any currency/price wording so unrecognized formats
-// ("costs 199", "USD one hundred", "priced at 149") fail closed instead of
-// bypassing dispatch verification.
-const BROAD_PRICE_SIGNAL_RE = /\$\s*\d|\busd\b|\b\d[\d,]*(?:\.\d{1,2})?\s*(?:dollars?|bucks|cents)\b|\b(?:costs?|price[ds]?|quoted?|rate|fee|charge[ds]?|total)\s*(?:is|of|at|for|:)?\s*(?:about\s+|around\s+|roughly\s+)?(?:us\$|\$|usd)?\s*\d/i;
-
-const FORBIDDEN_UNIT_RE = /\bper\s+visit\b|\ba\s+visit\b|\/\s*visit\b/i;
-const PER_APP_UNIT_RE = /\bper\s+application\b|\beach\s+application\b|\/\s*app(?:lication)?\b/i;
-const ONE_TIME_UNIT_RE = /\bone[\s-]?time\b|\bsetup\s+fee\b/i;
-const PER_MONTH_UNIT_RE = /\bper\s+month\b|\ba\s+month\b|\/\s*mo(?:nth)?\b|\bmonthly\b/i;
-const CADENCE_COUNT_RE = /\b(\d{1,2})\s+(?:applications?(?:\s*(?:\/|\s+a|\s+per)\s*(?:yr|year))|times?\s+(?:a|per)\s+year)\b/i;
-
-const NAMED_CADENCE_PATTERNS = [
-  { re: /\b(?:quarterly|every\s+(?:3|three)\s+months?)\b/i, visits: 4 },
-  { re: /\b(?:bi[\s-]?monthly|every\s+(?:2|two)\s+months?|every\s+other\s+month)\b/i, visits: 6 },
-  { re: /\b(?:every\s+(?:4|four)\s+months?)\b/i, visits: 3 },
-  { re: /\b(?:semi[\s-]?annual(?:ly)?|every\s+(?:6|six)\s+months?|twice\s+(?:a|per)\s+year)\b/i, visits: 2 },
-  { re: /\b(?:annual(?:ly)?|yearly|once\s+(?:a|per)\s+year)\b/i, visits: 1 },
-  { re: /\b(?:every\s+month)\b/i, visits: 12 },
-];
-const GENERIC_SCHEDULE_RE = /\b(?:every\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve|other)\s+(?:days?|weeks?|months?|years?)|bi[\s-]?weekly|weekly|monthly|quarterly|bi[\s-]?monthly|semi[\s-]?annual(?:ly)?|annual(?:ly)?|yearly|twice\s+(?:a|per)\s+year|once\s+(?:a|per)\s+year)\b/gi;
+// Any price, currency, or billing-unit signal left OUTSIDE a server-rendered
+// verbatim sentence fails closed.
+const UNVERIFIED_PRICE_SIGNAL_RE = /\$\s*\d|\$|\busd\b|\b\d[\d,]*(?:\.\d{1,2})?\s*(?:dollars?|bucks|cents|\/\s*(?:mo(?:nth)?|yr|year|app(?:lication)?|visit|tx|treatment)|per\s+(?:month|mo|year|yr|application|app|visit|treatment|service)|a\s+(?:month|year|application|visit)|one[\s-]time)\b|\b(?:per\s+(?:application|month|visit|year|treatment|service)|\/\s*(?:mo|month|yr|year|app|visit))\b|\b(?:costs?|price[ds]?|quoted?|rate|fee|charge[ds]?|total)\b[^.!?\n]*\d/i;
 
 function positiveMoneyCents(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -108,6 +88,8 @@ function estimateIsQuoteRequired(estimate, data) {
 
 function estimateLinkOnlyReason(estimate, data) {
   if (estimateIsQuoteRequired(estimate, data)) return 'quote_required';
+  const status = String(estimate?.status || '').toLowerCase();
+  if (!OPEN_QUOTABLE_STATUSES.has(status) || estimateIsPriceLocked(estimate)) return 'estimate_closed';
   if (String(estimate?.category || '').toUpperCase() === 'COMMERCIAL'
     || isCommercialAutoAcceptEstimate(estimate)
     || data?.proposal?.enabled === true) {
@@ -141,15 +123,17 @@ function classifyOneTimeBreakdownItems(items, data) {
   return { unitKind: fallbackRows.some(isPerApplicationOneTimeItem) ? 'mixed' : 'one_time', charges: [] };
 }
 
-function oneTimeServiceLabels(charges, estimate) {
-  const fromItems = (charges || [])
-    .map((item) => cleanEstimateLineLabel(
+function singleOneTimeLabel(charges, estimate) {
+  // Withhold multi-item bundles so a bundle total cannot be quoted as a single
+  // component; only a single named service produces a verbatim sentence.
+  if (charges.length > 1) return '';
+  if (charges.length === 1) {
+    const item = charges[0];
+    return cleanEstimateLineLabel(
       item?.label || item?.name || item?.addOnKey || (item?.service !== 'area_addon' ? item?.service : ''),
-    ))
-    .filter(Boolean);
-  if (fromItems.length) return fromItems;
-  const interest = cleanEstimateLineLabel(estimate?.service_interest);
-  return interest ? [interest] : [];
+    );
+  }
+  return cleanEstimateLineLabel(estimate?.service_interest);
 }
 
 function bundleHasRecurringPricing(bundle) {
@@ -183,18 +167,23 @@ async function perApplicationEstimatePricing(estimate) {
   const average = await perApplicationAverageFor(estimate, { rethrow: true });
   if (!average?.model?.services?.length || average.model.credit) return null;
   const lines = [];
+  const priceSentences = [];
   for (const service of average.model.services) {
     const cents = positiveMoneyCents(service.perApplication);
     const applicationsPerYear = Math.round(Number(service.visits));
-    if (!cents || !(applicationsPerYear > 0)) return null;
     const label = cleanEstimateLineLabel(service.label);
+    if (!cents || !(applicationsPerYear > 0) || !label) return null;
+    const amountText = formatDollarsFromCents(cents);
+    const appWord = applicationsPerYear === 1 ? 'application' : 'applications';
+    const sentence = `Your estimate lists ${label} at ${amountText} per application, ${applicationsPerYear} ${appWord} a year.`;
     lines.push({
-      ...(label ? { label } : {}),
+      label,
       amount: cents / 100,
       unit: 'per_application',
       applicationsPerYear,
-      display: `${formatDollarsFromCents(cents)} per application (${applicationsPerYear} application${applicationsPerYear === 1 ? '' : 's'}/yr)`,
+      display: `${amountText} per application (${applicationsPerYear} ${appWord}/yr)`,
     });
+    priceSentences.push(sentence);
   }
   const oneTime = average.inputs?.oneTime;
   if (oneTime && positiveMoneyCents(oneTime.amount) !== null && oneTime.setup !== true) return null;
@@ -205,39 +194,40 @@ async function perApplicationEstimatePricing(estimate) {
     label: 'one-time setup fee',
     display: `${formatDollarsFromCents(oneTimeCents)} one-time setup fee`,
   } : null;
-  const parts = lines.map((line) => (line.label ? `${line.label}: ${line.display}` : line.display));
-  const display = oneTimeCharge ? `${parts.join('; ')}; plus ${oneTimeCharge.display}` : parts.join('; ');
+  if (oneTimeCharge) {
+    priceSentences.push(`Your estimate lists a one-time setup fee of ${formatDollarsFromCents(oneTimeCents)}.`);
+  }
   return {
     pricing: {
       unit: 'per_application',
       lines,
       ...(oneTimeCharge ? { oneTimeCharge } : {}),
-      display,
+      priceSentences,
+      display: priceSentences.join(' '),
     },
   };
 }
 
-async function oneTimeEstimatePricing(estimate, onetimeCents, data) {
-  let verifiedCents = onetimeCents;
-  let breakdownItems = data?.sendSnapshot?.pricingBundle?.oneTimeBreakdown?.items
+async function oneTimeEstimatePricing(estimate, data) {
+  const resolved = await resolveLiveOneTimeBundle(estimate);
+  if (resolved.reason) return { pricingUnavailable: resolved.reason };
+  const breakdownItems = resolved.items
+    || data?.sendSnapshot?.pricingBundle?.oneTimeBreakdown?.items
     || data?.oneTimeBreakdown?.items
     || null;
-  if (!estimateIsPriceLocked(estimate)) {
-    const resolved = await resolveLiveOneTimeBundle(estimate);
-    if (resolved.reason) return { pricingUnavailable: resolved.reason };
-    verifiedCents = resolved.cents;
-    breakdownItems = resolved.items || breakdownItems;
-  }
   const { unitKind, charges } = classifyOneTimeBreakdownItems(breakdownItems, data);
   if (unitKind === 'mixed') return { pricingUnavailable: 'use_estimate_link' };
+  const label = singleOneTimeLabel(charges, estimate);
+  if (!label) return { pricingUnavailable: 'use_estimate_link' };
   const suffix = unitKind === 'per_application' ? 'per application' : 'one-time';
-  const serviceLabels = oneTimeServiceLabels(charges, estimate);
+  const sentence = `Your estimate lists ${label} at ${formatDollarsFromCents(resolved.cents)} ${suffix}.`;
   return {
     pricing: {
       unit: unitKind,
-      amount: verifiedCents / 100,
-      ...(serviceLabels.length ? { serviceLabels } : {}),
-      display: `${formatDollarsFromCents(verifiedCents)} ${suffix}`,
+      amount: resolved.cents / 100,
+      serviceLabel: label,
+      priceSentences: [sentence],
+      display: sentence,
     },
   };
 }
@@ -248,59 +238,70 @@ async function monthlyMembershipEstimatePricing(estimate, monthlyCents) {
     estimateSoldAsAnnualPrepay(estimate, { rethrow: true }),
   ]);
   if (perApplication !== false || prepaid !== false) return { pricingUnavailable: 'use_estimate_link' };
-  if (!estimateIsPriceLocked(estimate)) {
-    const live = await resolveLivePricing(structuredClone(estimate), { rethrow: true });
-    if (!live || live.unresolved || !live.bundle) return { pricingUnavailable: 'use_estimate_link' };
-    if (live.bundle.quoteRequired === true) return { pricingUnavailable: 'quote_required' };
-    if (live.snapshotHit !== true) return { pricingUnavailable: 'use_estimate_link' };
-    const hasExtraFees = positiveMoneyCents(live.bundle.setupFee?.amount) !== null
-      || (Array.isArray(live.bundle.firstVisitFees) && live.bundle.firstVisitFees.some((f) => positiveMoneyCents(f?.amount) !== null));
-    if (hasExtraFees) return { pricingUnavailable: 'use_estimate_link' };
-  }
+  const live = await resolveLivePricing(structuredClone(estimate), { rethrow: true });
+  if (!live || live.unresolved || !live.bundle) return { pricingUnavailable: 'use_estimate_link' };
+  if (live.bundle.quoteRequired === true) return { pricingUnavailable: 'quote_required' };
+  if (live.snapshotHit !== true) return { pricingUnavailable: 'use_estimate_link' };
+  const hasExtraFees = positiveMoneyCents(live.bundle.setupFee?.amount) !== null
+    || (Array.isArray(live.bundle.firstVisitFees) && live.bundle.firstVisitFees.some((f) => positiveMoneyCents(f?.amount) !== null));
+  if (hasExtraFees) return { pricingUnavailable: 'use_estimate_link' };
   const label = cleanEstimateLineLabel(estimate?.service_interest);
+  if (!label) return { pricingUnavailable: 'use_estimate_link' };
+  const sentence = `Your estimate lists ${label} at ${formatDollarsFromCents(monthlyCents)} per month.`;
   return {
     pricing: {
       unit: 'per_month',
       amount: monthlyCents / 100,
-      ...(label ? { serviceLabels: [label] } : {}),
-      display: `${formatDollarsFromCents(monthlyCents)} per month`,
+      serviceLabel: label,
+      priceSentences: [sentence],
+      display: sentence,
     },
   };
 }
 
-// Resolves explicit lead/property evidence across the viewable set BEFORE
-// applying the multi-estimate ambiguity fallback. Returns { boundId, fallbackReason }.
-function resolveLeadBindingPlan(entries, lead) {
-  if (lead?.estimate_id) return { boundId: String(lead.estimate_id), fallbackReason: 'different_lead_estimate' };
-  if (lead?.id) {
-    const leadMatches = entries.filter(({ row, data }) => {
-      const rec = estimateRecordedLeadId(row, data);
-      return rec && String(rec) === String(lead.id);
-    });
-    if (leadMatches.length === 1) return { boundId: String(leadMatches[0].row.id), fallbackReason: 'different_lead_estimate' };
-    if (leadMatches.length > 1) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
-  }
-  const eligible = entries.filter(({ row, data }) => {
-    const rec = estimateRecordedLeadId(row, data);
-    return !rec || !lead?.id || String(rec) === String(lead.id);
-  });
-  if (lead?.property_id) {
-    const propMatches = eligible.filter(({ row }) => row?.property_id && String(row.property_id) === String(lead.property_id));
-    if (propMatches.length === 1) return { boundId: String(propMatches[0].row.id), fallbackReason: 'different_property_estimate' };
-    if (propMatches.length > 1) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
-    return { boundId: null, fallbackReason: 'different_property_estimate' };
-  }
-  if (entries.length === 1 && eligible.length === 1) return { boundId: String(entries[0].row.id), fallbackReason: null };
-  return { boundId: null, fallbackReason: entries.length === 1 ? 'different_lead_estimate' : 'ambiguous_multiple_estimates' };
-}
-
-function bindingReasonForRow(entry, lead, plan) {
-  if (plan.boundId && String(entry.row.id) === plan.boundId) return null;
+// Conflict check runs BEFORE accepting any match, including an explicit
+// lead.estimate_id, so a stale link can never override conflicting lead or
+// property identifiers.
+function rowIdentifierConflict(entry, lead) {
   const rec = estimateRecordedLeadId(entry.row, entry.data);
   if (rec && lead?.id && String(rec) !== String(lead.id)) return 'different_lead_estimate';
   if (lead?.property_id && entry.row?.property_id && String(lead.property_id) !== String(entry.row.property_id)) {
     return 'different_property_estimate';
   }
+  return null;
+}
+
+function resolveLeadBindingPlan(allEligible, lead) {
+  if (lead?.estimate_id) {
+    const linked = allEligible.find((e) => String(e.row.id) === String(lead.estimate_id));
+    if (!linked) return { boundId: null, fallbackReason: 'different_lead_estimate' };
+    const conflict = rowIdentifierConflict(linked, lead);
+    return conflict ? { boundId: null, fallbackReason: conflict } : { boundId: String(linked.row.id), fallbackReason: 'different_lead_estimate' };
+  }
+  const nonConflicting = allEligible.filter((e) => !rowIdentifierConflict(e, lead));
+  if (lead?.id) {
+    const leadMatches = nonConflicting.filter((e) => {
+      const rec = estimateRecordedLeadId(e.row, e.data);
+      return rec && String(rec) === String(lead.id);
+    });
+    if (leadMatches.length === 1) return { boundId: String(leadMatches[0].row.id), fallbackReason: 'different_lead_estimate' };
+    if (leadMatches.length > 1) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
+  }
+  if (lead?.property_id) {
+    const propMatches = nonConflicting.filter((e) => e.row?.property_id && String(e.row.property_id) === String(lead.property_id));
+    if (propMatches.length === 1) return { boundId: String(propMatches[0].row.id), fallbackReason: 'different_property_estimate' };
+    return { boundId: null, fallbackReason: propMatches.length > 1 ? 'ambiguous_multiple_estimates' : 'different_property_estimate' };
+  }
+  if (nonConflicting.length === 1 && allEligible.length === 1) {
+    return { boundId: String(nonConflicting[0].row.id), fallbackReason: null };
+  }
+  return { boundId: null, fallbackReason: allEligible.length === 1 ? 'different_lead_estimate' : 'ambiguous_multiple_estimates' };
+}
+
+function bindingReasonForRow(entry, lead, plan) {
+  const conflict = rowIdentifierConflict(entry, lead);
+  if (conflict) return conflict;
+  if (plan.boundId && String(entry.row.id) === plan.boundId) return null;
   return plan.fallbackReason || 'ambiguous_multiple_estimates';
 }
 
@@ -314,7 +315,7 @@ async function customerFacingEstimatePricing(estimate, data) {
     const annualCents = positiveMoneyCents(estimate?.annual_total);
     const onetimeCents = positiveMoneyCents(estimate?.onetime_total);
     if (monthlyCents === null && annualCents === null && onetimeCents !== null) {
-      return await oneTimeEstimatePricing(estimate, onetimeCents, data);
+      return await oneTimeEstimatePricing(estimate, data);
     }
     if (monthlyCents !== null && onetimeCents === null && !estimate?.show_one_time_option) {
       return await monthlyMembershipEstimatePricing(estimate, monthlyCents);
@@ -334,7 +335,11 @@ async function evaluateDeliveredEstimateRow(conn, row) {
     logger.warn('[lead-tools] check_existing_estimates: malformed estimate_data hidden', { estimateId: row.id });
     return null;
   }
-  if (isUndeliveredSelfServe(row.source, parsed.data)) return null;
+  // Require real delivery/publication evidence: declined rows can pass public
+  // viewability without ever having been sent, and self-serve rows stamp
+  // sent_at at mint time without delivering anything.
+  const hasDeliveryEvidence = Boolean(row.sent_at || row.viewed_at || parsed.data?.deliveryState?.firstDeliveredAt);
+  if (!hasDeliveryEvidence || isUndeliveredSelfServe(row.source, parsed.data)) return null;
   try {
     const blocked = await callSideBlockForEstimateData(conn, parsed.data, { estimateStatus: row.status });
     return blocked ? null : { row, data: parsed.data };
@@ -351,40 +356,95 @@ async function loadExplicitLinkedEstimate(conn, customerId, explicitEstimateId) 
   return evaluateDeliveredEstimateRow(conn, row);
 }
 
-async function loadDeliveredViewableEstimates(conn, customerId, explicitEstimateId = null) {
+// Checks remaining rows past the 5-row display limit ONLY when an implicit
+// binding candidate currently looks unique, so a 6th matching row cannot hide
+// ambiguity without penalizing the normal paging stop when already ambiguous.
+async function probeForAdditionalBindingMatches(conn, customerId, lead, seenIds, startPageRows, nextOffset, initialPlan) {
+  if (lead?.estimate_id || !initialPlan.boundId) return initialPlan;
+  const matches = [initialPlan.boundId];
+  const checkCandidate = async (row) => {
+    if (seenIds.has(String(row.id))) return false;
+    seenIds.add(String(row.id));
+    const evaluated = await evaluateDeliveredEstimateRow(conn, row);
+    if (!evaluated || rowIdentifierConflict(evaluated, lead)) return false;
+    const rec = estimateRecordedLeadId(evaluated.row, evaluated.data);
+    if (lead?.id && rec && String(rec) === String(lead.id)) {
+      matches.push(String(evaluated.row.id));
+      return matches.length > 1;
+    }
+    if (lead?.property_id && evaluated.row?.property_id && String(evaluated.row.property_id) === String(lead.property_id)) {
+      matches.push(String(evaluated.row.id));
+      return matches.length > 1;
+    }
+    if (!lead?.property_id && !rec) {
+      matches.push(String(evaluated.row.id));
+      return matches.length > 1;
+    }
+    return false;
+  };
+  for (const row of startPageRows) {
+    if (await checkCandidate(row)) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
+  }
+  if (startPageRows.exhausted) return initialPlan;
+  for (let offset = nextOffset; ; offset += VIEWABLE_PAGE) {
+    const rows = await conn('estimates').where({ customer_id: customerId })
+      .orderBy('created_at', 'desc').offset(offset).limit(VIEWABLE_PAGE);
+    for (const row of rows) {
+      if (await checkCandidate(row)) return { boundId: null, fallbackReason: 'ambiguous_multiple_estimates' };
+    }
+    if (rows.length < VIEWABLE_PAGE) break;
+  }
+  return initialPlan;
+}
+
+async function loadDeliveredViewableEstimates(conn, customerId, lead) {
   const entries = [];
   const seenIds = new Set();
   let hiddenCount = 0;
-  // Fetch the lead's explicitly linked estimate first (within the assigned
-  // customer scope) so 5 newer customer estimates cannot mask it.
-  const linked = await loadExplicitLinkedEstimate(conn, customerId, explicitEstimateId);
+  const linked = await loadExplicitLinkedEstimate(conn, customerId, lead?.estimate_id || null);
   if (linked) {
     entries.push(linked);
     seenIds.add(String(linked.row.id));
   }
+  let unreadInLastPage = [];
+  let exhausted = false;
+  let nextOffset = 0;
   for (let offset = 0; ; offset += VIEWABLE_PAGE) {
     const rows = await conn('estimates').where({ customer_id: customerId })
       .orderBy('created_at', 'desc').offset(offset).limit(VIEWABLE_PAGE);
-    for (const row of rows) {
+    nextOffset = offset + VIEWABLE_PAGE;
+    let i = 0;
+    for (; i < rows.length; i += 1) {
       if (entries.length >= VIEWABLE_LIMIT) break;
+      const row = rows[i];
       if (seenIds.has(String(row.id))) continue;
       seenIds.add(String(row.id));
       const evaluated = await evaluateDeliveredEstimateRow(conn, row);
       if (evaluated) entries.push(evaluated);
       else hiddenCount += 1;
     }
-    if (entries.length >= VIEWABLE_LIMIT || rows.length < VIEWABLE_PAGE) break;
+    if (entries.length >= VIEWABLE_LIMIT) {
+      unreadInLastPage = rows.slice(i);
+      exhausted = rows.length < VIEWABLE_PAGE;
+      break;
+    }
+    if (rows.length < VIEWABLE_PAGE) {
+      exhausted = true;
+      break;
+    }
   }
-  return { entries, hiddenCount };
+  const initialPlan = resolveLeadBindingPlan(entries, lead);
+  unreadInLastPage.exhausted = exhausted;
+  const bindingPlan = await probeForAdditionalBindingMatches(conn, customerId, lead, seenIds, unreadInLastPage, nextOffset, initialPlan);
+  return { entries, hiddenCount, bindingPlan };
 }
 
 async function checkExistingEstimatesForLead(conn, subject, { estimateDeliverableUnderGate, shortenOrPassthrough }) {
   const customerId = subject.customer.id;
-  const { entries, hiddenCount } = await loadDeliveredViewableEstimates(conn, customerId, subject.lead?.estimate_id || null);
+  const { entries, hiddenCount, bindingPlan } = await loadDeliveredViewableEstimates(conn, customerId, subject.lead);
   if (!entries.length) {
     return { hasEstimates: false, estimates: [], ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}) };
   }
-  const bindingPlan = resolveLeadBindingPlan(entries, subject.lead);
   const estimates = await Promise.all(entries.map(async (entry) => {
     const e = entry.row;
     const authorityOk = await estimateDeliverableUnderGate(conn, e);
@@ -421,122 +481,28 @@ async function checkExistingEstimatesForLead(conn, subject, { estimateDeliverabl
   };
 }
 
-// ── Outgoing SMS price verification ───────────────────────────
+// ── Outgoing SMS verbatim price verification ──────────────────
 
-function extractPriceMentions(message) {
-  const text = String(message || '');
-  const raw = [];
-  PRICE_MENTION_RE.lastIndex = 0;
-  let match = PRICE_MENTION_RE.exec(text);
-  while (match) {
-    const numStr = (match[1] || match[2] || match[3] || '').replace(/,/g, '');
-    const cents = Math.round(Number(numStr) * 100);
-    if (Number.isFinite(cents) && cents >= 0) {
-      raw.push({ index: match.index, end: match.index + match[0].length, cents, rawText: match[0] });
-    }
-    match = PRICE_MENTION_RE.exec(text);
+function normalizeForMatch(text) {
+  return normalizeGsmPunctuation(String(text || ''))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function stripVerifiedPriceSentences(message, sentences) {
+  let remainder = normalizeForMatch(message);
+  const sorted = [...new Set((sentences || []).map(normalizeForMatch).filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+  for (const sentence of sorted) {
+    const escaped = sentence.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    remainder = remainder.replace(new RegExp(escaped, 'gi'), ' ');
   }
-  return raw.map((item, idx) => {
-    const prevEnd = idx > 0 ? raw[idx - 1].end : 0;
-    const nextStart = idx + 1 < raw.length ? raw[idx + 1].index : text.length;
-    const leftBound = Math.max(prevEnd, text.lastIndexOf('.', item.index) + 1, text.lastIndexOf(';', item.index) + 1, text.lastIndexOf('\n', item.index) + 1);
-    const rightCandidates = [nextStart, text.indexOf('.', item.end), text.indexOf(';', item.end), text.indexOf('!', item.end), text.indexOf('?', item.end), text.indexOf('\n', item.end)]
-      .filter((pos) => pos >= item.end);
-    const rightBound = Math.min(...rightCandidates);
-    const clause = text.slice(leftBound, rightBound);
-    const localAround = text.slice(Math.max(leftBound, item.index - 25), Math.min(rightBound, item.end + 45));
-    return { ...item, clause, localAround };
-  });
-}
-
-function detectMentionUnit(mention) {
-  const scope = mention.localAround;
-  if (FORBIDDEN_UNIT_RE.test(scope)) return { error: 'forbidden_per_visit_unit' };
-  const units = [];
-  if (PER_APP_UNIT_RE.test(scope)) units.push('per_application');
-  if (ONE_TIME_UNIT_RE.test(scope)) units.push('one_time');
-  if (PER_MONTH_UNIT_RE.test(scope)) units.push('per_month');
-  if (units.length === 0) return { error: 'missing_price_unit' };
-  if (units.length > 1) return { error: 'ambiguous_price_unit' };
-  return { unit: units[0] };
-}
-
-function schedulePhraseMatches(phrase, claim) {
-  if (/^monthly$/i.test(phrase) && claim.unit === 'per_month') return true;
-  if (!claim.applicationsPerYear) return false;
-  const hit = NAMED_CADENCE_PATTERNS.find((entry) => entry.re.test(phrase));
-  return !!hit && hit.visits === claim.applicationsPerYear;
-}
-
-function cadenceMatchesClaim(clause, claim) {
-  const countMatch = CADENCE_COUNT_RE.exec(clause);
-  if (countMatch && (!claim.applicationsPerYear || Number(countMatch[1]) !== claim.applicationsPerYear)) {
-    return false;
-  }
-  const phrases = clause.match(GENERIC_SCHEDULE_RE) || [];
-  return phrases.every((phrase) => schedulePhraseMatches(phrase, claim));
-}
-
-function claimsFromVerifiedEstimate(estimate) {
-  const pricing = estimate?.pricing;
-  if (!pricing) return [];
-  const claims = [];
-  if (Array.isArray(pricing.lines)) {
-    for (const line of pricing.lines) {
-      const cents = positiveMoneyCents(line.amount);
-      if (!cents) continue;
-      claims.push({
-        cents,
-        unit: line.unit,
-        applicationsPerYear: line.applicationsPerYear || null,
-        serviceKeys: serviceKeysFromText(line.label || estimate.serviceInterest),
-        isSetupFee: false,
-      });
-    }
-    if (pricing.oneTimeCharge) {
-      const feeCents = positiveMoneyCents(pricing.oneTimeCharge.amount);
-      if (feeCents) {
-        claims.push({ cents: feeCents, unit: 'one_time', applicationsPerYear: null, serviceKeys: [], isSetupFee: true });
-      }
-    }
-    return claims;
-  }
-  const cents = positiveMoneyCents(pricing.amount);
-  if (cents) {
-    const labelText = Array.isArray(pricing.serviceLabels) && pricing.serviceLabels.length
-      ? pricing.serviceLabels.join(' ')
-      : estimate.serviceInterest;
-    claims.push({
-      cents,
-      unit: pricing.unit,
-      applicationsPerYear: null,
-      serviceKeys: serviceKeysFromText(labelText),
-      isSetupFee: false,
-    });
-  }
-  return claims;
-}
-
-function claimMatchesMention(claim, mention, unit, messageServiceKeys) {
-  if (claim.cents !== mention.cents || claim.unit !== unit) return false;
-  if (claim.isSetupFee) return /\bsetup\b/i.test(mention.clause);
-  if (!cadenceMatchesClaim(mention.clause, claim)) return false;
-  // Require a verified service identity on every non-setup price claim so an
-  // unidentified estimate can never authorize arbitrary service wording.
-  if (!claim.serviceKeys.length) return false;
-  const clauseKeys = serviceKeysFromText(mention.clause);
-  const effectiveKeys = clauseKeys.length ? clauseKeys : messageServiceKeys;
-  if (!effectiveKeys.some((key) => claim.serviceKeys.includes(key))) return false;
-  return !clauseKeys.some((key) => !claim.serviceKeys.includes(key));
+  return remainder.replace(/\s+/g, ' ').trim();
 }
 
 async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliverableUnderGate }) {
-  const text = String(message || '');
-  const mentions = extractPriceMentions(text);
-  if (!mentions.length) {
-    if (BROAD_PRICE_SIGNAL_RE.test(text)) {
-      return { ok: false, hasPrice: true, reason: 'unrecognized_price_wording' };
-    }
+  const normalized = normalizeForMatch(message);
+  if (!UNVERIFIED_PRICE_SIGNAL_RE.test(normalized)) {
     return { ok: true, hasPrice: false };
   }
   try {
@@ -544,14 +510,14 @@ async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliv
       estimateDeliverableUnderGate,
       shortenOrPassthrough: async (url) => url,
     });
-    const claims = (existing.estimates || []).flatMap(claimsFromVerifiedEstimate);
-    if (!claims.length) return { ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' };
-    const messageServiceKeys = serviceKeysFromText(text);
-    for (const mention of mentions) {
-      const parsedUnit = detectMentionUnit(mention);
-      if (parsedUnit.error) return { ok: false, hasPrice: true, reason: parsedUnit.error };
-      const matched = claims.some((claim) => claimMatchesMention(claim, mention, parsedUnit.unit, messageServiceKeys));
-      if (!matched) return { ok: false, hasPrice: true, reason: 'price_or_service_mismatch' };
+    const allowedSentences = (existing.estimates || [])
+      .flatMap((est) => (Array.isArray(est?.pricing?.priceSentences) ? est.pricing.priceSentences : []));
+    if (!allowedSentences.length) {
+      return { ok: false, hasPrice: true, reason: 'no_verified_estimate_pricing' };
+    }
+    const remainder = stripVerifiedPriceSentences(normalized, allowedSentences);
+    if (UNVERIFIED_PRICE_SIGNAL_RE.test(remainder)) {
+      return { ok: false, hasPrice: true, reason: 'unverified_price_outside_verbatim_sentence' };
     }
     return { ok: true, hasPrice: true };
   } catch (err) {
@@ -562,6 +528,5 @@ async function verifyLeadSmsQuotedPrices(message, conn, subject, { estimateDeliv
 
 module.exports = {
   checkExistingEstimatesForLead,
-  extractPriceMentions,
   verifyLeadSmsQuotedPrices,
 };
