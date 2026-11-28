@@ -35,6 +35,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const gh = require('./content-astro/github-client');
 const { isEnabled } = require('../config/feature-gates');
+const { CITY_TO_LOCATION } = require('../config/locations');
 
 const ASTRO_FILE = 'src/data/entity-profiles.auto.json';
 const SYNC_BRANCH_PREFIX = 'data/entity-profiles-sync-';
@@ -85,8 +86,15 @@ const EXPLICIT_OFFICE_URLS = new Map([
   ['citysquares.com/b/waves-pest-control-lakewood-ranch-26663854', 'bradenton-fl'],
 ]);
 
-const NON_OFFICE_CITY_RE =
-  /(?:^|[-_/])(?:englewood|north[-_]?port|rotonda[-_]?west|port[-_]?charlotte|palmetto|ellenton|nokomis|osprey|siesta[-_]?key|longboat[-_]?key|anna[-_]?maria|holmes[-_]?beach|bradenton[-_]?beach)(?:$|[-_/])/;
+const OFFICE_CITY_KEYS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
+const SERVICE_AREA_CITY_PATTERN = Object.keys(CITY_TO_LOCATION || {})
+  .filter((c) => !OFFICE_CITY_KEYS.has(c) && c !== 'lakewood ranch')
+  .map((c) => c.trim().replace(/\s+/g, '[-_]?'))
+  .sort((a, b) => b.length - a.length)
+  .join('|');
+const NON_OFFICE_CITY_RE = SERVICE_AREA_CITY_PATTERN
+  ? new RegExp(`(?:^|[-_/])(?:${SERVICE_AREA_CITY_PATTERN})(?:$|[-_/])`)
+  : null;
 
 function urlHostAndPath(rawUrl) {
   let u;
@@ -100,7 +108,7 @@ function urlHostAndPath(rawUrl) {
 function inferOfficeSlugFromUrl(rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
-  if (NON_OFFICE_CITY_RE.test(hp.path)) return null;
+  if (NON_OFFICE_CITY_RE && NON_OFFICE_CITY_RE.test(hp.path)) return null;
   const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
   const matches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   if (explicit) {
@@ -114,7 +122,7 @@ function inferOfficeSlugFromUrl(rawUrl) {
 function officeSlugForRow(location, rawUrl) {
   const hp = urlHostAndPath(rawUrl);
   if (!hp) return null;
-  if (NON_OFFICE_CITY_RE.test(hp.path)) return null;
+  if (NON_OFFICE_CITY_RE && NON_OFFICE_CITY_RE.test(hp.path)) return null;
   const pathMatches = URL_PATH_OFFICE_RULES.filter((r) => r.re.test(hp.path)).map((r) => r.slug);
   const explicit = EXPLICIT_OFFICE_URLS.get(hp.host + hp.path);
   if (pathMatches.length > 1) return null;
@@ -162,10 +170,7 @@ const SAMEAS_EXCLUDED_PAGES = new Set([
 ]);
 
 function allowedHostRule(host) {
-  for (const [h, pathRe] of SAMEAS_ALLOWED_OFFICE_HOSTS.entries()) {
-    if (host === h || host.endsWith(`.${h}`)) return pathRe;
-  }
-  return null;
+  return SAMEAS_ALLOWED_OFFICE_HOSTS.get(host) || null;
 }
 
 /**
