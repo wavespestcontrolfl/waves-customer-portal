@@ -2706,8 +2706,9 @@ function singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, ri
   const boundWarnings = rigCtx.rigCarrier
     ? rigVolumeBoundWarnings({ min: protocolLine?.minCarrier, max: capWarn ? null : protocolLine?.maxCarrier, ...rigCtx })
     : [];
+  const labelWarnings = !protocolLine?.conflictLines && Array.isArray(protocolLine?.rowLabelWarnings) ? protocolLine.rowLabelWarnings : [];
   const useNotes = Array.isArray(protocolLine?.doseUseNotes) ? protocolLine.doseUseNotes : [];
-  return [rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, capWarn, ...boundWarnings, ...useNotes, ...serviceWarnings].filter(Boolean);
+  return [...labelWarnings, rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, capWarn, ...boundWarnings, ...useNotes, ...serviceWarnings].filter(Boolean);
 }
 
 function statedLabelVolume(raw) {
@@ -2889,8 +2890,9 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     const used = band || labelPerGallon || null;
     const lineCarrier = used ? lineCarrierOf(band, line) : null;
     // The row's own conditions ride with it whether or not a number can be worked out for it.
+    const labelWarnings = Array.isArray(line.rowLabelWarnings) ? line.rowLabelWarnings : [];
     const useNotes = Array.isArray(line.doseUseNotes) ? line.doseUseNotes : [];
-    const warning = [...lineConditions(line), ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx }), ...useNotes];
+    const warning = [...lineConditions(line), ...labelWarnings, ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx }), ...useNotes];
     if (!used || line.directDoseOnly) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: warning, ...(line.conditional ? { conditional: true } : {}) };
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier, tankOverrides: band ? line.tankOverrides : [] });
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
@@ -2912,10 +2914,11 @@ const NOT_TANK_MIX = 'Not a tank mix — apply as labeled';
 
 function noTankDoseResult(protocolLine, governedRate, rateUnit) {
   const reason = protocolLine?.governed ? AREA_ADDON_NO_TANK : (protocolLine?.directDoseOnly ? DIRECT_DOSE_NO_TANK : NOT_TANK_MIX);
+  const labelWarnings = !protocolLine?.conflictLines && Array.isArray(protocolLine?.rowLabelWarnings) ? protocolLine.rowLabelWarnings : [];
   const useNotes = Array.isArray(protocolLine?.doseUseNotes) ? protocolLine.doseUseNotes : [];
   return {
     mix: { amount: null, unit: governedRate?.rateUnit || rateUnit || null, ratePerGallon: null, reason },
-    warnings: [...conditionWarnings(protocolLine), ...useNotes],
+    warnings: [...conditionWarnings(protocolLine), ...labelWarnings, ...useNotes],
   };
 }
 function mixWarnings(c) {
@@ -2987,18 +2990,27 @@ function mixRowRate(row) {
 
 const CONDITIONAL_MIX_ROW_RE = /\b(?:if you find|if needed|if found|only when|only where|work order|live finds? only)\b/i;
 
-function syntheticHitFromMixRow(row) {
-  const declaredRate = mixRowRate(row);
-  const condText = [row?.condition, row?.where, row?.limit].filter(Boolean).join('; ');
-  const conditional = CONDITIONAL_MIX_ROW_RE.test(condText);
-  const raw = [row?.condition, row?.where, row?.sprayVolume, row?.limit].filter(Boolean).join('; ');
-  return { raw, selected: !conditional, ...(declaredRate ? { declaredRate } : {}) };
+function syntheticHitFromMixRow(row, baseHit = null) {
+  const r = row || {};
+  const base = baseHit || {};
+  const declaredRate = mixRowRate(r);
+  const condText = [r.condition, r.where, r.limit].filter(Boolean).join('; ');
+  const conditional = CONDITIONAL_MIX_ROW_RE.test(condText) || base.selected === false;
+  const raw = [...new Set(
+    [r.condition, r.where, r.sprayVolume, r.limit, base.raw].map((p) => String(p || '').trim()).filter(Boolean),
+  )].join('; ');
+  const hit = { raw, selected: !conditional };
+  if (declaredRate && !base.labelRateRefused) hit.declaredRate = declaredRate;
+  if (base.labelRateRefused) hit.labelRateRefused = true;
+  if (base.labelHold) hit.labelHold = base.labelHold;
+  if (base.governed) hit.governed = base.governed;
+  return hit;
 }
 
 function directDoseNotes(directRows) {
   return (directRows || []).map((row) => {
     const label = row.where ? `${row.where}: ` : 'Direct dose: ';
-    const detail = [row.dose, row.limit ? `(${row.limit})` : null].filter(Boolean).join(' ');
+    const detail = [row.dose, row.note, row.limit ? `(${row.limit})` : null].filter(Boolean).join(' ');
     return detail ? `${label}${detail}` : null;
   }).filter(Boolean);
 }
@@ -3009,6 +3021,14 @@ function mixedMethodUseNotes(tankRow, directRows) {
   return [...notes, ...directDoseNotes(directRows)];
 }
 
+function rowLabelWarningsOf(mixRows) {
+  return [...new Set(
+    (mixRows || [])
+      .map((row) => row?.labelWarning)
+      .filter((w) => w && w !== 'Label rate not yet verified'),
+  )];
+}
+
 function expandedMixRowLabel(serviceName, row, relevant) {
   const duplicateWhere = Boolean(row.where) && relevant.filter((r) => r.where === row.where).length > 1;
   if (!duplicateWhere && row.where) return `${serviceName} — ${row.where}`;
@@ -3016,10 +3036,10 @@ function expandedMixRowLabel(serviceName, row, relevant) {
   return detail ? `${serviceName} — ${detail}` : serviceName;
 }
 
-function expandedMixRowHit(c, row, relevant, directRows, directDoseOnly) {
+function expandedMixRowHit(c, row, hit, relevant, directRows, directDoseOnly) {
   return {
     c: { ...c, name: expandedMixRowLabel(c.name, row, relevant) },
-    hit: syntheticHitFromMixRow(row),
+    hit: syntheticHitFromMixRow(row, hit),
     mixRows: [row],
     doseUseNotes: directDoseOnly ? directDoseNotes([row]) : mixedMethodUseNotes(row, directRows),
     directDoseOnly,
@@ -3037,7 +3057,7 @@ function candidateProtocolHits(c, resolved, product) {
   const directDoseOnly = !tankRows.length && directRows.length > 0;
   const relevant = tankRows.length ? tankRows : mixRows;
   if (relevant.length > 1) {
-    return relevant.map((row) => expandedMixRowHit(c, row, relevant, directRows, directDoseOnly));
+    return relevant.map((row) => expandedMixRowHit(c, row, hit, relevant, directRows, directDoseOnly));
   }
   const singleRow = relevant[0] || null;
   const doseUseNotes = directDoseOnly ? directDoseNotes(directRows) : (tankRows.length && directRows.length ? mixedMethodUseNotes(singleRow, directRows) : []);
@@ -3050,6 +3070,7 @@ function protocolHitRate(h) {
   if (h.hit.declaredRate) return { rate: h.hit.declaredRate, declared: true };
   const fromRow = h.mixRows.length === 1 ? mixRowRate(h.mixRows[0]) : null;
   if (fromRow) return { rate: fromRow, declared: true };
+  if (h.useSpecific) return { rate: null, declared: false };
   const fromRaw = lineRate(h.hit.raw, h.hit.selected === false);
   return { rate: fromRaw, declared: false };
 }
@@ -3101,15 +3122,18 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const stated = h.hit.labelCarrierGalPer1000 ? null : ((h.useSpecific ? null : statedLabelVolume(h.hit.raw)) || specs.exact);
     const { rate, declared } = protocolHitRate(h);
     const tankOverrides = (h.mixRows || []).flatMap((row) => tankTableOverrides(row?.sprayVolume));
+    const rowLabelWarnings = rowLabelWarningsOf(h.mixRows);
+    const explicitDilution = Boolean(h.mixRows.some((row) => row?.perGallon)) || (!h.useSpecific && lineRateIsDilution(h.hit.raw, h.hit.selected === false));
     return {
       rate, declared, labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
       // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
-      explicitDilution: Boolean(h.mixRows.some((row) => row?.perGallon)) || lineRateIsDilution(h.hit.raw, h.hit.selected === false),
+      explicitDilution,
       // The line's own per-area limit for one spray (Acelepryn: no more than 0.37 fl oz per 1,000 sq ft), checked against the rig's volume.
       ...areaCapForRows(h.mixRows, boundLine),
       ...(specs.min ? { minCarrier: specs.min } : {}),
       ...(specs.max ? { maxCarrier: specs.max } : {}),
       ...(tankOverrides.length ? { tankOverrides } : {}),
+      ...(rowLabelWarnings.length ? { rowLabelWarnings } : {}),
       ...(h.doseUseNotes?.length ? { doseUseNotes: h.doseUseNotes } : {}),
       ...(h.directDoseOnly ? { directDoseOnly: true } : {}),
       ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
