@@ -139,7 +139,7 @@ test('sendMessage marks blockquotes and Gmail quote/signature containers so stri
   const htmlBody = [
     '<p>Thanks, we will see you Friday.</p>',
     '<div class="gmail_signature"><p>Waves Support</p></div>',
-    '<div class="gmail_quote"><blockquote><p>I promise to send the waiver by Tuesday.</p></blockquote></div>',
+    '<div class="gmail_quote_container"><p>I promise to send the waiver by Tuesday.</p></div>',
   ].join('');
   await gmail.sendMessage('fixture@example.test', 'Re: Visit', htmlBody);
   const payload = requests[0].data ?? requests[0].body;
@@ -149,6 +149,6 @@ test('sendMessage marks blockquotes and Gmail quote/signature containers so stri
   const sections = raw.split(`--${boundaryMatch[1]}`);
   const [, plainB64 = ''] = sections[1].split('\r\n\r\n');
   const plainDecoded = Buffer.from(plainB64.replace(/\r\n/g, ''), 'base64').toString('utf8');
-  expect(plainDecoded).toContain('> > I promise to send the waiver by Tuesday.');
+  expect(plainDecoded).toContain('> I promise to send the waiver by Tuesday.');
   expect(stripQuotedAndSignature(plainDecoded)).toBe('Thanks, we will see you Friday.');
 });

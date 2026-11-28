@@ -113,6 +113,19 @@ describe('Customer emails audit PR 1 regressions', () => {
       unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsub?a=1&b="x"',
     });
     expect(marketing.html).toContain('href="https://portal.wavespestcontrol.com/unsub?a=1&amp;b=&quot;x&quot;"');
+
+    const badUnsub = renderTemplate({
+      template: { template_key: 'newsletter.promo', name: 'Promo', mode: 'marketing' },
+      version: {
+        subject: 'Promo',
+        blocks: [{ type: 'paragraph', content: 'Hello' }],
+      },
+      payload: {},
+      unsubscribeUrl: 'javascript:alert(1)',
+    });
+    expect(badUnsub.html).not.toContain('href="#"');
+    expect(badUnsub.html).not.toContain('javascript:alert(1)');
+    expect(badUnsub.text).not.toContain('javascript:alert(1)');
   });
 
   test('automation-runner passes escaped previewText as preheader and detects darkAwareBody', () => {

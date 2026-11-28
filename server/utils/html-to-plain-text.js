@@ -6,8 +6,8 @@ const BLOCK_TAGS = new Set([
   'blockquote', 'section', 'article', 'header', 'footer',
 ]);
 const CELL_TAGS = new Set(['td', 'th']);
-const QUOTE_CLASS_RE = /\b(?:gmail_quote|yahoo_quoted)\b/i;
-const SIGNATURE_CLASS_RE = /\bgmail_signature\b/i;
+const QUOTE_CLASS_RE = /(?:gmail_quote|yahoo_quoted)/i;
+const SIGNATURE_CLASS_RE = /gmail_signature/i;
 const HIDDEN_STYLE_RE = /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\b/i;
 
 function hasAttr(node, name) {

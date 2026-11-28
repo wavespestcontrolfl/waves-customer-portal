@@ -96,10 +96,18 @@ function safeImageUrl(url) {
   return /^(https?:\/\/|\/)/i.test(safe) ? safe : '';
 }
 
+function validatedUnsubscribeUrl(url) {
+  const trimmed = String(url == null ? '' : url).trim();
+  if (!trimmed) return null;
+  if (trimmed === ASM_UNSUBSCRIBE_URL || /^\{\{[a-zA-Z0-9_]+\}\}$/.test(trimmed)) return trimmed;
+  return /^(?:https?:\/\/|mailto:)/i.test(trimmed) ? trimmed : null;
+}
+
 function safeUnsubscribeHref(url) {
-  if (!url) return null;
-  if (url === ASM_UNSUBSCRIBE_URL || /^\{\{[a-zA-Z0-9_]+\}\}$/.test(url)) return url;
-  return escapeHtml(safeUrl(url));
+  const valid = validatedUnsubscribeUrl(url);
+  if (!valid) return null;
+  if (valid === ASM_UNSUBSCRIBE_URL || /^\{\{[a-zA-Z0-9_]+\}\}$/.test(valid)) return valid;
+  return escapeHtml(valid);
 }
 
 // For suppressProviderErrorLog callers: strip anything address-shaped from a
@@ -549,7 +557,8 @@ function isMarketingSend(template, suppressionGroupKey) {
 }
 
 function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppressionGroupKey } = {}) {
-  if (unsubscribeUrl) return unsubscribeUrl;
+  const valid = validatedUnsubscribeUrl(unsubscribeUrl);
+  if (valid) return valid;
   if (isMarketingSend(template, suppressionGroupKey) && asmGroupId) return ASM_UNSUBSCRIBE_URL;
   return null;
 }
@@ -839,7 +848,8 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // one stream ("referral emails", "these follow-ups") would understate it.
   // Only an admin preview/test passes a link for a service-stream template.
   const unsubScope = isMarketingSend(template, null) ? 'Waves marketing emails' : 'these emails';
-  const unsubHref = safeUnsubscribeHref(unsubscribeUrl);
+  const validUnsubUrl = validatedUnsubscribeUrl(unsubscribeUrl);
+  const unsubHref = safeUnsubscribeHref(validUnsubUrl);
   const unsubFooterHtml = unsubHref
     ? `<a href="${unsubHref}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
     : null;
@@ -865,8 +875,8 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText, bodyAppend?.text].filter(Boolean).join('\n\n')
     : [bodyText, bodyAppend?.text].filter(Boolean).join('\n\n');
-  const text = (mode === 'marketing' || unsubscribeUrl)
-    ? ensureLegalTextFooter(textBody, { unsubscribeUrl: unsubscribeUrl || null }) || bodyText
+  const text = (mode === 'marketing' || validUnsubUrl)
+    ? ensureLegalTextFooter(textBody, { unsubscribeUrl: validUnsubUrl }) || bodyText
     : textBody;
 
   return {
