@@ -329,8 +329,8 @@ router.post('/chat/report', requireAiContentReport, chatReportLimiter, authentic
 // ADMIN — escalation queue, conversation history, call log
 // =========================================================================
 
-// GET /api/ai/admin/escalations — pending escalations
-router.get('/admin/escalations', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+// GET /api/ai/admin/escalations — pending escalations (admin-only: office Portal Inbox)
+router.get('/admin/escalations', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const { status = 'pending' } = req.query;
     const escalations = await db('ai_escalations as e')
@@ -351,8 +351,8 @@ router.get('/admin/escalations', adminAuthenticate, requireTechOrAdmin, async (r
 // Statuses ai_escalations really uses (pending, claimed by staff, resolved, dismissed).
 const ESCALATION_STATUSES = ['pending', 'claimed', 'resolved', 'dismissed'];
 
-// PUT /api/ai/admin/escalations/:id — claim, resolve, or dismiss
-router.put('/admin/escalations/:id', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+// PUT /api/ai/admin/escalations/:id — claim, resolve, or dismiss (admin-only)
+router.put('/admin/escalations/:id', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const { status, resolution_notes, claimed_by } = req.body;
     if (status !== undefined && !ESCALATION_STATUSES.includes(status)) {
@@ -381,8 +381,8 @@ router.put('/admin/escalations/:id', adminAuthenticate, requireTechOrAdmin, asyn
   } catch (err) { next(err); }
 });
 
-// GET /api/ai/admin/conversations — recent conversations
-router.get('/admin/conversations', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+// GET /api/ai/admin/conversations — recent conversations (admin-only)
+router.get('/admin/conversations', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const { status, limit = 30 } = req.query;
     let query = db('agent_sessions as conv')
@@ -398,8 +398,8 @@ router.get('/admin/conversations', adminAuthenticate, requireTechOrAdmin, async 
   } catch (err) { next(err); }
 });
 
-// GET /api/ai/admin/conversations/:id/messages — full message thread
-router.get('/admin/conversations/:id/messages', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+// GET /api/ai/admin/conversations/:id/messages — full message thread (admin-only)
+router.get('/admin/conversations/:id/messages', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const messages = await db('agent_messages')
       .where('conversation_id', req.params.id)
@@ -411,8 +411,8 @@ router.get('/admin/conversations/:id/messages', adminAuthenticate, requireTechOr
   } catch (err) { next(err); }
 });
 
-// POST /api/ai/admin/conversations/:id/reply — admin sends a reply in a conversation
-router.post('/admin/conversations/:id/reply', adminAuthenticate, requireTechOrAdmin, async (req, res, next) => {
+// POST /api/ai/admin/conversations/:id/reply — admin sends a reply in a conversation (admin-only)
+router.post('/admin/conversations/:id/reply', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const { message } = req.body;
     const conv = await db('agent_sessions').where('id', req.params.id).first();

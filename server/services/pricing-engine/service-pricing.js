@@ -5225,10 +5225,23 @@ function resolveMistingBasis({ tier, solution }, knobs) {
     && (!knobs.tier || knobs.tier === tier)
     && (!knobs.refillSolution || knobs.refillSolution === solution);
   const knob = mistingKnobReader(matches ? knobs : null);
+  // Smart-never-below-Essential floor (owner 2026-11-27): on fresh smart quotes,
+  // carry the comparable Essential tier basis so Smart never undercuts Essential
+  // at 29+ nozzles. On a legacy replay (matching knobs without essentialTierPrice),
+  // keep both null so already-sent quotes replay verbatim at their stamped price.
+  const essentialCfg = M.tiers.essential;
+  const essentialTierPrice = tier === 'smart'
+    ? (matches ? knob('essentialTierPrice', null) : (essentialCfg ? essentialCfg.price : null))
+    : null;
+  const essentialIncludedNozzles = tier === 'smart'
+    ? (matches ? knob('essentialIncludedNozzles', null, { positive: true, whole: true }) : (essentialCfg ? essentialCfg.includedNozzles : null))
+    : null;
   return {
     tierPrice: knob('tierPrice', tierCfg.price),
     hardwareCost: knob('hardwareCost', tierCfg.hardwareCost),
     includedNozzles: knob('includedNozzles', tierCfg.includedNozzles, { positive: true, whole: true }),
+    essentialTierPrice,
+    essentialIncludedNozzles,
     extraNozzlePrice: knob('extraNozzlePrice', M.extraNozzlePrice),
     extraNozzleCost: knob('extraNozzleCost', M.extraNozzleCost),
     includedRisers: knob('includedRisers', M.includedRisers, { whole: true }),
@@ -5294,6 +5307,12 @@ function mistingPricingKnobs(choice, basis) {
     tierPrice: basis.tierPrice,
     hardwareCost: basis.hardwareCost,
     includedNozzles: basis.includedNozzles,
+    ...(choice.tier === 'smart' && basis.essentialTierPrice != null && basis.essentialIncludedNozzles != null
+      ? {
+        essentialTierPrice: basis.essentialTierPrice,
+        essentialIncludedNozzles: basis.essentialIncludedNozzles,
+      }
+      : {}),
     extraNozzlePrice: basis.extraNozzlePrice,
     extraNozzleCost: basis.extraNozzleCost,
     includedRisers: basis.includedRisers,
@@ -5334,7 +5353,17 @@ function mistingOversizeResult(base, reasons) {
 function buildMistingPricedResult(base, basis, reasons) {
   const { extraNozzles, extraRisers } = base;
   // Cents are kept: the DB-authoritative row may hold fractional tier or overage prices (Codex #6503 r11).
-  const price = Math.round((basis.tierPrice + extraNozzles * basis.extraNozzlePrice + extraRisers * basis.extraRiserPrice) * 100) / 100;
+  const rawPrice = Math.round((basis.tierPrice + extraNozzles * basis.extraNozzlePrice + extraRisers * basis.extraRiserPrice) * 100) / 100;
+  const essentialComparablePrice = base.tier === 'smart'
+    && basis.essentialTierPrice != null
+    && basis.essentialIncludedNozzles != null
+    ? Math.round((
+      basis.essentialTierPrice
+      + Math.max(0, base.nozzles - basis.essentialIncludedNozzles) * basis.extraNozzlePrice
+      + extraRisers * basis.extraRiserPrice
+    ) * 100) / 100
+    : null;
+  const price = essentialComparablePrice != null ? Math.max(rawPrice, essentialComparablePrice) : rawPrice;
   const materialCost = Math.round((basis.hardwareCost + extraNozzles * basis.extraNozzleCost + extraRisers * basis.extraRiserCost) * 100) / 100;
   const laborCost = Math.round(basis.installTechs * basis.installHours * basis.laborRate * 100) / 100;
   const totalCost = Math.round((materialCost + laborCost) * 100) / 100;
@@ -7301,7 +7330,10 @@ const namesCrosscheckPlus = (product = {}) => namesBottle(product, CROSSCHECK_PL
 // the same Volume Adjustment Chart as Crosscheck Plus, so the trench half volume holds for it too (priceTrenching).
 const TALAK_79F_NAMES = new Set(['talak79f', 'talak79fbifenthrin', 'atticustalak79f', 'atticustalak79fbifenthrin']);
 // A bottle whose label was read for the trench half volume: a product an admin renamed to any other bottle keeps the full volume.
-const namesHalfVolumeLabel = (product = {}) => namesCrosscheckPlus(product) || namesBottle(product, TALAK_79F_NAMES);
+// Both Crosscheck Plus and the earlier Atticus Talak 7.9 F carry the same chart, so a partial overlay mixing Crosscheck's
+// catalog link with a Talak label still qualifies while any third bottle (e.g. Bifen I/T, Crosscheck G) stays full volume.
+const HALF_VOLUME_LABEL_NAMES = new Set([...CROSSCHECK_PLUS_NAMES, ...TALAK_79F_NAMES]);
+const namesHalfVolumeLabel = (product = {}) => namesBottle(product, HALF_VOLUME_LABEL_NAMES);
 function labelCheckCounts(options, productKey, product) {
   if (!optionBooleanTrue(options.labelConfirmed)) return false;
   return !BIFENTHRIN_TERMITICIDE_KEYS.has(productKey)
@@ -7340,6 +7372,16 @@ const TRENCH_CHART_VERDICTS = new Map([
     warning: (chartPairs, oz, gallons) => `The configured dilution and finished volume, ${roundMoney(oz)} fl oz a finished gallon at ${roundMoney(gallons)} gal per 10 linear feet per foot of depth, are not a pair on the label's volume adjustment chart (${chartPairs.map(([pairOz, pairGallons]) => `${roundMoney(pairOz)} fl oz at ${roundMoney(pairGallons)} gal`).join(', or ')}). Requires review before sending.`,
   }],
 ]);
+
+function trenchingIncludedProductCostPerOz(includedProduct) {
+  const configuredCost = Number(includedProduct?.configuredContainerCost);
+  const configuredOz = Number(includedProduct?.configuredContainerOz);
+  const hasConfigured = Number.isFinite(configuredCost) && configuredCost > 0
+    && Number.isFinite(configuredOz) && configuredOz > 0;
+  const cost = hasConfigured ? configuredCost : includedProduct.containerCost;
+  const oz = hasConfigured ? configuredOz : includedProduct.containerOz;
+  return cost / oz;
+}
 
 function priceTrenching(property = {}, options = {}, replay) {
   const measurements = resolveTrenchingMeasurements(property || {}, options || {});
@@ -7581,10 +7623,13 @@ function priceTrenching(property = {}, options = {}, replay) {
   const chemicalCostPerOz = containerCost / containerOz;
   const allocatedChemicalCost = productOz * chemicalCostPerOz;
   const includedProduct = cfg.products?.[cfg.defaultIncludedProductKey] || cfg.products?.[cfg.defaultProductKey] || product;
-  // The install price includes the included product at its standard rate over the labeled volume, a reduced volume or not.
+  // The install price includes the included product at its configured baseline
+  // rate over the labeled volume — kept separate from catalog cost ratchets so
+  // a wholesale increase on the included product raises standard retail instead
+  // of widening the allowance subtracted from premium products.
   const includedChemicalCost = labeledGallons *
     includedProduct.productOzPerFinishedGallonAtStandardRate *
-    (includedProduct.containerCost / includedProduct.containerOz);
+    trenchingIncludedProductCostPerOz(includedProduct);
   const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
   const surchargePinned = trenchReplayPinApplies(replay, {
     productKey: productResolution.productKey,
@@ -7646,6 +7691,44 @@ function priceTrenching(property = {}, options = {}, replay) {
     price,
     quoteRequired: warrantyQuoteRequired,
     manualReviewReasons: finalManualReviewReasons,
+  };
+}
+
+function resolveBoraCareBasis(options) {
+  const k = options && typeof options.knobs === 'object' && !Array.isArray(options.knobs) ? options.knobs : null;
+  const pick = (key, live, allowZero = false) => {
+    const v = k ? Number(k[key]) : NaN;
+    return Number.isFinite(v) && (allowZero ? v >= 0 : v > 0) ? v : live;
+  };
+  return {
+    galCost: pick('galCost', SPECIALTY.boraCare.galCost),
+    coverage: pick('coverage', SPECIALTY.boraCare.coverage),
+    equipCost: pick('equipCost', SPECIALTY.boraCare.equipCost, true),
+    marginDivisor: pick('marginDivisor', SPECIALTY.boraCare.marginDivisor),
+    minJobPrice: pick('minJobPrice', SPECIALTY.boraCare.minJobPrice, true),
+    surfaceLaborSqFtPerHour: pick('surfaceLaborSqFtPerHour', SPECIALTY.boraCare.surfaceLaborSqFtPerHour),
+    laborRate: pick('laborRate', GLOBAL.LABOR_RATE),
+  };
+}
+
+function finalizeBoraCarePrice(options, { atticSqFt, surfaceSqFt, surfaceOnly, basis, rawPrice }) {
+  const k = options && typeof options.knobs === 'object' && !Array.isArray(options.knobs) ? options.knobs : null;
+  const pinned = k ? Number(k.pinnedPrice) : NaN;
+  const hasScope = k && (k.pinnedAtticSqFt !== undefined || k.pinnedSurfaceSqFt !== undefined);
+  if (Number.isFinite(pinned) && pinned > 0 && hasScope) {
+    const atticMatch = (k.pinnedAtticSqFt ?? 0) === (atticSqFt ?? 0);
+    const surfaceMatch = (k.pinnedSurfaceSqFt ?? 0) === (surfaceSqFt ?? 0);
+    if (atticMatch && surfaceMatch) {
+      const price = Math.round(pinned * 100) / 100;
+      return {
+        price,
+        pricingKnobs: { ...basis, pinnedPrice: price, pinnedAtticSqFt: atticSqFt, pinnedSurfaceSqFt: surfaceSqFt },
+      };
+    }
+  }
+  return {
+    price: surfaceOnly ? Math.max(basis.minJobPrice, rawPrice) : rawPrice,
+    pricingKnobs: basis,
   };
 }
 
@@ -7726,18 +7809,19 @@ function priceBoraCare(input, options = {}) {
   // the attic-access overhead the floors were built for, so it prices on actual
   // gallons + actual labor and is floored at minJobPrice instead. Attic jobs
   // (attic-only or attic+surface) keep the proven 3-gallon / 2-hour floors.
+  const basis = resolveBoraCareBasis(options);
   const surfaceOnly = !hasAttic;
   const gallonsFloor = surfaceOnly ? 1 : 3;
-  const gallons = Math.max(gallonsFloor, Math.ceil(totalSqFt / SPECIALTY.boraCare.coverage));
+  const gallons = Math.max(gallonsFloor, Math.ceil(totalSqFt / basis.coverage));
   const isMultiDay = totalSqFt > 4500;
   const laborHrs = isMultiDay
     ? Math.min(10, Math.max(6, 1.5 + totalSqFt / 800))
     : surfaceOnly
-      ? Math.min(6, totalSqFt / SPECIALTY.boraCare.surfaceLaborSqFtPerHour)
+      ? Math.min(6, totalSqFt / basis.surfaceLaborSqFtPerHour)
       : Math.min(6, Math.max(2, 1.5 + totalSqFt / 1000));
-  const cost = gallons * SPECIALTY.boraCare.galCost + laborHrs * GLOBAL.LABOR_RATE + SPECIALTY.boraCare.equipCost;
-  const rawPrice = Math.round(cost / SPECIALTY.boraCare.marginDivisor);
-  const price = surfaceOnly ? Math.max(SPECIALTY.boraCare.minJobPrice, rawPrice) : rawPrice;
+  const cost = gallons * basis.galCost + laborHrs * basis.laborRate + basis.equipCost;
+  const rawPrice = Math.round(cost / basis.marginDivisor);
+  const { price, pricingKnobs } = finalizeBoraCarePrice(options, { atticSqFt, surfaceSqFt, surfaceOnly, basis, rawPrice });
 
   return {
     ...baseResult,
@@ -7747,6 +7831,7 @@ function priceBoraCare(input, options = {}) {
     cost: Math.round(cost),
     price,
     quoteRequired: false,
+    pricingKnobs,
   };
 }
 
@@ -11177,6 +11262,7 @@ module.exports = {
   // The migration 20261119020000 reads a Crosscheck Plus name by this same rule (pre-push audit at the sixteenth push).
   namesCrosscheckPlus,
   resolveBoraCareSqFt,
+  resolveBoraCareSurfaceSqFt,
   resolvePreSlabSqFt,
   normalizePreSlabTermiticideProduct,
   BIFENTHRIN_LABEL_BOTTLE,

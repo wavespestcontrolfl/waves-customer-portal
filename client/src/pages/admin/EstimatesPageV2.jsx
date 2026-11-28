@@ -2249,6 +2249,7 @@ function EstimatePipelineViewV2({
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
+  const actionLocks = useActionLocks();
   const [scheduleEstimate, setScheduleEstimate] = useState(null);
   const { lastMutation } = useIntelligenceBarActions();
   const estimatesRefresh =
@@ -2354,6 +2355,7 @@ function EstimatePipelineViewV2({
         )
       )
         return;
+      if (!actionLocks.enter(`archive:${e.id}`)) return;
       try {
         await adminFetch(`/admin/estimates/${e.id}/archive`, {
           method: "POST",
@@ -2361,12 +2363,15 @@ function EstimatePipelineViewV2({
         refreshEstimates();
       } catch (err) {
         alert("Archive failed: " + err.message);
+      } finally {
+        actionLocks.leave(`archive:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const unarchiveEstimate = useCallback(
     async (e) => {
+      if (!actionLocks.enter(`unarchive:${e.id}`)) return;
       try {
         await adminFetch(`/admin/estimates/${e.id}/unarchive`, {
           method: "POST",
@@ -2374,9 +2379,11 @@ function EstimatePipelineViewV2({
         refreshEstimates();
       } catch (err) {
         alert("Unarchive failed: " + err.message);
+      } finally {
+        actionLocks.leave(`unarchive:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const patchEstimateToggle = useCallback(
     async (estimate, field, value) => {
@@ -2465,6 +2472,7 @@ function EstimatePipelineViewV2({
           ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
           : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
       if (!window.confirm(confirmMsg)) return;
+      if (!actionLocks.enter(`mark-accepted:${e.id}`)) return;
       try {
         const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
           method: "POST",
@@ -2479,9 +2487,11 @@ function EstimatePipelineViewV2({
         if (notes.length) window.alert(`Marked won:\n\n${notes.join("\n")}`);
       } catch (err) {
         window.alert("Mark accepted failed: " + err.message);
+      } finally {
+        actionLocks.leave(`mark-accepted:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const markEstimateAnnualPrepayAccepted = useCallback(
     async (e) => {
@@ -2493,6 +2503,7 @@ function EstimatePipelineViewV2({
         )
       )
         return;
+      if (!actionLocks.enter(`annual-prepay:${e.id}`)) return;
       try {
         const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
           method: "POST",
@@ -2509,9 +2520,11 @@ function EstimatePipelineViewV2({
         }
       } catch (err) {
         alert(`Failed to mark annual prepay accepted: ${err.message}`);
+      } finally {
+        actionLocks.leave(`annual-prepay:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const sendBookingLink = useCallback(
     async (e) => {
@@ -2527,6 +2540,7 @@ function EstimatePipelineViewV2({
         )
       )
         return;
+      if (!actionLocks.enter(`send-booking:${e.id}`)) return;
       try {
         await adminFetch(`/admin/estimates/${e.id}/send-booking-link`, {
           method: "POST",
@@ -2534,9 +2548,11 @@ function EstimatePipelineViewV2({
         refreshEstimates();
       } catch (err) {
         window.alert("Send booking link failed: " + err.message);
+      } finally {
+        actionLocks.leave(`send-booking:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
 
   // Classify + sort newest-first so the most recent estimates stay at the top.
@@ -2611,8 +2627,8 @@ function EstimatePipelineViewV2({
         <FollowUpModalV2
           estimate={followUpTarget}
           onClose={() => setFollowUpTarget(null)}
-          onSent={() => {
-            callOutcomes.release(followUpTarget.id);
+          onSent={(sentId) => {
+            callOutcomes.release(sentId || followUpTarget?.id);
             setFollowUpTarget(null);
             refreshEstimates();
           }}
@@ -2954,6 +2970,7 @@ function EstimatePipelineViewV2({
                         {e.customerPhone && (
                           <Button
                             type="button"
+                            disabled={actionLocks.isBusy(`call:${e.id}`)}
                             onClick={async (evt) => {
                               evt.stopPropagation();
                               if (
@@ -2962,6 +2979,7 @@ function EstimatePipelineViewV2({
                                 )
                               )
                                 return;
+                              if (!actionLocks.enter(`call:${e.id}`)) return;
                               try {
                                 const r = await adminFetch(
                                   "/admin/communications/call",
@@ -2986,6 +3004,8 @@ function EstimatePipelineViewV2({
                                   callOutcomes.hold(e);
                               } catch (err) {
                                 alert("Call failed: " + err.message);
+                              } finally {
+                                actionLocks.leave(`call:${e.id}`);
                               }
                             }}
                             aria-label={`Call ${e.customerName || "customer"} via Waves`}
@@ -3231,6 +3251,7 @@ function EstimatePipelineViewV2({
                           <Button
                             size="sm"
                             variant="secondary"
+                            disabled={actionLocks.isBusy(`mark-accepted:${e.id}`)}
                             className="w-full sm:w-auto whitespace-nowrap"
                             onClick={() => markEstimateAccepted(e)}
                           >
@@ -3242,6 +3263,7 @@ function EstimatePipelineViewV2({
                           <Button
                             size="sm"
                             variant="secondary"
+                            disabled={actionLocks.isBusy(`annual-prepay:${e.id}`)}
                             className="w-full sm:w-auto whitespace-nowrap"
                             onClick={() => markEstimateAnnualPrepayAccepted(e)}
                           >
@@ -3289,6 +3311,7 @@ function EstimatePipelineViewV2({
                           <Button
                             size="sm"
                             variant="secondary"
+                            disabled={actionLocks.isBusy(`unarchive:${e.id}`)}
                             className="w-full sm:w-auto whitespace-nowrap"
                             onClick={() => unarchiveEstimate(e)}
                           >
@@ -3514,6 +3537,7 @@ function EstimatePipelineViewV2({
                               label: "Delete draft",
                               icon: <Trash2 size={16} strokeWidth={1.75} />,
                               variant: "danger",
+                              disabled: actionLocks.isBusy(`delete:${e.id}`),
                               onClick: async () => {
                                 if (
                                   !confirm(
@@ -3521,6 +3545,7 @@ function EstimatePipelineViewV2({
                                   )
                                 )
                                   return;
+                                if (!actionLocks.enter(`delete:${e.id}`)) return;
                                 try {
                                   await adminFetch(
                                     `/admin/estimates/${e.id}`,
@@ -3529,6 +3554,8 @@ function EstimatePipelineViewV2({
                                   refreshEstimates();
                                 } catch (err) {
                                   alert("Delete failed: " + err.message);
+                                } finally {
+                                  actionLocks.leave(`delete:${e.id}`);
                                 }
                               },
                             },
@@ -3958,6 +3985,8 @@ export function MobileEstimateRow({
   const amountInline = estimatePriceInline(amount);
   const canSend = canSendEstimate(estimate);
   const [viewError, setViewError] = useState("");
+  const [calling, setCalling] = useState(false);
+  const callingRef = useRef(false);
   const customerName = estimate.customerName || "Unknown";
   const isDraftMuted = v3Flag && estimate.status === "draft";
   const hasCustomer = !!estimate.customerId;
@@ -4200,14 +4229,18 @@ export function MobileEstimateRow({
         {estimate.customerPhone && (
           <Button
             type="button"
+            disabled={calling}
             onClick={async (e) => {
               e.stopPropagation();
+              if (callingRef.current) return;
               if (
                 !window.confirm(
                   `Call ${estimate.customerName || "customer"} at ${estimate.customerPhone}?\n\nWaves will call your phone first — press 1 to connect.`,
                 )
               )
                 return;
+              callingRef.current = true;
+              setCalling(true);
               try {
                 const r = await adminFetch("/admin/communications/call", {
                   method: "POST",
@@ -4222,6 +4255,9 @@ export function MobileEstimateRow({
                 else onCalled?.(estimate);
               } catch (err) {
                 alert("Call failed: " + err.message);
+              } finally {
+                callingRef.current = false;
+                setCalling(false);
               }
             }}
             aria-label="Call via Waves"
@@ -4488,6 +4524,7 @@ function EstimatesMobileListView({
     };
     // A Call today link taken on the open list loads it fresh, as on desktop.
   }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
+  const actionLocks = useActionLocks();
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked.
@@ -4499,6 +4536,7 @@ function EstimatesMobileListView({
           ? `Mark ${e.customerName || "this proposal"} as won?\n\nThis stamps the proposal as won and creates the customer if none is linked. The customer is NOT texted, NOT auto-scheduled, and NO invoice is created — bill it from the proposal when ready.`
           : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
       if (!window.confirm(confirmMsg)) return;
+      if (!actionLocks.enter(`mark-accepted:${e.id}`)) return;
       try {
         const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
           method: "POST",
@@ -4513,9 +4551,11 @@ function EstimatesMobileListView({
         if (notes.length) window.alert(`Marked won:\n\n${notes.join("\n")}`);
       } catch (err) {
         window.alert("Mark accepted failed: " + err.message);
+      } finally {
+        actionLocks.leave(`mark-accepted:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const markEstimateAnnualPrepayAccepted = useCallback(
     async (e) => {
@@ -4527,6 +4567,7 @@ function EstimatesMobileListView({
         )
       )
         return;
+      if (!actionLocks.enter(`annual-prepay:${e.id}`)) return;
       try {
         const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
           method: "POST",
@@ -4543,9 +4584,11 @@ function EstimatesMobileListView({
         }
       } catch (err) {
         alert(`Failed to mark annual prepay accepted: ${err.message}`);
+      } finally {
+        actionLocks.leave(`annual-prepay:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const sendBookingLink = useCallback(
     async (e) => {
@@ -4561,6 +4604,7 @@ function EstimatesMobileListView({
         )
       )
         return;
+      if (!actionLocks.enter(`send-booking:${e.id}`)) return;
       try {
         await adminFetch(`/admin/estimates/${e.id}/send-booking-link`, {
           method: "POST",
@@ -4568,9 +4612,11 @@ function EstimatesMobileListView({
         refreshEstimates();
       } catch (err) {
         window.alert("Send booking link failed: " + err.message);
+      } finally {
+        actionLocks.leave(`send-booking:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const archiveEstimateMobile = useCallback(
     async (e) => {
@@ -4580,17 +4626,21 @@ function EstimatesMobileListView({
         )
       )
         return;
+      if (!actionLocks.enter(`archive:${e.id}`)) return;
       try {
         await adminFetch(`/admin/estimates/${e.id}/archive`, { method: "POST" });
         refreshEstimates();
       } catch (err) {
         window.alert("Archive failed: " + err.message);
+      } finally {
+        actionLocks.leave(`archive:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const unarchiveEstimateMobile = useCallback(
     async (e) => {
+      if (!actionLocks.enter(`unarchive:${e.id}`)) return;
       try {
         await adminFetch(`/admin/estimates/${e.id}/unarchive`, {
           method: "POST",
@@ -4598,9 +4648,11 @@ function EstimatesMobileListView({
         refreshEstimates();
       } catch (err) {
         window.alert("Unarchive failed: " + err.message);
+      } finally {
+        actionLocks.leave(`unarchive:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const deleteDraftMobile = useCallback(
     async (e) => {
@@ -4610,14 +4662,17 @@ function EstimatesMobileListView({
         )
       )
         return;
+      if (!actionLocks.enter(`delete:${e.id}`)) return;
       try {
         await adminFetch(`/admin/estimates/${e.id}`, { method: "DELETE" });
         refreshEstimates();
       } catch (err) {
         window.alert("Delete failed: " + err.message);
+      } finally {
+        actionLocks.leave(`delete:${e.id}`);
       }
     },
-    [refreshEstimates],
+    [actionLocks, refreshEstimates],
   );
   const resendEstimateMobile = useCallback(
     async (e) => {
@@ -5011,8 +5066,8 @@ function EstimatesMobileListView({
         <FollowUpModalV2
           estimate={followUpTarget}
           onClose={() => setFollowUpTarget(null)}
-          onSent={() => {
-            callOutcomes.release(followUpTarget.id);
+          onSent={(sentId) => {
+            callOutcomes.release(sentId || followUpTarget?.id);
             setFollowUpTarget(null);
             refreshEstimates();
           }}
@@ -5040,6 +5095,22 @@ function EstimatesMobileListView({
     </div>
   );
 }
+function useActionLocks() {
+  const ref = useRef(new Set());
+  const [keys, setKeys] = useState(() => new Set());
+  const enter = useCallback((key) => {
+    if (ref.current.has(key)) return false;
+    ref.current.add(key);
+    setKeys(new Set(ref.current));
+    return true;
+  }, []);
+  const leave = useCallback((key) => {
+    if (ref.current.delete(key)) setKeys(new Set(ref.current));
+  }, []);
+  const isBusy = useCallback((key) => keys.has(key), [keys]);
+  return useMemo(() => ({ enter, leave, isBusy }), [enter, leave, isBusy]);
+}
+
 function EstimatesWorkspace() {
   const isMobile = useIsMobile(768);
   const [searchParams, setSearchParams] = useSearchParams();

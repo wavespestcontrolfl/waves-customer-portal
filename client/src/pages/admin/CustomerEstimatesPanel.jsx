@@ -111,6 +111,8 @@ export default function CustomerEstimatesPanel({
   const [err, setErr] = useState("");
   const loadControllerRef = useRef(null);
   const loadSeqRef = useRef(0);
+  const [calling, setCalling] = useState(false);
+  const callingRef = useRef(false);
 
   const load = useCallback(async () => {
     loadControllerRef.current?.abort();
@@ -320,7 +322,9 @@ export default function CustomerEstimatesPanel({
               {c.phone && (
                 <Button
                   type="button"
+                  disabled={calling}
                   onClick={async () => {
+                    if (callingRef.current) return;
                     if (
                       !window.confirm(
                         `Call ${c.first_name || ""} ${c.last_name || ""}`.trim() +
@@ -328,6 +332,8 @@ export default function CustomerEstimatesPanel({
                       )
                     )
                       return;
+                    callingRef.current = true;
+                    setCalling(true);
                     try {
                       const r = await adminFetch("/admin/communications/call", {
                         method: "POST",
@@ -344,6 +350,9 @@ export default function CustomerEstimatesPanel({
                         );
                     } catch (e) {
                       alert("Call failed: " + e.message);
+                    } finally {
+                      callingRef.current = false;
+                      setCalling(false);
                     }
                   }}
                   className="gap-2"
@@ -518,6 +527,8 @@ export default function CustomerEstimatesPanel({
 
 // Humanize lead_source enum values for display.
 function EstimateHistoryRow({ estimate: e, onDeleted }) {
+  const [deleting, setDeleting] = useState(false);
+  const deletingRef = useRef(false);
   const tone = STATUS_TONES[e.status] || "neutral";
   const label = STATUS_LABELS[e.status] || e.status;
   const anchorDate =
@@ -574,13 +585,17 @@ function EstimateHistoryRow({ estimate: e, onDeleted }) {
             <Button
               type="button"
               variant="ghost"
+              disabled={deleting}
               aria-label="Delete draft estimate"
               title="Delete this draft estimate"
               onClick={async () => {
+                if (deletingRef.current) return;
                 const ok = window.confirm(
                   "Delete this draft estimate?\n\nThis permanently removes it from the admin portal.",
                 );
                 if (!ok) return;
+                deletingRef.current = true;
+                setDeleting(true);
                 try {
                   const r = await adminFetch(`/admin/estimates/${e.id}`, {
                     method: "DELETE",
@@ -592,6 +607,9 @@ function EstimateHistoryRow({ estimate: e, onDeleted }) {
                   onDeleted?.();
                 } catch (err) {
                   window.alert("Delete failed: " + err.message);
+                } finally {
+                  deletingRef.current = false;
+                  setDeleting(false);
                 }
               }}
               className="h-9 w-9 px-0 text-alert-fg hover:bg-alert-bg"

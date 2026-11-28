@@ -37,6 +37,7 @@ vi.mock("./MailProspectsPage", () => ({
 
 import BidsPage from "./BidsPage";
 import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
+import { registerLeaveGuard } from "../../lib/navigation-guard";
 
 function Where() {
   const { pathname, search, hash } = useLocation();
@@ -157,4 +158,22 @@ it("opens the Mail tab for ?tab=mail; switching to it sets the param", () => {
   fireEvent.click(screen.getByRole("button", { name: "Mail" }));
   expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("mail");
   expect(screen.getByTestId("mail")).toBeInTheDocument();
+});
+
+it("checks the active leave guard before switching Bids workspace tabs", () => {
+  const guard = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+  const unregister = registerLeaveGuard(guard);
+  try {
+    renderAt("/admin/bids");
+    fireEvent.click(screen.getByRole("button", { name: "Bid kit" }));
+    expect(guard).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("desk")).toBeInTheDocument();
+    expect(screen.queryByTestId("kit")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Bid kit" }));
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("kit")).toBeInTheDocument();
+  } finally {
+    unregister();
+  }
 });

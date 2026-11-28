@@ -367,7 +367,7 @@
         "routes/admin-dispatch.js#trx.update",
         "services/technician-visit-scope.js#trx.forUpdate"
       ],
-      "hash": "468339ec441daa3749e3102e45d58186"
+      "hash": "960cd98b7c4af5329b3485e04329210b"
     },
     {
       "method": "PUT",

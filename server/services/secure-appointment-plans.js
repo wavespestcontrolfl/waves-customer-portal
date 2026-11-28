@@ -101,9 +101,9 @@ function cents(n) {
 // the prepay invoice too). It rides prepay.total (the page total must equal
 // the minted invoice) while prepay.coverageTotal stays the per-visit
 // coverage money the term is sliced from (codex #3591 r9 P1).
-function computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee = 0 }) {
+function computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee = 0, noYear1PrepayPercent = false }) {
   const annualBase = cents(Number(perVisit) * Number(visitsPerYear));
-  const discountRate = planClass === 'discount' ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
+  const discountRate = (planClass === 'discount' && !noYear1PrepayPercent) ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
   const coverageTotal = cents(annualBase * (1 - discountRate));
   const setup = cents(Math.max(0, Number(unwaivedSetupFee) || 0));
   return {

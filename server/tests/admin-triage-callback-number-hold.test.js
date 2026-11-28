@@ -734,12 +734,17 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
     expect(numberHold(fx.tables).cleared_at).toBeNull();
   });
 
-  test('technicians can still use the inbox-card release (no line named) exactly as the callback_number_needed card', async () => {
+  test('technician is also refused (403) on inbox-card no-text release (triage router is admin-only)', async () => {
     mockRole = 'technician';
-    const cb = await run([cbCard()], 'resolve', 'card-cb');
-    expect(cb.tables.triage_items[0].status).toBe('resolved');
-    const tx = await run([textCard()], 'resolve', CARD_ID, { line_can_get_texts: true });
-    expect(numberHold(tx.tables).cleared_at).toBeInstanceOf(Date);
+    const fx = fixture({ triage_items: [textCard()] });
+    wireDb(db, { conn: fx.conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'Admin access required' });
+    });
+    expect(fx.tables.triage_items.find((r) => r.id === CARD_ID).status).toBe('open');
+    expect(numberHold(fx.tables).cleared_at).toBeNull();
   });
 
   // Lock order for a "Line can get texts" release (#6112 r15 follow-up): per-call triage lock, then the

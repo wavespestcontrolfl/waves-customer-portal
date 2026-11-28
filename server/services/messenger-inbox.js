@@ -166,11 +166,11 @@ async function readMessages({ token }, conversationId, from, maxPages) {
       if (createdAt < from) { reachedOlder = true; continue; }
       all.push({ ...msg, createdAt });
     }
-    if (reachedOlder) return all.sort((a, b) => a.createdAt - b.createdAt);
+    if (reachedOlder) return all.reverse().sort((a, b) => a.createdAt - b.createdAt);
     next = json.paging?.next || null;
   }
   if (next) throw new Error(`Messenger conversation has more than ${maxPages} pages of messages`);
-  return all.sort((a, b) => a.createdAt - b.createdAt);
+  return all.reverse().sort((a, b) => a.createdAt - b.createdAt);
 }
 
 // The page's identities. FACEBOOK_PAGE_ID can be a New Pages Experience alias of the page's true id
@@ -335,11 +335,27 @@ async function importConversation(config, conv, { since, firstRun, limits, page 
   const stored = new Map((await db('messages').where({ channel: CHANNEL }).whereIn('twilio_sid', keys)
     .select('id', 'twilio_sid', 'created_at')).map((r) => [r.twilio_sid, r]));
   const fresh = messages.filter((m, i) => !stored.has(keys[i]));
+  const isOutboundMsg = (msg) => Boolean(msg.from?.id) && isPage(msg.from, page);
   // Facebook's created_time is the delivered order. A portal reply is stored when its send began,
   // so a customer message sent meanwhile would sort after it; move stored times to Facebook's, by any
   // amount (an imported message already carries Facebook's time, so only a portal reply ever moves, once).
-  const moved = messages.map((m, i) => ({ row: stored.get(keys[i]), at: new Date(m.createdAt) }))
-    .filter(({ row, at }) => row && new Date(row.created_at).getTime() !== at.getTime());
+  // Facebook times have 1-second resolution: keep a portal reply's sub-second timestamp within the same
+  // second ONLY when no customer message appears after it in Facebook's delivery order.
+  const moved = messages.map((m, i) => ({ row: stored.get(keys[i]), at: new Date(m.createdAt), index: i }))
+    .filter(({ row, at, index }) => {
+      if (!row) return false;
+      const rowMs = new Date(row.created_at).getTime();
+      const atMs = at.getTime();
+      if (rowMs === atMs) return false;
+      const sameSec = Math.floor(rowMs / 1000) === Math.floor(atMs / 1000);
+      if (sameSec && rowMs > atMs) {
+        const laterInboundSameSec = messages.slice(index + 1).some(
+          (m) => !isOutboundMsg(m) && Math.floor(m.createdAt.getTime() / 1000) === Math.floor(atMs / 1000),
+        );
+        if (!laterInboundSameSec) return false;
+      }
+      return true;
+    });
   for (const { row, at } of moved) await db('messages').where({ id: row.id }).update({ created_at: at, updated_at: new Date() });
   const thread = fresh.length ? await ensureThread(contact, pageId) : await findThread(contact.psid, pageId);
   if (!thread) return { inserted: 0 };
@@ -347,7 +363,8 @@ async function importConversation(config, conv, { since, firstRun, limits, page 
   // First run: what Facebook already shows as read stays read here.
   const importRead = firstRun && !(Number(conv.unread_count) > 0);
   for (const msg of fresh) {
-    const outbound = String(msg.from?.id) !== contact.psid;
+    // Require explicit sender id matching the page; a missing from.id must never be misclassified as staff outbound.
+    const outbound = isOutboundMsg(msg);
     await appendMessage({
       conversationId: thread.id,
       channel: CHANNEL,
@@ -541,17 +558,143 @@ async function markThreadRead(req, id, technicianId, readBefore) {
 
 // ── replying ──────────────────────────────────────────────────
 
+// In-process in-flight dedupe for authorized retries sharing a requestId.
+const inFlightReplies = new Map();
+
+function replyClaimKey(conversationId, requestId) {
+  return `messenger_reply:${crypto.createHash('sha256').update(`${conversationId}:${requestId}`).digest('hex').slice(0, 40)}`;
+}
+
+function parseClaim(raw) {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function claimReplyRequest(conversationId, requestId, text, now) {
+  const key = replyClaimKey(conversationId, requestId);
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+    const existingClaim = parseClaim((await trx('system_settings').where({ key }).first('value'))?.value);
+    if (existingClaim) {
+      if (existingClaim.text !== text) return { conflict: true };
+      if (existingClaim.status === 'sent') return { existing: { ok: true, message: existingClaim.message || null } };
+      return { existing: { ok: false, status: 504, error: 'send_uncertain' } };
+    }
+    const stored = await trx('messages')
+      .where({ conversation_id: conversationId, channel: CHANNEL, direction: 'outbound' })
+      .whereRaw("metadata->>'clientRequestId' = ?", [requestId])
+      .first('id', 'body', 'created_at');
+    if (stored) {
+      if (String(stored.body || '') !== text) return { conflict: true };
+      return { existing: { ok: true, message: { id: stored.id, createdAt: iso(stored.created_at) } } };
+    }
+    const payload = JSON.stringify({ text, status: 'pending', at: now.toISOString() });
+    await trx('system_settings').insert({ key, value: payload, category: 'messenger_reply' })
+      .onConflict('key').merge({ value: payload, updated_at: trx.fn.now() });
+    return { claimed: true, key };
+  });
+}
+
+async function settleReplyClaim(key, patch) {
+  if (!key) return;
+  try {
+    if (patch === null) {
+      await db('system_settings').where({ key }).del();
+      return;
+    }
+    await writeSetting(key, JSON.stringify(patch));
+  } catch (err) {
+    logger.warn(`[messenger-inbox] reply claim not updated: ${safeError(err)}`);
+  }
+}
+
+function replyTimestamp(row, now) {
+  const lastInMs = row.last_in ? new Date(row.last_in).getTime() : 0;
+  // Avoid exact-millisecond tie with last_in (e.g. same-second reply), staying within the same second.
+  return lastInMs && now.getTime() === lastInMs ? new Date(lastInMs + 1) : now;
+}
+
+async function persistReplyMessage(row, { actorId, text, mid, now, requestId }) {
+  const replyMeta = { graph_mid: mid, source: 'portal', ...(requestId ? { clientRequestId: requestId } : {}) };
+  try {
+    const message = await appendMessage({
+      conversationId: row.id,
+      channel: CHANNEL,
+      direction: 'outbound',
+      authorType: 'admin',
+      adminUserId: actorId,
+      body: text,
+      twilioSid: messageKey(mid),
+      createdAt: replyTimestamp(row, now),
+      isRead: true,
+      metadata: replyMeta,
+    });
+    // The poll may have stored this message first, as seen in Facebook: it becomes the portal's.
+    if (message && ((!message.admin_user_id && actorId) || requestId)) {
+      const patch = {
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ source: 'portal', ...(requestId ? { clientRequestId: requestId } : {}) })]),
+      };
+      if (actorId && !message.admin_user_id) patch.admin_user_id = actorId;
+      await db('messages').where({ id: message.id }).update(patch);
+    }
+    return message ? { id: message.id, createdAt: iso(message.created_at) } : null;
+  } catch (err) {
+    // Facebook has the reply; a resend would double it. The next poll stores it.
+    logger.error(`[messenger-inbox] reply sent but not stored: ${safeError(err)}`);
+    return null;
+  }
+}
+
 /**
  * Send one reply through Facebook's Send API.
  * @returns {Promise<{ok: true, message: object|null}|{ok: false, status: number, error: string}>}
  * Nothing is written when Facebook refuses the reply.
  */
-async function sendReply(req, id, text, { now = new Date() } = {}) {
+async function sendReply(req, id, text, { now = new Date(), requestId = null } = {}) {
+  // Always authorize the caller's thread scope before checking any shared/in-flight state.
   const row = await loadThread(req, id);
   if (!row) return { ok: false, status: 404, error: 'not_found' };
-  if (!canReplyNow(row, now)) return { ok: false, status: 409, error: 'outside_window' };
+  const dedupeKey = requestId ? `${row.id}:${requestId}` : null;
+  if (dedupeKey && inFlightReplies.has(dedupeKey)) {
+    const active = inFlightReplies.get(dedupeKey);
+    if (active.text !== text) return { ok: false, status: 409, error: 'request_id_conflict' };
+    return active.promise;
+  }
+  const run = runAuthorizedReply(req, row, text, { now, requestId });
+  if (!dedupeKey) return run;
+  inFlightReplies.set(dedupeKey, { text, promise: run });
+  try {
+    return await run;
+  } finally {
+    inFlightReplies.delete(dedupeKey);
+  }
+}
+
+async function runAuthorizedReply(req, row, text, { now, requestId }) {
+  let claimKey = null;
+  if (requestId) {
+    const claim = await claimReplyRequest(row.id, requestId, text, now);
+    if (claim.conflict) return { ok: false, status: 409, error: 'request_id_conflict' };
+    if (claim.existing) return claim.existing;
+    claimKey = claim.key;
+  }
+  return executeSendReply(req, row, text, { now, requestId, claimKey });
+}
+
+async function executeSendReply(req, row, text, { now, requestId, claimKey }) {
+  if (!canReplyNow(row, now)) {
+    await settleReplyClaim(claimKey, null);
+    return { ok: false, status: 409, error: 'outside_window' };
+  }
   const config = pageConfig();
-  if (!config) return { ok: false, status: 502, error: 'send_failed' };
+  if (!config) {
+    await settleReplyClaim(claimKey, null);
+    return { ok: false, status: 502, error: 'send_failed' };
+  }
 
   let sent;
   try {
@@ -566,50 +709,29 @@ async function sendReply(req, id, text, { now = new Date() } = {}) {
     });
   } catch (err) {
     logger.warn(`[messenger-inbox] reply not sent: ${safeError(err)}`);
-    // No HTTP answer (a timeout or a dropped connection): Facebook may have delivered it, so the
-    // staff member must check before sending again. An HTTP error is a refusal: nothing went out.
-    // A 5xx is Facebook's own failure, after it may have delivered: unconfirmed too.
-    if (!err?.status || err.unreadable || err.status >= 500) return { ok: false, status: 504, error: 'send_uncertain' };
+    // No HTTP answer (timeout/dropped connection) or 5xx: Facebook may have delivered it.
+    if (!err?.status || err.unreadable || err.status >= 500) {
+      await settleReplyClaim(claimKey, { text, status: 'uncertain', at: now.toISOString() });
+      return { ok: false, status: 504, error: 'send_uncertain' };
+    }
+    await settleReplyClaim(claimKey, null);
     return { ok: false, status: 502, error: 'send_failed' };
   }
   const mid = sent?.message_id;
-  // A 200 without a message id: Facebook took the request but did not confirm a message.
-  if (!mid) return { ok: false, status: 504, error: 'send_uncertain' };
-
-  const actorId = req.technicianId || null;
-  let message = null;
-  try {
-    message = await appendMessage({
-      conversationId: row.id,
-      channel: CHANNEL,
-      direction: 'outbound',
-      authorType: 'admin',
-      adminUserId: actorId,
-      body: text,
-      twilioSid: messageKey(mid),
-      createdAt: now,
-      isRead: true,
-      metadata: { graph_mid: mid, source: 'portal' },
-    });
-    // The poll may have stored this message first, as seen in Facebook: it becomes the portal's.
-    if (message && !message.admin_user_id && actorId) {
-      await db('messages').where({ id: message.id }).update({
-        admin_user_id: actorId,
-        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ source: 'portal' })]),
-      });
-    }
-  } catch (err) {
-    // Facebook has the reply; a resend would double it. The next poll stores it.
-    logger.error(`[messenger-inbox] reply sent but not stored: ${safeError(err)}`);
+  if (!mid) {
+    await settleReplyClaim(claimKey, { text, status: 'uncertain', at: now.toISOString() });
+    return { ok: false, status: 504, error: 'send_uncertain' };
   }
+
+  const message = await persistReplyMessage(row, { actorId: req.technicianId || null, text, mid, now, requestId });
+  await settleReplyClaim(claimKey, { text, status: 'sent', message, at: now.toISOString() });
   try {
-    // Settle the bell from what is stored, never a blind close: a customer message that
-    // landed after this reply keeps (or rings) its bell.
+    // Settle the bell from what is stored, never a blind close.
     await reconcileBell(row);
   } catch (err) {
     logger.warn(`[messenger-inbox] bell not settled after reply: ${safeError(err)}`);
   }
-  return { ok: true, message: message ? { id: message.id, createdAt: iso(message.created_at) } : null };
+  return { ok: true, message };
 }
 
 module.exports = {
