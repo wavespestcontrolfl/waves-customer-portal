@@ -124,7 +124,7 @@ function MessageBubble({ m }) {
           <div className="whitespace-pre-wrap break-words">
             {(typeof m.body === "string" && m.body.trim() ? m.body : "") || (Array.isArray(m.media) && m.media.length ? `${m.media.length} photo${m.media.length === 1 ? "" : "s"}` : "")}
           </div>
-          <div className={cn("flex items-center gap-2 mt-1 text-12", inbound ? "text-ink-tertiary" : "text-white/70")}>
+          <div className={cn("flex items-center gap-2 mt-1 text-14", inbound ? "text-ink-tertiary" : "text-white/70")}>
             <span className="u-nums">{stampLabel(m.createdAt)}</span>
             {receipt ? <span className={cn(receipt.tone === "alert" && "text-red-200")}>{receipt.label}</span> : null}
           </div>
@@ -148,7 +148,7 @@ function MessageBubble({ m }) {
         {(rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid) ? (
           <AuthenticatedCallAudio recordingId={rec?.sid || m.recordingSid} className="mt-1.5 w-full h-9" />
         ) : null}
-        <div className="u-nums text-12 text-ink-tertiary mt-1">{stampLabel(m.createdAt)}</div>
+        <div className="u-nums text-14 text-ink-tertiary mt-1">{stampLabel(m.createdAt)}</div>
       </div>
     </div>
   );

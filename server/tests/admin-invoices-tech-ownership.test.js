@@ -97,8 +97,10 @@ const FOREIGN_INVOICE = {
     card_on_file: { brand: 'visa', last_four: '4242' },
   },
   active_payment_plan: { id: 'pp-1', status: 'active' },
-  annual_prepay: null,
+  annual_prepay: { monthlyRate: 95, prepayAmount: 1083, termMonths: 12 },
   annual_prepay_term: { id: 'apt-1' },
+  payer_id: 'payer-1',
+  payer_snapshot: { company: 'Acme HOA', email: 'ap@acme-hoa.example', address: '999 AP Blvd' },
   review_hold: false,
 };
 
@@ -143,7 +145,7 @@ describe('admin-invoices GET /:id — technician ownership scoping (ADMIN-BUG-R0
     });
   });
 
-  test('a servicing technician never receives the frozen property addresses of a multi-property invoice (money fields kept)', async () => {
+  test('a servicing technician never receives line_items (property addresses, discount IDs/rates, or deposit-credit rows)', async () => {
     holdsVisit();
     const palm = { address_line1: '1842 Palm Harbor Dr', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
     const bay = { address_line1: '410 Bayshore Rd', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' };
@@ -151,7 +153,8 @@ describe('admin-invoices GET /:id — technician ownership scoping (ADMIN-BUG-R0
       ...FOREIGN_INVOICE,
       line_items: [
         { client_id: 'a', description: 'Quarterly pest', quantity: 1, unit_price: 149, amount: 149, property_id: 'p1', property_address: palm },
-        { client_id: 'a-d', _kind: 'discount', discount_for: 'a', description: 'Multi-Home Discount (10%)', quantity: 1, unit_price: -14.9, amount: -14.9, property_id: 'p1', property_address: palm },
+        { client_id: 'a-d', _kind: 'discount', discount_id: 'disc-multi-10', discount_for: 'a', description: 'Multi-Home Discount (10%)', quantity: 1, unit_price: -14.9, amount: -14.9, property_id: 'p1', property_address: palm },
+        { client_id: 'dep-1', is_deposit_credit: true, description: 'Deposit Credit Applied', quantity: 1, unit_price: -50, amount: -50 },
         { client_id: 'b', description: 'Quarterly pest', quantity: 1, unit_price: 149, amount: 149, property_id: 'p2', property_address: bay },
       ],
     });
@@ -159,21 +162,29 @@ describe('admin-invoices GET /:id — technician ownership scoping (ADMIN-BUG-R0
       const r = await fetch(`${baseUrl}/api/admin/invoices/${FOREIGN_INVOICE.id}`);
       const body = await r.json();
       expect(r.status).toBe(200);
-      expect(JSON.stringify(body)).not.toMatch(/Bayshore|Palm Harbor|property_id|property_address/);
-      expect(body.line_items.map((l) => l.amount)).toEqual([149, -14.9, 149]);
-      expect(body.line_items[1]).toMatchObject({ discount_for: 'a', _kind: 'discount' });
+      expect(body.line_items).toBeUndefined();
+      expect(body.total).toBe(201.29);
+      expect(JSON.stringify(body)).not.toMatch(/Bayshore|Palm Harbor|property_id|property_address|Multi-Home Discount|disc-multi-10|discount_for|Deposit Credit/);
     });
   });
 
-  test('technician who holds the invoice\'s visit (own tap-to-pay checkout) still gets 200 with the full payload', async () => {
+  test('technician who holds the invoice\'s visit today (own tap-to-pay checkout) gets 200 without bearer token, card_on_file, notes, or office billing metadata', async () => {
     holdsVisit();
     await withServer(async (baseUrl) => {
       const r = await fetch(`${baseUrl}/api/admin/invoices/${FOREIGN_INVOICE.id}`);
       const body = await r.json();
       expect(r.status).toBe(200);
-      expect(body.customer.card_on_file).toEqual({ brand: 'visa', last_four: '4242' });
       expect(body.total).toBe(201.29);
-      expect(body.token).toBe('tok-secret-foreign');
+      expect(body.status).toBe('sent');
+      expect(body.token).toBeUndefined();
+      expect(body.notes).toBeUndefined();
+      expect(body.active_payment_plan).toBeUndefined();
+      expect(body.annual_prepay).toBeUndefined();
+      expect(body.annual_prepay_term).toBeUndefined();
+      expect(body.payer_snapshot).toBeUndefined();
+      expect(body.payer_id).toBeUndefined();
+      expect(body.customer.card_on_file).toBeUndefined();
+      expect(JSON.stringify(body)).not.toMatch(/ap@acme-hoa|999 AP Blvd|monthlyRate|prepayAmount/);
       expect(technicianCurrentVisitFilter).toHaveBeenCalledWith(expect.objectContaining({ techRole: 'technician' }), expect.objectContaining({ table: 'scheduled_services' }));
     });
   });

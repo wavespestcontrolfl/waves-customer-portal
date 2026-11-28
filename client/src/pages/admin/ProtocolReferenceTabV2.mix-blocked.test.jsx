@@ -38,25 +38,25 @@ it("shows a field hold on both layouts even after a technician requested the pro
   />);
   expect(screen.getAllByText("On hold")).toHaveLength(2);
   expect(screen.queryByText("Selected")).not.toBeInTheDocument();
-  expect(screen.queryByText(/appear once calibrated equipment/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/appear once a sprayer/)).not.toBeInTheDocument();
   expect(screen.queryByText("Area Mix")).not.toBeInTheDocument();
 });
 
 it("a blocked mix shows the block message as an alert and in the mixing order, not the generic hint", () => {
   renderCard(plan({ blocks: [BLOCK] }));
   const alert = screen.getByRole("alert");
-  expect(alert).toHaveTextContent("Mix on hold");
+  expect(alert).toHaveTextContent("Mix warnings");
   expect(alert).toHaveTextContent(BLOCK.message);
   // The mixing-order card repeats the reason where the order would be.
   expect(screen.getAllByText(BLOCK.message, { exact: false }).length).toBeGreaterThanOrEqual(2);
-  expect(screen.queryByText(/Select calibrated equipment and products/)).not.toBeInTheDocument();
-  expect(screen.queryByText(/appear once calibrated equipment is selected/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Select a sprayer and products/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/appear once a sprayer is selected/)).not.toBeInTheDocument();
 });
 
 it("control: no blocks and no mix keeps the generic hint and shows no alert", () => {
   renderCard(plan());
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  expect(screen.getByText(/Select calibrated equipment and products/)).toBeInTheDocument();
+  expect(screen.getByText(/Select a sprayer and products/)).toBeInTheDocument();
 });
 
 it("a spot row shows its label rate and the note beside the product, with no quantity", () => {

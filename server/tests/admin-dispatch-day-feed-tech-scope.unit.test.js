@@ -191,6 +191,15 @@ describe('AUDIT r1-authz-4 — GET /api/admin/dispatch/:date? technician scoping
     // EXPECTED: no cross-tech row with contact/billing context leaks.
     const leaked = res.body.services.find((s) => s.id === 'svc-other');
     expect(leaked).toBeUndefined();
+    // EXPECTED: owner-only billing fields are stripped from the tech's own row too.
+    const own = res.body.services[0];
+    expect(own.monthlyRate).toBeUndefined();
+    expect(own.estimatedPrice).toBeUndefined();
+    expect(own.autopayActive).toBeUndefined();
+    expect(own.autopayEnabled).toBeUndefined();
+    expect(own.prepaidAmount).toBeUndefined();
+    expect(own.checkoutInvoiceId).toBeUndefined();
+    expect(own.checkoutInvoiceTotal).toBeUndefined();
   });
 
   test('an admin token stays unscoped (control — should pass on current code)', async () => {
@@ -200,6 +209,8 @@ describe('AUDIT r1-authz-4 — GET /api/admin/dispatch/:date? technician scoping
     expect(res.statusCode).toBe(200);
     expect(res.body.services.map((s) => s.id).sort()).toEqual(['svc-mine', 'svc-other']);
     expect(res.body.techSummary.map((t) => t.technicianId).sort()).toEqual(['tech-7', 'tech-9']);
+    expect(res.body.services[0].monthlyRate).toBe(45);
+    expect(res.body.services[0].estimatedPrice).toBe(120);
   });
 
   // Documents WHAT leaks on current code (diagnostic; passes either way).

@@ -303,7 +303,7 @@ describe('protocols and the job card route by catalog key', () => {
     for (const [programKey, program] of Object.entries(protocols)) {
       // The safety-field programs (job-card.js SAFETY_ON_CARD_PROGRAMS) are skipped. No category: a 'mosquito' category would open the
       // mosquito program for every name, so each program is matched by its own name.
-      if (['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent', 'palm_injection'].includes(programKey) || !program || !program.safety_rules) continue;
+      if (['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent', 'palm_injection', 'cockroach'].includes(programKey) || !program || !program.safety_rules) continue;
       const out = await resolveVisitProducts({
         facts: { serviceCategory: null, serviceType: program.name, scheduledDate: '2027-03-10', isLawn: false },
         protocols, catalog: [], dbh: null, deps: { programKey },
@@ -320,7 +320,7 @@ describe('protocols and the job card route by catalog key', () => {
     expect(job).toContain("...(fieldGuide ? {} : mistingSafetyField(program, programKey || match?.programKey)),");
     // The safety field is for the programs on this list only (misting, the mosquito barrier, and the indoor flea and bed bug sprays):
     // Tree & Shrub is not on it.
-    expect(job).toContain("const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent', 'palm_injection'];");
+    expect(job).toContain("const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent', 'palm_injection', 'cockroach'];");
     expect(job).toContain("if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};");
   });
 

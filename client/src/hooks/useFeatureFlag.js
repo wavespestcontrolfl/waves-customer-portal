@@ -170,7 +170,7 @@ export function refetchFlags() {
 const pairedLoggedOnce = new Set();
 export function usePairedFeatureFlag(keyA, keyB, defaultValue = false) {
   const [state, setState] = useState(() => ({
-    enabled: defaultValue,
+    enabled: cache !== null ? Boolean(defaultValue) : false,
     ready: cache !== null,
     mismatched: false,
   }));

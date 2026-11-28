@@ -1089,65 +1089,20 @@ router.post(
 /**
  * payment_intent.succeeded — Update payment/invoice to paid
  */
-// P3 — payer statement PaymentIntents (metadata.waves_statement_id) settle the
-// CONSOLIDATED statement, never an individual invoice. Isolated from the invoice
-// PI lifecycle so legacy invoice_id intents are unchanged. Idempotent: succeeded
-// on an already-paid statement is a no-op; processing/revert are conditional on
-// the statement's ACTIVE PI, so a stale/replaced PI's events match nothing. NOT
-// feature-gated — a confirmed money event must settle regardless of the flag.
-async function handleStatementPaymentIntentEvent(paymentIntent, eventType, eventCreated = null) {
-  const statementId = Number(paymentIntent.metadata?.waves_statement_id);
-  if (!Number.isInteger(statementId) || statementId <= 0) return;
-  const piId = paymentIntent.id;
-  const Settle = require('../services/payer-statement-settle');
-
-  if (eventType === 'succeeded') {
-    const { computeChargeAmount } = require('../services/stripe-pricing');
-    // Funding + method from the ACTUAL confirmed payment — never trust PI
-    // metadata (a failed /finalize can leave a stale surcharge_policy_version on
-    // a reused PI; the same client secret could then be confirmed with a
-    // different tender).
-    const details = await paymentDetailsFromIntent(paymentIntent);
-    // If the actual method/funding couldn't be resolved (transient Stripe lookup
-    // failure), the `paymentMethod` default is `card` — settling now would either
-    // strand a legit ACH (fail-closed on null funding) or mis-validate. THROW so
-    // Stripe retries the webhook; the lookup almost always succeeds on retry.
-    if (!details.resolved) {
-      throw new Error(`statement S-${statementId} PI ${piId}: payment method/funding unresolved (transient lookup) — retrying`);
-    }
-    const methodType = details.paymentMethod || 'card';
-    const funding = details.cardFunding || null;
-    const paymentMethod = methodType === 'us_bank_account' ? 'ach' : 'card';
-    const actualTotalCents = paymentIntent.amount_received || paymentIntent.amount || 0;
-
-    // Returns true ONLY when this PI left the statement `paid` (a fresh settle or
-    // an idempotent already-paid) — every anomaly path returns false so the
-    // post-txn dunning-stop never fires on a still-unpaid statement.
-    let settledPacketInvoiceIds = [];
+async function runStatementSettleTransaction({ Settle, paymentIntent, statementId, piId, settleOpts }) {
+  let settledPacketInvoiceIds = [];
+  try {
     const settledNow = await db.transaction(async (trx) => {
-      // Same per-statement money lock as disputes/refunds — serialize settlement
-      // against any concurrent/out-of-order clawback on this statement.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
       const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
       if (!stmt) { logger.warn(`[stripe-webhook] statement ${statementId} not found for PI ${piId}`); return false; }
 
-      // Active-PI binding FIRST — before the idempotent-paid shortcut. Settle (or
-      // no-op) only when the statement's stored PI is exactly this PI (NON-NULL
-      // match). A null/different stored PI means this success is stale/orphan/
-      // replaced; even if the statement is already `paid` by another PI/offline,
-      // this PI collected money that needs a durable manual-refund record, not a
-      // silent skip.
       if (String(stmt.stripe_payment_intent_id || '') !== String(piId)) {
         await recordStatementPaymentIssue(paymentIntent, statementId, `orphan/stale success: PI ${piId}, active ${stmt.stripe_payment_intent_id || 'none'} (status ${stmt.status}) — manual refund/review`);
         logger.warn(`[stripe-webhook] statement S-${statementId} non-active-PI success ${piId} (active ${stmt.stripe_payment_intent_id || 'none'})`);
         return false;
       }
       if (stmt.status === 'paid') {
-        // Idempotent — THIS PI already settled (dunning may stop). The packet
-        // children are still reported (Codex #4311 r30 P1): if the first
-        // delivery settled but its review enrollment and recovery marker both
-        // failed, this redelivery is the only path back, and an empty list
-        // would acknowledge the event with those reviews still missing.
         settledPacketInvoiceIds = await trx('invoices')
           .where({ payer_statement_id: statementId })
           .whereNotNull('visit_completion_packet_id')
@@ -1155,126 +1110,132 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
           .pluck('id');
         return true;
       }
-
-      // Fail closed on UNVERIFIED card funding: surcharge must derive from the
-      // ACTUAL confirmed funding, but paymentDetailsFromIntent swallows Stripe
-      // charge/PM lookup failures and leaves funding null. For a card-family PI
-      // (created at base) a credit card confirmed without /finalize would then
-      // recompute against funding:null (no surcharge) and settle undercharged.
-      // Record for manual review instead of settling the wrong amount.
-      if (methodType !== 'us_bank_account' && !funding) {
+      if (settleOpts.methodType !== 'us_bank_account' && !settleOpts.funding) {
         await recordStatementPaymentIssue(paymentIntent, statementId, `unverified card funding (lookup failed) for PI ${piId} — surcharge can't be validated, manual review`);
         logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} unverified card funding — not settling`);
         return false;
       }
-
-      // Surcharge correctness: recompute the expected total for the ACTUAL
-      // confirmed funding and require the charged amount to match (binds surcharge
-      // to the real tender, not stale finalization metadata). A credit card
-      // confirmed at base, a stale-credit-surcharge on a debit, a wallet bypass —
-      // all mismatch here → quarantine, never settle the wrong amount.
       const base = parseFloat(stmt.total);
       const { baseCents, surchargeCents, totalCents: expectedTotalCents, rateBps, policyVersion } =
-        computeChargeAmount(base, methodType, { funding });
-      if (Math.abs(actualTotalCents - expectedTotalCents) > 1) {
-        await recordStatementPaymentIssue(paymentIntent, statementId, `surcharge mismatch: charged ${actualTotalCents}c, expected ${expectedTotalCents}c for ${methodType}/${funding || 'n/a'} — manual review`);
-        logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} surcharge mismatch (charged ${actualTotalCents}c, expected ${expectedTotalCents}c) — not settling`);
+        settleOpts.computeChargeAmount(base, settleOpts.methodType, { funding: settleOpts.funding });
+      if (Math.abs(settleOpts.actualTotalCents - expectedTotalCents) > 1) {
+        await recordStatementPaymentIssue(paymentIntent, statementId, `surcharge mismatch: charged ${settleOpts.actualTotalCents}c, expected ${expectedTotalCents}c for ${settleOpts.methodType}/${settleOpts.funding || 'n/a'} — manual review`);
+        logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} surcharge mismatch (charged ${settleOpts.actualTotalCents}c, expected ${expectedTotalCents}c) — not settling`);
         return false;
       }
-
       const settleResult = await Settle.settleStatementPaid(statementId, {
-        paymentMethod,
-        processor: 'stripe',
-        stripePaymentIntentId: piId,
+        ...settleOpts.baseSettlement,
         stripeChargeId: paymentIntent.latest_charge || null,
-        amountCents: actualTotalCents,
+        settledAt: settleOpts.eventCreated ? new Date(settleOpts.eventCreated * 1000) : null,
+        amountCents: settleOpts.actualTotalCents,
         baseAmountCents: baseCents,
         surchargeAmountCents: surchargeCents,
         surchargeRateBps: rateBps,
         surchargePolicyVersion: policyVersion,
-        cardFunding: funding,
-        // Stripe's event timestamp — the settlement moment. The payment row's
-        // payment_date buckets P&L revenue; stamping webhook delivery time
-        // let a delayed/retried event move statement cash across a period
-        // boundary.
-        settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
-        source: 'stripe_webhook',
-      }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
+      }, { database: trx });
       settledPacketInvoiceIds = settleResult?.packetInvoiceIds || [];
-      // An already-paid statement still reports its packet children, so a
-      // redelivery re-runs the post-commit enrollment (idempotent) instead of
-      // finishing with nothing to do.
       return true;
     });
-    // Only when this PI actually left the statement paid — never on an anomaly
-    // path (orphan/stale PI, unverified funding, surcharge quarantine), which all
-    // leave the statement sent/viewed + unpaid (dunning must keep collecting).
-    if (settledNow) {
-      logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
-      // Every linked child invoice is paid now: close out their open visits,
-      // outside the money txn (GitHub r9 P1 #4127). Best-effort by contract.
-      await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
-      // The packet-owned children's deferred review asks, enrolled after the
-      // money transaction committed (that closeout refuses packet-owned
-      // visits, so nothing else enrolls them on this rail).
-      // An enrollment whose recovery marker ALSO failed is not something this
-      // rail can drop (Codex #4311 r30 P1): completing the handler marks the
-      // event processed and the requested reviews are gone for good. Throwing
-      // leaves the event unacknowledged, and the redelivery re-enters the
-      // idempotent already-paid path, which reports the same children.
-      const unrecorded = await Settle.enrollSettledPacketReviews(settledPacketInvoiceIds, { source: 'payer_statement_webhook' });
-      // Stop any statement-level dunning now that it's paid (best-effort, outside
-      // the money txn — the eligibility filter already excludes `paid`, so this is
-      // just hygiene and never gates settlement). Runs BEFORE the retry throw so
-      // a redelivery is not the first thing that stops dunning on a paid
-      // statement.
-      await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
-        .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
-      if (unrecorded.length) {
-        throw new Error(`statement S-${statementId} settled but ${unrecorded.length} packet review enrollment(s) are unrecorded — retrying on redelivery`);
-      }
+    return { settledNow, settledPacketInvoiceIds };
+  } catch (err) {
+    if (!err?.statementChildBlocked) throw err;
+    await recordStatementPaymentIssue(paymentIntent, statementId, err.message);
+    logger.warn(`[stripe-webhook] statement S-${statementId} PI ${piId} blocked child prevented settlement — rolled back and quarantined: ${err.message}`);
+    return { settledNow: false, settledPacketInvoiceIds: [] };
+  }
+}
+
+// P3 — payer statement PaymentIntents (metadata.waves_statement_id) settle the
+// CONSOLIDATED statement, never an individual invoice. Isolated from the invoice
+// PI lifecycle so legacy invoice_id intents are unchanged. Idempotent: succeeded
+// on an already-paid statement is a no-op; processing/revert are conditional on
+// the statement's ACTIVE PI, so a stale/replaced PI's events match nothing. NOT
+// feature-gated — a confirmed money event must settle regardless of the flag.
+async function handleStatementPaymentIntentSucceeded(Settle, paymentIntent, statementId, piId, eventCreated) {
+  const { computeChargeAmount } = require('../services/stripe-pricing');
+  const details = await paymentDetailsFromIntent(paymentIntent);
+  if (!details.resolved) {
+    throw new Error(`statement S-${statementId} PI ${piId}: payment method/funding unresolved (transient lookup) — retrying`);
+  }
+  const methodType = details.paymentMethod || 'card';
+  const funding = details.cardFunding || null;
+  const paymentMethod = methodType === 'us_bank_account' ? 'ach' : 'card';
+  const actualTotalCents = paymentIntent.amount_received || paymentIntent.amount || 0;
+
+  const { settledNow, settledPacketInvoiceIds } = await runStatementSettleTransaction({
+    Settle,
+    paymentIntent,
+    statementId,
+    piId,
+    settleOpts: {
+      computeChargeAmount,
+      methodType,
+      funding,
+      actualTotalCents,
+      eventCreated,
+      baseSettlement: {
+        paymentMethod,
+        processor: 'stripe',
+        stripePaymentIntentId: piId,
+        cardFunding: funding,
+        source: 'stripe_webhook',
+      },
+    },
+  });
+  if (settledNow) {
+    logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
+    await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
+    const unrecorded = await Settle.enrollSettledPacketReviews(settledPacketInvoiceIds, { source: 'payer_statement_webhook' });
+    await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
+      .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
+    if (unrecorded.length) {
+      throw new Error(`statement S-${statementId} settled but ${unrecorded.length} packet review enrollment(s) are unrecorded — retrying on redelivery`);
     }
+  }
+}
+
+async function handleStatementPaymentIntentProcessing(Settle, statementId, piId) {
+  const stripeClient = getStripe();
+  let current = null;
+  if (stripeClient) {
+    try { current = await stripeClient.paymentIntents.retrieve(piId); }
+    catch (e) { logger.warn(`[stripe-webhook] could not re-read statement PI ${piId} on processing: ${e.message}`); }
+  }
+  if (current && current.status !== 'processing') {
+    logger.warn(`[stripe-webhook] stale processing event for statement S-${statementId} PI ${piId} (now ${current.status}) — skipping`);
+    return;
+  }
+  const moved = await Settle.markStatementProcessing(statementId, piId);
+  if (moved) logger.info(`[stripe-webhook] statement S-${statementId} → processing (ACH in flight) via PI ${piId}`);
+}
+
+async function handleStatementPaymentIntentFailedOrCanceled(Settle, paymentIntent, eventType, statementId, piId) {
+  const reverted = await db.transaction((trx) => Settle.revertStatementProcessing(statementId, piId, { database: trx }));
+  if (eventType !== 'failed' || !reverted) return;
+  const reasonMsg = paymentIntent.last_payment_error?.message || 'bank/card declined';
+  try {
+    await NotificationService.notifyAdmin(
+      'payment',
+      `Statement payment failed: S-${statementId}`,
+      `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
+      { icon: '⚠️', link: '/admin/payers', bell: true },
+    );
+  } catch (e) { logger.error(`[stripe-webhook] statement S-${statementId} failure notification insert failed: ${e.message}`); }
+  logger.warn(`[stripe-webhook] statement S-${statementId} payment FAILED after confirmation via PI ${piId} (${reasonMsg}) — reverted to payable`);
+}
+
+async function handleStatementPaymentIntentEvent(paymentIntent, eventType, eventCreated = null) {
+  const statementId = Number(paymentIntent.metadata?.waves_statement_id);
+  if (!Number.isInteger(statementId) || statementId <= 0) return;
+  const piId = paymentIntent.id;
+  const Settle = require('../services/payer-statement-settle');
+
+  if (eventType === 'succeeded') {
+    await handleStatementPaymentIntentSucceeded(Settle, paymentIntent, statementId, piId, eventCreated);
   } else if (eventType === 'processing') {
-    // Re-read the CURRENT PI status before marking processing — a stale/retried
-    // processing event can arrive AFTER payment_failed/canceled, and re-marking
-    // processing would strand the statement (blocks online pay + admin reconcile).
-    // Only honor it if Stripe still shows the PI processing (when unreachable,
-    // trust the event; a later failed/canceled re-delivery would revert it).
-    const stripeClient = getStripe();
-    let current = null;
-    if (stripeClient) {
-      try { current = await stripeClient.paymentIntents.retrieve(piId); }
-      catch (e) { logger.warn(`[stripe-webhook] could not re-read statement PI ${piId} on processing: ${e.message}`); }
-    }
-    if (current && current.status !== 'processing') {
-      logger.warn(`[stripe-webhook] stale processing event for statement S-${statementId} PI ${piId} (now ${current.status}) — skipping`);
-    } else {
-      const moved = await Settle.markStatementProcessing(statementId, piId);
-      if (moved) logger.info(`[stripe-webhook] statement S-${statementId} → processing (ACH in flight) via PI ${piId}`);
-    }
+    await handleStatementPaymentIntentProcessing(Settle, statementId, piId);
   } else if (eventType === 'failed' || eventType === 'canceled') {
-    const reverted = await db.transaction((trx) => Settle.revertStatementProcessing(statementId, piId, { database: trx }));
-    // A `failed` that actually REVERTED a `processing` statement = a confirmed
-    // payment bounced (ACH return days later, or a post-confirm card decline) —
-    // the silent revert leaves AP/operators no signal, so raise a durable admin
-    // notification. (A `failed` on an unconfirmed PI — a normal pay-page decline,
-    // not processing — reverts nothing and stays quiet; `canceled` is usually our
-    // own replaceable-PI cancel.)
-    if (eventType === 'failed' && reverted) {
-      const reasonMsg = paymentIntent.last_payment_error?.message || 'bank/card declined';
-      try {
-        await NotificationService.notifyAdmin(
-          'payment',
-          `Statement payment failed: S-${statementId}`,
-          `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
-          // bell:true — a confirmed payer payment bouncing is the returned-ACH
-          // case the 2026-09-11 ruling names; a category-only write would
-          // stay silent behind the payment override (codex P2 on #4392).
-          { icon: '⚠️', link: '/admin/payers', bell: true },
-        );
-      } catch (e) { logger.error(`[stripe-webhook] statement S-${statementId} failure notification insert failed: ${e.message}`); }
-      logger.warn(`[stripe-webhook] statement S-${statementId} payment FAILED after confirmation via PI ${piId} (${reasonMsg}) — reverted to payable`);
-    }
+    await handleStatementPaymentIntentFailedOrCanceled(Settle, paymentIntent, eventType, statementId, piId);
   }
 }
 
@@ -5184,8 +5145,19 @@ async function handleRefundFailed(refund) {
  * dedupes replays. Gated by GATE_CARD_DETAILS_SYNC.
  */
 async function handlePaymentMethodAutomaticallyUpdated(paymentMethod) {
-  if (require('../config/feature-gates').gates?.cardDetailsSync !== true) {
+  const featureGates = require('../config/feature-gates');
+  const syncLive = typeof featureGates.cardDetailsSyncLive === 'function'
+    ? featureGates.cardDetailsSyncLive()
+    : featureGates.gates?.cardDetailsSync === true;
+  if (!syncLive) {
     logger.info(`[stripe-webhook] Card auto-update ignored (GATE_CARD_DETAILS_SYNC off): ${paymentMethod.id}`);
+    return;
+  }
+  const hasLocal = await db('payment_methods')
+    .where({ stripe_payment_method_id: paymentMethod.id })
+    .first('id');
+  if (!hasLocal) {
+    logger.info(`[stripe-webhook] Card auto-update skipped (unknown local PM): ${paymentMethod.id}`);
     return;
   }
   const result = await require('../services/card-details-sync')
@@ -5299,6 +5271,17 @@ async function handlePaymentMethodDetached(paymentMethod) {
 
   for (const row of disabledCustomers) {
     logger.info(`[stripe-webhook] Auto Pay disabled for customer ${row.customer_id} — in-charge method ${row.id} detached out-of-band`);
+  }
+
+  // Record a canonical payment_method_removed audit event so card-on-file
+  // reminders catch out-of-band detachments even if email or email gate is off (B-50).
+  for (const row of removedRows) {
+    await require('../services/autopay-log').logAutopay(row.customer_id, 'payment_method_removed', {
+      paymentMethodId: row.id,
+      details: { source: 'stripe_webhook_detached', stripe_payment_method_id: pmId, method_type: row.method_type || null },
+    }).catch((logErr) => {
+      logger.warn(`[stripe-webhook] payment_method_removed log failed for customer ${row.customer_id}: ${logErr.message}`);
+    });
   }
 
   // The customer cares about the resulting account state, not which surface

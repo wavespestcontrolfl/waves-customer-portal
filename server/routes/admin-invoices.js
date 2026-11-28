@@ -932,8 +932,43 @@ router.get('/:id/recipients', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+const TECH_SAFE_INVOICE_KEYS = [
+  'id', 'customer_id', 'scheduled_service_id', 'invoice_number', 'title', 'status',
+  'subtotal', 'tax', 'tax_rate', 'tax_amount', 'total', 'amount_paid', 'balance_due',
+  'service_date', 'due_date', 'paid_at', 'created_at', 'updated_at', 'payment_method',
+];
+const TECH_SAFE_CUSTOMER_KEYS = [
+  'first_name', 'last_name', 'phone', 'email',
+];
+const TECH_SAFE_VISIT_CUSTOMER_KEYS = [
+  ...TECH_SAFE_CUSTOMER_KEYS, 'address_line1', 'city', 'state', 'zip',
+];
+
+function pickAllowedFields(source, keys) {
+  const out = {};
+  for (const key of keys) {
+    if (key in source) out[key] = source[key];
+  }
+  return out;
+}
+
+// Explicit field-checkout allowlist for technician single-invoice reads so
+// permanent public bearer tokens, third-party payer snapshots (AP email /
+// address), annual-prepay plan pricing (monthlyRate / prepayAmount), saved
+// card metadata, discounts, credits, and office notes can never leak.
+// Only visit-bound invoices include the service customer's address fields;
+// customer-level prepay invoices omit address keys across multi-home accounts.
+function techSafeInvoicePayload(invoice) {
+  const safe = pickAllowedFields(invoice, TECH_SAFE_INVOICE_KEYS);
+  safe.tech_card_on_file = invoice.tech_card_on_file === true;
+  const c = invoice.customer;
+  const customerKeys = invoice.scheduled_service_id ? TECH_SAFE_VISIT_CUSTOMER_KEYS : TECH_SAFE_CUSTOMER_KEYS;
+  safe.customer = (c && typeof c === 'object') ? pickAllowedFields(c, customerKeys) : null;
+  return safe;
+}
+
 // What a technician may read with GET /:id (technician visibility audit A10,
-// 2026-11-04): an invoice bound to one of its own current visits, or the
+// 2026-11-04): an invoice bound to one of its own visits TODAY (ET), or the
 // prepay invoice of an annual prepay term for a customer it serves (the
 // prepay switch mints that invoice with no visit link, then re-reads it after
 // tender). Not the customer's other invoices. Admins read any invoice.
@@ -942,7 +977,9 @@ async function technicianMayReadInvoice(req, invoice) {
   if (invoice.scheduled_service_id) {
     const visit = await technicianCurrentVisitFilter(
       req,
-      db('scheduled_services').where({ 'scheduled_services.id': invoice.scheduled_service_id, customer_id: invoice.customer_id }),
+      db('scheduled_services')
+        .where({ 'scheduled_services.id': invoice.scheduled_service_id, customer_id: invoice.customer_id })
+        .where('scheduled_services.scheduled_date', etDateString()),
     ).first('scheduled_services.id');
     return !!visit;
   }
@@ -954,7 +991,8 @@ async function technicianMayReadInvoice(req, invoice) {
 // above lets a technician token reach this handler for their own tap-to-pay
 // checkout (PrepaySwitchSheet / AnnualPrepayLauncher re-reading after
 // tender) — so a technician request is scoped here by
-// technicianMayReadInvoice. Admin requests are unscoped (ADMIN-BUG-R05).
+// technicianMayReadInvoice and stripped of bearer tokens & office-only
+// billing fields via techSafeInvoicePayload. Admin requests are unscoped.
 router.get('/:id', async (req, res, next) => {
   try {
     const invoice = await InvoiceService.getById(req.params.id);
@@ -969,12 +1007,12 @@ router.get('/:id', async (req, res, next) => {
     if (isTechnicianRequest(req)) {
       // The visit payment sheet shows Card on File to a technician only when
       // this invoice is one it may charge (GATE_TECH_CARD_ON_FILE), judged on
-      // the stored lines before the property strip below.
+      // the stored lines before techSafeInvoicePayload omits line_items.
       invoice.tech_card_on_file = techCardOnFileLive() && await technicianMayChargeCardOnFile(req, invoice);
-      invoice.line_items = require('../services/invoice-property-lines').techSafeInvoiceLineItems(invoice.line_items);
+      return res.json(techSafeInvoicePayload(invoice));
     }
     // Coverage-service suggestion for the annual-prepay modal (real recurring
-    // service, not the invoice title). Modal-only; safe to attach for all GETs.
+    // service, not the invoice title). Modal-only; safe to attach for admin GETs.
     invoice.suggested_coverage = await suggestCoverageServiceType(invoice.customer_id);
     res.json(invoice);
   } catch (err) { next(err); }

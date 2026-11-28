@@ -216,4 +216,14 @@ describe("MixSafetySection", () => {
     const post = fetch.mock.calls.find(([, opts]) => opts?.method === "POST");
     expect(JSON.parse(post[1].body)).toMatchObject({ productAId: CELSIUS.id, productBId: CERTAINTY.id, groupB: null, verdict: "caution", reason: "Short reason." });
   });
+
+  it("renders mobile rule cards with actions for phone screens", async () => {
+    render(<MixSafetySection />);
+    await screen.findByRole("table", { name: "Mix safety rules" });
+    const mobile = screen.getByLabelText("Mix safety rules mobile");
+    expect(within(mobile).getByText("Celsius WG + Group: Fertilizer")).toBeInTheDocument();
+    expect(within(mobile).getByText("Celsius WG + Certainty Turf Herbicide")).toBeInTheDocument();
+    fireEvent.click(within(mobile).getAllByRole("button", { name: "Edit" })[0]);
+    expect(screen.getByRole("button", { name: "Save rule" })).toBeInTheDocument();
+  });
 });

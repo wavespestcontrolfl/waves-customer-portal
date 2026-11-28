@@ -525,4 +525,28 @@ describe('admin estimate email delivery', () => {
     expect(estimateMatchesSentOnlyScope({ status: 'sending', sent_at: null })).toBe(true);
     expect(estimateMatchesSentOnlyScope({ status: 'send_failed', sent_at: null })).toBe(true);
   });
+
+  test('estimateSmtpContent escapes dynamic HTML fields while keeping text raw and returns proposal subject', () => {
+    const est = router._internals.estimateSmtpContent({
+      firstName: 'Sam <img src=x>',
+      viewUrl: 'https://portal.wavespestcontrol.com/e/1?a=1&b="2"',
+      priceLine: '$129/visit <script>1</script>',
+      proposalMode: false,
+    });
+    expect(est.html).toContain('Hi Sam &lt;img src=x&gt;');
+    expect(est.html).not.toContain('<img src=x>');
+    expect(est.html).toContain('$129/visit &lt;script&gt;1&lt;/script&gt;');
+    expect(est.html).not.toContain('<script>1</script>');
+    expect(est.html).toContain('href="https://portal.wavespestcontrol.com/e/1?a=1&amp;b=&quot;2&quot;"');
+    expect(est.text).toContain('Hi Sam <img src=x>,');
+    expect(est.subject).toBe('Your Waves Pest Control Estimate is Ready');
+
+    const prop = router._internals.estimateSmtpContent({
+      firstName: 'Jordan',
+      viewUrl: 'https://portal.wavespestcontrol.com/e/2',
+      priceLine: '$199',
+      proposalMode: true,
+    });
+    expect(prop.subject).toBe('Your pest control proposal from Waves');
+  });
 });

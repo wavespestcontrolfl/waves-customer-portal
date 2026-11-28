@@ -91,6 +91,67 @@ function safeUrl(url) {
   return SAFE_URL_SCHEME.test(trimmed) ? trimmed : '#';
 }
 
+function safeImageUrl(url) {
+  const safe = safeUrl(url);
+  return /^(https?:\/\/|\/)/i.test(safe) ? safe : '';
+}
+
+const BATCH_UNSUBSCRIBE_TOKEN = '{{unsubscribe_url}}';
+
+const PLACEHOLDER_RE = /\{\{|\}\}|<%|%>|%7b%7b|%7d%7d|%3c%25|%25%3e/i;
+
+function hasUnresolvedPlaceholder(value) {
+  let cur = String(value || '');
+  if (PLACEHOLDER_RE.test(cur)) return true;
+  for (let i = 0; i < 2; i += 1) {
+    try {
+      const next = decodeURIComponent(cur);
+      if (next === cur) break;
+      if (PLACEHOLDER_RE.test(next)) return true;
+      cur = next;
+    } catch {
+      break;
+    }
+  }
+  return false;
+}
+
+const PUBLIC_HOSTNAME_RE = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+)$/i;
+const INTERNAL_HOST_SUFFIX_RE = /\.(?:internal|local|localdomain|lan|home\.arpa|corp|intranet)$/i;
+
+function isLoopbackHost(host) {
+  return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+function isValidUnsubscribeTarget(trimmed, { allowLocal = false } = {}) {
+  if (!/^https?:\/\//i.test(trimmed) || /\s/.test(trimmed) || hasUnresolvedPlaceholder(trimmed)) return false;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    if (isLoopbackHost(host)) return allowLocal;
+    if (INTERNAL_HOST_SUFFIX_RE.test(host)) return false;
+    return PUBLIC_HOSTNAME_RE.test(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function validatedUnsubscribeUrl(url, { allowAsmToken = false, allowBatchToken = false, allowLocal = false } = {}) {
+  const trimmed = String(url == null ? '' : url).trim();
+  if (!trimmed) return null;
+  if (allowAsmToken && trimmed === ASM_UNSUBSCRIBE_URL) return trimmed;
+  if (allowBatchToken && trimmed === BATCH_UNSUBSCRIBE_TOKEN) return trimmed;
+  return isValidUnsubscribeTarget(trimmed, { allowLocal }) ? trimmed : null;
+}
+
+function safeUnsubscribeHref(url) {
+  const valid = validatedUnsubscribeUrl(url, { allowAsmToken: true, allowBatchToken: true, allowLocal: true });
+  if (!valid) return null;
+  if (valid === ASM_UNSUBSCRIBE_URL || valid === BATCH_UNSUBSCRIBE_TOKEN) return valid;
+  return escapeHtml(valid);
+}
+
 // For suppressProviderErrorLog callers: strip anything address-shaped from a
 // provider error before it is persisted or audited (SendGrid 4xx bodies can
 // echo the recipient address).
@@ -400,8 +461,8 @@ function renderBlocks(blocks, payload) {
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="dm-rule" style="margin:18px 0;border-top:1px solid ${B.rule};border-bottom:1px solid ${B.rule};">
             ${rows.map((row) => `
               <tr>
-                <td class="dm-muted" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.mutedText};">${row.labelHtml}</td>
-                <td align="right" class="dm-ink" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.valueHtml}</td>
+                <td valign="top" class="dm-muted" style="padding:8px 12px 8px 0;vertical-align:top;font-family:${B.font};font-size:14px;color:${B.mutedText};">${row.labelHtml}</td>
+                <td valign="top" align="right" class="dm-ink" style="padding:8px 0;vertical-align:top;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.valueHtml}</td>
               </tr>
             `).join('')}
           </table>
@@ -413,7 +474,7 @@ function renderBlocks(blocks, payload) {
       if (href) {
         const label = renderInline(block.label || 'Open', payload, { html: false });
         if (block.variant === 'link') {
-          htmlParts.push(`<p style="margin:0 0 10px;font-family:${B.font};font-size:13px;line-height:1.58;"><a class="dm-link" href="${escapeHtml(safeUrl(href))}" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(label)}</a></p>`);
+          htmlParts.push(`<p style="margin:0 0 10px;font-family:${B.font};font-size:14px;line-height:1.58;"><a class="dm-link" href="${escapeHtml(safeUrl(href))}" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(label)}</a></p>`);
         } else {
           const render = renderedCtaCount === 0 ? ctaButton : ctaChip;
           renderedCtaCount += 1;
@@ -427,7 +488,7 @@ function renderBlocks(blocks, payload) {
       // portal-hosted asset URL with no variable is fine too. Width is in CSS
       // px (capped to 100% on narrow screens); radius rounds screenshots
       // (badges pass radius 0). A missing/blank src renders nothing.
-      const src = renderInline(block.src, payload, { html: false }).trim();
+      const src = safeImageUrl(renderInline(block.src, payload, { html: false }));
       if (src) {
         const width = Number(block.width) > 0 ? Math.round(Number(block.width)) : 240;
         const align = block.align === 'left' ? 'left' : block.align === 'right' ? 'right' : 'center';
@@ -486,7 +547,7 @@ function renderBlocks(blocks, payload) {
       const content = renderInline(block.content, payload);
       if (content) {
         const small = block.type === 'small_note';
-        htmlParts.push(`<p class="${small ? 'dm-muted' : 'dm-text'}" style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:${B.font};font-size:${small ? '13' : '15'}px;line-height:1.58;color:${small ? B.mutedText : B.text};">${content}</p>`);
+        htmlParts.push(`<p class="${small ? 'dm-muted' : 'dm-text'}" style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:${B.font};font-size:${small ? '14' : '15'}px;line-height:1.58;color:${small ? B.mutedText : B.text};">${content}</p>`);
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     }
@@ -537,8 +598,9 @@ function isMarketingSend(template, suppressionGroupKey) {
     || sendStreamFor(template, suppressionGroupKey).startsWith('marketing_');
 }
 
-function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppressionGroupKey } = {}) {
-  if (unsubscribeUrl) return unsubscribeUrl;
+function unsubscribeUrlForRender({ template, unsubscribeUrl, asmGroupId, suppressionGroupKey, allowLocal = false } = {}) {
+  const valid = validatedUnsubscribeUrl(unsubscribeUrl, { allowAsmToken: Boolean(asmGroupId), allowLocal });
+  if (valid) return valid;
   if (isMarketingSend(template, suppressionGroupKey) && asmGroupId) return ASM_UNSUBSCRIBE_URL;
   return null;
 }
@@ -800,7 +862,7 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   }
   if (bodyAppend?.html) {
     const B = blockPalette();
-    bodyHtml = [bodyHtml, `<p class="dm-muted" style="margin:18px 0 0 0;font-family:${B.font};font-size:13px;line-height:1.58;color:${B.mutedText};">${bodyAppend.html}</p>`].filter(Boolean).join('\n');
+    bodyHtml = [bodyHtml, `<p class="dm-muted" style="margin:18px 0 0 0;font-family:${B.font};font-size:14px;line-height:1.58;color:${B.mutedText};">${bodyAppend.html}</p>`].filter(Boolean).join('\n');
   }
   const mode = String(modeOverride || template.mode || 'service').toLowerCase();
   // Billing-family templates carry the Stripe trust line (owner scope
@@ -828,8 +890,10 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // one stream ("referral emails", "these follow-ups") would understate it.
   // Only an admin preview/test passes a link for a service-stream template.
   const unsubScope = isMarketingSend(template, null) ? 'Waves marketing emails' : 'these emails';
-  const unsubFooterHtml = unsubscribeUrl
-    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
+  const validUnsubUrl = validatedUnsubscribeUrl(unsubscribeUrl, { allowAsmToken: true, allowBatchToken: true, allowLocal: true });
+  const unsubHref = safeUnsubscribeHref(validUnsubUrl);
+  const unsubFooterHtml = unsubHref
+    ? `<a href="${unsubHref}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
     : null;
   const footerNote = mode === 'marketing'
     ? null
@@ -848,13 +912,13 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // referral.friend_invite) must not close the hidden preheader div.
   const preheader = previewText ? escapeHtml(previewText) : undefined;
   const html = mode === 'marketing'
-    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader, darkAwareBody })
+    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl: unsubHref, preheader, darkAwareBody })
     : wrapServiceEmail({ body: bodyHtml, preheader, footerNote, darkAwareBody });
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText, bodyAppend?.text].filter(Boolean).join('\n\n')
     : [bodyText, bodyAppend?.text].filter(Boolean).join('\n\n');
-  const text = (mode === 'marketing' || unsubscribeUrl)
-    ? ensureLegalTextFooter(textBody, { unsubscribeUrl: unsubscribeUrl || null }) || bodyText
+  const text = (mode === 'marketing' || validUnsubUrl)
+    ? ensureLegalTextFooter(textBody, { unsubscribeUrl: validUnsubUrl }) || bodyText
     : textBody;
 
   return {
@@ -1329,6 +1393,7 @@ function prepareTemplateSend({
     unsubscribeUrl,
     asmGroupId,
     suppressionGroupKey: effectiveSuppressionGroupKey,
+    allowLocal: Boolean(test),
   });
   if (isMarketingSend(template, effectiveSuppressionGroupKey) && !test && !effectiveUnsubscribeUrl) {
     const err = new Error('marketing template sends require an unsubscribe URL or SendGrid ASM group');

@@ -32,6 +32,7 @@ const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-s
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { redactOfferLinks, redactOfferLinksTogether, offerLinkTokens } = require('../utils/offer-link-redaction');
 const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+const { wrapServiceEmail, ctaButton, colors } = require('./email-template');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const FROM_EMAIL = 'contact@wavespestcontrol.com';
@@ -257,25 +258,27 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff }) {
+function wrapEmailHtml({ heading, paragraphs, buttonUrl, buttonLabel, signoff, lang = 'en' }) {
   const parts = [
-    '<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#1a1a1a;">',
-    `<h2 style="font-size:18px;margin:0 0 16px;">${escapeHtml(heading)}</h2>`,
+    `<h2 style="margin:0 0 16px 0;font-family:${colors.HEADING_FONT};font-size:20px;line-height:1.25;color:${colors.NAVY};font-weight:${colors.HEADING_WEIGHT};">${escapeHtml(heading)}</h2>`,
   ];
   for (const p of paragraphs) {
-    parts.push(`<p style="font-size:14px;line-height:1.5;margin:0 0 12px;">${escapeHtml(p)}</p>`);
+    parts.push(`<p style="font-family:${colors.FONT};font-size:15px;line-height:1.58;margin:0 0 14px 0;color:${colors.BODY};">${escapeHtml(p)}</p>`);
   }
   if (buttonUrl) {
-    parts.push(
-      `<p style="margin:20px 0;"><a href="${escapeHtml(buttonUrl)}" style="background:#0b5c3f;color:#ffffff;` +
-      `padding:12px 20px;border-radius:6px;text-decoration:none;font-size:14px;display:inline-block;">` +
-      `${escapeHtml(buttonLabel || buttonUrl)}</a></p>`,
-    );
-    parts.push(`<p style="font-size:12px;color:#666;word-break:break-all;">${escapeHtml(buttonUrl)}</p>`);
+    const safeHref = escapeHtml(buttonUrl);
+    parts.push(`<div style="margin:24px 0 14px 0;text-align:center;">${ctaButton(safeHref, escapeHtml(buttonLabel || buttonUrl))}</div>`);
+    parts.push(`<p style="font-family:${colors.FONT};font-size:14px;line-height:1.5;color:${colors.MUTED};word-break:break-all;margin:0 0 14px 0;">${safeHref}</p>`);
   }
-  if (signoff) parts.push(`<p style="font-size:14px;line-height:1.5;margin:16px 0 0;">${escapeHtml(signoff)}</p>`);
-  parts.push('</div>');
-  return parts.join('\n');
+  if (signoff) {
+    parts.push(`<p style="font-family:${colors.FONT};font-size:15px;line-height:1.58;margin:16px 0 0 0;color:${colors.BODY};">${escapeHtml(signoff)}</p>`);
+  }
+  return wrapServiceEmail({
+    preheader: paragraphs[0] ? escapeHtml(paragraphs[0]) : escapeHtml(heading),
+    body: parts.join('\n'),
+    lang,
+    appPromo: false,
+  });
 }
 
 // The job-offer email (GATE_JOB_OFFERS) and its one reminder (GATE_JOB_OFFER_REMINDER). Owner-approved words, spec
@@ -297,9 +300,10 @@ function buildOfferEmail(stage, first, vars) {
   const signoff = `${vars.sender_name}, owner`;
   return {
     subject,
-    html: wrapEmailHtml({ heading: 'Your job offer', paragraphs, buttonUrl: vars.offer_link, buttonLabel, signoff }),
+    html: wrapEmailHtml({ heading: 'Your job offer', paragraphs, buttonUrl: vars.offer_link, buttonLabel, signoff, lang: 'en' }),
     text: `${paragraphs.join('\n\n')}\n\n${vars.offer_link}\n\n${signoff}`,
     buttonLabel,
+    lang: 'en',
   };
 }
 
@@ -307,6 +311,8 @@ function buildEmailContent(app, stage, vars) {
   const language = languageOf(app);
   const first = firstNameOf(contactOf(app).name);
   const isEs = language === 'es';
+
+  const lang = isEs ? 'es' : 'en';
 
   if (stage === 'application_received') {
     const subject = isEs ? 'Recibimos tu solicitud' : 'We received your application';
@@ -318,8 +324,9 @@ function buildEmailContent(app, stage, vars) {
       : `If you have questions, call or text ${WAVES_SUPPORT_PHONE_DISPLAY}.`;
     return {
       subject,
-      html: wrapEmailHtml({ heading: subject, paragraphs: [intro, contactLine] }),
+      html: wrapEmailHtml({ heading: subject, paragraphs: [intro, contactLine], lang }),
       text: `${intro}\n\n${contactLine}`,
+      lang,
     };
   }
 
@@ -334,9 +341,10 @@ function buildEmailContent(app, stage, vars) {
     const buttonLabel = isEs ? 'Elegir horario' : 'Pick a time';
     return {
       subject,
-      html: wrapEmailHtml({ heading: subject, paragraphs: [intro, explain], buttonUrl: vars.interview_url, buttonLabel }),
+      html: wrapEmailHtml({ heading: subject, paragraphs: [intro, explain], buttonUrl: vars.interview_url, buttonLabel, lang }),
       text: `${intro}\n\n${vars.interview_url}\n\n${explain}`,
       buttonLabel,
+      lang,
     };
   }
 
@@ -360,13 +368,14 @@ function buildEmailContent(app, stage, vars) {
     const buttonLabel = isEs ? 'Cambiar horario' : 'Change time';
     return {
       subject,
-      html: wrapEmailHtml({ heading: subject, paragraphs, buttonUrl: vars.interview_url, buttonLabel }),
+      html: wrapEmailHtml({ heading: subject, paragraphs, buttonUrl: vars.interview_url, buttonLabel, lang }),
       text: `${paragraphs.join('\n\n')}\n\n${vars.interview_url}`,
       buttonLabel,
+      lang,
     };
   }
 
-  return { subject: '', html: '', text: '' };
+  return { subject: '', html: '', text: '', lang };
 }
 
 // Settle the ledger row this send attempt owns — the shared tail of every
@@ -1178,6 +1187,7 @@ async function runEmailLeg(ctx) {
     ? wrapEmailHtml({
       heading: subject,
       paragraphs: String(text).split(/\n{2,}/),
+      lang: built.lang,
       ...(vars.interview_url ? { buttonUrl: vars.interview_url, buttonLabel: built.buttonLabel || 'Pick a time' } : {}),
     })
     : built.html;

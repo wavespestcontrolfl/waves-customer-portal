@@ -1327,7 +1327,7 @@ describe('admin customer writes stamp the implied monthly lane (source pins)', (
   });
 
   test('both stamp sites surface an owner review notification', () => {
-    const sites = src.match(/'billing_lane_review'/g) || [];
+    const sites = src.match(/'billing_lane_review(?:ed)?'/g) || [];
     expect(sites.length).toBe(2);
   });
 });

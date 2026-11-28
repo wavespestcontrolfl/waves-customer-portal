@@ -741,7 +741,7 @@ class WavesAssistant {
       logger.error(`[ai-assistant] getOrCreateConversation failed: ${convErr.message}`, { stack: convErr.stack });
       // GATE_PORTAL_CHAT_OPEN: the message is filed as a hand-off item when it can be.
       return this.rescueFailedTurn({ message, channel, channelIdentifier, customerId, customerPhone, turn, error: convErr },
-        { reply: "I'm having a brief connection issue. Please try again in a moment, or call us at (941) 318-7612.", escalated: false });
+        { reply: `I'm having a brief connection issue. Please try again in a moment, or call us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, escalated: false });
     }
     const replay = portalReplay(conversation, message);
     const turnMessage = replay.content;
@@ -831,7 +831,7 @@ class WavesAssistant {
       // A card or button a tool already built this turn still shows under
       // the fallback text.
       return this.rescueFailedTurn({ conversation, message: turnMessage, channel, customerId, lane, turn, error: err },
-        { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", escalated: false, ...laneExtras(lane) });
+        { reply: `I'm having trouble right now. Please try calling us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, escalated: false, ...laneExtras(lane) });
     }
   }
 
@@ -1022,7 +1022,7 @@ class WavesAssistant {
       if (loopExhausted && lastResponse) ledgerCallRejected(lastResponse, 'tool_loop_exhausted');
       logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
       return this.rescueFailedTurn({ conversation, message, channel, customerId, lane, turn },
-        { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false, ...laneExtras(lane) });
+        { reply: `I'm having trouble right now. Please try calling us at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, conversationId: conversation.id, escalated: false, ...laneExtras(lane) });
     }
 
     // The transcript and the exact portal response are one durable outcome.

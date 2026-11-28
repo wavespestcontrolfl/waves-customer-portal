@@ -10165,20 +10165,20 @@ function initScheduledJobs() {
   }
 
   // =========================================================================
-  // DAILY 8:31 AM — Card details sync (GATE_CARD_DETAILS_SYNC)
-  // Stripe's card account updater renews saved cards without telling us. This
-  // safety net re-reads the cards the portal thinks are expired or expiring
-  // from Stripe. It runs before the 9:00 Auto Pay pre-charge and payment-expiry
-  // jobs and the Monday 9:17 expiry warnings so they read Stripe's current
-  // expiry. Minute :31 at 8 AM is unused (one-minute-per-job rule above).
+  // DAILY 7:30 AM — Card details sync (GATE_CARD_DETAILS_SYNC)
+  // Runs BEFORE the 8:00 AM Auto Pay billing cron (and outside 8:40-9:40 AM
+  // deploy blackout) so renewed expiries are updated before Auto Pay runs (B-52).
   // =========================================================================
-  cron.schedule('31 8 * * *', async () => {
+  cron.schedule('30 7 * * *', async () => {
     logger.info('Running: card details sync');
     try {
       await runExclusive('card-details-sync', async () => {
         const result = await require('./card-details-sync').syncNearExpiryCards();
         if (result.updated > 0) {
           logger.info(`Card details sync: ${result.updated} refreshed of ${result.checked} checked (${result.detached} detached, ${result.errors} errors)`);
+        }
+        if (result.checked > 0 && result.errors >= result.checked && result.updated === 0) {
+          throw new Error(`Card details sync failed for all ${result.checked} checked card(s)`);
         }
       });
     } catch (err) {
