@@ -1036,6 +1036,12 @@ async function endNowUnavailableForTerm({ customerId, term, wholeAccount, prepay
   }
 }
 
+async function previewReasonCode(acceptance, fallbackCode) {
+  if (!acceptance) return fallbackCode;
+  const accepted = await acceptedCancelReason(acceptance);
+  return accepted ? accepted.code : null;
+}
+
 async function previewCancelPlan({ customerId, ...raw } = {}) {
   if (!CancellationResolution.cancelFlowV2Enabled()) {
     throw new CancelPlanError(404, 'cancel_flow_v2_off', 'Cancel flow V2 is not enabled');
@@ -1156,7 +1162,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     logger.warn(`[admin-cancellation] open-scoped-repairs listing failed for ${customerId}: ${openErr.message}`);
   }
   const today = etDateString();
-  const acceptedReason = acceptance ? await acceptedCancelReason(acceptance) : null;
+  const resolvedReasonCode = await previewReasonCode(acceptance, input.reasonCode);
   return {
     previewFingerprint: cancelPlanFactsFingerprint({ term, prepayPlan, refund, impact, visitFees, scope, wholeAccount, endNowBlocked }),
     enabled: true,
@@ -1193,7 +1199,7 @@ async function previewCancelPlan({ customerId, ...raw } = {}) {
     // STOP, disabled email prefs, or a malformed address must not let the
     // card promise "text + email" the send legs will refuse.
     confirmationChannels: await require('./cancellation-confirmations').confirmationChannelAvailability(customer),
-    reasonCode: acceptedReason ? acceptedReason.code : input.reasonCode,
+    reasonCode: resolvedReasonCode,
     reasonCodes: [...REASON_CODE_VALUES],
     note: input.note,
   };
