@@ -249,7 +249,8 @@ const { stampInvalidReason } = require('./call-invalid-reason');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, mapServiceCategoryToLegacy, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { flagCallBookingRain } = require('./call-booking-rain-flag');
-const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, callServiceBooksAtPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
+const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, callServiceBooksAtPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd, applyCatalogSelectionGuard } = require('./call-booking-catalog');
+const { syncCallbackPriceIfEligible } = require('./call-callback-price-sync');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -10019,143 +10020,25 @@ const RECURRING_OVERRIDE_SOURCES = new Set([
 // so lead-recurring-intent.js can share them without requiring this 16k-line
 // module. Pure relocation — same Set, same normalizer, byte-identical.
 const { RECURRING_PEST_PROGRAMS, normalizeServiceKey } = require('../config/recurring-pest-programs');
-// Program words that are unambiguous on their own. Bare cadence words —
-// including "quarterly"/"semiannual" — are NOT here: they only count with
-// the pest-pressure/history guard below ("we get ants every month" and
-// "I USED TO HAVE quarterly service" are not plan asks). Bare
-// "ongoing"/"year-round" are nowhere: as descriptions ("an ongoing ant
-// problem", "year-round bugs") they're pressure, and the genuine asks are
-// the service-anchored forms here (plus "keep … year-round").
-const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|keep[^.?!;]{0,40}\byear[- ]?round|(?:service|maintenance|pest|treatment) plans?|(?:a|any|your|the|what|which) plans?\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already|next|on|that|changed?|fell|got)\b|\s+(?:sun|mon|tues?|wednes|thurs?|fri|satur)day\b)|(?<!\bpayment )(?<!\bfinanc(?:e|ing) )(?<!\binstallment )plans\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already|next|on|that|changed?|fell|got)\b|\s+(?:sun|mon|tues?|wednes|thurs?|fri|satur)day\b)|(?<!\bpayment )packages?|memberships?)\b/i;
-const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bquarterly\b|\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:other )?(?:single )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?\b/gi;
-// "we get/see/have fire ants every month" describes pressure, not a plan
-// ask. "have" is pressure ONLY as possession — request idioms ("can I
-// have…", "want to have…") are excluded by lookbehind.
-const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|(?<!\b(?:can|could|may) (?:i|we) )(?<!\b(?:do|does|did) (?:you|they) )(?<!\byou guys )(?<!\b(?:want|need|like|love|prefer)(?:ed)? to )have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in)|(?:was|were|used to be) (?:on|with|getting|doing)|(?:i'?m|we'?re|am|are|currently|already|still) (?:on|with|using))\b[^.?!]{0,40}$/i;
-// ...but a request verb AFTER the pressure verb re-frames the clause as an
-// ask: "I HAVE ants and WANT monthly service".
-const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me| us)? up|set(?:ting)? up|start|get started|schedule|book|interested in|looking for|put (?:me|us) on)\b/i;
-// Declines: negated-want forms, bare opt-outs ("no package, only the nest"),
-// and "just a one-time" — the latter only when not itself negated ("NOT just
-// a one-time" / "I don't want just a one-time" are recurring requests).
-// NOTE: "contract"/"subscription" are deliberately NOT opt-out words — "no
-// contract" is month-to-month sales language ("can I do quarterly with no
-// contract?") and usually accompanies WANTING the plan.
-// The negated-want gap is clause-bounded (no ;) and must not cross another
-// "want/need" — "I don't want just a one-time; I want a package" pivots to a
-// request and is NOT a decline.
-const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|doesn'?t|does not|isn'?t|is not|won'?t|not) (?:want|need|interested in|looking for)\b(?:(?!\b(?:want|need)\b)[^.?!;]){0,50}\b(?:recurring|plans?|packages?|memberships?|ongoing|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:(?:service|maintenance|pest|treatment) )?(?:recurring|plans?|packages?|memberships?|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)\b|(?<!\b(?:not|than)\s)(?<!\b(?:don'?t|do not|doesn'?t|won'?t|didn'?t) (?:want|need) )\bjust (?:a |the )?one[- ]?time\b/i;
-// A decline whose object is ONLY a cadence ("no monthly", "don't want
-// quarterly") excludes that cadence, it does not decline recurring service —
-// the negated-cadence filter already keeps it from being chosen. Only a
-// decline naming the PROGRAM itself (plan/package/recurring/one-time…)
-// carries veto semantics.
-const PROGRAM_DECLINE_RE = /\b(?:recurring|plans?|packages?|memberships?|ongoing|one[- ]?time)\b/i;
-
-// A cadence word the caller is EXCLUDING ("but not monthly", "instead of
-// monthly") must not count as their chosen cadence.
-const NEGATED_CADENCE_BEFORE_RE = /(?:\b(?:not|no|never|without|rather than|instead of|(?:don'?t|do not|doesn'?t|does not|isn'?t|is not|can'?t|cannot|won'?t) (?:want|need|do|offer|provide|carry|interested in)|(?:not|never) (?:interested in|looking for|into)|no longer (?:want|need|on|interested in))\s+(?:the |a |any )?|\b(?:not|no|never|(?:don'?t|do not) want)\s+(?:the |a |any )?(?:(?:bi[- ]?)?monthly|quarterly|semi[- ]?annual(?:ly)?),? (?:or|nor|and) )$/i;
-// Billing cadence is not service cadence: "can I PAY MONTHLY for the one-time
-// treatment?" is a payment-terms question.
-const PAYMENT_CONTEXT_BEFORE_RE = /\b(?:pay(?:ing)?|billed?|billing|charged?|payments?|installments?|invoiced?)\b[^.?!]{0,15}$/i;
-
-// True when `re` (global) matches somewhere that reads as SERVICE cadence:
-// not negated, and not preceded by a pest-pressure verb in the same clause —
-// unless a request verb after the pressure verb turned the clause into an ask.
-function serviceCadenceMatch(re, text) {
-  const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-  let m;
-  while ((m = scan.exec(text))) {
-    const before = text.slice(Math.max(0, m.index - 60), m.index);
-    const after = text.slice(m.index + m[0].length, m.index + m[0].length + 20);
-    const billingNounAfter = /^\s{0,2}(?:payments?|installments?|billing|invoices?|price|pricing|cost)\b/i.test(after);
-    if (!billingNounAfter && !NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
-      const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
-      if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;
-    }
-    if (scan.lastIndex === m.index) scan.lastIndex++;
-  }
-  return false;
-}
-
-// Transcribers emit curly apostrophes; every guard regex here uses ASCII
-// ones — normalize before matching or "don’t want a recurring plan" slips
-// past the decline guard.
-const normalizeApostrophes = (s) => String(s || '').replace(/[‘’]/g, "'");
-
-// Speaker turns from a labelled transcript: a turn starts at a
-// "Speaker:" label (incl. raw diarized "Speaker 1:") and absorbs unlabelled
-// continuation lines (a diarized turn can wrap), so continuations inherit
-// their speaker.
-function speakerTurns(transcription) {
-  const lines = String(transcription || '').split('\n');
-  const turns = [];
-  for (const line of lines) {
-    const label = line.match(/^\s*([A-Za-z][A-Za-z0-9 ]{0,20}?)\s*:/);
-    if (label) {
-      // `label` (the RAW label text, e.g. "Speaker 1", "Agent", "Caller") is
-      // additive — existing consumers (callerOnlyText, acceptedPlanOffer)
-      // only read `.speaker`/`.text`; hasRealTwoWayConversation below reads
-      // `.label` directly, since raw diarization ("Speaker 1:"/"Speaker 2:",
-      // when both the labeling pass and its fallback miss) never matches
-      // caller/customer/agent and would otherwise normalize BOTH speakers to
-      // the same 'other' role (codex pre-push r2 P2).
-      const rawLabel = label[1].trim();
-      turns.push({ speaker: /^(caller|customer)$/i.test(rawLabel) ? 'caller' : 'other', label: rawLabel, text: line });
-    } else if (turns.length) {
-      turns[turns.length - 1].text += `\n${line}`;
-    }
-  }
-  return turns;
-}
-
-// The caller's own turns when the transcript is caller-labelled. Two
-// distinct fallbacks: NO labels at all → whole transcript (fail-open —
-// better a rare agent-word trigger than losing the rule); labels present
-// but none identifiable as the caller (raw "Speaker 1:"/"Speaker 2:"
-// diarization) → EMPTY (fail-closed — scanning the whole text there would
-// let an agent's ignored upsell trigger the override).
-function callerOnlyText(transcription) {
-  const turns = speakerTurns(transcription);
-  if (!turns.length) return String(transcription || '');
-  const callerTurns = turns.filter((t) => t.speaker === 'caller');
-  return callerTurns.map((t) => t.text).join('\n');
-}
-
-// True when `re` matches somewhere NOT immediately preceded by negation —
-// an agent's "So just the nest, NOT quarterly service?" is a one-time
-// confirmation, not a plan offer.
-function nonNegatedMatch(re, text) {
-  const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-  let m;
-  while ((m = scan.exec(text))) {
-    const before = text.slice(Math.max(0, m.index - 60), m.index);
-    if (!NEGATED_CADENCE_BEFORE_RE.test(before)) return true;
-    if (scan.lastIndex === m.index) scan.lastIndex++;
-  }
-  return false;
-}
-
-// An agent plan offer the caller ACCEPTS is caller intent too ("we can put
-// you on quarterly service" → "yes, that works"). Returns the offer turn
-// ({ text, index }) or null; `afterIndex` scopes the scan so a counteroffer
-// accepted AFTER a decline can be found. The ignored-upsell guard survives:
-// an offer with no affirmative reply returns nothing.
-// Bare "ok(ay)" is deliberately absent — it's conversational acknowledgment
-// ("okay." while the agent pitches), not acceptance. A negation right after
-// the affirmation word ("definitely not", "yeah, no") is a REJECTION.
-const PLAN_AFFIRMATION_RE = /^\s*(?:caller|customer)\s*:\s*(?:(?:um|uh|well|hmm|so|oh|ok(?:ay)?)[,.\s]+){0,3}(?:yes|yeah|yep|yup|sure|sounds good|that works|that'?s fine|let'?s do (?:that|it)|perfect|please do|sign me up|absolutely|definitely)\b(?!\s*,?\s*(?:not|no|never|don'?t)\b)/i;
-function acceptedPlanOffer(turns, afterIndex = -1) {
-  for (let i = Math.max(0, afterIndex + 1); i + 1 < turns.length; i++) {
-    if (turns[i].speaker !== 'other' || turns[i + 1].speaker !== 'caller') continue;
-    const offer = turns[i].text;
-    if ((nonNegatedMatch(RECURRING_INTENT_STRONG_RE, offer) || serviceCadenceMatch(RECURRING_CADENCE_RE, offer))
-      && PLAN_AFFIRMATION_RE.test(turns[i + 1].text)) {
-      return { text: offer, index: i };
-    }
-  }
-  return null;
-}
+const {
+  RECURRING_INTENT_STRONG_RE,
+  RECURRING_CADENCE_RE,
+  PEST_PRESSURE_BEFORE_RE,
+  REQUEST_VERB_RE,
+  RECURRING_DECLINED_RE,
+  PROGRAM_DECLINE_RE,
+  NEGATED_CADENCE_BEFORE_RE,
+  PAYMENT_CONTEXT_BEFORE_RE,
+  OTHER_PROVIDER_CONTEXT_RE,
+  PLAN_AFFIRMATION_RE,
+  normalizeApostrophes,
+  serviceCadenceMatch,
+  speakerTurns,
+  callerOnlyText,
+  nonNegatedMatch,
+  acceptedPlanOffer,
+  recurringIntentEvidence,
+} = require('./call-cadence-intent');
 
 // The program name for a cadence, resolved from the LIVE bookable catalog
 // when it's available (booking exact-matches catalog names, and seeded
@@ -10172,42 +10055,6 @@ function resolveProgramName(cadenceKey, fallback, catalogNames) {
   const hit = (Array.isArray(catalogNames) ? catalogNames : [])
     .find((n) => /pest control/i.test(n) && fits(String(n)));
   return hit || fallback;
-}
-
-// The caller-intent evidence behind the recurring-program default: the caller's
-// own text plus the agent plan offer they accepted, or null when the caller
-// voiced / accepted no recurring intent (or declined it). ONE place, read by
-// applyRecurringIntentDefault (to rewrite the service) and by
-// forcedAssessmentBooking (to know a recurring program is the caller's, not the
-// model's guess).
-function recurringIntentEvidence(transcription) {
-  const normalized = normalizeApostrophes(transcription);
-  const turns = speakerTurns(normalized);
-  const callerText = callerOnlyText(normalized);
-  // A decline only vetoes when nothing recurring FOLLOWS it — a caller who
-  // rejects one option and chooses another ("I don't want the monthly plan;
-  // can we do quarterly instead?"), or who accepts the agent's COUNTEROFFER
-  // after declining ("I don't want a monthly plan" → Agent: "we can do
-  // quarterly" → "yes"), made a recurring request.
-  const decline = callerText.match(RECURRING_DECLINED_RE);
-  let postDeclineOffer = null;
-  if (decline && PROGRAM_DECLINE_RE.test(decline[0])) {
-    const afterDecline = callerText.slice(decline.index + decline[0].length);
-    const declineTurnIdx = turns.reduce(
-      (acc, t, i) => (t.speaker === 'caller' && RECURRING_DECLINED_RE.test(t.text) ? i : acc), -1
-    );
-    postDeclineOffer = acceptedPlanOffer(turns, declineTurnIdx);
-    // Negation-aware: a REPEATED opt-out after the first decline ("I don't
-    // want a package either") is not fresh intent.
-    if (!nonNegatedMatch(RECURRING_INTENT_STRONG_RE, afterDecline)
-      && !serviceCadenceMatch(RECURRING_CADENCE_RE, afterDecline)
-      && !postDeclineOffer) return null;
-  }
-  const callerVoiced = nonNegatedMatch(RECURRING_INTENT_STRONG_RE, callerText)
-    || serviceCadenceMatch(RECURRING_CADENCE_RE, callerText);
-  const acceptedOffer = postDeclineOffer || (callerVoiced ? null : acceptedPlanOffer(turns, -1));
-  if (!callerVoiced && !acceptedOffer) return null;
-  return { callerText, acceptedOffer };
 }
 
 // Owner 2026-11-22 ("fix", then "yes" to the service-only cut): a call on which
@@ -20365,6 +20212,14 @@ const CallRecordingProcessor = {
     // ambiguous-service force below strips treatment signals (see
     // forcedAssessmentBooking) — `extracted` itself stays whole for the record.
     let bookingExtracted = extracted;
+    ({ callBookingCatalogRow, genericBookingUnbookable } = applyCatalogSelectionGuard({
+      callBookingCatalogRow,
+      bookableCallServices,
+      extracted,
+      v2ApprovedExtraction,
+      transcription,
+      genericBookingUnbookable,
+    }));
     if (v2ForceAssessmentService && isEnabled('callFailOpenBooking')) {
       const forced = forcedAssessmentBooking({
         serviceResolution, services: bookableCallServices, current: callBookingCatalogRow, extracted, transcription,
@@ -21106,6 +20961,8 @@ const CallRecordingProcessor = {
                   parentDate: scheduledDate,
                   parentWindowStart: windowStart || '09:00',
                   v2Extraction: v2ApprovedExtraction,
+                  resolvedPrice: priceInfo.price,
+                  transcription,
                 });
               let reusedExistingSchedule = false;
               // The reuse branch below may assign the default tech to an
@@ -21340,6 +21197,8 @@ const CallRecordingProcessor = {
                       parentDate: primaryActualDate,
                       parentWindowStart: String(primaryRow.window_start || '').slice(0, 5) || windowStart || '09:00',
                       v2Extraction: v2ApprovedExtraction,
+                      resolvedPrice: priceInfo.price,
+                      transcription,
                     });
                     if (!fuPlan) return null;
                   }
@@ -24617,6 +24476,20 @@ const CallRecordingProcessor = {
         appointmentResult = { error: err.message, ...(scheduledServiceId ? { scheduledServiceId, smsSent: false } : {}) };
       }
     }
+
+    await syncCallbackPriceIfEligible({
+      appointmentResult,
+      extracted,
+      procToken,
+      customerId,
+      isOutbound: isOutboundCall(call),
+      conn: db,
+      call,
+      v2DrivesRouting: CALL_EXTRACTION_V2_DRIVES_ROUTING,
+      v2CanonicalExtraction,
+      transcription,
+      callSid,
+    });
 
     // The "collect the email" card belongs to the CALL, not to the booking
     // (codex round-20 P2, generalized in round-22 P2). EVERY branch above
