@@ -9631,15 +9631,16 @@ function CustomerContactNotificationChoices({ customerId, isAdmin, refreshKey })
   }, [customerId, refreshKey]);
   const contacts = state.data?.contacts || [];
   if (!state.loading && !state.error && !contacts.length) return null;
-  const save = async (slot, patch) => {
+  const save = async (slot, patch, contactPhone = "") => {
     if (!isAdmin || saving) return;
     const seq = seqRef.current;
     setSaving(true);
     setSaveErr("");
     try {
+      const payload = contactPhone ? { ...patch, expectedPhoneKey: contactPhone } : patch;
       const response = await adminFetch(`/admin/customers/${customerId}/contact-notification-prefs/${slot}`, {
         method: "PUT",
-        body: JSON.stringify(patch),
+        body: JSON.stringify(payload),
       });
       if (seqRef.current === seq && response?.contacts) setState({ loading: false, error: "", data: response });
     } catch (err) {
@@ -9699,13 +9700,13 @@ function CustomerContactNotificationChoices({ customerId, isAdmin, refreshKey })
                 <div className="flex items-center justify-between py-1">
                   <span className="ui-label text-ink-secondary">Text messages</span>
                   <Switch aria-label={`Text messages for ${contact.name || `contact ${contact.slot}`}`} checked={contact.preferences?.smsEnabled !== false} disabled={saving}
-                    onChange={(next) => save(contact.slot, { smsEnabled: !!next })} />
+                    onChange={(next) => save(contact.slot, { smsEnabled: !!next }, contact.phone)} />
                 </div>
                 {contact.emailAvailable && (
                   <div className="flex items-center justify-between py-1">
                     <span className="ui-label text-ink-secondary">Email messages</span>
                     <Switch aria-label={`Email messages for ${contact.name || `contact ${contact.slot}`}`} checked={contact.preferences?.emailEnabled !== false} disabled={saving}
-                      onChange={(next) => save(contact.slot, { emailEnabled: !!next })} />
+                      onChange={(next) => save(contact.slot, { emailEnabled: !!next }, contact.phone)} />
                   </div>
                 )}
                 {CONTACT_CHOICE_ROWS.filter((row) => row.key !== "serviceCompleted" || !contact.reportsWithheld).map((row) => {
@@ -9721,11 +9722,11 @@ function CustomerContactNotificationChoices({ customerId, isAdmin, refreshKey })
                       <div className="flex items-center gap-2 shrink-0">
                         <Select size="sm" className="!w-auto" aria-label={`Delivery for ${row.label} (${contact.name || `contact ${contact.slot}`})`}
                           value={contact.preferences?.[row.channelKey] || "both"} disabled={saving || holderOff || !on}
-                          onChange={(e) => save(contact.slot, { [row.channelKey]: e.target.value })}>
+                          onChange={(e) => save(contact.slot, { [row.channelKey]: e.target.value }, contact.phone)}>
                           {channels.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                         </Select>
                         <Switch aria-label={`${row.label} for ${contact.name || `contact ${contact.slot}`}`} checked={on} disabled={saving || holderOff}
-                          onChange={(next) => save(contact.slot, { [row.key]: !!next })} />
+                          onChange={(next) => save(contact.slot, { [row.key]: !!next }, contact.phone)} />
                       </div>
                     </div>
                   );

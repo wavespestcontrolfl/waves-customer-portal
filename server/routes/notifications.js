@@ -1269,13 +1269,12 @@ async function profileOnAccount(req, customerId, { conn = db, lock = false } = {
   // still be on the account the session names (a profile moved away after sign-in reaches nothing).
   const key = (v) => String(v).toLowerCase();
   const ids = [...new Set([key(customerId), key(selfId)])].sort();
-  const q = conn('customers').whereIn('id', ids).orderBy('id', 'asc')
-    .select('id', 'active', 'deleted_at', conn.raw('COALESCE(account_id, id) AS owner_account'));
+  const q = conn('customers').whereIn('id', ids).orderBy('id', 'asc');
   if (lock === 'share') q.forShare(); else if (lock) q.forUpdate();
-  const rows = await q;
+  const rows = await q.select('id', 'account_id', 'active', 'deleted_at');
   const byId = new Map(rows.map((r) => [key(r.id), r]));
   // Both rows active, undeleted and on the session's account (staff turning off the signed-in profile ends its reach).
-  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && key(r.owner_account) === key(accountId);
+  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && key(r.account_id || r.id) === key(accountId);
   return onAccount(byId.get(key(customerId))) && onAccount(byId.get(key(selfId)));
 }
 

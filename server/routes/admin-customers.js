@@ -1534,7 +1534,7 @@ function assertPartialSlotIdentityUnchanged(contactPatch, before, lockedBefore) 
   if (!before || !lockedBefore) return;
   for (const [n, p, e] of SERVICE_CONTACT_SLOT_FIELDS) {
     const provided = [n, p, e].filter((col) => contactPatch.raw[col] !== undefined);
-    if (provided.length === 0 || provided.length === 3) continue;
+    if (provided.length === 0) continue;
     const norm = (row) => [row[n], row[p], row[e]].map((v) => String(v || '').trim().toLowerCase());
     if (JSON.stringify(norm(before)) !== JSON.stringify(norm(lockedBefore))) {
       throw Object.assign(new Error('Service contact slots changed while saving. Reload the customer and try again.'), {
@@ -5336,11 +5336,15 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       ...Object.fromEntries(Object.values(ContactPrefs.CONTACT_CHANNEL_KEY_BY_COLUMN).map((key) => [key, Joi.string().valid(...ContactPrefs.CONTACT_CHANNEL_VALUES)])),
       smsEnabled: Joi.boolean(),
       emailEnabled: Joi.boolean(),
+      expectedPhoneKey: Joi.string().trim().max(32).allow('', null),
     }).min(1);
     const { value: updates, error } = schema.validate(req.body || {});
     if (error) return res.status(400).json({ error: error.message });
-    const patch = ContactPrefs.contactPrefPatchFromBody(updates);
+    const { expectedPhoneKey, ...prefUpdates } = updates;
+    if (!Object.keys(prefUpdates).length) return res.status(400).json({ error: 'At least one notification preference must be provided' });
+    const patch = ContactPrefs.contactPrefPatchFromBody(prefUpdates);
     const asksEmailOnly = Object.values(patch).includes('email');
+    const asksEmailOn = prefUpdates.emailEnabled === true;
     // Every input the save depends on is read under the comms lock, as the
     // contact's own PUT reads it (codex #6364 r1 P2): the slot (a holder
     // replacing it meanwhile must not have the pruned row recreated), the
@@ -5352,7 +5356,8 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       const slots = getServiceContactSlots(customer);
       const slot = slots[slotNo - 1];
       if (!slot || !slot.phone) return { code: 'no_slot' };
-      if (asksEmailOnly && !contactEmailOnFile(slots, phoneKeyOf(slot.phone))) return { code: 'email_unavailable' };
+      if (expectedPhoneKey && phoneKeyOf(slot.phone) !== phoneKeyOf(expectedPhoneKey)) return { code: 'slot_changed' };
+      if ((asksEmailOnly || asksEmailOn) && !contactEmailOnFile(slots, phoneKeyOf(slot.phone))) return { code: 'email_unavailable' };
       const [existing, accountRow] = await Promise.all([
         ContactPrefs.getContactPrefRow(req.params.id, slot.phone, { dbh: trx }),
         trx('notification_prefs').where({ customer_id: req.params.id }).first().catch(() => null),
@@ -5362,13 +5367,16 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
       if (ContactPrefs.textPathsOpened(accountRow, existing, patch) && !existing?.consent_attested_at) return { code: 'consent_required' };
       await ContactPrefs.upsertContactNotificationPrefs(trx, req.params.id, slot.phone, patch);
       await auditCustomerMutation(req, 'customer.contact_notification_prefs.update', req.params.id,
-        { slot: slotNo, fields: Object.keys(updates).sort() }, false, trx);
+        { slot: slotNo, fields: Object.keys(prefUpdates).sort() }, false, trx);
       return { code: 'saved' };
     });
     if (outcome.code === 'not_found') return res.status(404).json({ error: 'Customer not found' });
     if (outcome.code === 'no_slot') return res.status(404).json({ error: 'No contact with a phone number in that slot' });
+    if (outcome.code === 'slot_changed') {
+      return res.status(409).json({ error: 'That contact slot changed while saving. Reload the customer and try again.' });
+    }
     if (outcome.code === 'email_unavailable') {
-      return res.status(400).json({ error: 'This contact has no email address on file, so email-only delivery cannot be chosen.' });
+      return res.status(400).json({ error: 'This contact has no email address on file, so email notifications or email-only delivery cannot be chosen.' });
     }
     if (outcome.code === 'consent_required') {
       return res.status(400).json({

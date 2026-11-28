@@ -410,8 +410,11 @@ describe('holder contact save prunes a removed contact\'s choices', () => {
 
   // GATE_CONTACT_LOGIN_HOLDER_ONLY: the signed-in holder's save is the only writer of
   // the per-phone login attestation (service_preferences.login_attested_phone_keys).
-  test('a consented list save records exactly the saved phones as login-attested, keeping other preferences; an emptied list drops it', async () => {
-    tables.customers[0].service_preferences = JSON.stringify({ unconsented_slot_phone_keys: ['9415550999'] });
+  test('a consented list save records exactly the saved phones as login-attested, keeping other preferences and pruning removed unconsented keys; an emptied list drops it', async () => {
+    tables.customers[0].service_preferences = JSON.stringify({
+      custom_note: 'keep',
+      unconsented_slot_phone_keys: ['9415550999', '9415550303'],
+    });
     mockSession.current = { customer: tables.customers[0], customerId: 'cust-1', accountId: 'cust-1', contactSession: null };
     const res = await call('PUT', '/api/notifications/property-preferences/cust-1', {
       serviceContacts: [{ firstName: 'Terry', lastName: 'Tenant', phone: '+19415550303', email: '' }],
@@ -419,11 +422,11 @@ describe('holder contact save prunes a removed contact\'s choices', () => {
     });
     expect(res.status).toBe(200);
     expect(JSON.parse(tables.customers[0].service_preferences)).toEqual({
-      unconsented_slot_phone_keys: ['9415550999'], login_attested_phone_keys: ['9415550303'],
+      custom_note: 'keep', login_attested_phone_keys: ['9415550303'],
     });
     const cleared = await call('PUT', '/api/notifications/property-preferences/cust-1', { serviceContacts: [], serviceContactsConsent: true });
     expect(cleared.status).toBe(200);
-    expect(JSON.parse(tables.customers[0].service_preferences)).toEqual({ unconsented_slot_phone_keys: ['9415550999'] });
+    expect(JSON.parse(tables.customers[0].service_preferences)).toEqual({ custom_note: 'keep' });
   });
 
   test('the legacy single-contact save attests slot 1 only: a surviving phone keeps an attestation it had and a phone filed without one gains none', async () => {
