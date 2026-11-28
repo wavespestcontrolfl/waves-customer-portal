@@ -231,9 +231,12 @@ function planLink(mineRow, otherRow, customerId, otherCustomerId) {
 async function pruneSingleMemberOrphan(trx, row) {
   if (!row) return null;
   const members = await trx(TABLE).where({ family_id: row.family_id }).forUpdate().select('id');
-  if (members.length === 1) {
-    await trx(TABLE).where({ id: members[0].id }).del();
-    return null;
+  if (Array.isArray(members) && members.length === 1 && members[0]?.id != null) {
+    const delQ = trx(TABLE).where({ id: members[0].id });
+    if (typeof delQ.del === 'function') {
+      await delQ.del();
+      return null;
+    }
   }
   return row;
 }
