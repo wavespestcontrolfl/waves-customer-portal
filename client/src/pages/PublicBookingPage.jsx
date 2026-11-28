@@ -23,10 +23,29 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // ("+1 (941) 555-1234") is 11 digits — drop the US country code so the same
 // input the gate accepts is also accepted by the contact step, the existing-
 // customer lookup, intent capture and confirm (they previously disagreed).
+const NANP_PHONE_RE = /^[2-9]\d{2}[2-9]\d{6}$/;
+
 const phoneDigits = (raw) => {
-  const d = String(raw || '').replace(/\D/g, '');
-  return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  const d = trimmed.replace(/\D/g, '');
+  if (trimmed.startsWith('+')) {
+    // Only +1 E.164 US/NANP numbers (11 digits starting with 1) strip the
+    // country code; foreign prefixes like +44 stay invalid instead of turning
+    // into 10 domestic digits.
+    const nat = trimmed.startsWith('+1') && d.length === 11 && d.startsWith('1') ? d.slice(1) : '';
+    return NANP_PHONE_RE.test(nat) ? nat : '';
+  }
+  const nat = d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
+  if (nat.length === 10 && !NANP_PHONE_RE.test(nat)) return '';
+  return nat;
 };
+
+const isContactPhoneInvalid = (existingCustomerId, rawPhone, normalizedDigits) => (
+  !existingCustomerId && String(rawPhone || '').trim().length > 0 && normalizedDigits.length !== 10
+);
+
+const confirmSubmittedPhone = (rawPhone) => phoneDigits(rawPhone) || String(rawPhone || '').trim();
 
 function bookingOfferAddress(address = {}) {
   return Object.fromEntries(Object.entries({
@@ -472,7 +491,7 @@ export default function PublicBookingPage() {
       ...c,
       firstName: customer.first_name || '',
       lastName: customer.last_name || '',
-      phone: customer.phone || '',
+      phone: customer.phone || c.phone || '',
       email: customer.email || '',
     }));
   }, []);
@@ -706,7 +725,7 @@ export default function PublicBookingPage() {
           new_customer: {
             first_name: contact.firstName,
             last_name: contact.lastName,
-            phone: phoneDigits(contact.phone),
+            phone: confirmSubmittedPhone(contact.phone),
             email: contact.email,
             address_line1: address.line1,
             address_line2: address.line2 || undefined,
@@ -766,7 +785,7 @@ export default function PublicBookingPage() {
   const contactPhoneDigits = phoneDigits(contact.phone);
   // Inline message instead of a silently disabled Confirm: only once the
   // visitor has typed something, never on the empty field.
-  const contactPhoneInvalid = !existingCustomerId && contactPhoneDigits.length > 0 && contactPhoneDigits.length !== 10;
+  const contactPhoneInvalid = isContactPhoneInvalid(existingCustomerId, contact.phone, contactPhoneDigits);
   const handleGateSendCode = async () => {
     if (gateDigits.length !== 10 || gateSending) return;
     setGateSending(true);

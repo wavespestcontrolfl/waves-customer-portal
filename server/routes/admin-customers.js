@@ -2037,13 +2037,18 @@ function assertFenceTransaction(trx) {
 
 async function findAccountByContact(trx, {
   phone, email, matchEmail = false, confirmEmailAccountId = null, fenceAttach = false,
-  forceNewAccount = false, ignorePhoneMatch = false,
+  forceNewAccount = false, ignorePhoneMatch = false, exactUsPhone,
 }) {
   if (fenceAttach) assertFenceTransaction(trx);
   const digits = phoneLast10(phone);
   const lookupByPhone = () => (digits
     ? trx('customers')
-      .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${digits}`])
+      .whereRaw(
+        exactUsPhone
+          ? "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')"
+          : "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?",
+        exactUsPhone ? [digits, `1${digits}`] : [`%${digits}`],
+      )
       .whereNull('deleted_at')
       .orderBy('is_primary_profile', 'desc')
       .orderBy('created_at', 'asc')

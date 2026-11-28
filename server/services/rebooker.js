@@ -2916,6 +2916,7 @@ class SmartRebooker {
       }
     }
 
+    invalidateEstimateSlotCaches();
     const changeDates = [originalDate, newDateStr, ...(followUpReport.shifted || []).flatMap(row => [row.previousDate, row.date])];
     if (options.qualityDates) {
       for (const date of changeDates) if (date) options.qualityDates.add(date);
@@ -4986,6 +4987,7 @@ class SmartRebooker {
     } catch (vgErr) {
       logger.warn(`[rebooker] series visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
     }
+    invalidateEstimateSlotCaches();
     // Same shared-Set convention as the single-visit path above: a caller
     // batching several series moves (rain-out's collective-anchor branch)
     // passes qualityDates and flushes it once itself (codex #4295 r2 P2).
@@ -5278,6 +5280,12 @@ module.exports = new SmartRebooker();
 // writer's own question instead of re-deriving it. The tech-scoped hard
 // check reschedule() also runs is a strict subset of this tech-blind one
 // (same status/hold/window rules, narrowed to one technician_id).
+function invalidateEstimateSlotCaches() {
+  try {
+    require('./estimate-slot-availability').invalidateAllEstimates();
+  } catch { /* best-effort */ }
+}
+
 module.exports.probeMoveConflicts = probeMoveConflicts;
 module.exports.occupancyProbeEnd = occupancyProbeEnd;
 module.exports.loadNextVisitSweep = loadNextVisitSweep;
