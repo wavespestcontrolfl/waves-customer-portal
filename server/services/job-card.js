@@ -2943,6 +2943,54 @@ function primaryProgramKey(svc, protocols) {
  * `primaryIsLawn` whether the lawn plan governs it; `lawnAddon` names a
  * booked lawn add-on, which has no plan on this visit.
  */
+function mixRowRate(row) {
+  const lo = Number(row?.perGallon?.amount || 0);
+  if (!(lo > 0) || !row?.perGallon?.unit) return null;
+  const hi = Number(row.perGallon.amountMax > lo ? row.perGallon.amountMax : lo);
+  return { lo, hi, unit: normRateUnit(row.perGallon.unit) };
+}
+
+function syntheticHitFromMixRow(row) {
+  const declaredRate = mixRowRate(row);
+  const conditional = /^if you find:/i.test(String(row?.condition || ''));
+  const raw = [row?.where, row?.sprayVolume, row?.limit].filter(Boolean).join('; ');
+  return { raw, selected: !conditional, ...(declaredRate ? { declaredRate } : {}) };
+}
+
+function candidateProtocolHits(c, resolved, product) {
+  const pid = String(product.id);
+  const hit = resolved.lines.find((l) => String(l.product.id) === pid) || null;
+  const mixRows = entryMixRateRows(resolved).filter((row) => String(row.productId) === pid);
+  if (!hit && !mixRows.length) return [];
+  const tankRows = mixRows.filter((row) => Boolean(row?.perGallon));
+  const relevant = tankRows.length ? tankRows : mixRows;
+  if (relevant.length > 1) {
+    return relevant.map((row) => {
+      const rate = mixRowRate(row);
+      const label = row.where ? `${c.name} — ${row.where}` : c.name;
+      const baseHit = hit || syntheticHitFromMixRow(row);
+      return {
+        c: { ...c, name: label },
+        hit: rate ? { ...baseHit, declaredRate: rate } : baseHit,
+        mixRows: [row],
+        useSpecific: true,
+      };
+    });
+  }
+  const singleRow = relevant[0] || null;
+  if (!hit) return [{ c, hit: syntheticHitFromMixRow(singleRow), mixRows: singleRow ? [singleRow] : [] }];
+  return [{ c, hit, mixRows: singleRow ? [singleRow] : [] }];
+}
+
+function protocolHitRate(h) {
+  if (h.hit.labelRateRefused) return { rate: null, declared: false };
+  if (h.hit.declaredRate) return { rate: h.hit.declaredRate, declared: true };
+  const fromRaw = lineRate(h.hit.raw, h.hit.selected === false);
+  if (fromRaw) return { rate: fromRaw, declared: false };
+  const fromRow = h.mixRows.length === 1 ? mixRowRate(h.mixRows[0]) : null;
+  return { rate: fromRow, declared: Boolean(fromRow) };
+}
+
 async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
   const protocols = deps.protocols || require('../config/protocols.json');
   const primaryKey = primaryProgramKey(svc, protocols);
@@ -2969,33 +3017,32 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const catalog = await loadCatalog(dbh);
   // Every candidate whose lines name the product owns its rain rule (`owners`); the
   // first selected line governs the dose, else the first "if needed" one.
-  const hits = candidates
-    .map((c) => {
-      const resolved = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null, isFollowup: c.isFollowup === true });
-      const hit = resolved.lines.find((l) => String(l.product.id) === String(product.id)) || null;
-      const mixRows = entryMixRateRows(resolved).filter((row) => String(row.productId) === String(product.id));
-      return { c, hit, mixRows };
-    })
-    .filter(({ hit, mixRows }) => hit || mixRows.length);
-  const owners = hits.map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
-  const lineHits = hits.filter(({ hit }) => hit);
-  const selectedHits = lineHits.filter(({ hit }) => hit.selected !== false);
-  const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw, hit.selected === false));
+  const candidateMatches = candidates.map((c) => {
+    const resolved = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null, isFollowup: c.isFollowup === true });
+    return { c, entries: candidateProtocolHits(c, resolved, product) };
+  });
+  const owners = candidateMatches.filter(({ entries }) => entries.length).map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
+  const hits = candidateMatches.flatMap(({ entries }) => entries);
+  const selectedHits = hits.filter(({ hit }) => hit.selected !== false);
+  const rateOf = (h) => protocolHitRate(h).rate;
   // The spray volume a line states for its own rate: a label-use card's carrier, the protocol text's "at the label volume of N gal",
-  // or the exact volume from the structured mix row / line prose.
-  const statedVolumeOf = (hit, mixRows = []) => statedLabelVolume(hit.raw) || sprayVolumeBoundsForRows(mixRows, hit).exact;
+  // or the exact volume from the specific mix row / line prose.
+  const statedVolumeOf = (hit, mixRows = [], useSpecific = false) => (useSpecific ? null : statedLabelVolume(hit.raw))
+    || sprayVolumeBoundsForRows(mixRows, useSpecific ? null : hit).exact;
   // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
   // narrowed by the label band, as before.
   const conflictLinesOf = (list) => (servicesConflict(list, { rateOf, statedVolumeOf }) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {});
   const lineOf = (h) => {
-    const specs = sprayVolumeBoundsForRows(h.mixRows, h.hit);
-    const stated = h.hit.labelCarrierGalPer1000 ? null : (statedLabelVolume(h.hit.raw) || specs.exact);
+    const boundLine = h.useSpecific ? null : h.hit;
+    const specs = sprayVolumeBoundsForRows(h.mixRows, boundLine);
+    const stated = h.hit.labelCarrierGalPer1000 ? null : ((h.useSpecific ? null : statedLabelVolume(h.hit.raw)) || specs.exact);
+    const { rate, declared } = protocolHitRate(h);
     return {
-      rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
+      rate, declared, labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
       // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
-      explicitDilution: lineRateIsDilution(h.hit.raw, h.hit.selected === false),
+      explicitDilution: Boolean(h.mixRows.some((row) => row?.perGallon)) || lineRateIsDilution(h.hit.raw, h.hit.selected === false),
       // The line's own per-area limit for one spray (Acelepryn: no more than 0.37 fl oz per 1,000 sq ft), checked against the rig's volume.
-      ...areaCapForRows(h.mixRows, h.hit),
+      ...areaCapForRows(h.mixRows, boundLine),
       ...(specs.min ? { minCarrier: specs.min } : {}),
       ...(specs.max ? { maxCarrier: specs.max } : {}),
       ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
@@ -3004,15 +3051,15 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
       ...(stated ? { carrier: stated, statedVolume: true } : {}),
     };
   };
-  if (!lineHits.length) return found(null, owners);
+  if (!hits.length) return found(null, owners);
   // Group the hits once. A chemical area add-on's dose is its booked rate over the area sold, not a tank amount, so its hits stay out of
   // the tank lines and ride as governedRows under their service names (a Tree & Shrub visit's own Snapshot beside a Bed Pre-Emergent
   // add-on keeps its tank amount). The tank lines that decide the amount are chosen once: the selected ones, else the "if needed" ones
   // (marked for confirmation), else, when every line is an area add-on, the hits themselves (a governed dose).
-  const tankLines = lineHits.filter((h) => !h.hit.governed);
+  const tankLines = hits.filter((h) => !h.hit.governed);
   const usable = tankLines.filter((h) => h.hit.selected !== false);
   const optional = tankLines.filter((h) => h.hit.selected === false);
-  const decisive = [usable, optional, lineHits].find((list) => list.length);
+  const decisive = [usable, optional, hits].find((list) => list.length);
   const [lead] = decisive;
   const governedRows = selectedHits.filter((h) => h.hit.governed).map((h) => ({ service: h.c.name, ...governedRateOf(h.hit.governed, h.c.scope) })).filter((row) => row.ratePer1000);
   // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
@@ -3058,7 +3105,7 @@ function servicesConflict(list, { rateOf, statedVolumeOf }) {
   if (list.length < 2) return false;
   const rates = new Set(list.map((h) => JSON.stringify(rateOf(h))));
   const mixed = list.some((h) => h.hit.selected === false) && list.some((h) => h.hit.selected !== false);
-  const volumes = new Set(list.map((h) => statedVolumeOf(h.hit, h.mixRows) || h.hit.labelCarrierGalPer1000 || 0));
+  const volumes = new Set(list.map((h) => statedVolumeOf(h.hit, h.mixRows, h.useSpecific) || h.hit.labelCarrierGalPer1000 || 0));
   // Several "if needed" services that differ in target or restriction keep one row each, even at one concentration.
   const conditionalUses = list.filter((h) => h.hit.selected === false);
   const usesDiffer = conditionalUses.length > 1 && new Set(conditionalUses.map((h) => String(h.hit.raw || '').replace(/\s+/g, ' ').trim())).size > 1;

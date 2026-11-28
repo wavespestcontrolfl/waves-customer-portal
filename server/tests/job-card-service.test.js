@@ -4033,5 +4033,53 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     });
     const boraCalc = await jobCard.mixForProduct('bora', 4, { serviceId: 'svc5', dbh: boraDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(boraCalc.warnings.join(' ')).toContain('below the label minimum of 2.5 gal per 1,000 sq ft');
+
+    // A product identified only by mixRates (Taurus SC on pest perimeter visit) keeps its protocol dose (0.4 fl oz/gal) instead of the broader catalog range.
+    const taurus = { id: 'taurus', name: 'Taurus SC', epa_reg_number: '53883-279', default_rate: '0.4-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const pestDb = dbFor({
+      scheduled_services: [{ id: 'svc6', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
+      products_catalog: [taurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const taurusCalc = await jobCard.mixForProduct('taurus', 4, { serviceId: 'svc6', dbh: pestDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(taurusCalc).toMatchObject({ rateSource: 'protocol', amount: 1.6, amountMax: null, unit: 'fl_oz' });
+
+    // Multi-use products keep spray-volume limits scoped to each use: DiPel's shrub-and-bed 50 gal/acre minimum does not warn on its foliar tree dilution,
+    // and TriStar's three labeled uses render separately so only Whitefly/soft scale enforces the 3.5 gal/1,000 max.
+    const dipel = { id: 'dipel', name: 'DiPel PRO DF', epa_reg_number: '73049-39', default_rate: '0.08-0.16', default_unit: 'oz/gal', label_verified_at: '2027-12-01', active: true };
+    const tristar = { id: 'tristar', name: 'TriStar 8.5 SL', epa_reg_number: '8033-106-1001', default_rate: '0.04-0.165', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const tsRigLow = [{ id: 'cal-ts-low', equipment_system_id: 'sys-ts', technician_id: 'tech-a', system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 1, tank_capacity_gal: '110.00' }];
+    const tsRigHigh = [{ id: 'cal-ts-high', equipment_system_id: 'sys-ts', technician_id: 'tech-a', system_type: 'tank', system_name: 'Truck Rig #1', carrier_gal_per_1000: 4, tank_capacity_gal: '110.00' }];
+    const dipelDb = dbFor({
+      scheduled_services: [{ id: 'svc7', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [dipel],
+      product_aliases: [],
+      equipment_calibrations: tsRigLow,
+      equipment_systems: [{ id: 'sys-ts', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }],
+      scheduled_service_addons: [],
+    });
+    const dipelCalc = await jobCard.mixForProduct('dipel', 100, { serviceId: 'svc7', dbh: dipelDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(dipelCalc.warnings.join(' ')).not.toContain('below the label minimum');
+
+    const tristarDb = dbFor({
+      scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
+      products_catalog: [tristar],
+      product_aliases: [],
+      equipment_calibrations: tsRigHigh,
+      equipment_systems: [{ id: 'sys-ts', name: 'Truck Rig #1', system_type: 'tank', tank_capacity_gal: '110.00' }],
+      scheduled_service_addons: [],
+    });
+    const tristarCalc = await jobCard.mixForProduct('tristar', 100, { serviceId: 'svc8', dbh: tristarDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(tristarCalc.serviceAmounts.map((row) => row.service)).toEqual([
+      'Tree & Shrub Care — Aphids',
+      'Tree & Shrub Care — Mealybugs',
+      'Tree & Shrub Care — Whiteflies or soft scales (higher rate for high pressure)',
+    ]);
+    expect(tristarCalc.warnings.filter((w) => w.includes('above the label maximum of 3.5 gal'))).toEqual([
+      expect.stringContaining('Tree & Shrub Care — Whiteflies or soft scales (higher rate for high pressure)'),
+    ]);
   });
 });
