@@ -7,9 +7,9 @@
  * applies to them unchanged, plus one rule: a copy grants only while the visit's current customer lists the number. List entries are never deleted or changed by a
  * call. Every existing stop route
  * (STOP, suppression, opt-in decline, own choices, a "no texts" call) is read at each send, as for every row. A caller who limits the texts to the booked visit ("just this visit": the extraction's
- * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. The staff and portal
- * list adds a sticky stop (a stopped_at column read by declinedByRecipient, never a row delete) in a follow-up change; the
- * gate stays off until it ships.
+ * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. The account holder (in
+ * the app) and staff can stop a listed person: a sticky texts_stopped_at mark that declinedByRecipient reads at every send and
+ * on the map link, never a row delete, and that no later call clears (listReminderContacts, setReminderContactStopped).
  * The rest of this header describes the per-visit rows.
  *
  * A caller who books a visit and gives another person's number to be texted ("my husband Bob will
@@ -286,7 +286,7 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
       `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
        SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id
          FROM scheduled_services s
-         JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id
+         JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id AND c.texts_stopped_at IS NULL
         WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${LIVE_STATUSES.map(() => '?').join(', ')})
        ON CONFLICT (scheduled_service_id, phone_key) DO NOTHING`,
       [REMINDER_SOURCE, scheduledServiceId, owner, ...LIVE_STATUSES],
@@ -301,6 +301,42 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
   });
 }
 
+const { lineageSql, stoppedSql } = require('./reminder-stop-sql');
+
+// A database failure here answers with its code only: the bound phone key never reaches a log.
+function codeOnly(err) {
+  return Object.assign(new Error('caller-named list read or write failed'), { code: (err && err.code) || 'REMINDER_LIST_DB' });
+}
+
+// Stopped for this customer (its own list or a merged-in one). Throws a code-only error; callers fail closed.
+async function stoppedOnList(customerId, phoneKey, conn) {
+  if (!customerId || !phoneKey) return false;
+  try {
+    // EXISTS over the list table itself: a stop row is a row of this table, so the outer read finds one exactly when a
+    // stop counts.
+    return !!(await conn(REMINDER_TABLE).whereRaw(stoppedSql('?', '?'), [phoneKey, customerId, customerId, customerId, phoneKey]).first('id'));
+  } catch (err) {
+    throw codeOnly(err);
+  }
+}
+
+// The stop that counts for each listed number of this customer (own or merged-in, after its own last Restart).
+async function effectiveStops(customerId, phoneKeys, conn) {
+  const out = new Map();
+  if (!phoneKeys.length) return out;
+  const rows = await conn(`${REMINDER_TABLE} as st`).whereIn('st.phone_key', phoneKeys).whereNotNull('st.texts_stopped_at')
+    .whereRaw(`st.customer_id IN (${lineageSql('?')})`, [customerId])
+    .whereRaw(`(st.customer_id = ?::uuid OR st.texts_stopped_at > COALESCE((SELECT o.texts_restarted_at FROM ${REMINDER_TABLE} o WHERE o.customer_id = ?::uuid AND o.phone_key = st.phone_key), '-infinity'::timestamptz))`, [customerId, customerId])
+    .orderBy('st.texts_stopped_at', 'asc').select('st.phone_key', 'st.texts_stopped_at', 'st.texts_stopped_by');
+  for (const r of rows) if (!out.has(r.phone_key)) out.set(r.phone_key, r);
+  return out;
+}
+
+function stopFields(phoneKey, stops) {
+  const stop = stops.get(phoneKey) || null;
+  return { stopped: !!stop, stoppedAt: stop ? stop.texts_stopped_at : null, stoppedBy: stop ? stop.texts_stopped_by || null : null };
+}
+
 // The customer lists the number for every visit.
 async function listedBy(customerId, phoneKey, conn) {
   return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).first('id'));
@@ -312,6 +348,9 @@ async function listedBy(customerId, phoneKey, conn) {
  * suppression. Read only. Throws on an unreadable answer; callers fail closed.
  */
 async function declinedByRecipient({ customerId, phoneKey, phoneE164, purpose, conn = db }) {
+  // A stop on the customer's list (the account holder in the app, or staff) is sticky and covers EVERY visit row of the
+  // number on this customer: list copies and a call's "just this visit" grant alike. Nothing is deleted.
+  if (await stoppedOnList(customerId, phoneKey, conn)) return true;
   // The person's own saved choices row: a direct read (code-only errors, no write), whatever GATE_CONTACT_LOGIN says. That gate
   // only governs whether the contact pages and the holder's senders use the table; a decline saved there is a decline for this
   // feature too. contactPhoneDeclinesText is not used (it skips with the gate off and logs err.message). failClosed: a missing
@@ -933,7 +972,78 @@ function releaseDeferredClaim(meta, { conn = db } = {}) {
     .catch((err) => { throw Object.assign(new Error('visit-only replay release failed'), { code: err && err.code }); });
 }
 
+/**
+ * The customer's list of people a caller named for the visit texts, for the account holder's app and for staff.
+ * `inContacts`: the number also sits in one of the account's on-location contact spots (those texts have their own
+ * controls). Read only.
+ */
+async function listReminderContacts(customerId, { conn = db } = {}) {
+  if (!customerId) return [];
+  const rows = await conn(REMINDER_TABLE).where({ customer_id: customerId }).orderBy('created_at', 'asc')
+    .select('id', 'phone_key', 'phone_e164', 'first_name', 'last_name', 'created_at');
+  if (!rows.length) return [];
+  const customer = await conn('customers').where({ id: customerId }).first();
+  const { getServiceContactSlots, phoneKeyOf } = require('./customer-contact');
+  const slotKeys = new Set(getServiceContactSlots(customer).map((slot) => phoneKeyOf(slot.phone)).filter(Boolean));
+  // A stop saved on a record merged into this one counts here too (the same check the senders use).
+  let stops;
+  try {
+    stops = await effectiveStops(customerId, rows.map((r) => r.phone_key), conn);
+  } catch (err) {
+    throw codeOnly(err);
+  }
+  return rows.map((row) => ({
+    id: row.id,
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
+    phone: row.phone_e164,
+    ...stopFields(row.phone_key, stops),
+    addedAt: row.created_at,
+    // Also in one of the account's on-location contact spots: those texts have their own controls (the contacts editor);
+    // a stop on this list still stops the texts this list sends.
+    inContacts: slotKeys.has(row.phone_key),
+  }));
+}
+
+/**
+ * Stop or restart the visit texts for one person on the customer's list. `by`: 'customer' (the account holder in the
+ * app) or 'staff'. Scoped to the customer: an id of another customer's list changes nothing and answers null. A stop
+ * is a mark, never a delete; a later call never clears it. Returns the updated entry, or null when not found.
+ */
+async function setReminderContactStopped({ customerId, id, stopped, by, conn = db }) {
+  if (!customerId || !id || !['customer', 'staff'].includes(by)) return null;
+  if (!conn.isTransaction) return conn.transaction((trx) => setReminderContactStopped({ customerId, id, stopped, by, conn: trx }));
+  try {
+    const own = await conn(REMINDER_TABLE).where({ id, customer_id: customerId }).forUpdate().first('id', 'phone_key', 'texts_stopped_at');
+    if (!own) return null;
+    const before = stopFields(own.phone_key, await effectiveStops(customerId, [own.phone_key], conn));
+    // Only a real change writes: a repeat stop keeps the first stop's time and who made it; a restart needs a stop that
+    // counts here. A restart writes only this customer's own row: a stop that came from a merged-in record stays saved
+    // there (an undone merge brings it back as it was), and the restart time outranks it here.
+    let changed = false;
+    // Times come from clock_timestamp() (taken after the row lock), not now() (the transaction's start), so a later
+    // write always carries a later time. A stop on the customer's own row counts whatever the restart time says.
+    // An explicit Stop is saved on the customer's own row even when a merged-in stop already counts, so undoing that
+    // merge never brings the texts back.
+    if (stopped && !own.texts_stopped_at) {
+      changed = (await conn(REMINDER_TABLE).where({ id: own.id }).whereNull('texts_stopped_at')
+        .update({ texts_stopped_at: conn.raw('clock_timestamp()'), texts_stopped_by: by })) > 0;
+    } else if (!stopped && before.stopped) {
+      changed = (await conn(REMINDER_TABLE).where({ id: own.id })
+        .update({ texts_stopped_at: null, texts_stopped_by: null, texts_restarted_at: conn.raw('clock_timestamp()') })) > 0;
+    }
+    // The answer is the state as written, read in the same transaction. `changed`: false when nothing was written (the
+    // caller audits real changes only).
+    const fields = changed ? stopFields(own.phone_key, await effectiveStops(customerId, [own.phone_key], conn)) : before;
+    return { id: own.id, ...fields, changed };
+  } catch (err) {
+    throw codeOnly(err);
+  }
+}
+
 module.exports = {
+  listReminderContacts,
+  setReminderContactStopped,
   gateLive,
   SOURCE,
   CONSENT_VERSION,

@@ -5710,7 +5710,7 @@ async function renderSeriesDayBody({ state, templateKey, vars, serviceId }) {
   return body;
 }
 
-async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText, qualityDates = null }) {
+async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText, qualityDates = null, customerInitiated, customerInitiatedPhone }) {
   const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
   // The text is driven by the intent the OPERATION was recorded with
   // (result.notifyRequested — set by the move, carried by a replay, read
@@ -6170,14 +6170,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           ), {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
-            // neighboring rain-out and quick-move actions. A CUSTOMER-driven
-            // move (an SMS reply) is not staff action: it stays inside the
-            // quiet-hours window like the single-visit reply path, and a
-            // held send is a deferral (notified_at stays NULL) the
-            // reconciler retries once the window opens (hook r19 P1). The
-            // row's recorded source decides — the same on a live pass and
-            // on reconciliation.
+            // neighboring rain-out and quick-move actions. Owner rulings
+            // 2026-11-02 & 2026-11-27 (resched A): ONLY the live reply handler
+            // (`sms-scheduling-act.js`) passes `customerInitiated: true` so the
+            // account holder's confirmation sends immediately overnight; delayed
+            // reconciler retries pass no flag and stay inside the 8AM-8PM fence
+            // so a failed daytime confirmation never texts at night hours later.
             operatorInitiated: STAFF_SERIES_SURFACES.has(markers.source_surface),
+            customerInitiated: customerInitiated === true,
+            customerInitiatedPhone,
             sendOutcome,
             preDispatchCheck: async () => {
               const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');

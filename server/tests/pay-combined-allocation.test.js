@@ -165,6 +165,18 @@ describe('verifyAllocationLocked withdrawal fence', () => {
     });
   });
 
+  test('refuses as stale when an allocated row carries a chemical add-on review hold', async () => {
+    await expect(verifyAllocationLocked(
+      trxFor(row({ scheduled_send_error: 'chemical_addon_review:svc-42' })),
+      [{ invoiceId: ANCHOR, cents: 10530 }],
+      { anchorInvoiceId: ANCHOR, allowUnbound: true },
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      staleBalance: true,
+      reason: 'invoice WPC-2026-0378 is held for chemical add-on billing review',
+    });
+  });
+
   // Only the `payer_billed:` prefix means the debt moved — a retry failure
   // must not refuse the allocation. (This row still stops at a later seam in
   // this stripped-down harness; what matters is WHICH fence it reaches.)

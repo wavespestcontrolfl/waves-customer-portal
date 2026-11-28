@@ -161,14 +161,22 @@ function coolingDown(key, now) {
   return recentFailures.has(key);
 }
 
+function isOwnerOnlyMetadata(metadata) {
+  let meta = metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  return Boolean(meta && typeof meta === 'object' && (meta.ownerOnly === true || meta.ownerOnly === 'true'));
+}
+
 // The bell's "What to do" for one admin row: { status, body }. 404 when the row is gone or out of the caller's scope.
 // body: { explainer: { happened, steps, fixer, fallback? }, customer: { id, name } | null, version }. `version` is the
 // content version the summary was written for: the bell shows and keeps it only on a row it holds at that version, so a
 // summary of text that changed meanwhile (a refresh during the model call, whose save the version fence refused) never
 // lands on the newer text.
-async function explainAdminAlert(id, { role, technicianId = null } = {}) {
+async function explainAdminAlert(id, { role, technicianId = null, fullAccess = false } = {}) {
   const row = await NotificationService.getAdminNotificationForExplainer(id, { role, technicianId });
-  if (!row) return { status: 404, body: { error: 'not_found' } };
+  if (!row || (!fullAccess && isOwnerOnlyMetadata(row.metadata))) return { status: 404, body: { error: 'not_found' } };
   const customer = (await customersForAlerts(db, [row])).get(String(row.id)) || null;
   const answer = (explainer) => ({ status: 200, body: { explainer, customer, version: row.version } });
   const cached = servedExplainer(row.explainer, row.version);

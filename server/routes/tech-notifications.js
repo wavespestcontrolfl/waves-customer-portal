@@ -27,6 +27,10 @@ router.get('/', async (req, res, next) => {
         this.whereNot({ type: 'storm_watch_alert' })
           .orWhereRaw("created_at >= now() - interval '6 hours'");
       })
+      .where(function weatherAdvisoryFreshness() {
+        this.whereNot({ type: 'weather_safety_advisory' })
+          .orWhereRaw("created_at >= now() - interval '6 hours'");
+      })
       // The geofence notice types are retired (no card renders them): an old
       // unread row must not take a slot under the feed limit.
       .whereRaw("type NOT LIKE 'geofence\\_%'");
@@ -88,7 +92,7 @@ router.get('/', async (req, res, next) => {
     // rescue what the server never returned (codex P2 round 8). Its OWN
     // bucket, ahead of every other fresh row (codex P2 round 17).
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 4 WHEN type = 'storm_watch_alert' THEN 3 WHEN created_at >= now() - interval '6 hours' THEN 2 ELSE 4 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 4 WHEN type = 'storm_watch_alert' THEN 3 WHEN type = 'weather_safety_advisory' THEN 3 WHEN created_at >= now() - interval '6 hours' THEN 2 ELSE 4 END")
       // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
       // truncates: a tech with more than 20 undismissed tracking cards would
       // otherwise lose an older critical arrival check behind 20 newer

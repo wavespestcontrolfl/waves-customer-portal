@@ -201,4 +201,28 @@ describe('AdsGapRulePanel', () => {
     await waitFor(() => expect(calls.some((c) => c.method === 'DELETE')).toBe(true));
     await waitFor(() => expect(calls.filter((c) => c.method === 'GET')).toHaveLength(2));
   });
+
+  it('shows active holds and Back to automatic when GATE_ADS_GAP_RULE is off (P1-2)', async () => {
+    const offHeld = {
+      mode: 'off',
+      settings: null,
+      window: null,
+      decision: null,
+      campaigns: [
+        { id: 'camp-1', campaign_name: 'Test Search Campaign', budget_mode: 'stop', daily_budget_current: 0.05, daily_budget_base: 5, hold: { mode: 'stop', until: '2026-11-06', set_at: '2026-10-29T14:00:00Z', set_by: 'owner' } },
+      ],
+      last_run: null,
+    };
+    route({
+      'GET /admin/ads/gap-rule': () => json(offHeld),
+      'DELETE /admin/ads/campaigns/camp-1/hold': () => json({ hold: null }),
+    });
+    render(<AdsGapRulePanel />);
+    expect(await screen.findByText('Active budget holds')).toBeInTheDocument();
+    expect(screen.getByText('Held off until Nov 6')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Keep ads off until this date' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Weekday limit')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to automatic' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'DELETE')).toBe(true));
+  });
 });

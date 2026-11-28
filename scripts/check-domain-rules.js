@@ -30,9 +30,10 @@
  *      "Make" is English and can't be flagged) / Elementor / NitroPack /
  *      RankMath in portal code.
  *
- *   5. agents-md-budget — AGENTS.md stays under 30 KB. Codex silently
- *      truncates the project doc at 32 KiB (DEFAULT_PROJECT_DOC_MAX_BYTES in
- *      the Codex CLI), so every rule past that byte is invisible to the
+ *   5. agents-md-budget — AGENTS.md stays under 26 KB. Codex silently
+ *      truncates the cumulative instruction chain (~/.codex/AGENTS.md + repo
+ *      AGENTS.md) at 32 KiB (DEFAULT_PROJECT_DOC_MAX_BYTES in the Codex CLI),
+ *      so leaving ~6 KB for global rules keeps every rule loaded by the
  *      pre-push audit and the @codex bot. The file once reached 114 KB with
  *      70% never loaded.
  *
@@ -222,12 +223,12 @@ for (const file of files) {
 // AGENTS.md budget (rule 5) — a byte check, not a source scan.
 // =========================================================================
 const AGENTS_MD = path.join(ROOT, 'AGENTS.md');
-const AGENTS_MD_BUDGET_BYTES = 30 * 1024;
+const AGENTS_MD_BUDGET_BYTES = 26 * 1024;
 const agentsMdBytes = fs.statSync(AGENTS_MD).size;
 if (agentsMdBytes > AGENTS_MD_BUDGET_BYTES) {
   violations += 1;
   console.error('AGENTS.md  [agents-md-budget]');
-  console.error(`    ${agentsMdBytes} bytes > ${AGENTS_MD_BUDGET_BYTES}-byte budget (Codex truncates at 32 KiB).`);
+  console.error(`    ${agentsMdBytes} bytes > ${AGENTS_MD_BUDGET_BYTES}-byte budget (Codex truncates the cumulative AGENTS.md chain at 32 KiB).`);
   console.error('    Sharpen an existing rule instead of adding one, or move prose to a skill / docs/public-route-contracts.md.\n');
 }
 

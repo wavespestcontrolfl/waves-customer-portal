@@ -2089,4 +2089,17 @@ describe('print (Codex r2 on #6088)', () => {
     const printBlocks = src.split('@media print').slice(1).map((b) => b.slice(0, 2500));
     expect(printBlocks.some((b) => /\.plan-visit-reschedule\s*\{\s*display:\s*none;/.test(b))).toBe(true);
   });
+
+  // Owner 2026-11-27: the owner's standing sprayer number reads "Owner estimate" on the report's lawn protocol card.
+  it('shows an owner estimate calibration as "Owner estimate"', async () => {
+    const report = JSON.parse(JSON.stringify(legacyLawnReport));
+    report.dynamicContext = {
+      ...(report.dynamicContext || {}),
+      lawnProtocol: { window: { title: 'Fixture window' }, equipment: { systemName: 'FlowZone Typhoon 3.0 #1' }, calibration: { status: 'owner_estimate', carrierGalPer1000: 2 } },
+    };
+    const { container } = renderReport(report);
+    await screen.findByText('Visit Summary');
+    const cell = within(container.querySelector('#lawn-protocol')).getByText('Calibration').closest('.sr-cell');
+    expect(within(cell).getByText('Owner estimate')).toBeInTheDocument();
+  });
 });

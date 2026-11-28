@@ -10,9 +10,13 @@
 #
 # What it does:
 #   1. installs the exact lockfile-pinned Capacitor deps (incl. Android)
-#   2. builds the web app into client/dist (the webDir Capacitor copies)
+#   2. verifies the slim native fallback shell (client/native-shell/index.html)
+#      — the native app loads https://portal.wavespestcontrol.com remotely, so
+#      bundling client/dist would copy ~95 MB of unused marketing/admin files
+#      into the .aab
 #   3. generates the native Android project at client/android (idempotent)
-#   4. syncs web assets + native plugins into the Android project
+#   4. syncs the slim shell + native plugins, Waves launcher/adaptive icons,
+#      splash screen, monochrome notification icon, SDK 36 pin, and App Links
 #   5. prints the manual steps (Firebase, signing, Play) and opens Android Studio
 #
 # Run from the repo root:  bash scripts/mobile/bootstrap-android.sh
@@ -21,14 +25,148 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT/client"
 
+install_brand_assets() {
+  local res_root="${WAVES_ANDROID_RES_ROOT:-android/app/src/main/res}"
+  local icon_src="resources/icon.png"
+  local splash_src="resources/splash-2732x2732.png"
+
+  if [ ! -f "$icon_src" ] || [ ! -d "$res_root" ]; then
+    echo "==> ERROR: icon source or Android res directory missing — refusing to ship the Capacitor default." >&2
+    return 1
+  fi
+
+  # Generate/copy launcher & adaptive foreground icons across all density buckets.
+  # Uses sharp (installed at workspace root) for crisp downscaling when available,
+  # falling back to copying the 1024px source so asset installation stays reliable.
+  WAVES_ICON_SRC="$icon_src" WAVES_RES_ROOT="$res_root" node -e '
+    const fs = require("fs");
+    const path = require("path");
+    const src = process.env.WAVES_ICON_SRC;
+    const res = process.env.WAVES_RES_ROOT;
+    let sharp = null;
+    try { sharp = require("sharp"); } catch { /* fallback to raw copy */ }
+    const buckets = [
+      ["mipmap-mdpi", 48, 108],
+      ["mipmap-hdpi", 72, 162],
+      ["mipmap-xhdpi", 96, 216],
+      ["mipmap-xxhdpi", 144, 324],
+      ["mipmap-xxxhdpi", 192, 432],
+    ];
+    (async () => {
+      for (const [dir, legacySize, fgSize] of buckets) {
+        const outDir = path.join(res, dir);
+        fs.mkdirSync(outDir, { recursive: true });
+        for (const name of ["ic_launcher.png", "ic_launcher_round.png"]) {
+          const dest = path.join(outDir, name);
+          if (sharp) await sharp(src).resize(legacySize, legacySize).png().toFile(dest);
+          else fs.copyFileSync(src, dest);
+        }
+        const fgDest = path.join(outDir, "ic_launcher_foreground.png");
+        if (sharp) {
+          // Adaptive icons mask the outer ~18% bleed; keep the artwork safely centered inside the 66% safe zone.
+          const inset = Math.round(fgSize * 0.70);
+          const pad = Math.floor((fgSize - inset) / 2);
+          const padRight = fgSize - inset - pad;
+          await sharp(src)
+            .resize(inset, inset)
+            .extend({ top: pad, bottom: padRight, left: pad, right: padRight, background: { r: 0, g: 0, b: 0, alpha: 0 } })
+            .png()
+            .toFile(fgDest);
+        } else {
+          fs.copyFileSync(src, fgDest);
+        }
+      }
+    })().catch((err) => { console.error(err); process.exit(1); });
+  '
+
+  mkdir -p "$res_root/mipmap-anydpi-v26" "$res_root/values" "$res_root/drawable"
+  cat > "$res_root/values/ic_launcher_background.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#1299DE</color>
+</resources>
+XML
+
+  for name in ic_launcher.xml ic_launcher_round.xml; do
+    cat > "$res_root/mipmap-anydpi-v26/$name" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>
+XML
+  done
+  echo "==> Waves launcher & adaptive icons installed into $res_root ✓"
+
+  # Monochrome status-bar notification icon (Android renders non-monochrome
+  # launcher icons as solid white squares in the status bar).
+  cat > "$res_root/drawable/ic_stat_waves.xml" <<'XML'
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M2,13.5C4.5,11 6.5,11 9,13.5C11.5,16 13.5,16 16,13.5C18.5,11 20.5,11 22,12.5V16.5C20.5,15 18.5,15 16,17.5C13.5,20 11.5,20 9,17.5C6.5,15 4.5,15 2,17.5V13.5ZM2,7.5C4.5,5 6.5,5 9,7.5C11.5,10 13.5,10 16,7.5C18.5,5 20.5,5 22,6.5V10.5C20.5,9 18.5,9 16,11.5C13.5,14 11.5,14 9,11.5C6.5,9 4.5,9 2,11.5V7.5Z" />
+</vector>
+XML
+
+  cat > "$res_root/values/waves_colors.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="waves_notification_color">#04395E</color>
+</resources>
+XML
+  echo "==> Android monochrome notification icon & accent color installed ✓"
+
+  if [ -f "$splash_src" ]; then
+    cp "$splash_src" "$res_root/drawable/splash.png"
+    for dir in "$res_root"/drawable-port-* "$res_root"/drawable-land-*; do
+      [ -d "$dir" ] && cp "$splash_src" "$dir/splash.png"
+    done
+    echo "==> Waves splash installed into $res_root/drawable*/splash.png ✓"
+  else
+    echo "==> WARNING: splash source missing — keeping Capacitor default splash."
+  fi
+}
+
+inject_fcm_manifest_metadata() {
+  local manifest="${1:-${WAVES_ANDROID_MANIFEST:-android/app/src/main/AndroidManifest.xml}}"
+  [ -f "$manifest" ] || return 0
+  local ind="        "
+  local nl=$'\n'
+  local fcm_meta="${ind}<meta-data android:name=\"com.google.firebase.messaging.default_notification_icon\" android:resource=\"@drawable/ic_stat_waves\" />${nl}"
+  fcm_meta="${fcm_meta}${ind}<meta-data android:name=\"com.google.firebase.messaging.default_notification_color\" android:resource=\"@color/waves_notification_color\" />${nl}"
+  fcm_meta="${fcm_meta}${ind}<meta-data android:name=\"com.google.firebase.messaging.default_notification_channel_id\" android:value=\"waves_service_updates\" />"
+  FCM_META="$fcm_meta" perl -0pi -e '
+    s{\n?[ \t]*<meta-data\b[^>]*android:name="com\.google\.firebase\.messaging\.default_notification_(?:icon|color|channel_id)"[^>]*/>}{}gs;
+    s{(\n\s*</application>)}{\n$ENV{FCM_META}$1};
+  ' "$manifest"
+  echo "==> FCM default notification icon, color, and channel injected into $manifest ✓"
+}
+
+# Reinstall tracked Waves Android icons/splash/notification drawables without
+# running npm, Capacitor, or Android Studio. Safe for hermetic fixture tests.
+if [ "${1:-}" = "--assets-only" ]; then
+  install_brand_assets
+  if [ -n "${WAVES_ANDROID_MANIFEST:-}" ]; then
+    inject_fcm_manifest_metadata "$WAVES_ANDROID_MANIFEST"
+  fi
+  exit 0
+fi
+
 echo "==> 1/5  Installing lockfile-pinned native dependencies…"
 # Run from client/ intentionally: npm resolves the workspace root lockfile.
 # `npm ci` refuses drift instead of silently moving Capacitor/plugin versions
 # between release builds.
 npm ci
 
-echo "==> 2/5  Building web bundle (dist/)…"
-npm run build
+echo "==> 2/5  Verifying slim native shell (native-shell/)…"
+# capacitor.config.json sets server.url = https://portal.wavespestcontrol.com
+# and webDir = native-shell, keeping the .aab slim instead of bundling ~95 MB
+# of unreachable marketing media and admin bundles from dist/.
+test -f native-shell/index.html || { echo "ERROR: client/native-shell/index.html missing." >&2; exit 1; }
 
 if [ ! -d "android" ]; then
   echo "==> 3/5  Generating native Android project (client/android)…"
@@ -39,6 +177,11 @@ fi
 
 echo "==> 4/5  Syncing web + plugins into the Android project…"
 npx cap sync android
+
+# Reapply tracked Waves launcher icons, adaptive icons, monochrome notification
+# icon, and splash screen after every add/sync so a fresh checkout never ships
+# the stock Capacitor branding.
+install_brand_assets
 
 # Push (FCM) needs google-services.json from your Firebase project. If it's present
 # at the repo path below, copy it into the Android app module so the build picks it up.
@@ -52,23 +195,25 @@ else
   echo "    Android push (FCM) will be inert until you add it (see step 5)."
 fi
 
-# Google Play target-API-level policy: releases must target Android 16 (API 36)
-# by Aug 31, 2026. The Capacitor 7 template generates the project at SDK 35, and
-# client/android persists across bootstraps, so pin the SDK levels here — this
-# script is the source of truth (same replacement-idempotent pattern as the App
-# Links block below). compileSdk 36 needs AGP >= 8.9.1 (the template's 8.7.x tops
-# out at 35); the template's Gradle 8.11.1 wrapper already satisfies AGP 8.9.
-# Remove these pins once the Capacitor template itself reaches SDK 36.
+# Google Play policies:
+# - Play automatic protection requires minSdkVersion >= 24 (the Capacitor 7
+#   template defaults to 23 and Play Console refuses the bundle at upload).
+# - Releases must target Android 16 (API 36) by Aug 31, 2026 (template is 35).
+# compileSdk 36 needs AGP >= 8.9.1 (the template's 8.7.x tops out at 35);
+# client/android persists across bootstraps, so pin all SDK levels here.
+ANDROID_MIN_SDK=24
 ANDROID_TARGET_SDK=36
 ANDROID_AGP_VERSION=8.9.2
+perl -pi -e "s/^(\s*minSdkVersion = )\d+/\${1}$ANDROID_MIN_SDK/" android/variables.gradle
 perl -pi -e "s/^(\s*(?:compileSdkVersion|targetSdkVersion) = )\d+/\${1}$ANDROID_TARGET_SDK/" android/variables.gradle
 perl -pi -e "s/(com\.android\.tools\.build:gradle:)[0-9.]+/\${1}$ANDROID_AGP_VERSION/" android/build.gradle
-if grep -q "compileSdkVersion = $ANDROID_TARGET_SDK" android/variables.gradle \
+if grep -q "minSdkVersion = $ANDROID_MIN_SDK" android/variables.gradle \
+   && grep -q "compileSdkVersion = $ANDROID_TARGET_SDK" android/variables.gradle \
    && grep -q "targetSdkVersion = $ANDROID_TARGET_SDK" android/variables.gradle \
    && grep -q "gradle:$ANDROID_AGP_VERSION" android/build.gradle; then
-  echo "==> Pinned compile/target SDK $ANDROID_TARGET_SDK + AGP $ANDROID_AGP_VERSION ✓"
+  echo "==> Pinned min SDK $ANDROID_MIN_SDK + compile/target SDK $ANDROID_TARGET_SDK + AGP $ANDROID_AGP_VERSION ✓"
 else
-  echo "==> ERROR: could not pin SDK $ANDROID_TARGET_SDK / AGP $ANDROID_AGP_VERSION —"
+  echo "==> ERROR: could not pin SDK $ANDROID_MIN_SDK/$ANDROID_TARGET_SDK / AGP $ANDROID_AGP_VERSION —"
   echo "    check android/variables.gradle and android/build.gradle by hand."
   exit 1
 fi
@@ -148,6 +293,30 @@ if [ -f "$MANIFEST" ]; then
   else
     echo "==> WARNING: could not inject the App Links intent-filter — add it to"
     echo "    MainActivity in $MANIFEST manually (see docs/mobile/universal-links.md)."
+  fi
+
+  # FCM defaults: monochrome status-bar icon, Waves navy accent color, and
+  # default high-priority service-updates channel (matches server/services/fcm.js).
+  inject_fcm_manifest_metadata "$MANIFEST"
+fi
+
+# Optional release versioning for reproducible Play Console builds (mirrors
+# WAVES_IOS_MARKETING_VERSION in bootstrap-ios.sh).
+APP_GRADLE="android/app/build.gradle"
+if [ -f "$APP_GRADLE" ]; then
+  if [ -n "${WAVES_ANDROID_VERSION_NAME:-}" ]; then
+    [[ "$WAVES_ANDROID_VERSION_NAME" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] || {
+      echo "ERROR: WAVES_ANDROID_VERSION_NAME must look like 1.9 or 1.9.1" >&2; exit 1;
+    }
+    perl -pi -e "s/^(\s*versionName\s+)\"[^\"]+\"/\${1}\"$WAVES_ANDROID_VERSION_NAME\"/" "$APP_GRADLE"
+    echo "==> Android versionName set to $WAVES_ANDROID_VERSION_NAME ✓"
+  fi
+  if [ -n "${WAVES_ANDROID_VERSION_CODE:-}" ]; then
+    [[ "$WAVES_ANDROID_VERSION_CODE" =~ ^[0-9]+$ ]] || {
+      echo "ERROR: WAVES_ANDROID_VERSION_CODE must be a positive integer" >&2; exit 1;
+    }
+    perl -pi -e "s/^(\s*versionCode\s+)[0-9]+/\${1}$WAVES_ANDROID_VERSION_CODE/" "$APP_GRADLE"
+    echo "==> Android versionCode set to $WAVES_ANDROID_VERSION_CODE ✓"
   fi
 fi
 

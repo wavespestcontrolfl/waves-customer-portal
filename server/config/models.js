@@ -216,7 +216,7 @@ const DEFAULTS = Object.freeze({
   VOICE: 'claude-sonnet-5',
   VISION: 'claude-opus-4-8',
   DEEP: 'claude-opus-4-8',
-  EXTREME: 'claude-fable-5',
+  EXTREME: 'claude-fable-5-1',
   LAWN_CHALLENGE: 'claude-opus-4-8',
   // Live-call upset-caller check (owner 2026-11-16 "use haiku"): a tiny classifier read, Haiku 5.5.
   LIVE_CALL: 'claude-haiku-5-5',

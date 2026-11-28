@@ -257,12 +257,15 @@ describe('runDailySync', () => {
     for (const [q] of mockQuery.mock.calls) expect(q).not.toMatch(/campaign\.status\s*(!=|=|IN)/);
   });
 
-  test('a Performance Max campaign in the account fails the run with nothing written: its Local Services cost cannot be told apart', async () => {
+  test('a Performance Max campaign in the account warns without aborting the standalone Local Services sync and atomically flags metadata.performance_max_present', async () => {
     answerGoogle({ campaigns: [CAMPAIGN_ROW, googleCampaign(901, 2, 40000000, 10)] });
-    await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: the account has 1 Performance Max campaign(s)');
-    expect(insertCalls).toEqual([]);
-    expect(updateCalls).toEqual([]);
-    expect(mockQuery).toHaveBeenCalledTimes(1);
+    await expect(GoogleLsa.runDailySync()).resolves.toEqual({ configured: true, synced: { campaigns: 1, performanceRows: 0 } });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Performance Max campaign(s)'));
+    expect(accountUpdate()).toMatchObject({ status: 'active', daily_budget_current: 25.5 });
+    expect(accountUpdate().metadata).toEqual({
+      rawSql: "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+      bindings: [JSON.stringify({ performance_max_present: true })],
+    });
   });
 
   test('the Performance Max check reads impressions and clicks too: a day that served at no cost still counts as a day it ran', async () => {
@@ -284,16 +287,29 @@ describe('runDailySync', () => {
     await expect(GoogleLsa.runDailySync()).resolves.toMatchObject({ synced: { campaigns: 1 } });
   });
 
-  test('a removed Performance Max campaign that ran inside the window fails the run before anything is written, the account row included', async () => {
+  test('a removed Performance Max campaign that ran inside the window warns while still writing standalone LSA days and flags performance_max_present', async () => {
     answerGoogle({
       campaigns: [CAMPAIGN_ROW, googleCampaign(901, 4, 40000000, 10)],
       metrics: [metricsRow('2026-11-20', { cost_micros: 31000000 })],
       performanceMaxDays: [metricsRow('2026-11-19', { cost_micros: 9000000 }, 901)],
     });
-    await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: a Performance Max campaign ran in the account between');
-    expect(insertCalls).toEqual([]);
-    expect(updateCalls).toEqual([]);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    await expect(GoogleLsa.runDailySync()).resolves.toEqual({ configured: true, synced: { campaigns: 1, performanceRows: 1 } });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Performance Max campaign ran in the account'));
+    expect(accountUpdate().metadata).toEqual({
+      rawSql: "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+      bindings: [JSON.stringify({ performance_max_present: true })],
+    });
+    expect(perfInserts()).toHaveLength(1);
+  });
+
+  test('clearing performance_max_present once Performance Max is no longer active or in the window uses atomic jsonb key removal', async () => {
+    accountRowInDb = { ...ACCOUNT_ROW, metadata: { lsa_customer_id: ACCOUNT, performance_max_present: true, custom: 'keep' } };
+    answerGoogle({ campaigns: [CAMPAIGN_ROW] });
+    await GoogleLsa.runDailySync();
+    expect(accountUpdate().metadata).toEqual({
+      rawSql: "COALESCE(metadata, '{}'::jsonb) - 'performance_max_present'",
+      bindings: undefined,
+    });
   });
 
   test('the first run inserts ONE google_lsa row for the account, marked with the account', async () => {

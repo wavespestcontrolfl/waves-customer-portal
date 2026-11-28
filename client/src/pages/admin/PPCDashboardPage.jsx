@@ -32,6 +32,10 @@ function adminFetch(path) {
 // is today: a campaign paused in Google Ads still spent money before the pause.
 // /campaigns already leaves out removed rows. Budgets stay active-only.
 const PERIOD_METRICS = ["spend", "conversionValue", "conversions", "clicks", "impressions"];
+const isCpaUnavailable = (c) => Boolean(
+  c?.cpaUnavailable || c?.performanceMaxPresent || c?.metadata?.performance_max_present === true,
+);
+
 function ranInPeriod(c, period) {
   if (c.status === "active") return true;
   const p = c[period];
@@ -462,12 +466,15 @@ export default function WavesPPCDashboard() {
       leads: ran.reduce((s, c) => s + (c.last7d?.conversions || 0), 0),
       clicks: ran.reduce((s, c) => s + (c.last7d?.clicks || 0), 0),
       impressions: ran.reduce((s, c) => s + (c.last7d?.impressions || 0), 0),
+      cplUnavailable: ran.some(
+        (c) => isCpaUnavailable(c) && ((c.last7d?.spend || 0) > 0 || (c.last7d?.conversions || 0) > 0),
+      ),
     };
   }, [filtered]);
   const overallROAS =
     totals.spent > 0 ? (totals.revenue / totals.spent).toFixed(1) : "--";
   const overallCPL =
-    totals.leads > 0 ? (totals.spent / totals.leads).toFixed(2) : "--";
+    !totals.cplUnavailable && totals.leads > 0 ? (totals.spent / totals.leads).toFixed(2) : "--";
   const overallCTR =
     totals.impressions > 0
       ? ((totals.clicks / totals.impressions) * 100).toFixed(1)
@@ -613,9 +620,9 @@ export default function WavesPPCDashboard() {
               color={"#18181B"}
             />{" "}
             <KPI
-              value={`$${overallCPL}`}
+              value={overallCPL === "--" ? "--" : `$${overallCPL}`}
               label="Cost per reported conversion"
-              sub="all campaigns"
+              sub={totals.cplUnavailable ? "unavailable — LSA includes PMax" : "all campaigns"}
               color={"#18181B"}
             />{" "}
             <KPI
@@ -828,6 +835,11 @@ export default function WavesPPCDashboard() {
                         <div className="text-ui-body text-ink-secondary">
                           COST / WON
                         </div>
+                        {lsaSummary.performanceMaxPresent && (
+                          <div className="text-ui-body text-ink-secondary">
+                            PMax active — CPL n/a
+                          </div>
+                        )}
                       </div>{" "}
                     </div>
                   )}
@@ -937,7 +949,9 @@ export default function WavesPPCDashboard() {
                     const p = c.last7d || {};
                     const roas = p.spend > 0 ? p.conversionValue / p.spend : 0;
                     const cpa =
-                      p.conversions > 0 ? p.spend / p.conversions : null;
+                      isCpaUnavailable(c)
+                        ? null
+                        : p.conversions > 0 ? p.spend / p.conversions : null;
                     const ctr =
                       p.impressions > 0
                         ? (p.clicks / p.impressions) * 100
@@ -1189,12 +1203,14 @@ export default function WavesPPCDashboard() {
                               spend: 0,
                               revenue: 0,
                               conv: 0,
+                              cpaUnavailable: false,
                             };
                           cityMap[city].count++;
                           cityMap[city].spend += c.last30d?.spend || 0;
                           cityMap[city].revenue +=
                             c.last30d?.conversionValue || 0;
                           cityMap[city].conv += c.last30d?.conversions || 0;
+                          if (isCpaUnavailable(c)) cityMap[city].cpaUnavailable = true;
                         });
                       return Object.values(cityMap)
                         .sort((a, b) => b.revenue - a.revenue)
@@ -1202,7 +1218,7 @@ export default function WavesPPCDashboard() {
                           const roas =
                             row.spend > 0 ? row.revenue / row.spend : 0;
                           const cpa =
-                            row.conv > 0 ? row.spend / row.conv : null;
+                            !row.cpaUnavailable && row.conv > 0 ? row.spend / row.conv : null;
                           return (
                             <TR
                               key={row.city}

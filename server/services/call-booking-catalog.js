@@ -156,6 +156,12 @@ const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
 // is still the live pest lane (reServiceLanes) — with no live pest lane the
 // paid row books as before.
 const PLAN_COVERED_PEST_ONE_TIME_KEYS = new Set(['cockroach_control', 'one_time_pest_control']);
+// Plan-covered lawn one-time row (owner 2026-11-27, call 12647dd6): active
+// recurring lawn customers calling for a between-visits callback/follow-up
+// (fungicide, breakthrough weeds, chinch bugs) get Lawn Care Re-Service, not
+// a paid One-Time Lawn Care row. Specialty lawn add-ons (plugging, dethatching,
+// top dressing, soil test, area addons) stay paid work.
+const PLAN_COVERED_LAWN_ONE_TIME_KEYS = new Set(['lawn_care_one_time']);
 // German roach words come from the species catalog's high-risk indoor roach
 // subgroup: every common name and alias word that is not a generic roach word,
 // plus the scientific species epithet ("german", "germanica"). "croton" (the
@@ -189,6 +195,10 @@ function isPlanCoveredPestRow(row) {
   return !!row && PLAN_COVERED_PEST_ONE_TIME_KEYS.has(row.service_key);
 }
 
+function isPlanCoveredLawnRow(row) {
+  return !!row && PLAN_COVERED_LAWN_ONE_TIME_KEYS.has(row.service_key);
+}
+
 // German roach stays a paid specialty cleanout even for a plan customer, so an
 // affirmative German-roach mention switches the plan-covered exception off.
 function mentionsGermanRoach(haystack) {
@@ -200,20 +210,23 @@ function mentionsGermanRoach(haystack) {
 // may still run, and if it declines the keyword row stands as before. That
 // override is pest work, so it runs toward the pest lane only (codex #7480
 // r1): a pick pinned to another lane (a lawn plan row) keeps the block.
-function keywordRowsBlockReService(keywordRows, haystack, pickPlanLane) {
+function keywordRowsBlockReService(keywordRows, haystack, pickPlanLane, agreedPrice = false) {
   if (keywordRows.length === 0) return false;
-  return keywordRows.some((row) => !isPlanCoveredPestRow(row))
+  return (!pickPlanLane && agreedPrice)
+    || keywordRows.some((row) => !isPlanCoveredPestRow(row))
     || mentionsGermanRoach(haystack)
     || (!!pickPlanLane && pickPlanLane !== 'pest');
 }
 
 // The re-service override behind the keyword gate: a blocking keyword row
-// keeps the paid row; plan-covered roach wording with no pick pins the pest lane.
+// keeps the paid row; plan-covered roach wording with no pick pins the pest lane
+// unless the call agreed on a one-time visit price.
 function keywordGatedReServiceRow({ keywordRows, pickPlanLane, ...overrideArgs }) {
-  if (keywordRowsBlockReService(keywordRows, overrideArgs.haystack, pickPlanLane)) return null;
+  const agreedPrice = agreedOneTimeVisitPrice(overrideArgs.extracted, overrideArgs.v2Extraction) !== null;
+  if (keywordRowsBlockReService(keywordRows, overrideArgs.haystack, pickPlanLane, agreedPrice)) return null;
   return reServiceOverrideRow({ ...overrideArgs, pickPlanLane: pickPlanLane || (keywordRows.length > 0 ? 'pest' : null) });
 }
-const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?=\\s*$|\\s*[.;!?]|\\s*[,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|\\s*[^a-z\\s.;!?,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b)|\\s+(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|revisit(?=\\s*$|\\s*[.;!?]|\\s*[,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|\\s*[^a-z\\s.;!?,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b)|\\s+(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
+const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?=\\s*$|\\s*[.;!?]|\\s*[,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|\\s*[^a-z\\s.;!?,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b)|\\s+(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|revisit(?=\\s*$|\\s*[.;!?]|\\s*[,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|\\s*[^a-z\\s.;!?,:—–-]\\s*(?:$|(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b)|\\s+(?:(?:the|my|our|your|this|that|its?|them|next|coming|after|before|between|on|in|at|for|early|late|later|week|weeks|month|months|morning|afternoon|evening)\\b\\s+){0,4}(?:(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|kitchen|bathroom|bedroom|garage|attic|lanai|patio|pool|cage|inside|outside|interior|exterior|front|back|ants?|roach(?:es)?|cockroach(?:es)?|bugs?|pests?|spiders?|wasps?|hornets?|fleas?|ticks?|mosquito(?:e?s)?|rodents?|rats?|mice|weeds?|soon|asap|today|tomorrow|again|us|me|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|noon|midday)\\b|(?:(?:at|on|by|until|around)\\s+(?:the\\s+)?[0-9]{1,4}(?:st|nd|rd|th)?\\b|[0-9]{1,2}(?::[0-9]{2})?\\s*(?:am|pm|a\\.m|p\\.m)\\b)))|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out|callback\\s+(?:treatment|visit|service))";
 const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
 // Negated wording ("I don't need a re-service, just my regular visit") is not
 // intent (codex #3222 r3) — same shape as NEGATED_ROACH_RE: negation word +
@@ -246,7 +259,7 @@ function hasAffirmativeReServiceIntent(text) {
     .replace(RE_SERVICE_HISTORICAL_RE, ' ');
   return RE_SERVICE_INTENT_RE.test(cleaned);
 }
-const RE_SERVICE_LAWN_CONTEXT_RE = /\b(?:lawn|turf|grass|weeds?|fertili[sz]\w*|chinch|sod)\b/i;
+const RE_SERVICE_LAWN_CONTEXT_RE = /\b(?:lawn|turf|grass|weeds?|fertili[sz]\w*|chinch|sod|fung(?:us|al|icide)|irrigation)\b/i;
 // Lane evidence for the DUAL-eligibility case (codex #3222 r5): with both
 // lanes open, the lane must be evidenced by what the caller talked about —
 // pest wording or lawn wording, not a default. Neither (or both) present →
@@ -254,6 +267,11 @@ const RE_SERVICE_LAWN_CONTEXT_RE = /\b(?:lawn|turf|grass|weeds?|fertili[sz]\w*|c
 // Waves Assessment fallback (assess on-site) instead of guessing which free
 // service to dispatch.
 const RE_SERVICE_PEST_CONTEXT_RE = /\b(?:pests?|bugs?|insects?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|wasps?|hornets?|fleas?|ticks?|silverfish|earwigs?|millipedes?|centipedes?|scorpions?)\b/i;
+// Strip the company greeting/name before reading lane evidence: every call
+// transcript starts with "Waves Pest Control", which would otherwise match
+// RE_SERVICE_PEST_CONTEXT_RE (\bpests?\b) and supply fake pest evidence on a
+// neutral or V2-identified lawn callback.
+const BRAND_NAME_FOR_LANE_RE = /\bwaves[,\s]+pest(?:\s+control)?(?:\s*(?:&|and)\s*lawn(?:\s+care)?)?\b/gi;
 const GENERIC_CALL_CATALOG_ROW_RE = /^(?:waves pest control appointment service|waves appointment)$/i;
 // Coarse resolveSchedulableCallService labels a lane's re-service may stand in
 // for. Anything else ("Mosquito Control", "Termite Inspection", …) means the
@@ -325,11 +343,155 @@ function callBookingReServiceIntentText(extracted = {}) {
   ].filter(Boolean).join(' ');
 }
 
+// Structured V2 existing-customer service follow-up / callback intent (owner
+// 2026-11-27, call 12647dd6): existing recurring customers rarely say the
+// literal word "re-service" — they call about a lawn fungicide follow-up or
+// breakthrough bugs after a recent treatment, and V2 classifies the call as
+// `existing_customer_service` + `follow_up_existing_service` (or
+// `complaint_or_callback`). Scoped tightly so:
+//   - only the two covered re-service families qualify (never termite,
+//     mosquito, rodent, tree/shrub, bed bug, etc.);
+//   - calls with a distinct secondary category decline (never guess lane);
+//   - `existing_customer_scheduling` + `follow_up_existing_service` stays out
+//     of this rule so missed-visit make-up moves (call-reschedule-apply.js)
+//     and regular-visit scheduling are untouched;
+//   - any agreed/quoted price keeps the booking paid;
+//   - explicit negation ("don't need a re-service") or an explicit regular
+//     plan booking ("schedule my regular quarterly visit") always wins.
+const STRUCTURED_RE_SERVICE_CATEGORY_LANE = Object.freeze({
+  lawn_care: 'lawn',
+  pest_general: 'pest',
+  bundled_waveguard: 'either',
+});
+const EXISTING_SERVICE_FOLLOWUP_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback']);
+const REGULAR_PLAN_VISIT_PHRASE = "(?:(?:my|our|the|their|a|her|his)\\s+)?(?:regular|routine|normal|next|scheduled)\\s+(?:(?:quarterly|monthly|bi[-\\s]?monthly|6[-\\s]?week|every\\s+6\\s+weeks?|pest(?:\\s+control)?|lawn(?:\\s+care)?)\\s+){0,2}(?:visit|service|treatment|appointment)";
+const REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|just\\s+(?:want|need)(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'i');
+const NEGATED_REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:no|not|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|never|rather\\s+than|instead\\s+of|already|previously)\\s+(?:[\\w'’]+\\s+){0,3}(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|want(?:ed|ing)?|need(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'gi');
+const HISTORICAL_REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:book(?:ed)?|scheduled|set\\s+up|confirmed)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b[^.!?\\n]{0,30}\\b(?:last\\s+(?:time|visit|week|month|year)|yesterday|earlier|before|ago)\\b`, 'gi');
+// Recurring cadence units only (matches call-commercial-dictated-booking.js:
+// per_application is a valid per-visit price unit on one-time jobs unless tied
+// to a WaveGuard tier or annual prepay plan).
+const RECURRING_V2_PRICE_UNITS = new Set(['per_month', 'per_quarter', 'per_year']);
+const REJECTED_V2_PRICE_RESPONSES = new Set(['declined', 'no_response', 'not_at_issue']);
+
+function v2PriceEntries(v2Extraction) {
+  const sr = v2Extraction?.service_request;
+  if (!sr) return [];
+  return [sr.price, ...(Array.isArray(sr.prices) ? sr.prices : [])].filter(Boolean);
+}
+
+function isAcceptedV2Price(entry) {
+  return Boolean(entry && (entry.caller_response
+    ? entry.caller_response === 'accepted'
+    : entry.accepted === true));
+}
+
+function isRejectedV2Price(entry) {
+  return Boolean(entry && (REJECTED_V2_PRICE_RESPONSES.has(entry.caller_response) || entry.accepted === false));
+}
+
+function isPlanRateV2Price(entry) {
+  return Boolean(entry && (
+    RECURRING_V2_PRICE_UNITS.has(entry.unit)
+    || Boolean(entry.tier_mentioned)
+    || entry.prepay_term === 'annual'
+  ));
+}
+
+// Classify the booked service's quoted total under V2 evidence:
+//   - 'none': no quoted total on the call;
+//   - 'agreed': final, accepted per-visit price (usable for selection & billing);
+//   - 'plan_rate': recurring/tier/annual plan rate echoed into quoted_price_usd
+//     (does not block covered callbacks and is not billed as a one-time quote);
+//   - 'disputed': caller declined or price is non-final (never silently bill
+//     either the disputed number OR a higher fixed catalog list price).
+function classifyOneTimeVisitPrice(extracted = {}, v2Extraction = null) {
+  const sr = v2Extraction?.service_request;
+  const scalar = sanitizeQuotedCallPrice(sr?.quoted_price_usd)
+    ?? sanitizeQuotedCallPrice(extracted?.quoted_price);
+  if (scalar === null) return { status: 'none', amount: null };
+  if (sr?.price_accepted_by_caller === false || sr?.price_is_final === false) {
+    return { status: 'disputed', amount: null };
+  }
+  const matching = v2PriceEntries(v2Extraction).filter((e) => sanitizeQuotedCallPrice(e.amount_usd) === scalar);
+  if (matching.length === 0) return { status: 'agreed', amount: scalar };
+  const accepted = matching.filter(isAcceptedV2Price);
+  const usable = accepted.length > 0 ? accepted : matching.filter((e) => !isRejectedV2Price(e));
+  if (usable.length === 0) return { status: 'disputed', amount: null };
+  if (usable.every(isPlanRateV2Price)) return { status: 'plan_rate', amount: null };
+  return { status: 'agreed', amount: scalar };
+}
+
+function agreedOneTimeVisitPrice(extracted = {}, v2Extraction = null) {
+  return classifyOneTimeVisitPrice(extracted, v2Extraction).amount;
+}
+
+function requestsRegularPlanVisit(extracted = {}, v2Extraction = null) {
+  const combined = [
+    callBookingReServiceIntentText(extracted),
+    v2Extraction?.meta?.call_summary,
+    v2Extraction?.scheduling?.scheduling_notes_raw,
+  ].filter(Boolean).join(' ');
+  const cleaned = combined
+    .replace(NEGATED_REGULAR_PLAN_VISIT_RE, ' ')
+    .replace(HISTORICAL_REGULAR_PLAN_VISIT_RE, ' ');
+  return REGULAR_PLAN_VISIT_RE.test(cleaned);
+}
+
+function v2CategoryLaneForReService(v2Extraction) {
+  const sr = v2Extraction?.service_request;
+  if (!sr || typeof sr !== 'object') return null;
+  const category = String(sr.primary_service_category || '').trim();
+  const secondary = Array.isArray(sr.secondary_categories)
+    ? sr.secondary_categories.filter((c) => c && c !== category)
+    : [];
+  if (secondary.length > 0) return 'blocked';
+  if (!category || category === 'other') return null;
+  return STRUCTURED_RE_SERVICE_CATEGORY_LANE[category] || 'blocked';
+}
+
+function hasNegatedReServiceIntent(text) {
+  const raw = String(text || '');
+  return !!raw && Boolean(raw.match(NEGATED_RE_SERVICE_RE)) && !hasAffirmativeReServiceIntent(raw);
+}
+
+function structuredReServiceCategoryLane(v2Extraction) {
+  if (!v2Extraction || typeof v2Extraction !== 'object') return null;
+  const sr = v2Extraction.service_request || {};
+  const intent = String(sr.service_intent || '');
+  const nature = String(v2Extraction.call_nature || '');
+  const isCallback = intent === 'complaint_or_callback'
+    && (nature === 'existing_customer_service'
+      || nature === 'existing_customer_scheduling'
+      || v2Extraction.customer_history?.status === 'current_active');
+  const isServiceFollowUp = intent === 'follow_up_existing_service'
+    && nature === 'existing_customer_service';
+  if (!isCallback && !isServiceFollowUp) return null;
+  const lane = v2CategoryLaneForReService(v2Extraction);
+  return lane && lane !== 'blocked' ? lane : null;
+}
+
+function structuredReServiceLane(extracted = {}, v2Extraction = null) {
+  const lane = structuredReServiceCategoryLane(v2Extraction);
+  if (!lane) return null;
+  if (agreedOneTimeVisitPrice(extracted, v2Extraction) !== null) return null;
+  if (requestsRegularPlanVisit(extracted, v2Extraction)) return null;
+  const combined = [
+    callBookingReServiceIntentText(extracted),
+    v2Extraction?.meta?.call_summary,
+    v2Extraction?.scheduling?.scheduling_notes_raw,
+  ].filter(Boolean).join(' ');
+  if (hasNegatedReServiceIntent(combined)) return null;
+  return lane;
+}
+
 // Cheap pre-gate so the processor only runs the re-service eligibility lookups
 // (customer row + live lanes) on revisit-shaped calls.
-function hasCallReServiceIntent(extracted = {}) {
+function hasCallReServiceIntent(extracted = {}, v2Extraction = null) {
+  if (requestsRegularPlanVisit(extracted, v2Extraction)) return false;
   const intentText = callBookingReServiceIntentText(extracted);
-  return !!intentText && hasAffirmativeReServiceIntent(intentText);
+  if (intentText && hasAffirmativeReServiceIntent(intentText)) return true;
+  return Boolean(structuredReServiceLane(extracted, v2Extraction));
 }
 
 // The two covered re-service rows, loaded OUTSIDE loadBookableCallServices on
@@ -445,21 +607,54 @@ function findServiceByName(services, value) {
 // exactly one of pest/lawn wording — or the override declines (codex r5:
 // never guess which free service to dispatch; the processor's Waves
 // Assessment fallback books an assessment instead).
-function reServiceOverrideRow({ extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane }) {
+function resolveReServiceLane(candidates, evidence, structuredLane, pickPlanLane) {
+  // Bundled WaveGuard with no plan pick never guesses a lane: the call's own
+  // wording must uniquely identify one lane AND the customer must cover it.
+  if (structuredLane === 'either' && !pickPlanLane) {
+    return evidence.length === 1 && candidates.includes(evidence[0]) ? evidence[0] : null;
+  }
+  // When no plan pick pins the lane and the call's wording uniquely names the
+  // OPPOSITE uncovered lane (e.g. fungicide wording for a pest-only customer),
+  // decline instead of dispatching the wrong service.
+  if (!pickPlanLane && evidence.length === 1 && !candidates.includes(evidence[0])) return null;
+  if (candidates.length === 1) return candidates[0];
+  return evidence.length === 1 && candidates.includes(evidence[0]) ? evidence[0] : null;
+}
+
+function reServiceLaneEvidence(haystack) {
+  const cleaned = String(haystack || '').replace(BRAND_NAME_FOR_LANE_RE, ' ');
+  return [
+    RE_SERVICE_LAWN_CONTEXT_RE.test(cleaned) && 'lawn',
+    RE_SERVICE_PEST_CONTEXT_RE.test(cleaned) && 'pest',
+  ].filter(Boolean);
+}
+
+function reServiceOverrideRow({ extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane, v2Extraction }) {
+  // Never replace a call that agreed on a one-time visit price or explicitly
+  // asks to schedule a regular plan visit with a $0 re-service row.
+  if (agreedOneTimeVisitPrice(extracted, v2Extraction) !== null) return null;
+  if (requestsRegularPlanVisit(extracted, v2Extraction)) return null;
   const intentText = callBookingReServiceIntentText(extracted);
-  if (!intentText || !hasAffirmativeReServiceIntent(intentText)) return null;
+  const hasExplicitIntent = !!intentText && hasAffirmativeReServiceIntent(intentText);
+  const structuredLane = hasExplicitIntent ? null : structuredReServiceLane(extracted, v2Extraction);
+  if (!hasExplicitIntent && !structuredLane) return null;
+  // Preserve V2's primary service category and mixed-service guard even when
+  // explicit callback wording established intent: a V2 pest complaint must
+  // never book a lawn callback on a lawn-only customer, and an uncovered or
+  // multi-category call declines instead of dispatching a pest/lawn re-service.
+  const v2CategoryLane = v2CategoryLaneForReService(v2Extraction);
+  if (v2CategoryLane === 'blocked') return null;
+  const effectiveLane = structuredLane || v2CategoryLane;
+  const structuredPin = effectiveLane === 'pest' || effectiveLane === 'lawn' ? effectiveLane : null;
   const coarse = coarseServiceLabel ? String(coarseServiceLabel) : null;
   const candidates = (reServiceLanes || []).filter((lane) => (
     (!pickPlanLane || lane === pickPlanLane)
+    && (!structuredPin || lane === structuredPin)
     && !!RE_SERVICE_COARSE_COMPATIBLE[lane]
     && (coarse === null || RE_SERVICE_COARSE_COMPATIBLE[lane].has(coarse))
   ));
-  const evidence = [
-    RE_SERVICE_LAWN_CONTEXT_RE.test(haystack) && 'lawn',
-    RE_SERVICE_PEST_CONTEXT_RE.test(haystack) && 'pest',
-  ].filter(Boolean);
-  const lane = candidates.length === 1 ? candidates[0]
-    : (evidence.length === 1 && candidates.includes(evidence[0]) ? evidence[0] : null);
+  const evidence = reServiceLaneEvidence(haystack);
+  const lane = resolveReServiceLane(candidates, evidence, effectiveLane, pickPlanLane);
   return (reServices || []).find((s) => lane && s.service_key === RE_SERVICE_KEYS[lane]) || null;
 }
 
@@ -475,11 +670,17 @@ function assessmentPickHolds(pick, extracted, services) {
 }
 
 // Lane a replaceable pick pins the re-service override to: the customer's own
-// recurring plan family, or 'pest' for a plan-covered pest one-time row.
-function reServicePickLane(pick, haystack) {
+// recurring plan family, 'pest' for an unpriced plan-covered pest one-time row,
+// or 'lawn' for an unpriced One-Time Lawn Care row. A one-time row with an
+// agreed/quoted one-time visit price stays a paid booking even if callback
+// wording appears.
+function reServicePickLane(pick, haystack, extracted, v2Extraction) {
   const planLane = reServiceLaneForPlanRow(pick);
   if (planLane) return planLane;
-  return isPlanCoveredPestRow(pick) && !mentionsGermanRoach(haystack) ? 'pest' : null;
+  if (agreedOneTimeVisitPrice(extracted, v2Extraction) !== null) return null;
+  if (isPlanCoveredPestRow(pick) && !mentionsGermanRoach(haystack)) return 'pest';
+  if (isPlanCoveredLawnRow(pick)) return 'lawn';
+  return null;
 }
 
 function matchingKeywordRows(haystack, services) {
@@ -489,12 +690,12 @@ function matchingKeywordRows(haystack, services) {
     .filter(Boolean);
 }
 
-// transcription / reServices / reServiceLanes / coarseServiceLabel may be
-// absent: the haystack drops empty parts and reServiceOverrideRow treats
+// transcription / reServices / reServiceLanes / coarseServiceLabel / v2Extraction
+// may be absent: the haystack drops empty parts and reServiceOverrideRow treats
 // missing lists and labels as none.
 function resolveCallBookingCatalogService({
   extracted = {}, transcription, services = [],
-  reServices, reServiceLanes, coarseServiceLabel,
+  reServices, reServiceLanes, coarseServiceLabel, v2Extraction = null,
 } = {}) {
   if (!Array.isArray(services) || services.length === 0) return null;
 
@@ -507,11 +708,13 @@ function resolveCallBookingCatalogService({
   // r3) the customer's own lane-family RECURRING plan row — the extractor
   // exact-picks it from the prompt catalog on plan-customer revisit calls,
   // but a revisit is the plan's free between-visits callback, not an extra
-  // plan visit; and (owner 2026-11-02, call 534ea913) a plan-covered pest
+  // plan visit; (owner 2026-11-02, call 534ea913) an unpriced plan-covered pest
   // one-time row (roach / One-Time Pest Control), which pins the override to
-  // the pest lane. German roach mentions switch that last shape off.
+  // the pest lane (German roach mentions switch that shape off); and (owner
+  // 2026-11-27, call 12647dd6) an unpriced One-Time Lawn Care row, which pins
+  // to the lawn lane.
   const haystack = callBookingResolutionHaystack(extracted, transcription);
-  const pickPlanLane = reServicePickLane(byModelPick, haystack);
+  const pickPlanLane = reServicePickLane(byModelPick, haystack, extracted, v2Extraction);
   if (byModelPick && !isGenericCallCatalogRow(byModelPick) && !pickPlanLane) return byModelPick;
 
   // Computed before the re-service override so a concrete paid service keyword
@@ -525,7 +728,7 @@ function resolveCallBookingCatalogService({
   const keywordRow = keywordRows[0] || null;
 
   const reServiceRow = keywordGatedReServiceRow({
-    keywordRows, extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane,
+    keywordRows, extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane, v2Extraction,
   });
   if (reServiceRow) return reServiceRow;
 
@@ -577,7 +780,7 @@ function sanitizeQuotedCallPrice(value) {
  * A transcript quote on a one_time row wins over the list price: it IS the
  * job-specific price the agent and caller agreed to.
  */
-function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
+function resolveCallBookingPrice({ quotedPrice, catalogRow, v2Extraction = null } = {}) {
   // A covered re-service is free by definition — a number the extractor
   // caught on the call (the plan rate, a misheard fee) must never become the
   // visit's invoice amount (codex #3222 r2). Same shape the self-serve
@@ -592,8 +795,11 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
   if (!catalogRow || catalogRow.billing_type !== 'one_time') {
     return { price: null, source: null };
   }
-  const quoted = sanitizeQuotedCallPrice(quotedPrice);
-  if (quoted !== null) return { price: quoted, source: 'transcript' };
+  const quoted = classifyOneTimeVisitPrice({ quoted_price: quotedPrice }, v2Extraction);
+  if (quoted.status === 'agreed') return { price: quoted.amount, source: 'transcript' };
+  // A disputed/non-final quote must not silently fall through to a fixed catalog
+  // list price and auto-invoice at completion (leave unpriced for office review).
+  if (quoted.status === 'disputed') return { price: null, source: null };
   const base = Number(catalogRow.base_price);
   if (catalogRow.pricing_type === 'fixed' && Number.isFinite(base) && base > 0) {
     return { price: Math.round(base * 100) / 100, source: 'catalog' };
@@ -685,15 +891,62 @@ function catalogIntervalFollowUpDate(parentDate, catalogRow) {
   return Number.isNaN(base.getTime()) ? null : etDateString(addETDays(base, days));
 }
 
-function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, parentWindowStart } = {}) {
+function followUpRowDisallowed(catalogRow, parentDate) {
   const serviceKey = catalogRow?.service_key;
+  return !isValidCalendarDate(parentDate)
+    || isAssessmentCatalogRow(catalogRow)
+    || catalogRow?.billing_type === 'recurring'
+    || /^rodent_/.test(serviceKey);
+}
+
+function parseStatedFollowUp(rawValue, parentDate) {
+  const m = String(rawValue || '').trim().match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
+  if (!m || !isValidCalendarDate(m[1])) return { futureDate: null, futureWindow: null, nonFutureDate: false };
+  if (m[1] > parentDate) return { futureDate: m[1], futureWindow: m[2] || null, nonFutureDate: false };
+  return { futureDate: null, futureWindow: null, nonFutureDate: true };
+}
+
+function followUpEligibility(extracted, catalogRow, stated, v2Extraction) {
+  const isExistingServiceFollowUp = EXISTING_SERVICE_FOLLOWUP_INTENTS.has(
+    String(v2Extraction?.service_request?.service_intent || ''),
+  );
+  const hasNewSalePrice = agreedOneTimeVisitPrice(extracted, v2Extraction) !== null;
+  const suppressForExistingFollowUp = isExistingServiceFollowUp && !hasNewSalePrice;
+  // A two-treatment package (cockroach / flea / bed bug, owner ruling 2026-10-04) owes
+  // visit 2 whether or not the caller brought it up — behind the same gate
+  // the other booking paths use (package-followup-booking.js). Existing-service
+  // follow-up/callback calls without an agreed one-time purchase price are NOT
+  // a new package sale (preventing a phantom Visit 3 on Visit 2 bookings), while
+  // a complaint call that establishes a newly priced package purchase keeps Visit 2.
+  const { packageFollowupAutobookLive } = require('../config/feature-gates');
+  const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
+  const packageRow = !suppressForExistingFollowUp
+    && packageFollowupAutobookLive()
+    && isPackageFollowUpServiceKey(catalogRow?.service_key);
+  // On an existing-service follow-up/callback call without a new one-time sale
+  // (e.g. a fungicide return visit or final termite spray) and no later date
+  // AFTER the primary visit, follow_up_visit_mentioned describes the primary
+  // visit itself, not a phantom visit 2 14 days later. Likewise, on a single-
+  // visit service (requires_follow_up !== true), a follow_up_date_time on or
+  // before the primary visit proves the model pointed at the primary/prior visit
+  // rather than a separate second visit.
+  const mentionCounts = extracted.follow_up_visit_mentioned === true
+    && !suppressForExistingFollowUp
+    && !(stated.nonFutureDate && catalogRow?.requires_follow_up !== true);
+  return { discussed: mentionCounts || Boolean(stated.futureDate), packageRow };
+}
+
+function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, parentWindowStart, v2Extraction = null } = {}) {
   // A follow-up treatment talked about on an assessment call follows the
   // quote, not the assessment (the forced-assessment path clears the same
   // signals). A rodent visit's follow-up is the trap check, and it is never
   // booked at the first booking (owner ruling 2026-11-02): the tech books it
   // after the visit from what the traps show, so no rodent_* row plans one,
   // whatever the call said about it (the key family, never the name).
-  if (!isValidCalendarDate(parentDate) || isAssessmentCatalogRow(catalogRow) || /^rodent_/.test(serviceKey)) return null;
+  // Recurring maintenance plans (Quarterly Pest, Every 6 Weeks Lawn, etc.)
+  // run on their own recurring series and never spawn a one-time +14d Visit 2
+  // follow-up child (owner 2026-11-27, call 12647dd6).
+  if (followUpRowDisallowed(catalogRow, parentDate)) return null;
 
   // A stated date only counts as a mention signal when it parses as a real
   // calendar date AND falls after the initial visit: the V1 normalizer merely
@@ -701,23 +954,15 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, paren
   // garbage, or copy confirmed_start_at into the field — the primary visit's
   // own date is not evidence of a second visit, and without this guard it
   // would book a default-interval follow-up nobody discussed.
-  const raw = String(extracted.follow_up_date_time || '').trim();
-  const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
-  const statedFutureDate = !!(m && isValidCalendarDate(m[1]) && m[1] > parentDate);
-  // A two-treatment package (cockroach / flea / bed bug, owner ruling 2026-10-04) owes
-  // visit 2 whether or not the caller brought it up — behind the same gate
-  // the other booking paths use (package-followup-booking.js).
-  const { packageFollowupAutobookLive } = require('../config/feature-gates');
-  const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
-  const packageRow = packageFollowupAutobookLive() && isPackageFollowUpServiceKey(serviceKey);
-  const discussed = extracted.follow_up_visit_mentioned === true || statedFutureDate;
+  const stated = parseStatedFollowUp(extracted.follow_up_date_time, parentDate);
+  const { discussed, packageRow } = followUpEligibility(extracted, catalogRow, stated, v2Extraction);
   if (!discussed && !packageRow) return null;
 
   // Date from the transcript when a valid future date was stated, else the
   // catalog interval. Window: the stated time, else the parent's, else 09:00.
-  const scheduledDate = statedFutureDate ? m[1] : catalogIntervalFollowUpDate(parentDate, catalogRow);
+  const scheduledDate = stated.futureDate || catalogIntervalFollowUpDate(parentDate, catalogRow);
   if (!scheduledDate) return null;
-  const statedWindow = statedFutureDate ? m[2] : null;
+  const statedWindow = stated.futureWindow;
   return {
     scheduledDate,
     windowStart: [statedWindow, parentWindowStart].find(isValidWindowTime) || '09:00',

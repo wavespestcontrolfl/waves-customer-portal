@@ -239,6 +239,7 @@ function resultMessage(data, own) {
 
 // signed / declined / date_requested: the answer given (see resultMessage).
 function ResultState({ data, own }) {
+  const showSignedCopy = data.state === 'signed' && hasOfferFacts(data);
   return (
     <Column>
       <div style={EYEBROW}>Waves</div>
@@ -250,6 +251,17 @@ function ResultState({ data, own }) {
           </p>
         )}
         <p style={BODY_STYLE} role="status">{resultMessage(data, own)}</p>
+        {showSignedCopy && (
+          <>
+            <OfferSummary data={data} />
+            <TermsSection terms={data.terms} />
+            <div style={{ marginTop: 16 }}>
+              <BrandButton variant="secondary" onClick={() => window.print()}>
+                Print / save copy
+              </BrandButton>
+            </div>
+          </>
+        )}
       </BrandCard>
     </Column>
   );
@@ -696,6 +708,9 @@ function SignBlock({ name, onName, onAccept, busy, saving, frozen }) {
         onChange={(e) => onName(e.target.value)}
         style={FIELD_STYLE}
       />
+      <p style={{ ...BODY_STYLE, fontSize: 14, color: MUTED, marginTop: 8 }}>
+        By typing your full name and selecting Accept and sign, you agree to sign this offer electronically with the same legal effect as a handwritten signature. You can print or save a copy after signing, or call us at {WAVES_SUPPORT_PHONE_DISPLAY} for a paper copy.
+      </p>
       <BrandButton fullWidth disabled={!valid || busy} onClick={onAccept} style={{ marginTop: 12 }}>
         {saving ? 'Saving…' : 'Accept and sign'}
       </BrandButton>

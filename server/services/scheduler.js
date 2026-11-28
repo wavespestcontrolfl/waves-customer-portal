@@ -4406,9 +4406,10 @@ function initScheduledJobs() {
         // A skipped sweep (no valid PURCHASE_RECEIPT_SINCE) stops the agent
         // too: clearing the cutoff is a kill switch for every receipt write.
         if (result.skipped) return;
-        const { logged, held, errors } = summarize(result);
-        if (logged || held || errors) {
-          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        const { logged, held, errors, unappliedFailedLines } = summarize(result);
+        if (logged || held || errors || unappliedFailedLines) {
+          // job_health records this run as a success even when single lines failed; the failed-lines alert carries them.
+          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s), ${unappliedFailedLines} failed line(s) still not applied`);
         }
         // Inventory agent (GATE_INVENTORY_AGENT): resolves lines the sweep
         // above just handed off as agent_pending (unmatched/needs_size/
@@ -6127,8 +6128,16 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {
     try {
-      // runMorningBanner logs its own one line with the count.
-      await runExclusive('morning-banner', () => require('./morning-banner').runMorningBanner());
+      // runMorningBanner logs its own one line with the count and never throws;
+      // surface its fixed `error` code inside runExclusive so job health records
+      // delivery/claim failures instead of a false success.
+      await runExclusive('morning-banner', async () => {
+        const result = await require('./morning-banner').runMorningBanner();
+        if (result?.error || result?.uncertain) {
+          throw new Error(`morning banner: ${result.error || 'delivery_uncertain'}`);
+        }
+        return result;
+      });
     } catch (err) {
       logger.error(`Morning banner failed: ${err.message}`);
     }
@@ -9562,13 +9571,15 @@ function initScheduledJobs() {
   cron.schedule('0 8 * * *', async () => {
     logger.info('Running: AI campaign advisor');
     try {
-      const CampaignAdvisor = require('./ads/campaign-advisor');
-      // The office Mac's Max-plan runner writes today's report at 7:30 AM (owner 2026-10-29).
-      if (await CampaignAdvisor.hasModelReportToday()) {
-        logger.info('AI campaign advisor: today already has a model-written report, skipping');
-        return;
-      }
-      await CampaignAdvisor.generateDailyAdvice();
+      await runExclusive('ads-daily-advisor', async () => {
+        const CampaignAdvisor = require('./ads/campaign-advisor');
+        // The office Mac's Max-plan runner writes today's report at 7:30 AM (owner 2026-10-29).
+        if (await CampaignAdvisor.hasModelReportToday()) {
+          logger.info('AI campaign advisor: today already has a model-written report, skipping');
+          return;
+        }
+        await CampaignAdvisor.generateDailyAdvice();
+      });
     } catch (err) {
       logger.error(`AI campaign advisor failed: ${err.message}`);
     }

@@ -33,7 +33,9 @@ const { toE164 } = require('../utils/phone');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
 const { runExclusive } = require('../utils/cron-lock');
 const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
-const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
+const {
+  invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview,
+} = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
@@ -205,6 +207,7 @@ async function freshOverdueRecurringInvoices(customerId, now = new Date(), datab
   }).filter(Boolean));
   const fresh = overdue.filter((invoice) => isInvoiceCollectibleStatus(invoice.status)
     && !invoiceWithdrawnFromCustomer(invoice)
+    && !invoiceHeldForChemicalReview(invoice)
     && invoiceAmountDue(invoice) > 0
     && !legacyDunnedIds.has(String(invoice.id))
     && [invoice.last_reminder_at, invoice.followup_last_touch_at]

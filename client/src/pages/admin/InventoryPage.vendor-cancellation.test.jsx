@@ -78,6 +78,38 @@ describe('Record vendor cancellation', () => {
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   });
 
+  it('a post-submit park without its placed time still offers it (the server marks it outstanding), never Cancel', async () => {
+    const request = { ...ORDERED_REQUEST, status: 'open', order: { ...ORDER, status: 'needs_review', placedAt: null, error: 'ambiguous_after_submit: unknown', outstanding: true } };
+    installFetch({ requests: [request] });
+    mount();
+    expect(await screen.findByRole('button', { name: 'Record vendor cancellation' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+  });
+
+  it('Mark Ordered is hidden for an open request whose order may be out (the status cell uses the same outstanding check)', async () => {
+    const maybeOut = { ...ORDERED_REQUEST, status: 'open', order: { ...ORDER, status: 'needs_review', placedAt: null, error: 'ambiguous_after_submit: unknown', outstanding: true } };
+    installFetch({ requests: [maybeOut] });
+    mount();
+    await screen.findByRole('button', { name: 'Record vendor cancellation' });
+    expect(screen.queryByRole('button', { name: 'Mark Ordered' })).not.toBeInTheDocument();
+    cleanup();
+    // A pre-click park (nothing out) still offers it.
+    installFetch({ requests: [{ ...ORDERED_REQUEST, status: 'open', order: { ...ORDER, status: 'needs_review', placedAt: null, error: 'item_not_found: x', outstanding: false } }] });
+    mount();
+    expect(await screen.findByRole('button', { name: 'Mark Ordered' })).toBeEnabled();
+  });
+
+  it('a cancelled request whose order may be out offers Receive, Close already counted and Record vendor cancellation, never Cancel', async () => {
+    const cancelled = { ...ORDERED_REQUEST, status: 'cancelled', order: { ...ORDER, status: 'needs_review', placedAt: null, error: 'ambiguous_after_submit: unknown', outstanding: true } };
+    installFetch({ requests: [cancelled] });
+    mount();
+    expect(await screen.findByRole('button', { name: 'Record vendor cancellation' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Receive' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Close, already counted' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark Ordered' })).not.toBeInTheDocument();
+  });
+
   it('Record stays disabled until the vendor cancellation is confirmed, and Keep order sends nothing', async () => {
     installFetch();
     mount();

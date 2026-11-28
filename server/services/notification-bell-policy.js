@@ -64,6 +64,10 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   // category, so payment_succeeded stays denylisted and every other payment
   // bell stays behind the category toggle.
   'payment_failed',
+  // Owner ruling 2026-11-27: Twilio SMS/voice send failures must ring by
+  // default even while the generic 'system' category stays silent by default.
+  // Per-user bell/push/sound preferences on twilio_failure still apply.
+  'twilio_failure',
 ]);
 
 // Owner 2026-10-29, "small" E1: a customer's invoice payment that failed at checkout,
@@ -143,7 +147,10 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // estimate_stuck: a customer stuck booking from an estimate, back on an expired one, or still deciding with a reason
 // (services/estimate-stuck-alert.js,
 // owner 2026-11-05 "1, 2 and 3"). No gate: it must reach the office, who can still silence the category here.
-const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost', 'review_low_rating', 'truck_kit', 'access_codes', 'payroll', 'estimate_stuck']);
+// schedule_conflict (owner ruling 2026-11-27): dispatch slot clashes and
+// recurring scheduling conflicts ring by default while staying owner-silenceable
+// via Push Settings (category:schedule_conflict).
+const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call', 'visit_prep_photos', 'typed_decisions', 'llm_cost', 'review_low_rating', 'truck_kit', 'access_codes', 'payroll', 'estimate_stuck', 'schedule_conflict']);
 
 const OVERRIDABLE_CATEGORIES = [
   // Owner ruling 2026-08-28: customer communication only. These no longer

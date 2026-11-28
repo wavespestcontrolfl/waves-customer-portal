@@ -45,13 +45,14 @@ const { LAWN_ROUNDS_9, roundOf } = require('../lawn-rounds');
 const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
-const { routeCost, clusterShare } = require('./route-model');
+const { routeCost, routeOrderCovers, clusterShare } = require('./route-model');
 const { techStartPointsLive, techStartPoint, START_COLUMNS } = require('../scheduling/tech-start-point');
 const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { currentConflict } = require('./current-conflict');
 const { capacityEnabled } = require('../scheduling/policy');
+const { arrivalWindowRoutingEnabled } = require('../scheduling/arrival-route');
 const dryTime = require('./dry-time');
 const mowingDays = require('./mowing-days');
 const southDayKept = require('./south-day-kept');
@@ -172,7 +173,7 @@ function rowToDayStop(r) {
 // so routeCost must charge their planning minutes with the visit's — on the
 // current placement and every candidate alike — or a grouped visit's route
 // minutes would omit their work (Codex pre-push P1).
-function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order) {
+function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order, insertByTime = false, routeOrderIds = null) {
   return {
     geo,
     startMin,
@@ -189,7 +190,26 @@ function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = 
     window_end: service.window_end,
     preserveCapacity: preservesCapacity(service),
     unitMembers: siblings,
+    ...(insertByTime ? { insertByTime: true } : {}),
+    ...(insertByTime && Array.isArray(routeOrderIds) ? { routeOrderIds } : {}),
   };
+}
+
+// Standalone moves can persist mid-route route_order on commit via apply.js
+// placeInRoute -> arrival-route.js placeMovedVisit iff capacity mode is off
+// and arrival-window routing is enabled (arrival-route.js:1373). Keep search,
+// scoring, and commit gated on the exact same predicate.
+function canPlaceInRoute(siblings) {
+  return !capacityEnabled() && arrivalWindowRoutingEnabled() && siblings.length === 0;
+}
+
+// Same date, technician, and arrival window as the visit's stored placement:
+// rebooker.js sees placementWindowChanged === false and skips placeMovedVisit,
+// so never score it as a fresh mid-route insertion on a stale numbered day.
+function isSamePlacement(service, cand) {
+  return toDateStr(service.scheduled_date) === cand.date
+    && String(service.technician_id || '') === String(cand.technician_id || '')
+    && String(service.window_start || '').slice(0, 5) === String(cand.start_time || '').slice(0, 5);
 }
 
 // Which tech-day a batched day-stop row belongs to (loadDayStopRows serves
@@ -537,12 +557,30 @@ function candidateRouteOrder(service, cand) {
 
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
-// active stops.
+// active stops. Only candidates with a certified solver order (`route_order_ids`,
+// standalone, non-same-slot, no unassigned stops outside the tech's order) use
+// mid-route insertion in both scoring and commit (apply.js placeInRoute); legacy
+// or mismatched candidates keep currentOrder on both sides.
+function certifiedRouteOrderIds(service, cand, stops, siblings) {
+  if (isSamePlacement(service, cand) || !canPlaceInRoute(siblings)) return null;
+  if (!Array.isArray(cand.route_order_ids) || !cand.route_order_ids.length) return null;
+  if ((stops || []).some((s) => s && s.technician_id == null)) return null;
+  if (!routeOrderCovers(stops, cand.route_order_ids)) return null;
+  return cand.route_order_ids;
+}
+
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
   const moved = movedSiblings(siblings, placement, cand);
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand)), home);
+  const certifiedOrder = certifiedRouteOrderIds(service, cand, stops, siblings);
+  const cost = routeCost(
+    stops,
+    serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand), Boolean(certifiedOrder), certifiedOrder),
+    home,
+  );
+  const { route_order_ids: _ignoredOrder, ...candBase } = cand;
   return {
-    ...cand,
+    ...candBase,
+    ...(certifiedOrder ? { route_order_ids: certifiedOrder } : {}),
     detour_minutes: cost.detourMinutes,
     total_drive_minutes: cost.driveWithMinutes,
     route_minutes: cost.routeTimeWithMinutes,
@@ -579,7 +617,16 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id)));
+    const dayStopList = stopsByTechDay.get(key);
+    // A candidate certified only via mid-route insertion (cand.route_order_ids)
+    // must still match the day's stops cleanly; if an unassigned stop or
+    // between-read edit invalidated its order, drop it rather than keeping an
+    // unverified append-at-999 slot.
+    if (Array.isArray(cand.route_order_ids) && !isSamePlacement(service, cand)
+      && !certifiedRouteOrderIds(service, cand, dayStopList, siblings)) {
+      continue;
+    }
+    kept.push(scoreOnSharedModel(service, geo, cand, dayStopList, siblings, placement, homeFor(ctx, cand.technician_id)));
   }
   return kept;
 }
@@ -922,6 +969,7 @@ function candidateFromSlot(slot, hard) {
     technician_name: (slot.technician && slot.technician.name) || null,
     capability_level: cap,
     find_time_score: slot.score,
+    ...(Array.isArray(slot.route_order_ids) ? { route_order_ids: slot.route_order_ids } : {}),
   };
 }
 
@@ -1284,9 +1332,16 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // instead of one-hour blocks with drive time on both sides. It spends none
     // of the paid road allowance customer booking shares (providerTravel
     // false): the run scores on the shared model, and road-check.js still asks
-    // Google about an ordinary move before it is made.
+    // Google about an ordinary move before it is made. For standalone visits
+    // (`arrivalInsert: true`), allow mid-route insertion into numbered days,
+    // matching apply.js placeInRoute -> arrival-route.js placeMovedVisit.
     arrivalSearch: ctx.arrivalSearch === true,
-    ...(ctx.arrivalSearch === true ? { providerTravel: false } : {}),
+    ...(ctx.arrivalSearch === true ? {
+      providerTravel: false,
+      ...(service.is_recurring === true ? { isRecurring: true } : {}),
+      ...(service.is_callback === true ? { isCallback: true } : {}),
+    } : {}),
+    ...(ctx.arrivalSearch === true && ctx.groupContext && canPlaceInRoute(ctx.groupContext.siblings) ? { arrivalInsert: true } : {}),
     // GATE_AUTO_DISPATCH_DAY_RULES (config.dayRules, carried on ctx by
     // index.js): Sundays are searched too (move-rules.js takes one only when
     // no other day qualifies), and the arrival search's van leaves at the
@@ -1374,7 +1429,7 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, loadOccupiedSpansByDate, stopsForTechDay, slotTaken, canPlaceInRoute, serviceToRouteStop, planUnitPlacement, movedSiblings, candidateRouteOrder, isSamePlacement, scoreOnSharedModel, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };
 // Own lines: the day-replan job reads the same open/close bounds the after_hours filter uses.

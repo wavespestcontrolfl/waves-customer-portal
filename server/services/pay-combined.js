@@ -45,7 +45,9 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
 const { dunningStoppedInvoiceIds } = require('./completion-balance-sweep');
-const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
+const {
+  invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview,
+} = require('./invoice-helpers');
 
 // Stripe metadata values cap at 500 chars. The compact `${id}:${cents}`
 // encoding spends ~44 chars per sibling, so 8 siblings stay comfortably
@@ -198,6 +200,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
       [!isEnabled('payIncludeBalance'), 'gate_off'],
       [!anchorInvoice?.customer_id, 'incomplete'],
       [anchorInvoice?.payer_id || anchorInvoice?.payer_statement_id, 'payer_anchor'],
+      [invoiceHeldForChemicalReview(anchorInvoice), 'incomplete'],
     ].find(([hit]) => hit);
     if (earlyExit) return degrade(earlyExit[1]);
     // LIVE anchor payer resolution (codex r6 P1): a payer assigned via the
@@ -255,7 +258,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     // pairing cannot occur (the unpaid prepay is an undelivered draft, which
     // the open-balance read never returns).
     const { prepayNoteNamesInvoice } = require('./pay-plan-choice');
-    const candidates = openInvoices.filter((inv) => !prepayNoteNamesInvoice(anchorInvoice.notes, inv.invoice_number));
+    const candidates = openInvoices.filter((inv) => !prepayNoteNamesInvoice(anchorInvoice.notes, inv.invoice_number) && !invoiceHeldForChemicalReview(inv));
     if (incomplete) {
       logger.warn(`[pay-combined] sibling read incomplete for invoice ${anchorInvoice.invoice_number} (${incomplete}) — combined flow disabled for this session`);
       return degrade('incomplete');
@@ -459,6 +462,7 @@ async function memberCollectionPending(inv, { database = db, customerId = null }
   if (!(amountDueCents(inv) > 0)) return { reason: 'nothing_due' };
   if (inv.payer_id || inv.payer_statement_id) return { reason: 'payer_billed' };
   if (invoiceWithdrawnFromCustomer(inv)) return { reason: 'withdrawn' };
+  if (invoiceHeldForChemicalReview(inv)) return { reason: 'chemical_addon_hold' };
   // LIVE payer re-resolution, fail closed (a lookup failure throws).
   {
     let resolved;
@@ -536,6 +540,7 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     // representative service — the payer may sit on another billed member of
     // the same packet. This is the allocation's last fence before money moves.
     if (invoiceWithdrawnFromCustomer(row)) throw staleErr(`invoice ${row.invoice_number} was withdrawn to a third-party payer`);
+    if (invoiceHeldForChemicalReview(row)) throw staleErr(`invoice ${row.invoice_number} is held for chemical add-on billing review`);
     // LIVE payer re-resolution for EVERY row, anchor included (codex r4 P1;
     // anchor exemption removed per codex r5 P1): a payer assigned after
     // invoice creation lives on scheduled_services (or as the customer's

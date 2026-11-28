@@ -1,4 +1,5 @@
 import { useCustomerSms } from "../../components/admin/customer360/CustomerSmsPanel";
+import { useEstimateSend } from "../../components/admin/EstimateSendDialog";
 import React, {
   useState,
   useEffect,
@@ -45,6 +46,85 @@ import { isConsultationVisit } from "../../lib/consultationVisit";
 import ConsultationStatsPanel from "./ConsultationStatsPanel";
 import { leadServiceAddress } from "../../utils/format-address";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+
+const DRAFT_HOLD_LABELS = {
+  large_pool_cage: "Large pool cage",
+  property_type_unresolved: "Confirm home type",
+  stories_estimated: "Confirm stories",
+  home_size_above_public_limit: "Large home (>20k sf)",
+  open_parcel_basis_unconfirmed_footprint: "Confirm bed area",
+  low_confidence_turf_requires_field_verification: "Confirm lawn area",
+  zero_turf_verified: "No turf verified",
+};
+
+function leadDraftSummaryText(preview) {
+  const m = preview?.measurements;
+  const parts = [];
+  if (m?.homeSqFt) parts.push(`${Number(m.homeSqFt).toLocaleString()} sf`);
+  if (m?.lotSqFt) parts.push(`${Number(m.lotSqFt).toLocaleString()} lot`);
+  if (m?.features?.poolCage) {
+    parts.push(m.features.poolCageSqft ? `Cage ${m.features.poolCageSqft} sf` : "Pool cage");
+  }
+  return parts.join(" · ");
+}
+
+function leadDraftPriceText(preview) {
+  if (preview?.monthly > 0) return `$${Math.round(preview.monthly)}/mo`;
+  if (preview?.oneTime > 0) return `$${Math.round(preview.oneTime)}`;
+  return "";
+}
+
+function LeadDraftActionStrip({ lead, openEstimateSend, navigate, onSent }) {
+  const preview = lead.estimate_preview;
+  if (!lead.estimate_id) return null;
+  if (!preview || preview.status !== "draft") {
+    return (
+      <div className="text-ui-body text-ink-secondary">
+        Estimate: {lead.estimate_status || "linked"}
+      </div>
+    );
+  }
+  const summary = leadDraftSummaryText(preview);
+  const price = leadDraftPriceText(preview);
+  const holdLabel = preview.quoteRequiredReason
+    ? (DRAFT_HOLD_LABELS[preview.quoteRequiredReason] || String(preview.quoteRequiredReason).replace(/_/g, " "))
+    : null;
+  return (
+    <div
+      className="mt-1 flex flex-wrap items-center gap-1.5 text-ui-body text-ink-secondary"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <Badge tone={preview.sendReady ? "strong" : "neutral"}>
+        {preview.sendReady ? "Draft ready" : "Draft review"}
+        {price ? ` · ${price}` : ""}
+      </Badge>
+      {summary && <span>{summary}</span>}
+      {!preview.sendReady && holdLabel && <span>· {holdLabel}</span>}
+      {preview.sendReady && openEstimateSend ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="primary"
+          onClick={async () => {
+            const res = await openEstimateSend(lead.estimate_id);
+            if (res && onSent) onSent();
+          }}
+        >
+          Send Quote
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          onClick={() => navigate(`/admin/pipeline?tab=new&editEstimateId=${encodeURIComponent(lead.estimate_id)}`)}
+        >
+          Review
+        </Button>
+      )}
+    </div>
+  );
+}
 
 const CONTACT_EVIDENCE_LABELS = new Map([
   ["live_conversation", "Contacted after a live conversation"],
@@ -1015,6 +1095,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const compactQueue = useIsMobile(1280);
   const [tab, setTab] = useState("pipeline");
   const openMessages = useCustomerSms();
+  const openEstimateSend = useEstimateSend();
   // appendDraft: unlike initialDraft (only seeds an EMPTY draft — an
   // existing per-lead draft silently wins and the text never lands), this
   // is joined onto whatever draft already exists, matching how the
@@ -2040,11 +2121,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 {leadServiceName(lead)}
                               </div>
                             )}{" "}
-                            {lead.estimate_id && (
-                              <div className="text-ui-body text-ink-secondary">
-                                Estimate: {lead.estimate_status || "linked"}
-                              </div>
-                            )}
+                            <LeadDraftActionStrip
+                              lead={lead}
+                              openEstimateSend={openEstimateSend}
+                              navigate={navigate}
+                              onSent={loadLeads}
+                            />
                             {lead.first_contact_at && (
                               <div className="text-ui-body text-ink-secondary">
                                 Received <time dateTime={lead.first_contact_at}>{formatETDateTime(lead.first_contact_at, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time>

@@ -293,7 +293,7 @@ describe('Finalized run', () => {
     expect(fieldDocument).toHaveClass('field-document-scroll', 'pay-stub');
     expect(within(fieldDocument).getByRole('heading', { level: 1, name: 'Pay stub' })).toBeInTheDocument();
     expect(within(fieldDocument).getByText('Controlled staff document')).toBeInTheDocument();
-    expect(fieldDocument.querySelector('img')).toBeNull();
+    expect(fieldDocument.querySelector('img[alt="Waves Pest Control"]')).not.toBeNull();
     expect(stub).toHaveTextContent('Waves Pest Control, LLC');
     expect(stub).toHaveTextContent('SSN ending 4321');
     expect(stub).toHaveTextContent('Pay period Oct 12, 2026 to Oct 18, 2026');
