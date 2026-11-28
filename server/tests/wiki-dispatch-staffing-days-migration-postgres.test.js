@@ -9,7 +9,12 @@ const { randomUUID } = require('crypto');
 
 const migration = require('../models/migrations/20261128140000_wiki_dispatch_staffing_days');
 
-const { _ARTICLES: ARTICLES, _AUDIT_ACTION: AUDIT, _AUDIT_ACTION_DOWN: AUDIT_DOWN } = migration;
+const {
+  _ARTICLES: ARTICLES,
+  _AUDIT_ACTION: AUDIT,
+  _AUDIT_ACTION_DOWN: AUDIT_DOWN,
+  _applyReplacements: applyReplacements,
+} = migration;
 const REPO_ROOT = path.join(__dirname, '..', '..');
 
 function readWiki(relPath) {
@@ -25,7 +30,7 @@ function beforeContent(article) {
 }
 
 describe('wiki files and 20261128140000_wiki_dispatch_staffing_days agree (no database)', () => {
-  test('both wiki files on disk carry the new wording, omit the superseded lines, and round-trip cleanly', () => {
+  test('both wiki files on disk carry the new wording, omit the superseded lines, and round-trip cleanly via section-scoped line matching', () => {
     for (const article of ARTICLES) {
       const disk = readWiki(article.path);
       for (const r of article.replacements) {
@@ -34,12 +39,33 @@ describe('wiki files and 20261128140000_wiki_dispatch_staffing_days agree (no da
       }
       const prior = beforeContent(article);
       expect(prior).not.toBe(disk);
-      let rebuilt = prior;
-      for (const r of article.replacements) {
-        expect(rebuilt).toContain(r.old);
-        rebuilt = rebuilt.replace(r.old, () => r.next);
-      }
-      expect(rebuilt).toBe(disk);
+      const up = applyReplacements(prior, article.replacements, 'up', article.path);
+      expect(up.content).toBe(disk);
+      expect(up.changed.map((c) => c.key)).toEqual(article.replacements.map((r) => r.key));
+      const down = applyReplacements(up.content, article.replacements, 'down', article.path);
+      expect(down.content).toBe(prior);
+    }
+  });
+
+  test('appending a dispatch exception to an existing line or repeating old wording in another section leaves that text untouched', () => {
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const [profiles, routing] = ARTICLES;
+      const withException = beforeContent(routing).replace(
+        routing.replacements[0].old,
+        `${routing.replacements[0].old} (Exception: never on Fridays.)`,
+      );
+      const resRouting = applyReplacements(withException, routing.replacements, 'up', routing.path);
+      expect(resRouting.content).toBe(withException);
+      expect(resRouting.changed).toHaveLength(0);
+
+      // Same old line quoted under a different section (e.g. filed-back Q&A) must never be rewritten.
+      const quotedInQa = `${readWiki(profiles.path)}\n\n## Q&A\n${profiles.replacements[0].old}\n`;
+      const resQuoted = applyReplacements(quotedInQa, profiles.replacements, 'up', profiles.path);
+      expect(resQuoted.content).toBe(quotedInQa);
+      expect(resQuoted.changed).toHaveLength(0);
+    } finally {
+      log.mockRestore();
     }
   });
 
@@ -115,7 +141,7 @@ jest.setTimeout(30000);
   const byPath = (articlePath) => database('knowledge_base').where({ path: articlePath }).first();
   const events = (action = AUDIT) => database('audit_log').where({ action });
 
-  test('updates both articles, preserves unrelated Q&A edits, purges matching kb and stale ops_rule chunks, and audits once per article', async () => {
+  test('updates both articles under FOR UPDATE lock, preserves unrelated Q&A edits, purges matching kb and stale ops_rule chunks, and audits once per article', async () => {
     const qaNote = '\n\n---\n## Q&A (filed 11/25/2026)\n**Q:** Custom staff note?\n\n**A:** Keep this intact.';
     const rows = [];
     for (const article of ARTICLES) {
@@ -159,19 +185,40 @@ jest.setTimeout(30000);
     }
   });
 
-  test('preserves manual human edits on targeted lines and handles missing articles gracefully', async () => {
+  test('preserves lines with appended dispatch exceptions and handles missing articles gracefully', async () => {
     const [profiles, routing] = ARTICLES;
-    const customProfiles = beforeContent(profiles).replace(profiles.replacements[0].old, 'Custom owner dispatch wording.');
-    await insertArticle(profiles, { content: customProfiles });
+    const withException = beforeContent(profiles).replace(
+      profiles.replacements[0].old,
+      `${profiles.replacements[0].old} (Exception: hold Fridays for commercial bids.)`,
+    );
+    await insertArticle(profiles, { content: withException });
     await migration.up(database);
 
     const updated = await byPath(profiles.path);
-    expect(updated.content).toContain('Custom owner dispatch wording.');
+    expect(updated.content).toContain('(Exception: hold Fridays for commercial bids.)');
     expect(updated.content).toContain(profiles.replacements[1].next);
     expect(updated.content).toContain(profiles.replacements[2].next);
     expect(log).toHaveBeenCalledWith(expect.stringContaining('line left as it is'));
     expect(await byPath(routing.path)).toBeUndefined();
     expect(await events()).toHaveLength(1);
+  });
+
+  test('purges stale kb chunks even when the article already carries the new wording, and down() leaves pre-existing new wording untouched', async () => {
+    const [, routing] = ARTICLES;
+    await insertArticle(routing, { content: readWiki(routing.path) });
+    await insertChunk('kb', routing.slug, beforeContent(routing), 0);
+    await insertChunk('ops_rule', routing.opsRuleSourceId, beforeContent(routing), 0);
+
+    await migration.up(database);
+
+    expect(await events()).toHaveLength(0);
+    expect(await database('knowledge_embeddings').where({ source: 'kb', source_id: routing.slug })).toHaveLength(0);
+    expect(await database('knowledge_embeddings').where({ source: 'ops_rule', source_id: routing.opsRuleSourceId })).toHaveLength(0);
+
+    // Since up() did not write this row, down() must NOT revert the human-installed new wording.
+    await migration.down(database);
+    expect((await byPath(routing.path)).content).toBe(readWiki(routing.path));
+    expect(await events(AUDIT_DOWN)).toHaveLength(0);
   });
 
   test('matches rows by path even with a legacy slug and purges that row\'s actual slug chunks', async () => {
@@ -185,11 +232,17 @@ jest.setTimeout(30000);
     expect(await database('knowledge_embeddings').where({ source: 'kb', source_id: 'adam-benetti-technician-profile' })).toHaveLength(0);
   });
 
-  test('down() restores prior text, preserves unrelated edits, purges chunks, audits once, and skips manually edited new lines', async () => {
+  test('down() reverses only replacements applied by up(), preserves unrelated edits, purges chunks, audits once, and skips post-up manual edits', async () => {
     const qaNote = '\n\n---\n## Q&A\nKeep me.';
-    for (const article of ARTICLES) {
-      await insertArticle(article, { content: beforeContent(article) + qaNote });
-    }
+    const [profiles, routing] = ARTICLES;
+    // Pre-apply replacement 0 manually on profiles before up() so only replacements 1 & 2 are applied by up().
+    const partiallyEdited = beforeContent(profiles).replace(
+      profiles.replacements[0].old,
+      () => profiles.replacements[0].next,
+    );
+    await insertArticle(profiles, { content: partiallyEdited + qaNote });
+    await insertArticle(routing, { content: beforeContent(routing) + qaNote });
+
     await migration.up(database);
     for (const article of ARTICLES) {
       await insertChunk('kb', article.slug, readWiki(article.path), 0);
@@ -198,20 +251,21 @@ jest.setTimeout(30000);
 
     await migration.down(database);
 
+    // On profiles, replacement 0 stays at next (pre-existing before up), while 1 & 2 revert to old.
+    expect((await byPath(profiles.path)).content).toBe(partiallyEdited + qaNote);
+    expect((await byPath(routing.path)).content).toBe(beforeContent(routing) + qaNote);
     for (const article of ARTICLES) {
-      expect((await byPath(article.path)).content).toBe(beforeContent(article) + qaNote);
       expect(await database('knowledge_embeddings').where({ source: 'kb', source_id: article.slug })).toHaveLength(0);
       expect(await database('knowledge_embeddings').where({ source: 'ops_rule', source_id: article.opsRuleSourceId })).toHaveLength(0);
     }
     expect(await events(AUDIT_DOWN)).toHaveLength(ARTICLES.length);
 
-    // Repeat down() is a no-op
+    // Repeat down() is a no-op.
     await migration.down(database);
     expect(await events(AUDIT_DOWN)).toHaveLength(ARTICLES.length);
 
-    // Manual edit after up() is preserved on down()
+    // Post-up manual edit is preserved on down().
     await migration.up(database);
-    const [, routing] = ARTICLES;
     await database('knowledge_base').where({ path: routing.path }).update({
       content: (await byPath(routing.path)).content.replace(routing.replacements[0].next, '- **Adam:** custom human rule.'),
     });
