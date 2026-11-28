@@ -44,15 +44,14 @@ function bookedWdoVisitFee(visit) {
   if (rawEstimated !== '' && rawEstimated != null && Number(rawEstimated) === 0) return null;
   const primary = positiveFee(visit.primary_line_price ?? visit.primaryLinePrice);
   const estimated = positiveFee(rawEstimated);
-  const hasExplicitDiscount = Number(visit.discount_amount || visit.discountAmount || 0) > 0
-    || Number(visit.primary_line_discount || visit.primaryLineDiscount || 0) > 0;
   const addonCents = addonCentsTotal(visit.service_addons || visit.serviceAddons);
   if (visit.has_billable_addons || visit.hasBillableAddons || addonCents > 0) {
-    if (primary === null || hasExplicitDiscount || addonCents === 0) return null;
+    const discounted = Number(visit.discount_amount || visit.discountAmount || 0) > 0
+      || Number(visit.primary_line_discount || visit.primaryLineDiscount || 0) > 0;
+    if (primary === null || discounted || addonCents === 0) return null;
     if (estimated !== null && Math.round(primary * 100) + addonCents !== Math.round(estimated * 100)) return null;
     return primary;
   }
-  if (hasExplicitDiscount && estimated === null) return null;
   if (primary !== null && estimated !== null) return Math.min(primary, estimated);
   return estimated ?? primary;
 }

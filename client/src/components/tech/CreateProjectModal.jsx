@@ -228,25 +228,34 @@ function formatStructureType(customer) {
 // price ($150-$275) so the tech isn't left with a blank field that would fall
 // back to $250; if primaryLinePrice is absent or an appointment-level discount
 // applies across add-ons, seed nothing so the tech enters the exact fee.
+const ADDON_SEED_PRICE_KEYS = ['estimatedPrice', 'estimated_price', 'basePrice', 'base_price', 'price'];
+
+function addonSeedPrice(addon) {
+  if (!addon) return 0;
+  for (const key of ADDON_SEED_PRICE_KEYS) {
+    const val = Number(addon[key]);
+    if (Number.isFinite(val) && val > 0) return val;
+  }
+  return 0;
+}
+
 export function wdoFeeSeedFromVisit(service) {
-  const addons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
-  const addonTotal = addons.reduce(
-    (sum, a) => sum + Math.max(0, Number(a?.estimatedPrice ?? a?.estimated_price ?? a?.basePrice ?? a?.base_price ?? a?.price ?? 0) || 0),
-    0,
-  );
-  const hasBillableAddon = addonTotal > 0;
-  const primary = Number(service?.primaryLinePrice ?? service?.primary_line_price);
+  if (!service) return '';
+  const addons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
+  let addonTotal = 0;
+  for (const a of addons) addonTotal += addonSeedPrice(a);
+  const rawPrimary = service.primaryLinePrice ?? service.primary_line_price;
+  const primary = Number(rawPrimary);
   const validPrimary = Number.isFinite(primary) && primary > 0 ? primary : '';
-  const hasExplicitDiscount = Number(service?.discountAmount ?? service?.discount_amount ?? 0) > 0
-    || Number(service?.primaryLineDiscount ?? service?.primary_line_discount ?? 0) > 0;
-  if (hasBillableAddon) {
-    if (hasExplicitDiscount || validPrimary === '') return '';
-    const rawEst = service?.estimatedPrice ?? service?.estimated_price;
+  const hasExplicitDiscount = Number(service.discountAmount || service.discount_amount || 0) > 0
+    || Number(service.primaryLineDiscount || service.primary_line_discount || 0) > 0;
+  const rawEst = service.estimatedPrice ?? service.estimated_price;
+  if (addonTotal > 0) {
     const est = Number(rawEst);
-    if (rawEst == null || rawEst === '' || !Number.isFinite(est)) return '';
+    if (hasExplicitDiscount || validPrimary === '' || rawEst == null || rawEst === '' || !Number.isFinite(est)) return '';
     return Math.round((primary + addonTotal) * 100) === Math.round(est * 100) ? primary : '';
   }
-  if (service?.estimatedPrice != null && service.estimatedPrice !== '') return service.estimatedPrice;
+  if (rawEst != null && rawEst !== '') return rawEst;
   return hasExplicitDiscount ? '' : validPrimary;
 }
 
