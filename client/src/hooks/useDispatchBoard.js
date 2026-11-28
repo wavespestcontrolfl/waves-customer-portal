@@ -177,6 +177,7 @@ export function useDispatchBoard() {
   // not guaranteed to reach this tab.
   // False until the first connect, so the mount read never clears stale.
   const socketUpRef = useRef(false);
+  const requestResyncRef = useRef(null);
 
   // Track the latest techsMap in a ref so the socket handler closure
   // always sees current state without re-subscribing on every render.
@@ -222,12 +223,20 @@ export function useDispatchBoard() {
       });
       return;
     }
+    let needsAuthoritativeCounts = false;
     setBoardState((prevState) => {
       const prev = prevState.jobs;
       const idx = prev.findIndex((j) => j.id === payload.job_id);
       if (idx === -1) {
         const created = boardJobFromPayload(payload);
         if (!created) return prevState;
+        // Address-only visits without customer_id may already sit in today_agg
+        // while omitted from /board's jobs baseline before LEFT JOIN customers;
+        // resync counts instead of blind +1 when unlinked to the baseline.
+        if (!payload.customer_id) {
+          needsAuthoritativeCounts = true;
+          return { ...prevState, jobs: [...prev, created] };
+        }
         return {
           techsMap: nextTechsMapForJobChange(prevState.techsMap, null, created),
           jobs: [...prev, created],
@@ -257,6 +266,7 @@ export function useDispatchBoard() {
         jobs: next,
       };
     });
+    if (needsAuthoritativeCounts) requestResyncRef.current?.();
   }, []);
 
   // ---- on-demand tech refresh (see header comment) ----
@@ -403,6 +413,7 @@ export function useDispatchBoard() {
       if (mountedRef.current) runResync();
     }, RESYNC_DEBOUNCE_MS);
   }, [runResync]);
+  requestResyncRef.current = requestResync;
 
   const markMaybeStale = useCallback(() => {
     staleSinceSeqRef.current = refreshSeqRef.current;

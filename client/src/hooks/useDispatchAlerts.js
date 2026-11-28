@@ -133,7 +133,7 @@ export function useDispatchAlerts() {
   alertsRef.current = alerts;
   const resolvedIdsRef = useRef(new Set());
   const resolvedCountRef = useRef(0);
-  const addedCountRef = useRef(0);
+  const addedSinceRef = useRef(new Map());
   const totalRef = useRef(0);
   const requestResyncRef = useRef(null);
   // Reconcile bookkeeping. broadcastCountRef counts handled dispatch:alert
@@ -187,7 +187,6 @@ export function useDispatchAlerts() {
     const seq = ++readSeqRef.current;
     const countAtStart = broadcastCountRef.current;
     const resolvedAtStart = resolvedCountRef.current;
-    const addedAtStart = addedCountRef.current;
     const res = await fetch(
       `${API_BASE}/admin/dispatch/alerts?unresolved=true`,
       { headers: adminAuthHeaders() }
@@ -199,16 +198,22 @@ export function useDispatchAlerts() {
     if (seq < appliedSeqRef.current) return;
     appliedSeqRef.current = seq;
     const fetched = Array.isArray(data.alerts) ? data.alerts : [];
+    const fetchedIds = new Set(fetched.map((a) => a.id));
     const serverTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : fetched.length;
     const resolvedDuringRead = resolvedCountRef.current - resolvedAtStart;
-    const addedDuringRead = addedCountRef.current - addedAtStart;
+    const addedNotInResponse = [...addedSinceRef.current.entries()]
+      .filter(([id, addedAt]) => addedAt > countAtStart && !fetchedIds.has(id) && !resolvedIdsRef.current.has(id))
+      .length;
     const changedSinceRead = (id) => (changedAtRef.current.get(id) || 0) > countAtStart;
     const merged = mergeHydration(alertsRef.current, fetched, resolvedIdsRef.current, changedSinceRead);
     alertsRef.current = merged;
-    const nextTotal = Math.max(merged.length, serverTotal + addedDuringRead - resolvedDuringRead);
+    const nextTotal = Math.max(merged.length, serverTotal + addedNotInResponse - resolvedDuringRead);
     totalRef.current = nextTotal;
     setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current, changedSinceRead));
     setTotal(nextTotal);
+    if (serverTotal > fetched.length && (resolvedDuringRead > 0 || broadcastCountRef.current > countAtStart)) {
+      requestResyncRef.current?.();
+    }
     setError(null);
     setLoading(false);
   }, []);
@@ -332,7 +337,7 @@ export function useDispatchAlerts() {
       alertsRef.current = mergeAlertBroadcast(alertsRef.current, payload, resolvedIdsRef.current);
       setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
       if (!wasPresent) {
-        addedCountRef.current += 1;
+        addedSinceRef.current.set(payload.id, broadcastCountRef.current);
         totalRef.current = Math.max(alertsRef.current.length, totalRef.current + 1);
         setTotal((t) => Math.max(alertsRef.current.length, t + 1));
       }
