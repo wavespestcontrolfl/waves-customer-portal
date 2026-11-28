@@ -19,6 +19,8 @@ const mockInspection = {
   findSlotIn: jest.fn(),
   commitWindowFailure: jest.fn(() => null),
   parseCommitBody: jest.requireActual('../routes/inspection-public')._internals.parseCommitBody,
+  customerAddressFields: jest.requireActual('../routes/inspection-public')._internals.customerAddressFields,
+  zoneFunnelInputs: jest.requireActual('../routes/inspection-public')._internals.zoneFunnelInputs,
   findOpenVisit: jest.fn(),
   visitShape: jest.fn((row) => ({ date: row.scheduled_date, window: { start: '09:00', end: '11:00' }, serviceType: 'Waves Assessment' })),
   rescheduleUrlFor: jest.fn(async () => '/reschedule/resched-token'),
@@ -570,5 +572,36 @@ describe('assessmentFirstFor (/data)', () => {
     expect(await assessmentFirstFor(estimate(), { open: true })).toBeNull();
     customerRow = { ...CUSTOMER, zip: '34236' };
     expect(await assessmentFirstFor(estimate(), { open: true })).toBeNull();
+  });
+});
+
+describe('Phase 2B-2b south-zone funnel and per-truck rule B parity', () => {
+  test('GET, find-slots, commit rebuild, and 409 refresh pass customer address to buildAvailabilityForLead', async () => {
+    await call(TOKEN);
+    await call(`${TOKEN}/find-slots`, { method: 'POST', body: { query: 'next tuesday morning' } });
+    await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '13:00' } });
+
+    const expectedAddr = { line1: '100 Sample Way', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
+    expect(mockInspection.buildAvailabilityForLead).toHaveBeenCalledTimes(4);
+    for (const [, opts] of mockInspection.buildAvailabilityForLead.mock.calls) {
+      expect(opts.address).toEqual(expectedAddr);
+    }
+  });
+
+  test('commit passes zoneAddress and slotGuard that enforces truckMayTakeDate before accepting', async () => {
+    const zdf = require('../services/scheduling/zone-day-funnel');
+    const truckSpy = jest.spyOn(zdf, 'truckMayTakeDate').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    try {
+      const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } });
+      expect(res.status).toBe(200);
+      const args = mockInspection.bookAssessmentVisit.mock.calls[0][0];
+      expect(args.zoneAddress(CUSTOMER)).toEqual({ address: '100 Sample Way, Bradenton, FL, 34205', city: 'Bradenton' });
+      const trx = jest.fn();
+      await expect(args.slotGuard(trx, { zone: { slug: 'south' } })).resolves.toBe(false);
+      await expect(args.slotGuard(trx, { zone: { slug: 'south' } })).resolves.toBe(true);
+      expect(truckSpy).toHaveBeenCalledWith(trx, { estimateZone: { slug: 'south' }, date: '2026-11-03', technicianId: null });
+    } finally {
+      truckSpy.mockRestore();
+    }
   });
 });

@@ -16,7 +16,7 @@ jest.mock('../services/logger', () => ({
 // flipping this map flips the gate per test.
 const gateState = { reserviceSelfServe: true, selfBooking: true, bookingCustomersOnly: false, reservicePestChips: false };
 jest.mock('../config/feature-gates', () => ({
-  gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
+  ...jest.requireActual('../config/feature-gates'),
   isEnabled: jest.fn((name) => (name in gateState ? gateState[name] : true)),
   // GATE_BOOK_CAPACITY_COMMIT (owner 2026-09-28, PR #5231 rounds 1-2):
   // routes/booking.js is NOT mocked in this file, so buildAvailabilityFor
@@ -1574,7 +1574,13 @@ describe('reserviceOpeningsFor (GATE_SMS_PROMPT_B1: the texting AI offers the pa
   test('builds the page\'s own availability for the customer\'s bookable lane, by customer id', async () => {
     const out = await reservicePublicRouter._internals.reserviceOpeningsFor(CUST_ID);
     expect(out).toEqual({ days: [{ date: '2027-05-20', slots: [{ start_time: '09:00' }] }] });
-    expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey: 'pest_control', duration: 20, selfServeNotice: true, rankProfile: 'reservice' }));
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({
+      serviceKey: 'pest_control',
+      duration: 20,
+      selfServeNotice: true,
+      rankProfile: 'reservice',
+      serviceIdentity: expect.objectContaining({ catalogServiceKey: 'pest_re_service' }),
+    }));
   });
 
   test('the reported lane narrows a two-lane customer; with capacity booking a two-lane browse offers nothing', async () => {
@@ -1598,5 +1604,112 @@ describe('reserviceOpeningsFor (GATE_SMS_PROMPT_B1: the texting AI offers the pa
     delete firstResults.customers;
     expect(await reservicePublicRouter._internals.reserviceOpeningsFor(CUST_ID)).toBeNull();
     expect(build).not.toHaveBeenCalled();
+  });
+});
+
+describe('Phase 2B-2b reservice serviceIdentity & serviceLines parity', () => {
+  test('POST commit threads serviceIdentity into single-day rebuild, 409 refresh (no offer), and callbackVisit.expectedIdentity', async () => {
+    const token = 'a'.repeat(64);
+    const tomorrow = etDateString(addETDays(new Date(), 2));
+    firstResults.customers = {
+      id: CUST_ID, first_name: 'Jamie', last_name: 'Doe', active: true,
+      waveguard_tier: 'Bronze', monthly_rate: 46.33,
+      address_line1: '100 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+      latitude: 27.49, longitude: -82.57, phone: '+19415550100',
+    };
+    listResults['scheduled_services as s'] = [{ category: 'pest_control', service_type: 'General Pest Control' }];
+    listResults.services = [
+      { id: 'pest-svc', service_key: 'pest_re_service', name: 'Pest Control Re-Service', default_duration_minutes: 20 },
+    ];
+
+    const booking = require('../routes/booking')._internals;
+    const cfgSpy = jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    const buildSpy = jest.spyOn(booking, 'buildBookingAvailability')
+      .mockResolvedValueOnce({
+        slots: [], nearby: false,
+        days: [{ date: tomorrow, slots: [{ start_time: '10:00', end_time: '10:20', technician_id: 'tech-1' }] }],
+      })
+      .mockResolvedValueOnce({
+        slots: [], nearby: false,
+        days: [{ date: tomorrow, slots: [{ start_time: '14:00', end_time: '14:20', technician_id: 'tech-1' }] }],
+      });
+    const csbSpy = jest.spyOn(booking, 'createSelfBooking').mockResolvedValueOnce({ ok: false, status: 409, code: 'SLOT_TAKEN', error: 'taken' });
+
+    const commitLayer = reservicePublicRouter.stack.find((l) => l.route?.path === '/:token' && l.route.methods.post);
+    const handler = commitLayer.route.stack[commitLayer.route.stack.length - 1].handle;
+    const res = {
+      statusCode: 200,
+      status: jest.fn(function (c) { this.statusCode = c; return this; }),
+      json: jest.fn(function (b) { this.body = b; return this; }),
+    };
+
+    try {
+      await handler({ params: { token }, body: { lane: 'pest', date: tomorrow, start_time: '10:00', details: 'ants' } }, res, jest.fn());
+      expect(res.status).toHaveBeenCalledWith(409);
+      const identity = { catalogServiceKey: 'pest_re_service', serviceType: 'Pest Control Re-Service' };
+      // Both commit rebuild and 409 refresh pass serviceIdentity and omit surface/offer.
+      expect(buildSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({ serviceIdentity: identity }));
+      expect(buildSpy.mock.calls[0][0]).not.toHaveProperty('surface');
+      expect(buildSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({ serviceIdentity: identity }));
+      expect(buildSpy.mock.calls[1][0]).not.toHaveProperty('surface');
+      expect(csbSpy).toHaveBeenCalledWith(expect.objectContaining({
+        callbackVisit: expect.objectContaining({ expectedIdentity: identity }),
+      }));
+    } finally {
+      cfgSpy.mockRestore();
+      buildSpy.mockRestore();
+      csbSpy.mockRestore();
+    }
+  });
+
+  test('offer build passes preferServiceIdentity: true and honors callback catalog identity over funnel category average', async () => {
+    const oldTravelGap = process.env.GATE_SLOT_TRAVEL_GAP;
+    process.env.GATE_SLOT_TRAVEL_GAP = 'true';
+    const findSpy = jest.fn(async () => ({ slots: [], days: [] }));
+    try {
+      let isolatedBooking;
+      let clearCache;
+      jest.isolateModules(() => {
+        jest.doMock('../services/scheduling/find-time', () => ({ findAvailableSlots: findSpy }));
+        clearCache = require('../services/scheduling/expected-service-minutes').clearExpectedServiceMinutesCache;
+        isolatedBooking = require('../routes/booking')._internals;
+      });
+      clearCache();
+      listResults.services = [
+        { id: 'pest-cb', service_key: 'pest_re_service', name: 'Pest Control Re-Service', category: 'pest_control', min_duration_minutes: 15, max_duration_minutes: 25, default_duration_minutes: 20 },
+        { id: 'pest-q', service_key: 'quarterly_pest', name: 'Quarterly Pest Control Service', category: 'pest_control', min_duration_minutes: 50, max_duration_minutes: 70, default_duration_minutes: 60 },
+      ];
+      await isolatedBooking.buildBookingAvailability({
+        lat: 27.49,
+        lng: -82.57,
+        duration: 20,
+        rangeFrom: etDateString(addETDays(new Date(), 2)),
+        rangeTo: etDateString(addETDays(new Date(), 3)),
+        config: { advance_days_min: 1, advance_days_max: 14 },
+        today: new Date(),
+        serviceKey: 'pest_control',
+        serviceIdentity: { catalogServiceKey: 'pest_re_service', serviceType: 'Pest Control Re-Service' },
+        preferServiceIdentity: true,
+      });
+      expect(findSpy).toHaveBeenCalledWith(expect.objectContaining({ expectedMinutes: 20 }));
+
+      findSpy.mockClear();
+      await isolatedBooking.buildBookingAvailability({
+        lat: 27.49,
+        lng: -82.57,
+        duration: 60,
+        rangeFrom: etDateString(addETDays(new Date(), 2)),
+        rangeTo: etDateString(addETDays(new Date(), 3)),
+        config: { advance_days_min: 1, advance_days_max: 14 },
+        today: new Date(),
+        serviceKey: 'pest_control',
+        serviceIdentity: { catalogServiceKey: 'pest_re_service', serviceType: 'Pest Control Re-Service' },
+      });
+      // Funnel default keeps the pest_control category average ((20+60)/2 = 40), not the 20-minute callback row.
+      expect(findSpy).toHaveBeenCalledWith(expect.objectContaining({ expectedMinutes: 40 }));
+    } finally {
+      if (oldTravelGap === undefined) delete process.env.GATE_SLOT_TRAVEL_GAP;
+      else process.env.GATE_SLOT_TRAVEL_GAP = oldTravelGap;
+    }
   });
 });
