@@ -1918,9 +1918,10 @@ function mergeProductLines(lines) {
     const existing = byCard.get(id);
     if (!existing) { byCard.set(id, { ...line, extraLines: [] }); continue; }
     const shared = Object.fromEntries(SHARED_LINE_FIELDS.map((field) => [field, existing[field] || line[field]]).filter(([, value]) => value));
+    const lineText = (item, ownerSource) => (item.source && item.source !== ownerSource ? `${item.source}: ${item.raw}` : item.raw);
     const kept = line.selected && !existing.selected
-      ? { ...line, extraLines: [existing.raw, ...existing.extraLines] }
-      : { ...existing, extraLines: [...existing.extraLines, line.raw] };
+      ? { ...line, extraLines: [lineText(existing, line.source), ...existing.extraLines] }
+      : { ...existing, extraLines: [...existing.extraLines, lineText(line, existing.source)] };
     byCard.set(id, { ...kept, ...shared });
   }
   return [...byCard.values()];
@@ -2266,7 +2267,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const rainRules = rainRulesFor(products, (p) => sprayServicesForProduct(p, lines, procedureEntries, facts));
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources, rainRules });
   attachMixSprayVerdicts(procedureEntries, sprayCheck.verdicts);
-  const cardLines = [...lines, ...requiredMixRateLines(procedureEntries, lines, catalog)];
+  const cardLines = [...lines, ...requiredMixRateLines(procedureEntries, catalog)];
   if (isToday && products.length) {
     const shadow = sprayCheck;
     const names = new Map(products.map((p) => [p.id, p.name]));
@@ -2872,18 +2873,17 @@ function isConditionalMixRow(row) {
   return CONDITIONAL_MIX_ROW_RE.test([row?.condition, row?.where, row?.limit].filter(Boolean).join('; '));
 }
 
-function requiredMixRateLines(entries, lines, catalog) {
-  const selectedLineIds = new Set(lines.filter((l) => l.selected !== false).map((l) => String(l.product.id)));
+function requiredMixRateLines(entries, catalog) {
   const catalogById = new Map(catalog.map((p) => [String(p.id), p]));
   const out = [];
   for (const entry of entries) {
     const entryLineIds = new Set((entry.lines || []).map((l) => String(l.product.id)));
     for (const row of entryMixRateRows(entry)) {
       const id = row.productId ? String(row.productId) : null;
-      if (!id || entryLineIds.has(id) || selectedLineIds.has(id) || isConditionalMixRow(row)) continue;
+      if (!id || entryLineIds.has(id) || isConditionalMixRow(row)) continue;
       const product = catalogById.get(id);
       if (!product) continue;
-      selectedLineIds.add(id);
+      entryLineIds.add(id);
       const detail = [row.product, row.where, row.sprayVolume, row.limit].filter(Boolean).join(' — ');
       out.push({ product, role: 'base', selected: true, raw: detail || row.product || '', ...(entry.isAddon ? { source: entry.name } : {}) });
     }

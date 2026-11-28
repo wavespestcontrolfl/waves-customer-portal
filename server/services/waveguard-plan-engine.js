@@ -1780,8 +1780,21 @@ async function getActiveCalibrations(knex, filters = {}, { strict = false } = {}
   return savepointRead(knex, () => query).catch((err) => { if (strict) throw err; return []; });
 }
 
+async function resolveAssignedSystemId(knex, service, { strict = false } = {}) {
+  if (service.assigned_equipment_system_id) return service.assigned_equipment_system_id;
+  if (!service.assigned_calibration_id) return null;
+  const row = await savepointRead(knex, () => knex('equipment_calibrations')
+    .where({ id: service.assigned_calibration_id })
+    .first('equipment_system_id'))
+    .catch((err) => { if (strict) throw err; return null; });
+  return row?.equipment_system_id || null;
+}
+
 async function loadServiceCalibrations(knex, service, options = {}, { strict = false } = {}) {
-  const rigOverridden = Boolean(options.equipmentSystemId && String(options.equipmentSystemId) !== String(service.assigned_equipment_system_id || ''));
+  const assignedSystemId = options.equipmentSystemId && !options.calibrationId && service.assigned_calibration_id
+    ? await resolveAssignedSystemId(knex, service, { strict })
+    : service.assigned_equipment_system_id;
+  const rigOverridden = Boolean(options.equipmentSystemId && String(options.equipmentSystemId) !== String(assignedSystemId || ''));
   const equipmentSystemId = options.equipmentSystemId || service.assigned_equipment_system_id;
   const calibrationId = options.calibrationId || (rigOverridden ? null : service.assigned_calibration_id);
   const rows = await getActiveCalibrations(knex, { equipmentSystemId, calibrationId }, { strict });

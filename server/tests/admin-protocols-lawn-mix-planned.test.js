@@ -450,7 +450,7 @@ describe('resolveMixWith: the tank sheet ties a mix by product id, from the plan
 });
 
 describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like the plan engine', () => {
-  const { loadSheetCalibration, getBackpackCalibration } = adminProtocolsRouter._internals;
+  const { loadSheetCalibration, getBackpackCalibration, getActiveBigTanks } = adminProtocolsRouter._internals;
 
   test('system-only visit assignment excludes another technician calibration and keeps shared or assigned technician rows', async () => {
     const otherTechRow = { id: 'cal-b', equipment_system_id: 'sys-1', technician_id: 'tech-b', system_name: 'Truck #1', carrier_gal_per_1000: 2.5 };
@@ -464,7 +464,7 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
     );
     expect(rejected).toMatchObject({ rigId: 'sys-1', calibration: null, calibrationScope: { scopeByTechnician: true, technicianId: 'tech-a' } });
 
-    // The backpack fallback obeys the same technician scope so a rejected FlowZone calibration is not reloaded.
+    // The backpack fallback and alternate 110-gal tank options obey the same technician scope.
     backpackCalibration = [{ id: 'bp-b', equipment_system_id: 'bp-sys', technician_id: 'tech-b', system_name: 'FlowZone Typhoon 3.0', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.5 }];
     expect(await getBackpackCalibration(rejected.calibration, rejected.calibrationScope)).toBeNull();
     backpackCalibration = [
@@ -472,6 +472,13 @@ describe('loadSheetCalibration: scheduled tank sheet scopes calibrations like th
       { id: 'bp-a', equipment_system_id: 'bp-sys', technician_id: 'tech-a', system_name: 'FlowZone Typhoon 3.0', system_type: 'backpack', tank_capacity_gal: 4, carrier_gal_per_1000: 1.2 },
     ];
     expect(await getBackpackCalibration(rejected.calibration, rejected.calibrationScope)).toMatchObject({ id: 'bp-a' });
+
+    calibration = [
+      { id: 'tank-b', equipment_system_id: 'sys-2', technician_id: 'tech-b', system_name: '110-Gallon Spray Tank #2', system_type: 'tank', tank_capacity_gal: 110, carrier_gal_per_1000: 3 },
+      { id: 'tank-shared', equipment_system_id: 'sys-1', technician_id: null, system_name: '110-Gallon Spray Tank #1', system_type: 'tank', tank_capacity_gal: 110, carrier_gal_per_1000: 2 },
+    ];
+    expect((await getActiveBigTanks(rejected.calibrationScope)).map((r) => r.id)).toEqual(['tank-shared']);
+    expect((await getActiveBigTanks({ scopeByTechnician: false })).map((r) => r.id)).toEqual(['tank-b', 'tank-shared']);
 
     calibration = [otherTechRow, ownTechRow];
     const matchedOwn = await loadSheetCalibration(

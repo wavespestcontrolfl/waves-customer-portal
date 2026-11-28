@@ -4466,6 +4466,40 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const bedBugCimexaCalc = await jobCard.mixForProduct('cimexa', 1, { serviceId: 'svc28', dbh: bedBugFollowupDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(bedBugCimexaCalc.context.conditional).toBe(true);
 
+    // Required mixRates rows are deduplicated per service, so a primary service selecting Taurus does not drop an add-on's Taurus placement text.
+    const bothReqProtocols = {
+      termite: {
+        name: 'Termite Liquid Trench & Rod',
+        visits: [{ visit: 3, month: 'Any', primary: 'Taurus SC trench along foundation' }],
+      },
+      pest: {
+        name: 'Quarterly Pest Control',
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Exterior perimeter',
+          mixRates: [{ product: 'Taurus SC', where: 'Outside: foundation band', perGallon: { amount: 0.4, unit: 'fl oz' }, epa: '53883-279' }],
+        }],
+      },
+    };
+    const bothReqDb = dbFor({
+      scheduled_services: [{ id: 'svc29', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Termite Liquid Trench & Rod', service_category: 'termite', latitude: 27.33, longitude: -82.53, first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [windyEmptyTaurus],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control', service_key: 'pest_general_quarterly' }],
+    });
+    const bothReqCard = await jobCard.buildJobCard('svc29', {
+      dbh: bothReqDb,
+      deps: { protocols: bothReqProtocols, getRecentCalls: async () => [], getHourly: async () => readinessHourly },
+      now: new Date('2028-03-10T15:00:00Z'),
+    });
+    expect(bothReqCard.products).toEqual([
+      expect.objectContaining({ id: 'taurus', line: expect.stringContaining('Quarterly Pest Control: Taurus SC — Outside: foundation band') }),
+    ]);
+
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],
       products_catalog: [tristar],

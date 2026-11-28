@@ -813,8 +813,8 @@ async function assignedRigId(scheduled) {
 }
 
 // Every active 110 gal tank's active calibration, tank #1 first (as getActiveCalibration orders them).
-async function getActiveBigTanks() {
-  return db('equipment_calibrations as ec')
+async function getActiveBigTanks(scope = {}) {
+  const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where({ 'ec.active': true, 'es.active': true, 'es.system_type': 'tank' })
     .where('es.tank_capacity_gal', BIG_TANK_CAPACITY_GAL)
@@ -822,6 +822,7 @@ async function getActiveBigTanks() {
     .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 else 1 end")
     // No catch: a failed read fails the sheet, never one tank's number shown as if it were the only tank.
     .orderBy('es.name', 'asc');
+  return (rows || []).filter((row) => calibrationAllowedForScope(row, scope));
 }
 const BIG_TANK_CAPACITY_GAL = 110;
 
@@ -1306,7 +1307,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // neither: every active 110 gal tank, so the sheet names each tank's amount when their numbers differ.
     const { rigId, calibration, calibrationScope } = await loadSheetCalibration(req, scheduled);
     const backpack = await getBackpackCalibration(calibration, calibrationScope);
-    const bigTanks = rigId ? [] : await getActiveBigTanks();
+    const bigTanks = rigId ? [] : await getActiveBigTanks(calibrationScope);
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
@@ -2311,6 +2312,7 @@ router._internals = {
   resolveMixWith,
   loadSheetCalibration,
   getBackpackCalibration,
+  getActiveBigTanks,
 };
 
 module.exports = router;

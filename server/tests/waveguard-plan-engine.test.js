@@ -1289,4 +1289,26 @@ describe('loadServiceCalibrations technician scoping', () => {
     expect(whereCalls).toContainEqual(['ec.equipment_system_id', 'rig-b']);
     expect(whereCalls).not.toContainEqual(['ec.id', 'cal-a']);
   });
+
+  test('selecting the pinned calibration own rig keeps the calibration pin even when assigned_equipment_system_id is null', async () => {
+    const whereCalls = [];
+    const knex = (table) => {
+      const q = {
+        join: () => q,
+        where: (...args) => { if (table === 'equipment_calibrations as ec') whereCalls.push(args); return q; },
+        select: () => q,
+        orderBy: () => q,
+        first: () => Promise.resolve({ equipment_system_id: 'rig-a' }),
+        then: (res, rej) => Promise.resolve([{ id: 'cal-a', equipment_system_id: 'rig-a', technician_id: null, carrier_gal_per_1000: 1.8 }]).then(res, rej),
+      };
+      return q;
+    };
+    const out = await loadServiceCalibrations(
+      knex,
+      { assigned_equipment_system_id: null, assigned_calibration_id: 'cal-a', technician_id: 'tech-a' },
+      { equipmentSystemId: 'rig-a' },
+    );
+    expect(out.map((r) => r.id)).toEqual(['cal-a']);
+    expect(whereCalls).toContainEqual(['ec.id', 'cal-a']);
+  });
 });
