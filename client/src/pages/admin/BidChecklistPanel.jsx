@@ -36,6 +36,54 @@ const Section = ({ title, children }) => (
   </section>
 );
 
+function detailsSnapshot(bid) {
+  return {
+    type: bid.solicitation_type || "",
+    scored: scoredOf(bid.scored),
+    questions: etDatetimeLocalValue(bid.questions_due_at),
+    walk: etDatetimeLocalValue(bid.job_walk_at),
+    mandatory: !!bid.job_walk_mandatory,
+  };
+}
+
+const SCORED_LABELS = { "": "(none)", scored: "Scored proposal", pass_fail: "Pass or fail" };
+const DETAILS_LABELS = {
+  type: "Solicitation type",
+  scored: "How it is judged",
+  questions: "Questions due",
+  walk: "Site visit",
+  mandatory: "Mandatory",
+};
+const SUBMISSION_LABELS = {
+  at: "Submitted",
+  confirmation: "Confirmation number",
+};
+
+function formatConflictValue(key, value) {
+  if (key === "type") return TYPE_LABEL[value] || value || "(none)";
+  if (key === "scored") return SCORED_LABELS[value] || value || "(none)";
+  if (key === "mandatory") return value ? "Yes" : "No";
+  return value || "(none)";
+}
+
+function reconcileFormFields(current, prevServer, nextServer, labels) {
+  const merged = {};
+  const conflicts = [];
+  for (const key of Object.keys(nextServer)) {
+    const untouched = !prevServer || current[key] === prevServer[key];
+    merged[key] = untouched ? nextServer[key] : current[key];
+    if (!untouched && nextServer[key] !== prevServer[key] && current[key] !== nextServer[key]) {
+      conflicts.push(
+        `${labels[key]} is now "${formatConflictValue(key, nextServer[key])}" on the server (your draft: "${formatConflictValue(key, current[key])}")`,
+      );
+    }
+  }
+  return {
+    merged,
+    conflictNote: conflicts.length ? `Server updated while you were editing: ${conflicts.join("; ")}.` : "",
+  };
+}
+
 function isDetailsDirty(form, bid) {
   if (!("type" in form)) return false;
   return orNull(form.type) !== (bid.solicitation_type || null)
@@ -46,13 +94,19 @@ function isDetailsDirty(form, bid) {
 }
 
 function Details({ bid, busy, save, onDirtyChange }) {
-  const [form, setForm] = useState({});
+  const [form, setForm] = useState(() => detailsSnapshot(bid));
   const [unchanged, setUnchanged] = useState(false);
+  const [conflictNote, setConflictNote] = useState("");
+  const formRef = useRef(form);
+  formRef.current = form;
+  const prevServerRef = useRef(detailsSnapshot(bid));
   useEffect(() => {
-    setForm({
-      type: bid.solicitation_type || "", scored: scoredOf(bid.scored), questions: etDatetimeLocalValue(bid.questions_due_at),
-      walk: etDatetimeLocalValue(bid.job_walk_at), mandatory: !!bid.job_walk_mandatory,
-    });
+    const nextServer = detailsSnapshot(bid);
+    const prevServer = prevServerRef.current;
+    prevServerRef.current = nextServer;
+    const { merged, conflictNote: note } = reconcileFormFields(formRef.current, prevServer, nextServer, DETAILS_LABELS);
+    setForm(merged);
+    if (note) setConflictNote(note);
   }, [bid.solicitation_type, bid.scored, bid.questions_due_at, bid.job_walk_at, bid.job_walk_mandatory]);
   const dirty = isDetailsDirty(form, bid);
   useEffect(() => {
@@ -61,6 +115,7 @@ function Details({ bid, busy, save, onDirtyChange }) {
   }, [dirty, onDirtyChange]);
   const set = (key) => (event) => {
     setUnchanged(false);
+    setConflictNote("");
     setForm((f) => ({ ...f, [key]: event.target.type === "checkbox" ? event.target.checked : event.target.value }));
   };
   return (
@@ -108,10 +163,12 @@ function Details({ bid, busy, save, onDirtyChange }) {
             if (form.walk !== etDatetimeLocalValue(bid.job_walk_at)) body.jobWalkAt = orNull(form.walk);
             if (Object.keys(body).length === 0) { setUnchanged(true); return; }
             setUnchanged(false);
+            setConflictNote("");
             save(body, "Bid details saved");
           }}>Save bid details</Button>
         </div>
         {unchanged && <ActionFeedback>Nothing changed</ActionFeedback>}
+        {conflictNote && <ActionFeedback error>{conflictNote}</ActionFeedback>}
       </div>
     </div>
   );
@@ -120,17 +177,25 @@ function Details({ bid, busy, save, onDirtyChange }) {
 function EstimateLink({ bid, estimate, busy, save }) {
   const [query, setQuery] = useState("");
   const [found, setFound] = useState(null);
+  const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
+  const searchSeqRef = useRef(0);
   const search = async () => {
+    const seq = ++searchSeqRef.current;
+    setSearching(true);
     setError("");
     try {
       const res = await adminFetch(`/admin/bid-desk/estimates?q=${encodeURIComponent(query.trim())}`);
       const body = await res.json().catch(() => ({}));
+      if (seq !== searchSeqRef.current) return;
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
       setFound(body.estimates || []);
     } catch (err) {
+      if (seq !== searchSeqRef.current) return;
       setFound(null);
       setError(`Search failed: ${err.message}`);
+    } finally {
+      if (seq === searchSeqRef.current) setSearching(false);
     }
   };
   if (bid.estimate_id && estimate) {
@@ -151,7 +216,7 @@ function EstimateLink({ bid, estimate, busy, save }) {
             <Input value={query} onChange={(event) => setQuery(event.target.value)} autoComplete="off" />
           </Field>
         </div>
-        <Button variant="secondary" disabled={busy || query.trim().length < 2} onClick={search}>Search estimates</Button>
+        <Button variant="secondary" disabled={busy || searching || query.trim().length < 2} onClick={search}>Search estimates</Button>
       </div>
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       {found && found.length === 0 && <div className="text-ui-body text-ink-secondary">No estimate matches.</div>}
@@ -171,10 +236,17 @@ function EstimateLink({ bid, estimate, busy, save }) {
 
 function Documents({ documents }) {
   const [error, setError] = useState("");
+  const [downloadingIds, setDownloadingIds] = useState(() => new Set());
   const download = async (doc) => {
+    if (downloadingIds.has(doc.id)) return;
+    setDownloadingIds((cur) => {
+      const next = new Set(cur);
+      next.add(doc.id);
+      return next;
+    });
     setError("");
     try {
-      const res = await adminFetch(`/admin/email/message/${doc.email_id}/attachment/${encodeURIComponent(doc.gmail_attachment_id)}`, { skipContentType: true });
+      const res = await adminFetch(`/admin/email/message/${doc.email_id}/attachment/${encodeURIComponent(doc.gmail_attachment_id)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const url = URL.createObjectURL(await res.blob());
       const link = document.createElement("a");
@@ -183,9 +255,16 @@ function Documents({ documents }) {
       document.body.appendChild(link);
       link.click();
       link.remove();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL?.(url), 10000);
     } catch {
       setError("Could not download the file. Try again.");
+    } finally {
+      setDownloadingIds((cur) => {
+        if (!cur.has(doc.id)) return cur;
+        const next = new Set(cur);
+        next.delete(doc.id);
+        return next;
+      });
     }
   };
   if (!documents.length) return <div className="text-ui-body text-ink-secondary">No files came with the emails on this bid.</div>;
@@ -197,7 +276,11 @@ function Documents({ documents }) {
             <span className="min-w-0 break-words font-medium">{doc.name}</span>
             {doc.size != null && <span className="text-ink-secondary">{sizeText(doc.size)}</span>}
             <span className="min-w-0 break-words text-ink-secondary">from “{doc.email_subject || "(no subject)"}”</span>
-            {doc.gmail_attachment_id && <Button size="sm" variant="secondary" aria-label={`Download ${doc.name}`} onClick={() => download(doc)}>Download</Button>}
+            {doc.gmail_attachment_id && (
+              <Button size="sm" variant="secondary" disabled={downloadingIds.has(doc.id)} aria-label={`Download ${doc.name}`} onClick={() => download(doc)}>
+                Download
+              </Button>
+            )}
           </li>
         ))}
       </ul>
@@ -334,7 +417,7 @@ function AddRow({ busy, onAdd, onDirtyChange }) {
 
 function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, kit, onDirtyChange }) {
   const act = (path, method, body, query = "") => adminFetch(`/admin/bid-desk/${bidId}/checklist${path}${query}`, { method, ...(body === undefined ? {} : { body }) });
-  const start = (query) => run(() => act("/start", "POST", bid.solicitation_type ? { type: bid.solicitation_type } : {}, query));
+  const start = (query) => run(() => act("/start", "POST", {}, query));
   // "Add missing lines" is offered whenever the bid has template lines it does not carry (an unset type means the base
   // ten), even with no live lines left (a line added and removed must not leave the page with no way to start).
   const addMissing = missing > 0 && (
@@ -381,11 +464,20 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, ki
 }
 
 function Submission({ bid, busy, save, invite, onDirtyChange }) {
-  const [at, setAt] = useState("");
-  const [confirmation, setConfirmation] = useState("");
+  const [at, setAt] = useState(() => etDatetimeLocalValue(bid.submitted_at));
+  const [confirmation, setConfirmation] = useState(() => bid.submission_confirmation || "");
+  const [conflictNote, setConflictNote] = useState("");
+  const currentRef = useRef({ at, confirmation });
+  currentRef.current = { at, confirmation };
+  const prevServerRef = useRef({ at: etDatetimeLocalValue(bid.submitted_at), confirmation: bid.submission_confirmation || "" });
   useEffect(() => {
-    setAt(etDatetimeLocalValue(bid.submitted_at));
-    setConfirmation(bid.submission_confirmation || "");
+    const nextServer = { at: etDatetimeLocalValue(bid.submitted_at), confirmation: bid.submission_confirmation || "" };
+    const prev = prevServerRef.current;
+    prevServerRef.current = nextServer;
+    const { merged, conflictNote: note } = reconcileFormFields(currentRef.current, prev, nextServer, SUBMISSION_LABELS);
+    setAt(merged.at);
+    setConfirmation(merged.confirmation);
+    if (note) setConflictNote(note);
   }, [bid.submitted_at, bid.submission_confirmation]);
   const dirty = at !== etDatetimeLocalValue(bid.submitted_at) || confirmation !== (bid.submission_confirmation || "");
   useEffect(() => {
@@ -397,13 +489,14 @@ function Submission({ bid, busy, save, invite, onDirtyChange }) {
       {invite && <div className="mb-2 text-ui-body text-ink-secondary">Record when the bid was handed in and the confirmation number. Neither is required.</div>}
       <div className="grid gap-3 md:grid-cols-[minmax(0,16rem)_minmax(0,1fr)_auto] md:items-end">
         <Field id="bid-submitted-at" label="Submitted (Eastern time)">
-          <Input type="datetime-local" value={at} onChange={(event) => setAt(event.target.value)} />
+          <Input type="datetime-local" value={at} onChange={(event) => { setConflictNote(""); setAt(event.target.value); }} />
         </Field>
         <Field id="bid-confirmation" label="Confirmation number or receipt">
-          <Input value={confirmation} maxLength={500} onChange={(event) => setConfirmation(event.target.value)} />
+          <Input value={confirmation} maxLength={500} onChange={(event) => { setConflictNote(""); setConfirmation(event.target.value); }} />
         </Field>
-        <Button disabled={busy} onClick={() => save({ submittedAt: orNull(at), submissionConfirmation: confirmation.trim() }, "Submission record saved")}>Save submission</Button>
+        <Button disabled={busy} onClick={() => { setConflictNote(""); save({ submittedAt: orNull(at), submissionConfirmation: confirmation.trim() }, "Submission record saved"); }}>Save submission</Button>
       </div>
+      {conflictNote && <ActionFeedback error className="mt-2">{conflictNote}</ActionFeedback>}
     </>
   );
 }
@@ -414,8 +507,15 @@ function Submission({ bid, busy, save, invite, onDirtyChange }) {
  * @param save      (body, doneMessage) => Promise<boolean>: a PATCH of the bid, by the page
  * @param invite    true while the Decision field says Submitted: the submission record is invited, never required
  */
-export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite, onProgress, onDirtyChange }) {
+export default function BidChecklistPanel({ bidId, bid, extras, save, busy: parentBusy, invite, onProgress, reloadSeqRef, onDirtyChange }) {
+  const localSeqRef = useRef(0);
+  const seqRef = reloadSeqRef || localSeqRef;
   const [state, setState] = useState(extras);
+  useEffect(() => {
+    if (extras?._seq == null || extras._seq >= seqRef.current) {
+      setState(extras);
+    }
+  }, [extras, seqRef]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState({ text: "", error: false });
   const [refreshError, setRefreshError] = useState("");
@@ -446,24 +546,23 @@ export default function BidChecklistPanel({ bidId, bid, extras, save, busy: pare
 
   // Reloads the lines, progress, estimate and documents. A failure (network error, a refusal, the gate turned off) is
   // shown in the checklist section until the next success; it never throws.
-  // Reloads can overlap now (a note save runs beside a tick); only the newest reload is applied.
-  const refreshSeq = useRef(0);
+  // Reloads can overlap now (a note save runs beside a tick or a parent reload); only the newest reload is applied.
   const refresh = useCallback(async () => {
-    const seq = ++refreshSeq.current;
+    const seq = ++seqRef.current;
     try {
       const res = await adminFetch(`/admin/bid-desk/${bidId}`);
       const body = await res.json().catch(() => ({}));
-      if (seq !== refreshSeq.current) return;
+      if (seq !== seqRef.current) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setState({ checklist: body.checklist, progress: body.checklist_progress, missing: body.checklist_missing ?? 0, estimate: body.estimate, documents: body.documents });
       // The list row's chip follows at once, not on the next list load.
       if (onProgress) onProgress(bidId, body.checklist_progress);
       setRefreshError("");
     } catch {
-      if (seq !== refreshSeq.current) return;
+      if (seq !== seqRef.current) return;
       setRefreshError("Could not reload the checklist, so the lines below may be out of date. Reload the page to check.");
     }
-  }, [bidId, onProgress]);
+  }, [bidId, onProgress, seqRef]);
 
   // A linked or unlinked estimate, or a new solicitation type, changes what the server builds (the estimate summary,
   // and how many template lines for the type the bid does not carry yet).

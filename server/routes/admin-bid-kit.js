@@ -143,6 +143,22 @@ async function activity(req, action, row, changed) {
     { bid_kit_item_id: row.id, item_key: entry ? row.item_key : 'custom', ...(fields ? { fields } : {}) });
 }
 
+// Post-commit side effects (activity row and optional expiry bell sync) run best-effort so a log or bell outage
+// never turns an already-committed write into a 500.
+async function afterCommit(req, action, row, { changed = null, syncBell = false, context = action } = {}) {
+  try {
+    await activity(req, action, row, changed);
+  } catch (err) {
+    logger.warn(`[bid-kit] activity row after ${context} failed: ${errorTag(err)}`);
+  }
+  if (!syncBell) return;
+  try {
+    await expiry.syncExpiryBell(statusRow(row));
+  } catch (err) {
+    logger.warn(`[bid-kit] expiry bell after ${context} failed: ${errorTag(err)}`);
+  }
+}
+
 router.get('/', async (req, res, next) => {
   try {
     const today = catalog.etToday();
@@ -206,7 +222,7 @@ router.post('/', async (req, res, next) => {
       { unique: !isCustom && !item.many },
     );
     if (outcome.duplicate) return res.status(409).json({ error: 'This item already exists. Edit it instead.' });
-    await activity(req, 'bid_kit_created', outcome.item);
+    await afterCommit(req, 'bid_kit_created', outcome.item);
     return res.status(201).json({ item: present(statusRow(outcome.item), catalog.etToday()) });
   } catch (err) {
     return next(scrubError(err));
@@ -233,8 +249,10 @@ router.patch('/:id', async (req, res, next) => {
     });
     if (outcome.notFound) return res.status(404).json({ error: 'Not found' });
     if (outcome.error) return res.status(outcome.error.status).json({ error: outcome.error.message });
-    await activity(req, 'bid_kit_updated', outcome.item, changedFields(outcome.before, outcome.item, Object.keys(rest)));
-    await expiry.syncExpiryBell(statusRow(outcome.item));
+    await afterCommit(req, 'bid_kit_updated', outcome.item, {
+      changed: changedFields(outcome.before, outcome.item, Object.keys(rest)),
+      syncBell: true,
+    });
     return res.json({ item: present(statusRow(outcome.item), catalog.etToday()) });
   } catch (err) {
     return next(scrubError(err));
@@ -255,7 +273,7 @@ router.post('/:id/attest', async (req, res, next) => {
     });
     if (outcome.notFound) return res.status(404).json({ error: 'Not found' });
     if (outcome.error) return res.status(outcome.error.status).json({ error: outcome.error.message });
-    await activity(req, 'bid_kit_attested', outcome.item);
+    await afterCommit(req, 'bid_kit_attested', outcome.item);
     return res.json({ item: present(statusRow(outcome.item), today) });
   } catch (err) {
     return next(scrubError(err));
@@ -306,16 +324,11 @@ async function replaceStoredFile(id, stored, expectedUpdatedAt) {
 // delete the new object; a failure is logged with a fixed line.
 async function afterReplacement(req, outcome) {
   if (outcome.oldKey) await files.deleteFile(outcome.oldKey);
-  try {
-    await activity(req, 'bid_kit_file_uploaded', outcome.item, ['file']);
-  } catch (err) {
-    logger.warn(`[bid-kit] activity row after a file replacement failed: ${errorTag(err)}`);
-  }
-  try {
-    await expiry.syncExpiryBell(statusRow(outcome.item));
-  } catch (err) {
-    logger.warn(`[bid-kit] expiry bell after a file replacement failed: ${errorTag(err)}`);
-  }
+  await afterCommit(req, 'bid_kit_file_uploaded', outcome.item, {
+    changed: ['file'],
+    syncBell: true,
+    context: 'a file replacement',
+  });
 }
 
 router.post('/:id/file', receiveFile, async (req, res, next) => {
@@ -364,8 +377,7 @@ router.delete('/:id', async (req, res, next) => {
     if (outcome.notFound) return res.status(404).json({ error: 'Not found' });
     if (outcome.conflict) return res.status(409).json({ error: CHANGED });
     const row = outcome.item;
-    await activity(req, 'bid_kit_archived', row);
-    await expiry.syncExpiryBell(statusRow(row));
+    await afterCommit(req, 'bid_kit_archived', row, { syncBell: true });
     logger.info(`[bid-kit] item archived (${row.item_key})`);
     return res.json({ success: true, item: present(statusRow(row), catalog.etToday()) });
   } catch (err) {

@@ -124,9 +124,16 @@ async function reorderItems(conn, bidId, ids) {
   const live = await conn('bid_checklist_items').where({ bid_id: bidId }).whereNull('archived_at').forUpdate().select('id');
   const want = new Set(live.map((row) => row.id));
   if (ids.length !== want.size || new Set(ids).size !== ids.length || !ids.every((id) => want.has(id))) return false;
-  for (let index = 0; index < ids.length; index += 1) {
-    await conn('bid_checklist_items').where({ id: ids[index], bid_id: bidId }).update({ position: index + 1, updated_at: conn.fn.now() });
-  }
+  if (!ids.length) return true;
+  const placeholders = ids.map(() => '(?::uuid, ?::int)').join(', ');
+  const bindings = ids.flatMap((id, index) => [id, index + 1]);
+  await conn.raw(
+    `UPDATE bid_checklist_items AS i
+     SET position = v.pos, updated_at = NOW()
+     FROM (VALUES ${placeholders}) AS v(id, pos)
+     WHERE i.id = v.id AND i.bid_id = ?`,
+    [...bindings, bidId],
+  );
   return true;
 }
 
