@@ -274,14 +274,16 @@ function threadSchedulingFollowUp({ inboundMessage, inboundPhone, smsHistory, no
           return { carried: false, reason: 'non_appointment_subject', anchorText: '' };
         }
         const priorCustomer = collectCurrentCustomerTurns(recent, i + 1);
-        const anchorText = [...priorCustomer, `Staff asked: ${String(turn.body).trim()}`].join('\n');
+        const newerCustomer = recent.slice(0, i).reverse().map((r) => String(r.body).trim());
+        const anchorText = [...priorCustomer, `Staff asked: ${String(turn.body).trim()}`, ...newerCustomer].join('\n');
         return { carried: true, reason: 'staff_scheduling_question', anchorText };
       }
       return { carried: false, reason: 'staff_closed_thread', anchorText: '' };
     }
     if (isCustomerAppointmentAsk(turn.body)) {
       const priorContext = collectCurrentCustomerTurns(recent, i + 1);
-      const anchorText = [...priorContext, String(turn.body).trim()].join('\n');
+      const newerCustomer = recent.slice(0, i).reverse().map((r) => String(r.body).trim());
+      const anchorText = [...priorContext, String(turn.body).trim(), ...newerCustomer].join('\n');
       return { carried: true, reason: 'prior_customer_booking_ask', anchorText };
     }
     if (isCustomerTopicBarrier(turn.body)) {
@@ -351,8 +353,17 @@ function effectiveSchedulingIntent(directSchedulingIntent, openTimesStamp) {
 }
 
 function namedDayMatcherForThread(inboundMessage, threadFollowUp) {
-  return namedDayMatcher(inboundMessage)
-    || (threadFollowUp?.anchorText ? namedDayMatcher(threadFollowUp.anchorText) : null);
+  const direct = namedDayMatcher(inboundMessage);
+  if (direct) return direct;
+  const anchor = String(threadFollowUp?.anchorText || '');
+  if (!anchor) return null;
+  const lines = anchor.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).reverse();
+  for (const line of lines) {
+    if (line.startsWith('Staff asked:')) continue;
+    const match = namedDayMatcher(line);
+    if (match) return match;
+  }
+  return null;
 }
 
 module.exports = {

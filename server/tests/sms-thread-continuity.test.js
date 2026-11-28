@@ -517,5 +517,22 @@ describe('threadSchedulingFollowUp', () => {
       ],
     });
     expect(retrospectiveQuestion).toEqual({ carried: false, reason: 'staff_closed_thread', anchorText: '' });
+
+    // Codex P2: preserve customer day preference sent AFTER the staff scheduling question
+    const newerCustomerDay = threadSchedulingFollowUp({
+      inboundMessage: 'Anytime works',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'inbound', body: 'Friday works', date: minsAgo(5), fromPhone: ME, toPhone: WAVES },
+        { direction: 'outbound', body: 'What day works best for your lawn visit? Tuesday or Wednesday?', date: minsAgo(15), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+      ],
+    });
+    expect(newerCustomerDay.carried).toBe(true);
+    expect(newerCustomerDay.anchorText).toContain('Friday works');
+    expect(newerCustomerDay.anchorText).toContain('lawn visit');
+    const newerMatcher = namedDayMatcherForThread('Anytime works', newerCustomerDay);
+    expect(newerMatcher('Friday, December 11', '2026-12-11')).toEqual(['weekday:friday']);
+    expect(newerMatcher('Tuesday, December 8', '2026-12-08')).toEqual([]);
   });
 });
