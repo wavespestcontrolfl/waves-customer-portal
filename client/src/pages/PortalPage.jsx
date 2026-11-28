@@ -5566,23 +5566,24 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
 function ReminderContactsSection({ property, enabled, savedContactsKey, muted, buttonStyle }) {
   const profileId = property.customerId || property.id;
   const [list, setList] = useState([]);
+  const [loadErr, setLoadErr] = useState('');
   const [busyId, setBusyId] = useState(null);
   // A Stop / Restart bumps this: a read that started before it is dropped, so it never puts back the old state, and
   // the list then reads again (reloads), so nothing a dropped read carried (such as "also in your contacts") is lost.
   const readSeq = useRef(0);
   const [reloads, setReloads] = useState(0);
   useEffect(() => {
-    if (!enabled || !profileId) { setList([]); return undefined; }
+    if (!enabled || !profileId) { setList([]); setLoadErr(''); return undefined; }
     let alive = true;
     const mine = ++readSeq.current;
     const current = () => alive && readSeq.current === mine;
     Promise.resolve(api.getReminderContacts(profileId))
-      .then((res) => { if (current()) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
-      .catch((err) => { console.error(err); if (current()) setList([]); });
+      .then((res) => { if (current()) { setLoadErr(''); setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); } })
+      .catch((err) => { console.error(err); if (current()) setLoadErr('Could not refresh reminder contacts.'); });
     return () => { alive = false; };
   // savedContactsKey: a count of contact saves, so "also in your contacts" stays current after the editor above saves.
   }, [enabled, profileId, savedContactsKey, reloads]);
-  if (!enabled || !list.length) return null;
+  if (!enabled || (!list.length && !loadErr)) return null;
   const toggle = async (person) => {
     if (busyId) return;
     setBusyId(person.id);
@@ -5610,6 +5611,12 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
       <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.4 }}>
         People named on a call get the booking, reminder and on-the-way texts for every visit. Stop and Restart apply to every address on this profile. Being on this list does not give app access.
       </div>
+      {loadErr && (
+        <div role="alert" style={{ fontSize: 14, color: B.orange, marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span>{loadErr}</span>
+          <button type="button" onClick={() => setReloads((n) => n + 1)} style={{ ...buttonStyle, padding: '4px 10px', fontSize: 14 }}>Retry</button>
+        </div>
+      )}
       {list.map((person) => {
         const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'Contact';
         const busy = busyId === person.id;

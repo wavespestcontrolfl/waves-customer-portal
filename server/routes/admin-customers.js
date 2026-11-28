@@ -1520,6 +1520,49 @@ function compactServiceContactSlots(updates, before = {}) {
   return updates;
 }
 
+const SERVICE_CONTACT_ALL_COLS = SERVICE_CONTACT_SLOT_FIELDS.flat();
+
+function snapshotServiceContactPatch(updates, ibRoles) {
+  const raw = Object.fromEntries(
+    SERVICE_CONTACT_ALL_COLS.filter((col) => updates[col] !== undefined).map((col) => [col, updates[col]]),
+  );
+  const active = Object.keys(raw).length > 0 || Object.keys(ibRoles || {}).length > 0;
+  return { raw, active };
+}
+
+function assertPartialSlotIdentityUnchanged(contactPatch, before, lockedBefore) {
+  if (!before || !lockedBefore) return;
+  for (const [n, p, e] of SERVICE_CONTACT_SLOT_FIELDS) {
+    const provided = [n, p, e].filter((col) => contactPatch.raw[col] !== undefined);
+    if (provided.length === 0 || provided.length === 3) continue;
+    const norm = (row) => [row[n], row[p], row[e]].map((v) => String(v || '').trim().toLowerCase());
+    if (JSON.stringify(norm(before)) !== JSON.stringify(norm(lockedBefore))) {
+      throw Object.assign(new Error('Service contact slots changed while saving. Reload the customer and try again.'), {
+        statusCode: 409, isOperational: true, code: 'contact_slot_changed',
+      });
+    }
+  }
+}
+
+function applyLockedServiceContactCompaction(updates, contactPatch, ibRoles, lockedBefore, preLockBefore = null) {
+  if (!contactPatch.active) return;
+  assertPartialSlotIdentityUnchanged(contactPatch, preLockBefore, lockedBefore);
+  for (const col of SERVICE_CONTACT_ALL_COLS) {
+    if (contactPatch.raw[col] !== undefined) updates[col] = contactPatch.raw[col];
+    else delete updates[col];
+  }
+  delete updates.service_contacts_consent_at;
+  delete updates.service_contacts_consent_source;
+  delete updates.service_contacts_consent_text_version;
+  Object.assign(updates, ibRoles);
+  compactServiceContactSlots(updates, lockedBefore);
+  const CustomerContact = require('../services/customer-contact');
+  const survivingPhones = CustomerContact.getServiceContactSlots({ ...lockedBefore, ...updates })
+    .map((s) => s.phone).filter(Boolean);
+  const prunedPrefs = CustomerContact.pruneRemovedUnconsentedSlotKeys(lockedBefore, survivingPhones, null);
+  if (prunedPrefs) updates.service_preferences = JSON.stringify(prunedPrefs);
+}
+
 function applyCustomerListFilters(query, filters, healthColumns) {
   const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, searchHomes } = filters;
   if (search) query = applyCustomerSearchFilter(query, search, { homes: searchHomes === true });
@@ -2908,6 +2951,8 @@ const REMINDER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 router.get('/:id/reminder-contacts', requireAdmin, async (req, res, next) => {
   try {
     if (!REMINDER_ID.test(String(req.params.id))) return res.status(400).json({ error: 'Invalid customer id' });
+    const exists = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first('id');
+    if (!exists) return res.status(404).json({ error: 'Customer not found' });
     const VisitRecipient = require('../services/call-visit-recipient');
     res.json({ reminderContacts: await VisitRecipient.listReminderContacts(req.params.id) });
   } catch (err) { next(err); }
@@ -4531,6 +4576,10 @@ const customerUpdateHandler = async (req, res, next) => {
       // too. (member_since/churned_at aren't editable fields, so no clobber.)
       Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
     }
+    // Snapshot raw contact slot fields before pre-lock compaction so the
+    // locked transaction below can re-compact deterministically against
+    // lockedBefore instead of a stale pre-lock read (P1-E3).
+    const contactPatch = snapshotServiceContactPatch(updates, req.ibServiceContactRoles);
     // req.ibServiceContactRoles is set only by setServiceContactsFromBar (never an HTTP field): the relationship the bar
     // card recorded, as role columns ({ service_contact2_role: 'tenant' }), applied before compaction so it travels with
     // its person, as the call pipeline's explicit role does.
@@ -4667,6 +4716,10 @@ const customerUpdateHandler = async (req, res, next) => {
           // invoice FOR UPDATE; service-contact-tools.js lockedPlanCheck: the locked contact slots) and throws
           // preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
           if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
+          // Re-compact service contact slots against the LOCKED row (P1-E3) and
+          // prune removed keys from unconsented_slot_phone_keys (P1-E2) so
+          // concurrent saves never lose roles or leave stale unconsented keys.
+          applyLockedServiceContactCompaction(updates, contactPatch, req.ibServiceContactRoles, lockedBefore, before);
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
           // phone; a save that moved the number and marked it since keeps its
@@ -7289,6 +7342,8 @@ router._private = {
   addMonthsDateOnly,
   cadenceFromEstimateLine,
   compactServiceContactSlots,
+  snapshotServiceContactPatch,
+  applyLockedServiceContactCompaction,
   customerSearchTerms,
   defaultAnnualPrepayTermStart,
   hasMembership,

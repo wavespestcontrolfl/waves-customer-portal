@@ -523,6 +523,24 @@ function loginAttestedPrefs(lockedRow, phones, attested) {
   return prefs;
 }
 
+// Prune any phone keys from unconsented_slot_phone_keys that are no longer
+// stored in any surviving contact slot, so removing an unconsented contact
+// clears stale unconsented entries instead of poisoning future re-adds (P1-E2).
+function pruneRemovedUnconsentedSlotKeys(lockedRow, survivingPhones, existingPrefs = null) {
+  const base = existingPrefs !== null && existingPrefs !== undefined
+    ? { ...existingPrefs }
+    : { ...parsedServicePrefs(lockedRow) };
+  if (!Array.isArray(base.unconsented_slot_phone_keys) || !base.unconsented_slot_phone_keys.length) {
+    return existingPrefs;
+  }
+  const keptSet = new Set((survivingPhones || []).map((p) => phoneKeyOf(p)).filter((k) => k.length >= 10));
+  const nextKeys = base.unconsented_slot_phone_keys.filter((k) => keptSet.has(phoneKeyOf(k)));
+  if (nextKeys.length === base.unconsented_slot_phone_keys.length) return existingPrefs;
+  if (nextKeys.length) base.unconsented_slot_phone_keys = nextKeys;
+  else delete base.unconsented_slot_phone_keys;
+  return base;
+}
+
 function contactSlotMayLogIn(customer, phoneKey) {
   const key = phoneKeyOf(phoneKey);
   if (!customer || !key) return false;
@@ -559,6 +577,8 @@ module.exports = {
   contactSlotMayLogIn,
   loginAttestedPrefs,
   loginAttestedPhoneKeys,
+  unconsentedSlotPhoneKeys,
+  pruneRemovedUnconsentedSlotKeys,
   findServiceContactSlotByPhoneKey,
   phoneKeyOf,
   isServiceContactRole,

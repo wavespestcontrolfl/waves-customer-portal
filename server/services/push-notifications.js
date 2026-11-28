@@ -237,8 +237,9 @@ class PushNotificationService {
   async customerStatus(customerId, database = db, { contactKey = null } = {}) {
     const context = await customerPushContext(customerId, database);
     if (!context) return { enabled: false, registered: false, fresh: false };
+    const scopeIds = contactKey ? [customerId] : context.ids;
     const rows = (await database('push_subscriptions')
-      .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
+      .whereIn('customer_id', scopeIds).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
       .filter((row) => (contactKey ? String(row.contact_phone_key || '') === String(contactKey) : !row.contact_phone_key));
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;

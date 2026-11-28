@@ -773,8 +773,9 @@ router.post('/select-property', authenticate, async (req, res, next) => {
     // account with the same contact claim (a saved-property selection is
     // never a contact's).
     if (req.contactSession) {
-      const { findServiceContactSlotByPhoneKey } = require('../services/customer-contact');
-      if (!findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey)) {
+      const { findServiceContactSlotByPhoneKey, contactSlotMayLogIn } = require('../services/customer-contact');
+      if (!findServiceContactSlotByPhoneKey(target, req.contactSession.phoneKey)
+        || !contactSlotMayLogIn(target, req.contactSession.phoneKey)) {
         return res.status(403).json({ error: 'Property is not available for this account' });
       }
       const switched = await rotateRefreshSession(currentRefreshToken, {
