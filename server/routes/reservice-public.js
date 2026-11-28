@@ -258,9 +258,9 @@ async function loadLaneCatalog(database = db) {
 // the stored pin, else a staff-verified pin or the canonical geocode) — an
 // offer made anywhere else would be for a location the commit never uses
 // (Codex #4992 P1). Nothing resolvable, no offers.
-async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes, offer = false, onLocation = null }) {
+async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes, serviceIdentity = null, offer = false, onLocation = null }) {
   const booking = require('./booking');
-  const { customerBookingLocation, buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
+  const { customerBookingLocation, buildBookingAvailability, bookInsertionOffersLive, funnelServiceLines } = booking._internals;
 
   const location = await customerBookingLocation(customer);
   if (!location) return null;
@@ -268,11 +268,15 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
   // expectedLocation fence, so it is never resolved a third time.
   if (typeof onLocation === 'function') onLocation(location);
 
+  const serviceKey = lanes.map(lane => ({ pest: 'pest_control', lawn: 'lawn_care' })[lane]).join('+');
+  const serviceLines = funnelServiceLines(serviceKey);
   return buildBookingAvailability({
     lat: location.lat,
     lng: location.lng,
     duration,
-    serviceKey: lanes.map(lane => ({ pest: 'pest_control', lawn: 'lawn_care' })[lane]).join('+'),
+    serviceKey,
+    ...(serviceIdentity ? { serviceIdentity, preferServiceIdentity: true } : {}),
+    ...(serviceLines ? { serviceLines } : {}),
     rangeFrom,
     rangeTo,
     config,
@@ -365,6 +369,11 @@ async function pageLaneState(token, database = db) {
   return { customer, laneCatalog, ...await resolveLaneState(customer, laneCatalog, database) };
 }
 
+function singleLaneIdentity(lanes, laneCatalog) {
+  const cat = lanes.length === 1 ? laneCatalog[lanes[0]] : null;
+  return cat ? { catalogServiceKey: cat.serviceKey, serviceType: cat.serviceType } : null;
+}
+
 router.get('/:token', async (req, res, next) => {
   if (!reserviceSelfServeEnabled() || !TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -414,10 +423,11 @@ router.get('/:token', async (req, res, next) => {
       return res.json({ ...base, availability: null, location_review_required: true });
     }
     const browseDuration = Math.max(...browseLanes.map((lane) => laneCatalog[lane].durationMinutes));
+    const serviceIdentity = singleLaneIdentity(browseLanes, laneCatalog);
 
     let availability = null;
     try {
-      availability = await buildAvailabilityForCustomer(customer, { ...range, config, duration: browseDuration, lanes: browseLanes, offer: true });
+      availability = await buildAvailabilityForCustomer(customer, { ...range, config, duration: browseDuration, lanes: browseLanes, serviceIdentity, offer: true });
     } catch (err) {
       logger.error(`[reservice-public] availability failed for customer ${customer.id}: ${err.message}`);
     }
@@ -468,6 +478,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
     const browseDuration = Math.max(...browseLanes.map((lane) => laneCatalog[lane].durationMinutes));
+    const serviceIdentity = singleLaneIdentity(browseLanes, laneCatalog);
 
     const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
     const when = await parseWhen(query, searchParseOpts(config));
@@ -478,6 +489,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
       config,
       duration: browseDuration,
       lanes: browseLanes,
+      serviceIdentity,
       offer: true,
       timeOfDay: when.timeOfDay,
     }).catch((err) => {
@@ -583,12 +595,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // otherwise be compared with itself; the existing expectedLocation fence
     // refuses it (LOCATION_CHANGED_RETRY, handled below).
     let rebuildLocation = null;
+    const serviceIdentity = { catalogServiceKey: catalog.serviceKey, serviceType: catalog.serviceType };
     const dayAvailability = await buildAvailabilityForCustomer(customer, {
       rangeFrom: date,
       rangeTo: date,
       config,
       duration: catalog.durationMinutes,
       lanes: [lane],
+      serviceIdentity,
       onLocation: (location) => { rebuildLocation = location; },
     });
     const day = dayAvailability?.days?.find((d) => d.date === date);
@@ -597,7 +611,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       let refreshed = null;
       try {
         refreshed = await buildAvailabilityForCustomer(customer, {
-          ...range, config, duration: catalog.durationMinutes, lanes: [lane],
+          ...range, config, duration: catalog.durationMinutes, lanes: [lane], serviceIdentity,
         });
       } catch (err) {
         logger.warn(`[reservice-public] refresh availability failed for customer ${customer.id}: ${err.message}`);
@@ -636,6 +650,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         serviceId: catalog.serviceId,
         serviceType: catalog.serviceType,
         durationMinutes: catalog.durationMinutes,
+        expectedIdentity: serviceIdentity,
         // The exact location the availability rebuild above resolved.
         ...(rebuildLocation ? { expectedLocation: { lat: rebuildLocation.lat, lng: rebuildLocation.lng } } : {}),
         // Clean re-service request storage (migration 20260927100000) — the
@@ -682,7 +697,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         let refreshed = null;
         try {
           refreshed = await buildAvailabilityForCustomer(currentCustomer, {
-            ...range, config, duration: catalog.durationMinutes, lanes: [lane],
+            ...range, config, duration: catalog.durationMinutes, lanes: [lane], serviceIdentity,
           });
         } catch { /* answer without the refresh; the client reloads */ }
         return res.status(409).json({
@@ -698,7 +713,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         let refreshed = null;
         try {
           refreshed = await buildAvailabilityForCustomer(customer, {
-            ...range, config, duration: catalog.durationMinutes, lanes: [lane],
+            ...range, config, duration: catalog.durationMinutes, lanes: [lane], serviceIdentity,
           });
         } catch { /* answer without the refresh */ }
         return res.status(409).json({
@@ -1105,7 +1120,11 @@ async function reserviceOpeningsFor(customerId, { lanes: wanted = null, database
   if (await reserviceLocationReviewRequired(customer, database)) return null;
   const config = await require('./booking')._internals.loadBookingConfig();
   const duration = Math.max(...browseLanes.map((lane) => laneCatalog[lane].durationMinutes));
-  const availability = await buildAvailabilityForCustomer(customer, { ...bookingRange(config), config, duration, lanes: browseLanes });
+  const serviceIdentity = singleLaneIdentity(browseLanes, laneCatalog);
+  const availability = await buildAvailabilityForCustomer(customer, {
+    ...bookingRange(config), config, duration, lanes: browseLanes,
+    ...(serviceIdentity ? { serviceIdentity } : {}),
+  });
   return availability ? { days: availability.days || [] } : null;
 }
 
