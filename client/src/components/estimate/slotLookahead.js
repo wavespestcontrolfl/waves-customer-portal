@@ -29,10 +29,16 @@ const NO_BOOKING_FLAGS = ['reviewBeforeBooking', 'commercialManualScheduling', '
 
 export const bodySlots = (body) => (body ? [...(body.primary || []), ...(body.expander || [])] : []);
 
+export const calendarBodySlots = (body) => (
+  Array.isArray(body?.calendarSlots) && body.calendarSlots.length
+    ? body.calendarSlots
+    : bodySlots(body)
+);
+
 const isBrowsable = (body) => !!body && !NO_BOOKING_FLAGS.some((flag) => body[flag]);
 
 // A normal, bookable answer that simply has no open slot in its window.
-export const isEmptyBrowsable = (body) => isBrowsable(body) && bodySlots(body).length === 0;
+export const isEmptyBrowsable = (body) => isBrowsable(body) && calendarBodySlots(body).length === 0;
 
 // True when the page has times to show but none within SOON_DAYS: the cue to tell the
 // customer to text or call. `answer` is the 14-day list body, `slots` what is on screen.
@@ -100,7 +106,7 @@ export async function fetchLookaheadSlots({ apiBase, token, params, onRefusal = 
   wide.set('windowDays', String(LOOKAHEAD_DAYS));
   const body = await getBody(`${base}?${wide.toString()}`, onRefusal);
   if (!isBrowsable(body)) return { slots: [], firstDay: null };
-  let slots = bodySlots(body);
+  let slots = calendarBodySlots(body);
   const firstDay = body.metadata?.firstDayAvailability?.date;
   const earliest = sortSlots(slots)[0]?.date;
   if (firstDay && (!earliest || firstDay < earliest)) {
@@ -108,7 +114,7 @@ export async function fetchLookaheadSlots({ apiBase, token, params, onRefusal = 
     day.set('date', firstDay);
     try {
       const dayBody = await getBody(`${base}?${day.toString()}`, onRefusal);
-      if (isBrowsable(dayBody)) slots = [...slots, ...bodySlots(dayBody)];
+      if (isBrowsable(dayBody)) slots = [...slots, ...calendarBodySlots(dayBody)];
     } catch (err) {
       // A refusal the page took ends the read; any other failure leaves the 90-day list, which still gives times.
       if (err instanceof PageTookRefusal) throw err;

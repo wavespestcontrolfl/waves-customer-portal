@@ -46,7 +46,7 @@ function ComponentsTable({ components }) {
     weight: c ? Number(c.weight) : 0,
   }));
   return (
-    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginTop: 8, fontFamily: "'Inter', system-ui, sans-serif" }}>
+    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14, marginTop: 8, fontFamily: "'Inter', system-ui, sans-serif" }}>
       <thead>
         <tr style={{ textAlign: 'left', color: '#64748B', fontWeight: 600 }}>
           <th style={{ padding: '6px 4px', borderBottom: '1px solid #E5E7EB' }}>Component</th>
@@ -107,7 +107,7 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
       marginTop: 12, marginBottom: 4, padding: 14,
       background: CUSTOMER_SURFACE.page, border: `1px solid ${CUSTOMER_SURFACE.border}`, borderRadius: 10,
     }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: 4 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: '#64748B', textTransform: 'uppercase', marginBottom: 4 }}>
         Help us calibrate your Pest Pressure score
       </div>
       <div style={{ fontSize: 14, fontWeight: 600, color: CUSTOMER_SURFACE.text, marginBottom: 8 }}>
@@ -133,11 +133,11 @@ function ClientRatingPicker({ token, question, onSubmitted }) {
           </button>
         ))}
       </div>
-      <div style={{ fontSize: 11, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
+      <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
         0 = no activity · 5 = severe activity
       </div>
       {error ? (
-        <div style={{ fontSize: 12, color: '#991B1B', marginTop: 8 }}>{error}</div>
+        <div style={{ fontSize: 14, color: '#991B1B', marginTop: 8 }}>{error}</div>
       ) : null}
     </div>
   );
@@ -199,14 +199,14 @@ export default function PestPressureCard({ data, token, trendSection = null }) {
     >
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
         <div>
-          <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 600 }}>
+          <div style={{ fontSize: 14, letterSpacing: '0.08em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 600 }}>
             Pest Pressure
           </div>
           <h2 style={{ margin: '4px 0 0', fontSize: 18, fontWeight: 700, color: CUSTOMER_SURFACE.text }}>
             {isInsufficient ? 'Pest Pressure is being calculated' : `${labelName || 'Score'} — ${scoreNum.toFixed(1)} / ${MAX_SCORE}`}
           </h2>
           {dateText ? (
-            <div style={{ fontSize: 12, color: CUSTOMER_SURFACE.muted, marginTop: 4 }}>As of {dateText}</div>
+            <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 4 }}>As of {dateText}</div>
           ) : null}
         </div>
         <TrendChip trend={effective.trend} delta={effective.trendDelta} />

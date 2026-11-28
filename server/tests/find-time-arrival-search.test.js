@@ -14,6 +14,7 @@ const path = require('path');
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/scheduling/blackout-dates', () => ({
+  getBlackoutDates: jest.fn(async () => new Set()),
   getBlackoutLayers: jest.fn(async () => ({ dates: new Set() })),
 }));
 jest.mock('../services/technician-capabilities', () => ({
@@ -199,6 +200,8 @@ test('only the nightly auto-dispatch search passes arrivalSearch to find-time', 
     'services/auto-dispatch/index.js',
     // The night run's rain term (shadow): its drier-date search is the night run's own arrival search.
     'services/auto-dispatch/rain-term.js',
+    // The night run's two-stop pair-clearing pass mirrors the night arrival-routing mode.
+    'services/auto-dispatch/two-stop-clear.js',
     'services/scheduling/find-time.js',
   ]);
 });

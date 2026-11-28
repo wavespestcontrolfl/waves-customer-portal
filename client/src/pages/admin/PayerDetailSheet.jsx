@@ -88,6 +88,25 @@ const parseCurrencyInput = (value) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+async function parseJsonResponse(res, fallbackError) {
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || fallbackError || `HTTP ${res.status}`);
+  return data;
+}
+
+const VALID_SEQUENCE_STATUSES = new Set(["active", "paused", "stopped", "completed"]);
+
+function extractReminderSequence(data) {
+  if (!data || typeof data !== "object" || !Object.prototype.hasOwnProperty.call(data, "sequence")) {
+    throw new Error("Could not load reminder status.");
+  }
+  const seq = data.sequence;
+  if (seq !== null && (typeof seq !== "object" || Array.isArray(seq) || !VALID_SEQUENCE_STATUSES.has(seq.status))) {
+    throw new Error("Could not load reminder status.");
+  }
+  return seq;
+}
+
 export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const [tab, setTab] = useState("statements");
   const [statements, setStatements] = useState([]);
@@ -99,41 +118,57 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const [openStmtId, setOpenStmtId] = useState(null);
+  const statementsReqRef = useRef(0);
+  const arReqRef = useRef(0);
 
   const loadStatements = useCallback(async () => {
+    const reqId = ++statementsReqRef.current;
     setLoading(true);
     setStatementsError("");
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/statements`);
-      const d = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
-      setStatements(Array.isArray(d?.statements) ? d.statements : []);
+      const d = await parseJsonResponse(r);
+      if (reqId !== statementsReqRef.current) return;
+      if (!Array.isArray(d?.statements)) throw new Error("Could not load this payer's statements.");
+      setStatements(d.statements);
     } catch (err) {
-      setStatementsError(err.message || "Could not load this payer's statements.");
+      if (reqId === statementsReqRef.current) {
+        setStatementsError(err.message || "Could not load this payer's statements.");
+      }
     } finally {
-      setLoading(false);
+      if (reqId === statementsReqRef.current) setLoading(false);
     }
   }, [payer.id]);
 
   const loadAr = useCallback(async () => {
+    const reqId = ++arReqRef.current;
     setArLoading(true);
     setArError("");
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/ar`);
-      const d = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+      const d = await parseJsonResponse(r);
+      if (reqId !== arReqRef.current) return;
       if (!d?.summary) throw new Error("Could not load this payer's balance.");
       setAr(d);
     } catch (err) {
-      setArError(err.message || "Could not load this payer's balance.");
+      if (reqId === arReqRef.current) {
+        setArError(err.message || "Could not load this payer's balance.");
+      }
     } finally {
-      setArLoading(false);
+      if (reqId === arReqRef.current) setArLoading(false);
     }
   }, [payer.id]);
 
   useEffect(() => {
+    setStatements([]);
+    setAr(null);
+    setOpenStmtId(null);
     loadStatements();
     loadAr();
+    return () => {
+      statementsReqRef.current += 1;
+      arReqRef.current += 1;
+    };
   }, [loadStatements, loadAr]);
 
   const refresh = useCallback(async () => {
@@ -268,6 +303,7 @@ function StatementRow({ payerId, statement, expanded, onToggle, onChanged, pendi
 function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
   const [lines, setLines] = useState(null);
   const [sequence, setSequence] = useState(null);
+  const [sequenceLoaded, setSequenceLoaded] = useState(false);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState(null); // { tone: 'ok'|'err', text }
   const [reconcileOpen, setReconcileOpen] = useState(false);
@@ -275,31 +311,47 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
   const [linesError, setLinesError] = useState("");
   const [sequenceError, setSequenceError] = useState("");
 
-  const base = `/admin/payers/${payerId}/statements/${statement.id}`;
+  const detailReqRef = useRef(0);
+  const base = `/admin/payers/${encodeURIComponent(payerId)}/statements/${encodeURIComponent(statement.id)}`;
 
   const loadDetail = useCallback(async () => {
+    const reqId = ++detailReqRef.current;
     setLinesError("");
     setSequenceError("");
+    setSequenceLoaded(false);
     try {
       const r = await adminFetch(base);
-      const d = await r.json().catch(() => null);
-      if (!r.ok) throw new Error(d?.error || "Could not load statement visits.");
-      setLines(Array.isArray(d?.lines) ? d.lines : []);
+      const d = await parseJsonResponse(r, "Could not load statement visits.");
+      if (reqId !== detailReqRef.current) return;
+      if (!Array.isArray(d?.lines)) throw new Error("Could not load statement visits.");
+      setLines(d.lines);
     } catch (err) {
+      if (reqId !== detailReqRef.current) return;
       setLinesError(err.message || "Could not load statement visits.");
     }
     try {
       const r2 = await adminFetch(`${base}/followups`);
-      const d2 = await r2.json();
-      if (!r2.ok) throw new Error(d2?.error || "Could not load reminder status.");
-      setSequence(d2?.sequence ?? null);
+      const d2 = await parseJsonResponse(r2, "Could not load reminder status.");
+      if (reqId !== detailReqRef.current) return;
+      setSequence(extractReminderSequence(d2));
+      setSequenceLoaded(true);
     } catch (err) {
-      setSequenceError(err.message || "Could not load reminder status.");
+      if (reqId === detailReqRef.current) {
+        setSequence(null);
+        setSequenceLoaded(false);
+        setSequenceError(err.message || "Could not load reminder status.");
+      }
     }
   }, [base]);
 
   useEffect(() => {
+    setLines(null);
+    setSequence(null);
+    setSequenceLoaded(false);
     loadDetail();
+    return () => {
+      detailReqRef.current += 1;
+    };
   }, [loadDetail]);
 
   async function act(label, path, body) {
@@ -420,7 +472,14 @@ function StatementDetail({ payerId, statement, onChanged, onPendingChange }) {
 
       {sequenceError && <ActionFeedback error onRetry={loadDetail} className="mt-3">{sequenceError}</ActionFeedback>}
       {showDunning && (
-        <DunningControls base={base} sequence={sequence} busy={busy} act={act} />
+        <DunningControls
+          base={base}
+          sequence={sequence}
+          statusLoading={!sequenceLoaded && !sequenceError}
+          statusUnavailable={Boolean(sequenceError)}
+          busy={busy}
+          act={act}
+        />
       )}
 
       {notice && (
@@ -467,14 +526,20 @@ function ReconcileForm({ total, busy, onCancel, onSubmit }) {
   );
 }
 
-function DunningControls({ base, sequence, busy, act }) {
-  const st = sequence?.status || null;
+function DunningControls({ base, sequence, statusLoading = false, statusUnavailable = false, busy, act }) {
+  const statusPending = statusLoading || statusUnavailable;
+  const st = statusPending ? null : (sequence?.status || null);
+  const actionsDisabled = !!busy || statusLoading;
   return (
     <div className="mt-2 pt-2 border-t border-zinc-100">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-ui-caption text-ink-secondary">
           Reminders:{" "}
-          {st === "paused"
+          {statusLoading
+            ? "loading…"
+            : statusUnavailable
+            ? "status unavailable"
+            : st === "paused"
             ? "paused"
             : st === "stopped"
             ? "stopped"
@@ -484,20 +549,20 @@ function DunningControls({ base, sequence, busy, act }) {
             ? `active${sequence?.next_step_label ? ` · next: ${sequence.next_step_label}` : ""}`
             : "not started"}
         </span>
-        <Button size="sm" variant="ghost" loading={busy === "Reminder sent"} disabled={!!busy} onClick={() => act("Reminder sent", `${base}/followups/send-now`, {})}>
+        <Button size="sm" variant="ghost" loading={busy === "Reminder sent"} disabled={actionsDisabled} onClick={() => act("Reminder sent", `${base}/followups/send-now`, {})}>
           Send reminder now
         </Button>
         {st === "paused" ? (
-          <Button size="sm" variant="ghost" loading={busy === "Reminders resumed"} disabled={!!busy} onClick={() => act("Reminders resumed", `${base}/followups/resume`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders resumed"} disabled={actionsDisabled} onClick={() => act("Reminders resumed", `${base}/followups/resume`, {})}>
             Resume
           </Button>
         ) : st !== "stopped" && st !== "completed" ? (
-          <Button size="sm" variant="ghost" loading={busy === "Reminders paused"} disabled={!!busy} onClick={() => act("Reminders paused", `${base}/followups/pause`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders paused"} disabled={actionsDisabled} onClick={() => act("Reminders paused", `${base}/followups/pause`, {})}>
             Pause
           </Button>
         ) : null}
         {st !== "stopped" && (
-          <Button size="sm" variant="ghost" loading={busy === "Reminders stopped"} disabled={!!busy} onClick={() => act("Reminders stopped", `${base}/followups/stop`, {})}>
+          <Button size="sm" variant="ghost" loading={busy === "Reminders stopped"} disabled={actionsDisabled} onClick={() => act("Reminders stopped", `${base}/followups/stop`, {})}>
             Stop
           </Button>
         )}

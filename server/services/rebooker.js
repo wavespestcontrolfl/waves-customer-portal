@@ -1364,11 +1364,86 @@ async function loadSeriesClosedDays(conn, { initiatedBy = null, deferred = false
   }
 }
 
+function blackoutWithTechWorkDays(closedDays, workDays) {
+  if (!Array.isArray(workDays) || !workDays.length) return closedDays;
+  const offWeekdays = new Set(closedDays?.weeklyDaysOff || []);
+  for (let dow = 0; dow < 7; dow += 1) {
+    if (!workDays.includes(dow)) offWeekdays.add(dow);
+  }
+  return {
+    dates: closedDays?.dates || new Set(),
+    weeklyDaysOff: offWeekdays,
+    closedHolidays: closedDays?.closedHolidays || new Set(),
+  };
+}
+
+async function loadSeriesTechWorkDays(conn, { initiatedBy = null, technicianIds = [] } = {}) {
+  if (initiatedBy === 'admin' || !techWorkDaysLive()) return null;
+  const ids = [...new Set(technicianIds.filter(Boolean).map(String))];
+  if (!ids.length) return null;
+  try {
+    const rows = await conn('technicians').whereIn('id', ids).select('id', 'work_days');
+    const map = new Map();
+    for (const row of rows) {
+      if (Array.isArray(row.work_days) && row.work_days.length) map.set(String(row.id), row.work_days);
+    }
+    return map.size ? map : null;
+  } catch (err) {
+    logger.warn(`[rebooker] tech work_days unreadable; series dates projected without them: ${err.message}`);
+    return null;
+  }
+}
+
 // The per-occurrence date projection a series shift writes — shared by
 // rescheduleSeries (inside its transaction) and previewSeriesMove (read-only
 // counts for the surfaces), so what a surface previews is exactly what the
 // move probes and writes.
-async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db, prefersNoWeekends, closedDays = null }) {
+async function loadSeriesTechWorkDaysForParent(conn, { initiatedBy = null, service, parent, parentId } = {}) {
+  if (initiatedBy === 'admin' || !techWorkDaysLive()) return null;
+  const seriesTechIds = [service?.technician_id, parent?.technician_id].filter(Boolean);
+  if (parentId) {
+    const sibTechRows = await conn('scheduled_services')
+      .where((q) => q.where('id', parentId).orWhere('recurring_parent_id', parentId))
+      .whereNotIn('status', ['completed', 'cancelled'])
+      .whereNotNull('technician_id')
+      .distinct('technician_id');
+    seriesTechIds.push(...sibTechRows.map((r) => r.technician_id));
+  }
+  return loadSeriesTechWorkDays(conn, { initiatedBy, technicianIds: seriesTechIds });
+}
+
+async function loadCandidateDayLoadAndArea(dateStr, service) {
+  const scopeTech = techScopedConfirmActive() && service.technician_id ? service.technician_id : null;
+  const { excludeHeld } = require('./visit-hold');
+  let loadQuery = excludeHeld(
+    db('scheduled_services')
+      .where('scheduled_date', dateStr)
+      .whereIn('status', ['pending', 'confirmed']),
+    'scheduled_services',
+  );
+  if (scopeTech) loadQuery = loadQuery.where('technician_id', scopeTech);
+  const dayLoad = await loadQuery.count('* as count').first();
+
+  let nearbyQuery = excludeHeld(
+    db('scheduled_services')
+      .where('scheduled_date', dateStr)
+      .whereIn('status', ['pending', 'confirmed']),
+    'scheduled_services',
+  );
+  if (scopeTech) nearbyQuery = nearbyQuery.where('scheduled_services.technician_id', scopeTech);
+  const nearbyServices = await nearbyQuery
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select('scheduled_services.service_address_zip', 'customers.zip', 'customers.city');
+
+  const serviceZip = service.service_address_zip || service.zip;
+  const sameAreaCount = nearbyServices.filter((s) => (
+    (serviceZip && (s.service_address_zip || s.zip) === serviceZip)
+    || (s.city || '').toLowerCase() === (service.city || '').toLowerCase()
+  )).length;
+  return { dayLoad, sameAreaCount };
+}
+
+async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db, prefersNoWeekends, closedDays = null, techWorkDaysById = null }) {
   const pattern = parent.recurring_pattern;
   const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
   // Seasonal series keep their seeded weekend/season contract on re-anchor
@@ -1394,7 +1469,10 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // stays as picked. Null = projected as before.
   // `roundSlot` (lawn rounds only): the cadence slot whose round the date must
   // stay in. Defaults to `raw`'s own round, which is right for a cadence date.
-  const projectSeriesDate = (raw, roundSlot = null) => {
+  const effectiveClosedFor = (techId) => (
+    techWorkDaysById && techId ? blackoutWithTechWorkDays(closedDays, techWorkDaysById.get(String(techId))) : closedDays
+  );
+  const projectSeriesDate = (raw, roundSlot = null, techId = null) => {
     let out = String(raw).split('T')[0];
     // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
     // the old seasonal-only scoping predates the ruling): a weekend-
@@ -1410,28 +1488,16 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
         out = etDateString(addETDays(at, delta));
       }
     }
-    // Off a closed day (null closedDays = no-op). An exhausted search (three
-    // closed weeks) keeps the date: this projector always returns a date
-    // (its write sites are not null-safe).
-    out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
-    // A lawn round is a window too: the weekend shift or a closed-day nudge
-    // must not carry the date into the next round. A cadence date stays in its
-    // own round. A date exception's shifted date (the anchor delta can carry it
-    // past its round's end) stays in the round of the occurrence's own cadence
-    // slot, never the shifted date's round: that would leave a round empty and
-    // put two visits in the next one. The clamp starts at the crossed round
-    // edge, so a distant exception (an admin move months away) still lands in
-    // its own round. If every day of the round is closed, the round's edge day
-    // itself is kept (closures ignored): the date never leaves its round.
+    const dayClosed = effectiveClosedFor(techId);
+    // Off a closed day or kept tech's weekly off-day (null = no-op).
+    out = clearOfBlackout(out, dayClosed, { skipWeekends: seriesSkipWeekends }) || out;
     if (pattern === LAWN_ROUNDS_9) {
       const intendedDate = String(roundSlot || raw).split('T')[0];
-      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays, intendedDate })
+      return clampDateToRound(pattern, out, { skipWeekends: seriesSkipWeekends, blackoutDates: dayClosed, intendedDate })
         || clampDateToRound(pattern, out, { intendedDate }) || out;
     }
     if (pattern !== SEASONAL_FEB_OCT) return out;
-    // The clamp can exhaust only on 75 straight in-season closed or weekend
-    // days; the || keeps the always-a-date contract above if it ever does.
-    return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends, blackoutDates: closedDays }) || out;
+    return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends, blackoutDates: dayClosed }) || out;
   };
   const opts = {
     ...(isMonthBasedPattern
@@ -1457,8 +1523,10 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   const deltaDays = calendarDaysBetween(dateOnly(service.scheduled_date), seriesDateStr);
   const anchorDate = String(newDate).split('T')[0];
   // `step`: how many cadence steps after the anchor (see cadenceStep).
-  const pureCadenceDate = (step) => projectSeriesDate(
+  const pureCadenceDate = (step, techId = null) => projectSeriesDate(
     nextRecurringDate(newDate, parent.recurring_pattern, step, opts),
+    null,
+    techId,
   );
   // Lawn rounds: a later visit keeps its distance in ROUNDS from the moved
   // visit (its series position against the anchor's), not its place in the
@@ -1479,8 +1547,9 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   const usedDates = new Set();
   // `roundSlot` (lawn rounds only): the cadence slot whose round the walk stays
   // in; defaults to `start`.
-  const advancePastUsed = (start, roundSlot = start) => {
+  const advancePastUsed = (start, roundSlot = start, techId = null) => {
     let out = start;
+    const dayClosed = effectiveClosedFor(techId);
     for (let guard = 0; guard < 31 && usedDates.has(out); guard++) {
       let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
       if (seriesSkipWeekends) {
@@ -1488,13 +1557,13 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
         if (dayOfWeek === 0 || dayOfWeek === 6) at = addETDays(at, dayOfWeek === 6 ? 2 : 1);
       }
       out = etDateString(at);
-      out = clearOfBlackout(out, closedDays, { skipWeekends: seriesSkipWeekends }) || out;
+      out = clearOfBlackout(out, dayClosed, { skipWeekends: seriesSkipWeekends }) || out;
       if (pattern === LAWN_ROUNDS_9) {
         // Same at a round edge: walk back into the round the slot belongs to,
         // skipping the dates already handed out.
         out = clampDateToRound(pattern, out, {
           skipWeekends: seriesSkipWeekends,
-          blackoutDates: { ...closedDays, dates: new Set([...(closedDays?.dates || []), ...usedDates]) },
+          blackoutDates: { ...dayClosed, dates: new Set([...(dayClosed?.dates || []), ...usedDates]) },
           intendedDate: roundSlot,
         }) || out;
       }
@@ -1505,27 +1574,27 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
         // visits on one day (Codex #6500 r1 P2).
         out = clampDateToSeason(SEASONAL_FEB_OCT, out, {
           skipWeekends: seriesSkipWeekends,
-          blackoutDates: { ...closedDays, dates: new Set([...(closedDays?.dates || []), ...usedDates]) },
+          blackoutDates: { ...dayClosed, dates: new Set([...(dayClosed?.dates || []), ...usedDates]) },
         }) || out;
       }
     }
     usedDates.add(out);
     return out;
   };
-  // The cadence SLOT an occurrence index owns after collision handling —
-  // where a plain cadence row at that index is written, and the series
-  // POSITION a date exception at that index records
-  // (date_exception_cadence_date). Collision-adjusted, never the raw
-  // cadence date (codex r8 P2): under weekend avoidance a Saturday and a
-  // Sunday occurrence both map to Monday and the second one's slot is
-  // Tuesday — recording Monday for an exception there would tie it with
-  // the Monday row and let a later collective move reorder the two.
-  // Slots are reserved in index order, so positions stay strictly
-  // increasing and unique against every date the sweep writes.
   const cadenceSlotByOccurrence = new Map();
+  let lastCadenceDate = null;
   const cadenceSlotDate = (occurrenceIndex, sib = null) => {
     if (cadenceSlotByOccurrence.has(occurrenceIndex)) return cadenceSlotByOccurrence.get(occurrenceIndex);
-    const slot = advancePastUsed(occurrenceIndex === 0 ? anchorDate : pureCadenceDate(cadenceStep(occurrenceIndex, sib)));
+    const techId = occurrenceIndex === 0 ? null : (sib ? (sib.technician_id || null) : (service?.technician_id || null));
+    let rawSlot = occurrenceIndex === 0 ? anchorDate : pureCadenceDate(cadenceStep(occurrenceIndex, sib), techId);
+    // Mixed tech work_days across siblings (Codex P2): keep non-exception cadence
+    // occurrences strictly increasing even when sibling k+1's tech works earlier than sibling k's tech.
+    if (occurrenceIndex > 0 && lastCadenceDate && rawSlot <= lastCadenceDate) {
+      const nextDay = etDateString(addETDays(parseETDateTime(`${lastCadenceDate}T12:00`), 1));
+      rawSlot = projectSeriesDate(nextDay, rawSlot, techId);
+    }
+    const slot = advancePastUsed(rawSlot, undefined, techId);
+    lastCadenceDate = slot;
     cadenceSlotByOccurrence.set(occurrenceIndex, slot);
     return slot;
   };
@@ -1535,9 +1604,10 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
     const slot = cadenceSlotDate(occurrenceIndex, sib);
     let out = slot;
     if (occurrenceIndex > 0 && sib && sib.date_exception === true) {
-      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)), slot);
+      const techId = sib.technician_id || null;
+      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)), slot, techId);
       // Landing exactly on its own slot = the row rejoins the cadence.
-      out = shifted === slot ? slot : advancePastUsed(shifted, slot);
+      out = shifted === slot ? slot : advancePastUsed(shifted, slot, techId);
     }
     projectedByOccurrence.set(occurrenceIndex, out);
     return out;
@@ -1583,7 +1653,7 @@ async function loadNextVisitSweep(conn, serviceId) {
     .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
     .whereNotIn('status', ['completed', 'cancelled'])
     .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', ...require('./visit-hold').heldColumn());
+    .select('id', 'status', 'technician_id', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', ...require('./visit-hold').heldColumn());
   const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
   if (droppedIdx === -1) return null;
   // GATE_VISIT_HOLD: a held sibling is counted, never the next visit the move shifts (the writer classifies it the same way).
@@ -1640,6 +1710,42 @@ async function visitStopIsHeld(conn, visitId, { strict = false } = {}) {
   return !!verdict?.frozen;
 }
 
+// GATE_VISIT_HOLD write fence shared by single and series CAS updates:
+// non-releasing writes require `held_at IS NULL`; a person's hold-releasing
+// write pins the observed `held_at` so two concurrent submissions cannot both
+// release the same hold and duplicate reschedule logs/notices.
+function holdCasPredicate(releasesHold, row) {
+  if (!require('./visit-hold').visitHoldLive()) return {};
+  return { held_at: releasesHold ? row.held_at : null };
+}
+
+async function loadKeptTechUnavailability(service, reason, today) {
+  if (!reason || !service.technician_id) return { workDays: null, absentDays: null, failed: false };
+  const { absentTechDays } = require('./technician-eligibility');
+  const workDays = techWorkDaysLive()
+    ? await db('technicians').where({ id: service.technician_id }).first('id', 'work_days').catch(() => null)
+    : null;
+  try {
+    const absentDays = await absentTechDays(db, {
+      dateFrom: etDateString(addETDays(today, 1)),
+      dateTo: etDateString(addETDays(today, 10)),
+      technicianIds: [service.technician_id],
+    });
+    return { workDays, absentDays, failed: false };
+  } catch (err) {
+    // Partial unit-test DB mocks (lacking .whereBetween/.whereNotNull) throw TypeError;
+    // real DB errors fail closed so customer reschedule options are withheld.
+    if (err instanceof TypeError) return { workDays, absentDays: null, failed: false };
+    logger.warn(`[rebooker] failed to read technician absences for ${service.technician_id}: ${err.message}`);
+    return { workDays, absentDays: null, failed: true };
+  }
+}
+
+function isKeptTechUnavailableOnDate(unavail, technicianId, dateStr, isOffDay) {
+  if (unavail.workDays && isOffDay(unavail.workDays, dateStr)) return true;
+  return Boolean(unavail.absentDays && unavail.absentDays.has(`${technicianId}:${dateStr}`));
+}
+
 class SmartRebooker {
   async findRescheduleOptions(serviceId, reason, opts = {}) {
     const service = await db('scheduled_services')
@@ -1665,15 +1771,13 @@ class SmartRebooker {
       etDateString(addETDays(today, 10)),
     );
 
-    // Work days (GATE_TECH_WORK_DAYS): the options keep the visit's own
-    // technician, so a non-admin flow (a call with a `reason`: rain-out, the
-    // customer's own move) is not offered a weekday that technician does not
-    // work; the commit would refuse it. The admin picker (no reason) lists every
-    // day: office moves warn instead. One extra read, only with the gate on.
-    let keptTechWorkDays = null;
-    if (reason && service.technician_id && techWorkDaysLive()) {
-      keptTechWorkDays = await db('technicians').where({ id: service.technician_id }).first('id', 'work_days');
-    }
+    // Work days + absences (GATE_TECH_WORK_DAYS + technician_absences):
+    // non-admin flows keep the visit's technician, so never offer an absent or
+    // off day that commit would reject with 409 SLOT_TAKEN (P1-14). Withhold
+    // customer options if absence lookup fails so unverified days are never offered.
+    const { isOffDay } = require('./technician-eligibility');
+    const techUnavailability = await loadKeptTechUnavailability(service, reason, today);
+    if (techUnavailability.failed) return [];
 
     // Shift hours (GATE_TECH_SHIFT_HOURS). A non-admin commit of one of these
     // options refuses a window the kept technician's shift does not hold
@@ -1794,7 +1898,7 @@ class SmartRebooker {
 
       const dateStr = etDateString(candidateDate);
       if (blackout.has(dateStr)) continue;
-      if (keptTechWorkDays && require('./technician-eligibility').isOffDay(keptTechWorkDays, dateStr)) continue;
+      if (isKeptTechUnavailableOnDate(techUnavailability, service.technician_id, dateStr, isOffDay)) continue;
       // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option to
       // flows that commit with a non-admin initiator: rain-out calls
       // reschedule() as 'tech', whose season guard would reject the target —
@@ -1811,20 +1915,7 @@ class SmartRebooker {
       // the visit's round, so do not offer one.
       if (reason && leavesOwnRound(service.recurring_pattern, service.scheduled_date, dateStr)) continue;
 
-      const dayLoad = await db('scheduled_services')
-        .where('scheduled_date', dateStr)
-        .whereIn('status', ['pending', 'confirmed'])
-        .count('* as count').first();
-
-      const nearbyServices = await db('scheduled_services')
-        .where('scheduled_date', dateStr)
-        .whereIn('status', ['pending', 'confirmed'])
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .select('customers.zip', 'customers.city');
-
-      const sameAreaCount = nearbyServices.filter(s =>
-        s.zip === service.zip || (s.city || '').toLowerCase() === (service.city || '').toLowerCase()
-      ).length;
+      const { dayLoad, sameAreaCount } = await loadCandidateDayLoadAndArea(dateStr, service);
 
       let score = 100;
       const load = parseInt(dayLoad.count);
@@ -1922,7 +2013,7 @@ class SmartRebooker {
       // The single-row CAS found the row grouped AFTER the pre-read (codex
       // #3609 r13 P2): re-enter once so the fresh read routes through the
       // unit mover (whole-visit move) instead of moving the lone member.
-      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED' && !options._membershipRetried) {
+      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED' && !options._membershipRetried && !options.trx) {
         return this.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, _membershipRetried: true });
       }
       throw err;
@@ -1930,7 +2021,8 @@ class SmartRebooker {
   }
 
   async rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
-    const service = await db('scheduled_services').where({ id: serviceId }).first();
+    const readConn = options.trx || db;
+    const service = await readConn('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
@@ -2005,6 +2097,9 @@ class SmartRebooker {
     // an explicit single-row member move, keeps its own contract.
     const membershipFenced = options.visitPolicy !== 'single' && !service.visit_id
       && !Object.prototype.hasOwnProperty.call(options.expect || {}, 'visit_id');
+    // GATE_VISIT_HOLD: a person's move of a held visit ends the hold in this same UPDATE; any other move fences held_at IS NULL.
+    const visitHold = require('./visit-hold');
+    const releasesHold = visitHold.rowIsHeld(service) && options.releaseHold === true;
     // Size rule (owner 2026-10-31, lawn_rounds_9 only): a one-off date move falls through to the
     // single path below, which keeps the OUT_OF_ROUND guard (see movesAsSeries).
     if (options.seriesPolicy !== 'single' && movesAsSeries(service, newDate)) {
@@ -2014,7 +2109,13 @@ class SmartRebooker {
       // retry replays it (and its caller can finish the effects) instead of
       // falling into a same-date single edit.
       const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
-      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expect || null);
+      // A held visit picked back onto its prior date (without an explicit
+      // idempotency key from a retried staff series move) must still run
+      // through the mover to release the hold rather than replaying a
+      // pre-hold move; explicit operationKey retries keep their replay fence.
+      const prior = (releasesHold && !options.operationKey)
+        ? null
+        : await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expect || null);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
         return replaySeriesMoveWithQuality(prior, newDate, serviceId, options);
@@ -2045,10 +2146,7 @@ class SmartRebooker {
     // status-based. For NON-live rows the rewind is additionally gated on
     // the DATE actually changing: a same-date window edit of a visit with
     // genuine same-day tracker state must not erase the active attempt.
-    const sameDayTarget = String(newDate || '').split('T')[0]
-      === String(service.scheduled_date instanceof Date
-        ? service.scheduled_date.toISOString()
-        : service.scheduled_date || '').slice(0, 10);
+    const sameDayTarget = dateOnly(newDate) === dateOnly(service.scheduled_date);
     const lifecycleRewound = wasLive || (!sameDayTarget && needsLifecycleRewind(service));
 
     // A past target date moves the job where no "upcoming" query will ever
@@ -2071,7 +2169,7 @@ class SmartRebooker {
     // for the nightly auto-dispatch move: it blocks when the list is unreadable.
     if (initiatedBy !== 'admin') {
       const { isBlackoutDate } = require('./scheduling/blackout-dates');
-      if (await isBlackoutDate(newDateStr, undefined, { strict: isNightWriter(initiatedBy) })) {
+      if (await isBlackoutDate(newDateStr, options.trx, { strict: isNightWriter(initiatedBy) })) {
         throw Object.assign(new Error('That day is no longer available'), {
           statusCode: 409,
           isOperational: true,
@@ -2142,10 +2240,7 @@ class SmartRebooker {
     // Combine then has nothing to un-confirm. A live row still rewinds.
     const landedStatus = options.pendingConfirmation === true ? 'pending'
       : (options.keepStatus === true && !lifecycleRewound ? service.status : 'confirmed');
-    // GATE_VISIT_HOLD: a person's move of a held visit ends the hold in this same UPDATE; any other move fences held_at IS NULL.
-    const visitHold = require('./visit-hold');
-    const releasesHold = visitHold.rowIsHeld(service) && options.releaseHold === true;
-    const holdFence = visitHold.visitHoldLive() && !releasesHold;
+    const holdCasWhere = holdCasPredicate(releasesHold, service);
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
@@ -2173,12 +2268,10 @@ class SmartRebooker {
     // sequence.
     let routeOrderInvalidated = false;
     {
-      const svcDay = service.scheduled_date instanceof Date
-        ? service.scheduled_date.toISOString().slice(0, 10)
-        : String(service.scheduled_date).slice(0, 10);
+      const svcDay = dateOnly(service.scheduled_date);
       const techChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
         && (options.technicianId || null) !== (service.technician_id || null);
-      routeOrderInvalidated = String(newDate).slice(0, 10) !== svcDay || techChanges;
+      routeOrderInvalidated = dateOnly(newDate) !== svcDay || techChanges || releasesHold;
       if (routeOrderInvalidated) {
         updates.route_order = null;
       }
@@ -2250,6 +2343,7 @@ class SmartRebooker {
         // from changes.window_start on a same-day same-tech move; without it
         // the stop is evaluated at its old route_order (Codex r3 P1, #5267).
         changes: { window_start: updates.window_start, window_end: occupancyGateEnd },
+        ...(releasesHold ? { forceInsert: true } : {}),
         windowStart: updates.window_start,
         windowEnd: occupancyGateEnd,
         durationMinutes: service.estimated_duration_minutes || undefined,
@@ -2294,6 +2388,7 @@ class SmartRebooker {
     // a chosen-victim reschedule fails instead of re-entering the
     // membership check. Nothing committed on a 40P01 abort.
     const moveTrx = async (body) => {
+      if (options.trx) return body(options.trx);
       for (let attempt = 0; ; attempt += 1) {
         try {
           return await db.transaction(body);
@@ -2671,7 +2766,7 @@ class SmartRebooker {
           property_id: service.property_id ?? null,
           // the account the log row is filed under (a racing customer merge repoints it)
           customer_id: service.customer_id ?? null,
-          ...(holdFence ? { held_at: null } : {}),
+          ...holdCasWhere,
         })
         // Ungrouped at the pre-read ⇒ must still be ungrouped at the write
         // (knex renders null as IS NULL); see membershipFenced above.
@@ -2796,20 +2891,30 @@ class SmartRebooker {
       }
     });
 
-    // Tech-facing notice (tech-visit-notifications.js), post-commit,
-    // best-effort and NOT awaited (push delivery stays off the caller's
-    // response path): a tech change tells both techs; a same-tech
-    // date/window move tells the holder. options.actorId is the acting staff row when a
-    // staff surface made the move (so their own move stays silent); system
-    // callers are named by initiatedBy. options.suppressTechNotice: the unit
-    // mover's member moves — the canonical assignment right after sends the
-    // pair, so no intermediate "visit moved" card.
-    if (options.suppressTechNotice !== true) try {
+    const postCommit = () => this.finishSingleReschedulePostCommit({
+      serviceId, service, updates, originalDate, newDateStr, committedTechId, landedStatus, wasLive, lifecycleRewound, initiatedBy, options,
+    });
+    if (!options.trx) await postCommit();
+
+    const baseResult = {
+      success: true, originalDate, newDate, previousStatus: service.status, landedStatus, technicianId: committedTechId,
+      ...(options.trx ? { postCommit } : {}),
+    };
+    if (overlapWarned || offDayWarnings.size) {
+      const { slotOverlapWarning } = require('./scheduling/window-rules');
+      return {
+        ...baseResult,
+        warnings: [...(overlapWarned ? [arrivalWarning || slotOverlapWarning(newDateStr)] : []), ...offDayWarnings],
+      };
+    }
+    return baseResult;
+  }
+
+  notifyTechAfterSingleMove({ serviceId, service, updates, newDateStr, committedTechId, initiatedBy, options }) {
+    if (options.suppressTechNotice === true) return;
+    try {
       const techNotices = require('./tech-visit-notifications');
       const noticeActor = options.actorId || initiatedBy || null;
-      // A tech change pinned the prior tech in the CAS (so `service` names
-      // the real "from"); a same-tech move reads the holder off the
-      // committed row.
       const priorTechId = service.technician_id || null;
       const noticeTechChanged = Object.prototype.hasOwnProperty.call(options, 'technicianId')
         && (options.technicianId || null) !== priorTechId;
@@ -2817,8 +2922,6 @@ class SmartRebooker {
         void techNotices.notifyAssignmentChange({
           visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
           snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
-          // The old slot rides along so a move off today/tomorrow stays a
-          // today/tomorrow change on the Today page (Codex #5783 P2).
           previous: { date: service.scheduled_date, windowStart: service.window_start, windowEnd: service.window_end },
         });
       } else if (committedTechId) {
@@ -2842,28 +2945,16 @@ class SmartRebooker {
     } catch (noticeErr) {
       logger.warn(`[rebooker] tech notice failed for ${serviceId} (move already committed): ${noticeErr.message}`);
     }
+  }
 
-    // Live override post-commit cleanup:
-    //   1. The tech's tech_status row still points at this job
-    //      (en_route / on_site). Release it so the tech shows idle and
-    //      the next job can claim them. Best-effort outside the trx —
-    //      same pattern as track-transitions.markComplete; a failure
-    //      here leaves a stale pointer, not inconsistent job state.
-    //   2. A customer watching the public tracker would otherwise stay
-    //      on the stale en-route / on-site screen — push the refresh.
+  async finishSingleReschedulePostCommit({
+    serviceId, service, updates, originalDate, newDateStr, committedTechId, landedStatus, wasLive, lifecycleRewound, initiatedBy, options,
+  }) {
+    this.notifyTechAfterSingleMove({ serviceId, service, updates, newDateStr, committedTechId, initiatedBy, options });
     if (wasLive || lifecycleRewound) {
-      // lifecycleRewound without wasLive: a manual En Route tap advanced
-      // track_state (and pinned tech_status) without syncing status — the
-      // rewind above cleared the row, so the tech pointer and any open
-      // customer tracker need the same cleanup. This path lands the row on
-      // 'confirmed' either way, so the refresh status is unchanged.
       if (service.technician_id) {
         try {
-          await clearTechCurrentJob({
-            tech_id: service.technician_id,
-            current_job_id: serviceId,
-            status: 'idle',
-          });
+          await clearTechCurrentJob({ tech_id: service.technician_id, current_job_id: serviceId, status: 'idle' });
         } catch (err) {
           logger.error(`[rebooker] tech_status clear after live reschedule failed for ${serviceId}: ${err.message}`);
         }
@@ -2871,8 +2962,6 @@ class SmartRebooker {
       emitCustomerJobRefresh({ ...service, ...updates, id: serviceId }, landedStatus);
     }
 
-    // Keep a call-created follow-up (visit 2) spaced from its parent —
-    // shared with the admin schedule-edit path; best-effort outside the trx.
     const followUpReport = {};
     try {
       const shifted = options.skipCallFollowUpShift ? 0 : await shiftCallFollowUpsForParentMove({
@@ -2880,13 +2969,9 @@ class SmartRebooker {
         parentServiceId: serviceId,
         fromDate: originalDate,
         toDate: newDateStr,
-        // Same actor and suppression as the parent's own notice above.
         noticeActorId: options.actorId || initiatedBy || null,
         suppressTechNotice: options.suppressTechNotice === true,
-        // Reported so the route refresh below covers the child's own two
-        // days, not just the parent's (codex #4295 r1 P2).
         report: followUpReport,
-        // A grouped stop's member too (skipVisitSeam): its follow-up is its own row.
         shiftLive: automaticShiftLive(initiatedBy),
       });
       if (shifted > 0) {
@@ -2896,18 +2981,9 @@ class SmartRebooker {
       logger.error(`[rebooker] call follow-up shift failed for ${serviceId}: ${err.message}`);
     }
 
-    // Check escalation — best-effort, post-commit: the move is already
-    // committed, so a failure here must not be reported as a failed move
-    // (a grouped unit move would otherwise abort with its primary landed —
-    // codex #3609 r13 P1).
     try {
-      const count = await db('reschedule_log')
-        .where({ scheduled_service_id: serviceId })
-        .count('* as count').first();
-
+      const count = await db('reschedule_log').where({ scheduled_service_id: serviceId }).count('* as count').first();
       if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
-        // IDs only — never the customer's name in plaintext logs (AGENTS.md
-        // non-card PII rule; local codex audit).
         logger.warn(`[rebooker] service ${serviceId} (customer ${service.customer_id}) has been rescheduled ${count.count} times — needs manual review`);
         await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
           .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
@@ -2916,12 +2992,6 @@ class SmartRebooker {
       logger.warn(`[rebooker] escalation check failed for ${serviceId} (move already committed): ${escErr.message}`);
     }
 
-    // This writer moves the visit with a direct UPDATE, not
-    // transitionJobStatus — a LEGACY outbound-review row (pending before the
-    // 2026-08-11 review-hold removal) rescheduled here would otherwise move
-    // and message the customer while still unactivated: reminders unarmed,
-    // lead unconverted, review card open (Codex #3361 r2 P0). Best-effort
-    // post-commit, at-most-once via the helper's guarded stamp.
     if (options.pendingConfirmation !== true) {
       try {
         const { activateLegacyOutboundReviewRowIfNeeded } = require('./outbound-review-confirm');
@@ -2931,12 +3001,6 @@ class SmartRebooker {
       }
     }
 
-    // Visit-group seam (visit-group-scope.md §2): a moved child whose stop
-    // no longer matches its visit detaches; the remainder dissolves when one
-    // untouched row is left. A unit move (moveVisitAsUnit) passes
-    // skipVisitSeam and runs this once for every member AFTER they all
-    // moved — per member it would detach the first mover from siblings
-    // still on the old stop. Best-effort post-commit.
     if (!options.skipVisitSeam) {
       try {
         await require('./visit-groups').handleChildStopChanged(serviceId);
@@ -2945,11 +3009,7 @@ class SmartRebooker {
       }
     }
 
-    // A caller that mutates several visits in one pass (rain-out's per-job
-    // loop, a future batch) passes a shared Set here and flushes it once
-    // itself instead of every row awaiting its own repair/measurement pass
-    // (codex #4295 r2 P2) — a caller with no batch of its own keeps the
-    // inline refresh.
+    invalidateEstimateSlotCaches();
     const changeDates = [originalDate, newDateStr, ...(followUpReport.shifted || []).flatMap(row => [row.previousDate, row.date])];
     if (options.qualityDates) {
       for (const date of changeDates) if (date) options.qualityDates.add(date);
@@ -2959,20 +3019,6 @@ class SmartRebooker {
         dates: changeDates,
       });
     }
-
-    if (overlapWarned || offDayWarnings.size) {
-      const { slotOverlapWarning } = require('./scheduling/window-rules');
-      // previousStatus: the status the CAS matched — the row's real
-      // pre-move state; landedStatus: the one the move wrote (auto-dispatch
-      // reports and fences on it).
-      return {
-        success: true, originalDate, newDate, previousStatus: service.status, landedStatus, technicianId: committedTechId,
-        warnings: [...(overlapWarned ? [arrivalWarning || slotOverlapWarning(newDateStr)] : []), ...offDayWarnings],
-      };
-    }
-    // technicianId: the holder on the COMMITTED row — a caller that suppressed
-    // the per-move tech notice (options.suppressTechNotice) tells them itself.
-    return { success: true, originalDate, newDate, previousStatus: service.status, landedStatus, technicianId: committedTechId };
   }
 
   // Reschedule the dropped occurrence AND every future sibling in the
@@ -3181,7 +3227,12 @@ class SmartRebooker {
     const {
       isMonthBasedPattern, seriesSkipWeekends, opts, deltaDays, cadenceSlotDate, projectOccurrenceDate, assertClosedDaysUnchanged,
     } = await makeSeriesProjector({
-      service, parent, newDate, seriesDateStr, closedDays: await loadSeriesClosedDays(db, { initiatedBy, deferred: deferFuturePlacement }),
+      service,
+      parent,
+      newDate,
+      seriesDateStr,
+      closedDays: await loadSeriesClosedDays(db, { initiatedBy, deferred: deferFuturePlacement }),
+      techWorkDaysById: await loadSeriesTechWorkDaysForParent(db, { initiatedBy, service, parent, parentId }),
     });
     // The call-created follow-ups this move shifts — planned before the
     // locks (their destination days join rung 1) and handed to the shift
@@ -4617,8 +4668,8 @@ class SmartRebooker {
               status: sib.status,
               scheduled_date: sib.scheduled_date,
               window_start: sib.window_start,
-              // GATE_VISIT_HOLD: no occurrence moves once held, except the anchor a person is releasing.
-              ...(require('./visit-hold').visitHoldLive() && !(isAnchor && releasesHold) ? { held_at: null } : {}),
+              // GATE_VISIT_HOLD: no occurrence moves once held, except the anchor a person is releasing (pinned on original service.held_at).
+              ...holdCasPredicate(isAnchor && releasesHold, isAnchor ? service : sib),
               // window_end and technician_id are overwritten by this sweep
               // (duration + the conflict-unassign decision were computed from
               // the values read above) — a concurrent resize/reassignment
@@ -5034,6 +5085,7 @@ class SmartRebooker {
     } catch (vgErr) {
       logger.warn(`[rebooker] series visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
     }
+    invalidateEstimateSlotCaches();
     // Same shared-Set convention as the single-visit path above: a caller
     // batching several series moves (rain-out's collective-anchor branch)
     // passes qualityDates and flushes it once itself (codex #4295 r2 P2).
@@ -5079,12 +5131,15 @@ class SmartRebooker {
     // …and the closed days a deferred-placement move skips for the later
     // visits it hands to dispatch, so the date named is the date it writes.
     const closedDays = await loadSeriesClosedDays(conn, { deferred });
+    const techWorkDaysById = await loadSeriesTechWorkDays(conn, {
+      technicianIds: [service.technician_id, parent?.technician_id, ...swept.map((r) => r.technician_id)],
+    });
     for (const raw of candidateDates) {
       const seriesDateStr = dateOnly(raw);
       // No entry for a time-only date, a repeat, or a lawn rounds one-off (size rule): that date moves this visit alone.
       if (!datesMoveSeries(service, currentDate, seriesDateStr) || byDate[seriesDateStr]) continue;
       const { cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
-        service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends, closedDays,
+        service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends, closedDays, techWorkDaysById,
       });
       // Walk the rows before it in sweep order, exactly as the move does: a
       // row that does not move still reserves its cadence slot.
@@ -5326,6 +5381,12 @@ module.exports = new SmartRebooker();
 // writer's own question instead of re-deriving it. The tech-scoped hard
 // check reschedule() also runs is a strict subset of this tech-blind one
 // (same status/hold/window rules, narrowed to one technician_id).
+function invalidateEstimateSlotCaches() {
+  try {
+    require('./estimate-slot-availability').invalidateAllEstimates();
+  } catch { /* best-effort */ }
+}
+
 module.exports.probeMoveConflicts = probeMoveConflicts;
 module.exports.occupancyProbeEnd = occupancyProbeEnd;
 module.exports.loadNextVisitSweep = loadNextVisitSweep;

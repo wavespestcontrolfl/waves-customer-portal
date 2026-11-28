@@ -92,6 +92,32 @@ function parsePriceInput(value) {
   return value !== '' && !isNaN(parseFloat(value)) ? parseFloat(value) : undefined;
 }
 
+function makeInitialEditSnapshot(service, tier, autoDispatchLocked) {
+  return {
+    tier,
+    price: service?.estimatedPrice != null ? String(service.estimatedPrice) : '',
+    technicianId: service?.technicianId || '',
+    duration: service?.estimatedDuration || 30,
+    notes: service?.notes || '',
+    autoDispatchLocked,
+  };
+}
+
+function isServiceEditDirty(initial, current) {
+  return current.tier !== initial.tier
+    || current.price !== initial.price
+    || String(current.technicianId || '') !== String(initial.technicianId || '')
+    || Number(current.duration) !== Number(initial.duration)
+    || current.notes !== initial.notes
+    || current.autoDispatchLocked !== initial.autoDispatchLocked;
+}
+
+function confirmDiscardEdit(dirty) {
+  if (!dirty) return true;
+  if (typeof window === 'undefined' || typeof window.confirm !== 'function') return true;
+  return window.confirm('Discard unsaved service changes?');
+}
+
 // Edit appointment's two price/service scopes, posted as priceServiceScope.
 const PRICE_SCOPE_OPTIONS = [
   { key: 'this_only', label: 'This appointment only' },
@@ -117,6 +143,7 @@ export default function MobileServiceEditModal({
   const [duration, setDuration] = useState(() => service?.estimatedDuration || 30);
   const [notes, setNotes] = useState(() => service?.notes || '');
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [error, setError] = useState(null);
   const [sharedStopAsk, setSharedStopAsk] = useState(false);
   const [showStaffPicker, setShowStaffPicker] = useState(false);
@@ -171,9 +198,20 @@ export default function MobileServiceEditModal({
     ? `Tech #${technicianId}`
     : 'Unassigned';
 
+  const initialSnapshot = useRef(makeInitialEditSnapshot(service, initialTier.current, autoDispatchLockedSeed));
+
+  const requestClose = () => {
+    if (savingRef.current) return;
+    const dirty = isServiceEditDirty(initialSnapshot.current, {
+      tier, price, technicianId, duration, notes, autoDispatchLocked,
+    });
+    if (confirmDiscardEdit(dirty)) onClose?.();
+  };
+
   // `comboMove`: the answer to the shared-stop question below, when asked.
   async function handleSave(comboMove) {
-    if (saving) return;
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     setError(null);
     setSharedStopAsk(false);
@@ -233,12 +271,15 @@ export default function MobileServiceEditModal({
       }
       const scopeNotice = seriesScopeSaveNotice(result);
       if (scopeNotice) showScheduleSaveNotice(scopeNotice);
+      savingRef.current = false;
+      setSaving(false);
       onSaved?.();
     } catch (e) {
       // A technician change on a stop shared by two or more services is
       // refused until someone chooses (nothing separates unchosen): ask here.
       if (!comboMove && /"code"\s*:\s*"VISIT_EDIT_SCHEDULE_UNSUPPORTED"/.test(String(e?.message || ''))) {
         setSharedStopAsk(true);
+        savingRef.current = false;
         setSaving(false);
         return;
       }
@@ -246,12 +287,14 @@ export default function MobileServiceEditModal({
       // have gone through (split, reassignment, customer text).
       if (comboMove && e?.status == null) {
         setError('The save did not confirm, so it may or may not have gone through. Close this and check the schedule before you save again.');
+        savingRef.current = false;
         setSaving(false);
         return;
       }
       // The inline helper throws the raw JSON body as the message — show the
       // server's own sentence (a refused collective move names what it needs).
       setError(apiErrorMessage(e, 'Failed to save'));
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -267,9 +310,10 @@ export default function MobileServiceEditModal({
       >
         <button
           type="button"
-          onClick={onClose}
+          onClick={requestClose}
+          disabled={saving}
           aria-label="Close"
-          className="flex items-center justify-center h-11 w-11 u-focus-ring text-zinc-900"
+          className="flex items-center justify-center h-11 w-11 u-focus-ring text-zinc-900 disabled:opacity-50"
         >
           <X size={22} strokeWidth={1.75} />
         </button>

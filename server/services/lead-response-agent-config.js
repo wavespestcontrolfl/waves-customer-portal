@@ -33,7 +33,7 @@ CUSTOMER SMS HOUSE VOICE (mandatory for every message sent to a lead):
 - LENGTH: Under 300 characters. 2-3 sentences. One exclamation mark max.
 - NO SIGNATURE: never sign or add a sign-off. No "— Adam", no "Waves Pest Control" closer, no name at the end. The message just ends.
 - Never say "I'm an AI" or use corporate hedging like "I understand your concern."
-- Never quote exact prices — route to an estimate flow instead.
+- PRICES: real amounts on an open estimate already sent to this lead (from check_existing_estimates) may be stated ONLY by copying a matching sentence from pricing.priceSentences word for word (exact amount, service, and billing unit — never "per visit", and never a monthly average as an application price). When quoting from pricing.priceSentences, keep the surrounding text to a brief greeting, the non-null viewUrl link, and a simple reply/scheduling close — never add extra coverage, discount, or bundle claims beside a price. Never paraphrase, invent, round, or compute a price. If pricing is unavailable or withheld, do not quote a number — share viewUrl only when check_existing_estimates returns a non-null viewUrl; if both pricing and viewUrl are unavailable or withheld, use queue_for_adam or offer to send a fresh estimate. Never quote exact prices for unquoted NEW work — route new pricing requests to an estimate flow instead.
 
 AUTO-SEND when ALL true: standard residential pest/lawn, normal urgency, clear service interest, not commercial, not a complaint.
 
@@ -45,7 +45,7 @@ LEAD SOURCE ADAPTATION:
 - Organic: may need education, reference blog content
 - Referral: mention referrer, warm tone
 
-NEVER: send a generic template, promise pricing, book without availability check, auto-send when it should be queued, use emojis in a customer-facing message.`,
+NEVER: send a generic template, invent or promise unquoted pricing, book without availability check, auto-send when it should be queued, use emojis in a customer-facing message.`,
 
   tools: [
     {
@@ -120,7 +120,7 @@ NEVER: send a generic template, promise pricing, book without availability check
     {
       type: 'custom',
       name: 'check_existing_estimates',
-      description: `Check if any estimates have been sent to this customer/lead. Returns estimate status (draft, sent, viewed, accepted, expired), services quoted, total amount, when it was sent/viewed, and the estimate view URL. Use to avoid sending duplicate estimates or to reference an existing one in your response.`,
+      description: `Check if any estimates have been sent to this customer/lead. Returns estimate status (sent, viewed, accepted, declined), service interest, verified pricing with verbatim priceSentences (copy word for word when stating a price) when available, pricingUnavailable/totalWithheld when amounts must not be stated, when it was sent/viewed, and viewUrl (or viewUrlWithheld when null). State a price ONLY by copying a sentence from pricing.priceSentences word for word; if pricing is unavailable or withheld, share viewUrl only when non-null, and if both pricing and viewUrl are unavailable or withheld, use queue_for_adam or offer a fresh estimate.`,
       input_schema: {
         type: 'object',
         properties: {

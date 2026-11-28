@@ -132,13 +132,13 @@ async function main({ aps = false, apsPass = null } = {}) {
   const { loadBookableCallServices } = require('../services/call-booking-catalog');
   const bookableCallServices = await loadBookableCallServices(db);
   const liveCatalogNames = bookableCallServices.map((s) => s.name).filter(Boolean);
-  const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
   // GATE_CALL_EXTRACTION_SYSTEM_PROMPT: with the gate on the processor stamps the system-layout
-  // cohort (`s`), so that is the live main cohort this run must match.
-  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames, { systemLayout: systemLayoutLive() });
+  // cohort (`s`), scoped to Gemini's systemInstruction channel hash ONLY when the route's primary
+  // provider is Gemini (preserving OpenAI/Anthropic cohorts unchanged while excluding pre-cutover
+  // Gemini, legacy bare PROMPT_HASH, and pre-cutover fallback rows from a Gemini-primary cohort).
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
-    .whereIn('ai_extraction_prompt_version', aps ? [apsCohortVersion(liveCatalogNames)] : [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
+    .whereIn('ai_extraction_prompt_version', aps ? [apsCohortVersion(liveCatalogNames)] : mainCohortVersions(liveCatalogNames))
     // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
     // exactly as the live path passes `extracted` to it.
     // metadata + source: resolveCallContactPhone needs both to resolve a
@@ -549,8 +549,14 @@ function systemLayoutLive() {
   return require('../config/feature-gates').callExtractionSystemPromptLive() === true;
 }
 
-function apsCohortVersion(liveCatalogNames) {
-  return extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true, systemLayout: systemLayoutLive() });
+function mainCohortVersions(liveCatalogNames, { provider = ROUTE_PROVIDER } = {}) {
+  const systemLayout = systemLayoutLive();
+  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames, { systemLayout, provider });
+  return systemLayout ? [LIVE_PROMPT_VERSION] : [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])];
+}
+
+function apsCohortVersion(liveCatalogNames, { provider = ROUTE_PROVIDER } = {}) {
+  return extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true, systemLayout: systemLayoutLive(), provider });
 }
 
 // The whole run: with the gate on, the -aps cohort is evaluated first (its own full report) and
@@ -565,4 +571,4 @@ if (require.main === module) {
   runReadiness().catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { contactPhoneForCall, apsCohortVersion, runReadiness };
+module.exports = { contactPhoneForCall, mainCohortVersions, apsCohortVersion, runReadiness };

@@ -28,7 +28,7 @@ import { createPortal } from 'react-dom';
 import { stackDiscounts, percentageDiscountDollars, stackGroupConflict } from '../../lib/discountStack';
 import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
 import { X, Tag } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import MobileServicePickerSheet from './MobileServicePickerSheet';
 import MobileItemDiscountPickerSheet from './MobileItemDiscountPickerSheet';
 import {
@@ -39,6 +39,8 @@ import {
 } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice } from './visitInvoice';
 import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+import { getAdminUser } from '../../lib/adminAuth';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -63,20 +65,141 @@ function formatTime(hhmm) {
 let _uid = 0;
 const uid = () => `ex_${Date.now()}_${++_uid}`;
 
+function parseErrorResponse(raw, fallbackStatus) {
+  if (!raw) return fallbackStatus;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.error || parsed?.message || raw;
+  } catch {
+    return raw;
+  }
+}
+
+function CheckoutPrimaryServiceRow({ isAdmin, onEditServiceLine, service, baseServiceLabel, billingSubtitle, timeSubtitle, baseServicePrice }) {
+  const content = (
+    <>
+      <div className="flex-1 min-w-0 pr-2">
+        <div className="flex items-center gap-1.5">
+          <span className={`font-medium truncate ${isAdmin && onEditServiceLine ? 'text-blue-600' : 'text-zinc-900'}`} style={{ fontSize: 15 }}>
+            {baseServiceLabel}
+          </span>
+          {isAdmin && onEditServiceLine && <Tag size={14} className="text-zinc-400 shrink-0" strokeWidth={1.5} />}
+        </div>
+        <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
+          {billingSubtitle}
+        </div>
+        {timeSubtitle && (
+          <div className="text-ink-tertiary u-nums" style={{ fontSize: 12, marginTop: 1 }}>
+            {timeSubtitle}
+          </div>
+        )}
+      </div>
+      <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
+        ${baseServicePrice.toFixed(2)}
+      </div>
+    </>
+  );
+  if (isAdmin && onEditServiceLine) {
+    return (
+      <button
+        type="button"
+        onClick={() => onEditServiceLine(service)}
+        className="w-full flex items-start justify-between gap-3 py-4 bg-white border-b border-hairline border-zinc-200 text-left u-focus-ring"
+      >
+        {content}
+      </button>
+    );
+  }
+  return (
+    <div className="w-full flex items-start justify-between gap-3 py-4 bg-white border-b border-hairline border-zinc-200 text-left">
+      {content}
+    </div>
+  );
+}
+
+function CheckoutFooterActions({
+  invoicePreview,
+  processingVisitInvoice,
+  attachedInvoiceRefusedForFeeAtCompletion,
+  feeOnlyPerApplicationPreview,
+  isAdmin,
+  onAddService,
+  onAddItem,
+}) {
+  if (invoicePreview) {
+    return (
+      <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
+        {processingVisitInvoice
+          ? 'A payment for this invoice is already processing — do not collect again.'
+          : attachedInvoiceRefusedForFeeAtCompletion
+            ? <>This visit bills its application fee at completion, so Charge Now can’t collect{' '}
+              {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'this invoice'} here — settle it from
+              the Invoices page, or set a price on this visit first.</>
+            : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
+              {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
+              the Invoices page before charging.</>}
+      </div>
+    );
+  }
+  if (feeOnlyPerApplicationPreview) {
+    return (
+      <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
+        This visit bills its application fee at completion — add extras there, or set a price on this visit first.
+      </div>
+    );
+  }
+  if (!isAdmin) return null;
+  return (
+    <div className="mt-4 space-y-3">
+      <button
+        type="button"
+        onClick={onAddService}
+        className="w-full bg-white text-zinc-900 font-medium rounded-xs u-focus-ring border border-hairline border-zinc-200"
+        style={{ padding: '14px 20px', fontSize: 15 }}
+      >
+        Add Service
+      </button>
+      <button
+        type="button"
+        onClick={onAddItem}
+        className="w-full bg-white text-zinc-900 font-medium rounded-xs u-focus-ring border border-hairline border-zinc-200"
+        style={{ padding: '14px 20px', fontSize: 15 }}
+      >
+        Add Item or Discount
+      </button>
+    </div>
+  );
+}
+
 export default function MobileCheckoutSheet({
   service,
   onClose,
   onChargeSuccess,
   onEditServiceLine,
   desktopVisible = false,
+  isAdmin: isAdminProp,
 }) {
   const [minting, setMinting] = useState(false);
+  const mintingRef = useRef(false);
   const [mintError, setMintError] = useState(null);
   const [extras, setExtras] = useState([]);
   // { id, description, unit_price, quantity, amount, _kind }
   //   _kind is 'service' | 'discount' (UI label only — server treats uniformly)
   const [showServicePicker, setShowServicePicker] = useState(false);
   const [showItemPicker, setShowItemPicker] = useState(false);
+  // Reset local draft/loading state whenever the mounted visit changes so
+  // unsaved extras or a prior error never bleed across visits (P0-3).
+  useEffect(() => {
+    mintingRef.current = false;
+    setMinting(false);
+    setMintError(null);
+    setExtras([]);
+    setShowServicePicker(false);
+    setShowItemPicker(false);
+  }, [service?.id]);
+  // Owner ruling 2026-11-27: technicians cannot add services, custom
+  // discounts, or edit visit prices — fail closed unless admin.
+  const isAdmin = isAdminProp !== undefined ? !!isAdminProp : getAdminUser()?.role === 'admin';
   // Saved payment methods — shown under the Charge button so the tech knows
   // whether a card is on file before picking a tender. null = unknown
   // (loading / fetch failed) and renders nothing: a false "No card on file"
@@ -574,7 +697,8 @@ export default function MobileCheckoutSheet({
   const removeExtra = (id) => setExtras((prev) => prev.filter((e) => e.id !== id));
 
   async function handleCharge() {
-    if (minting || nothingToCharge || stackingUnconfirmedBlocksCharge || discountGroupConflict) return;
+    if (mintingRef.current || minting || nothingToCharge || stackingUnconfirmedBlocksCharge || discountGroupConflict) return;
+    mintingRef.current = true;
     setMinting(true);
     setMintError(null);
     // Revalidate right before posting money: polling narrows the window after a
@@ -591,6 +715,7 @@ export default function MobileCheckoutSheet({
     if (discountRegimeDependent) {
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
+        mintingRef.current = false;
         setMinting(false);
         setMintError('The discount-stacking setting changed while this was open. Reload before charging so the total matches what will be billed.');
         return;
@@ -625,16 +750,18 @@ export default function MobileCheckoutSheet({
         // moved also has nothing to bind).
         ...(discountRegimeDependent ? { expected_discount_stacking: confirmedStackingRegime } : {}),
       };
-      const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/invoice`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
-        },
-        body: JSON.stringify(body),
+      const data = await holdReloadWhileSending('checkout-invoice-mint', async () => {
+        const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/invoice`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
+          },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(parseErrorResponse(await r.text().catch(() => ''), `${r.status}`));
+        return r.json();
       });
-      if (!r.ok) throw new Error(await r.text().catch(() => `${r.status}`));
-      const data = await r.json();
       if (!data.invoiceId) throw new Error('No invoice id returned');
       // The visit's invoice is already settled (paid, or prepaid/covered by
       // account credit) — there's nothing to collect, so don't open tender
@@ -645,7 +772,6 @@ export default function MobileCheckoutSheet({
             ? 'This visit is already covered by account credit — nothing to collect.'
             : 'This visit is already paid — nothing to collect.',
         );
-        setMinting(false);
         return;
       }
       const confirmedTotal = Number(data.total);
@@ -657,6 +783,8 @@ export default function MobileCheckoutSheet({
       });
     } catch (e) {
       setMintError(e.message || 'Failed to create invoice');
+    } finally {
+      mintingRef.current = false;
       setMinting(false);
     }
   }
@@ -809,32 +937,16 @@ export default function MobileCheckoutSheet({
             </>
           ) : (
           <>
-          {/* Base appointment service */}
-          <button
-            type="button"
-            onClick={() => onEditServiceLine?.(service)}
-            className="w-full flex items-start justify-between gap-3 py-4 bg-white border-b border-hairline border-zinc-200 text-left u-focus-ring"
-          >
-            <div className="flex-1 min-w-0 pr-2">
-              <div className="flex items-center gap-1.5">
-                <span className="font-medium text-blue-600 truncate" style={{ fontSize: 15 }}>
-                  {baseServiceLabel}
-                </span>
-                <Tag size={14} className="text-zinc-400 shrink-0" strokeWidth={1.5} />
-              </div>
-              <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
-                {billingSubtitle}
-              </div>
-              {timeSubtitle && (
-                <div className="text-ink-tertiary u-nums" style={{ fontSize: 12, marginTop: 1 }}>
-                  {timeSubtitle}
-                </div>
-              )}
-            </div>
-            <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
-              ${baseServicePrice.toFixed(2)}
-            </div>
-          </button>
+          {/* Base appointment service — editable by office admins only */}
+          <CheckoutPrimaryServiceRow
+            isAdmin={isAdmin}
+            onEditServiceLine={onEditServiceLine}
+            service={service}
+            baseServiceLabel={baseServiceLabel}
+            billingSubtitle={billingSubtitle}
+            timeSubtitle={timeSubtitle}
+            baseServicePrice={baseServicePrice}
+          />
 
           {splitAppointmentAddons && appointmentAddons.map((addon) => (
             <div
@@ -910,6 +1022,11 @@ export default function MobileCheckoutSheet({
               ${total.toFixed(2)}
             </span>
           </div>
+          {!invoicePreview && !nothingToCharge && (
+            <div className="text-ink-tertiary" style={{ fontSize: 12, marginTop: -8, paddingBottom: 8 }}>
+              Applicable sales tax or estimate deposits are finalized on the invoice.
+            </div>
+          )}
         </div>
 
         {/* Add Service / Add Item or Discount. Hidden when an invoice is
@@ -925,49 +1042,15 @@ export default function MobileCheckoutSheet({
             lookup would find it and never re-run the fee decision at all).
             Offering the pickers here would let the tech add an extra the
             server then 409s. */}
-        {invoicePreview ? (
-          <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
-            {processingVisitInvoice
-              ? 'A payment for this invoice is already processing — do not collect again.'
-              // Codex pre-push P1 (round 13, Codex r11 finding): this visit
-              // bills its acceptance fee at completion — resolveScheduledServiceCharge
-              // refuses the mint for it even with this invoice already
-              // attached (the same "never trust an existing invoice blindly
-              // for this shape" posture round-9 P1 established), so the
-              // ordinary "charging collects this invoice" copy would be
-              // wrong here — every tap 409s.
-              : attachedInvoiceRefusedForFeeAtCompletion
-                ? <>This visit bills its application fee at completion, so Charge Now can’t collect{' '}
-                  {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'this invoice'} here — settle it from
-                  the Invoices page, or set a price on this visit first.</>
-                : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
-                  {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
-                  the Invoices page before charging.</>}
-          </div>
-        ) : feeOnlyPerApplicationPreview ? (
-          <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
-            This visit bills its application fee at completion — add extras there, or set a price on this visit first.
-          </div>
-        ) : (
-        <div className="mt-4 space-y-3">
-          <button
-            type="button"
-            onClick={() => setShowServicePicker(true)}
-            className="w-full bg-white text-zinc-900 font-medium rounded-xs u-focus-ring border border-hairline border-zinc-200"
-            style={{ padding: '14px 20px', fontSize: 15 }}
-          >
-            Add Service
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowItemPicker(true)}
-            className="w-full bg-white text-zinc-900 font-medium rounded-xs u-focus-ring border border-hairline border-zinc-200"
-            style={{ padding: '14px 20px', fontSize: 15 }}
-          >
-            Add Item or Discount
-          </button>
-        </div>
-        )}
+        <CheckoutFooterActions
+          invoicePreview={invoicePreview}
+          processingVisitInvoice={processingVisitInvoice}
+          attachedInvoiceRefusedForFeeAtCompletion={attachedInvoiceRefusedForFeeAtCompletion}
+          feeOnlyPerApplicationPreview={feeOnlyPerApplicationPreview}
+          isAdmin={isAdmin}
+          onAddService={() => setShowServicePicker(true)}
+          onAddItem={() => setShowItemPicker(true)}
+        />
       </div>
 
       {showServicePicker && (

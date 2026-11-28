@@ -264,7 +264,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
           </div>
         ) : null}
         {totals.hasTax || anyTaxableLine ? (
-          <div style={{ fontSize: 13, color: W.textCaption, marginTop: 6, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 14, color: W.textCaption, marginTop: 6, lineHeight: 1.5 }}>
             * Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus
             the service county surtax. Residential pest control and residential lawn maintenance are
             tax-exempt in Florida; commercial services may be taxable.

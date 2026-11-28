@@ -134,7 +134,23 @@ export function customerNameOf(visit, service) {
 // `suspended` (owner 2026-10-09): the appointment details sheet is open over
 // this visit. The sheet stays mounted, so everything entered is kept, but it is
 // hidden and inert until Details closes.
-export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hiddenProps, overlay, dialogClassName, suspended = false, children }) {
+export function FastCompleteFrame({
+  isMobile,
+  dialogRef,
+  titleId,
+  onDismiss,
+  hiddenProps,
+  overlay,
+  dialogClassName,
+  suspended = false,
+  onInputCapture,
+  onChangeCapture,
+  onClickCapture,
+  confirmingDiscard = false,
+  onKeepEditing,
+  onDiscardAndClose,
+  children,
+}) {
   const fieldPortalClass = useFieldPortalClass();
   return createPortal(
     <>
@@ -150,15 +166,104 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen', dialogClassName)}
+        onInputCapture={onInputCapture}
+        onChangeCapture={onChangeCapture}
+        onClickCapture={onClickCapture}
         {...hiddenProps}
       >
-        {children}
+        {confirmingDiscard && (
+          <div
+            role="alertdialog"
+            aria-label="Discard unsaved visit changes"
+            className="tech-visit-card"
+            style={{ margin: '8px 12px 0', border: '1px solid #d6d3d1' }}
+          >
+            <p className="tech-visit-section-title" style={{ marginBottom: 4 }}>Discard unsaved changes?</p>
+            <p className="tech-visit-muted" style={{ marginBottom: 8 }}>Your entered notes, photos, or product amounts will be lost if you close now.</p>
+            <div className="tech-visit-tile-grid tech-visit-tile-grid--2">
+              <Button type="button" variant="secondary" className="tech-visit-action" onClick={onKeepEditing}>Keep editing</Button>
+              <Button type="button" variant="primary" className="tech-visit-action" onClick={onDiscardAndClose}>Discard &amp; close</Button>
+            </div>
+          </div>
+        )}
+        <div style={{ display: 'contents' }} {...(confirmingDiscard ? { 'aria-hidden': true, inert: '' } : {})}>
+          {children}
+        </div>
       </section>
     </UiSurface>
     {overlay}
     </>,
     document.body,
   );
+}
+
+// Guards accidental backdrop / × / Escape dismissal once a tech has entered
+// notes, amounts, or selections, while keeping untouched, blocked, failed, or
+// already-saved sheets single-tap dismissible (Schedule & Dispatch audit P1-19).
+export function useFastCompleteCloseGuard({ blocked = false, skipConfirm = false, skipWhen = null, onClose }) {
+  const dirtyRef = useRef(false);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const skip = skipConfirm || (Array.isArray(skipWhen) && skipWhen.some(Boolean));
+
+  useEffect(() => {
+    if (blocked) setConfirmingDiscard(false);
+  }, [blocked]);
+
+  const markFormEdit = useCallback((event) => {
+    const target = event?.target;
+    if (!target) return;
+    const tag = String(target.tagName || '').toUpperCase();
+    if (tag === 'TEXTAREA' || tag === 'SELECT') {
+      dirtyRef.current = true;
+      return;
+    }
+    if (tag === 'INPUT' && String(target.type || '').toLowerCase() !== 'search') {
+      dirtyRef.current = true;
+    }
+  }, []);
+
+  const markDirty = useCallback(() => {
+    dirtyRef.current = true;
+  }, []);
+
+  const markSelectionClick = useCallback((event) => {
+    const btn = event?.target?.closest?.('button[aria-pressed], button[role="radio"], button.tech-product-remove');
+    if (btn) dirtyRef.current = true;
+  }, []);
+
+  const requestClose = useCallback(() => {
+    if (blocked) return;
+    if (confirmingDiscard) {
+      setConfirmingDiscard(false);
+      return;
+    }
+    if (skip || !dirtyRef.current) {
+      onClose();
+      return;
+    }
+    setConfirmingDiscard(true);
+  }, [blocked, confirmingDiscard, skip, onClose]);
+
+  const onKeepEditing = useCallback(() => setConfirmingDiscard(false), []);
+  const onDiscardAndClose = useCallback(() => {
+    if (blocked) return;
+    dirtyRef.current = false;
+    setConfirmingDiscard(false);
+    onClose();
+  }, [blocked, onClose]);
+
+  return {
+    requestClose,
+    markDirty,
+    frameProps: {
+      onInputCapture: markFormEdit,
+      onChangeCapture: markFormEdit,
+      onClickCapture: markSelectionClick,
+      confirmingDiscard,
+      onKeepEditing,
+      onDiscardAndClose,
+    },
+  };
 }
 
 // Details opens the appointment details sheet on the schedule row the sheet was

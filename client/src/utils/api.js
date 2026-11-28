@@ -244,6 +244,7 @@ export class ApiClient {
         // partial batches use this to know which fields must never be
         // retried, same way `code` is a machine-readable discriminator.
         if (Array.isArray(errorBody?.rejected)) requestErr.rejected = errorBody.rejected;
+        if (errorBody?.attemptsLeft !== undefined) requestErr.attemptsLeft = errorBody.attemptsLeft;
         Object.assign(requestErr, partialSaveFields(errorBody));
         throw requestErr;
       }

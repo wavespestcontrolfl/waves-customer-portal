@@ -15,6 +15,7 @@ import QRCode from 'qrcode';
 import useModalFocus from '../../hooks/useModalFocus';
 import { describeCardRequestResult } from './cardLinkStatus';
 import { HANDOFF_OPEN, getAdminCapabilities, openHandoff } from '../../lib/wavesAdminHandoff';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 // Same zinc admin palette as CreateAppointmentModal's D.
 const D = {
@@ -138,29 +139,37 @@ function useHandoff({ secureUrl, firstName, adminFetch, visitId, mountedRef }) {
   const [canHandoff, setCanHandoff] = useState(false);
   const [phase, setPhase] = useState('idle'); // idle | with
   const [result, setResult] = useState(null);
+  const activeRef = useRef(false);
   useEffect(() => {
     let cancelled = false;
     getAdminCapabilities().then((caps) => { if (!cancelled) setCanHandoff(caps.includes(HANDOFF_OPEN)); });
     return () => { cancelled = true; };
   }, []);
   const start = async () => {
-    if (phase === 'with') return;
+    if (activeRef.current || phase === 'with') return;
+    activeRef.current = true;
     setPhase('with');
     setResult(null);
-    const outcome = await openHandoff({ url: handoffHref(secureUrl), firstName });
-    if (!mountedRef.current) return;
-    if (outcome.status === 'failed') {
-      setPhase('idle');
-      setResult({ tone: 'bad', text: outcome.message || 'The hand-off did not start. Use the QR code instead.' });
-      return;
-    }
-    let state = null;
-    try { state = await adminFetch(`/admin/schedule/${visitId}/card-request`); } catch { /* said below */ }
-    if (!mountedRef.current) return;
-    setPhase('idle');
-    if (cardSaved(state)) setResult({ tone: 'good', text: 'Saved. Auto Pay is on.' });
-    else if (state) setResult({ tone: 'muted', text: 'Not saved yet. Hand the phone over again or use the QR code.' });
-    else setResult({ tone: 'bad', text: 'Could not check whether the card was saved.' });
+    await holdReloadWhileSending('in-person-card-handoff', async () => {
+      try {
+        const outcome = await openHandoff({ url: handoffHref(secureUrl), firstName });
+        if (!mountedRef.current) return;
+        if (outcome.status === 'failed') {
+          setPhase('idle');
+          setResult({ tone: 'bad', text: outcome.message || 'The hand-off did not start. Use the QR code instead.' });
+          return;
+        }
+        let state = null;
+        try { state = await adminFetch(`/admin/schedule/${visitId}/card-request`); } catch { /* said below */ }
+        if (!mountedRef.current) return;
+        setPhase('idle');
+        if (cardSaved(state)) setResult({ tone: 'good', text: 'Saved. Auto Pay is on.' });
+        else if (state) setResult({ tone: 'muted', text: 'Not saved yet. Hand the phone over again or use the QR code.' });
+        else setResult({ tone: 'bad', text: 'Could not check whether the card was saved.' });
+      } finally {
+        activeRef.current = false;
+      }
+    });
   };
   return { canHandoff, phase, result, start };
 }
@@ -170,6 +179,7 @@ function useHandoff({ secureUrl, firstName, adminFetch, visitId, mountedRef }) {
 function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
   const [qrOpen, setQrOpen] = useState(false);
   const [textState, setTextState] = useState(null); // null | 'sending' | { tone, text }
+  const textSendingRef = useRef(false);
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -179,10 +189,13 @@ function CardActions({ secureUrl, firstName, adminFetch, visitId, onClose }) {
   const first = firstName || 'the customer';
   const handoff = useHandoff({ secureUrl, firstName, adminFetch, visitId, mountedRef });
   const textTheLink = () => {
+    if (textSendingRef.current || textState === 'sending') return;
+    textSendingRef.current = true;
     setTextState('sending');
     adminFetch(`/admin/schedule/${visitId}/card-request`, { method: 'POST' })
       .then((r) => { if (mountedRef.current) setTextState(describeTextOutcome(r)); })
-      .catch(() => { if (mountedRef.current) setTextState({ tone: 'bad', text: 'Send failed — try again' }); });
+      .catch(() => { if (mountedRef.current) setTextState({ tone: 'bad', text: 'Send failed — try again' }); })
+      .finally(() => { textSendingRef.current = false; });
   };
 
   return (

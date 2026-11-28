@@ -4,6 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { KpiGrid, KpiTile } from "./KpiTile";
+import MarginByLineBars from "./MarginByLineBars";
 
 afterEach(cleanup);
 
@@ -36,13 +37,43 @@ describe("KpiTile target-store integration", () => {
         label="Gross Margin"
         metricKey="gross_margin"
         targets={null}
-        value="45%"
-        chart={{ kind: "gauge", value: 45, max: 100 }}
+        value="56%"
+        chart={{ kind: "gauge", value: 56, max: 100 }}
       />,
     );
-    // 45 ≥ default target 40 → good → emerald ring, no alert red.
+    // 56 ≥ default target 55 → good → emerald ring, no alert red.
     expect(container.innerHTML).toContain("#10B981");
     expect(container.innerHTML).not.toContain("#C8312F");
+  });
+
+  it("matches MarginByLineBars at 45%, 48%, and 55% with default gross_margin thresholds", () => {
+    for (const [pct, expectedHex, expectedRgb] of [
+      [45, "#F59E0B", "rgb(245, 158, 11)"],
+      [48, "#F59E0B", "rgb(245, 158, 11)"],
+      [55, "#10B981", "rgb(16, 185, 129)"],
+      [44.9, "#C8312F", "rgb(200, 49, 47)"],
+    ]) {
+      const tile = render(
+        <KpiTile
+          label="Gross Margin"
+          metricKey="gross_margin"
+          targets={null}
+          value={`${pct}%`}
+          chart={{ kind: "gauge", value: pct, max: 100 }}
+        />,
+      );
+      expect(tile.container.innerHTML).toContain(expectedHex);
+      tile.unmount();
+
+      const bars = render(
+        <MarginByLineBars
+          byServiceLine={[{ serviceLine: "Pest Control", margin: pct, revenue: 5000, services: 10 }]}
+          targetPct={55}
+        />,
+      );
+      expect(bars.container.innerHTML).toContain(expectedRgb);
+      bars.unmount();
+    }
   });
 
   it("renders a sparkline from the metric's history series", () => {
