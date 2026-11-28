@@ -2521,6 +2521,8 @@ const BERMUDA_STEP_LIMIT_TYPE = 'bermuda_step_limit';
 const BERMUDA_PAIR_TYPE = 'bermuda_pair_missing';
 const BERMUDA_AREA_TYPE = 'bermuda_area_missing';
 const BERMUDA_CONFIG_TYPE = 'bermuda_limits_not_configured';
+const INACTIVE_PRODUCT_TYPE = 'inactive_catalog_product';
+const AREA_SQFT_MISSING_TYPE = 'broadcast_area_sqft_missing';
 const bermudaStepFinding = (message) => ({
   code: 'application_limit_exceeded',
   limitType: BERMUDA_STEP_LIMIT_TYPE,
@@ -2549,10 +2551,53 @@ const bermudaConfigFinding = (message) => ({
   reason: message,
   message: `Bermuda removal limits could not be checked: ${message} The visit was recorded and the office was told.`,
 });
+const inactiveProductFinding = (product) => ({
+  code: 'inactive_product_warning',
+  limitType: INACTIVE_PRODUCT_TYPE,
+  productId: product.id || null,
+  productName: product.name || 'Product',
+  reason: `${product.name || 'Product'} is marked inactive in the product catalog.`,
+  message: `${product.name || 'Product'} is inactive in the catalog. The visit was recorded and the office was told.`,
+});
+const missingAreaSqftFinding = (product) => ({
+  code: 'area_sqft_warning',
+  limitType: AREA_SQFT_MISSING_TYPE,
+  productId: product.id || null,
+  productName: product.name || 'Product',
+  reason: `Treated square feet were not entered for ${product.name || 'Product'}.`,
+  message: `Square feet were not entered for ${product.name || 'Product'}. The visit was recorded and the office was told.`,
+});
+function pushUniqueLawnFinding(findings, finding) {
+  const exists = findings.some(
+    (f) => f.limitType === finding.limitType && String(f.productId || '') === String(finding.productId || ''),
+  );
+  if (!exists) findings.push(finding);
+}
+async function isPacketBilledMember(packetContext, serviceId, database = db, { recordId = null, existingCompletionInvoice = null } = {}) {
+  if (existingCompletionInvoice) return true;
+  if (packetContext?.phase !== 'effects' || !packetContext?.packetId || !serviceId) return false;
+  const billed = await database('visit_completion_packet_items')
+    .where({ packet_id: packetContext.packetId, scheduled_service_id: serviceId })
+    .whereNotNull('invoice_id')
+    .first('id');
+  if (billed) return true;
+  const liveByVisit = await completionSuppressorInvoiceLookup(database, { scheduled_service_id: serviceId });
+  if (liveByVisit) return true;
+  if (recordId) {
+    const liveByRecord = await completionSuppressorInvoiceLookup(database, { service_record_id: recordId });
+    if (liveByRecord) return true;
+  }
+  return false;
+}
+function isExcludedFromPafHold({ visitIsPayerBilled, svc, packetBilledMember }) {
+  return Boolean(visitIsPayerBilled || svc?.prepaid_method || Number(svc?.prepaid_amount) > 0 || packetBilledMember);
+}
 const FINDING_ACTION = {
   [BERMUDA_PAIR_TYPE]: () => 'review Bermuda removal product pairing',
   [BERMUDA_AREA_TYPE]: () => 'review Bermuda removal treated area',
   [BERMUDA_CONFIG_TYPE]: () => 'verify Bermuda removal limits configuration',
+  [INACTIVE_PRODUCT_TYPE]: (name) => `review inactive product ${name}`,
+  [AREA_SQFT_MISSING_TYPE]: (name) => `review missing treated area for ${name}`,
   [areaAddOnGovernedRate.ACTUALS_CODE]: () => 'review area add-on actuals',
   [areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE]: () => 'review unrecorded chemical add-on',
   [tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE]: () => 'review NutriRoot application',
@@ -2562,6 +2607,8 @@ FINDING_WHY[BERMUDA_STEP_LIMIT_TYPE] = () => 'Bermuda removal was recorded past 
 FINDING_WHY[BERMUDA_PAIR_TYPE] = () => 'Bermuda removal was recorded without both required paired products.';
 FINDING_WHY[BERMUDA_AREA_TYPE] = () => 'Bermuda removal was recorded without its required treated area.';
 FINDING_WHY[BERMUDA_CONFIG_TYPE] = () => 'Bermuda removal limits were not configured, so yearly and 42-day limits could not be checked.';
+FINDING_WHY[INACTIVE_PRODUCT_TYPE] = (name) => `${name} was applied while marked inactive in the product catalog.`;
+FINDING_WHY[AREA_SQFT_MISSING_TYPE] = (name) => `${name} was recorded without treated square feet.`;
 FINDING_WHY[areaAddOnGovernedRate.ACTUALS_CODE] = (name) => `${name} add-on was recorded with incomplete application actuals.`;
 FINDING_WHY[areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE] = (name) => `${name} chemical add-on completed with no recorded product application.`;
 FINDING_DETAIL[lawnProhibited.LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit at a residential property. The label prohibits residential use: oxadiazon is not for use on home lawns. The visit was recorded. Review it with the technician and report it if needed.`;
@@ -2569,12 +2616,16 @@ FINDING_DETAIL[BERMUDA_STEP_LIMIT_TYPE] = (fullName, f, svc) => `Bermuda removal
 FINDING_DETAIL[BERMUDA_PAIR_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit without both paired products: ${f.reason} The visit was recorded. Review it with the technician.`;
 FINDING_DETAIL[BERMUDA_AREA_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit without its required treated area: ${f.reason} The visit was recorded. Review it with the technician.`;
 FINDING_DETAIL[BERMUDA_CONFIG_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit, but its limits could not be checked: ${f.reason} Verify the Bermuda removal limits configuration and review this application.`;
+FINDING_DETAIL[INACTIVE_PRODUCT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'service'} visit while marked inactive in the product catalog. The visit was recorded. Review the catalog status and application record.`;
+FINDING_DETAIL[AREA_SQFT_MISSING_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'service'} visit without treated square feet. The visit was recorded. Review the application record with the technician.`;
 FINDING_DETAIL[areaAddOnGovernedRate.ACTUALS_CODE] = (fullName, f, svc) => `Area add-on (${fullName}) on a ${svc.service_type || 'service'} visit was recorded with incomplete application actuals: ${f.message || f.reason || 'missing rate or treated area'}. Review it with the technician.`;
 FINDING_DETAIL[areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE] = (fullName, f, svc) => `Chemical area add-on (${fullName}) on a ${svc.service_type || 'service'} visit completed with no recorded product application: ${f.message || f.reason || 'no product recorded'}. Automatic invoicing was held for office review.`;
 
 // A product the catalog could not name (a free-text oxadiazon entry or area add-on key) keys on its name, so distinct warnings do not share one alert.
 const NAME_KEYED_LIMIT_TYPES = new Set([
   lawnProhibited.LIMIT_TYPE,
+  INACTIVE_PRODUCT_TYPE,
+  AREA_SQFT_MISSING_TYPE,
   areaAddOnGovernedRate.ACTUALS_CODE,
   areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE,
 ]);
@@ -9184,9 +9235,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw err;
             }
             if (product.active === false) {
-              const err = new Error(`Product is inactive: ${product.name}`);
-              err.isOperational = true; err.statusCode = 400;
-              throw err;
+              // Owner ruling 2026-11-26 (warn, never block): record applied
+              // products even if deactivated in the catalog; warn tech & office.
+              logger.warn(`[dispatch] non-blocking inactive product recorded on ${svc.id}: ${product.name}`);
+              pushUniqueLawnFinding(lawnWarningFindings, inactiveProductFinding(product));
             }
             const applicationMethod = inferServiceReportApplicationMethod(product, p, reportServiceLine);
             const areaValue = p.areaValue != null && p.areaValue !== '' ? Number(p.areaValue) : null;
@@ -9211,10 +9263,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
               && requiresSqftForReportApplication(applicationMethod, reportServiceLine)
               && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'sqft')
             ) {
-              const err = new Error(`Square feet are required for ${product.name}`);
-              err.isOperational = true; err.statusCode = 400;
-              err.code = 'area_sqft_required';
-              throw err;
+              // Owner ruling 2026-11-26 (warn, never block): allow completion
+              // when broadcast/lawn sqft is omitted and alert tech & office.
+              logger.warn(`[dispatch] non-blocking missing treated sqft on ${svc.id}: ${product.name}`);
+              pushUniqueLawnFinding(lawnWarningFindings, missingAreaSqftFinding(product));
             }
             // The amount was parsed once, strictly, before the first write (normalizeProductAmounts); NaN here is a line
             // that never went through it, and is refused below.
@@ -11693,18 +11745,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // text all read that stamp, never the live hold, which the year's charge
     // and activation end.
     let deferredPrepayCovered = false;
-    // A closeout (fresh or resumed) that is now payer-billed or paid another
-    // way is never held: clear a stamp an earlier run wrote, so it cannot
-    // release the year beside the payer's bill or the other payment (GitHub
-    // Codex #5567 r16, r18).
-    if ((visitIsPayerBilled || svc.prepaid_method) && svc.paf_held_term_id) {
+    const packetBilledMember = await isPacketBilledMember(packetContext, svc.id, db, { recordId: record.id, existingCompletionInvoice });
+    const pafExcluded = isExcludedFromPafHold({ visitIsPayerBilled, svc, packetBilledMember });
+    // A closeout (fresh or resumed) that is now payer-billed, paid another way,
+    // or billed onto a grouped packet invoice is never held: clear any stamp an
+    // earlier run wrote, so it cannot release the annual year beside the payer's
+    // bill, packet invoice, or other payment (GitHub Codex #5567 r16, r18).
+    if (pafExcluded && svc.paf_held_term_id) {
       await db('scheduled_services').where({ id: svc.id }).update({ paf_held_term_id: null });
       svc.paf_held_term_id = null;
     }
-    // A quiet backfill closeout never takes the deferred hold: it keeps its
-    // normal open review invoice, since a backfill neither releases the year
-    // nor reaches the cancelled-year handoff (GitHub Codex #5567 r19).
-    if (!visitIsPayerBilled && !svc.prepaid_method && !isBackfillCompletion) {
+    // A quiet backfill closeout or a member already billed on a grouped packet
+    // invoice never takes the deferred hold: it keeps its invoice and must not
+    // release the annual charge beside it (GitHub Codex #5567 r19).
+    if (!pafExcluded && !isBackfillCompletion) {
       try {
         // Only a RESUMED closeout trusts the stamp it wrote; a fresh closeout
         // (first run, or a visit reopened and completed again, possibly
@@ -11749,7 +11803,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
     const annualPrepayCovered = !visitIsPayerBilled
-      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db, { skipDeferredHold: isBackfillCompletion }));
+      && (deferredPrepayCovered || await AnnualPrepayRenewals.annualPrepayCoversVisit(svc, db, { skipDeferredHold: isBackfillCompletion || pafExcluded }));
     const prepaidCovered = annualPrepayCovered
       || (!visitIsPayerBilled
         && svc.prepaid_method !== AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD
@@ -13118,8 +13172,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           logger.error(`[dispatch] Prepaid credit NOT applied to invoice ${lockedInvoice.invoice_number}: PaymentIntent changed under lock — manual reconciliation needed`);
           return lockedInvoice;
         }
+        const { invoiceAmountDue } = require('../services/invoice-helpers');
         const invoiceTotalCents = toCents(lockedInvoice.total);
-        if (!(invoiceTotalCents > 0)) return lockedInvoice;
+        const amountDueCents = toCents(invoiceAmountDue(lockedInvoice));
+        if (!(amountDueCents > 0)) return lockedInvoice;
         // A part payment is already on this invoice: this application reduces total and would paid-flip it with the part still in
         // amount_paid. The office settles it from the Invoices page.
         if (toCents(lockedInvoice.amount_paid) > 0) {
@@ -13134,14 +13190,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           .first('id');
         if (existingCredit) return lockedInvoice;
 
-        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
-        const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
+        const creditCents = Math.min(prepaidCents, amountDueCents);
+        const remainingDueCents = Math.max(0, amountDueCents - creditCents);
+        const remainingTotalCents = Math.max(0, invoiceTotalCents - creditCents);
         const prepaidCredit = centsToDollars(creditCents);
-        const remainingTotal = centsToDollars(remainingCents);
+        const remainingTotal = centsToDollars(remainingTotalCents);
         const stamp = etDateString();
         const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
         const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
-        const paidByPrepayment = remainingCents <= 0;
+        const paidByPrepayment = remainingDueCents <= 0;
         flippedPaidByPrepayment = paidByPrepayment;
         const [updatedInvoice] = await trx('invoices')
           .where({ id: lockedInvoice.id })
@@ -17325,12 +17382,14 @@ async function stampChemicalReviewHoldOnVisitInvoices(trx, {
     .orderBy('id', 'asc')
     .forUpdate();
   if (noWait && typeof lockQuery.noWait === 'function') lockQuery.noWait();
-  const visitInvoices = await lockQuery.select('id', 'invoice_number', 'status', 'stripe_payment_intent_id', 'scheduled_send_error');
+  const visitInvoices = await lockQuery.select(
+    'id', 'invoice_number', 'status', 'stripe_payment_intent_id', 'scheduled_send_error', 'payer_id', 'payer_statement_id',
+  );
   const stampedIds = [];
   const invoicesToNeutralize = [];
   for (const heldInv of visitInvoices) {
-    // Skip third-party-billed invoices via the single withdrawal authority (row is already FOR UPDATE locked).
-    if (invoiceWithdrawnFromCustomer(heldInv)) continue;
+    // Skip third-party-billed or statement-rolled AP invoices (row is already FOR UPDATE locked).
+    if (heldInv.payer_id || heldInv.payer_statement_id || invoiceWithdrawnFromCustomer(heldInv)) continue;
     const stamped = await trx('invoices')
       .where({ id: heldInv.id })
       .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
@@ -17444,6 +17503,10 @@ module.exports.deductionAdvisoryMessages = deductionAdvisoryMessages;
 module.exports.isOverVisitLimitLine = (line) => OVER_VISIT_LIMIT_LINES.has(line);
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.bermudaStepFinding = bermudaStepFinding;
+module.exports.inactiveProductFinding = inactiveProductFinding;
+module.exports.missingAreaSqftFinding = missingAreaSqftFinding;
+module.exports.isPacketBilledMember = isPacketBilledMember;
+module.exports.isExcludedFromPafHold = isExcludedFromPafHold;
 module.exports.bermudaPairFinding = bermudaPairFinding;
 module.exports.bermudaAreaFinding = bermudaAreaFinding;
 module.exports.bermudaConfigFinding = bermudaConfigFinding;
