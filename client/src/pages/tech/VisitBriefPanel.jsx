@@ -754,6 +754,35 @@ function QuotedSection({ estimate }) {
 // One member service's Paid · prepaid / Amount due today rows. Grouped
 // stops render one block per member (siblings keep separate invoices and
 // billing lanes — a prepaid primary must not hide a sibling's amount due).
+function MemberPrepayRows({ payment }) {
+  if (!payment) return null;
+  if (payment.annualPrepayCovered === true && !payment.annualPrepay) {
+    return <p style={factRowStyle}>Annual prepay plan — do not collect at the visit</p>;
+  }
+  const prepayLive = payment.billingTerm === 'prepay_annual' && payment.annualPrepay;
+  const prepayDead = !!payment.annualPrepay && payment.billingTerm !== 'prepay_annual';
+  return (
+    <>
+      {prepayLive && (
+        <p style={factRowStyle}>
+          Annual prepay plan
+          {payment.annualPrepay.coversThisVisit === false ? (
+            <span style={{ color: DARK.amber, fontWeight: 500 }}> — does not cover this visit</span>
+          ) : null}
+        </p>
+      )}
+      {prepayDead && (
+        <p style={{ ...factRowStyle, color: DARK.amber }}>
+          Annual prepay {payment.annualPrepay.refunded ? 'refunded' : 'not active'} — bill normally
+        </p>
+      )}
+      {payment.billingTerm && payment.billingTerm !== 'prepay_annual' && (
+        <p style={factMutedStyle}>Billing: {String(payment.billingTerm).replace(/_/g, ' ')}</p>
+      )}
+    </>
+  );
+}
+
 function MemberMoney({ service, estimate, showType }) {
   const summary = visitMoneySummary(service);
   const prepaid = prepaidLine(service);
@@ -764,13 +793,6 @@ function MemberMoney({ service, estimate, showType }) {
   // single credit look available multiple times.
   const deposit = estimate?.linked ? estimate.deposit : null;
   const payment = estimate?.linked ? estimate.payment : null;
-  // billingTerm is the authority on whether an annual-prepay term is
-  // LIVE — buildEstimatePaymentContext keeps the annualPrepay object as
-  // historical context (refunded/dead terms) while setting billingTerm
-  // 'standard'. A dead term must read as standard billing, never as an
-  // active plan next to a Collect headline.
-  const prepayLive = payment?.billingTerm === 'prepay_annual' && payment?.annualPrepay;
-  const prepayDead = !!payment?.annualPrepay && payment.billingTerm !== 'prepay_annual';
   const rows = [];
   if (prepaid || summary.invoice?.settled) {
     rows.push(['Paid · prepaid', prepaid || summary.note, null]);
@@ -778,8 +800,8 @@ function MemberMoney({ service, estimate, showType }) {
   if (summary.headline) {
     rows.push(['Amount due today', summary.headline, summary.collectNeeded ? DARK.amber : null]);
   }
-  const hasDepositInfo = deposit?.payerBilled || deposit?.required
-    || payment?.annualPrepay || payment?.billingTerm;
+  const hasDepositInfo = Boolean(deposit?.payerBilled || deposit?.required
+    || payment?.annualPrepay || payment?.annualPrepayCovered || payment?.billingTerm);
   if (!rows.length && !hasDepositInfo) return null;
   return (
     <>
@@ -799,22 +821,7 @@ function MemberMoney({ service, estimate, showType }) {
           Deposit required{Number(deposit.policyAmount) > 0 ? ` (${fmtMoney(deposit.policyAmount)})` : ''}
         </p>
       )}
-      {prepayLive && (
-        <p style={factRowStyle}>
-          Annual prepay plan
-          {payment.annualPrepay.coversThisVisit === false ? (
-            <span style={{ color: DARK.amber, fontWeight: 500 }}> — does not cover this visit</span>
-          ) : null}
-        </p>
-      )}
-      {prepayDead && (
-        <p style={{ ...factRowStyle, color: DARK.amber }}>
-          Annual prepay {payment.annualPrepay.refunded ? 'refunded' : 'not active'} — bill normally
-        </p>
-      )}
-      {payment?.billingTerm && payment.billingTerm !== 'prepay_annual' && (
-        <p style={factMutedStyle}>Billing: {String(payment.billingTerm).replace(/_/g, ' ')}</p>
-      )}
+      <MemberPrepayRows payment={payment} />
       {summary.invoice && !summary.invoice.settled && summary.note && (
         <p style={factMutedStyle}>{summary.note}</p>
       )}

@@ -1544,6 +1544,19 @@ router.post('/recap-preview', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function stripTechDispatchBillingFields(req, row) {
+  if (!isTechnicianRequest(req)) return row;
+  for (const field of [
+    'monthlyRate', 'autopayActive', 'autopayEnabled', 'estimatedPrice',
+    'prepaidAmount', 'prepaidMethod', 'prepaidNote', 'prepaidAt',
+    'prepaidSeriesContext', 'createInvoiceOnComplete',
+    'checkoutInvoiceId', 'checkoutInvoiceStatus', 'checkoutInvoiceTotal',
+  ]) {
+    delete row[field];
+  }
+  return row;
+}
+
 // GET /api/admin/dispatch/today (or /:date)
 router.get('/:date?', async (req, res, next) => {
   try {
@@ -1697,7 +1710,7 @@ router.get('/:date?', async (req, res, next) => {
         isTechnicianRequest(req) ? redactFreeTextAccessCodes(lastService?.technician_notes, knownCodes) : lastService?.technician_notes,
       );
 
-      const row = {
+      const row = stripTechDispatchBillingFields(req, {
         id: s.id,
         routeOrder: s.route_order,
         customerName: `${s.first_name} ${s.last_name}`,
@@ -1819,7 +1832,7 @@ router.get('/:date?', async (req, res, next) => {
           at: l.at,
           notes: allowTechVisitWindow ? (l.notes || null) : (redactFreeTextAccessCodes(l.notes, knownCodes) || null),
         })),
-      };
+      });
       if (isTechnicianRequest(req)) {
         techRecheckCandidates.push({
           visit: s, row, prefs, hadWindow: allowTechVisitWindow, hadPrimary: allowTechPrimaryPrefs,

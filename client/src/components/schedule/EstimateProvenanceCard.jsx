@@ -139,88 +139,77 @@ function invoicePendingNote(status) {
   return 'Payment not received yet';
 }
 
+function annualPrepayMeta(ap) {
+  const svc = ap.coverageServiceType ? ` ${ap.coverageServiceType}` : '';
+  let usage = '';
+  if (ap.visitNumber && ap.totalVisits) usage = ` · visit ${ap.visitNumber} of ${ap.totalVisits}${svc}`;
+  else if (ap.totalVisits) usage = ` · ${ap.visitsUsed || 0} of ${ap.totalVisits}${svc} used`;
+  else if (ap.coverageVisitCount > 0) usage = ` · covers ${ap.coverageVisitCount}${svc} visit${ap.coverageVisitCount === 1 ? '' : 's'}`;
+  const left = ap.totalVisits && ap.visitsRemaining != null ? ` · ${ap.visitsRemaining} left` : '';
+  const through = ap.termEnd ? ` through ${fmtDate(ap.termEnd)}` : '';
+  return `${usage}${left}${through}`;
+}
+
+function annualPrepayRows(ap) {
+  const amount = money(ap.prepayAmount ?? ap.invoiceTotal);
+  const status = String(ap.status || '').toLowerCase();
+  const meta = annualPrepayMeta(ap);
+  if (ap.paid) {
+    const paidOn = fmtPaidDate(ap.invoicePaidAt);
+    const collect = ap.coversThisVisit === true
+      ? ' — do not collect at the visit'
+      : ap.coversThisVisit === false ? ' — not applied to this visit; it bills normally' : '';
+    return [{ label: 'Annual prepay — paid', value: amount, sub: `Paid${paidOn ? ` ${paidOn}` : ''}${meta}${collect}`, tone: 'paid' }];
+  }
+  if (ap.refunded || ['cancelled', 'canceled', 'refunded'].includes(status)) {
+    return [{ label: 'Annual prepay', value: amount, sub: `${ap.refunded ? 'refunded' : status} — bill normally`, tone: 'muted' }];
+  }
+  const pendingNote = ap.chargeAfterFirstVisit
+    ? 'Charged to the card on file after the first visit'
+    : invoicePendingNote(ap.invoiceStatus);
+  const collect = ap.coversThisVisit === true ? ' — do not collect at the visit' : '';
+  return [{ label: 'Annual prepay — pending', value: amount, sub: `${pendingNote}${meta}${collect}`, tone: 'muted' }];
+}
+
+function acceptanceInvoiceRows(inv) {
+  if (!inv) return [];
+  const paidSub = inv.paid
+    ? `Paid${fmtPaidDate(inv.paidAt) ? ` ${fmtPaidDate(inv.paidAt)}` : ''}`
+    : invoicePendingNote(inv.status);
+  const paidTone = inv.paid ? 'paid' : 'muted';
+  const rows = [];
+  if (inv.setupFeeAmount != null) {
+    rows.push({ label: 'WaveGuard setup fee', value: money(inv.setupFeeAmount), sub: paidSub, tone: paidTone });
+  }
+  if (inv.firstApplicationAmount != null) {
+    rows.push({ label: 'First application', value: money(inv.firstApplicationAmount), sub: paidSub, tone: paidTone });
+  }
+  if (inv.setupFeeAmount == null && inv.firstApplicationAmount == null && inv.total != null) {
+    rows.push({ label: inv.title || 'Acceptance invoice', value: money(inv.total), sub: paidSub, tone: paidTone });
+  }
+  return rows;
+}
+
 // Payment-posture rows: what the customer actually paid (or still owes) at
 // acceptance, from persisted invoice/term figures. Same row shape as
 // depositRow so all money facts render in one list.
 function paymentRows(payment) {
   if (!payment) return [];
+  if (payment.annualPrepayCovered === true && !payment.annualPrepay) {
+    return [{
+      label: 'Annual prepay',
+      value: 'Covered',
+      sub: 'Do not collect at the visit',
+      tone: 'paid',
+    }];
+  }
   const rows = [];
-  const ap = payment.annualPrepay;
-
-  if (ap) {
-    const amount = money(ap.prepayAmount != null ? ap.prepayAmount : ap.invoiceTotal);
-    const status = String(ap.status || '').toLowerCase();
-    // "visit 2 of 4 Quarterly Pest Control · 2 left" when this appointment is
-    // one of the covered visits; "1 of 4 used · 3 left" when it isn't linked
-    // (coverage gap) but the term still has usage; plain "covers 4 visits"
-    // when no visits are linked at all.
-    const svc = ap.coverageServiceType ? ` ${ap.coverageServiceType}` : '';
-    let usage = '';
-    if (ap.visitNumber && ap.totalVisits) {
-      usage = ` · visit ${ap.visitNumber} of ${ap.totalVisits}${svc}`;
-    } else if (ap.totalVisits) {
-      usage = ` · ${ap.visitsUsed || 0} of ${ap.totalVisits}${svc} used`;
-    } else if (ap.coverageVisitCount > 0) {
-      usage = ` · covers ${ap.coverageVisitCount}${svc} visit${ap.coverageVisitCount === 1 ? '' : 's'}`;
-    }
-    const left = ap.totalVisits && ap.visitsRemaining != null
-      ? ` · ${ap.visitsRemaining} left`
-      : '';
-    const through = ap.termEnd ? ` through ${fmtDate(ap.termEnd)}` : '';
-    if (ap.paid) {
-      const paidOn = fmtPaidDate(ap.invoicePaidAt);
-      // "Do not collect" only when the visit-level billing gate confirms THIS
-      // visit is covered (coversThisVisit true). false = the prepay is real
-      // but this visit isn't covered (detached/unstamped/service mismatch) and
-      // completion billing WILL bill it — say so instead of contradicting the
-      // invoice. null = no visit context (pre-booking); make no claim.
-      const collect = ap.coversThisVisit === true
-        ? ' — do not collect at the visit'
-        : ap.coversThisVisit === false
-          ? ' — not applied to this visit; it bills normally'
-          : '';
-      rows.push({
-        label: 'Annual prepay — paid',
-        value: amount,
-        sub: `Paid${paidOn ? ` ${paidOn}` : ''}${usage}${left}${through}${collect}`,
-        tone: 'paid',
-      });
-    } else if (ap.refunded || ['cancelled', 'canceled', 'refunded'].includes(status)) {
-      // ap.refunded covers the drift case: invoice still looks paid but the
-      // payment was fully refunded (term status may not have flipped yet).
-      rows.push({
-        label: 'Annual prepay',
-        value: amount,
-        sub: `${ap.refunded ? 'refunded' : status} — bill normally`,
-        tone: 'muted',
-      });
-    } else {
-      // A pay-after-first-visit year (GATE_PAF_PREPAY) keeps its invoice a
-      // draft on purpose: the card on file is charged once a visit is
-      // performed, so "not sent to the customer yet" would read as a step
-      // someone owes. A visit the year holds is not collected at the door.
-      const pendingNote = ap.chargeAfterFirstVisit
-        ? 'Charged to the card on file after the first visit'
-        : invoicePendingNote(ap.invoiceStatus);
-      const collect = ap.coversThisVisit === true ? ' — do not collect at the visit' : '';
-      rows.push({
-        label: 'Annual prepay — pending',
-        value: amount,
-        sub: `${pendingNote}${usage}${left}${through}${collect}`,
-        tone: 'muted',
-      });
-    }
-    // A dead/uncovered prepay hands billing back to the standard path —
-    // the setup-fee warning must render BESIDE the prepay history, not be
-    // swallowed by it (Codex PR r6 P2): the server signals that state by
-    // setting billingTerm 'standard' while annualPrepay still carries the
-    // term's history.
+  if (payment.annualPrepay) {
+    rows.push(...annualPrepayRows(payment.annualPrepay));
     if (payment.billingTerm !== 'standard') return rows;
   }
 
   if (payment.billingTerm === 'prepay_annual') {
-    // Prepay was chosen at acceptance but no term row exists (older accept or
-    // manual billing) — say what's known rather than inventing an amount.
     rows.push({
       label: 'Annual prepay',
       value: '—',
@@ -232,11 +221,6 @@ function paymentRows(payment) {
 
   if (payment.billingTerm === 'standard') {
     rows.push({ label: 'Billing', value: 'Per application', sub: null, tone: 'muted' });
-    // Setup fee owed but never invoiced (standard Mark Won accepts skip the
-    // acceptance invoice): warn BEFORE completion. The sub describes what
-    // completion will ACTUALLY do — parking only happens while the server
-    // gate is on; while off, completion mints the bare per-application
-    // invoice and the fee must be billed by hand.
     if (payment.setupFeeMissing) {
       rows.push({
         label: 'Setup fee not invoiced',
@@ -249,24 +233,7 @@ function paymentRows(payment) {
         tone: 'warn',
       });
     }
-    const inv = payment.acceptanceInvoice;
-    if (inv) {
-      const paidSub = inv.paid
-        ? `Paid${fmtPaidDate(inv.paidAt) ? ` ${fmtPaidDate(inv.paidAt)}` : ''}`
-        : invoicePendingNote(inv.status);
-      const paidTone = inv.paid ? 'paid' : 'muted';
-      if (inv.setupFeeAmount != null) {
-        rows.push({ label: 'WaveGuard setup fee', value: money(inv.setupFeeAmount), sub: paidSub, tone: paidTone });
-      }
-      if (inv.firstApplicationAmount != null) {
-        rows.push({ label: 'First application', value: money(inv.firstApplicationAmount), sub: paidSub, tone: paidTone });
-      }
-      // A manually built acceptance invoice may carry neither recognizable
-      // line — still show the exact invoiced total rather than nothing.
-      if (inv.setupFeeAmount == null && inv.firstApplicationAmount == null && inv.total != null) {
-        rows.push({ label: inv.title || 'Acceptance invoice', value: money(inv.total), sub: paidSub, tone: paidTone });
-      }
-    }
+    rows.push(...acceptanceInvoiceRows(payment.acceptanceInvoice));
   }
   return rows;
 }
@@ -406,8 +373,41 @@ function PriceDriftNote({ show, price, quotedComparable, deltaPct }) {
   );
 }
 
+function buildQuotedFraming(serviceLines, quoted, oneTime, compareScope) {
+  const perAppPrices = serviceLines.map((l) => l.perAppPrice).filter((p) => p != null);
+  const perAppSum = perAppPrices.reduce((s, p) => s + p, 0);
+  const monthlyPrices = serviceLines.map((l) => l.monthlyPrice).filter((p) => p != null);
+  const recurringLineCount = serviceLines.filter((l) => l.recurring).length;
+  const allRecurringPerApp = perAppPrices.length > 0 && perAppPrices.length === recurringLineCount;
+  const allRecurringProven = recurringLineCount > 0
+    && perAppPrices.length + monthlyPrices.length === recurringLineCount;
+  const quotedLabel = allRecurringProven
+    ? [
+      ...(perAppPrices.length ? [`${perAppPrices.map((p) => money(p)).join(' + ')}/application`] : []),
+      ...monthlyPrices.map((m) => `${money(m)}/mo`),
+      ...(oneTime > 0 ? [`${money(oneTime)} one-time`] : []),
+    ].join(' + ')
+    : (quoted != null ? money(quoted) : null);
+  const oneTimeLineSum = serviceLines.reduce((s, l) => s + (l.oneTimePrice || 0), 0);
+  const everyLinePriced = serviceLines.length > 0
+    && serviceLines.every((l) => l.perAppPrice != null || l.oneTimePrice != null);
+  const oneTimeLineCount = serviceLines.filter((l) => l.oneTimePrice != null).length;
+  const visitComparable = allRecurringPerApp && recurringLineCount === 1 && oneTimeLineSum === 0
+    ? perAppSum
+    : (recurringLineCount === 0 && oneTimeLineCount > 0 && serviceLines.length === oneTimeLineCount
+      ? oneTimeLineSum : null);
+  const groupComparable = allRecurringPerApp
+    ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)
+    : (perAppPrices.length || monthlyPrices.length ? null : quoted);
+  return {
+    quotedLabel,
+    quotedComparable: compareScope === 'visit' ? visitComparable : groupComparable,
+  };
+}
+
 export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onetimeTotal, deposit, payment, lines, estimateRef, cardsOnFile, style, compareScope = 'group', adminActions = true }) {
-  const quoted = Number(quotedTotal) || 0;
+  const hasQuotedTotal = quotedTotal != null && Number.isFinite(Number(quotedTotal));
+  const quoted = hasQuotedTotal ? Number(quotedTotal) : null;
   const refLabel = String(estimateRef || '').trim();
   const price = currentPrice != null ? Number(currentPrice) : null;
   // Accepted service mix — prefer the estimate's own wording (estimateLabel)
@@ -418,21 +418,12 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
       cadence: cadenceLabel(line?.cadence, line?.intervalDays),
       recurring: !!line?.cadence && line.cadence !== 'one_time',
       rawCadence: line?.cadence || null,
-      // perApplicationPrice / monthlyPrice are EXPLICIT provenance from the
-      // server (discount-aware canonical derivation; the engine's true
-      // normalized monthly) — `price` can be a list rate or a synthesized
-      // monthly figure, so it is never trusted for unit copy.
       perAppPrice: line?.cadence && line.cadence !== 'one_time'
         && Number(line?.perApplicationPrice) > 0
         ? Number(line.perApplicationPrice) : null,
       monthlyPrice: line?.cadence && line.cadence !== 'one_time'
         && !(Number(line?.perApplicationPrice) > 0) && Number(line?.monthlyPrice) > 0
         ? Number(line.monthlyPrice) : null,
-      // acceptedOneTimePrice is the NET after a manual discount allocated
-      // to one-time work — the row's price stays gross (Codex #3173 r4).
-      // PRESENCE, not positivity (r5): the server legitimately emits 0 when
-      // a discount fully covers the line, and a $0 accepted line must not
-      // fall back to the gross price.
       oneTimePrice: line?.cadence === 'one_time'
         ? (Number.isFinite(Number(line?.acceptedOneTimePrice)) && Number(line?.acceptedOneTimePrice) >= 0
           ? Number(line.acceptedOneTimePrice)
@@ -440,31 +431,7 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
         : null,
     }))
     .filter((line) => line.name);
-  // Honest quoted framing (owner ruling 2026-08-02): a blended
-  // "monthly + one-time" total matches nothing the customer ever pays at
-  // once. When real per-application prices exist, the header reads
-  // "$121/application + $99 one-time"; otherwise it keeps the legacy total.
-  const perAppPrices = serviceLines.map((l) => l.perAppPrice).filter((p) => p != null);
-  const perAppSum = perAppPrices.reduce((s, p) => s + p, 0);
-  const monthlyPrices = serviceLines.map((l) => l.monthlyPrice).filter((p) => p != null);
-  const oneTime = Number(onetimeTotal) || 0;
-  // EVERY recurring line must carry a proven unit, and a mixed quote keeps
-  // EACH billing unit ("$121.00/application + $24.00/mo") — collapsing to
-  // one aggregate monthly is the exact flat-monthly copy this removes
-  // (Codex #3173 r2). Unprovable lines → legacy total tells the whole truth.
-  const recurringLineCount = serviceLines.filter((l) => l.recurring).length;
-  const allRecurringPerApp = perAppPrices.length > 0 && perAppPrices.length === recurringLineCount;
-  // All-monthly proven sets qualify too (rodent-bait-only quotes —
-  // Codex #3173 r2): each line just renders its own true unit.
-  const allRecurringProven = recurringLineCount > 0
-    && perAppPrices.length + monthlyPrices.length === recurringLineCount;
-  const quotedLabel = allRecurringProven
-    ? [
-      ...(perAppPrices.length ? [`${perAppPrices.map((p) => money(p)).join(' + ')}/application`] : []),
-      ...monthlyPrices.map((m) => `${money(m)}/mo`),
-      ...(oneTime > 0 ? [`${money(oneTime)} one-time`] : []),
-    ].join(' + ')
-    : money(quoted);
+  const { quotedLabel, quotedComparable } = buildQuotedFraming(serviceLines, quoted, Number(onetimeTotal) || 0, compareScope);
   const rows = buildEstimateRows({ adminActions, payment, deposit, cardsOnFile });
   // Whole-visit third-party billing: surfaced as its own prominent banner so a
   // tech scanning on a phone can't miss it and ask the homeowner for money.
@@ -472,45 +439,6 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   // to the deposit exemptReason for older payloads.
   const payerBilled = !!(deposit && (deposit.payerBilled || deposit.exemptReason === 'payer_billed'));
   if (!adminActions && !payerBilled && rows.length === 0) return null;
-  // Compare the visit's charge against the quoted VISIT total when one can
-  // be established — measuring a per-visit price against the blended
-  // monthly+one-time total manufactured phantom deltas (a $121/application
-  // booking read as "-11% vs quoted $135.30"). The booked visit carries the
-  // recurring lines PLUS any schedulable one-time lines (the modal books
-  // them together), so both sides must count both — and if any line lacks a
-  // real price, no like-for-like total exists, so the comparison is
-  // suppressed rather than guessed (Codex P1).
-  const oneTimeLineSum = serviceLines.reduce((s, l) => s + (l.oneTimePrice || 0), 0);
-  const everyLinePriced = serviceLines.length > 0
-    && serviceLines.every((l) => l.perAppPrice != null || l.oneTimePrice != null);
-  // compareScope='group' (create modal): the price covers EVERY quoted line
-  // booked together, so the whole-quote sum is the right frame.
-  // compareScope='visit' (detail sheet / SchedulePage row): a child visit
-  // carries only the add-ons due on its date — cadence mixes differ month
-  // to month (Codex #3173 r2) and even SAME-cadence bundles break on
-  // off-cycle booster visits, which carry only the primary line (r3). The
-  // comparison therefore stands only for a SINGLE-recurring-line quote with
-  // no one-time work: the one shape where every visit provably IS the plan.
-  // A one-time-only quote IS its visit — the accepted one-time total is
-  // directly comparable, and suppressing it hid real operator price changes
-  // (Codex #3173 r5).
-  const oneTimeLineCount = serviceLines.filter((l) => l.oneTimePrice != null).length;
-  // A fully-discounted (accepted-$0) one-time quote is still comparable
-  // (Codex #3173 r5): an operator editing that visit to a nonzero price is
-  // exactly the drift the warning exists for, so the sum may be zero — only
-  // the ABSENCE of priced lines disqualifies it.
-  const visitComparable = allRecurringPerApp && recurringLineCount === 1 && oneTimeLineSum === 0
-    ? perAppSum
-    : (recurringLineCount === 0 && oneTimeLineCount > 0
-      && serviceLines.length === oneTimeLineCount
-      ? oneTimeLineSum : null);
-  const groupComparable = allRecurringPerApp
-    ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)
-    : (perAppPrices.length || monthlyPrices.length ? null : quoted);
-  const quotedComparable = compareScope === 'visit' ? visitComparable : groupComparable;
-  // An accepted-$0 quote still warns when the visit now charges something
-  // (Codex #3173 r5) — the percentage is meaningless against a zero base,
-  // so the delta chip is suppressed while the comparison itself stands.
   const showVsQuoted = price != null && quotedComparable != null && quotedComparable >= 0
     && price > 0 && Math.abs(quotedComparable - price) > 0.01;
   const deltaPct = showVsQuoted && quotedComparable > 0
@@ -541,7 +469,7 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
           {/* Wrapping allowed (Codex #3173 r2 P2): a multi-service breakdown
               is wider than a phone-width card — nowrap forced horizontal
               page overflow on the exact surface this targets. */}
-          {adminActions && (
+          {adminActions && quotedLabel && (
             <span style={{ fontSize: 12, fontWeight: 500, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>
               Quoted {quotedLabel}
             </span>

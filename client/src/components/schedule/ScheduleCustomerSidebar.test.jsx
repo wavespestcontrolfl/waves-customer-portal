@@ -201,22 +201,25 @@ describe('ScheduleCustomerSidebar Access block', () => {
 describe('ScheduleCustomerSidebar office-only actions by role', () => {
   const service = { id: 'v0', customerId: 'c1', customerName: 'Test Customer', status: 'confirmed', estimatedPrice: 100 };
 
-  it('a technician sees no Book next, Edit or Take payment', async () => {
+  it('a technician sees no Book next, Edit, Take payment, or Payment on file, and View messages carries customerId', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
-    render(<ScheduleCustomerSidebar service={service} onClose={() => {}} />);
+    render(<ScheduleCustomerSidebar service={{ ...service, customerPhone: '941-555-0100' }} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText('Visit 0')).toBeTruthy());
     expect(screen.queryByRole('button', { name: 'Book next' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
     expect(screen.queryByText('Take payment')).toBeNull();
+    expect(screen.queryByText('Payment on file')).toBeNull();
+    expect(screen.getByRole('link', { name: 'View messages' }).getAttribute('href')).toContain('customerId=c1');
   });
 
-  it('an admin still sees Book next, Edit and Take payment', async () => {
+  it('an admin still sees Book next, Edit, Take payment, and Payment on file', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     render(<ScheduleCustomerSidebar service={service} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByText('Visit 0')).toBeTruthy());
     expect(screen.getByRole('button', { name: 'Book next' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Edit' })).toBeTruthy();
     expect(screen.getByText('Take payment')).toBeTruthy();
+    expect(screen.getByText('Payment on file')).toBeTruthy();
   });
 });
 

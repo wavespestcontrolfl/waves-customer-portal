@@ -539,9 +539,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | PATCH | `/api/admin/turf-height/:id/resolve` | admin-turf-height |
 | GET | `/api/admin/turf-height/review` | admin-turf-height |
 | GET | `/api/ai/admin/stats` | ai-assistant |
-| GET | `/api/badges/admin/customer/:customerId` | badges |
-| GET | `/api/badges/admin/definitions` | badges |
-| GET | `/api/badges/admin/stats` | badges |
 | POST | `/api/dispatch/jobs/:id/cancel` | dispatch |
 | POST | `/api/knowledge/queries/:id/file-back` | knowledge |
 | POST | `/api/knowledge/queries/:id/rate` | knowledge |

@@ -1,3 +1,4 @@
+import { useIsStaffAdmin } from "../../hooks/useStaffRole";
 /**
  * Customer360ProfileV2.jsx
  * client/src/components/admin/Customer360ProfileV2.jsx
@@ -304,15 +305,6 @@ function defaultAnnualPrepayStart(activeTerm) {
 function customerTextHref(c, isAdmin) {
   const base = `/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`;
   return isAdmin ? base : `${base}&customerId=${encodeURIComponent(c.id)}&thread=${encodeURIComponent(c.id)}`;
-}
-function getAdminRole() {
-  try {
-    return (
-      JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role || null
-    );
-  } catch {
-    return null;
-  }
 }
 function fmtNumber(v, digits = 3) {
   const n = Number(v);
@@ -10081,6 +10073,16 @@ function CustomerConversationLoadError({ error, feedbackEnabled, embedded, comms
   );
 }
 
+function AdminOwedCommitmentsSummaries({ isAdmin, customerId, embedded }) {
+  if (!isAdmin) return null;
+  return (
+    <>
+      <OwedCommitmentsSummary customerId={customerId} />
+      {!embedded && <OwedCommitmentsSummary customerId={customerId} source="sms" />}
+    </>
+  );
+}
+
 function CustomerConversation({
   customerId,
   composerComms,
@@ -10120,10 +10122,7 @@ function CustomerConversation({
   return (
     <div className="c360-conversation flex flex-col">
       {" "}
-      <OwedCommitmentsSummary customerId={customerId} />
-      {!embedded && (
-        <OwedCommitmentsSummary customerId={customerId} source="sms" />
-      )}
+      <AdminOwedCommitmentsSummaries isAdmin={isAdmin} customerId={customerId} embedded={embedded} />
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <SectionTitle>Thread ({comms.length} loaded)</SectionTitle>
         {/* Calls are office only: a technician's thread is texts, so it gets no channel filter. */}
@@ -11688,7 +11687,7 @@ export default function Customer360ProfileV2({
 }) {
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
-  const isAdmin = getAdminRole() === "admin";
+  const isAdmin = useIsStaffAdmin();
   // B10: read the dispute hold ONCE per customer; the billing summary shows
   // it (with Release) and every manual charge control shows it beside itself.
   const collectionHold = useCollectionHold(customerId, isAdmin);
