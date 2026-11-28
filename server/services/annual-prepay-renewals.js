@@ -8423,10 +8423,11 @@ async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = fals
 async function revertPlanRatesAfterTermCancel(term, conn, { throwOnError = false, hasAnyActiveReplacement = null } = {}) {
   if (!term?.customer_id || !term?.source_estimate_id) return { reverted: false, reason: 'no_source_estimate' };
   try {
+    if (hasAnyActiveReplacement === true) return { reverted: false, reason: 'replacement_active' };
     if (hasAnyActiveReplacement !== false) {
       const today = etDateString();
       const replacement = await conn('annual_prepay_terms')
-        .where({ customer_id: term.customer_id, source_estimate_id: term.source_estimate_id })
+        .where({ customer_id: term.customer_id })
         .whereNot({ id: term.id })
         .whereIn('status', ACTIVE_STATUSES)
         .where('term_start', '<=', today)

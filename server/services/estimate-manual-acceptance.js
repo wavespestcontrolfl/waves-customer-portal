@@ -944,11 +944,12 @@ async function assertNoExistingPlanForPrepay(trx, ctx, estimate) {
 }
 
 function customerHasActiveMonthlyMembership(customer) {
-  if (!customer) return false;
+  if (!customer || customer.active === false) return false;
   if (customerPreservesMonthlyMembership(customer)) return true;
-  const inactive = new Set(['cancelled', 'canceled', 'churned', 'inactive']);
+  const inactive = new Set(['cancelled', 'canceled', 'churned', 'inactive', 'lost', 'archived']);
   return customer.billing_mode === 'monthly_membership'
     && Number(customer.monthly_rate) > 0
+    && !inactive.has(String(customer.pipeline_stage || '').toLowerCase())
     && !inactive.has(String(customer.status || '').toLowerCase());
 }
 
