@@ -485,13 +485,14 @@ describe('C2-22: case-insensitive, live-only, unambiguous customer matching', ()
 
 describe('C2-23: non-ASCII attachment filename (macOS screenshot U+202F)', () => {
   test('returns 200 with ASCII fallback and RFC 5987 UTF-8 filename*', async () => {
+    const emailId = '11111111-1111-4111-8111-111111111111';
     const macName = 'Screenshot 2026-11-27 at 1.00.00\u202fPM.png';
     installDb({
-      emails: [{ id: 'e1', gmail_id: 'g1' }],
-      email_attachments: [{ email_id: 'e1', gmail_attachment_id: 'att-1', filename: macName, mime_type: 'image/png' }],
+      emails: [{ id: emailId, gmail_id: 'g1' }],
+      email_attachments: [{ email_id: emailId, gmail_attachment_id: 'att-1', filename: macName, mime_type: 'image/png' }],
     });
     gmail.getAttachment.mockResolvedValue(Buffer.from('png-bytes'));
-    const res = await fetch(`${baseUrl}/message/e1/attachment/att-1`);
+    const res = await fetch(`${baseUrl}/message/${emailId}/attachment/att-1`);
     expect(res.status).toBe(200);
     const cd = res.headers.get('content-disposition');
     expect(cd).toContain('filename="Screenshot 2026-11-27 at 1.00.00_PM.png"');
