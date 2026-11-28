@@ -3574,8 +3574,10 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(out.procedure.mixRates[1].labelWarning).toBeUndefined();
     expect(out.procedure.mixRates[4].labelWarning).toBeUndefined();
 
-    // Assigned sprayer carrier-volume and area-cap warnings ride on procedure.mixRates rows.
-    const proc = {
+    // Assigned sprayer carrier-volume and area-cap warnings ride on each procedure's own rows:
+    // shared products across primary + add-ons do not borrow each other's lineCarrier, 1,500 sq ft volumes normalize
+    // to per 1,000 sq ft, and published "at most" area caps warn when the assigned rig exceeds them.
+    const primaryProc = {
       mixRates: [{
         product: 'Tekko Pro IGR',
         productId: 'cat-tekko',
@@ -3584,15 +3586,36 @@ describe('rodent trap work: steps only, with the safety rules', () => {
         limit: 'no more than 3 fl oz per 1,000 sq ft in one spray',
       }],
     };
+    const addonMosquitoProc = {
+      mixRates: [{
+        product: 'Tekko Pro IGR',
+        productId: 'cat-tekko',
+        perGallon: { amount: 1, unit: 'fl oz' },
+        sprayVolume: '1 gal per 1,500 sq ft',
+      }, {
+        product: 'LESCO Crosscheck Plus',
+        productId: 'cat-cross',
+        perGallon: { amount: 0.625, unit: 'fl oz' },
+        limit: '1 fl oz per 1,000 sq ft at most',
+      }],
+    };
     jobCard._test.attachMixCalibrationWarnings(
-      [proc],
-      out.lines,
+      [
+        { procedure: primaryProc, lines: out.lines },
+        { procedure: addonMosquitoProc, lines: [] },
+      ],
       { source: 'rig', systemName: 'FlowZone #2', carrierGalPer1000: 2 },
       { equipmentSystemId: 'sys-2' },
     );
-    expect(proc.mixRates[0].calibrationWarnings).toEqual([
+    expect(primaryProc.mixRates[0].calibrationWarnings).toEqual([
       expect.stringContaining("The card's rate is for 1 gal per 1,000 sq ft"),
       expect.stringContaining('allows no more than 3 fl oz per 1,000 sq ft in one spray'),
+    ]);
+    expect(addonMosquitoProc.mixRates[0].calibrationWarnings).toEqual([
+      expect.stringContaining("The card's rate is for 0.67 gal per 1,000 sq ft"),
+    ]);
+    expect(addonMosquitoProc.mixRates[1].calibrationWarnings).toEqual([
+      expect.stringContaining('allows no more than 1 fl oz per 1,000 sq ft in one spray'),
     ]);
   });
 });

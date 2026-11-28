@@ -2205,7 +2205,10 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   ]);
   const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000, mixingOrder, bermudaMixingOrder, mixRequired, bermudaRequired } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
   const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
-  attachMixCalibrationWarnings([procedure, ...addons.map((a) => a.procedure)], lines, tank, facts.rig);
+  attachMixCalibrationWarnings([
+    { procedure, lines: lines.filter((l) => !l.source) },
+    ...addons.map((addon) => ({ procedure: addon.procedure, lines: lines.filter((l) => l.source === addon.name) })),
+  ], tank, facts.rig);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
   const products = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];
   // Limits are judged from the appointment start (now once the window has
@@ -2532,12 +2535,19 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
 
 // Reuse the tank calculator's carrier-volume and one-spray area-cap checks for every
 // procedure mix row when the appointment names an assigned sprayer rig.
-const SPRAY_VOL_GAL_RE = /(\d+(?:\.\d+)?)\s*gal\s+per\s+1,?000/i;
+const SPRAY_VOL_GAL_RE = /(\d+(?:\.\d+)?)\s*gal(?:lon)?s?\s+per\s+(\d+(?:,\d+)?)\s*sq\.?\s*ft/i;
+function sprayVolumeGalPer1000(text) {
+  const m = SPRAY_VOL_GAL_RE.exec(String(text || ''));
+  if (!m) return null;
+  const gal = Number(m[1]);
+  const sqft = Number(String(m[2]).replace(/,/g, ''));
+  return gal > 0 && sqft > 0 ? Math.round(((gal * 1000) / sqft) * 10000) / 10000 : null;
+}
+
 function calibrationWarningsForMixRow(row, lines, rigCtx) {
   if (!rigCtx.rigCarrier || !row?.perGallon?.amount) return [];
   const line = row.productId ? lines.find((l) => String(l.product?.id) === String(row.productId)) : null;
-  const volMatch = SPRAY_VOL_GAL_RE.exec(String(row.sprayVolume || ''));
-  const lineCarrier = line?.labelCarrierGalPer1000 || (volMatch && Number(volMatch[1]) > 0 ? Number(volMatch[1]) : null);
+  const lineCarrier = line?.labelCarrierGalPer1000 || sprayVolumeGalPer1000(row.sprayVolume);
   const lo = Number(row.perGallon.amount);
   const hi = Number(row.perGallon.amountMax > lo ? row.perGallon.amountMax : lo);
   const band = lo > 0 && row.perGallon.unit ? { lo, hi, unit: String(row.perGallon.unit) } : null;
@@ -2548,15 +2558,17 @@ function calibrationWarningsForMixRow(row, lines, rigCtx) {
   ].filter(Boolean);
 }
 
-function attachMixCalibrationWarnings(procedures, lines, tank, rig) {
+function attachMixCalibrationWarnings(entries, tank, rig) {
   const namedRig = Boolean(rig?.equipmentSystemId || rig?.calibrationId);
   const rigCarrier = namedRig && tank?.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
   if (!rigCarrier) return;
   const rigCtx = { rigCarrier, rigName: tank.systemName || 'This rig', rigGalPer1000: tank.carrierGalPer1000 };
-  for (const proc of procedures) {
+  for (const entry of entries) {
+    const proc = entry?.procedure || entry;
+    const procLines = entry?.lines || [];
     if (!Array.isArray(proc?.mixRates)) continue;
     proc.mixRates = proc.mixRates.map((row) => {
-      const warnings = calibrationWarningsForMixRow(row, lines, rigCtx);
+      const warnings = calibrationWarningsForMixRow(row, procLines, rigCtx);
       return warnings.length ? { ...row, calibrationWarnings: warnings } : row;
     });
   }
@@ -2790,8 +2802,10 @@ function servicesConflict(list, { rateOf, statedVolumeOf }) {
 
 // The per-area limit a line states for ONE spray ("no more than 0.37 fl oz per 1,000 sq ft in one spray"), or {}.
 const AREA_CAP_RE = /\bno more than (\d+(?:\.\d+)?)\s*([a-z]+(?:\s[a-z]+)?)\s*per\s*1,?000\s*sq\.?\s*ft\.?\s*in one (?:spray|application)/i;
+const AREA_CAP_AT_MOST_RE = /\b(\d+(?:\.\d+)?)\s*([a-z]+(?:\s[a-z]+)?)\s*per\s*1,?000\s*sq\.?\s*ft\.?\s*at most\b/i;
 function areaCapOf(raw) {
-  const m = AREA_CAP_RE.exec(String(raw || ''));
+  const text = String(raw || '');
+  const m = AREA_CAP_RE.exec(text) || AREA_CAP_AT_MOST_RE.exec(text);
   return m && Number(m[1]) > 0 ? { areaCap: { amount: Number(m[1]), unit: m[2].toLowerCase() } } : {};
 }
 
