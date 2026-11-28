@@ -10222,6 +10222,7 @@ function initScheduledJobs() {
               .orWhere((prevQ) => prevQ.where('scheduled_date', yesterday).whereIn('status', yesterdayStatuses));
           })
           .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at'))
+          .where((q) => q.whereNull('track_state').orWhereNotIn('track_state', ['complete', 'cancelled']))
           // A street-level address hold the office has not cleared was never dispatched, so it cannot be
           // a customer no-show (no customer_noshow row, no repeated-miss outreach).
           .whereNotExists(function unclearedAddressHold() {
@@ -10844,7 +10845,8 @@ function initScheduledJobs() {
     try {
       await runExclusive('tech-out-absent-day-sweep', async () => {
         const { sweepAbsentTechDays } = require('./tech-out');
-        await sweepAbsentTechDays();
+        const res = await sweepAbsentTechDays();
+        if (res?.failed > 0) throw new Error(`absent-day sweep had ${res.failed} failure(s)`);
       });
     } catch (err) {
       logger.error(`[tech-out] sweep tick failed: ${err.message}`);

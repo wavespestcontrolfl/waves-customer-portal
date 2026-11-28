@@ -27,7 +27,8 @@ function stillScannedCandidate(current, scanned) {
   const stuckInProgress = ['en_route', 'on_site'].includes(scanned.status)
     && ['en_route', 'on_site'].includes(current.status);
   const statusStillMatches = ['pending', 'confirmed'].includes(current.status) || stuckInProgress;
-  return statusStillMatches && !require('../visit-hold').rowIsHeld(current)
+  const terminalTracker = ['complete', 'cancelled'].includes(String(current.track_state || ''));
+  return statusStillMatches && !terminalTracker && !require('../visit-hold').rowIsHeld(current)
     && dateOnly(current.scheduled_date) === dateOnly(scanned.scheduled_date)
     && (current.window_start || null) === (scanned.window_start || null)
     && (current.window_end || null) === (scanned.window_end || null);

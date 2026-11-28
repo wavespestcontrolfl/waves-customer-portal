@@ -132,6 +132,10 @@ export function useDispatchAlerts() {
   const alertsRef = useRef(alerts);
   alertsRef.current = alerts;
   const resolvedIdsRef = useRef(new Set());
+  const resolvedCountRef = useRef(0);
+  const addedCountRef = useRef(0);
+  const totalRef = useRef(0);
+  const requestResyncRef = useRef(null);
   // Reconcile bookkeeping. broadcastCountRef counts handled dispatch:alert
   // broadcasts; changedAtRef maps id -> the count at that card's latest one.
   // A read notes the count before its fetch: a card whose entry is higher was
@@ -165,8 +169,12 @@ export function useDispatchAlerts() {
     }
     const nextAlerts = alertsRef.current.filter((a) => !gone.has(a.id));
     alertsRef.current = nextAlerts;
+    resolvedCountRef.current += newlyResolved;
+    const nextTotal = Math.max(nextAlerts.length, totalRef.current - newlyResolved);
+    totalRef.current = nextTotal;
     setAlerts((prev) => prev.filter((a) => !gone.has(a.id)));
     if (newlyResolved > 0) setTotal((t) => Math.max(nextAlerts.length, t - newlyResolved));
+    if (newlyResolved > 0 && nextTotal > nextAlerts.length) requestResyncRef.current?.();
     return newlyResolved;
   }, []);
   const [loading, setLoading] = useState(true);
@@ -178,6 +186,8 @@ export function useDispatchAlerts() {
   const hydrate = useCallback(async (isCancelled = () => false) => {
     const seq = ++readSeqRef.current;
     const countAtStart = broadcastCountRef.current;
+    const resolvedAtStart = resolvedCountRef.current;
+    const addedAtStart = addedCountRef.current;
     const res = await fetch(
       `${API_BASE}/admin/dispatch/alerts?unresolved=true`,
       { headers: adminAuthHeaders() }
@@ -190,11 +200,15 @@ export function useDispatchAlerts() {
     appliedSeqRef.current = seq;
     const fetched = Array.isArray(data.alerts) ? data.alerts : [];
     const serverTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : fetched.length;
+    const resolvedDuringRead = resolvedCountRef.current - resolvedAtStart;
+    const addedDuringRead = addedCountRef.current - addedAtStart;
     const changedSinceRead = (id) => (changedAtRef.current.get(id) || 0) > countAtStart;
     const merged = mergeHydration(alertsRef.current, fetched, resolvedIdsRef.current, changedSinceRead);
     alertsRef.current = merged;
+    const nextTotal = Math.max(merged.length, serverTotal + addedDuringRead - resolvedDuringRead);
+    totalRef.current = nextTotal;
     setAlerts((prev) => mergeHydration(prev, fetched, resolvedIdsRef.current, changedSinceRead));
-    setTotal(Math.max(serverTotal, merged.length));
+    setTotal(nextTotal);
     setError(null);
     setLoading(false);
   }, []);
@@ -275,6 +289,7 @@ export function useDispatchAlerts() {
       if (mountedRef.current) runResync();
     }, RESYNC_DEBOUNCE_MS);
   }, [runResync]);
+  requestResyncRef.current = requestResync;
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -314,8 +329,13 @@ export function useDispatchAlerts() {
       broadcastCountRef.current += 1;
       changedAtRef.current.set(payload.id, broadcastCountRef.current);
       const wasPresent = alertsRef.current.some((a) => a.id === payload.id);
+      alertsRef.current = mergeAlertBroadcast(alertsRef.current, payload, resolvedIdsRef.current);
       setAlerts((prev) => mergeAlertBroadcast(prev, payload, resolvedIdsRef.current));
-      if (!wasPresent) setTotal((t) => Math.max(alertsRef.current.length + 1, t + 1));
+      if (!wasPresent) {
+        addedCountRef.current += 1;
+        totalRef.current = Math.max(alertsRef.current.length, totalRef.current + 1);
+        setTotal((t) => Math.max(alertsRef.current.length, t + 1));
+      }
       relayTechOutAlertChange(payload);
       // The socket broadcast carries only the bare dispatch_alerts row (no
       // joined tech_name / customer / address). Hydrate immediately for
