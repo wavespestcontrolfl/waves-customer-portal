@@ -241,7 +241,7 @@ let invoiceColsCache = null;
 async function annualPrepayTableExists(conn = db) {
   if (tableExistsCache != null) return tableExistsCache;
   try {
-    const schema = conn && conn.schema ? conn.schema : db.schema;
+    const schema = conn && conn.schema && typeof conn.schema.hasTable === 'function' ? conn.schema : db.schema;
     tableExistsCache = await schema.hasTable('annual_prepay_terms');
   } catch (err) {
     logger.warn(`[annual-prepay] table detection failed: ${err.message}`);

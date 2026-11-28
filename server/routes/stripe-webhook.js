@@ -1435,10 +1435,12 @@ async function restoreSingleInvoiceOnRefundBounce(trx, { linkedInvoice, paymentR
     return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null, restoredFeeInvoiceId: null };
   }
   const duesRestore = await require('../services/invoice').prepareMembershipDuesRestore(trx, linkedInvoice.id, { exceptPaymentId: rowId });
+  let originalStatus = null;
+  let restoredPaidInvoiceId = null;
   if (achBounceState.debitAlreadyTerminal) {
-    const reopenedStatus = nextInvoiceStatusAfterFailedPayment(lockedInvoice);
+    originalStatus = nextInvoiceStatusAfterFailedPayment(lockedInvoice);
     const reopened = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).update({
-      status: reopenedStatus,
+      status: originalStatus,
       paid_at: null,
       stripe_payment_intent_id: null,
       stripe_charge_id: null,
@@ -1446,21 +1448,21 @@ async function restoreSingleInvoiceOnRefundBounce(trx, { linkedInvoice, paymentR
       updated_at: new Date(),
     });
     if (!(reopened > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null, restoredFeeInvoiceId: null };
-    if (duesRestore) duesRestore.originalStatus = reopenedStatus;
-    await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
-    return { duesRestore, invoiceRestored: linkedInvoice.invoice_number || linkedInvoice.id, restoredPaidInvoiceId: null, restoredFeeInvoiceId: linkedInvoice.id };
+  } else {
+    const updateFields = achBounceState.wasStillProcessing
+      ? { status: 'processing', paid_at: null, updated_at: new Date() }
+      : { status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() };
+    const flipped = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).update(updateFields);
+    if (!(flipped > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null, restoredFeeInvoiceId: null };
+    originalStatus = achBounceState.wasStillProcessing ? 'processing' : 'paid';
+    restoredPaidInvoiceId = achBounceState.wasStillProcessing ? null : linkedInvoice.id;
   }
-  const updateFields = achBounceState.wasStillProcessing
-    ? { status: 'processing', paid_at: null, updated_at: new Date() }
-    : { status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() };
-  const flipped = await trx('invoices').where({ id: linkedInvoice.id, status: 'refunded' }).update(updateFields);
-  if (!(flipped > 0)) return { duesRestore: null, invoiceRestored: null, restoredPaidInvoiceId: null, restoredFeeInvoiceId: null };
-  if (duesRestore) duesRestore.originalStatus = achBounceState.wasStillProcessing ? 'processing' : 'paid';
+  if (duesRestore) duesRestore.originalStatus = originalStatus;
   await require('../services/invoice').retireRodentSetupObligationForReinstatedInvoice(trx, linkedInvoice.id);
   return {
     duesRestore,
     invoiceRestored: linkedInvoice.invoice_number || linkedInvoice.id,
-    restoredPaidInvoiceId: achBounceState.wasStillProcessing ? null : linkedInvoice.id,
+    restoredPaidInvoiceId,
     restoredFeeInvoiceId: linkedInvoice.id,
   };
 }
