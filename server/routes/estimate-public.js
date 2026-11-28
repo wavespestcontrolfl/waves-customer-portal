@@ -12688,6 +12688,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           contactFillEmail = null;
         }
       };
+      if (prepayChargePlan) {
+        await require('../services/estimate-promo-code').preLockPromoDiscountInAcceptTransaction(trx, estimate.id);
+      }
       let customerId = estimate.customer_id;
       // True only when THIS accept minted the profile below (no linked,
       // sibling, or phone-matched customer). Handed to the converter so the

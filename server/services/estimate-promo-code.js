@@ -355,6 +355,22 @@ async function projectPendingEstimatePromoAmount(estimate, customerId = null, co
 }
 
 /**
+ * Acquire estimate_promo_codes -> discounts FOR UPDATE locks before accept
+ * acquires any customer row locks so prepay accept matches invoice promo
+ * redemption's discounts -> customers lock ordering (prevents 40P01 deadlocks).
+ */
+async function preLockPromoDiscountInAcceptTransaction(trx, estimateId) {
+  if (!gateOn() || !estimateId) return false;
+  const row = await trx('estimate_promo_codes')
+    .where({ estimate_id: estimateId, status: 'entered' })
+    .forUpdate()
+    .first('discount_id');
+  if (!row?.discount_id) return false;
+  await trx('discounts').where({ id: row.discount_id }).forUpdate().first('id');
+  return true;
+}
+
+/**
  * Redeem an estimate's entered promo code inside an active accept transaction
  * (in a savepoint so a promo failure never aborts acceptance). Used before
  * applyAccountCreditToInvoice on annual-prepay accepts so the customer's promo
@@ -431,6 +447,7 @@ module.exports = {
   sweepAcceptedPromoCodes,
   customerRedeemedPromoCredit,
   projectPendingEstimatePromoAmount,
+  preLockPromoDiscountInAcceptTransaction,
   redeemPromoCodeInAcceptTransaction,
   normalizeCode,
   creditAmountOf,

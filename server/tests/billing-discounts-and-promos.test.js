@@ -650,4 +650,30 @@ describe('Billing Audit PR 3 — discounts, promo codes & multi-home invariants'
       expect(familySrc).toContain('pruneSingleMemberOrphan');
     });
   });
+
+  describe('Prepay accept promo lock order', () => {
+    test('preLockPromoDiscountInAcceptTransaction locks estimate_promo_codes then discounts FOR UPDATE before customer locks', async () => {
+      const prevGate = process.env.GATE_ESTIMATE_PROMO_CODES;
+      process.env.GATE_ESTIMATE_PROMO_CODES = 'true';
+      jest.resetModules();
+      try {
+        const calls = [];
+        const trx = jest.fn((table) => {
+          const q = {
+            where: jest.fn(() => q),
+            forUpdate: jest.fn(() => { calls.push(`forUpdate:${table}`); return q; }),
+            first: jest.fn(async () => (table === 'estimate_promo_codes' ? { discount_id: 'disc-1' } : { id: 'disc-1' })),
+          };
+          return q;
+        });
+        const { preLockPromoDiscountInAcceptTransaction } = require('../services/estimate-promo-code');
+        const locked = await preLockPromoDiscountInAcceptTransaction(trx, 'est-prepay-1');
+        expect(locked).toBe(true);
+        expect(calls).toEqual(['forUpdate:estimate_promo_codes', 'forUpdate:discounts']);
+      } finally {
+        if (prevGate === undefined) delete process.env.GATE_ESTIMATE_PROMO_CODES;
+        else process.env.GATE_ESTIMATE_PROMO_CODES = prevGate;
+      }
+    });
+  });
 });
