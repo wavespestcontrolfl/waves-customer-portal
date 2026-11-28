@@ -146,6 +146,8 @@ export default function DispatchBoardPage() {
         const saved = await res.json().catch(() => null);
         const warnings = Array.isArray(saved?.warnings) ? saved.warnings.filter((w) => typeof w === "string" && w) : [];
         setAssignNotice(warnings.length ? warnings.join(" ") : null);
+        // Refresh roster/job counts immediately so TechCard totals don't wait on a socket round-trip (P2).
+        refreshTechs();
         // If the drawer is open on the same job we just reassigned,
         // bump its refetch signal so it re-pulls the enriched job
         // detail and shows the new assignee. The board pin re-colors
@@ -158,7 +160,7 @@ export default function DispatchBoardPage() {
         setAssignError(err.message || "Reassignment failed");
       }
     },
-    [selectedJobId],
+    [selectedJobId, refreshTechs],
   );
 
   if (loading) {

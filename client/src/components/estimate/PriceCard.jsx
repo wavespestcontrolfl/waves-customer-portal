@@ -726,7 +726,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                 // Bundle card: the interval slice has no honest unit here — a
                 // bare figure reads as per-application or one-time (codex
                 // #3128 r2, same rule as PlanTotalSummary).
-                ? <span style={{ fontWeight: 600, fontSize: 13 }}>Applied to your plan pricing</span>
+                ? <span style={{ fontWeight: 600, fontSize: 14 }}>Applied to your plan pricing</span>
                 : <>{fmtMoneySigned(-manualDiscountInterval)}{periodLabel}</>}
           </strong>
         </div>

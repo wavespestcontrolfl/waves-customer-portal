@@ -199,7 +199,7 @@ describe('products', () => {
     expect(completeButton().disabled).toBe(false);
   });
 
-  test('manual NutriRoot stays held until a Manatee P-deficient soil-test basis and report reference are recorded', async () => {
+  test('manual NutriRoot warns when basis or soil-test reference is missing without blocking Complete', async () => {
     const request = makeRequest();
     await readyVisit(request);
     fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'nutriroot' } });
@@ -208,10 +208,13 @@ describe('products', () => {
     expect(tile('Arborjet NUTRIROOT').textContent).toMatch(/Held:.*soil test documenting phosphorus-deficient soil/);
     fireEvent.click(tile('Arborjet NUTRIROOT'));
     enterAmount('Arborjet NUTRIROOT 1 gal', 3);
-    expect(screen.getByText('Record the NutriRoot application basis.')).toBeTruthy();
+    expect(screen.getByText('Record the NutriRoot application basis (warning only — recorded on visit).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'P-deficient soil documented by soil test' }));
-    expect(screen.getByText('Enter the P-deficient soil-test report date or file reference.')).toBeTruthy();
+    expect(screen.getByText('Enter the P-deficient soil-test report date or file reference (warning only — recorded on visit).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
     fireEvent.change(screen.getByLabelText('Soil-test report date / file reference'), { target: { value: 'UF report 2026-10-14, customer file' } });
+    expect(screen.queryByText(/warning only — recorded on visit/)).toBeNull();
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.structuredFindings.values).toMatchObject({
@@ -292,14 +295,20 @@ describe('products', () => {
     expect(completeButton().disabled).toBe(false);
   });
 
-  test('an N/P blackout product says so and cannot be turned on', async () => {
-    await openSheet();
-    const blocked = tile('Palm Special 8-2-12');
-    expect(blocked.disabled).toBe(true);
-    expect(within(blocked).getByText('N/P blackout — can’t apply Jun 1–Sep 30')).toBeTruthy();
-    fireEvent.click(blocked);
-    expect(blocked.getAttribute('aria-pressed')).toBe('false');
-    expect(screen.queryByRole('group', { name: 'Palm Special 8-2-12' })).toBeNull();
+  test('an N/P blackout product shows a warning and can still be selected and recorded', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    const blackout = tile('Palm Special 8-2-12');
+    expect(blackout.disabled).toBe(false);
+    expect(within(blackout).getByText('N/P blackout warning (Jun 1–Sep 30) — recorded on visit')).toBeTruthy();
+    fireEvent.click(blackout);
+    expect(blackout.getAttribute('aria-pressed')).toBe('true');
+    const editor = editorFor('Palm Special 8-2-12');
+    expect(within(editor).getByText('N/P blackout warning (Jun 1–Sep 30) — recorded on visit')).toBeTruthy();
+    enterAmount('Palm Special 8-2-12', 4);
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.products.find((p) => p.productId === 'palmfert')).toMatchObject({ totalAmount: 4 });
   });
 
   test('the server\'s warnings show under their product, never as a block', async () => {
@@ -363,7 +372,7 @@ describe('recoverable states', () => {
 });
 
 describe('compliance taps', () => {
-  test('pollinator status is required only with an insect product, and bees active blocks', async () => {
+  test('pollinator status warns when missing or bees active without blocking Complete, and omits blank status', async () => {
     const request = makeRequest();
     await readyVisit(request);
     // A rotation product that is no insect product: no pollinator tap.
@@ -373,19 +382,29 @@ describe('compliance taps', () => {
     expect(completeButton().disabled).toBe(false);
 
     fireEvent.click(tile('Merit 2F'));
-    expect(screen.getByText('Select the flowering / bee status.')).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
-    // Never offered: the server refuses it beside an insect product.
+    expect(screen.getByText('Select the flowering / bee status (warning only — recorded on visit).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
+    // Never offered: the server flags it beside an insect product.
     expect(screen.queryByRole('button', { name: /No insecticide applied/ })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Blooming — bees active' }));
     expect(screen.getByText('Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.')).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
 
     fireEvent.click(screen.getByRole('button', { name: 'Blooming — no bees active' }));
+    expect(screen.queryByText(/bees are active/)).toBeNull();
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.structuredFindings.values.pollinator_status).toBe('Blooming — no bees active');
+  });
+
+  test('an unselected pollinator status is omitted from the completion body instead of sending blank', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.click(tile('Merit 2F'));
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.structuredFindings.values).not.toHaveProperty('pollinator_status');
   });
 
   test('without an insect product no pollinator status is sent', async () => {
@@ -449,7 +468,7 @@ describe('compliance taps', () => {
     expect(body.structuredFindings.values.irac_frac_logged).toBe('Yes');
   });
 
-  test('a rotation product with no resistance group (an oil) gets the tech\'s own tap', async () => {
+  test('a rotation product with no resistance group (an oil) warns until confirmed without blocking Complete', async () => {
     const context = { ...CONTEXT, monthProducts: [...CONTEXT.monthProducts, { productId: 'oil', method: 'foliar_spray' }] };
     const request = makeRequest({ context });
     await readyVisit(request);
@@ -458,32 +477,39 @@ describe('compliance taps', () => {
     fireEvent.click(screen.getByRole('button', { name: 'No blooms or no bees' }));
     // The app has no group to compare, so it never claims the check.
     expect(screen.queryByText('IRAC / FRAC rotation checked by the app.')).toBeNull();
-    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged.')).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
+    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged (warning only — recorded on visit).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
+    expect(screen.queryByText(/IRAC \/ FRAC rotation was checked and logged/)).toBeNull();
     const body = await completeBody(request);
     expect(body.structuredFindings.values.irac_frac_logged).toBe('Yes');
   });
 
-  test('when the rotation check is unavailable the tech must tap Yes', async () => {
+  test('when the rotation check is unavailable, unconfirmed or No warns without blocking and never fabricates Yes', async () => {
     const request = makeRequest({ context: { ...CONTEXT, warnings: [], warningsUnavailable: true } });
     await readyVisit(request);
     fireEvent.click(tile('Heritage G'));
     enterAmount('Heritage G', 6);
-    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged.')).toBeTruthy();
-    expect(completeButton().disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'No' }));
-    expect(completeButton().disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
+    expect(screen.getByText('Confirm the IRAC / FRAC rotation was checked and logged (warning only — recorded on visit).')).toBeTruthy();
     expect(completeButton().disabled).toBe(false);
-    const body = await completeBody(request);
-    expect(body.structuredFindings.values.irac_frac_logged).toBe('Yes');
+    fireEvent.click(screen.getByRole('button', { name: 'No' }));
+    expect(completeButton().disabled).toBe(false);
+    const noBody = await completeBody(request);
+    expect(noBody.structuredFindings.values.irac_frac_logged).toBe('No');
+
+    cleanup();
+    const blankRequest = makeRequest({ context: { ...CONTEXT, warnings: [], warningsUnavailable: true } });
+    await readyVisit(blankRequest);
+    fireEvent.click(tile('Heritage G'));
+    enterAmount('Heritage G', 6);
+    const blankBody = await completeBody(blankRequest);
+    expect(blankBody.structuredFindings.values).not.toHaveProperty('irac_frac_logged');
   });
 });
 
 describe('photos and the photo read', () => {
-  test('five slots show their one-line captions and the first two are the floor', async () => {
-    await openSheet();
+  test('five slots show their one-line captions and missing floor photos warn without blocking Complete', async () => {
+    const request = await openSheet();
     for (const label of ['Front beds', 'Back or side landscape', 'Whole palm', 'Oldest fronds', 'Leaf close-up']) {
       expect(screen.getByLabelText(`${label} photo file`)).toBeTruthy();
     }
@@ -492,15 +518,39 @@ describe('photos and the photo read', () => {
     expect(screen.getByText('0 added')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Good' }));
-    expect(screen.getByText('Add a front beds photo.')).toBeTruthy();
+    expect(screen.getByText('Add a front beds photo (at least 2 photos recommended).')).toBeTruthy();
+    expect(screen.getByText('Add a back or side landscape photo (at least 2 photos recommended).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
     await addPhoto('Front beds', 'front.jpg');
-    expect(screen.getByText('Add a back or side landscape photo.')).toBeTruthy();
-    // A palm photo is optional and does not stand in for the second floor photo.
+    expect(screen.queryByText(/Add a front beds photo/)).toBeNull();
+    expect(screen.getByText('Add a back or side landscape photo (at least 2 photos recommended).')).toBeTruthy();
+    // A palm photo is optional and does not clear the back landscape warning, while Complete stays enabled.
     await addPhoto('Whole palm', 'palm.jpg');
-    expect(screen.getByText('Add a back or side landscape photo.')).toBeTruthy();
+    expect(screen.getByText('Add a back or side landscape photo (at least 2 photos recommended).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
+    await addPhoto('Back or side landscape', 'back.jpg');
+    expect(screen.queryByText(/photos recommended/)).toBeNull();
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.completionPhotos).toHaveLength(3);
+  });
+
+  test('Away Watch visit requires 3 distinct photos, credits staged photos, and suppresses the 2-photo recommendation', async () => {
+    const request = makeRequest({ context: { ...CONTEXT, awayWatch: { requiredPhotos: 3, stagedPhotoCount: 1 } } });
+    await openSheet(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Good' }));
+    expect(screen.queryByText(/at least 2 photos recommended/)).toBeNull();
+    expect(screen.getByText('Away Watch visit: add at least 3 distinct photos of the outside of the home (1 of 3 added).')).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    await addPhoto('Front beds', 'same.jpg');
+    // Same image chosen in a second slot still counts as 1 distinct sheet photo.
+    await addPhoto('Back or side landscape', 'same.jpg');
+    expect(screen.getByText('Away Watch visit: add at least 3 distinct photos of the outside of the home (2 of 3 added).')).toBeTruthy();
     expect(completeButton().disabled).toBe(true);
     await addPhoto('Back or side landscape', 'back.jpg');
     expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.completionPhotos).toHaveLength(2);
   });
 
   test('photos go in the body as completionPhotos in slot order, not through the staged photo manager', async () => {

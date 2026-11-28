@@ -110,7 +110,7 @@ function requestedSlots(slots, input) {
   if (action === 'add') {
     if (!text(input.name)) return refusal('Give the new contact\'s name.', 'invalid_input');
     if (!relationship) return refusal('Ask who the new contact is to the account (spouse or partner, family member, tenant, and so on), then pass relationship.', 'invalid_input');
-    if (!text(input.phone) && !text(input.email)) return refusal('Give the new contact\'s phone number or email (or both).', 'invalid_input');
+    if (![input.phone, input.email].some(text)) return refusal('Give the new contact\'s phone number or email (or both).', 'invalid_input');
     const index = slots.findIndex((s) => !isFilled(s));
     if (index < 0) return refusal('This account already has three contacts. Change or remove one first.', 'slots_full');
     next[index] = { name: text(input.name), phone: text(input.phone), email: text(input.email) };
@@ -131,6 +131,13 @@ function requestedSlots(slots, input) {
   if (!relationship) return refusal(`Ask who ${slots[index].name || 'this contact'} is to the account, then pass relationship (their current one: ${slots[index].role ? relationshipLabel(slots[index].role) : 'none recorded'}).`, 'invalid_input', { contacts: listed });
   for (const k of fields) next[index][k] = text(input[k]);
   if (!isFilled(next[index])) return refusal('That would leave the contact empty. Use action "remove" instead.', 'invalid_input');
+  if (![next[index].phone, next[index].email].some(Boolean)) {
+    return refusal('Keep a phone number or email on this contact, or use action "remove" to remove them.', 'invalid_input');
+  }
+  const cur = slots[index];
+  if (JSON.stringify([next[index].name, next[index].phone, next[index].email, relationship]) === JSON.stringify([cur.name, cur.phone, cur.email, cur.role])) {
+    return refusal('Nothing changed on this contact.', 'no_change');
+  }
   return { action, index, next, roles: keptRoles(slots, next, index, relationship) };
 }
 

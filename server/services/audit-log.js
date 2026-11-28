@@ -685,6 +685,27 @@ async function auditPestFrequencyChange({ customerId, seriesRootId, metadata = {
   });
 }
 
+/**
+ * Owner changed the DB-backed auto-order policy (switch, approved items, or
+ * per-order / monthly spend limits) for history-total vendors such as Sticker
+ * Mule (services/procurement/history-order-policy.js). Critical: the policy
+ * change and its audit record commit together or not at all.
+ */
+async function auditHistoryOrderPolicyChange({ actor_id = null, key, before, after, ip_address = null, user_agent = null, trx = null }) {
+  return recordAuditEvent({
+    actor_type: 'admin',
+    actor_id,
+    action: 'procurement.history_order_policy.updated',
+    resource_type: 'system_settings',
+    resource_id: null,
+    metadata: { key, before, after },
+    ip_address,
+    user_agent,
+    critical: true,
+    trx,
+  });
+}
+
 module.exports = {
   recordAuditEvent,
   auditPestFrequencyChange,
@@ -693,6 +714,7 @@ module.exports = {
   auditCardDetailsSynced,
   auditLawnSqftFromEstimate,
   auditVendorOrder,
+  auditHistoryOrderPolicyChange,
   auditTerminalHandoffMint,
   auditTerminalHandoffRateLimited,
   auditTerminalHandoffValidate,

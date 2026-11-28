@@ -226,11 +226,11 @@ function liveHoldByRealClock(q) {
 }
 
 async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaimedReservations = false } = {}) {
-  const rows = await dbc('scheduled_services')
+  const rows = await require('../visit-hold').excludeHeld(dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .andWhere(includeClaimedReservations ? bookedVisitOrLiveHoldByRealClock : liveHoldByRealClock)
+    .andWhere(includeClaimedReservations ? bookedVisitOrLiveHoldByRealClock : liveHoldByRealClock), 'scheduled_services')
     .select(
       'scheduled_services.scheduled_date',
       'scheduled_services.zone',

@@ -522,6 +522,24 @@ async function loadJointMosquitoAccount(svc, knex, serviceId) {
   }
 }
 
+async function loadAwayWatchContext(serviceId, knex) {
+  try {
+    const AwayWatch = require('./away-watch');
+    if (!(await AwayWatch.visitInAwayWatchWindow(knex, serviceId))) return null;
+    const stagedRow = await knex('scheduled_service_photo_staging')
+      .where({ scheduled_service_id: serviceId })
+      .count({ n: '*' })
+      .first();
+    return {
+      requiredPhotos: AwayWatch.AWAY_WATCH_MIN_PHOTOS,
+      stagedPhotoCount: Number(stagedRow?.n || 0),
+    };
+  } catch (err) {
+    logger.warn(`[ts-fast-context] away watch check unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
+}
+
 /**
  * The sheet's context for one scheduled service. `{ ok: false, reason }` only
  * for a missing service; an ineligible visit answers `eligible: false` with the
@@ -579,6 +597,8 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     logger.warn(`[ts-fast-context] warnings unavailable for ${serviceId}: ${err?.code || err?.name || 'Error'}`);
   }
 
+  const awayWatch = await loadAwayWatchContext(serviceId, knex);
+
   return {
     ok: true,
     eligible: true,
@@ -593,6 +613,7 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     lastPalms: buildLastPalms(history),
     lastVisitPhotos: await loadLastVisitPhotos(history, knex, serviceId),
     jointMosquitoAccount: await loadJointMosquitoAccount(svc, knex, serviceId),
+    ...(awayWatch && { awayWatch }),
     warnings,
     ...(warningsUnavailable && { warningsUnavailable: true }),
     // GATE_TS_WATCH_LIST: this visit's month on the seasonal watch list. Gate

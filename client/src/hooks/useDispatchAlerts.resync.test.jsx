@@ -283,3 +283,22 @@ describe('mergeHydration changedSinceRead predicate', () => {
     expect(mergeHydration([B], [A, C], new Set(['a']), () => true).map((x) => x.id)).toEqual(['c', 'b']);
   });
 });
+
+describe('batched broadcast total count accuracy', () => {
+  it('captures per-event list length so three batched unlinked broadcasts yield total 3', async () => {
+    server = [];
+    const hook = renderHook(() => useDispatchAlerts());
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    expect(hook.result.current.alerts).toEqual([]);
+    expect(hook.result.current.total).toBe(0);
+
+    act(() => {
+      socketHandlers['dispatch:alert']({ id: 'u-1', type: 'payer_enrollment', severity: 'warn', created_at: '2026-11-28T01:00:00Z' });
+      socketHandlers['dispatch:alert']({ id: 'u-2', type: 'payer_enrollment', severity: 'warn', created_at: '2026-11-28T01:01:00Z' });
+      socketHandlers['dispatch:alert']({ id: 'u-3', type: 'payer_enrollment', severity: 'warn', created_at: '2026-11-28T01:02:00Z' });
+    });
+
+    expect(hook.result.current.alerts).toHaveLength(3);
+    expect(hook.result.current.total).toBe(3);
+  });
+});

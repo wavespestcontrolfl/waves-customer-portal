@@ -10,7 +10,7 @@
 //   - A null/undefined score renders as "Tracking", never 0.
 //   - Charts hide themselves when their inputs are missing, rather than drawing empty.
 
-import { useRef, useState, useEffect, createContext, useContext } from 'react';
+import { useRef, useState, useEffect, useContext } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import { FS, LH } from '../../../theme-doc';
@@ -21,10 +21,10 @@ import RAIN_COPY from '../../../../../shared/lawn-water-rain-copy.json';
 import { weekPlanOnCard, rainSensorLineOnCard } from '@lawn-water-card';
 import { bannerAtNow, bannerNextChangeMs } from './lawnLayoutRules';
 import { scrollBehavior } from '../../../lib/scrollMotion';
+import { PrintContext } from './lawnPrintContext';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
-export const PrintContext = createContext(false);
 function usePrint() { return useContext(PrintContext); }
 
 // ── Surface tokens (mirror LawnReportViewPage / public estimate surface) ──────

@@ -46,7 +46,39 @@ describe('revenue and growth', () => {
 
   test('no earlier revenue gives no growth, never infinity', () => {
     const rows = [...run(1, 12, { cash_revenue: 0 }), ...run(13, 24)];
-    expect(view.revenueMetric(view.splitWindows(rows)).growthPct).toBeNull();
+    expect(view.revenueMetric(view.splitWindows(rows))).toMatchObject({
+      growthPct: null,
+      growthUnavailableReason: 'prior_incomplete',
+      priorActiveMonths: 0,
+    });
+  });
+
+  test('a sparse pre-portal baseline (< 6 non-zero prior months) hides growth instead of printing +36,000%', () => {
+    const rows = [
+      ...run(1, 12, (n) => ({ cash_revenue: n === 10 ? 267 : 0 })),
+      ...run(13, 24, { cash_revenue: 8000 }),
+    ];
+    expect(view.revenueMetric(view.splitWindows(rows))).toMatchObject({
+      value: 96000,
+      priorValue: 267,
+      growthPct: null,
+      growthUnavailableReason: 'prior_incomplete',
+      priorActiveMonths: 1,
+    });
+  });
+
+  test('at least 6 non-zero prior months computes growth cleanly', () => {
+    const rows = [
+      ...run(1, 12, (n) => ({ cash_revenue: n >= 7 ? 1000 : 0 })),
+      ...run(13, 24, { cash_revenue: 1000 }),
+    ];
+    expect(view.revenueMetric(view.splitWindows(rows))).toMatchObject({
+      value: 12000,
+      priorValue: 6000,
+      growthPct: 100,
+      growthUnavailableReason: null,
+      priorActiveMonths: 6,
+    });
   });
 });
 

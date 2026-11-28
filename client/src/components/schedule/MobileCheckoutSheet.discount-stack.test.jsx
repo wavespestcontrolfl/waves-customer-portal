@@ -78,8 +78,14 @@ vi.mock('../../hooks/useCustomerCards', () => ({
   isCardExpired: () => false,
 }));
 
-afterEach(cleanup);
-beforeEach(() => { stacking.enabled = true; stacking.known = true; stacking.retry.mockClear(); });
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
+beforeEach(() => {
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+  stacking.enabled = true; stacking.known = true; stacking.retry.mockClear();
+});
 
 const SERVICE = {
   id: 'svc-1',

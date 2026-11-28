@@ -1101,7 +1101,7 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     await screen.findByText('Visit Summary');
 
     expect(screen.getByRole('link', { name: /portal login/i })).toHaveAttribute('href', '/login');
-    const footer = container.querySelector('footer.sr-footer');
+    const footer = container.querySelector('.sr-footer');
     const safetyLink = within(footer).getByRole('link', { name: /see every product we use and our safety protocol/i });
     expect(safetyLink).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
     expect(safetyLink).toHaveAttribute('target', '_blank');

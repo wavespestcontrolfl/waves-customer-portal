@@ -1269,13 +1269,12 @@ async function profileOnAccount(req, customerId, { conn = db, lock = false } = {
   // still be on the account the session names (a profile moved away after sign-in reaches nothing).
   const key = (v) => String(v).toLowerCase();
   const ids = [...new Set([key(customerId), key(selfId)])].sort();
-  const q = conn('customers').whereIn('id', ids).orderBy('id', 'asc')
-    .select('id', 'active', 'deleted_at', conn.raw('COALESCE(account_id, id) AS owner_account'));
+  const q = conn('customers').whereIn('id', ids).orderBy('id', 'asc');
   if (lock === 'share') q.forShare(); else if (lock) q.forUpdate();
-  const rows = await q;
+  const rows = await q.select('id', 'account_id', 'active', 'deleted_at');
   const byId = new Map(rows.map((r) => [key(r.id), r]));
   // Both rows active, undeleted and on the session's account (staff turning off the signed-in profile ends its reach).
-  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && key(r.owner_account) === key(accountId);
+  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && key(r.account_id ?? r.owner_account ?? r.id) === key(accountId);
   return onAccount(byId.get(key(customerId))) && onAccount(byId.get(key(selfId)));
 }
 
@@ -1400,45 +1399,49 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
         });
       }
-      const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
-      // Recipient double opt-in (gated + dark template): the pending-row
-      // CLAIMS and the contact UPDATE commit in ONE transaction — the claim
-      // lands before the slots become visible (no grandfather window), and
-      // a failed UPDATE rolls the claims back (no stranded pending rows).
-      // A claim failure fails the whole save. Twilio dispatch runs only
-      // after commit, async, with failures logged.
       let optinClaims = [];
-      const optinArgs = updates.serviceContactsConsent === true && contacts.length ? {
-        customer: beforeRow,
-        contacts: contacts.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
-        priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
-        propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
-      } : null;
-      const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow);
-      const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
-      let lockedBefore = beforeRow;
+      let slotUpdates = {};
+      let consentUpdates = {};
+      let lockedBefore = {};
       let lockedAt = null;
       let loginPrefs;
       await db.transaction(async (trx) => {
-        // Row lock + re-read: the audit diff below must describe the actual
-        // DB transition — a concurrent save may have moved the row since the
-        // unlocked beforeRow read, and diffing against that stale snapshot
-        // fabricates or drops timeline events. The lock-held timestamp
-        // orders the events even if a later save's insert lands first.
-        lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
+        // Recheck account ownership under the row lock BEFORE reading,
+        // claiming opt-in texts, or writing contacts (codex P0: a profile
+        // moved to another account after pre-check must not be modified or
+        // have its new address sent in an opt-in text).
+        if (!(await profileOnAccount(req, req.params.customerId, { conn: trx, lock: true }))) {
+          throw Object.assign(new Error('Property is not available for this account'), { statusCode: 403, ownershipError: true });
+        }
+        // Row lock + re-read: slot compaction, role preservation, opt-in
+        // priorPhones, consent updates, and audit diff all derive from the
+        // LOCKED row so concurrent saves cannot clobber roles or skip opt-in
+        // claims (P1-E3).
+        lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || {};
         lockedAt = new Date();
+        slotUpdates = serviceContactSlotUpdates(contacts, lockedBefore);
+        consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
         // The assigned addresses take the shared email key after the row
         // lock, so a bounce recovery's ownership check cannot be overtaken
         // by this save (utils/customer-comms-lock.js lockAssignedCustomerEmails).
         await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, slotUpdates);
-        if (optinArgs) {
+        if (updates.serviceContactsConsent === true && contacts.length) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
-          optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
+          optinClaims = await claimRecipientOptins({
+            customer: lockedBefore,
+            contacts: contacts.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
+            priorPhones: [lockedBefore.service_contact_phone, lockedBefore.service_contact2_phone, lockedBefore.service_contact3_phone],
+            propertyAddress: [lockedBefore.address_line1, lockedBefore.city].filter(Boolean).join(', '),
+            trx,
+          });
         }
         // Contact login (GATE_CONTACT_LOGIN_HOLDER_ONLY): this signed-in holder
-        // save is the only writer of the per-phone login attestation.
-        loginPrefs = require('../services/customer-contact')
-          .loginAttestedPrefs(lockedBefore, contacts.map((c) => c.phone), !!consentUpdates.service_contacts_consent_at);
+        // save is the only writer of the per-phone login attestation. Also prune
+        // removed phone keys from unconsented_slot_phone_keys (P1-E2).
+        const CustomerContact = require('../services/customer-contact');
+        const survivingPhones = contacts.map((c) => c.phone);
+        loginPrefs = CustomerContact.loginAttestedPrefs(lockedBefore, survivingPhones, !!consentUpdates.service_contacts_consent_at);
+        loginPrefs = CustomerContact.pruneRemovedUnconsentedSlotKeys(lockedBefore, survivingPhones, loginPrefs);
         await trx('customers').where({ id: req.params.customerId }).update({
           ...slotUpdates,
           ...consentUpdates,
@@ -1451,10 +1454,10 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         await require('../services/contact-notification-prefs')
           .pruneContactNotificationPrefs(trx, req.params.customerId, contacts);
         await require('../middleware/auth')
-          .revokeRemovedContactRefreshSessions(trx, req.params.customerId, contacts.map((c) => c.phone));
+          .revokeRemovedContactRefreshSessions(trx, req.params.customerId, survivingPhones);
       });
       savedContacts = contacts.map(serviceContactPayload);
-      if (optinClaims.length) pendingOptinDispatch = { claims: optinClaims, customer: beforeRow };
+      if (optinClaims.length) pendingOptinDispatch = { claims: optinClaims, customer: lockedBefore };
       // Contact change events for the 360 timeline — post-commit, best-effort
       // (the recorder never throws; a logging failure only warns and never
       // fails the save). Awaited so the row is committed before the save
@@ -1473,93 +1476,80 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       // against any previous slot) keeps their pipeline-recorded role; a
       // genuinely new person never inherits the old one.
       const contact = normalizeContactInput(updates.serviceContact);
-      const beforeRow = await db('customers').where({ id: req.params.customerId }).first() || {};
-      // Consent decisions must describe what will actually be STORED after
-      // this save — the new slot 1 plus the untouched slot 2/3 people — not
-      // just the payload (codex #2948 r5): a slot-1-only edit neither
-      // bypasses the guard while other phone recipients remain, nor strips
-      // their stamp semantics by looking at slot 1 alone.
-      const survivors = [2, 3]
-        .map((n) => ({
-          name: String(beforeRow[`service_contact${n}_name`] || '').trim(),
-          phone: String(beforeRow[`service_contact${n}_phone`] || '').trim(),
-          email: String(beforeRow[`service_contact${n}_email`] || '').trim(),
-        }))
-        .filter((c) => c.name || c.phone || c.email);
-      const postSave = [contact, ...survivors].filter((c) => c.name || c.phone || c.email);
-      // Same consent rail as the list save — the legacy shape must not be
-      // a loophole for storing an unattested texting target.
-      if (serviceContactsRequireConsent(postSave, updates.serviceContactsConsent)) {
-        return res.status(400).json({
-          error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
-        });
-      }
-      const slot1 = serviceContactSlotUpdates([contact], beforeRow);
-      // Same artifact rule AND same claim-in-transaction opt-in flow as the
-      // list save — the legacy shape must not be a loophole that enrolls a
-      // new phone without the confirmation flow or its rollback semantics.
       let legacyClaims = [];
-      // Full post-save list, not just slot 1: ask_failed survivors in
-      // slots 2/3 must retry on this consented save too (#2956 r4).
-      const legacyOptinArgs = updates.serviceContactsConsent === true && postSave.some((c) => c.phone) ? {
-        customer: beforeRow,
-        contacts: postSave.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
-        priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
-        propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
-      } : null;
-      const legacySlot1Updates = {
-        service_contact_name: slot1.service_contact_name,
-        service_contact_phone: slot1.service_contact_phone,
-        service_contact_email: slot1.service_contact_email,
-        service_contact_role: slot1.service_contact_role,
-      };
-      const legacyConsentUpdates = serviceContactConsentUpdates(postSave, updates.serviceContactsConsent);
-      let legacyLockedBefore = beforeRow;
+      let legacySlot1Updates = {};
+      let legacyConsentUpdates = {};
+      let legacyLockedBefore = {};
       let legacyLockedAt = null;
       await db.transaction(async (trx) => {
-        // Same row-lock re-read as the list save — the audit diff must
-        // describe the actual DB transition, not a possibly-stale snapshot.
-        legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
-        legacyLockedAt = new Date();
-        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, legacySlot1Updates);
-        if (legacyOptinArgs) {
-          const { claimRecipientOptins } = require('../services/recipient-optin');
-          legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
+        if (!(await profileOnAccount(req, req.params.customerId, { conn: trx, lock: true }))) {
+          throw Object.assign(new Error('Property is not available for this account'), { statusCode: 403, ownershipError: true });
         }
-        // Per-phone login attestation (GATE_CONTACT_LOGIN_HOLDER_ONLY). This save
-        // submitted slot 1 only, so only slot 1 is newly attested; slots 2 and 3 keep
-        // an attestation they already hold and gain none (a phone the call pipeline
-        // filed meanwhile needs the holder's explicit full-list save).
-        const { loginAttestedPrefs, loginAttestedPhoneKeys, phoneKeyOf } = require('../services/customer-contact');
+        // Row lock + re-read: survivors, consent guard, role preservation,
+        // opt-in priorPhones, and audit diff all derive from the LOCKED row
+        // (P1-E3).
+        legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || {};
+        legacyLockedAt = new Date();
+        const lockedSurvivors = [2, 3]
+          .map((n) => ({
+            name: String(legacyLockedBefore[`service_contact${n}_name`] || '').trim(),
+            phone: String(legacyLockedBefore[`service_contact${n}_phone`] || '').trim(),
+            email: String(legacyLockedBefore[`service_contact${n}_email`] || '').trim(),
+          }))
+          .filter((c) => c.name || c.phone || c.email);
+        const lockedPostSave = [contact, ...lockedSurvivors].filter((c) => c.name || c.phone || c.email);
+        if (serviceContactsRequireConsent(lockedPostSave, updates.serviceContactsConsent)) {
+          throw Object.assign(
+            new Error('Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.'),
+            { statusCode: 400, consentError: true },
+          );
+        }
+        const slot1 = serviceContactSlotUpdates([contact], legacyLockedBefore);
+        legacySlot1Updates = {
+          service_contact_name: slot1.service_contact_name,
+          service_contact_phone: slot1.service_contact_phone,
+          service_contact_email: slot1.service_contact_email,
+          service_contact_role: slot1.service_contact_role,
+        };
+        legacyConsentUpdates = serviceContactConsentUpdates(lockedPostSave, updates.serviceContactsConsent);
+        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, legacySlot1Updates);
+        if (updates.serviceContactsConsent === true && lockedPostSave.some((c) => c.phone)) {
+          const { claimRecipientOptins } = require('../services/recipient-optin');
+          legacyClaims = await claimRecipientOptins({
+            customer: legacyLockedBefore,
+            contacts: lockedPostSave.map((c) => ({ name: c.name, firstName: String(c.name || '').split(/\s+/)[0], phone: c.phone })),
+            priorPhones: [legacyLockedBefore.service_contact_phone, legacyLockedBefore.service_contact2_phone, legacyLockedBefore.service_contact3_phone],
+            unconsentedOverridePhones: [contact.phone],
+            propertyAddress: [legacyLockedBefore.address_line1, legacyLockedBefore.city].filter(Boolean).join(', '),
+            trx,
+          });
+        }
+        // Per-phone login attestation (GATE_CONTACT_LOGIN_HOLDER_ONLY) +
+        // pruning removed phones from unconsented_slot_phone_keys (P1-E2).
+        const CustomerContact = require('../services/customer-contact');
+        const { loginAttestedPrefs, loginAttestedPhoneKeys, phoneKeyOf, pruneRemovedUnconsentedSlotKeys } = CustomerContact;
         const alreadyAttested = loginAttestedPhoneKeys(legacyLockedBefore);
-        const legacyLoginPrefs = loginAttestedPrefs(
+        let legacyLoginPrefs = loginAttestedPrefs(
           legacyLockedBefore,
           [contact.phone, ...[2, 3]
             .map((n) => legacyLockedBefore[`service_contact${n}_phone`])
             .filter((phone) => alreadyAttested.has(phoneKeyOf(phone)))],
           !!legacyConsentUpdates.service_contacts_consent_at,
         );
+        const survivingPhones = lockedPostSave.map((c) => c.phone);
+        legacyLoginPrefs = pruneRemovedUnconsentedSlotKeys(legacyLockedBefore, survivingPhones, legacyLoginPrefs);
         await trx('customers').where({ id: req.params.customerId }).update({
           ...legacySlot1Updates,
           ...legacyConsentUpdates,
           ...(legacyLoginPrefs ? { service_preferences: JSON.stringify(legacyLoginPrefs) } : {}),
           updated_at: new Date(),
         });
-        // Same prune as the list save: a replaced slot-1 person's own choices
-        // (and attestation) and sessions go with them (codex #6363 r2 P2).
-        // The survivors are read from the LOCKED row (codex r8 P2): a full
-        // contact edit that committed slot 2/3 between the unlocked read and
-        // this lock must not have its new contact pruned and signed out.
-        const lockedSurvivors = [2, 3]
-          .map((n) => ({ phone: String(legacyLockedBefore[`service_contact${n}_phone`] || '').trim(), email: String(legacyLockedBefore[`service_contact${n}_email`] || '').trim() }))
-          .filter((c) => c.phone || c.email);
-        const lockedPostSave = [{ phone: contact.phone, email: contact.email }, ...lockedSurvivors];
         await require('../services/contact-notification-prefs')
           .pruneContactNotificationPrefs(trx, req.params.customerId, lockedPostSave);
         await require('../middleware/auth')
-          .revokeRemovedContactRefreshSessions(trx, req.params.customerId, lockedPostSave.map((c) => c.phone));
+          .revokeRemovedContactRefreshSessions(trx, req.params.customerId, survivingPhones);
       });
-      if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: beforeRow };
+      if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: legacyLockedBefore };
       // Same events as the list save — the legacy shape must not be a
       // logging loophole either. Post-commit, best-effort, awaited (the
       // recorder never throws).
@@ -1608,6 +1598,8 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       ...(savedContacts !== undefined ? { serviceContacts: savedContacts } : {}),
     });
   } catch (err) {
+    if (err?.ownershipError) return res.status(403).json({ error: err.message });
+    if (err?.consentError) return res.status(400).json({ error: err.message });
     next(err);
   }
 });

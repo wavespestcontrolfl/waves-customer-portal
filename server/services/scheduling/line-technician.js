@@ -86,7 +86,10 @@ const placeOf = (opts = {}) => ({
 async function territoryTechnicianOf(db, place, { strict = false } = {}) {
   if (!territoryOn() || !place) return null;
   try {
-    return await territory.territoryTechnicianFor(db, place);
+    const { savepointRead } = require('./savepoint-read');
+    return strict
+      ? await territory.territoryTechnicianFor(db, place)
+      : await savepointRead(db, (dbh) => territory.territoryTechnicianFor(dbh, place));
   } catch (err) {
     if (strict) throw err;
     logger.warn(`[line-technician] territory read failed (the line map alone decides): ${err.message}`);

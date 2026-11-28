@@ -66,16 +66,12 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     expect(confirmCardHoldFeeChoice).toHaveBeenCalledWith(55, { scope: 'this_only' });
   });
 
-  // A technician login (the tech portal passes adminActions={false}): the
-  // status route answers 403 to a non-admin following/series cancel, so the
-  // sheet offers only this appointment, even on a recurring visit.
-  it('a technician login sees no series scopes on a recurring visit and sends this_only', async () => {
+  // P0-5: cancelling an appointment is office/admin-only across all scopes,
+  // so a technician login (adminActions={false}) never sees the Cancel button.
+  it('a technician login sees no Cancel appointment action even on a recurring visit', () => {
     render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} adminActions={false} onClose={() => {}} />);
-    fireEvent.click(screen.getByText('Cancel appointment'));
+    expect(screen.queryByText('Cancel appointment')).toBeNull();
     expect(screen.queryByText('Apply changes to')).toBeNull();
-    fireEvent.click(screen.getByText('Confirm cancellation'));
-    await waitFor(() => expect(statusCall()).not.toBeNull());
-    expect(statusCall().scope).toBe('this_only');
   });
 
   // Opened over a Fast Complete sheet (which drops its own focus trap while
@@ -245,11 +241,10 @@ describe('MobileAppointmentDetailSheet skip this visit', () => {
     expect(confirmCardHoldFeeChoice).toHaveBeenCalledWith(55, { scope: 'this_only' });
   });
 
-  it('a technician login never asks for the verdict and never shows the choice', async () => {
+  it('a technician login never asks for the verdict and never shows the choice', () => {
     answerPreview(eligible);
     render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} adminActions={false} onClose={() => {}} />);
-    fireEvent.click(screen.getByText('Cancel appointment'));
-    await screen.findByText('Client booking notifications');
+    expect(screen.queryByText('Cancel appointment')).toBeNull();
     expect(previewAsked()).toBe(false);
     expect(screen.queryByRole('button', { name: 'Skip this visit' })).toBeNull();
   });

@@ -106,7 +106,7 @@ import {
 } from '../../lib/typed-findings-rules';
 import {
   AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
-  SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
+  SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, useFastCompleteCloseGuard, usePhotoManager,
   useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock, detailsHandler,
 } from './FastCompleteParts';
 
@@ -664,15 +664,17 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   // a sheet blocked on a stale or changed visit, or an attempt whose outcome
   // is unknown or refused (it may have saved), so reopening routes from the
   // live schedule rather than the same old row.
-  const close = useCallback(() => {
-    // Voice still recording, transcribing or filling: closing (×, backdrop or
-    // Escape all come through here) would drop those words and the sheet's edits.
-    if ([submitting, voiceBusy, wrapChecking, tracing].some(Boolean)) return;
+  const performClose = useCallback(() => {
     // The completion response rides along: admin Dispatch reads its invoice
     // fields to stage the payment handoff.
     if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
-  }, [submitting, voiceBusy, wrapChecking, tracing, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  }, [done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
+  const { requestClose: close, frameProps } = useFastCompleteCloseGuard({
+    blocked: [submitting, voiceBusy, wrapChecking, tracing].some(Boolean),
+    skipWhen: [done, ctx.blockedReason, submission.failure, submission.restored],
+    onClose: performClose,
+  });
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
@@ -688,6 +690,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
       titleId={titleId}
       onDismiss={close}
       hiddenProps={sheetOverlay ? INERT : photoManager.hiddenProps}
+      {...frameProps}
       overlay={(photoManager.isOpen && (
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}

@@ -17,6 +17,7 @@
 
 import { cloneElement, useEffect, useState } from 'react';
 import ReportText, { reportSectionsForText } from '../ReportSections';
+import { PrintContext } from './lawnPrintContext';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import Icon from '../../Icon';
@@ -34,7 +35,6 @@ import {
   LawnTrends,
   LawnWateringBanner,
   MowingHeightGauge,
-  PrintContext,
   RainLast7DaysChart,
   ScoreRing,
   VisualDiagnosisCards,
@@ -51,7 +51,6 @@ import {
   bannerRepeatsAftercare,
   bannerShowsAnything,
   insightsWithoutRepeats,
-  lawnLayoutActive,
   mowingLine,
   pageCarriesInstruction,
   nextVisitPlacement,
@@ -438,9 +437,4 @@ export function LawnLayoutBody({ data, slots }) {
       </div>
     </PrintContext.Provider>
   );
-}
-
-/** The standard page body, or the lawn layout while the gate's payload key is on a live lawn report. */
-export function LawnLayoutSwitch({ data, mode, layout, children }) {
-  return lawnLayoutActive(data, mode) ? layout : children;
 }

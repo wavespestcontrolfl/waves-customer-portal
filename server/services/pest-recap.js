@@ -56,6 +56,18 @@ const COMPLETED_STATUS = 'completed';
 // customer for a visit the status machine says never happened (Codex P1).
 const NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
 
+function maybeTriggerPostVisitRedraft({
+  completedHere, recapPriorCompleted, recapPriorNonPerformed, svc, recordId, serviceDate, completedAt,
+}) {
+  if (!completedHere || recapPriorCompleted || recapPriorNonPerformed || !recordId || !svc?.customer_id) return;
+  require('./sms-post-visit-redraft').triggerOnVisitComplete({
+    isBackfillCompletion: false,
+    isIncompleteVisit: false,
+    svc,
+    record: { id: recordId, service_date: serviceDate || svc.scheduled_date, created_at: completedAt || new Date() },
+  });
+}
+
 // A visit already closed as NOT performed — status 'incomplete', or an
 // inspection-only / customer-declined visitOutcome recorded by the heavy
 // /complete path — must NOT earn a referral credit if it's later recapped: the
@@ -722,6 +734,7 @@ async function submitRecap({
   let rejectReason = null;
   // True when THIS submit moved the visit to completed (a performed completion).
   let completedHere = false;
+  let completedAt = null;
   // Set under the lock if the existing record shows the visit was NOT performed
   // (incomplete / inspection-only / customer-declined) — gates the referral credit.
   let recapPriorNonPerformed = false;
@@ -842,6 +855,7 @@ async function submitRecap({
         trx,
       });
       completedHere = true;
+      completedAt = new Date();
     }
     // 1b. A grouped row completing through this legacy path dissolves its
     //     open packet-less visit IN THIS TRANSACTION (codex #3590 r13):
@@ -1825,6 +1839,18 @@ async function submitRecap({
     const { runAndSwallowErrors: rescorePestPressure } = require('./pest-pressure/orchestrate');
     await rescorePestPressure(recordId, knex);
   }
+
+  // Post-visit SMS re-draft revision (owner 2026-11-27, Decision 4D): fire on
+  // first successful recap completion only (skips edits and prior non-performed).
+  maybeTriggerPostVisitRedraft({
+    completedHere,
+    recapPriorCompleted,
+    recapPriorNonPerformed,
+    svc,
+    recordId,
+    serviceDate: svc.scheduled_date,
+    completedAt,
+  });
 
   logger.info(
     `[pest-recap] recap committed service=${serviceId} record=${recordId} `
