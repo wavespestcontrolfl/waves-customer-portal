@@ -1291,12 +1291,23 @@ function confirmationDisplayParams(toolName, params, preview) {
     if (pinnedPrice && pinnedPrice.amount == null) {
       priceLine = 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type';
     } else if (pinnedPrice) {
-      const basis = pinnedPrice.source === 'stated' ? 'price you gave' : (discounted || `catalog price, ${pinnedPrice.service_name}`);
+      // A WDO inspection with no stated price books at the table price for the
+      // home (owner 2026-11-27), named with what the table was read at. The
+      // invoice carries it: this tool books the inspection as its own visit
+      // (no add-on lines), and the WDO filing form fills its fee from that
+      // visit's price (wdoFeeSeedFromVisit). A WDO main line with a paid add-on
+      // line keeps the catalog price (buildAppointmentPricing, WDO_WITH_OTHER_LINES_NOTE).
+      const tableBasis = pinnedPrice.source === 'wdo_table'
+        ? `table price by home size and construction: ${pinnedPrice.price_basis}` : null;
+      const basis = pinnedPrice.source === 'stated' ? 'price you gave' : (discounted || tableBasis || `catalog price, ${pinnedPrice.service_name}`);
       // A stated price that differs from what the catalog would charge this
       // customer shows both, so a typo in the stated one is easy to spot.
+      const comparedTo = pinnedPrice.catalog_price_basis
+        ? `the table price for this home (${pinnedPrice.catalog_price_basis}) is` : 'catalog price is';
       priceLine = pinnedPrice.source === 'stated' && pinnedPrice.catalog_price != null
-        ? `${money(pinnedPrice.amount)} (${basis}) — catalog price is ${money(pinnedPrice.catalog_price)}. Invoiced when the visit is completed`
+        ? `${money(pinnedPrice.amount)} (${basis}) — ${comparedTo} ${money(pinnedPrice.catalog_price)}. Invoiced when the visit is completed`
         : `${money(pinnedPrice.amount)} (${basis}) — invoiced when the visit is completed`;
+      if (pinnedPrice.price_note) priceLine = `${priceLine}. ${pinnedPrice.price_note}`;
     }
     // Plain fields, in the order an owner reads them. Display text only: the
     // execution params and pins are untouched. The raw customer id stays off
@@ -1749,7 +1760,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // (ADMIN-BUG-R12) gets no card. Fail closed on a read error.
       let booking;
       try {
-        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request, params.time_window);
+        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request, params.time_window, params.property_id);
       } catch {
         return { failed: true, modelResult: { error: 'Could not work out this visit\'s price or how this customer is billed — try again in a moment. Nothing was changed.' } };
       }
@@ -1776,10 +1787,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         } else {
           PriceReadBack.recordReadBack({ ...readBackKey, catalogPrice: booking.catalogPrice, requestStartedAt });
           const money = (n) => `$${Number(n).toFixed(2)}`;
+          const comparedTo = booking.catalogPriceBasis
+            ? `the table price for this home (${booking.catalogPriceBasis}) is` : 'the catalog price is';
           return {
             failed: true,
             modelResult: {
-              error: `You gave ${money(booking.price)}, but the catalog price is ${money(booking.catalogPrice)}. Ask the user which price to use. If they confirm ${money(booking.price)}, propose again with price_confirmed: true. Nothing was booked.`,
+              error: `You gave ${money(booking.price)}, but ${comparedTo} ${money(booking.catalogPrice)}. Ask the user which price to use. If they confirm ${money(booking.price)}, propose again with price_confirmed: true. Nothing was booked.`,
               code: 'price_read_back',
             },
           };
@@ -1869,6 +1882,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           // Only when the price was stated and the catalog would charge this
           // customer a different amount (display only).
           ...(booking.catalogPrice != null ? { catalog_price: booking.catalogPrice } : {}),
+          ...(booking.catalogPriceBasis ? { catalog_price_basis: booking.catalogPriceBasis } : {}),
+          // A WDO table price: what it was read at and the office note (display only).
+          ...(booking.priceBasis ? { price_basis: booking.priceBasis } : {}),
+          ...(booking.priceNote ? { price_note: booking.priceNote } : {}),
         },
       };
     }

@@ -250,6 +250,7 @@ const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, mapServiceCategoryToLegacy, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { flagCallBookingRain } = require('./call-booking-rain-flag');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, callServiceBooksAtPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
+const { wdoCallPriceBeforeBooking, wdoCallPriceForBooking, callBookingPriceNote, wdoTableNote } = require('./wdo-booking-price');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -21126,6 +21127,62 @@ const CallRecordingProcessor = {
                 },
                 call,
               );
+              // Which property is this visit FOR? The booking transaction below resolves it
+              // (resolveCallBookingPropertyLinkage, read only) from the inputs set here. They are set BEFORE the
+              // transaction because the WDO inspection's table price (owner 2026-11-27 "yes booking") reads the same
+              // home once first, on the shared pool: a transaction never reads the property record, and the visit
+              // keeps that price only when the transaction resolves the same home.
+              // V2 address authority carries into booking (codex #3418
+              // r18): when the role lane persists ONLY V2's address set,
+              // the visit stamp must resolve against that same set —
+              // passing V1's disagreeing address could stamp/dispatch a
+              // property the canonical persistence path rejected. A
+              // V2-null main street falls back to the on-file address
+              // inside the resolver, same as V1 mode.
+              const bookingV2Authority = require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')
+                && !!v2CanonicalExtraction?.property;
+              const bookingSvcAddr = bookingV2Authority
+                ? (v2CanonicalExtraction.property.service_address || null)
+                : null;
+              // The fail-open proof above was computed against knownCaller —
+              // Step 3 may have retained or reconciled this call to a
+              // DIFFERENT canonical customer since (codex P1). Never spend
+              // that proof on a customer it was never compared against.
+              const onFileAuthority = resolveOnFileAddressAuthority({
+                usesOnFileAddress: v2UsesOnFileAddress,
+                proofCustomerId: v2OnFileAddressProofCustomerId,
+                proofAddress: v2OnFileAddressProofSnapshot,
+                canonicalCustomerId: customerId,
+              });
+              // The street-level hold applies only while the on-file proof
+              // binds to the customer this booking finally resolves to.
+              const streetLevelPending = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;
+              const callBookingLinkageInput = bookingV2Authority
+                ? {
+                  ...extracted,
+                  address_line1: bookingSvcAddr?.street_line_1 || null,
+                  address_line2: bookingSvcAddr?.street_line_2 || null,
+                  city: bookingSvcAddr?.city || null,
+                  // State exclusively from V2 (codex #3418 r25) — FL
+                  // default matches the persistence path; never V1's
+                  // disagreeing state onto the V2 premise.
+                  state: bookingSvcAddr?.state || 'FL',
+                  zip: bookingSvcAddr?.postal_code || null,
+                }
+                : {
+                  ...extracted,
+                  // flatView historically dropped street_line_2; a condo unit
+                  // must survive into the stamp/key (codex P2).
+                  address_line2: extracted.address_line2
+                    || v2ApprovedExtraction?.property?.service_address?.street_line_2
+                    || v2CanonicalExtraction?.property?.service_address?.street_line_2
+                    || null,
+                };
+              const wdoTableBefore = await wdoCallPriceBeforeBooking(priceInfo, {
+                catalogRow: callBookingCatalogRow,
+                customerId,
+                resolveLinkage: () => resolveCallBookingPropertyLinkage(customerId, callBookingLinkageInput, db, onFileAuthority),
+              });
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r25):
@@ -21895,53 +21952,12 @@ const CallRecordingProcessor = {
                 // below stamps the same resolution so dispatch and the tech
                 // portal render the booked property, not the customer's
                 // primary mirror (a rental booking used to dispatch to the
-                // customer's home).
-                // V2 address authority carries into booking (codex #3418
-                // r18): when the role lane persists ONLY V2's address set,
-                // the visit stamp must resolve against that same set —
-                // passing V1's disagreeing address could stamp/dispatch a
-                // property the canonical persistence path rejected. A
-                // V2-null main street falls back to the on-file address
-                // inside the resolver, same as V1 mode.
-                const bookingV2Authority = require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')
-                  && !!v2CanonicalExtraction?.property;
-                const bookingSvcAddr = bookingV2Authority
-                  ? (v2CanonicalExtraction.property.service_address || null)
-                  : null;
-                // The fail-open proof above was computed against knownCaller —
-                // Step 3 may have retained or reconciled this call to a
-                // DIFFERENT canonical customer since (codex P1). Never spend
-                // that proof on a customer it was never compared against.
-                const onFileAuthority = resolveOnFileAddressAuthority({
-                  usesOnFileAddress: v2UsesOnFileAddress,
-                  proofCustomerId: v2OnFileAddressProofCustomerId,
-                  proofAddress: v2OnFileAddressProofSnapshot,
-                  canonicalCustomerId: customerId,
-                });
-                // The street-level hold applies only while the on-file proof
-                // binds to the customer this booking finally resolves to.
-                const streetLevelPending = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;
-                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, bookingV2Authority
-                  ? {
-                    ...extracted,
-                    address_line1: bookingSvcAddr?.street_line_1 || null,
-                    address_line2: bookingSvcAddr?.street_line_2 || null,
-                    city: bookingSvcAddr?.city || null,
-                    // State exclusively from V2 (codex #3418 r25) — FL
-                    // default matches the persistence path; never V1's
-                    // disagreeing state onto the V2 premise.
-                    state: bookingSvcAddr?.state || 'FL',
-                    zip: bookingSvcAddr?.postal_code || null,
-                  }
-                  : {
-                    ...extracted,
-                    // flatView historically dropped street_line_2; a condo unit
-                    // must survive into the stamp/key (codex P2).
-                    address_line2: extracted.address_line2
-                      || v2ApprovedExtraction?.property?.service_address?.street_line_2
-                      || v2CanonicalExtraction?.property?.service_address?.street_line_2
-                      || null,
-                  }, trx, onFileAuthority);
+                // customer's home). The inputs and their rules are set above the transaction.
+                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, callBookingLinkageInput, trx, onFileAuthority);
+                // The price the visit is saved with: the call's own (a price
+                // agreed on the call, else the catalog's), or a WDO
+                // inspection's table price when this is the home it was read at.
+                const bookedPriceInfo = wdoCallPriceForBooking(priceInfo, wdoTableBefore, propertyLinkage);
                 // codex P1: resolveCallBookingPropertyLinkage returns a null
                 // address with holdReason set when the on-file proof was
                 // rejected (computed against a different customer than
@@ -22503,9 +22519,9 @@ const CallRecordingProcessor = {
                   window_display: windowDisplay,
                   service_type: serviceType,
                   service_id: callBookingCatalogRow?.id || null,
-                  estimated_price: priceInfo.price,
+                  estimated_price: bookedPriceInfo.price,
                   create_invoice_on_complete: callBookingInvoiceOnComplete({
-                    price: priceInfo.price,
+                    price: bookedPriceInfo.price,
                     catalogRow: callBookingCatalogRow,
                   }),
                   estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
@@ -22543,9 +22559,7 @@ const CallRecordingProcessor = {
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     bookingTechnicianName ? `Auto-assigned technician: ${bookingTechnicianName}.` : null,
-                    priceInfo.price != null
-                      ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
-                      : null,
+                    callBookingPriceNote(bookedPriceInfo),
                     // bookingExtracted: a forced Assessment drops the model's summary
                     // (it may name a treatment or price nobody agreed to) from this
                     // customer-visible note.
@@ -22559,17 +22573,20 @@ const CallRecordingProcessor = {
                     streetLevelPending
                       ? 'Address from the web form; Google confirmed only the street, not the house number — CONFIRM the address with the customer before dispatch (pending review).'
                       : null,
-                    (priceInfo.source === 'transcript'
+                    (bookedPriceInfo.source === 'transcript'
                       && callBookingCatalogRow
                       && Number(callBookingCatalogRow.base_price) > 0
-                      && Math.abs(Number(callBookingCatalogRow.base_price) - priceInfo.price) >= 0.01)
+                      && Math.abs(Number(callBookingCatalogRow.base_price) - bookedPriceInfo.price) >= 0.01)
                       ? `Catalog list price: $${Number(callBookingCatalogRow.base_price).toFixed(2)} — quote differs, review.`
                       : null,
+                    // A WDO inspection saved at its table price: nobody on the
+                    // call said that number, so the office sees where it came from.
+                    wdoTableNote(bookedPriceInfo.wdoTable),
                     // Recurring services never stamp estimated_price (the rate
                     // belongs to plan/subscription billing, not this visit) —
                     // but a rate the agent quoted on the call must not vanish:
                     // it's the number plan setup has to honor.
-                    (priceInfo.price == null
+                    (bookedPriceInfo.price == null
                       && callBookingCatalogRow
                       && callBookingCatalogRow.billing_type !== 'one_time'
                       && typeof bookingExtracted.quoted_price === 'number'

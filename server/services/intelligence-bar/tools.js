@@ -3338,7 +3338,25 @@ function bookedServiceTypeFor(booking, serviceType) {
   return booking?.catalogRow?.closeMatch ? booking.catalogRow.name : serviceType;
 }
 
-async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
+// The WDO inspection's table price for a booking with no stated price (owner 2026-11-27 "yes booking"): the same read
+// the Schedule screen's blank WDO line gets (wdo-booking-price.js) at the visit's property (`propertyId`; none named =
+// the customer's own home). It replaces the catalog default below; null = no table price, the catalog price applies.
+// The property record is read only on an unlocked pass (conn = db). The locked recheck passes the unlocked pass's
+// answer as `wdoTable` (null included), so the booking transaction never reads it, and keeps that answer only for the
+// home it was read at: a customer address or saved property edited since is another home, so the booking refuses
+// (pre-push audit P0).
+async function ibWdoTablePrice({ customer, catalogRow, propertyId, wdoTable, conn }) {
+  const { isWdoInspectionService, wdoBookingPrice, wdoTableStillApplies } = require('../wdo-booking-price');
+  if (!isWdoInspectionService(catalogRow)) return null;
+  if (wdoTable !== undefined) {
+    if (await wdoTableStillApplies(wdoTable, { customer, propertyId: propertyId || null, conn })) return wdoTable;
+    throw Object.assign(new Error('booking_property_changed'), { bookingPropertyChanged: true });
+  }
+  if (conn !== db) throw new Error('A WDO table price is read before the booking transaction opens');
+  return wdoBookingPrice({ customer, propertyId: propertyId || null });
+}
+
+async function ibBookingPricing({ customer, serviceType, statedPrice, propertyId = null, wdoTable, conn = db }) {
   const services = await conn('services').where({ is_active: true })
     .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type', 'frequency');
   const match = resolveBookingCatalogRowWithClose(Array.isArray(services) ? services : [], serviceType);
@@ -3414,12 +3432,19 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // The Schedule modal's own pre-fill for a picked catalog line
   // (CreateAppointmentModal addServiceFromCatalog), sent as the line price:
   // blank for the one-time mosquito line, so the server's lot ladder prices
-  // it; otherwise the price range minimum, else the base price. A $0
-  // default is no price here (unpriced is NULL, never $0), and the
-  // billable-amount gate below decides.
+  // it; for a WDO inspection (blank on the modal) the price the server sets
+  // there: the table price, else the base price (pre-push audit P1: never the
+  // price range minimum, which the Schedule server does not read); otherwise
+  // the price range minimum, else the base price. A $0 default is no price
+  // here (unpriced is NULL, never $0), and the billable-amount gate below
+  // decides.
+  const table = stated ? null : await ibWdoTablePrice({ customer, catalogRow, propertyId, wdoTable, conn });
+  const listPrice = require('../wdo-booking-price').isWdoInspectionService(catalogRow)
+    ? catalogRow.base_price
+    : (catalogRow.price_range_min ?? catalogRow.base_price);
   const catalogDefault = catalogRow.service_key === 'mosquito_one_time'
     ? undefined
-    : (catalogRow.price_range_min ?? catalogRow.base_price ?? undefined);
+    : (table?.price ?? listPrice ?? undefined);
   // Lazy: the route module is large and requires services that require this
   // module (same avoid-a-route-load-cycle pattern as schedule-tools).
   const { buildAppointmentPricing } = require('../../routes/admin-schedule');
@@ -3457,6 +3482,9 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     // customer's one-time mosquito line prices at the member rate too.
     recurringMembershipBooking: !!memberDiscount?.recurringCustomer || mosquitoRecurringOverride,
     customer,
+    // The WDO table price this pass already has (null = none): the builder never reads it again, so the locked pass
+    // below reads no property record inside its transaction.
+    wdoTable: table,
     // The locked recheck (create_appointment's commit-time re-derivation)
     // must read the discount row and its eligibility on the SAME trx as the
     // locked customer row, not a racing global-db read (Codex r2 on #5093,
@@ -3465,8 +3493,9 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   });
   // A $0 price is no price at all.
   const priced = Number(pricing.finalPrice) > 0;
-  if (!priced) return { price: null, source: null, catalogRow, pricing: null };
-  return { price: Number(pricing.finalPrice), source: stated ? 'stated' : 'catalog', catalogRow, pricing };
+  if (!priced) return { price: null, source: null, catalogRow, pricing: null, wdoTable: table };
+  const source = stated ? 'stated' : (table ? 'wdo_table' : 'catalog');
+  return { price: Number(pricing.finalPrice), source, catalogRow, pricing, wdoTable: table };
 }
 
 // A discounted booking's line-discount columns and pricing-regime marker,
@@ -3580,14 +3609,16 @@ function ibBookingCustomerRequest(rawRequest, catalogRow) {
 // booking will carry and a booking that would be refused never reaches a
 // card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest, timeWindow) {
+// propertyId: the property the call names (a WDO inspection's table price is
+// read at that home; the route then checks the property itself).
+async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest, timeWindow, propertyId = null) {
   // The window verdict comes first and reads nothing (W5-dev-03): a start the
   // executor would refuse gets a coded refusal here, never a card.
   const windowRefusal = ibBookingWindowRefusal(timeWindow);
   if (windowRefusal) return windowRefusal;
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
-  const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
+  const booking = await ibBookingPricing({ customer, serviceType, statedPrice, propertyId });
   if (booking.error) return { error: booking.error, ...(booking.code ? { code: booking.code } : {}) };
   const refusal = ibBookingBillingRefusal(customer, bookedServiceTypeFor(booking, serviceType), booking.price);
   if (refusal) return { error: refusal };
@@ -3598,10 +3629,16 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   // the two differ (display only). Same helper, same inputs, no stated price;
   // best effort: any failure just leaves the card without the comparison.
   let catalogPrice = null;
+  // The comparison is a WDO table price: what it was read at, so the card and
+  // the read-back name it as the price for this home, not the catalog's.
+  let catalogPriceBasis = null;
   if (booking.source === 'stated') {
     try {
-      const catalog = await ibBookingPricing({ customer, serviceType: bookedServiceTypeFor(booking, serviceType) });
-      if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) catalogPrice = catalog.price;
+      const catalog = await ibBookingPricing({ customer, serviceType: bookedServiceTypeFor(booking, serviceType), propertyId });
+      if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) {
+        catalogPrice = catalog.price;
+        catalogPriceBasis = catalog.source === 'wdo_table' ? catalog.wdoTable.basis : null;
+      }
     } catch (err) {
       logger.warn(`[intelligence-bar] catalog price comparison unavailable: ${err.message}`);
     }
@@ -3610,6 +3647,11 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
     price: booking.price,
     source: booking.source,
     catalogPrice,
+    catalogPriceBasis,
+    // A WDO table price: what the table was read at ("2,600 sq ft, wood
+    // frame") and the office note, for the card (display only).
+    priceBasis: booking.source === 'wdo_table' ? booking.wdoTable.basis : null,
+    priceNote: booking.source === 'wdo_table' ? booking.wdoTable.staffNote : null,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
     // What the visit is booked as: the exact catalog name when the operator's
@@ -3864,7 +3906,7 @@ async function createAppointment(input, actionContext = {}) {
   // through the proposal's pins, so drift since then refuses — a booking
   // never carries a price the operator did not approve. A call with no pins
   // (never proposed through a card) may only book unpriced.
-  const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
+  const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price, propertyId: input.property_id });
   if (booking.error) return { error: booking.error, ...(booking.code ? { code: booking.code } : {}) };
   // A close or colloquial name books as the exact catalog name it resolved to.
   service_type = bookedServiceTypeFor(booking, service_type);
@@ -4036,8 +4078,12 @@ async function createAppointment(input, actionContext = {}) {
     // neither change the approved price nor slip an unbillable visit
     // through. The customer row stays locked through the insert, so both
     // hold for the row this booking writes against.
+    // A WDO table price is the unlocked pass's read (this transaction never
+    // reads the property record), kept only for the same home; the card
+    // pinned that same price.
     const lockedBooking = await ibBookingPricing({
-      customer: lockedCustomer, serviceType: service_type, statedPrice: input.price, conn: trx,
+      customer: lockedCustomer, serviceType: service_type, statedPrice: input.price, propertyId: input.property_id,
+      wdoTable: booking.wdoTable ?? null, conn: trx,
     });
     if (lockedBooking.error || !sameBookingPrice(lockedBooking.price, booking.price)
       || String(lockedBooking.catalogRow?.id || '') !== String(booking.catalogRow?.id || '')
