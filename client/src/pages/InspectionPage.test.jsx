@@ -2088,3 +2088,98 @@ describe('InspectionPage: a search keeps a pick it still offers', () => {
     expect(screen.queryByRole('button', { name: /^Book /i })).toBeNull();
   });
 });
+
+describe('InspectionPage EmptyTimesCard retry preserves held address', () => {
+  it('re-posts the held address after POST /availability returns 503 service_area_unavailable', async () => {
+    let availabilityPosts = 0;
+    let getCalls = 0;
+    const fetchMock = vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) {
+        return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+      }
+      if (u.endsWith('/availability')) {
+        availabilityPosts += 1;
+        if (availabilityPosts === 2) {
+          return Promise.resolve(jsonResponse({ error: 'service_area_unavailable' }, 503));
+        }
+        return Promise.resolve(jsonResponse({
+          availability: okPayload().availability,
+          needs_address: false,
+        }));
+      }
+      getCalls += 1;
+      return Promise.resolve(jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show all open times' }));
+    expect(await screen.findByText(/couldn't confirm your service area just now/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Try again/i }));
+
+    expect(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toBeInTheDocument();
+    expect(screen.getByLabelText('Search for a service date or time')).toBeInTheDocument();
+    expect(availabilityPosts).toBe(3);
+    expect(getCalls).toBe(1);
+  });
+
+  it('re-posts the held address after POST /availability returns 200 with null availability', async () => {
+    let availabilityPosts = 0;
+    let getCalls = 0;
+    const fetchMock = vi.fn((url) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (u.includes('/find-slots')) {
+        return Promise.resolve(jsonResponse({ availability: okPayload().availability, summary: 'Open Sunday afternoon.' }));
+      }
+      if (u.endsWith('/availability')) {
+        availabilityPosts += 1;
+        if (availabilityPosts === 2) {
+          return Promise.resolve(jsonResponse({
+            availability: null,
+            needs_address: false,
+          }));
+        }
+        return Promise.resolve(jsonResponse({
+          availability: okPayload().availability,
+          needs_address: false,
+        }));
+      }
+      getCalls += 1;
+      return Promise.resolve(jsonResponse(okPayload({
+        needs_address: true,
+        availability: null,
+        lead: { first_name: 'Pat', phone_masked: '***0101', has_address: false, address_display: null },
+      })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText('Address for the visit'), { target: { value: '123 Palm Ave, Bradenton, FL 34209' } });
+    fireEvent.click(screen.getByRole('button', { name: /Show open times/i }));
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i });
+
+    fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'this weekend' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show all open times' }));
+    expect(await screen.findByText(/couldn't load open times just now/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Try again/i }));
+
+    expect(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/i })).toBeInTheDocument();
+    expect(screen.getByLabelText('Search for a service date or time')).toBeInTheDocument();
+    expect(availabilityPosts).toBe(3);
+    expect(getCalls).toBe(1);
+  });
+});

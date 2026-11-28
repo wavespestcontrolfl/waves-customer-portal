@@ -74,7 +74,7 @@ export default function InstallPrompt() {
           gradient + blur, gold accent CTA, navy text; same recipe as the
           glass-components.css chips/CTAs, inlined because the login page
           isn't mounted under [data-glass-theme]. */}
-      <div data-glass-motion="card" style={{
+      <div data-glass="card" data-glass-motion="card" style={{
         maxWidth: 480,
         margin: '0 auto',
         background: 'linear-gradient(135deg, rgba(255,255,255,0.62), rgba(255,255,255,0.34)), rgba(255,255,255,0.3)',
@@ -115,11 +115,12 @@ export default function InstallPrompt() {
           </p>
         </div>
 
-        <button onClick={handleInstall} style={{
+        <button type="button" data-glass-accent="" data-glass-pill="" onClick={handleInstall} style={{
           background: 'linear-gradient(135deg, rgba(255,222,120,0.85), rgba(244,176,20,0.75)), rgba(240,165,0,0.5)',
           color: '#04395E',
           border: '1px solid rgba(255,238,180,0.92)',
           borderRadius: 999,
+          minHeight: 44,
           padding: '9px 16px',
           fontSize: 14,
           fontWeight: 700,
@@ -131,7 +132,7 @@ export default function InstallPrompt() {
         }}>Install</button>
 
         {/* Dismiss — 44×44 hit target; the × stays visually small. */}
-        <button onClick={dismiss} aria-label="Dismiss install prompt" style={{
+        <button type="button" onClick={dismiss} aria-label="Dismiss install prompt" style={{
           background: 'none',
           border: 'none',
           color: '#04395E',

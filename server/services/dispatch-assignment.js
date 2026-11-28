@@ -5,6 +5,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
 const { assertAssignableTechnician } = require('./technician-eligibility');
+const visitHold = require('./visit-hold');
 const { techShiftHoursLive } = require('../config/feature-gates');
 
 const ADMIN_ROOM = 'dispatch:admins';
@@ -73,13 +74,15 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
       db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
       db.raw('COALESCE(s.service_address_city, c.city) as city'),
       db.raw('COALESCE(s.service_address_state, c.state) as state'),
-      db.raw('COALESCE(s.service_address_zip, c.zip) as zip')
+      db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+      ...visitHold.heldColumn('s.')
     );
 
   if (!row) return null;
   const scheduledDate = dateOnly(row.scheduled_date);
   const boardVisible = scheduledDate === etDateString()
-    && !BOARD_HIDDEN_STATUSES.includes(row.status);
+    && !BOARD_HIDDEN_STATUSES.includes(row.status)
+    && !visitHold.rowIsHeld(row);
 
   return {
     job_id: row.job_id,
@@ -105,18 +108,37 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
   };
 }
 
+function emitScopedHoldJobUpdate(io, payload, previousTechnicianId) {
+  const { techRoom, technicianRoomsLive } = require('../sockets/tech-rooms');
+  const techPing = { job_id: payload.job_id, status: payload.status, tech_id: payload.tech_id || null };
+  const targetTechs = new Set([payload.tech_id, previousTechnicianId].filter(Boolean).map(String));
+  const sockets = io.sockets?.sockets?.values?.();
+  if (sockets) {
+    for (const socket of sockets) {
+      if (socket?.disconnected) continue;
+      if (socket.userType === 'admin') socket.emit(ADMIN_EVENT, payload);
+      else if (socket.userType === 'technician' && targetTechs.has(String(socket.userId))) socket.emit(ADMIN_EVENT, techPing);
+    }
+    return;
+  }
+  if (technicianRoomsLive()) io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
+  for (const id of targetTechs) io.to(techRoom(id)).emit(ADMIN_EVENT, techPing);
+}
+
 // `previousTechnicianId`: the technician who held the visit before this change
 // (null = it was unassigned). A caller that reassigns passes it so the old
 // technician's own screen hears the stop left. Left out (undefined), the emit
 // point cannot tell, so with GATE_TECH_LOGIN_PRIVACY on every other connected
 // technician room gets a ping with no payload (sockets/tech-rooms.js).
-async function emitDispatchJobUpdate({ jobId, actorId, previousDate, previousTechnicianId, qualityDates = null }) {
+async function emitDispatchJobUpdate({ jobId, actorId, previousDate, previousTechnicianId, qualityDates = null, verifiedAdminsOnly = false }) {
   const payload = await buildDispatchJobUpdatePayload(jobId, actorId);
   if (!payload) return null;
 
   const io = getIo();
   if (!io) {
     logger.warn('[dispatch-assignment] io not initialized; skipping dispatch:job_update');
+  } else if (verifiedAdminsOnly) {
+    emitScopedHoldJobUpdate(io, payload, previousTechnicianId);
   } else {
     io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
     // GATE_TECH_LOGIN_PRIVACY: ADMIN_ROOM is office-only with the gate on. The
@@ -163,6 +185,51 @@ async function flushDispatchQualityDates(qualityDates) {
 // what the shift check judges, and what the assignment write then pins.
 const SHIFT_BLOCK_COLUMNS = ['window_start', 'window_end', 'estimated_duration_minutes'];
 
+async function loadCapabilityWarningsWithAddons(conn, jobId, job, newTechId) {
+  if (!newTechId || (job.technician_id || null) === newTechId) return [];
+  let addonRows = [];
+  try {
+    const queryAddonRows = (c) => c('scheduled_service_addons')
+      .where({ scheduled_service_id: jobId })
+      .select('service_name as service_type', 'service_id');
+    addonRows = conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => queryAddonRows(sp))
+      : await queryAddonRows(conn);
+  } catch {
+    addonRows = [];
+  }
+  return require('./technician-eligibility').capabilityOffWarningsFor(
+    newTechId,
+    [job, ...(Array.isArray(addonRows) ? addonRows : [])],
+    { conn },
+  );
+}
+
+async function autoResolveStaleTechLateAlerts(trx, { jobId, fromTechId, newTechId, actorId }) {
+  if (!fromTechId || String(fromTechId) === String(newTechId || '')) return;
+  try {
+    const run = async (c) => {
+      const dispatchAlerts = require('./dispatch-alerts');
+      const staleLate = await c('dispatch_alerts')
+        .where({ type: 'tech_late', job_id: jobId, tech_id: fromTechId })
+        .whereNull('resolved_at')
+        .select('id');
+      for (const { id } of staleLate) {
+        await dispatchAlerts.resolveAlert({ id, resolvedBy: actorId, trx: c, auto: true });
+      }
+    };
+    if (trx.isTransaction && typeof trx.transaction === 'function') {
+      await trx.transaction((sp) => run(sp));
+    } else {
+      await run(trx);
+    }
+  } catch (err) {
+    // Minimal scheduling test DBs omit dispatch_alerts (42P01) or full chain builders.
+    if (err && err.code === '42P01') return;
+    logger.warn(`[dispatch-assignment] stale tech_late auto-resolve skipped for ${jobId}: ${err.message}`);
+  }
+}
+
 async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId, noticePrevious = null, place, shiftHours } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
@@ -206,12 +273,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // back to the row's own date when no snapshot date is given.
   const eligibilityDate = dateOnly(noticeSnapshot?.date) || dateOnly(job.scheduled_date);
   const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn, date: eligibilityDate }) : null;
-  // Job type (GATE_TECH_JOB_TYPE_CHECKS): the same office paths also say so when the
-  // technician is set to Off for this visit's job type. Warns, never blocks; the helper
-  // returns [] with the gate off (no read).
-  const capabilityLines = newTechId && (job.technician_id || null) !== newTechId
-    ? await require('./technician-eligibility').capabilityOffWarningsFor(newTechId, [job], { conn })
-    : [];
+  const capabilityLines = await loadCapabilityWarningsWithAddons(conn, jobId, job, newTechId);
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -302,6 +364,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     if (!fromTechId && newTechId) {
       await require('./dispatch-alerts').autoResolveUnassignedAlertsForJob({ jobId, resolvedBy: actorId, trx: assignmentTrx });
     }
+    await autoResolveStaleTechLateAlerts(assignmentTrx, { jobId, fromTechId, newTechId, actorId });
     // Route check on saves: the update above dropped the old stop
     // number; an office board assign (`place: true`, only PUT /jobs/:id/assign)
     // numbers the visit on the new technician's day in this same transaction,

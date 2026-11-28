@@ -13,7 +13,7 @@
 
 const { scorePests, MODEL_VERSION } = require('./pests');
 const { resolveLocation } = require('./locations');
-const { getWeatherSignals } = require('./weather');
+const { getWeatherSignals, flags } = require('./weather');
 const { historyEnabled, compareForecasts, readPreviousForecast } = require('./history');
 const logger = require('../logger');
 
@@ -26,6 +26,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
 const _cache = new Map(); // slug -> { forecast, freshUntil }
+const _inFlight = new Map(); // cacheKey -> Promise<{ forecast, freshUntil }>
 
 // Portal runs on Eastern Time end-to-end; derive the calendar month/day there
 // so the seasonal curve and the "as of" label don't shift around UTC midnight.
@@ -141,20 +142,30 @@ async function getForecastWithFreshness({ location, zip } = {}, { now } = {}) {
   const cached = _cache.get(cacheKey);
   if (cached && Date.now() < cached.freshUntil) return cached;
 
-  const signals = await getWeatherSignals({ lat: loc.lat, lng: loc.lng, region: loc.region });
-  let forecast = computeForecast(loc, signals, now || new Date());
-  if (withHistory) {
-    try {
-      forecast = compareForecasts(forecast, await readPreviousForecast(forecast));
-    } catch (err) {
-      // Missing migration / DB outage must not take the weather outlook down
-      // or turn an unavailable comparison into an invented "flat" trend.
-      logger.warn(`[pest-forecast] history unavailable: ${err.message}`);
+  const existing = _inFlight.get(cacheKey);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    const signals = await getWeatherSignals({ lat: loc.lat, lng: loc.lng, region: loc.region });
+    let forecast = computeForecast(loc, signals, now || new Date());
+    if (withHistory) {
+      try {
+        forecast = compareForecasts(forecast, await readPreviousForecast(forecast));
+      } catch (err) {
+        // Missing migration / DB outage must not take the weather outlook down
+        // or turn an unavailable comparison into an invented "flat" trend.
+        logger.warn(`[pest-forecast] history unavailable: ${err.message}`);
+      }
     }
-  }
-  const entry = { forecast, freshUntil: signals.freshUntil };
-  _cache.set(cacheKey, entry);
-  return entry;
+    const entry = { forecast, freshUntil: signals.freshUntil };
+    _cache.set(cacheKey, entry);
+    return entry;
+  })().finally(() => {
+    if (_inFlight.get(cacheKey) === promise) _inFlight.delete(cacheKey);
+  });
+
+  _inFlight.set(cacheKey, promise);
+  return promise;
 }
 
 /** The live forecast payload alone (see getForecastWithFreshness). */
@@ -162,6 +173,44 @@ async function getForecast(request, options) {
   return (await getForecastWithFreshness(request, options)).forecast;
 }
 
-function _clearCache() { _cache.clear(); } // test hook
+/**
+ * Non-blocking forecast lookup for service-report reads: returns fresh cache or
+ * same-day stale cache immediately (triggering a background refresh), and caps
+ * cold weather fetches to `timeoutMs` before falling back to the deterministic
+ * seasonal baseline while the background fetch continues warming the cache.
+ */
+async function getForecastFast({ location, zip } = {}, { timeoutMs = 350, now } = {}) {
+  const refDate = now || new Date();
+  const loc = resolveLocation({ location, zip });
+  const withHistory = historyEnabled();
+  const cacheKey = `${loc.slug}:${withHistory}`;
+  const cached = _cache.get(cacheKey);
+  if (cached && Date.now() < cached.freshUntil) return cached.forecast;
 
-module.exports = { getForecast, getForecastWithFreshness, computeForecast, _clearCache, LANDING, BRAND };
+  const refresh = getForecastWithFreshness({ location, zip }, { now }).catch(() => null);
+  const { dateStr } = etParts(refDate);
+  if (cached && cached.forecast?.as_of_date === dateStr) {
+    return cached.forecast;
+  }
+
+  let timerId = null;
+  const timedOut = Symbol('timeout');
+  const timer = new Promise((resolve) => {
+    timerId = setTimeout(() => resolve(timedOut), timeoutMs);
+    if (timerId.unref) timerId.unref();
+  });
+  try {
+    const winner = await Promise.race([refresh.then((entry) => entry?.forecast || null), timer]);
+    if (winner && winner !== timedOut) return winner;
+    return computeForecast(loc, flags({ hasWeather: false }), refDate);
+  } finally {
+    if (timerId !== null) clearTimeout(timerId);
+  }
+}
+
+function _clearCache() {
+  _cache.clear();
+  _inFlight.clear();
+} // test hook
+
+module.exports = { getForecast, getForecastWithFreshness, getForecastFast, computeForecast, _clearCache, LANDING, BRAND };

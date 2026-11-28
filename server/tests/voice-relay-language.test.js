@@ -68,6 +68,6 @@ describe('Spanish greeting validation arms', () => {
   });
   test('the English opener never carries a notice', () => {
     delete process.env.VOICE_RELAY_GREETING;
-    expect(defaultWelcomeGreeting()).toMatch(/^Waves, this is Jennifer\. How can I help you this (morning|afternoon|evening)\?$/);
+    expect(defaultWelcomeGreeting()).toBe('Waves Pest Control, this is Jennifer. How can I help?');
   });
 });

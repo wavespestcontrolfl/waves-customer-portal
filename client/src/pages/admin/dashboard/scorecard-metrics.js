@@ -172,14 +172,19 @@ export function captureVerdict(sc) {
   return { happened, action: "Capture rate is strong — keep the follow-up cadence running.", tone: "good", sampleN: n };
 }
 
+const validPct = (v) => (v != null && v <= 100 ? v : null);
+const cohortOrStage = (cohortVal, stageVal) => cohortVal ?? stageVal ?? 0;
+
 // Estimate Funnel — /admin/dashboard/funnel payload ({ funnel, rates }).
 export function funnelVerdict(data) {
   const f = data?.funnel;
   if (!f || !f.sent) return null;
   const { tier } = confidenceTier(f.sent);
-  const viewRate = data.rates?.view_rate ?? null;
-  const closeRate = data.rates?.close_rate ?? null;
-  const happened = `${f.sent} sent → ${f.viewed || 0} viewed → ${f.accepted || 0} accepted${closeRate != null ? ` (${closeRate}% close)` : ""}.`;
+  const viewRate = validPct(data.rates?.view_rate);
+  const closeRate = validPct(data.rates?.close_rate);
+  const viewed = cohortOrStage(data.cohort?.viewed, f.viewed);
+  const accepted = cohortOrStage(data.cohort?.accepted, f.accepted);
+  const happened = `${f.sent} sent → ${viewed} viewed → ${accepted} accepted${closeRate != null ? ` (${closeRate}% close)` : ""}.`;
   if (tier !== "ok") {
     return { happened, action: "Small batch — send more estimates before tuning the funnel.", tone: "neutral", sampleN: f.sent };
   }

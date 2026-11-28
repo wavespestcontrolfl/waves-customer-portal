@@ -850,11 +850,10 @@ async function disarmCustomerBillingFields(dbh, customerId, { preserveActive = f
     next_charge_date: null,
     updated_at: new Date(),
   });
-  // Deactivation ends the row's on-location CONTACT app sessions (contact
-  // login, GATE_CONTACT_LOGIN): a kept token must not rotate again once the
-  // account is reactivated (codex #6363 r12 P2). The holder's own sessions
-  // follow today's rules.
-  if (!preserveActive) await require('../middleware/auth').revokeContactRefreshFamilies(dbh, customerId);
+  // Deactivation or archival ends the row's on-location CONTACT app sessions
+  // (contact login, GATE_CONTACT_LOGIN): a kept token must not rotate again
+  // once the account is restored/reactivated (codex #6363 r12 P2, P2-E2).
+  await require('../middleware/auth').revokeContactRefreshFamilies(dbh, customerId);
 }
 
 // Both saved payment METHODS (StripeService.charge() picks the default by
@@ -1242,6 +1241,15 @@ async function processCancellationRequest({
   } catch (err) {
     logger.warn(`[cancellation-processor] hold invalidation failed for ${customerId}: ${err.message}`);
   }
+  // Decision 2 (owner 2026-11-27): if a full-account cancellation drops a
+  // Same-Family group below 2 active homes while a surviving member still holds
+  // upcoming visits with the Multi-Home discount, alert the office to review.
+  await require('./multi-home-family').alertFamilyDropForDepartedMember(db, {
+    customerId,
+    reason: 'cancelled',
+    scoped,
+    churned,
+  });
 
   let recurrenceStopped = 0;
   try {

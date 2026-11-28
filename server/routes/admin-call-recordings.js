@@ -394,6 +394,7 @@ router.post('/proposals/:id/preview', async (req, res, next) => {
     if (refusal) return res.status(refusal.status).json(refusal.payload);
     const p = await require('../services/call-reschedule-proposals').previewProposal(db, req.params.id, {
       visitId: req.body?.visit_id,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
       ...(techPrivacyOn(req) ? { technicianId: req.technicianId } : {}),
     });
     // Render the identity covered by this hash, not a potentially older list row.
@@ -419,6 +420,7 @@ router.post('/proposals/:id/apply', async (req, res, next) => {
     if (refusal) return res.status(refusal.status).json(refusal.payload);
     const result = await require('../services/call-reschedule-proposals').applyProposal(db, req.params.id, {
       actorId: req.technicianId,
+      actor: { techRole: req.techRole, technicianId: req.technicianId },
       visitId: req.body.visit_id,
       previewHash: req.body.preview_hash,
       ...(techPrivacyOn(req) ? { technicianId: req.technicianId } : {}),

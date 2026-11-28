@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { MessagesSquare, AlertTriangle, ExternalLink } from "lucide-react";
 import { Badge, Button, Card, CardBody, Textarea } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import { uuid } from "../../utils/ibSession";
 import { formatETDateTime } from "../../lib/timezone";
 
 // Communications -> Messenger tab. The Facebook page's
@@ -51,10 +52,24 @@ function ThreadRow({ thread, selected, onOpen }) {
 
 function MessageBubble({ message }) {
   const mine = message.direction === "outbound";
+  const hasUnviewableMedia = message.body === "[Photo]" || message.body === "[Attachment]";
   return (
     <div className={`flex ${mine ? "justify-end" : "justify-start"}`} data-testid={`messenger-message-${message.id}`}>
       <div className={`max-w-[85%] rounded-md px-3 py-2 ${mine ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-900"}`}>
         <div className="text-14 whitespace-pre-wrap break-words">{message.body}</div>
+        {hasUnviewableMedia && (
+          <div className={`text-14 mt-1 ${mine ? "text-zinc-300" : "text-ink-secondary"}`} data-testid={`messenger-media-note-${message.id}`}>
+            Attachments cannot be previewed here.{" "}
+            <a
+              className={`inline-flex items-center gap-1 font-medium underline ${mine ? "text-white" : "text-zinc-900"}`}
+              href={FACEBOOK_INBOX_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              View in Facebook <ExternalLink size={14} strokeWidth={1.75} aria-hidden />
+            </a>
+          </div>
+        )}
         <div className={`text-14 mt-1 ${mine ? "text-zinc-300" : "text-ink-tertiary"}`}>
           {mine ? (message.author?.name ? `${message.author.name} · ` : "Page · ") : ""}{formatWhen(message.createdAt)}
         </div>
@@ -72,6 +87,8 @@ function ReplyBox({ threadId, canReply, ready, onSend }) {
   const [error, setError] = useState("");
   // A ref guards a double click before the busy state renders.
   const inFlight = useRef(false);
+  // One request id per distinct reply text on this thread so retries are deduplicated server-side.
+  const requestRef = useRef(null);
 
   if (!canReply) {
     return (
@@ -93,10 +110,14 @@ function ReplyBox({ threadId, canReply, ready, onSend }) {
   const send = async () => {
     if (!ready || !trimmed || inFlight.current) return;
     inFlight.current = true;
+    if (requestRef.current?.text !== trimmed || requestRef.current?.threadId !== threadId) {
+      requestRef.current = { id: uuid(), text: trimmed, threadId };
+    }
     setSending(true);
     setError("");
     try {
-      await onSend(threadId, trimmed);
+      await onSend(threadId, trimmed, requestRef.current.id);
+      requestRef.current = null;
       setText("");
     } catch (err) {
       setError(isRateLimitError(err) ? SLOW_DOWN
@@ -141,9 +162,9 @@ function ReplyBox({ threadId, canReply, ready, onSend }) {
 }
 
 // onCount(n): how many threads wait for an answer, so the tab label follows
-// the list as replies go out. routeHash: the page's router hash, so a link to another thread
-// opens it while the tab is already showing.
-export default function MessengerTabV2({ onCount, routeHash = "" }) {
+// the list as replies go out. onMutate: refreshes cross-tab badges after replies/reads.
+// routeHash: the page's router hash, so a link to another thread opens it while the tab is already showing.
+export default function MessengerTabV2({ onCount, onMutate, routeHash = "" }) {
   // list: the loaded threads, whether older ones exist, and the server's count of threads
   // waiting for an answer (the whole inbox, not just the loaded page).
   const [list, setList] = useState(null);
@@ -218,6 +239,19 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
   const detailSeq = useRef(0);
   const sending = useRef(0);
   const opening = useRef(0);
+  const markDetailRead = useCallback(async (id, d, isCurrent) => {
+    const newest = d.thread?.unread > 0 ? d.messages?.[d.messages.length - 1]?.createdAt : null;
+    if (!newest) return;
+    try {
+      await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({ readBefore: newest }) });
+      if (isCurrent()) {
+        setList((prev) => prev && { ...prev, items: prev.items.map((t) => (t.id === id ? { ...t, unread: 0 } : t)) });
+      }
+    } catch {
+      // Isolate transient /read failures so an already-loaded conversation stays visible.
+    }
+  }, []);
+
   const loadDetail = useCallback(async (id, { refresh = false } = {}) => {
     // A refresh waits out a send and a thread the person is still opening.
     if (refresh && (picked.current !== id || sending.current > 0 || opening.current > 0)) return;
@@ -235,11 +269,7 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
       if (!current()) return;
       setDetail(d);
       // Read only up to the newest message on screen: one that arrives meanwhile stays unread.
-      const newest = d.thread?.unread > 0 ? d.messages?.[d.messages.length - 1]?.createdAt : null;
-      if (newest) {
-        await adminFetch(`/admin/messenger/threads/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({ readBefore: newest }) });
-        setList((prev) => prev && { ...prev, items: prev.items.map((t) => (t.id === id ? { ...t, unread: 0 } : t)) });
-      }
+      await markDetailRead(id, d, current);
     } catch (err) {
       if (refresh || !current()) return;
       setDetail(null);
@@ -247,7 +277,7 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
     } finally {
       if (!refresh) opening.current -= 1;
     }
-  }, []);
+  }, [markDetailRead]);
   const openThread = loadDetail;
 
   // A thread named in the page link opens when the tab first renders and whenever the link changes
@@ -285,17 +315,18 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
   }, [loadThreads, loadDetail]);
 
   // Posts to the thread whose detail is displayed, then refreshes it if it is still the picked one.
-  const send = async (threadId, text) => {
+  const send = async (threadId, text, requestId) => {
     sending.current += 1;
     try {
       await adminFetch(`/admin/messenger/threads/${encodeURIComponent(threadId)}/reply`, {
         method: "POST",
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, ...(requestId ? { requestId } : {}) }),
       });
     } finally {
       sending.current -= 1;
     }
     await Promise.all([picked.current === threadId ? openThread(threadId) : null, loadThreads()]);
+    onMutate?.();
   };
 
   const displayed = detail?.thread?.id || null;
@@ -306,8 +337,9 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
         Messages sent to the Waves Pest Control Facebook page. New ones appear within a few minutes.
       </p>
       {loadError && (
-        <div role="alert" className="flex items-center gap-2 text-14 text-alert-fg bg-alert-bg border-hairline border-alert-fg/30 rounded-md px-3 py-2">
-          <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {loadError}
+        <div role="alert" className="flex items-center justify-between gap-2 text-14 text-alert-fg bg-alert-bg border-hairline border-alert-fg/30 rounded-md px-3 py-2">
+          <span className="flex items-center gap-2"><AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {loadError}</span>
+          <Button type="button" density="comfortable" variant="secondary" onClick={loadThreads}>Retry</Button>
         </div>
       )}
       <div className="grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
@@ -339,8 +371,11 @@ export default function MessengerTabV2({ onCount, routeHash = "" }) {
         <Card>
           <CardBody>
             {detailError && (
-              <div role="alert" className="flex items-center gap-2 text-14 text-alert-fg">
-                <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {detailError}
+              <div role="alert" className="flex items-center justify-between gap-2 text-14 text-alert-fg">
+                <span className="flex items-center gap-2"><AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {detailError}</span>
+                {selectedId && (
+                  <Button type="button" density="comfortable" variant="secondary" onClick={() => openThread(selectedId)}>Retry</Button>
+                )}
               </div>
             )}
             {!detail && !detailError && (

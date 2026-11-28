@@ -182,8 +182,6 @@ beforeEach(() => {
 
 describe('schedule per-visit ownership (technician role)', () => {
   const denials = [
-    ['POST', '/api/admin/schedule/svc-other/prepaid', { amount: 50, method: 'cash' }],
-    ['DELETE', '/api/admin/schedule/svc-other/prepaid', undefined],
     ['POST', '/api/admin/schedule/svc-other/invoice', {}],
     ['PUT', '/api/admin/schedule/svc-other/status', { status: 'completed' }],
     ['GET', '/api/admin/schedule/svc-other/wdo-brief', undefined],
@@ -200,8 +198,8 @@ describe('schedule per-visit ownership (technician role)', () => {
     expect(db.__state.writes).toHaveLength(0);
   });
 
-  test('a nonexistent visit id also 404s (no existence oracle)', async () => {
-    const { status } = await call('POST', '/api/admin/schedule/svc-nope/prepaid', { amount: 50 });
+  test('a nonexistent visit id also 404s on tech-reachable invoice route (no existence oracle)', async () => {
+    const { status } = await call('POST', '/api/admin/schedule/svc-nope/invoice', {});
     expect(status).toBe(404);
     expect(db.__state.writes).toHaveLength(0);
   });
@@ -214,12 +212,18 @@ describe('schedule per-visit ownership (technician role)', () => {
   });
 
   test.each([
+    ['POST', '/api/admin/schedule/svc-other/prepaid', { amount: 50, method: 'cash' }],
+    ['DELETE', '/api/admin/schedule/svc-other/prepaid', undefined],
+    ['POST', '/api/admin/schedule/svc-own/prepaid', { amount: 50, method: 'cash' }],
+    ['DELETE', '/api/admin/schedule/svc-own/prepaid', undefined],
     ['POST', '/api/admin/schedule/svc-other/regenerate-brief', {}],
     ['POST', '/api/admin/schedule/svc-own/regenerate-brief', {}],
     ['POST', '/api/admin/schedule/optimize', {}],
     ['POST', '/api/admin/schedule/optimize-route', {}],
     ['GET', '/api/admin/schedule/recurring-alerts', undefined],
     ['POST', '/api/admin/schedule/recurring-alerts/alert-1/action', { action: 'renew' }],
+    ['GET', '/api/admin/schedule/zone-density', undefined],
+    ['GET', '/api/admin/schedule/recommend-slots?date=2026-12-01', undefined],
   ])('%s %s is admin-only (dispatch/office function)', async (method, path, body) => {
     const { status, body: res } = await call(method, path, body);
     expect(status).toBe(403);
@@ -244,11 +248,11 @@ describe('schedule per-visit ownership (technician role)', () => {
       amount: 360, method: 'cash', applyToSeries: true,
     });
     expect(stamp.status).toBe(403);
-    expect(stamp.body.error).toMatch(/series/i);
+    expect(stamp.body.error).toMatch(/admin access required/i);
 
     const clear = await call('DELETE', '/api/admin/schedule/svc-own/prepaid?series=1', undefined);
     expect(clear.status).toBe(403);
-    expect(clear.body.error).toMatch(/series/i);
+    expect(clear.body.error).toMatch(/admin access required/i);
 
     expect(db.__state.writes).toHaveLength(0);
   });

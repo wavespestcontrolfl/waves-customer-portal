@@ -19,9 +19,16 @@ const WITHDRAW_REPAIR_DAYS = 90;
 const STALE_CANDIDATE = Symbol('stale_candidate');
 const dateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
 // The nightly check's candidate, re-read under the visit lock: still open, same slot?
+// Yesterday's en_route / on_site visits are stuck past visits (P1-16); today's
+// pending/confirmed rows that moved into en_route/on_site since the scan are still
+// treated as stale so an active tech is never flagged as a no-show.
 function stillScannedCandidate(current, scanned) {
   // GATE_VISIT_HOLD: a hold placed after the scan (read on the locked row) means the visit was never due.
-  return ['pending', 'confirmed'].includes(current.status) && !require('../visit-hold').rowIsHeld(current)
+  const stuckInProgress = ['en_route', 'on_site'].includes(scanned.status)
+    && ['en_route', 'on_site'].includes(current.status);
+  const statusStillMatches = ['pending', 'confirmed'].includes(current.status) || stuckInProgress;
+  const terminalTracker = ['complete', 'cancelled'].includes(String(current.track_state || ''));
+  return statusStillMatches && !terminalTracker && !require('../visit-hold').rowIsHeld(current)
     && dateOnly(current.scheduled_date) === dateOnly(scanned.scheduled_date)
     && (current.window_start || null) === (scanned.window_start || null)
     && (current.window_end || null) === (scanned.window_end || null);

@@ -11,12 +11,12 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { lockTriageCall } = require('../utils/triage-locks');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // Cards whose payload.customer_ids lists the customers to open: the list resolves each to its live merge
 // survivor (owed_customer_open_ids).
@@ -1036,8 +1036,8 @@ async function transition(req, res, nextStatus) {
   // releases (line_e164); the inbox card names none (see releaseNoTextHold).
   const lineCanGetTexts = body.line_can_get_texts === true;
   const lineE164 = (typeof body.line_e164 === 'string' && body.line_e164.trim().slice(0, 40)) || null;
-  // Releasing a named line is the held-lines panel's act, and that panel is admin-only.
-  if (lineE164 && req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  // Releasing a held no-text line is an admin-only action (whether a line is named or inferred from the card).
+  if ((lineE164 || lineCanGetTexts) && req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
   const expectedUpdatedAt = body.expected_updated_at || null;
   const closed = lineCanGetTexts && nextStatus === 'resolved'
     ? await releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo: req.technicianId, lineE164 })

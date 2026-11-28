@@ -12,9 +12,10 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const logger = require('../services/logger');
 const AutomationRunner = require('../services/automation-runner');
-const { NEW_LEAD_DRIP_STEP_IDS } = require('../services/new-lead-drip-stops');
+const { isGateControlledNewLeadStepId } = require('../services/new-lead-drip-stops');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 
@@ -97,8 +98,8 @@ router.get('/templates/:key', async (req, res, next) => {
     const template = await db('automation_templates').where({ key: req.params.key }).first();
     if (!template) return res.status(404).json({ error: 'template not found' });
     const rows = await db('automation_steps').where({ template_key: req.params.key }).orderBy('step_order', 'asc');
-    // The two new_lead drip steps send only while GATE_NEW_LEAD_DRIP_STEPS is on, whatever their enabled flag says.
-    const steps = rows.map((row) => (NEW_LEAD_DRIP_STEP_IDS.includes(String(row.id)) ? { ...row, gate_controlled: true } : row));
+    // Seeded new_lead drip steps (1-2 under GATE_NEW_LEAD_DRIP_STEPS, 3-4 under GATE_NEW_LEAD_DRIP_EXTENDED) are gate-controlled.
+    const steps = rows.map((row) => (isGateControlledNewLeadStepId(row.id) ? { ...row, gate_controlled: true } : row));
     res.json({ template, steps });
   } catch (err) { next(err); }
 });
@@ -177,7 +178,7 @@ router.put('/steps/:id', async (req, res, next) => {
       from_email: fromEmail !== undefined ? normalizeAutomationFromEmail(fromEmail) : step.from_email,
       reply_to: replyTo ?? step.reply_to,
       // A gate-controlled drip step keeps its stored enabled=false: an older runner (a rollback) must never select it.
-      enabled: NEW_LEAD_DRIP_STEP_IDS.includes(String(step.id)) ? step.enabled : (enabled ?? step.enabled),
+      enabled: isGateControlledNewLeadStepId(step.id) ? step.enabled : (enabled ?? step.enabled),
       step_order: stepOrder ?? step.step_order,
       updated_at: new Date(),
     });
@@ -271,16 +272,17 @@ ${cleanTone ? `\nTone: ${cleanTone}` : ''}`;
 
 // ── Test + trigger ──────────────────────────────────────────────
 
-// POST /api/admin/automations/templates/:key/test — send full sequence to a test email
+// POST /api/admin/automations/templates/:key/test — send full sequence to an internal test email
 router.post('/templates/:key/test', async (req, res) => {
   try {
     const { toEmail } = req.body;
     if (!toEmail) return res.status(400).json({ error: 'toEmail required' });
-    const result = await AutomationRunner.testSequence({ templateKey: req.params.key, toEmail });
+    const to = assertInternalEmailRecipient(toEmail, { adminEmail: req.technician?.email });
+    const result = await AutomationRunner.testSequence({ templateKey: req.params.key, toEmail: to });
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[automations/test] failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

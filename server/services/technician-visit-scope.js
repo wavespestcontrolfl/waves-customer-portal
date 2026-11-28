@@ -17,6 +17,7 @@
 const { addETDays, etDateString } = require('../utils/datetime-et');
 
 const isTechnicianRequest = (req) => req.techRole === 'technician';
+const adminOnlyFields = (req, fields) => (isTechnicianRequest(req) ? {} : fields);
 
 const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
 const TECH_ACCESS_CODE_ENDED_STATUSES = ['completed', ...TECH_DEAD_ASSIGNMENT_STATUSES];
@@ -582,4 +583,4 @@ async function technicianMayChargeCardOnFile(req, invoice, conn = null) {
   return !(await require('./payment-method-consents').autopayOptedOut(invoice.customer_id, { dbh: database }));
 }
 
-module.exports = { isTechnicianRequest, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_CODE_ENDED_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly, technicianMayReadVisitAccessCodes, propertyPrefsMatchVisitHome, visitHasDirectPremiseStamp, visitMatchesPrimaryHomeForTechAccess, loadActiveHomesByCustomerIds, loadTechHomesByCustomerIds, loadTechPrimaryAccessIds, recheckTechFeedAccessRows, visitAllowsAccessCodes, isVisitLiveForTechAccess, sameHomeForTechVisitPrefs, collectStoredAccessCodes, redactFreeTextAccessCodes, stripAccessCodePrefs, stripAccessCodesFromBriefBlock };
+module.exports = { isTechnicianRequest, adminOnlyFields, technicianCustomerIdsSubquery, TECH_DEAD_ASSIGNMENT_STATUSES, TECH_ACCESS_CODE_ENDED_STATUSES, TECH_ACCESS_WINDOW_DAYS, techAccessCutoff, technicianCurrentVisitFilter, technicianServicesCustomer, technicianLiveVisitFilter, technicianVisitRowInScope, lockOwnedLiveVisit, technicianCardOnFileVisitOk, technicianMayChargeCardOnFile, invoiceChargesBookedVisitOnly, technicianMayReadVisitAccessCodes, propertyPrefsMatchVisitHome, visitHasDirectPremiseStamp, visitMatchesPrimaryHomeForTechAccess, loadActiveHomesByCustomerIds, loadTechHomesByCustomerIds, loadTechPrimaryAccessIds, recheckTechFeedAccessRows, visitAllowsAccessCodes, isVisitLiveForTechAccess, sameHomeForTechVisitPrefs, collectStoredAccessCodes, redactFreeTextAccessCodes, stripAccessCodePrefs, stripAccessCodesFromBriefBlock };

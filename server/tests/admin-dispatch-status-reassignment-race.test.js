@@ -160,19 +160,16 @@ test('control: no reassignment in flight — the same technician transitions the
   expect(mockTransitionJobStatus.mock.calls[0][0]).toMatchObject({ jobId: 'svc-1', toStatus: 'en_route', transitionedBy: 'tech-A' });
 });
 
-// codex-review P1 (PR #4673 round 3): lockOwnedLiveVisit's technicianLiveVisitFilter
-// rejects cancelled/skipped/no_show rows outright, so a technician retrying
-// their OWN already-terminal transition (recovering an interrupted invoice/
-// reminder/tracker effect — the route's own terminal-transition logic
-// explicitly permits this) started getting 403'd instead of re-running the
-// idempotent effects. allowTerminal must let a same-status resend through.
-test('a technician resending the SAME status on their own already-cancelled visit succeeds (idempotent retry), not 403', async () => {
-  db.__state.scheduledServices[0].status = 'cancelled';
-  const { status, body } = await put('svc-1', { status: 'cancelled' });
-  expect(status).toBe(200);
-  expect(body.success).toBe(true);
-  expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
-  expect(mockTransitionJobStatus.mock.calls[0][0]).toMatchObject({ jobId: 'svc-1', fromStatus: 'cancelled', toStatus: 'cancelled', transitionedBy: 'tech-A' });
+// P0-5: cancelling any visit (even this_only), no_show, and skipped stay
+// admin-only even on idempotent same-status retries, before any side effects.
+test('a technician resending terminal restricted statuses (cancelled, no_show, skipped) returns 403 admin_required before any transition', async () => {
+  for (const statusValue of ['cancelled', 'no_show', 'skipped']) {
+    db.__state.scheduledServices[0].status = statusValue;
+    const { status, body } = await put('svc-1', { status: statusValue });
+    expect(status).toBe(403);
+    expect(body).toEqual({ error: 'Admin access required for this action', code: 'admin_required' });
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  }
 });
 
 test('control: a DIFFERENT target from an already-cancelled visit still 409s (terminal, not a retry) — allowTerminal never widens to a new transition', async () => {
@@ -192,12 +189,27 @@ test("codex-review P1: allowTerminal is scoped to a TERMINAL same-status resend 
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
 });
 
-test('a reassigned tech resending the SAME status on a NOW-cancelled-and-reassigned visit is still refused (allowTerminal drops the staleness check but keeps the technician_id match)', async () => {
-  db.__state.scheduledServices[0].status = 'cancelled';
+test('lockOwnedLiveVisit with allowTerminal accepts assigned terminal row and refuses reassigned row with 403 service_not_assigned', async () => {
+  const { lockOwnedLiveVisit } = require('../services/technician-visit-scope');
+  const today = etDateString(new Date());
+  db.__state.scheduledServices = [
+    { id: 'svc-1', technician_id: 'tech-A', status: 'cancelled', scheduled_date: today },
+  ];
+  await expect(db.transaction((trx) => lockOwnedLiveVisit(
+    trx,
+    { techRole: 'technician', technicianId: 'tech-A' },
+    'svc-1',
+    ['id', 'technician_id', 'status'],
+    { allowTerminal: true },
+  ))).resolves.toMatchObject({ id: 'svc-1', technician_id: 'tech-A', status: 'cancelled' });
+
   db.__state.reassignOnTransaction = true;
   db.__state.reassignedTo = 'tech-B';
-  const { status, body } = await put('svc-1', { status: 'cancelled' });
-  expect(status).toBe(403);
-  expect(body).toEqual({ error: 'Not assigned to this service', code: 'service_not_assigned' });
-  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  await expect(db.transaction((trx) => lockOwnedLiveVisit(
+    trx,
+    { techRole: 'technician', technicianId: 'tech-A' },
+    'svc-1',
+    ['id', 'technician_id', 'status'],
+    { allowTerminal: true },
+  ))).rejects.toMatchObject({ status: 403, code: 'service_not_assigned' });
 });

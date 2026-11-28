@@ -34,8 +34,13 @@
 const defaultDb = require('../../models/db');
 const logger = require('../logger');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
-const { applyAssignable, absentTechDays } = require('../technician-eligibility');
+const eligibility = require('../technician-eligibility');
+const { applyAssignable, absentTechDays } = eligibility;
+const featureGates = require('../../config/feature-gates');
+const { rowBlockMinutes } = require('./window-rules');
 const { techScopedConfirmActive, findConflictingVisits } = require('./occupancy');
+
+const shiftHoursLive = () => typeof featureGates.techShiftHoursLive === 'function' && featureGates.techShiftHoursLive();
 
 // Detours this close to the best one are a tie: the estimate is a model, and
 // a few minutes of drive is not worth moving a customer off their technician.
@@ -159,6 +164,36 @@ async function pickByServiceLine(conn, techs, visit) {
   return { active: true, technician: tech ? { id: tech.id, name: tech.name || null } : null, reason: `line_${pick.reason}` };
 }
 
+async function filterByShiftAndCapabilities(conn, techs, {
+  date, windowStart, windowEnd, durationMinutes, serviceType, serviceId, serviceKey, serviceAddons,
+}) {
+  let kept = techs;
+  if (kept.length && shiftHoursLive() && typeof eligibility.shiftExcluding === 'function') {
+    const hours = rowBlockMinutes({ window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: durationMinutes });
+    if (hours) {
+      const inShift = [];
+      for (const tech of kept) {
+        if (!(await eligibility.shiftExcluding(conn, tech.id, date, hours))) inShift.push(tech);
+      }
+      kept = inShift;
+    }
+  }
+  const capabilityServices = [];
+  if (serviceType || serviceKey || serviceId) {
+    capabilityServices.push({ service_type: serviceType, service_id: serviceId, service_key: serviceKey });
+  }
+  if (Array.isArray(serviceAddons)) {
+    for (const addon of serviceAddons) if (addon) capabilityServices.push(addon);
+  }
+  if (capabilityServices.length && kept.length) {
+    const off = await require('../technician-capabilities')
+      .inactiveCapabilitiesForServices(conn, kept.map((t) => t.id), capabilityServices);
+    const offIds = new Set(off.map((row) => row.technician_id));
+    kept = kept.filter((t) => !offIds.has(t.id));
+  }
+  return kept;
+}
+
 /**
  * @returns {Promise<{active: boolean, technician: {id, name}|null, reason: string, candidates?: Array}>}
  *   active false → the caller keeps its own default. active true + technician
@@ -166,7 +201,7 @@ async function pickByServiceLine(conn, techs, visit) {
  */
 async function pickTechnicianForVisit({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = DEFAULT_DURATION_MINUTES,
-  lat = null, lng = null, zip = null, serviceType = null, serviceId = null, serviceKey = null, customerId = null, excludeServiceIds = [],
+  lat = null, lng = null, zip = null, serviceType = null, serviceId = null, serviceKey = null, serviceAddons, customerId = null, excludeServiceIds = [],
   // The lead the visit is booked for, when the caller has it: a Waves Assessment's line (line-technician).
   leadId = null,
   // Whose rows the availability probe skips. Default: the customer's own (a
@@ -183,12 +218,9 @@ async function pickTechnicianForVisit({
   if (!techs.length) return { active: true, technician: null, reason: 'none_assignable' };
   const absent = await absentTechDays(conn, { dateFrom: date, dateTo: date, technicianIds: techs.map((t) => t.id) });
   techs = techs.filter((t) => !absent.has(`${t.id}:${date}`));
-  if (serviceType && techs.length) {
-    const off = await require('../technician-capabilities')
-      .inactiveCapabilitiesForServices(conn, techs.map((t) => t.id), [{ service_type: serviceType, service_id: serviceId, service_key: serviceKey }]);
-    const offIds = new Set(off.map((row) => row.technician_id));
-    techs = techs.filter((t) => !offIds.has(t.id));
-  }
+  techs = await filterByShiftAndCapabilities(conn, techs, {
+    date, windowStart, windowEnd, durationMinutes, serviceType, serviceId, serviceKey, serviceAddons,
+  });
   if (!techs.length) return { active: true, technician: null, reason: 'none_assignable' };
 
   // The visit's place (customer, map position) rides along for GATE_TERRITORY_ROUTING.

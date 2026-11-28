@@ -206,6 +206,17 @@ async function listProposals(conn, { limit = 100, offset = 0, now = new Date(), 
   return rows;
 }
 
+function assertTechnicianOwnsProposalVisits(actor, selected, series, plan) {
+  const techScope = require('./technician-visit-scope');
+  if (!actor || !techScope.isTechnicianRequest(actor)) return;
+  if (!selected || !techScope.technicianVisitRowInScope(actor, selected) || selected.status === 'completed') {
+    throw Object.assign(fail('Not assigned to this service', 403), { code: 'service_not_assigned' });
+  }
+  if (series?.collective || (plan?.seriesMove && selected.is_recurring === true)) {
+    throw Object.assign(fail('Only an admin can move a recurring series', 403), { code: 'series_move_admin_only' });
+  }
+}
+
 async function loadAndValidateProposalVisit(conn, call, customer, card, visitId, now, technicianId) {
   const candidates = await visitsForCard(conn, customer.id, now, { technicianId });
   if (visitId && !candidates.some((visit) => visit.id === visitId)) {
@@ -271,7 +282,7 @@ function isProposalStateStale({ liveCard, card, liveCall, customer, liveCustomer
     || Number(liveCall.processing_generation) !== Number(call.processing_generation);
 }
 
-async function previewProposal(conn, id, { visitId, now = new Date(), rebooker = null, technicianId = null } = {}) {
+async function previewProposal(conn, id, { visitId, actor = null, now = new Date(), rebooker = null, technicianId = null } = {}) {
   const card = await conn('triage_items').where({ id }).whereIn('status', openStates).first();
   if (!card?.payload?.reschedule_proposal) throw fail('Proposal is no longer open', 404);
   const call = await conn('call_log').where({ id: card.call_log_id }).first();
@@ -289,6 +300,7 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
   // previewSeriesMove itself previews a lawn rounds one-off (size rule) as a single move.
   const series = mover.collectiveMoveGateOn()
     ? await mover.previewSeriesMove(selection, plan.newDate, plan.newWindow, { conn, adminWindowRules: true, overlapAdvisory: true }) : { collective: false };
+  assertTechnicianOwnsProposalVisits(actor, selected, series, plan);
   const conflictSnapshot = series.collective ? series.conflictSnapshot
     : await mover.previewMoveConflicts(selection, plan.newDate, plan.newWindow, {
       conn, adminWindowRules: true, overlapAdvisory: true, seriesPolicy: 'single',
@@ -307,13 +319,13 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
     overlap, conflictSnapshot, displayAddress: proposalAddress(selected, customer) };
 }
 
-async function applyProposal(conn, id, { actorId, visitId, previewHash, now = new Date(), rebooker = null, technicianId = null } = {}) {
+async function applyProposal(conn, id, { actorId, actor = null, visitId, previewHash, now = new Date(), rebooker = null, technicianId = null } = {}) {
   if (!previewHash) throw fail('Preview the requested move first', 400);
-  const preview = await previewProposal(conn, id, { visitId, now, rebooker, technicianId });
+  const preview = await previewProposal(conn, id, { visitId, actor, now, rebooker, technicianId });
   if (preview.preview_hash !== previewHash) throw fail('The appointment or recurring plan changed. Refresh the preview.');
   const { call, card, customer, candidates, v2, series, selected } = preview;
   return applyReviewedCallReschedule({
-    conn, call, customer, candidates, v2, visitId: selected.id, actorId, now, rebooker,
+    conn, call, customer, candidates, v2, visitId: selected.id, actorId, actor, now, rebooker,
     operationKey: `proposal:${id}:${previewHash}`, proposalCardId: id,
     occurrenceIds: series.occurrenceIds || [], occurrences: series.occurrences,
     conflictSnapshot: preview.conflictSnapshot,

@@ -764,7 +764,17 @@ async function getEstimateFunnel(input) {
   }
 
   const [sent, viewed, accepted, declined] = await Promise.all([
-    stageQuery(sentAtSql('e')).count('* as c').first(),
+    // Query #1 computes both sent volume AND the sent cohort's own outcomes in
+    // one scan so conversion rates stay strictly within 0–100% even when short
+    // windows (e.g. Today) include carry-over acceptances from earlier sends.
+    stageQuery(sentAtSql('e')).select(
+      db.raw('COUNT(*) as c'),
+      db.raw(`COUNT(*) FILTER (WHERE ${countableViewAtSql('e')} >= ${sentAtSql('e')} AND ${countableViewAtSql('e')} < ?) as cohort_viewed`, [bounds.toTs]),
+      // Require acceptance/decline within [sentAt, toTs) so neither pre-delivery
+      // self-serve decisions nor post-window outcomes distort historical cohorts.
+      db.raw(`COUNT(*) FILTER (WHERE e.status = 'accepted' AND e.accepted_at >= ${sentAtSql('e')} AND e.accepted_at < ?) as cohort_accepted`, [bounds.toTs]),
+      db.raw(`COUNT(*) FILTER (WHERE e.status = 'declined' AND e.declined_at >= ${sentAtSql('e')} AND e.declined_at < ?) as cohort_declined`, [bounds.toTs]),
+    ).first(),
     stageQuery(countableViewAtSql('e')).count('* as c').first(),
     stageQuery('e.accepted_at', 'accepted').count('* as c').first(),
     stageQuery('e.declined_at', 'declined').count('* as c').first(),
@@ -772,6 +782,9 @@ async function getEstimateFunnel(input) {
 
   const [totalSent, totalViewed, totalAccepted, totalDeclined] = [sent, viewed, accepted, declined]
     .map((row) => parseInt(row?.c || 0));
+  const cohortViewed = parseInt(sent?.cohort_viewed || 0);
+  const cohortAccepted = parseInt(sent?.cohort_accepted || 0);
+  const cohortDeclined = parseInt(sent?.cohort_declined || 0);
 
   const avgResponse = await excludeInternalEstimates(
     db({ e: 'estimates' })
@@ -864,10 +877,16 @@ async function getEstimateFunnel(input) {
       open: parseInt(r.sent, 10) - parseInt(r.won, 10) - parseInt(r.lost, 10),
       wonValue: parseFloat(r.won_value) || 0,
     })),
+    cohort: {
+      sent: totalSent,
+      viewed: cohortViewed,
+      accepted: cohortAccepted,
+      declined: cohortDeclined,
+    },
     rates: {
-      view_rate: totalSent > 0 ? Math.round(totalViewed / totalSent * 100) : 0,
-      close_rate: totalSent > 0 ? Math.round(totalAccepted / totalSent * 100) : 0,
-      decline_rate: totalSent > 0 ? Math.round(totalDeclined / totalSent * 100) : 0,
+      view_rate: totalSent > 0 ? Math.round((cohortViewed / totalSent) * 100) : 0,
+      close_rate: totalSent > 0 ? Math.round((cohortAccepted / totalSent) * 100) : 0,
+      decline_rate: totalSent > 0 ? Math.round((cohortDeclined / totalSent) * 100) : 0,
     },
     avg_response_hours: parseFloat(avgResponse?.avg_hrs || 0).toFixed(1),
     total_accepted_value: parseFloat(totalValue?.total || 0),
