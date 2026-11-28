@@ -10,7 +10,8 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import TimeTrackingPage, { EntriesTab } from "./TimeTrackingPage";
+import TimeTrackingPage from "./TimeTrackingPage";
+import { EntriesTab } from "./staff/EntriesTab";
 
 vi.mock("../../hooks/useStaffDocumentsAvailable", () => ({ default: () => false }));
 vi.mock("../../hooks/usePayrollAvailable", () => ({ default: () => false }));

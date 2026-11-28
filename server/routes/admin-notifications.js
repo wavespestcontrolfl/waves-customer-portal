@@ -385,6 +385,75 @@ router.put('/read-all', async (req, res, next) => {
 // teammate (admin role required) — necessary because the technicians.active
 // checkpoint is otherwise tautological: adminAuthenticate rejects inactive
 // callers before this handler runs.
+function buildPushTransportChecks(pushStatus) {
+  const vapidOk = Boolean(pushStatus.available && pushStatus.configured);
+  const apnsOk = Boolean(pushStatus.apns?.configured);
+  const fcmOk = Boolean(pushStatus.fcm?.configured);
+  return {
+    vapid: {
+      ok: vapidOk,
+      publicKeyPresent: Boolean(process.env.VAPID_PUBLIC_KEY),
+      privateKeyPresent: Boolean(process.env.VAPID_PRIVATE_KEY),
+      webPushAvailable: pushStatus.available,
+      configured: pushStatus.configured,
+      error: pushStatus.error,
+    },
+    apns: { ok: apnsOk, ...(pushStatus.apns || { configured: false }) },
+    fcm: { ok: fcmOk, ...(pushStatus.fcm || { configured: false }) },
+    pushTransport: { ok: vapidOk || apnsOk || fcmOk, vapid: vapidOk, apns: apnsOk, fcm: fcmOk },
+  };
+}
+
+function isEligibleStaffSubscription(sub, tech) {
+  if (!sub?.active || !tech || !tech.active) return false;
+  if (tech.role && tech.role !== 'admin' && tech.role !== 'technician') return false;
+  if (tech.auth_token_version !== undefined && tech.auth_token_version !== null) {
+    if (sub.staff_token_version === undefined || sub.staff_token_version === null) return false;
+    if (Number(sub.staff_token_version) !== Number(tech.auth_token_version)) return false;
+  }
+  const { adminMfaLive, adminMfaEnforceLive } = require('../services/staff-mfa');
+  if (adminMfaLive()) {
+    if (tech.mfa_enabled_at && sub.staff_mfa !== true) return false;
+    if (adminMfaEnforceLive() && tech.role === 'admin' && !tech.mfa_enabled_at) return false;
+  }
+  return true;
+}
+
+function summarizeSubscriptions(subs, transportChecks, tech) {
+  const activeSubs = subs.filter((s) => s.active);
+  const byPlatform = { web: 0, ios: 0, android: 0 };
+  const eligibleByPlatform = { web: 0, ios: 0, android: 0 };
+  let eligibleCount = 0;
+  for (const s of activeSubs) {
+    const p = s.platform === 'ios' || s.platform === 'android' ? s.platform : 'web';
+    byPlatform[p] += 1;
+    if (isEligibleStaffSubscription(s, tech)) {
+      eligibleCount += 1;
+      eligibleByPlatform[p] += 1;
+    }
+  }
+  const reachable = (transportChecks?.vapid?.ok ? eligibleByPlatform.web : 0)
+    + (transportChecks?.apns?.ok ? eligibleByPlatform.ios : 0)
+    + (transportChecks?.fcm?.ok ? eligibleByPlatform.android : 0);
+  return {
+    pushSubscriptions: {
+      ok: activeSubs.length > 0,
+      total: subs.length,
+      active: activeSubs.length,
+      inactive: subs.length - activeSubs.length,
+      byPlatform,
+    },
+    pushTransportMatch: {
+      ok: activeSubs.length === 0 || reachable > 0,
+      active: activeSubs.length,
+      eligible: eligibleCount,
+      reachable,
+      byPlatform,
+      eligibleByPlatform,
+    },
+  };
+}
+
 router.get('/diagnose', requireAdmin, async (req, res, next) => {
   try {
     const requestedUserId = req.query.userId ? parseInt(req.query.userId, 10) : null;
@@ -395,16 +464,8 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
     const userId = requestedUserId || req.technicianId;
     const report = { targetUserId: userId, callerUserId: req.technicianId, checks: {} };
 
-    // 1. VAPID env present (push silently no-ops without these)
-    const pushStatus = PushService.status();
-    report.checks.vapid = {
-      ok: pushStatus.available && pushStatus.configured,
-      publicKeyPresent: Boolean(process.env.VAPID_PUBLIC_KEY),
-      privateKeyPresent: Boolean(process.env.VAPID_PRIVATE_KEY),
-      webPushAvailable: pushStatus.available,
-      configured: pushStatus.configured,
-      error: pushStatus.error,
-    };
+    // 1. Push transports (Web Push VAPID, APNs for Waves Admin iOS, FCM for Android)
+    Object.assign(report.checks, buildPushTransportChecks(PushService.status()));
 
     // 2. web-push module loadable
     let webpushLoaded = false;
@@ -412,12 +473,13 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
     report.checks.webPushModule = { ok: webpushLoaded };
 
     // 3. technicians.active — the trigger loop skips inactive users entirely
+    let targetTech = null;
     try {
-      const tech = await db('technicians').where({ id: userId }).first();
+      targetTech = await db('technicians').where({ id: userId }).first();
       report.checks.technicianActive = {
-        ok: Boolean(tech && tech.active),
-        active: tech ? tech.active : null,
-        name: tech ? tech.name : null,
+        ok: Boolean(targetTech && targetTech.active),
+        active: targetTech ? targetTech.active : null,
+        name: targetTech ? targetTech.name : null,
       };
     } catch (err) {
       report.checks.technicianActive = { ok: false, error: err.message };
@@ -426,13 +488,7 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
     // 4. push_subscriptions — auto-deactivated rows (410/404) are a common cause
     try {
       const subs = await db('push_subscriptions').where({ admin_user_id: userId });
-      const active = subs.filter((s) => s.active).length;
-      report.checks.pushSubscriptions = {
-        ok: active > 0,
-        total: subs.length,
-        active,
-        inactive: subs.length - active,
-      };
+      Object.assign(report.checks, summarizeSubscriptions(subs, report.checks, targetTech));
     } catch (err) {
       report.checks.pushSubscriptions = { ok: false, error: err.message };
     }
@@ -470,8 +526,9 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
       report.checks.recentBellWrites = { ok: false, error: err.message };
     }
 
+    const optionalTransportChecks = new Set(['vapid', 'apns', 'fcm', 'webPushModule']);
     report.summary = Object.entries(report.checks)
-      .filter(([, v]) => v.ok === false)
+      .filter(([k, v]) => v.ok === false && !(report.checks.pushTransport.ok && optionalTransportChecks.has(k)))
       .map(([k]) => k);
 
     res.json(report);

@@ -76,4 +76,16 @@ describe('callbackCreditByTechnician', () => {
     const counts = await callbackCreditByTechnician(connReturning([]), { start: '2027-03-01', endDate: '2027-03-31' });
     expect(counts.size).toBe(0);
   });
+
+  test('excludeInternalTests adds the internal-test customer filter only when opted in', async () => {
+    const plainConn = connReturning([]);
+    await callbackCreditByTechnician(plainConn, { start: '2027-03-01', endDate: '2027-03-31', distinctVisits: true });
+    expect(plainConn.raw.mock.calls[0][0]).not.toMatch(/FROM customers itc/);
+
+    const filteredConn = connReturning([]);
+    await callbackCreditByTechnician(filteredConn, {
+      start: '2027-03-01', endDate: '2027-03-31', distinctVisits: true, excludeInternalTests: true,
+    });
+    expect(filteredConn.raw.mock.calls[0][0]).toMatch(/NOT \(EXISTS \(SELECT 1 FROM customers itc WHERE itc\.id = x\.customer_id/);
+  });
 });

@@ -5234,6 +5234,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 15 MIN — Phone-only residential new-lead SMS follow-up drip (Day 2 & Day 5).
+  // Ships 100% DARK behind GATE_NEW_LEAD_DRIP_EXTENDED; exits BEFORE acquiring DB lock while off.
+  cron.schedule('*/15 * * * *', async () => {
+    if (require('../config/feature-gates').newLeadDripExtendedLive?.() !== true) return;
+    try {
+      await runExclusive('new-lead-phone-sms-drip', async () => {
+        const { processPhoneOnlyLeadSmsDrip } = require('./new-lead-phone-sms-drip');
+        await processPhoneOnlyLeadSmsDrip();
+      });
+    } catch (err) {
+      logger.error(`[new-lead-phone-sms-drip] tick failed: ${err.code || err.name || 'error'}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY MIN — booked lead calls: the
   // 15-minute reminder, the press-1 ring at the booked time, and the 8 AM
   // bell for a time question never answered (lead-callback-scheduler.js).
@@ -8020,11 +8034,11 @@ function initScheduledJobs() {
         const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
         if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
         // Real Gmail draft ids only — 'pending' claims, reconciliation
-        // sentinels (reconciled_replied / reconciled_existing_draft) and a
-        // draft refused for a blank (refused_blank) are not drafts this agent
-        // created.
+        // sentinels (reconciled_replied / reconciled_existing_draft) and drafts
+        // refused for a blank or safety verifier (refused_blank / refused_verifier)
+        // are not drafts this agent created.
         const drafted = emails.filter(e => e.draft_gmail_id
-          && !['pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank'].includes(e.draft_gmail_id)).length;
+          && !['pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank', 'refused_verifier'].includes(e.draft_gmail_id)).length;
         if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
 
         // Follow-up nudges: inbound conversation mail nobody has answered.
@@ -9571,13 +9585,15 @@ function initScheduledJobs() {
   cron.schedule('0 8 * * *', async () => {
     logger.info('Running: AI campaign advisor');
     try {
-      const CampaignAdvisor = require('./ads/campaign-advisor');
-      // The office Mac's Max-plan runner writes today's report at 7:30 AM (owner 2026-10-29).
-      if (await CampaignAdvisor.hasModelReportToday()) {
-        logger.info('AI campaign advisor: today already has a model-written report, skipping');
-        return;
-      }
-      await CampaignAdvisor.generateDailyAdvice();
+      await runExclusive('ads-daily-advisor', async () => {
+        const CampaignAdvisor = require('./ads/campaign-advisor');
+        // The office Mac's Max-plan runner writes today's report at 7:30 AM (owner 2026-10-29).
+        if (await CampaignAdvisor.hasModelReportToday()) {
+          logger.info('AI campaign advisor: today already has a model-written report, skipping');
+          return;
+        }
+        await CampaignAdvisor.generateDailyAdvice();
+      });
     } catch (err) {
       logger.error(`AI campaign advisor failed: ${err.message}`);
     }

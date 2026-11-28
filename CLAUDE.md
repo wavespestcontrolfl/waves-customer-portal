@@ -4,8 +4,9 @@ Context for Claude Code sessions working on the waves-customer-portal monorepo.
 
 ## Dev Workflow
 
-- Subagents that only search, read logs, or run tests pass `model: sonnet`
-  (or `haiku`) — a search agent inherits the main model otherwise.
+- Work directly in the main session for routine lookups; when delegating a
+  bounded search, log-read, or test subagent, pass `model: sonnet` (or `haiku`)
+  so it does not inherit the main model.
 - Start the app only when the authorized task needs runtime verification.
   Read-only audits and explanations do not require startup.
 - Before startup, verify the selected checkout, command hooks, database
@@ -27,9 +28,9 @@ results as queued messages or as live graduation evidence.
 Waves Pest Control — family-owned, SW Florida (Manatee / Sarasota / Charlotte counties). Custom AI-native operations platform: React/Vite frontend + Express/Node.js backend + PostgreSQL, deployed on Railway.
 
 Three interfaces:
-- **Admin portal** (`/admin/*`) — owner/operator dashboard, full business management
+- **Admin portal** (`/admin/*`) — owner/operator dashboard, full business management, and all new field technician UI
 - **Customer portal** (`/`) — customer-facing PWA (service tracking, payments, referrals)
-- **Tech portal** (`/tech/*`) — field technician mobile app (route, protocols, estimating)
+- **Tech portal** (`/tech/*`) — **deprecated** legacy field UI (owner 2026-10-02): do not build new features here; build new field UI in the admin portal (`/admin/*`)
 
 ## Tech Stack
 
@@ -43,7 +44,7 @@ Three interfaces:
 
 ## Key Team Members
 
-- **Adam Benetti** — Owner-operator: primary admin user and a field technician (uses both admin and Tech portals). Design tech features for a multi-technician team (`docs/technician-provisioning-runbook.md`).
+- **Adam Benetti** — Owner-operator: primary admin user and field technician. Design tech features in `/admin/*` for a multi-technician team (`docs/technician-provisioning-runbook.md`).
 - **Virginia** — Office manager/CSR; uses Communications (`CommunicationsPageV2.jsx`) and the Pipeline Leads tab (`LeadsTabs.jsx`) daily
 
 ## Rules
@@ -70,6 +71,7 @@ Three interfaces:
 20. **Judge complexity qualitatively, not numerically.** A simplification must remove decisions (dedupe checks, delete dead branches, table-drive repeated conditionals), not relocate them into one-use helpers to lower a metric. New tests name the observable behavior, credible regression, and gap in existing proof; extend an existing case when possible. Preserve independent contracts, including static guards. Use the `waves-test-audit` skill for test-value audits or consolidation; ordinary changes need no sweep.
 21. **New or changed admin notifications follow `docs/admin-notifications.md`.** Raise them through `raiseAdminAlert` / `composeAdminAlert` (`server/services/admin-alert-compose.js`), never a hand-written title and body. `server/tests/admin-alert-raw-callsite-ratchet.test.js` counts raw `notifyAdmin(` call sites per file and fails when a file gains one. A conversion passes without a baseline edit, so lower that file's number when you are in it.
 22. **Money code calls the module that computes it.** Before new code predicts, reports or bills money, list in the PR's review map where each billing rule it needs lives, and call that function instead of writing the rule again. Homes: a visit's completion amount with the monthly-rate fallback = `completionInvoiceAmount`, dues coverage = `membershipDuesCoverVisit`, combined first-application invoice coverage = `siblingInvoiceCoverageVerdict` (all `server/services/billing-lane.js`); open self-pay invoices = `applyOpenSelfPayPredicates` (`server/services/open-balance.js`); who an invoice bills = `resolveForInvoice` (`server/services/payer.js`); a pg DATE value = `dateOnlyString` (`server/utils/date-only.js`). `server/tests/billing-rule-home-ratchet.test.js` fails when a file gains a copy of a known rule; lower a file's number when you remove one. When two copies disagree on a price or a charge, stop and ask the owner which one is right.
+23. **Spending money needs the owner's yes, every time (owner 2026-10-31, reaffirmed 2026-11-27).** Before making or proposing any change that starts, restores, or raises spend (new/widened paid APIs or services, pricier SKUs/models, new crons/backfills/evals on paid keys, gate flips that trigger paid calls, paid add-ons/domains/infra), stop and report estimated spend (what it buys, unit price, $/day and $/month with math, free-tier cap, free option) and wait for explicit owner approval. Never propose or enable Twilio RCS.
 
 ## Admin UI & Design Systems
 

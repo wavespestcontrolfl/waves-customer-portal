@@ -49,6 +49,7 @@ async function resolveTechPhotoUrl(s3Key, fallbackUrl, ttlSeconds = DEFAULT_TTL_
     return await getSignedUrl(s3, new GetObjectCommand({
       Bucket: config.s3.bucket,
       Key: s3Key,
+      ResponseContentDisposition: 'attachment',
     }), { expiresIn: ttlSeconds });
   } catch (err) {
     const code = (err && (err.code || err.name)) || 'none';

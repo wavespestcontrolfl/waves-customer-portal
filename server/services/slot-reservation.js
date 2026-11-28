@@ -1118,6 +1118,26 @@ async function moveMakeRoomStops(client, { row, estimate, serviceProfile, effect
   return writeChainOrRefuse(client, { row, scheduledDate });
 }
 
+// Seasonal (Feb–Oct) redemption & commit guard: the slot list is season-filtered
+// for a seasonal mosquito selection, but the offer HMAC does not bind the
+// frequency (and /accept can post seasonal9 on a reservation made under
+// monthly12). Both reserveSlot and commitReservation call this so a prohibited
+// Nov–Jan visit never reserves or commits under a seasonal program.
+function assertSeasonalSelectionInSeason(serviceProfile, date, slotId = null) {
+  const seasonalSelection = !!serviceProfile
+    && typeof estimateSlotAvailability.seasonalSelectionProfile === 'function'
+    && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile);
+  if (seasonalSelection
+    && typeof estimateSlotAvailability.inMosquitoSeason === 'function'
+    && !estimateSlotAvailability.inMosquitoSeason(date)) {
+    const err = new Error('This seasonal program runs February through October — pick an in-season date.');
+    err.code = 'SLOT_UNAVAILABLE';
+    if (slotId != null) err.slotId = slotId;
+    throw err;
+  }
+  return seasonalSelection;
+}
+
 async function reserveSlot({
   estimateId,
   slotId,
@@ -1171,7 +1191,7 @@ async function reserveSlot({
   {
     const { isBlackoutDate } = require('./scheduling/blackout-dates');
     if (await isBlackoutDate(date)) {
-      try { estimateSlotAvailability.invalidateEstimate(estimateId); } catch { /* best-effort */ }
+      invalidateSlotAvailabilityCache(estimateId, { all: true });
       const err = new Error('that day is no longer available');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = slotId;
@@ -1277,6 +1297,7 @@ async function reserveSlot({
     logger.warn(`[slot-reservation] hold coords resolve skipped for estimate ${estimateId}: ${geoErr.message}`);
   }
 
+  let occupancyChanged = false;
   try {
     let preparedCapacity = null;
     if (useCapacity) {
@@ -1442,26 +1463,7 @@ async function reserveSlot({
           serviceCadences,
           durationMinutes,
         }, trx);
-      // Seasonal (Feb–Oct) redemption re-check (codex r8 P1): the slot LIST
-      // is season-filtered for a seasonal mosquito selection, but the offer
-      // HMAC does not bind the frequency — a list fetched under monthly12
-      // (where winter dates are legitimately offered) could be redeemed with
-      // selectedFrequency seasonal9, and the converter would then seed the
-      // series from a Nov–Jan parent, counting a prohibited winter visit
-      // toward the nine. Office/admin bookings don't come through this route.
-      // Guarded like resolveEstimateSlotProfile above — suites mock the
-      // availability module down to the functions they assert on.
-      const seasonalSelection = !!serviceProfile
-        && typeof estimateSlotAvailability.seasonalSelectionProfile === 'function'
-        && estimateSlotAvailability.seasonalSelectionProfile(serviceProfile);
-      if (seasonalSelection
-        && typeof estimateSlotAvailability.inMosquitoSeason === 'function'
-        && !estimateSlotAvailability.inMosquitoSeason(date)) {
-        const err = new Error('This seasonal program runs February through October — pick an in-season date.');
-        err.code = 'SLOT_UNAVAILABLE';
-        err.slotId = slotId;
-        throw err;
-      }
+      const seasonalSelection = assertSeasonalSelectionInSeason(serviceProfile, date, slotId);
       // Deferred horizon adjudication (see the pre-txn note): standard callers
       // keep the 90-day ceiling; a seasonal selection may reach the extended
       // winter-gap horizon its slot list was generated with.
@@ -2003,6 +2005,7 @@ async function reserveSlot({
 
       return { scheduledServiceId, expiresAt };
     });
+    occupancyChanged = true;
     if (reserved && reserved.staleHoldSuperseded) {
       // Post-commit throw so the supersede above sticks (the finally still
       // invalidates the availability cache). Same error shape as the
@@ -2015,10 +2018,10 @@ async function reserveSlot({
     }
     return reserved;
   } finally {
-    // Invalidate the slot-availability wrapper cache for this estimate so
-    // subsequent /available-slots calls reflect the new occupancy. Cheap
-    // no-op if nothing cached.
-    try { estimateSlotAvailability.invalidateEstimate(estimateId); } catch {}
+    // Only flush all estimates when this call actually committed an occupancy
+    // change; on rolled-back/pre-transaction failures, invalidate only this
+    // estimate so unrelated customers' cached offers stay warm.
+    invalidateSlotAvailabilityCache(estimateId, { all: occupancyChanged });
   }
 }
 
@@ -2334,6 +2337,7 @@ async function commitReservation({
       );
     }
     const scheduledDate = dateOnly(row.scheduled_date);
+    assertSeasonalSelectionInSeason(serviceProfile, scheduledDate);
     const windowStart = row.window_start;
     const windowEnd = effectiveDurationMinutes && scheduledDate && windowStart
       ? addMinutesToTime(windowStart, effectiveDurationMinutes)
@@ -2596,10 +2600,38 @@ async function commitReservation({
     return updated;
   };
 
-  if (trx) return run(trx);
+  if (trx) {
+    const committed = await run(trx);
+    invalidateSlotAvailabilityAfterCommit(trx, estimate?.id || null, { all: true });
+    return committed;
+  }
   const committed = await db.transaction(run);
+  invalidateSlotAvailabilityCache(estimate?.id || null, { all: true });
   if (standaloneMakeRoom) await require('./scheduling/booking-make-room-accept').makeRoomAfterCommit(standaloneMakeRoom);
   return committed;
+}
+
+function invalidateSlotAvailabilityCache(estimateId = null, { all = false } = {}) {
+  try {
+    if (all && typeof estimateSlotAvailability.invalidateAllEstimates === 'function') {
+      estimateSlotAvailability.invalidateAllEstimates();
+    }
+    if (estimateId && typeof estimateSlotAvailability.invalidateEstimate === 'function') {
+      estimateSlotAvailability.invalidateEstimate(estimateId);
+    }
+  } catch { /* best-effort */ }
+}
+
+function invalidateSlotAvailabilityAfterCommit(conn, estimateId = null, { all = false } = {}) {
+  const flush = () => invalidateSlotAvailabilityCache(estimateId, { all });
+  if (conn && (conn.isTransaction || conn.executionPromise)) {
+    try {
+      const { afterCommit } = require('./customer-credit');
+      afterCommit(conn, flush);
+      return;
+    } catch { /* fall through to immediate best-effort flush */ }
+  }
+  flush();
 }
 
 /**
@@ -2628,6 +2660,7 @@ function uncommittedHoldQuery(client, { scheduledServiceId, estimateId }) {
 async function releaseReservation({ scheduledServiceId, estimateId }) {
   if (!scheduledServiceId) return { released: false };
   const count = await uncommittedHoldQuery(db, { scheduledServiceId, estimateId }).del();
+  if (count > 0) invalidateSlotAvailabilityCache(estimateId || null, { all: true });
   return { released: count > 0 };
 }
 
@@ -2638,6 +2671,7 @@ async function releaseReservation({ scheduledServiceId, estimateId }) {
 async function releaseEstimateHolds({ estimateId, database = null }) {
   if (!estimateId) return { released: 0 };
   const count = await uncommittedHoldQuery(database || db, { estimateId }).del();
+  if (count > 0) invalidateSlotAvailabilityAfterCommit(database, estimateId, { all: true });
   return { released: count };
 }
 
@@ -2791,6 +2825,9 @@ async function releaseExpiredReservations() {
     // Each estimate hold's end is recorded, and a customer's unfinished pick tells the office
     // (estimate-stuck-alert.js; never throws).
     await require('./estimate-stuck-alert').noteExpiredHolds(releasedRows);
+  }
+  if (released > 0 || rescued > 0) {
+    invalidateSlotAvailabilityCache(null, { all: true });
   }
   return { released, rescued };
 }
@@ -3175,16 +3212,22 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       scheduledServiceId: row.id,
       expiresAt: expiresAt instanceof Date ? expiresAt.toISOString() : expiresAt,
     });
-    return { scheduledServiceId: updated?.id || row.id, expiresAt };
-  }).then((result) => {
-    if (result?.staleHoldSuperseded) {
-      const err = new Error('slot no longer available');
-      err.code = 'SLOT_UNAVAILABLE';
-      err.slotId = result.slotId;
-      throw err;
-    }
-    return result;
-  });
+    return { scheduledServiceId: updated?.id || row.id, expiresAt, revivedHold: alreadyLapsed };
+  }).then((result) => finishExtendReservation(result, estimateId));
+}
+
+function finishExtendReservation(result, estimateId) {
+  if (result?.staleHoldSuperseded) {
+    invalidateSlotAvailabilityCache(estimateId, { all: true });
+    const err = new Error('slot no longer available');
+    err.code = 'SLOT_UNAVAILABLE';
+    err.slotId = result.slotId;
+    throw err;
+  }
+  if (result?.revivedHold) {
+    invalidateSlotAvailabilityCache(estimateId, { all: true });
+  }
+  return { scheduledServiceId: result.scheduledServiceId, expiresAt: result.expiresAt };
 }
 
 module.exports = {

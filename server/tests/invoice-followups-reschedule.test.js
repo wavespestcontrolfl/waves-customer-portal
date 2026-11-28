@@ -10,6 +10,7 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'),
   invoiceAmountDue: jest.fn(),
   // The dunning guards read the withdrawal stamp too (a payer-billed
   // combined-visit invoice keeps payer_id NULL).

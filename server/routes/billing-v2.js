@@ -11,7 +11,6 @@ const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { saveOnlyMetadata, saveOnlyEvidence, setupIntentSavesOnly, saveOnlyStampIsCurrent, finishSaveOnlyAdd } = require('../services/portal-save-only-card');
-const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral } = require('../services/failed-payments');
 const { isEnabled } = require('../config/feature-gates');
 const { removePaymentMethod } = require('../services/payment-method-removal');
@@ -717,7 +716,6 @@ router.get('/balance', async (req, res, next) => {
     // (isNeverAttemptedDeferral and the canonical unsuperseded-failed query live in services/failed-payments.js — the SMS
     // grounding balance reads the same code; Codex round-35 P1.)
     const failedFacts = await loadFailedPaymentFacts(req.customerId);
-    const { failedInvoiceIds, balanceCarryingInvoiceIds } = failedFacts;
     const failedTotal = standaloneFailedTotal(failedFacts, isPayerPayment);
 
     // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the
@@ -777,60 +775,23 @@ router.get('/balance', async (req, res, next) => {
       }
     }
 
-    // Portal "Pay now" (GATE_PORTAL_PAY_NOW, audit S2-1): the customer's own
-    // open invoices with their existing tokenized /pay links, oldest first,
-    // so the Billing tab can offer a real payment path instead of
-    // "enable Auto Pay and wait". Same open/non-payer filter as the balance
-    // sum above, plus payer-statement-accrued rows excluded (the /pay page
-    // 404s those tokens by design) and fully-credited rows skipped. Gate
-    // off → field absent → payload byte-identical to today.
+    // Portal "Pay now" (GATE_PORTAL_PAY_NOW, audit S2-1): shares the canonical
+    // open-balance.js listPayablePortalInvoices authority with payment history
+    // (same open + unsuperseded failed-draft rules, live payer re-resolution,
+    // positive remainder). Gate off → field absent → byte-identical to today.
     let openInvoices;
     if (isEnabled('portalPayNow')) {
-      // Failed-DRAFT rescue (Codex round-3 P2): a failed completion autopay
-      // leaves the obligation on a draft invoice — counted in failedTotal
-      // above precisely because unpaidInvoices skips drafts — so the balance
-      // and the failed banner can both show with zero sent/viewed/overdue
-      // rows. Those drafts are payable at /pay (only statement-accrued
-      // tokens are blocked there), and they're the exact failure this CTA
-      // exists to repair, so their ids ride along with the open statuses.
-      // Historic failed-payment metadata can carry non-UUID invoice_id values;
-      // invoices.id is a uuid column, so an unfiltered orWhereIn would make
-      // Postgres throw on the cast and 500 the whole Billing tab for that
-      // customer (Codex round-6 P2). Shape-filter before querying — a
-      // malformed id simply doesn't get a pay link.
-      const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      const failedDraftInvoiceIds = failedInvoiceIds
-        .filter((id) => !balanceCarryingInvoiceIds.has(id))
-        .filter((id) => UUID_SHAPE.test(id));
-      const openRows = await db('invoices')
-        .where({ customer_id: req.customerId })
-        .where(function () {
-          this.whereIn('status', ['sent', 'viewed', 'overdue']);
-          if (failedDraftInvoiceIds.length) this.orWhereIn('id', failedDraftInvoiceIds);
-        })
-        .whereNull('payer_id')
-        .whereNull('payer_statement_id')
-        // …and withdrawn rows, which keep a NULL payer_id: the Pay Now list
-        // hands out a bearer pay link, so it must never carry AP-owned debt.
-        .where(function withdrawnExcluded() {
-          this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
-        })
-        // Positive balance in SQL, BEFORE the cap — otherwise five old
-        // fully-credited invoices would crowd a payable sixth out of the
-        // list entirely (Codex P2). Same GREATEST expression as the
-        // balance SUM above.
-        .whereRaw('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0')
-        .orderBy('created_at', 'asc')
-        .limit(5)
-        .select('token', 'invoice_number', 'due_date', 'total', 'credit_applied', 'amount_paid');
-      openInvoices = openRows
-        .map((row) => ({
-          payUrl: `/pay/${row.token}`,
-          amountDue: invoiceAmountDue(row),
-          invoiceNumber: row.invoice_number,
-          dueDate: row.due_date,
-        }))
-        .filter((row) => row.amountDue > 0);
+      const { listPayablePortalInvoices } = require('../services/open-balance');
+      const rows = await listPayablePortalInvoices(req.customerId, {
+        failedFacts,
+        limit: 5,
+      });
+      openInvoices = rows.map(({ payUrl, amountDue, invoiceNumber, dueDate }) => ({
+        payUrl,
+        amountDue,
+        invoiceNumber,
+        dueDate,
+      }));
     }
 
     res.json({

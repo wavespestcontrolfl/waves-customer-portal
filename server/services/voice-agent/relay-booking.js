@@ -203,6 +203,7 @@ async function revalidateSlot({ offer, durationMinutes = null, serviceLines }) {
     // No serviceIdentity — see this function's doc comment (Codex r6 P2):
     // the offer never had one, so the recheck must not manufacture one.
     serviceLines,
+    mintSignedOffers: false,
   });
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);

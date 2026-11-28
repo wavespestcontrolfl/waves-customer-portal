@@ -1833,4 +1833,250 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(verifySpy).not.toHaveBeenCalled();
     });
   });
+
+  describe('P0-1 E.164 phone-length normalization on customer-lookup and createSelfBooking', () => {
+    test('createSelfBooking phone-on-file 409 matches +1 E.164 input via last-10 digits', async () => {
+      const whereRawCalls = [];
+      db.mockImplementation((table) => {
+        if (table === 'schedule_blackout_dates' || table === 'system_settings') {
+          const bb = { where: () => bb, whereBetween: () => bb, first: async () => undefined, select: async () => [] };
+          return bb;
+        }
+        if (table === 'estimates') {
+          return {
+            where: jest.fn().mockReturnThis(),
+            first: jest.fn().mockResolvedValue({ id: EST_ID, source: 'admin', customer_id: null, status: 'sent' }),
+          };
+        }
+        if (table === 'booking_config') return { first: jest.fn().mockResolvedValue({}) };
+        if (table === 'technician_absences') {
+          return { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+        }
+        if (table === 'technicians') {
+          return {
+            where: jest.fn().mockReturnThis(),
+            first: jest.fn().mockResolvedValue({ id: TECH_ID, employment_status: 'active', field_dispatchable: true }),
+          };
+        }
+        if (table === 'customers') {
+          const q = {
+            where: jest.fn().mockReturnThis(),
+            andWhere: jest.fn().mockReturnThis(),
+            whereRaw: jest.fn((sql, bindings) => { whereRawCalls.push({ sql, bindings }); return q; }),
+            first: jest.fn().mockResolvedValue({ id: 'existing-cust-1', phone: '+1 (941) 555-1234' }),
+          };
+          return q;
+        }
+        throw new Error(`unexpected table ${table}`);
+      });
+
+      const sig = mintSlotOfferField(offerPayload());
+      const res = await createSelfBooking(confirmPayload(sig, {
+        new_customer: { lat: LAT, lng: LNG, phone: '+19415551234', first_name: 'Pat', last_name: 'Lee' },
+      }));
+      expect(res).toMatchObject({ ok: false, status: 409 });
+      expect(res.error).toMatch(/already on file/i);
+      expect(whereRawCalls).toContainEqual({
+        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')",
+        bindings: ['9415551234', '19415551234'],
+      });
+
+      // Unsupported non-US / malformed phone formats (including a foreign +44 E.164
+      // number with 10 total digits) are rejected with 400 before identity recovery
+      // or account creation — both for anonymous callers and when customer identity
+      // already resolved (e.g. authenticated/estimate-bound customer).
+      for (const badPhone of ['+449415551234', '+4420123456', '1941555123']) {
+        whereRawCalls.length = 0;
+        const badPhoneRes = await createSelfBooking(confirmPayload(sig, {
+          new_customer: { lat: LAT, lng: LNG, phone: badPhone, first_name: 'Pat', last_name: 'Lee' },
+        }));
+        expect(badPhoneRes).toMatchObject({ ok: false, status: 400 });
+        expect(badPhoneRes.error).toMatch(/valid 10-digit US phone/i);
+        expect(whereRawCalls).toHaveLength(0);
+      }
+
+      const authedBadPhoneRes = await createSelfBooking(confirmPayload(sig, {
+        customer_id: 'cust-resolved',
+        authenticatedCustomerId: 'cust-resolved',
+        new_customer: { lat: LAT, lng: LNG, phone: '+4422345678', first_name: 'Pat', last_name: 'Lee' },
+      }));
+      expect(authedBadPhoneRes).toMatchObject({ ok: false, status: 400 });
+      expect(authedBadPhoneRes.error).toMatch(/valid 10-digit US phone/i);
+    });
+
+    test('ensureCustomerAccount with exactUsPhone: true uses exact US IN matching instead of LIKE suffix', async () => {
+      const { ensureCustomerAccount } = require('../routes/admin-customers');
+      const whereRawCalls = [];
+      const insertedAccounts = [];
+      const trx = jest.fn((table) => {
+        if (table === 'customers') {
+          const q = {
+            whereRaw: jest.fn((sql, bindings) => { whereRawCalls.push({ sql, bindings }); return q; }),
+            whereNull: jest.fn().mockReturnThis(),
+            orderBy: jest.fn().mockReturnThis(),
+            first: jest.fn().mockResolvedValue(null),
+          };
+          return q;
+        }
+        if (table === 'customer_accounts') {
+          return {
+            insert: jest.fn((row) => {
+              insertedAccounts.push(row);
+              return { returning: jest.fn().mockResolvedValue([{ id: 'acct-new', ...row }]) };
+            }),
+          };
+        }
+        throw new Error(`unexpected table ${table}`);
+      });
+      const res = await ensureCustomerAccount(trx, {
+        firstName: 'Pat', lastName: 'Lee', phone: '9415551234', email: null, exactUsPhone: true,
+      });
+      expect(res).toMatchObject({ accountId: 'acct-new', created: true });
+      expect(whereRawCalls).toContainEqual({
+        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')",
+        bindings: ['9415551234', '19415551234'],
+      });
+      expect(insertedAccounts).toHaveLength(1);
+    });
+
+    test('GET /api/booking/customer-lookup accepts +1 E.164 phone, matches property across shared-phone rows, and rejects non-US numbers', async () => {
+      const bookingRouter = require('../routes/booking');
+      const layer = bookingRouter.stack.find((l) => l.route?.path === '/customer-lookup' && l.route.methods.get);
+      const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+      const whereRawCalls = [];
+      db.mockImplementation((table) => {
+        if (table === 'customers') {
+          const q = {
+            whereRaw: jest.fn((sql, bindings) => { whereRawCalls.push({ sql, bindings }); return q; }),
+            where: jest.fn().mockReturnThis(),
+            andWhere: jest.fn().mockReturnThis(),
+            select: jest.fn().mockResolvedValue([
+              {
+                id: 'cust-other-addr',
+                first_name: 'Pat',
+                last_name: 'Lee',
+                email: 'old@example.com',
+                phone: '+19415551234',
+                address_line1: '999 Oak Ave',
+                address_line2: null,
+                city: 'Sarasota',
+                state: 'FL',
+                zip: '34231',
+              },
+              {
+                id: 'cust-e164',
+                first_name: 'Pat',
+                last_name: 'Lee',
+                email: 'pat@example.com',
+                phone: '9415551234',
+                address_line1: '123 Main St',
+                address_line2: null,
+                city: 'Sarasota',
+                state: 'FL',
+                zip: '34231',
+              },
+            ]),
+          };
+          return q;
+        }
+        throw new Error(`unexpected table ${table}`);
+      });
+      let body;
+      const req = { query: { phone: '+19415551234', address: '123 Main St', zip: '34231' } };
+      const res = { json: jest.fn((payload) => { body = payload; return res; }) };
+      await handler(req, res, jest.fn((err) => { if (err) throw err; }));
+      expect(body.customer).toMatchObject({ id: 'cust-e164', first_name: 'Pat', email: 'pat@example.com' });
+      expect(whereRawCalls).toContainEqual({
+        sql: "regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?) AND (TRIM(COALESCE(phone, '')) NOT LIKE '+%' OR TRIM(COALESCE(phone, '')) LIKE '+1%')",
+        bindings: ['9415551234', '19415551234'],
+      });
+
+      // International/malformed numbers (including a 10-digit +44 E.164 number) must not match.
+      for (const badPhone of ['+449415551234', '+4420123456']) {
+        whereRawCalls.length = 0;
+        let badBody;
+        const badReq = { query: { phone: badPhone, address: '123 Main St', zip: '34231' } };
+        const badRes = { json: jest.fn((payload) => { badBody = payload; return badRes; }) };
+        await handler(badReq, badRes, jest.fn((err) => { if (err) throw err; }));
+        expect(badBody).toEqual({ customer: null });
+        expect(whereRawCalls).toHaveLength(0);
+      }
+    });
+
+    test('GET /api/booking/customer-lookup ignores stored foreign E.164 rows, prefers exact apartment unit, and fails closed on ambiguity', async () => {
+      const bookingRouter = require('../routes/booking');
+      const layer = bookingRouter.stack.find((l) => l.route?.path === '/customer-lookup' && l.route.methods.get);
+      const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+      let mockedRows = [];
+      db.mockImplementation((table) => {
+        if (table === 'customers') {
+          const q = {
+            whereRaw: jest.fn().mockReturnThis(),
+            where: jest.fn().mockReturnThis(),
+            andWhere: jest.fn().mockReturnThis(),
+            select: jest.fn().mockImplementation(async () => mockedRows),
+          };
+          return q;
+        }
+        throw new Error(`unexpected table ${table}`);
+      });
+
+      const runLookup = async (query) => {
+        let out;
+        const res = { json: jest.fn((payload) => { out = payload; return res; }) };
+        await handler({ query }, res, jest.fn((err) => { if (err) throw err; }));
+        return out;
+      };
+
+      // 1. A stored foreign E.164 number (+44 2234 5678 = 10 digits) must never match a US phone lookup.
+      mockedRows = [{
+        id: 'cust-foreign',
+        first_name: 'UK',
+        last_name: 'Owner',
+        email: 'uk@example.com',
+        phone: '+4422345678',
+        address_line1: '123 Main St',
+        address_line2: null,
+        city: 'Sarasota',
+        state: 'FL',
+        zip: '34231',
+      }];
+      expect(await runLookup({ phone: '4422345678', address: '123 Main St', zip: '34231' })).toEqual({ customer: null });
+
+      // 2. Shared-phone apartment disambiguation prefers exact unit match over a blank-unit sibling.
+      mockedRows = [
+        {
+          id: 'cust-blank-unit',
+          first_name: 'Pat',
+          last_name: 'Blank',
+          email: 'blank@example.com',
+          phone: '9415551234',
+          address_line1: '123 Main St',
+          address_line2: null,
+          city: 'Sarasota',
+          state: 'FL',
+          zip: '34231',
+        },
+        {
+          id: 'cust-apt-b',
+          first_name: 'Pat',
+          last_name: 'UnitB',
+          email: 'aptb@example.com',
+          phone: '+19415551234',
+          address_line1: '123 Main St',
+          address_line2: 'Apt B',
+          city: 'Sarasota',
+          state: 'FL',
+          zip: '34231',
+        },
+      ];
+      const exactUnit = await runLookup({ phone: '9415551234', address: '123 Main St Apt B', zip: '34231' });
+      expect(exactUnit.customer).toMatchObject({ id: 'cust-apt-b', first_name: 'Pat', last_name: 'UnitB' });
+      expect(exactUnit.customer.address_line2).toBeUndefined();
+      expect(exactUnit.customer.phone).toBeUndefined();
+
+      // 3. Ambiguous shared-phone profiles on the same street fail closed when unit does not uniquely narrow them.
+      expect(await runLookup({ phone: '9415551234', address: '123 Main St', zip: '34231' })).toEqual({ customer: null });
+    });
+  });
 });

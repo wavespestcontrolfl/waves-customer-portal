@@ -228,16 +228,73 @@ async function resolveFindTimeTarget({ serviceId, propertyId, customerId, addres
   };
 }
 
+function firstTrimmed(obj, keys) {
+  for (const key of keys) {
+    const val = obj[key];
+    if (typeof val === 'string' && val.trim()) return val.trim();
+    if (val != null && typeof val !== 'string' && String(val).trim()) return String(val).trim();
+  }
+  return '';
+}
+
+function normalizeServiceEntry(addon) {
+  if (!addon) return null;
+  if (typeof addon === 'string') return addon.trim() ? { service_type: addon.trim() } : null;
+  if (typeof addon !== 'object') return null;
+  const service_type = firstTrimmed(addon, ['service_type', 'serviceType', 'service_name', 'serviceName', 'name']);
+  const service_key = firstTrimmed(addon, ['service_key', 'serviceKey', 'service_key_snapshot']);
+  const service_id = firstTrimmed(addon, ['service_id', 'serviceId']);
+  if (!service_type && !service_key && !service_id) return null;
+  return {
+    ...(service_type ? { service_type } : {}),
+    ...(service_key ? { service_key } : {}),
+    ...(service_id ? { service_id } : {}),
+  };
+}
+
 // The technicians among `techIds` who cannot perform one of the booking's
-// services. A list row books its technician explicitly, past the auto
-// matcher's capability check, so such a technician is never listed.
-async function techsLackingServices(techIds, { serviceType, serviceTypes }) {
-  const wanted = [...new Set([serviceType, ...(Array.isArray(serviceTypes) ? serviceTypes : [])]
-    .filter((t) => typeof t === 'string' && t.trim()))];
+// services (including catalog service_key and add-on services). A list row
+// books its technician explicitly, past the auto matcher's capability check,
+// so such a technician is never listed.
+async function techsLackingServices(techIds, { serviceType, serviceTypes, serviceKey, serviceKeys, serviceAddons }) {
+  const entries = [];
+  const seenTypes = new Set();
+  const seenKeys = new Set();
+  const seenIds = new Set();
+  const addEntry = (rawEntry) => {
+    const entry = normalizeServiceEntry(rawEntry);
+    if (!entry) return;
+    const typeKey = entry.service_type ? entry.service_type.toLowerCase() : '';
+    const keyVal = entry.service_key || '';
+    const idVal = entry.service_id || '';
+    if (keyVal && seenKeys.has(keyVal)) return;
+    if (!keyVal && idVal && seenIds.has(idVal)) return;
+    if (!keyVal && !idVal && typeKey && seenTypes.has(typeKey)) return;
+    if (keyVal) seenKeys.add(keyVal);
+    if (idVal) seenIds.add(idVal);
+    if (typeKey) seenTypes.add(typeKey);
+    entries.push(entry);
+  };
+  if (typeof serviceType === 'string' && serviceType.trim()) {
+    addEntry({ service_type: serviceType.trim(), ...(serviceKey ? { service_key: String(serviceKey) } : {}) });
+  } else if (serviceKey) {
+    addEntry({ service_key: String(serviceKey) });
+  }
+  const keyList = Array.isArray(serviceKeys) ? serviceKeys : [];
+  if (Array.isArray(serviceTypes)) {
+    serviceTypes.forEach((t, idx) => {
+      if (typeof t === 'string' && t.trim()) {
+        addEntry({ service_type: t.trim(), ...(keyList[idx] ? { service_key: String(keyList[idx]) } : {}) });
+      }
+    });
+  }
+  if (Array.isArray(serviceAddons)) {
+    for (const addon of serviceAddons) addEntry(addon);
+  }
   const ids = [...new Set(techIds.filter(Boolean).map(String))];
-  if (!wanted.length || !ids.length) return new Set();
+  if (!entries.length || !ids.length) return new Set();
   const inactive = await require('../services/technician-capabilities').inactiveCapabilitiesForServices(
-    db, ids, wanted.map((service_type) => ({ service_type })),
+    db, ids, entries,
   );
   return new Set(inactive.map((row) => String(row.technician_id)));
 }
@@ -248,18 +305,30 @@ router.get('/ui', (req, res) => {
   res.json({ ok: true, openTimes: openTimesBoxLive() });
 });
 
+function extractBookingServices(body = {}) {
+  const { serviceType, serviceTypes, serviceKey, serviceKeys, serviceAddons } = body;
+  return {
+    serviceType: typeof serviceType === 'string' ? serviceType : undefined,
+    serviceTypes,
+    serviceKey: typeof serviceKey === 'string' ? serviceKey : undefined,
+    serviceKeys,
+    serviceAddons: Array.isArray(serviceAddons) ? serviceAddons : undefined,
+  };
+}
+
 // Scopes this request so a refused Google
 // purchase (a spending limit) is noted for the answer's `road_limit`.
 router.post('/', trackRoadLimit, async (req, res) => {
   try {
     const {
       customerId, address, lat, lng,
-      durationMinutes, serviceType, dateFrom, dateTo,
+      durationMinutes, dateFrom, dateTo,
       topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
-      summary, pickedDate, moveScope, compareTechs, serviceTypes, bestRows,
+      summary, pickedDate, moveScope, compareTechs, bestRows,
     } = req.body || {};
+    const bookingServices = extractBookingServices(req.body || {});
     // Edit appointment's choice on a shared stop: 'separate' = the save
     // splits this service off and moves only it.
     const moveAlone = moveScope === 'separate';
@@ -411,7 +480,9 @@ router.post('/', trackRoadLimit, async (req, res) => {
       lat: target.lat,
       lng: target.lng,
       durationMinutes: Math.max(15, parseInt(durationMinutes, 10) || 60),
-      serviceType: typeof serviceType === 'string' ? serviceType : undefined,
+      serviceType: bookingServices.serviceType,
+      serviceKey: bookingServices.serviceKey,
+      serviceAddons: bookingServices.serviceAddons,
       dateFrom: plan.from,
       dateTo: plan.to,
       technicianId: technicianId || undefined,
@@ -482,13 +553,13 @@ router.post('/', trackRoadLimit, async (req, res) => {
       })
       : undefined;
     if (pickedByTech?.length) {
-      const unqualified = await techsLackingServices(pickedByTech.map((v) => v.technician.id), { serviceType, serviceTypes });
+      const unqualified = await techsLackingServices(pickedByTech.map((v) => v.technician.id), bookingServices);
       pickedByTech = pickedByTech.filter((v) => !unqualified.has(String(v.technician.id)));
     }
     // The open-times list across every route: its rows book their technician
     // the same way (tech pick), so the same check applies to each hour.
     const lacking = plan.openTimes && !technicianId && everyStart?.length
-      ? await techsLackingServices(everyStart.map((s) => s.technician?.id), { serviceType, serviceTypes })
+      ? await techsLackingServices(everyStart.map((s) => s.technician?.id), bookingServices)
       : new Set();
     const every = lacking.size ? everyStart.filter((s) => !lacking.has(String(s.technician?.id))) : everyStart;
 
@@ -504,7 +575,12 @@ router.post('/', trackRoadLimit, async (req, res) => {
     // same way as the chips.
     // The open-times list ranks by rain the same way (find-time-hints.js buildOpenTimes).
     const rainPlan = await bookingRainPlan({
-      bestRows: bestRows === true || plan.openTimes === true, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys, serviceId, moveAlone,
+      bestRows: bestRows === true || plan.openTimes === true,
+      serviceType: bookingServices.serviceType,
+      serviceTypes: bookingServices.serviceTypes,
+      serviceKeys: bookingServices.serviceKeys,
+      serviceId,
+      moveAlone,
     }, db);
     const built = await buildHintSummary(plan, every, {
       rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate, pickedEnd,

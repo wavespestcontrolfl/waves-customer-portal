@@ -2,11 +2,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const nativeMocks = vi.hoisted(() => {
-  const state = { permission: 'prompt', requestResult: 'granted', listeners: {} };
+  const state = { permission: 'prompt', requestResult: 'granted', listeners: {}, platform: 'ios' };
   const PushNotifications = {
     // Capacitor's proxy exposes a callable `then` for every plugin. Resolving
     // a promise with the proxy invokes it and never settles that promise.
     then: vi.fn(),
+    createChannel: vi.fn(async () => {}),
     addListener: vi.fn(async (name, callback) => {
       state.listeners[name] = callback;
       return { remove: vi.fn() };
@@ -25,7 +26,7 @@ const reportVisitCard = vi.hoisted(() => vi.fn());
 
 vi.mock('./platform', () => ({
   isNativeApp: () => true,
-  nativePlatform: () => 'ios',
+  nativePlatform: () => nativeMocks.state.platform,
 }));
 vi.mock('./nativeLinks', () => ({ navigateToCustomerUrl }));
 vi.mock('../lib/reportError', () => ({ reportError }));
@@ -51,11 +52,13 @@ import {
 beforeEach(() => {
   nativeMocks.state.permission = 'prompt';
   nativeMocks.state.requestResult = 'granted';
+  nativeMocks.state.platform = 'ios';
   navigateToCustomerUrl.mockClear();
   reportError.mockClear();
   reportPushOpen.mockReset();
   reportVisitCard.mockReset();
   nativeMocks.PushNotifications.then.mockClear();
+  nativeMocks.PushNotifications.createChannel.mockClear();
   nativeMocks.PushNotifications.checkPermissions.mockClear();
   nativeMocks.PushNotifications.requestPermissions.mockClear();
   nativeMocks.PushNotifications.register.mockClear();
@@ -362,4 +365,214 @@ it('shows the permission popup before listener setup and bounds a stalled bind',
   expect(nativeMocks.PushNotifications.checkPermissions).not.toHaveBeenCalled();
   expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
   expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
+});
+
+it('creates Android notification channels on Android startup using system default sound without touching iOS', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  const channels = nativeMocks.PushNotifications.createChannel.mock.calls.map(([ch]) => ch);
+  expect(channels.map((ch) => ch.id)).toEqual(['waves_service_updates', 'waves_billing', 'waves_messages']);
+  // Capacitor interprets sound:'default' as a missing res/raw/default file; omitting sound inherits Android's system alert sound.
+  for (const ch of channels) {
+    expect(ch.sound).toBeUndefined();
+  }
+});
+
+it('reports Android channels disabled by the user (importance 0) when registering the push token', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  nativeMocks.PushNotifications.listChannels = vi.fn(async () => ({
+    channels: [
+      { id: 'waves_service_updates', importance: 4 },
+      { id: 'waves_billing', importance: 0 },
+      { id: 'waves_messages', importance: 4 },
+    ],
+  }));
+  localStorage.setItem('waves_token', 'jwt-android');
+  api.request.mockResolvedValueOnce({ ok: true, id: 'sub-a1' });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  await nativeMocks.state.listeners.registration({ value: 'fcm-device-token' });
+
+  expect(api.request).toHaveBeenCalledWith(
+    '/push/native-subscribe',
+    expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        platform: 'android',
+        token: 'fcm-device-token',
+        deviceInfo: 'android · WavesApp',
+        disabledChannels: ['waves_billing'],
+      }),
+    }),
+  );
+});
+
+it('omits disabledChannels when listChannels fails so server preserves previously reported mutes', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  nativeMocks.PushNotifications.listChannels = vi.fn(async () => { throw new Error('plugin unavailable'); });
+  localStorage.setItem('waves_token', 'jwt-android');
+  api.request.mockResolvedValueOnce({ ok: true, id: 'sub-a2' });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  await nativeMocks.state.listeners.registration({ value: 'fcm-device-token' });
+
+  expect(api.request).toHaveBeenCalledWith(
+    '/push/native-subscribe',
+    expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        platform: 'android',
+        token: 'fcm-device-token',
+        deviceInfo: 'android · WavesApp',
+      }),
+    }),
+  );
+});
+
+it('aborts an Android registration awaiting listChannels when logout starts so it cannot reactivate pushes', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  let resolveChannels;
+  nativeMocks.PushNotifications.listChannels = vi.fn(() => new Promise((resolve) => { resolveChannels = resolve; }));
+  localStorage.setItem('waves_token', 'jwt-prior-customer');
+  api.request.mockResolvedValue({ ok: true, deactivated: 1 });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+
+  // Registration starts and suspends while reading Android channel importance.
+  const regPromise = nativeMocks.state.listeners.registration({ value: 'fcm-shared-device' });
+  await vi.waitFor(() => expect(nativeMocks.PushNotifications.listChannels).toHaveBeenCalledTimes(1));
+
+  // Logout begins BEFORE listChannels resolves (credentials still live during deactivate).
+  await freshNativePush.deactivateNativePushToken();
+
+  // Now listChannels resolves while logout may still be clearing tokens.
+  resolveChannels({ channels: [{ id: 'waves_billing', importance: 4 }] });
+  await regPromise;
+
+  const paths = api.request.mock.calls.map(([p]) => p);
+  expect(paths).toEqual(['/push/native-unsubscribe']);
+});
+
+it('retries missing Android notification channels on foreground after an initial createChannel failure', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  let failedOnce = false;
+  nativeMocks.PushNotifications.createChannel.mockImplementation(async (ch) => {
+    if (ch.id === 'waves_billing' && !failedOnce) {
+      failedOnce = true;
+      throw new Error('transient os error');
+    }
+  });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  expect(nativeMocks.PushNotifications.createChannel).toHaveBeenCalledTimes(3);
+
+  // Next foreground retries ONLY the channel that failed initially.
+  await freshNativePush.initNativePush();
+  expect(nativeMocks.PushNotifications.createChannel).toHaveBeenCalledTimes(4);
+  expect(nativeMocks.PushNotifications.createChannel.mock.calls[3][0].id).toBe('waves_billing');
+});
+
+it('immediately unsubscribes on logout without blocking on a slow registration, and cleans up if the slow subscribe finishes later', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  nativeMocks.PushNotifications.listChannels = vi.fn(async () => ({ channels: [] }));
+  localStorage.setItem('waves_token', 'jwt-old-customer');
+
+  let resolveSlowSubscribe;
+  api.request.mockImplementation((path) => {
+    if (path === '/push/native-subscribe') {
+      return new Promise((resolve) => { resolveSlowSubscribe = resolve; });
+    }
+    return Promise.resolve({ ok: true, deactivated: 1 });
+  });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+
+  // Registration starts and hangs on /push/native-subscribe.
+  const regPromise = nativeMocks.state.listeners.registration({ value: 'fcm-slow-device' });
+  await vi.waitFor(() => expect(resolveSlowSubscribe).toBeTypeOf('function'));
+
+  // Logout MUST send /push/native-unsubscribe immediately without waiting for the hung subscribe.
+  await freshNativePush.deactivateNativePushToken();
+  localStorage.removeItem('waves_token');
+  expect(api.request.mock.calls.map(([p]) => p)).toEqual(['/push/native-subscribe', '/push/native-unsubscribe']);
+
+  // Later, the slow subscribe finally succeeds — postToken must re-issue unsubscribe with its captured JWT.
+  resolveSlowSubscribe({ ok: true, id: 'sub-late' });
+  await regPromise;
+  await vi.waitFor(() => expect(api.request).toHaveBeenCalledTimes(3));
+  expect(api.request.mock.calls[2][0]).toBe('/push/native-unsubscribe');
+  expect(api.request.mock.calls[2][1].headers).toEqual({ Authorization: 'Bearer jwt-old-customer' });
+});
+
+it('blocks a fresh registration callback arriving during logout for the signing-out session and awaits late cleanup before a quick re-login', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  nativeMocks.PushNotifications.listChannels = vi.fn(async () => ({ channels: [] }));
+  localStorage.setItem('waves_token', 'jwt-session-a');
+
+  let resolveUnsubscribe;
+  api.request.mockImplementation((path) => {
+    if (path === '/push/native-unsubscribe') {
+      return new Promise((resolve) => { resolveUnsubscribe = resolve; });
+    }
+    return Promise.resolve({ ok: true, id: 'sub-1' });
+  });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  // Seed remembered token so deactivateNativePushToken sends /push/native-unsubscribe.
+  localStorage.setItem('waves_native_push_token', 'fcm-shared');
+
+  const logoutPromise = freshNativePush.deactivateNativePushToken();
+  await vi.waitFor(() => expect(resolveUnsubscribe).toBeTypeOf('function'));
+
+  // Registration callback arrives DURING logout while old JWT is still in localStorage.
+  const midLogoutReg = nativeMocks.state.listeners.registration({ value: 'fcm-shared' });
+  resolveUnsubscribe({ ok: true, deactivated: 1 });
+  await logoutPromise;
+  await midLogoutReg;
+
+  // Must NOT have called /push/native-subscribe for the signing-out session.
+  expect(api.request.mock.calls.map(([p]) => p)).toEqual(['/push/native-unsubscribe']);
+});
+
+it('invalidates an Android registration awaiting listChannels when notification permission is revoked', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  let resolveChannels;
+  nativeMocks.PushNotifications.listChannels = vi.fn(() => new Promise((resolve) => { resolveChannels = resolve; }));
+  nativeMocks.PushNotifications.register.mockImplementationOnce(async () => {});
+  nativeMocks.PushNotifications.checkPermissions
+    .mockResolvedValueOnce({ receive: 'granted' })
+    .mockResolvedValueOnce({ receive: 'denied' });
+  localStorage.setItem('waves_token', 'jwt-android');
+  api.request.mockResolvedValue({ ok: true, deactivated: 1 });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+
+  // Registration starts and suspends on listChannels.
+  const regPromise = nativeMocks.state.listeners.registration({ value: 'fcm-revoked-device' });
+  await vi.waitFor(() => expect(nativeMocks.PushNotifications.listChannels).toHaveBeenCalledTimes(1));
+
+  // User turns off notifications in OS Settings and returns to foreground -> initNativePush revokes.
+  await freshNativePush.initNativePush();
+
+  // Now the earlier listChannels resolves; the invalidated registration MUST NOT re-subscribe.
+  resolveChannels({ channels: [{ id: 'waves_billing', importance: 4 }] });
+  await regPromise;
+
+  expect(api.request.mock.calls.map(([p]) => p)).toEqual(['/push/native-unsubscribe']);
 });

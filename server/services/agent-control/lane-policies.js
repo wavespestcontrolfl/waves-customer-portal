@@ -148,13 +148,14 @@ const LANE_RUNTIME = {
   // call (2026-09-26): csr_coach, signal_detector, retention_drafts, ads_advisor and wiki_qa had moved onto the adapter
   // and now pass laneId; wdo_history and tax_advisor wrap their direct SDK call in ledgerCall. All were direct_sdk after
   // the Codex r12 sweep; expense_categorize left that list in #3821.
-  // offline (Codex r14): contact_pass, lead_synopsis, contact_dictation, address_recovery and tech_dictation each
+  // offline (Codex r14): contact_pass, lead_synopsis, address_recovery and tech_dictation each
   // run one provider and degrade to null / a review path / typed notes — no cross-provider answer. lead_synopsis wraps its direct SDK call in ledgerCall.
-  // direct_sdk (Codex r15): contact_dictation and address_recovery are raw Gemini fetches (contact-dictation.js, address-validation/recovery.js).
+  // contact_dictation rides dispatchWithFallback (Gemini -> OpenAI) with laneId: 'contact_dictation' (interactive fallback);
+  // address_recovery is still a raw Gemini fetch (address-validation/recovery.js).
   csr_coach: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null },
   // Spoken staff notes (GATE_CALL_SPOKEN_NOTES): one Haiku read per finished live call that has a trigger phrase on the staff side; a miss saves nothing.
   live_call_spoken_notes: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 5_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
-  contact_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact' },
+  contact_dictation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
   // Speech to text for Fast Complete voice fill: one provider, no stored output (the words live only inside the request).
@@ -167,10 +168,9 @@ const LANE_RUNTIME = {
   // M3 (Codex r19): replies go straight to the caller mid-call; the ordered transcript is written back to call_log on close.
   // ledger 'call': relay-conversation.js records each finished model round through recordStreamedMessage (the stream itself stays outside ledgerCall).
   voice_relay: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
-  // Same runtime shape as voice_relay (same offline direct-SDK stream, same
-  // customer-visible risk, same M3 maturity) — collections-conversation.js
-  // is the other relay implementation the comment above already covers.
-  voice_relay_collections: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
+  // Same runtime shape as voice_relay: streams via Anthropic SDK and records
+  // every finished or failed round via recordStreamedMessage.
+  voice_relay_collections: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'high_stakes_copy', maturity: 'M3', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 900_000 },
   // Optional manual replay judge: no business writes; ordinary call ledger
   // remains available. Event cadence avoids expected silence alarms.
   voice_relay_judge: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
@@ -184,9 +184,10 @@ const LANE_RUNTIME = {
   // so a stalled provider hangs the request past any interactive hard timeout — same condition as chart_builder_image.
   // M3 (Codex r19): pest_id persists pest_identifications and returns the teaser + claim token with no staff review; tree_shrub
   // scores with autoConfirm=true and marks its photos customer-visible on completion.
-  pest_id: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  // pest_id, lawn_assess and tree_shrub record every Gemini and Claude/OpenAI rung via ledgerCall / dispatch.
+  pest_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   // M3 (Codex r20): the public analyzer's fallback path converts analyzePhoto() into report findings it persists and teases without staff review.
-  lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  lawn_assess: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   lawn_visit_assessment: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
   // GATE_LAWN_PAIRED_RECHECK (dark, owner ruling 2026-09-29 round 3b): one background call per visit after the memory freezes;
   // a closed-enum verdict is written into the frozen visit memory and read by the progress engine (no customer text); a miss writes nothing and never fails a render.
@@ -197,7 +198,7 @@ const LANE_RUNTIME = {
   // Owner ruling 2026-09-29: the gated Fable name tie-break (GATE_LAWN_ASSESSMENT_REFEREE, dark). One extra ledger row
   // per call, inside the same technician-reviewed visit as lawn_visit_assessment; a miss leaves Gemini's read standing.
   lawn_assessment_referee: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
-  tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  tree_shrub: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   // Plant photo ID (owner rulings 2026-09-28/29): the plant engine's Gemini -> Sol ladder and its gated
   // Fable name tie-break, both through the llm adapters (one ledger row per call). No runtime caller until
   // the L4 route ships; customer-visible once it does. The referee is dark (GATE_PLANT_ID_REFEREE).
@@ -251,7 +252,8 @@ const LANE_RUNTIME = {
   lawn_diag_vision: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id' },
   lawn_challenge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // M3 (Codex r19): the public lawn analyzer persists customer_summary and returns the teaser without staff review.
-  lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'service_report', maturity: 'M3' },
+  // Both runWriter (OpenAI primary) and runNarrative (Claude fallback) record via ledgerCall under lawn_diag_writer.
+  lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'service_report', maturity: 'M3' },
   // direct_sdk + offline (Codex r18): the WDO treatment-photo path in admin-projects.js is one anthropic.messages.create with no fallback.
   // Both sites (brief + treatment-photo read) ride dispatchWithFallback, so the
   // adapters record them; the direct_sdk mark was stale (S2c follow-up).

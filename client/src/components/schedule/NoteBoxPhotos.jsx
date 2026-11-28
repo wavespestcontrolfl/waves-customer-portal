@@ -10,7 +10,7 @@
 // and save a description on the server (onCaption answers a promise; the
 // editor closes once it resolves true and stays open with the words
 // otherwise).
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Camera, Mic, MicOff } from 'lucide-react';
 import useSpeechDictation from '../../hooks/useSpeechDictation';
 
@@ -115,10 +115,10 @@ export default function NoteBoxPhotos({
           onSave={(caption) => {
             const saved = onCaption(editing, caption);
             if (saved && typeof saved.then === 'function') {
-              saved.then((ok) => { if (ok) close(); });
-            } else {
-              close();
+              return saved.then((ok) => { if (ok) close(); return ok; });
             }
+            close();
+            return null;
           }}
           onCancel={close}
         />
@@ -164,16 +164,34 @@ export default function NoteBoxPhotos({
 // records at a time (an upload recording would hear both).
 function CaptionEditor({ index, initial, disabled, micBusy, palette, button, dictationServiceId, onSave, onCancel }) {
   const [draft, setDraft] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const dictation = useSpeechDictation(
     (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text).slice(0, PHOTO_CAPTION_MAX_CHARS)),
     { uploadServiceId: dictationServiceId },
   );
   // A dictation still opening, recording or transcribing has words on the
   // way: Save waits for them, so a caption never closes on what was said.
+  const locked = disabled || saving;
   const hearing = dictation.starting || dictation.listening || dictation.uploading;
-  const saveOff = disabled || hearing;
+  const saveOff = locked || hearing;
+  const saveLabel = saving ? 'Saving…' : dictation.uploading ? 'Transcribing…' : 'Save description';
   const save = () => {
-    if (!saveOff) onSave(draft.trim());
+    if (saveOff || savingRef.current) return;
+    const pending = onSave(draft.trim());
+    if (pending && typeof pending.then === 'function') {
+      savingRef.current = true;
+      setSaving(true);
+      pending.finally(() => {
+        savingRef.current = false;
+        if (mountedRef.current) setSaving(false);
+      });
+    }
   };
   // Escape cancels the description, never the form around it
   // (useModalFocus leaves an owned Escape to its owner).
@@ -182,7 +200,7 @@ function CaptionEditor({ index, initial, disabled, micBusy, palette, button, dic
       style={{ display: 'grid', gap: 8 }}
       data-modal-escape-owned="true"
       onKeyDown={(e) => {
-        if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+        if (e.key === 'Escape') { e.preventDefault(); if (!saving) onCancel(); }
       }}
     >
       <label style={{ display: 'grid', gap: 4, fontSize: 14, color: palette.text }}>
@@ -190,7 +208,7 @@ function CaptionEditor({ index, initial, disabled, micBusy, palette, button, dic
         <span style={{ position: 'relative', display: 'block' }}>
           <input
             value={draft}
-            disabled={disabled}
+            disabled={locked}
             maxLength={PHOTO_CAPTION_MAX_CHARS}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -214,7 +232,7 @@ function CaptionEditor({ index, initial, disabled, micBusy, palette, button, dic
             <button
               type="button"
               onClick={dictation.toggle}
-              disabled={disabled || dictation.uploading || (micBusy && !dictation.listening)}
+              disabled={locked || dictation.uploading || (micBusy && !dictation.listening)}
               aria-label={dictation.listening ? 'Stop describing by voice' : 'Describe by voice'}
               style={{
                 position: 'absolute',
@@ -240,9 +258,9 @@ function CaptionEditor({ index, initial, disabled, micBusy, palette, button, dic
       </label>
       <div style={{ display: 'flex', gap: 8 }}>
         <button type="button" onClick={save} disabled={saveOff} style={{ ...button, opacity: saveOff ? 0.5 : 1, background: palette.text, color: palette.card, borderColor: palette.text }}>
-          {dictation.uploading ? 'Transcribing…' : 'Save description'}
+          {saveLabel}
         </button>
-        <button type="button" onClick={onCancel} style={{ ...button, cursor: 'pointer', opacity: 1 }}>
+        <button type="button" onClick={onCancel} disabled={saving} style={{ ...button, opacity: saving ? 0.5 : 1 }}>
           Cancel
         </button>
       </div>

@@ -114,7 +114,7 @@ describe('buildCheck', () => {
   });
 
   it.each([
-    ['a pay rate under the Florida minimum wage on the pay date', { tech: { pay_rate: '14.99' } }, /Hourly rate \$14\.99 is below the Florida minimum wage of \$15\.00 on 2026-10-23/],
+    ['a pay rate under the Florida minimum wage for the work week', { tech: { pay_rate: '14.99' } }, /Hourly rate \$14\.99 is below the Florida minimum wage of \$15\.00 on 2026-10-18/],
     ['no pay rate', { tech: { pay_rate: null } }, /No pay rate set/],
     ['a pay rate of zero', { tech: { pay_rate: '0.00' } }, /No pay rate set/],
     ['a pay date in a year with no tables', { payDate: '2028-01-07' }, /No federal withholding tables for 2028/],

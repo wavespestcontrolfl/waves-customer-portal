@@ -513,18 +513,35 @@ describe('bellAllowed decision order', () => {
     bellPolicy.clearOverrideCache();
   });
 
-  test('twilio_failure no longer rings by default (owner ruling 2026-08-28)', async () => {
-    mockTables({ notification_preferences: chainMock([]) });
+  test('twilio_failure rings by default even with system silenced; other system bells stay silent (owner ruling 2026-11-27)', async () => {
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:system', bell_enabled: false }]) });
+    bellPolicy.clearOverrideCache();
     await expect(bellPolicy.bellAllowed({ category: 'system', triggerKey: 'twilio_failure' }))
+      .resolves.toBe(true);
+    await expect(bellPolicy.bellAllowed({ category: 'system', triggerKey: null }))
       .resolves.toBe(false);
+    bellPolicy.clearOverrideCache();
   });
 
-  test('customer communication rings; everything else is silent by default (owner ruling 2026-08-28)', async () => {
+  test('schedule_conflict rings by default via DEFAULT_ON_CATEGORIES and still honors a saved off override (owner ruling 2026-11-27)', async () => {
     mockTables({ notification_preferences: chainMock([]) });
-    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent'], ['schedule', 'reservice_self_booked'], ['payment', 'payment_failed'], ['new_lead', 'relay_hot_lead'], ['service', 'relay_reservice_filed']]) {
+    bellPolicy.clearOverrideCache();
+    expect(bellPolicy.DEFAULT_ON_CATEGORIES.has('schedule_conflict')).toBe(true);
+    await expect(bellPolicy.bellAllowed({ category: 'schedule_conflict' })).resolves.toBe(true);
+
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:schedule_conflict', bell_enabled: false }]) });
+    bellPolicy.clearOverrideCache();
+    await expect(bellPolicy.bellAllowed({ category: 'schedule_conflict' })).resolves.toBe(false);
+    bellPolicy.clearOverrideCache();
+  });
+
+  test('customer communication + owner-approved lanes ring; everything else stays silent by default', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
+    bellPolicy.clearOverrideCache();
+    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent'], ['schedule', 'reservice_self_booked'], ['payment', 'payment_failed'], ['system', 'twilio_failure'], ['schedule_conflict', null], ['new_lead', 'relay_hot_lead'], ['service', 'relay_reservice_filed']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(true);
     }
-    for (const [category, triggerKey] of [['billing', null], ['dispute', null], ['job_application', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
+    for (const [category, triggerKey] of [['billing', null], ['dispute', null], ['job_application', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', null]]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(false);
     }
   });

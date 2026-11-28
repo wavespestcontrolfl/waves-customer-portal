@@ -28,7 +28,7 @@ import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // - Tech assignment dropdown: confirm "any available tech" vs an
 //   explicit assignment doesn't get silently swapped if the
 //   availability API responds slowly.
-import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
+import { Fragment, useCallback, useState, useEffect, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
@@ -1691,8 +1691,66 @@ export function lineIsRetiredSale(line) {
 export const saveFormMoved = (latest, atClick) => Object.keys(atClick).some((field) => latest?.[field] !== atClick[field]);
 const SAVE_FORM_MOVED_TEXT = 'The booking changed while the WDO price was checked — check it, then save again';
 
+function stripSwitchedCustomerLines(lines) {
+  const next = lines.filter((line) => !line.sourceEstimateId && !line.sourcePropertyId);
+  return next.length === lines.length ? lines : next;
+}
+
+function isCreateModalCloseBlocked(saving, quickAddSubmitting, newCallerSubmitting, pendingQuickAddSave) {
+  return Boolean(saving || quickAddSubmitting || newCallerSubmitting || pendingQuickAddSave);
+}
+
+function desktopCloseButtonStyle(disabled) {
+  return {
+    background: 'none',
+    border: 'none',
+    color: D.muted,
+    fontSize: 22,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.45 : 1,
+    minWidth: 48,
+    minHeight: 48,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  };
+}
+
+function defaultAppointmentClockET() {
+  const rounded = new Date();
+  if (rounded.getMinutes() > 0 || rounded.getSeconds() > 0 || rounded.getMilliseconds() > 0) {
+    rounded.setHours(rounded.getHours() + 1);
+  }
+  rounded.setMinutes(0, 0, 0);
+  try {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(rounded).map((p) => [p.type, p.value]),
+    );
+    const hour = parts.hour === '24' ? '00' : parts.hour;
+    return { defaultDate: `${parts.year}-${parts.month}-${parts.day}`, hhmm: `${hour}:00` };
+  } catch {
+    return {
+      defaultDate: `${rounded.getFullYear()}-${String(rounded.getMonth() + 1).padStart(2, '0')}-${String(rounded.getDate()).padStart(2, '0')}`,
+      hhmm: `${String(rounded.getHours()).padStart(2, '0')}:00`,
+    };
+  }
+}
+
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
-  const dialogRef = useModalFocus(true, onClose);
+  const closeBlockedRef = useRef(false);
+  const requestClose = useCallback(() => {
+    if (closeBlockedRef.current) return;
+    onClose?.();
+  }, [onClose]);
+  const dialogRef = useModalFocus(true, requestClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const searchRef = useRef(null);
 
@@ -1755,6 +1813,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [customerSearch, setCustomerSearch] = useState('');
   const [customerResults, setCustomerResults] = useState([]);
   const [customerLoading, setCustomerLoading] = useState(false);
+  const [customerSearchError, setCustomerSearchError] = useState('');
+  const customerSearchSeqRef = useRef(0);
+  const quickAddSubmittingRef = useRef(false);
+  const newCallerSubmittingRef = useRef(false);
   // Only treat a default customer as "selected" when it actually resolves to a
   // customer record. The Estimates page passes a placeholder with id = null for
   // a LEAD's quote (no customer yet); that must leave the customer unselected so
@@ -1965,10 +2027,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setServiceResults([]);
   }, [selectedCustomer?.id]);
 
+  // True once a best-time chip filled the time/tech —
+  // that pair was scored at ONE address and is dropped on a property/customer switch.
+  const appliedSuggestionRef = useRef(false);
+  const resetAddressDerivedState = () => {
+    if (appliedSuggestionRef.current) {
+      // The adopted technician/time was a detour scored at the previous
+      // address; back to auto-assign so the save re-evaluates at this one.
+      appliedSuggestionRef.current = false;
+      setTechMode('auto');
+      setTechId('');
+    }
+  };
+
   // GATE_DAY_ONLY_PROMISE part E: will the chosen customer's 24-hour reminder go out? Rides the schedule-estimates reply below.
   const [bookingReminder24h, setBookingReminder24h] = useState({});
+  const prevCustomerIdForSwitchRef = useRef(selectedCustomer?.id || null);
   useEffect(() => {
     const customerId = selectedCustomer?.id;
+    const prevCustomerId = prevCustomerIdForSwitchRef.current;
+    prevCustomerIdForSwitchRef.current = customerId || null;
     // When booking a SPECIFIC estimate (defaultEstimateId), the estimate — not
     // the customer — is the anchor. The lead-estimate flow creates the customer
     // mid-modal (quick-add), which re-runs this effect; clearing the link there
@@ -1977,6 +2055,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!defaultEstimateId) {
       setLinkedEstimate(null);
       autoAppliedScheduleEstimateRef.current = null;
+      // P1-1: Switching from Customer A to Customer B (or clearing Customer A)
+      // must drop Customer A's estimate/property-derived lines and address-scored
+      // tech so Customer B's own accepted quote can auto-apply cleanly without
+      // inheriting Customer A's quoted lines or route detour.
+      if (prevCustomerId && String(prevCustomerId) !== String(customerId || '')) {
+        setServices(stripSwitchedCustomerLines);
+        resetAddressDerivedState();
+      }
     } else if (linkedEstimate?.customerId && customerId && String(linkedEstimate.customerId) !== String(customerId)) {
       // ...but a pinned quote OWNED by a different customer cannot ride this
       // one: the server refuses it ("Linked estimate belongs to a different
@@ -2047,22 +2133,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return () => { cancelled = true; };
     // Deliberately keyed on the customer and default estimate only.
   }, [selectedCustomer?.id, defaultEstimateId]);
-
-  // True once a best-time chip filled the time/tech —
-  // that pair was scored at ONE address and is dropped on a property switch.
-  const appliedSuggestionRef = useRef(false);
-  // Everything derived from the service address, dropped on EVERY property
-  // change (initial default, operator pick, estimate-driven switch): an
-  // already-applied suggestion.
-  const resetAddressDerivedState = () => {
-    if (appliedSuggestionRef.current) {
-      // The adopted technician/time was a detour scored at the previous
-      // address; back to auto-assign so the save re-evaluates at this one.
-      appliedSuggestionRef.current = false;
-      setTechMode('auto');
-      setTechId('');
-    }
-  };
 
   useEffect(() => {
     const customerId = selectedCustomer?.id;
@@ -2159,18 +2229,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     [scheduleEstimates, propertyPickerActive, selectedPropertyId, bookingPropertyState],
   );
 
-  // Date/Time/Tech state — default to today + next clean hour in local time
-  const _now = new Date();
-  const _ymd = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, '0')}-${String(_now.getDate()).padStart(2, '0')}`;
-  const _rounded = new Date(_now);
-  if (_rounded.getMinutes() > 0 || _rounded.getSeconds() > 0 || _rounded.getMilliseconds() > 0) {
-    _rounded.setHours(_rounded.getHours() + 1);
-  }
-  _rounded.setMinutes(0, 0, 0);
-  const _hhmm = `${String(_rounded.getHours()).padStart(2, '0')}:${String(_rounded.getMinutes()).padStart(2, '0')}`;
-  const _defaultDate = _rounded.toDateString() !== _now.toDateString()
-    ? `${_rounded.getFullYear()}-${String(_rounded.getMonth() + 1).padStart(2, '0')}-${String(_rounded.getDate()).padStart(2, '0')}`
-    : _ymd;
+  // Date/Time/Tech state — default to today + next clean hour in America/New_York (P2)
+  const { defaultDate: _defaultDate, hhmm: _hhmm } = defaultAppointmentClockET();
   const [apptDate, setApptDate] = useState(defaultDate || _defaultDate);
   const [windowStart, setWindowStartValue] = useState(normalizeHourTime(defaultWindowStart || _hhmm, _hhmm));
   // requireTimeChoice (Dispatch "Book it" on a call with no agreed whole-hour time): the form
@@ -3301,14 +3361,25 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   const doSearch = async (val) => {
     setCustomerSearch(val);
-    if (val.length >= 2) {
+    setCustomerSearchError('');
+    const seq = ++customerSearchSeqRef.current;
+    if (val.trim().length >= 2) {
       setCustomerLoading(true);
       try {
         const r = await adminFetch(`/admin/customers?search=${encodeURIComponent(val)}&limit=8&suggest=1`);
+        if (seq !== customerSearchSeqRef.current) return;
         setCustomerResults(r.customers || []);
-      } catch { setCustomerResults([]); }
-      finally { setCustomerLoading(false); }
-    } else { setCustomerResults([]); setCustomerLoading(false); }
+      } catch {
+        if (seq !== customerSearchSeqRef.current) return;
+        setCustomerResults([]);
+        setCustomerSearchError('Could not search customers. Try again.');
+      } finally {
+        if (seq === customerSearchSeqRef.current) setCustomerLoading(false);
+      }
+    } else {
+      setCustomerResults([]);
+      setCustomerLoading(false);
+    }
   };
 
   const selectCustomer = (c) => {
@@ -3330,8 +3401,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Quick add customer. `submitQuickAdd` takes explicit confirm flags.
   // Resolves to the created customer once it is selected, else null.
   const submitQuickAdd = async (extraFlags = {}) => {
-    if (quickAddSubmitting) return null;
+    if (quickAddSubmittingRef.current) return null;
     if (!quickAdd.firstName || !quickAdd.lastName || !quickAdd.phone) return null;
+    quickAddSubmittingRef.current = true;
     setQuickAddSubmitting(true);
     try {
       const r = await adminFetch('/admin/customers/quick-add', {
@@ -3356,6 +3428,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       alert('Failed to add customer: ' + e.message);
       return null;
     } finally {
+      quickAddSubmittingRef.current = false;
       setQuickAddSubmitting(false);
     }
   };
@@ -5502,7 +5575,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const newCallerBlockReasonRef = useRef('');
   newCallerBlockReasonRef.current = newCallerBlockReason;
   const bookNewCaller = async () => {
-    if (!canBookNewCaller) return;
+    if (newCallerSubmittingRef.current || !canBookNewCaller) return;
+    newCallerSubmittingRef.current = true;
     const body = newCallerBody();
     setNewCallerError('');
     setNewCallerSubmitting(true);
@@ -5536,6 +5610,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setNewCallerError(err?.message || 'The visit was not booked. Try again.');
       }
     } finally {
+      newCallerSubmittingRef.current = false;
       if (modalMountedRef.current) setNewCallerSubmitting(false);
     }
   };
@@ -5665,12 +5740,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     </div>
   );
 
+  closeBlockedRef.current = isCreateModalCloseBlocked(saving, quickAddSubmitting, newCallerSubmitting, pendingQuickAddSave);
+
   if (bookedSheet) {
     return <InPersonCardSheet {...bookedSheet} adminFetch={adminFetch} onClose={onClose} />;
   }
 
   return createPortal(
-    <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) requestClose(); }}>
       <div
         ref={dialogRef}
         tabIndex={-1}
@@ -5707,7 +5784,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </h1>
               <button
                 type="button"
-                onClick={onClose}
+                onClick={requestClose}
+                disabled={savingLabel}
                 aria-label="Close"
                 style={{
                   position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
@@ -5736,7 +5814,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         ) : (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
             <h1 id="new-appointment-title" style={{ fontFamily: ROBOTO_STACK, fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
-            <button onClick={onClose} aria-label="Close" style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+            <button type="button" onClick={requestClose} disabled={savingLabel} aria-label="Close" style={desktopCloseButtonStyle(savingLabel)}>✕</button>
           </div>
         )}
         <div style={mobileContentStyle}>
@@ -5799,11 +5877,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       </button>
                       </Fragment>
                     ))}
-                    {!customerLoading && customerResults.length === 0 && (
+                    {!customerLoading && (customerSearchError ? (
+                      <div role="alert" style={{ padding: '14px', textAlign: 'center', color: D.red, fontSize: 13 }}>
+                        {customerSearchError}
+                      </div>
+                    ) : customerResults.length === 0 && (
                       <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
                         No customers match &ldquo;{customerSearch}&rdquo;
                       </div>
-                    )}
+                    ))}
                     {customerLoading && customerResults.length === 0 && (
                       <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
                         Searching…

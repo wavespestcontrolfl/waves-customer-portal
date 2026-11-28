@@ -8581,7 +8581,9 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
     if (!area) return;
     const primary = (body && body.primary) || [];
     const expander = (body && body.expander) || [];
-    const all = primary.concat(expander);
+    const all = (body && Array.isArray(body.calendarSlots) && body.calendarSlots.length)
+      ? body.calendarSlots
+      : primary.concat(expander);
     if (!all.length) {
       area.innerHTML = '<div class="booking-state">No open times then. <a href="tel:${COMPANY.phoneRaw}" style="color:#1B2C5B;font-weight:600">Call ${COMPANY.phone}</a> and we\\'ll fit you in.</div>';
       return;

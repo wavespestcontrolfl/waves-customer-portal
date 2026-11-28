@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FieldDocumentBody, FieldFooter, FieldMasthead, FieldTitle } from '../FieldDocument';
 import { etDatetimeLocalValue } from '../../lib/timezone';
 import DocumentRecord from './DocumentRecord';
@@ -114,6 +114,7 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
   const [name, setName] = useState('');
   const [accepted, setAccepted] = useState(false);
   const [effective, setEffective] = useState(etDatetimeLocalValue(new Date(Date.now() + 5 * 60000)));
+  const effectiveTouched = useRef(false);
   const [issueAccepted, setIssueAccepted] = useState(false);
   const [preview, setPreview] = useState(null);
   const [previewError, setPreviewError] = useState('');
@@ -139,7 +140,11 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
 
   useEffect(() => {
     const reveal = () => {
-      const element = globalThis.document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+      const rawHash = window.location.hash.slice(1);
+      if (!rawHash) return;
+      let targetId = rawHash;
+      try { targetId = decodeURIComponent(rawHash); } catch { /* malformed URI hash */ }
+      const element = globalThis.document.getElementById(targetId);
       if (element?.tagName === 'DETAILS') element.open = true;
       element?.scrollIntoView({ block: 'start' });
     };
@@ -185,10 +190,19 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
     <div className="staff-document-reader-actions waves-field-no-print">
       {needsPreview && (
         <IssueVersionForm
-          version={version} effective={effective} setEffective={setEffective}
-          issueAccepted={issueAccepted} setIssueAccepted={setIssueAccepted}
-          previewReady={previewReady} busy={busy} unresolvedCount={releaseBlockersOf(rendered).length}
-          onRefresh={() => { setIssueAccepted(false); setRefreshPreview(value => value + 1); }}
+          version={version}
+          effective={effective}
+          setEffective={val => { effectiveTouched.current = true; setEffective(val); }}
+          issueAccepted={issueAccepted}
+          setIssueAccepted={setIssueAccepted}
+          previewReady={previewReady}
+          busy={busy}
+          unresolvedCount={releaseBlockersOf(rendered).length}
+          onRefresh={() => {
+            setIssueAccepted(false);
+            if (!effectiveTouched.current) setEffective(etDatetimeLocalValue(new Date(Date.now() + 5 * 60000)));
+            setRefreshPreview(value => value + 1);
+          }}
           onIssue={() => act(async () => { await request(`/${document.id}/issue`, { version_id: version.id, effective_at: effective, preview_hash: preview.preview_hash }); onSaved('Document issued.'); })}
         />
       )}

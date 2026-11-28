@@ -352,6 +352,21 @@ function coveredBy(still, fenced) {
   return (still.with || []).every((id) => held.has(String(id)));
 }
 
+async function assertLockedPreferencesUnchanged(trx, row, config, refuse) {
+  if (config.assertPreferencesUnchanged !== true || !config.prefs || !row || !row.customer_id) return;
+  await trx('customers').where('id', row.customer_id).forShare().first('id');
+  const livePrefs = await preferences.getCustomerSchedulingPreferences(
+    row.customer_id,
+    row.service_type,
+    trx,
+    { serviceId: row.service_id, serviceKey: row.service_key_snapshot, lock: true },
+  );
+  const { preferencesPrint } = require('./proofreader/nightly');
+  if (preferencesPrint(livePrefs) !== preferencesPrint(config.prefs)) {
+    throw refuse(row.id, 'scheduling preferences changed before commit');
+  }
+}
+
 function makeMoveGuard({ service, best, config = {} }) {
   const refuse = (rowId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
@@ -374,6 +389,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     await fenceCustomerCommsForMove(trx, row, refuse);
     // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.
     await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
+    await assertLockedPreferencesUnchanged(trx, row, config, refuse);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination, true);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
     // The destination against the customer's blackout dates and mowing rule as saved now.
@@ -447,11 +463,11 @@ async function fenceCustomerCommsForMove(trx, row, refuse) {
   if (!locked) throw refuse(row.id, 'has a customer reminder or comms send in progress (no move, fail closed)');
 }
 
-// Night told-lock (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move
-// transaction (makeMemberGuard covers the siblings, never the primary).
+// Night told-lock (owner 2026-11-05, "D1 a"; W20 owner 2026-11-26), the moving visit's own
+// told-time check inside its move transaction (makeMemberGuard covers the siblings, never the primary).
 async function assertNotToldOnMove(trx, row, refuse) {
-  const { loadToldVisitIds } = require('./told-visits');
-  const told = await loadToldVisitIds(trx, [row.id], new Date(), { anyPromise: true });
+  const { loadToldVisitIds, NIGHT_FREEZE_ANY_PROMISE } = require('./told-visits');
+  const told = await loadToldVisitIds(trx, [row.id], new Date(), { anyPromise: NIGHT_FREEZE_ANY_PROMISE === true });
   if (told.has(String(row.id)) || told.has(row.id)) throw refuse(row.id, 'has a time the customer was already told (frozen)');
 }
 
@@ -505,10 +521,10 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
   }
 }
 
-// loadReminderFreeze's option object for a night run: lock24h, toldLock and anyPromise. A day-only (or unknown-window)
-// promise freezes a visit too, because the dispatcher moves DATES and a customer told only the day was still told that day.
+// Shared with index.js freezeReadArgs (W20 owner 2026-11-26: day-only confirmations are not frozen).
 function freezeOpts() {
-  return { lock24h: true, toldLock: true, anyPromise: true };
+  const { NIGHT_FREEZE_ANY_PROMISE } = require('./told-visits');
+  return { lock24h: true, toldLock: true, anyPromise: NIGHT_FREEZE_ANY_PROMISE === true };
 }
 
 function reminderWindowText(lock24h) {
@@ -954,107 +970,88 @@ async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, la
  * transaction as well). Throws SLOT_TAKEN (or any other rebooker refusal)
  * exactly as before this lane's retry wrapper was added.
  */
-async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
+// Expected prev/next stop IDs around the moved visit from the arrival search's
+// certified route order, for ordinary optimization moves (forced conflict /
+// unplaced due-date moves always commit regardless of neighbor drift).
+function expectedNeighboursFor(service, best, config) {
+  if (!Array.isArray(best && best.route_order_ids)) return null;
+  const forced = Boolean((config && config.sourceConflict) || (service && service.recurring_dispatch_due_date && !service.window_start));
+  if (forced) return null;
+  const ids = best.route_order_ids;
+  const at = ids.indexOf('__candidate__');
+  if (at < 0) return null;
+  return { prevId: at > 0 ? ids[at - 1] : null, nextId: at < ids.length - 1 ? ids[at + 1] : null };
+}
+
+function placeInRouteOptsFor(service, best, config) {
+  const expectedNeighbours = expectedNeighboursFor(service, best, config);
+  return {
+    autoDispatchPlace: true,
+    startPoints: true,
+    ...(config && Number.isFinite(config.departureMinutes) ? { vanDepartureMin: config.departureMinutes } : {}),
+    ...(expectedNeighbours ? { expectedNeighbours } : {}),
+  };
+}
+
+function applyPlaceInRouteOptions(options, service, best, config) {
+  if (!Array.isArray(best && best.route_order_ids) || !best.route_order_ids.length) return;
+  options.placeInRoute = true;
+  options.placeInRouteOpts = placeInRouteOptsFor(service, best, config);
+}
+
+function buildSingleMoveSpec(service, best, fresh, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
-  // Remaining per-run change budget (orchestrator): a grouped visit whose
-  // LOCKED member count exceeds it is refused inside the unit move before
-  // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.
   if (Number.isFinite(config.remainingChanges)) options.maxUnitSize = Math.max(0, config.remainingChanges);
   const techChanged = Boolean(best.technician_id)
     && String(best.technician_id) !== String(service.technician_id ?? '');
   if (techChanged) {
-    // GATE_AUTO_DISPATCH_KEEP_TECH (config.keepTech): a visit that has a
-    // technician never changes it here; refused before any write (keep-tech.js).
     if (config.keepTech === true && service.technician_id) throw techChangeBlocked();
     options.technicianId = best.technician_id;
   }
-  // Every grouped member re-passes the apply-time hard guards under the
-  // unit mover's stop lock, or the grouped move is refused (codex r13 P1).
   options.memberGuard = makeMemberGuard({ service, best, config, techChanged });
-  // The tapped row itself re-passes the capability fence inside the rebooker's
-  // move transaction (a standalone visit has no member guard).
   options.moveGuard = makeMoveGuard({ service, best, config });
-
   if (fresh.recurring_dispatch_due_date) {
     const drift = routeTiers.daysBetween(toDateStr(fresh.recurring_dispatch_due_date), best.date);
     if (drift == null || Math.abs(drift) > 3) {
       throw Object.assign(new Error('Placement is outside the recurring due date ±3 days'), { code: 'RECURRING_DUE_DATE_LIMIT' });
     }
   }
-
-  // Re-assert the operator opt-out flags + original date INSIDE the rebooker's
-  // move transaction so a lock/reschedule landing between the read above and the
-  // move is caught atomically (0 rows → the rebooker throws 409). These columns
-  // are NOT NULL / always-present, so no null-predicate pitfalls.
   options.expect = {
     auto_dispatch_locked: false,
     auto_dispatch_excluded: false,
-    status: fresh.status, // original status too — a flip to 'rescheduled' fails the match → 409
+    status: fresh.status,
     scheduled_date: toDateStr(fresh.scheduled_date),
-    // Full original placement too, so a same-date window/tech edit by an operator
-    // also fails the atomic match (knex renders null as IS NULL — verified).
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
-    // recurring_dispatch_due_date is pinned with the location fields, null
-    // when absent. A customer confirmation no longer holds a visit (owner
-    // 2026-11-22), so it is not pinned; the customer's own pick or asked time
-    // is re-read on the move transaction (makeMoveGuard).
     ...Object.fromEntries(['recurring_dispatch_due_date', ...LOCATION_FIELDS]
       .map((field) => [field, fresh[field] ?? null])),
   };
-
-  // Canonical move — transactional, overlap-checked, silent. ALWAYS a
-  // single-row move: an optimizer nudge is placement, not intent, so it must
-  // never shift the customer's future series (a -7d nudge would drag every
-  // later visit -7d and compound on the next run) — hard-coded here, not a
-  // caller convention (owner ruling 2026-08-28).
   options.seriesPolicy = 'single';
-  // The visit keeps its own status inside the move transaction (pending
-  // stays pending), so no write after the commit has to put it back.
   options.keepStatus = true;
-  const moveResult = (await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options)) || {};
-  // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit) reports its
-  // members here; a single-row move has none.
-  const visitMove = moveResult.visitMove || {};
+  applyPlaceInRouteOptions(options, service, best, config);
+  return { newWindow, options, techChanged };
+}
 
-  // Stamp auto-dispatch bookkeeping (+ restore pending after a lifecycle
-  // rewind). The pre-move status is the FRESH one (options.expect made it
-  // atomic), not the stale scored status. post_status is what is persisted.
+async function finalizeCommittedSingleMove({ service, best, fresh, runId, config, techChanged, moveResult }) {
+  const visitMove = moveResult.visitMove || {};
   const postStatus = await stampMovedRow({
     id: service.id,
-    // The complete landed slot (end too) is part of the fence.
     slot: { scheduled_date: best.date, window_start: best.start_time, window_end: best.end_time },
     previousStatus: fresh.status,
     landedStatus: moveResult.landedStatus,
     runId,
     label: service.id,
   });
-
-  // A grouped stop that only PARTLY moved (primary committed, a sibling
-  // lost its CAS / hit a conflict) is an explicit failure for auto-dispatch
-  // (codex #3609 r7): no operator consumes the warning here, so the run
-  // must not report the optimization as applied. Bookkeeping for the rows
-  // that DID move still runs below; the throw carries movedCount so the
-  // orchestrator's change count and cap stay honest.
   const partialFailed = visitMove.failed || [];
-
-  // Every grouped sibling went through the same reschedule() with
-  // keepStatus. Apply the identical bookkeeping per moved sibling from its
-  // pre-move and landed status, so a pending recurring sibling keeps
-  // counting toward plan extension (codex #3609 r4). A mover that reports no
-  // landed slot cannot be fenced ⇒ skipped (fail closed, in stampMovedRow).
-  // Best-effort, like the tapped row.
   const siblingMembers = (visitMove.members || []).filter((m) => m && !m.isPrimary && String(m.id) !== String(service.id));
   for (const sib of siblingMembers) {
     await stampMovedRow({
       id: sib.id, slot: sib.landed, previousStatus: sib.previousStatus, landedStatus: sib.landedStatus, runId, label: `grouped sibling ${sib.id}`,
     });
   }
-
   await syncMovedReminders(service, best, moveResult, siblingMembers);
-
   const movedCount = 1 + siblingMembers.length;
   if (partialFailed.length) {
     throw Object.assign(
@@ -1062,30 +1059,112 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
       { code: 'VISIT_PARTIAL_MOVE', movedCount, failedMembers: partialFailed.map((f) => f.id) },
     );
   }
-  // Every member moved but the visit record could not follow (codex r8):
-  // the cleanup seam may detach/dissolve the group against a parent that
-  // still names the old stop — an escalation, not a success.
   if (visitMove.parentRetargetFailed) {
     throw Object.assign(
       new Error(`grouped visit moved but its visit record could not be retargeted — ${(moveResult.warnings || []).join('; ')}`),
       { code: 'VISIT_PARENT_RETARGET_FAILED', movedCount },
     );
   }
-
   let notification = null;
   try {
     notification = await emitAutoDispatchChanged(service, best, runId, config);
   } catch (err) {
     logger.error(`[auto-dispatch] notify hook failed for ${service.id}: ${err.message}`);
   }
-
-  // `applied` is THIS attempt's candidate object — the caller (applyAutoDispatchMove's
-  // retry wrapper, and the orchestrator beyond it) needs to know WHICH
-  // candidate actually landed when a SLOT_TAKEN fallback lands on something
-  // other than the first one tried (Codex pre-push P1).
   return {
     ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification, movedCount, applied: best,
   };
+}
+
+async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
+  const { newWindow, options, techChanged } = buildSingleMoveSpec(service, best, fresh, config);
+  const moveResult = (await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options)) || {};
+  return finalizeCommittedSingleMove({ service, best, fresh, runId, config, techChanged, moveResult });
+}
+
+async function lockPairSchedulingDays(trx, { sourceTechId, sourceDate, bestA, bestB }) {
+  const { acquireOccupancyLock } = require('../scheduling/occupancy');
+  const { lockTechDays } = require('../scheduling/tech-day-lock');
+  const dates = [...new Set([sourceDate, bestA.date, bestB.date].filter(Boolean))].sort();
+  for (const date of dates) await acquireOccupancyLock(trx, date);
+  const techDays = [
+    { techId: sourceTechId, date: sourceDate }, { techId: null, date: sourceDate },
+    { techId: bestA.technician_id || sourceTechId, date: bestA.date }, { techId: null, date: bestA.date },
+    { techId: bestB.technician_id || sourceTechId, date: bestB.date }, { techId: null, date: bestB.date },
+  ];
+  await lockTechDays(trx, techDays);
+}
+
+async function reschedulePairLeg(pair, spec, trx) {
+  try {
+    return (await SmartRebooker.reschedule(
+      pair.service.id, pair.best.date, spec.newWindow, 'auto_dispatch', 'auto_dispatch', { ...spec.options, trx },
+    )) || {};
+  } catch (err) {
+    if (err && typeof err === 'object') err.failedServiceId = String(pair.service.id);
+    throw err;
+  }
+}
+
+/**
+ * Commit both visits of a 2-stop light-day clearing move atomically inside ONE
+ * transaction. Locks all affected dates/tech-days in canonical order, rechecks
+ * exact 2-stop source membership under the lock, and commits both moves or
+ * rolls both back together so a failure on B can never leave A stranded.
+ */
+async function applyAutoDispatchPairMove(pairA, pairB, runId, { sourceTechId, sourceDate, verifySourceInTrx } = {}) {
+  const [liveA, liveB] = await Promise.all([
+    revalidatePlacement(pairA.service),
+    revalidatePlacement(pairB.service),
+  ]);
+  if (!liveA.ok) throw Object.assign(new Error(liveA.reason), { code: liveA.code, failedServiceId: String(pairA.service.id) });
+  if (!liveB.ok) throw Object.assign(new Error(liveB.reason), { code: liveB.code, failedServiceId: String(pairB.service.id) });
+  const specA = buildSingleMoveSpec(pairA.service, pairA.best, liveA.fresh, pairA.config);
+  const specB = buildSingleMoveSpec(pairB.service, pairB.best, liveB.fresh, pairB.config);
+  if (pairA.service.customer_id != null) specA.options.expect.customer_id = pairA.service.customer_id;
+  if (pairB.service.customer_id != null) specB.options.expect.customer_id = pairB.service.customer_id;
+  specA.options.expect.estimated_duration_minutes = pairA.service.estimated_duration_minutes ?? null;
+  specB.options.expect.estimated_duration_minutes = pairB.service.estimated_duration_minutes ?? null;
+
+  const { moveResultA, moveResultB } = await db.transaction(async (trx) => {
+    await lockPairSchedulingDays(trx, { sourceTechId, sourceDate, bestA: pairA.best, bestB: pairB.best });
+    if (typeof verifySourceInTrx === 'function' && !(await verifySourceInTrx(trx))) {
+      throw Object.assign(new Error('Source 2-stop day changed before commit'), { statusCode: 409, code: 'ROUTE_ORDER_CHANGED', failedServiceId: null });
+    }
+    const resA = await reschedulePairLeg(pairA, specA, trx);
+    const resB = await reschedulePairLeg(pairB, specB, trx);
+    return { moveResultA: resA, moveResultB: resB };
+  });
+
+  for (const [label, res] of [[pairA.service.id, moveResultA], [pairB.service.id, moveResultB]]) {
+    if (typeof res.postCommit === 'function') {
+      try { await res.postCommit(); } catch (err) {
+        logger.warn(`[auto-dispatch] pair post-commit cleanup failed for ${label}: ${err.message}`);
+      }
+    }
+  }
+  const finalizePairLeg = async (pair, fresh, spec, moveResult) => {
+    try {
+      return await finalizeCommittedSingleMove({
+        service: pair.service, best: pair.best, fresh, runId, config: pair.config, techChanged: spec.techChanged, moveResult,
+      });
+    } catch (err) {
+      logger.error(`[auto-dispatch] pair post-commit finalization failed for ${pair.service.id}: ${err.message}`);
+      return {
+        ok: true,
+        pre_status: fresh.status,
+        post_status: moveResult.landedStatus || fresh.status,
+        technician_changed: spec.techChanged,
+        notification: null,
+        movedCount: 1,
+        applied: pair.best,
+        postCommitError: err.message,
+      };
+    }
+  };
+  const resultA = await finalizePairLeg(pairA, liveA.fresh, specA, moveResultA);
+  const resultB = await finalizePairLeg(pairB, liveB.fresh, specB, moveResultB);
+  return { ok: true, resultA, resultB };
 }
 
 // The attempts list after a SLOT_TAKEN on attempt `triedCount` (Codex r1):
@@ -1098,19 +1177,28 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
 // `rescore` hook the existing list is kept. Each fresh candidate is recorded
 // in `authorizedBy` against the re-evaluation that offered it, so the
 // caller audits it against THAT evaluation's current placement and scores.
-async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, authorizedBy) {
+function retryAttemptKey(cand, retryCode) {
+  const base = `${cand.date}|${cand.start_time}|${cand.technician_id}`;
+  if (retryCode !== 'ROUTE_ORDER_CHANGED') return base;
+  const ids = Array.isArray(cand.route_order_ids) ? cand.route_order_ids : [];
+  const at = ids.indexOf('__candidate__');
+  const prev = at > 0 ? ids[at - 1] : '';
+  const next = at >= 0 && at < ids.length - 1 ? ids[at + 1] : '';
+  return `${base}|${prev}>${next}`;
+}
+
+async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, authorizedBy, retryCode = 'SLOT_TAKEN') {
   if (typeof config.rescore !== 'function') return attempts;
   const tried = attempts.slice(0, triedCount);
   try {
     const refreshed = await config.rescore();
     if (!refreshed || refreshed.kind !== 'move' || !Array.isArray(refreshed.rankedCandidates)) return tried;
-    const keyOf = (c) => `${c.date}|${c.start_time}|${c.technician_id}`;
-    const triedKeys = new Set(tried.map(keyOf));
-    const fresh = refreshed.rankedCandidates.filter((c) => c && !triedKeys.has(keyOf(c)));
+    const triedKeys = new Set(tried.map((c) => retryAttemptKey(c, retryCode)));
+    const fresh = refreshed.rankedCandidates.filter((c) => c && !triedKeys.has(retryAttemptKey(c, retryCode)));
     fresh.forEach((c) => authorizedBy.set(c, refreshed));
     return [...tried, ...fresh].slice(0, MAX_APPLY_ATTEMPTS);
   } catch (rescoreErr) {
-    logger.warn(`[auto-dispatch] re-evaluation after SLOT_TAKEN failed for ${serviceId}: ${rescoreErr.message}`);
+    logger.warn(`[auto-dispatch] re-evaluation after ${retryCode} failed for ${serviceId}: ${rescoreErr.message}`);
     return tried;
   }
 }
@@ -1190,9 +1278,9 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
       const evaluation = authorizedBy.get(attempts[i]);
       return { ...applied, attempts: i + 1, ...(evaluation ? { evaluation } : {}) };
     } catch (err) {
-      const slotTaken = sharedModelOn && err && err.code === 'SLOT_TAKEN' && i + 1 < MAX_APPLY_ATTEMPTS;
-      if (slotTaken) attempts = await attemptsAfterSlotTaken(config, attempts, i + 1, service.id, authorizedBy);
-      if (!slotTaken || i + 1 >= attempts.length) {
+      const retryable = sharedModelOn && err && (err.code === 'SLOT_TAKEN' || err.code === 'ROUTE_ORDER_CHANGED') && i + 1 < MAX_APPLY_ATTEMPTS;
+      if (retryable) attempts = await attemptsAfterSlotTaken(config, attempts, i + 1, service.id, authorizedBy, err.code);
+      if (!retryable || i + 1 >= attempts.length) {
         // Gate on: name the candidate that actually failed last, for the
         // failure audit. Gate off: the error propagates untouched.
         if (sharedModelOn && err) {
@@ -1200,7 +1288,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
         }
         throw err;
       }
-      logger.warn(`[auto-dispatch] SLOT_TAKEN for ${service.id} on attempt ${i + 1}/${attempts.length} — trying next-best candidate`);
+      logger.warn(`[auto-dispatch] ${err.code} for ${service.id} on attempt ${i + 1}/${attempts.length} — trying next-best candidate`);
     }
   }
   // Unreachable: `attempts` always holds `best`, and the loop returns or throws.
@@ -1294,7 +1382,7 @@ async function previewGroupMove(service, best, config, conn = db) {
 }
 
 module.exports = {
-  applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard, previewGroupMove,
+  applyAutoDispatchMove, applyAutoDispatchPairMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard, previewGroupMove,
   // Exported for direct unit tests of the flex-tier apply-time guards (Codex
   // pre-push P1) — otherwise only reachable through the full member/move
   // guard closures.

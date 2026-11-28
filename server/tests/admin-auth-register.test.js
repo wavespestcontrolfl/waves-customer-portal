@@ -240,5 +240,17 @@ describe('register provisioning hardening', () => {
       expect(res.statusCode).toBe(403);
       expect(inserts).toHaveLength(0);
     });
+
+    test('a non-owner admin cannot register another admin account even with a non-owner email', async () => {
+      const inserts = installDb();
+      const res = await invoke({
+        body: baseBody({ email: 'shadow-admin@wavespestcontrol.com', role: 'admin' }),
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.body.error).toMatch(/owner account/i);
+      expect(inserts).toHaveLength(0);
+    });
   });
 });

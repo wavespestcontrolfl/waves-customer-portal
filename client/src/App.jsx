@@ -480,6 +480,7 @@ const MailHomePage = lazyWithRetry(() => import('./pages/MailHomePage'));
 const AdminTwoStepPage = lazyWithRetry(() => import('./pages/AdminTwoStepPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
+const AdminAccountingPage = lazyWithRetry(() => import('./pages/admin/AccountingPage'));
 const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealthPage'));
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
 const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
@@ -854,6 +855,7 @@ export default function App() {
             <Route path="referrals" element={<Suspense fallback={<RouteFallback label="Loading referrals..." />}><AdminReferralsPage /></Suspense>} />
             <Route path="social-media" element={<Suspense fallback={<RouteFallback label="Loading social media..." />}><AdminSocialMediaPage /></Suspense>} />
             <Route path="tax" element={<Suspense fallback={<RouteFallback label="Loading tax..." />}><AdminTaxPage /></Suspense>} />
+            <Route path="accounting" element={<Suspense fallback={<RouteFallback label="Loading general ledger..." />}><AdminAccountingPage /></Suspense>} />
             <Route path="pricing" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="strategy" />} />
             {/* /admin/lawn-assessments is the consolidated Assessments hub
                 (Lead Magnets tab + Field Assessment tab). The old standalone

@@ -126,8 +126,8 @@ describe('weather-forecast Open-Meteo backup', () => {
     // Each test uses its own point: the shared client keeps its own cache.
     const hours = await getHourlyRainOutlook(27.41, -82.41);
     expect(hours).toEqual([
-      { startTime: '2026-10-07T06:00:00-04:00', rainChance: 10, shortForecast: null, temperatureF: 84.4, windMph: 10.04, windDirection: null, relativeHumidity: null, source: 'open-meteo' },
-      { startTime: '2026-10-07T07:00:00-04:00', rainChance: 70, shortForecast: null, temperatureF: 84.4, windMph: 10.04, windDirection: null, relativeHumidity: null, source: 'open-meteo' },
+      { startTime: '2026-10-07T06:00:00-04:00', rainChance: 10, shortForecast: null, hasThunder: false, temperatureF: 84.4, windMph: 10.04, windGustMph: null, windDirection: null, relativeHumidity: null, source: 'open-meteo' },
+      { startTime: '2026-10-07T07:00:00-04:00', rainChance: 70, shortForecast: null, hasThunder: false, temperatureF: 84.4, windMph: 10.04, windGustMph: null, windDirection: null, relativeHumidity: null, source: 'open-meteo' },
     ]);
     const url = new URL(global.fetch.mock.calls[1][0]);
     expect(url.host).toBe('customer-api.open-meteo.com');
@@ -282,5 +282,75 @@ describe('weather-forecast Open-Meteo backup', () => {
     global.fetch.mockRejectedValue(new Error('down'));
     expect(await getHourlyRainOutlook(27.43, -82.43)).toBeNull();
     expect(await getDailyRainOutlook(27.43, -82.43)).toBeNull();
+  });
+
+  test('Open-Meteo hourly maps WMO 95/96/99 to hasThunder, preserves windGustMph and precipitationIn', async () => {
+    process.env.OPEN_METEO_API_KEY = 'test-key';
+    global.fetch
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          hourly: {
+            time: [BASE, BASE + 3600, BASE + 7200],
+            precipitation_probability: [20, 55, 80],
+            precipitation: [0, 0.15, 0.42],
+            temperature_2m: [82, 86, 84],
+            wind_speed_10m: [8, 15, 22],
+            wind_gusts_10m: [12, 28, 36],
+            weather_code: [3, 95, 99],
+          },
+        }),
+      });
+    const hours = await getHourlyRainOutlook(27.51, -82.51);
+    expect(hours.map((h) => ({ hasThunder: h.hasThunder, windGustMph: h.windGustMph, precipitationIn: h.precipitationIn }))).toEqual([
+      { hasThunder: false, windGustMph: 12, precipitationIn: 0 },
+      { hasThunder: true, windGustMph: 28, precipitationIn: 0.15 },
+      { hasThunder: true, windGustMph: 36, precipitationIn: 0.42 },
+    ]);
+  });
+
+  test('getNwsHourlyRainPatient tries NWS twice, then falls back to Open-Meteo when NWS fails both', async () => {
+    const { getNwsHourlyRainPatient } = require('../services/weather-forecast');
+    process.env.OPEN_METEO_API_KEY = 'test-key';
+    global.fetch
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          hourly: {
+            time: [BASE],
+            precipitation_probability: [75],
+            temperature_2m: [85],
+            wind_speed_10m: [12],
+            wind_gusts_10m: [24],
+            weather_code: [95],
+          },
+        }),
+      });
+    const hours = await getNwsHourlyRainPatient(27.52, -82.52);
+    expect(hours).toHaveLength(1);
+    expect(hours[0]).toMatchObject({ rainChance: 75, hasThunder: true, windGustMph: 24, source: 'open-meteo' });
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  test('concurrent getOpenMeteoHourlyBackup calls share ONE in-flight request while preserving a shorter caller deadline (P1-3)', async () => {
+    const { getOpenMeteoHourlyBackup } = require('../services/weather-forecast');
+    process.env.OPEN_METEO_API_KEY = 'test-key';
+    let releaseOm;
+    global.fetch.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseOm = () => resolve(omOk([65]));
+    }));
+    const p1 = getOpenMeteoHourlyBackup(27.53, -82.53);
+    const p2 = getOpenMeteoHourlyBackup(27.53, -82.53);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(_test._backupInFlight.size).toBe(1);
+    releaseOm();
+    const [h1, h2] = await Promise.all([p1, p2]);
+    expect(h1).toHaveLength(1);
+    expect(h2).toHaveLength(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(_test._backupInFlight.size).toBe(0);
   });
 });

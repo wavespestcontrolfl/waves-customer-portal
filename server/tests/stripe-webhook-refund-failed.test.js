@@ -167,9 +167,30 @@ describe('handleRefundFailed', () => {
       first: jest.fn(async () => paymentRow),
       update: trxUpdate,
     };
+    let trxInvoicesMode = 'default';
     trxInvoices = {
-      where: jest.fn(() => trxInvoices),
-      first: jest.fn(async () => null),
+      where: jest.fn((cond) => {
+        if (typeof cond === 'string' && cond === 'notes') trxInvoicesMode = 'marker';
+        else trxInvoicesMode = 'id';
+        return trxInvoices;
+      }),
+      whereNotIn: jest.fn(() => {
+        trxInvoicesMode = 'marker';
+        return trxInvoices;
+      }),
+      forUpdate: jest.fn(() => trxInvoices),
+      first: jest.fn(async () => {
+        if (trxInvoicesMode === 'marker') return null;
+        const lastDbCall = dbInvoices.first.mock.results[dbInvoices.first.mock.results.length - 1];
+        const found = lastDbCall ? await lastDbCall.value : null;
+        if (!found) return null;
+        return {
+          stripe_charge_id: paymentRow.stripe_charge_id || null,
+          stripe_payment_intent_id: paymentRow.stripe_payment_intent_id || null,
+          ...found,
+          status: 'refunded',
+        };
+      }),
       update: jest.fn().mockResolvedValue(1),
     };
     const trxInvoicesQuery = trxInvoices;
@@ -184,7 +205,7 @@ describe('handleRefundFailed', () => {
       }
       // ...which first locks the fee's series: no setup-fee claim here.
       if (table === 'setup_fee_claims') {
-        const q = { where: () => q, select: async () => [] };
+        const q = { where: () => q, select: async () => [], first: async () => null };
         return q;
       }
       throw new Error(`Unexpected trx table: ${table}`);

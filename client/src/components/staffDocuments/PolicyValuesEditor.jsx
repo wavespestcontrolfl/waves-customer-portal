@@ -29,11 +29,11 @@ export default function PolicyValuesEditor({ onClose, onSaved }) {
   }
   return <form style={box} onSubmit={save}>
     <h2 style={{ fontSize: 20, marginTop: 0 }}>Shared policy values</h2>
-    <p>Issuing changes every published document that uses these values. Each gets a new version; old copies and signatures retain their original terms. All affected documents must pass their ownership and review checks.</p>
+    <p>Issuing creates a new published version of every document bound to these values and requires staff to re-acknowledge affected onboarding policies. Old copies and prior signatures retain their original terms. All affected documents must pass their ownership and review checks.</p>
     {error && <p role="alert">{error}</p>}
     {!revisions ? <p>Loading policy values…</p> : <fieldset disabled={busy} style={{ border: 0, padding: 0, minWidth: 0 }}>
       <Field label="Pay frequency"><select required style={inputStyle} value={values.pay_frequency} onChange={e => setValues({ ...values, pay_frequency: e.target.value })}><option value="">Select approved frequency</option>{['weekly', 'biweekly', 'semi-monthly', 'monthly'].map(value => <option key={value}>{value}</option>)}</select></Field>
-      <Field label="Pay dates and processing rules"><textarea required style={inputStyle} value={values.pay_schedule} onChange={e => setValues({ ...values, pay_schedule: e.target.value })} /></Field>
+      <Field label="Pay dates and processing rules"><textarea required maxLength={475} style={inputStyle} value={values.pay_schedule} onChange={e => setValues({ ...values, pay_schedule: e.target.value })} /></Field>
       <h3>PTO accrual schedule</h3>
       {values.pto_accrual.map((tier, index) => <div key={index} style={{ display: 'grid', gap: 10, gridTemplateColumns: '1fr 1fr auto', alignItems: 'center' }}>
         <Field label="After years of service"><input required type="number" min="0" max="60" step="any" style={inputStyle} value={tier.after_years} onChange={e => setValues({ ...values, pto_accrual: values.pto_accrual.map((item, i) => i === index ? { ...item, after_years: e.target.value } : item) })} /></Field>

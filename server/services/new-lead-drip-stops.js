@@ -30,8 +30,15 @@ const { isOpenLeadRow } = require('./lead-statuses');
 // Only these exist for the runner while GATE_NEW_LEAD_DRIP_STEPS is on (automation-runner.js enabledSequenceSteps), and only
 // these get the stops below: a step the owner adds to new_lead in Admin by hand is neither hidden by the gate nor stopped by it.
 const NEW_LEAD_DRIP_STEP_IDS = Object.freeze(['c215d7f2-8052-47ac-94ac-e5c049ed2ca2', '04ca91c9-8bcf-49f2-95a3-5b6c3a359602']);
+// Extended new_lead drip steps 3 (Day 10) & 4 (Day 21) seeded by migration 20261128031000_new_lead_drip_extended_steps
+// (stored enabled=false; loaded ONLY while GATE_NEW_LEAD_DRIP_EXTENDED is on, guarded by the exact same 7 stop rules).
+const NEW_LEAD_EXTENDED_STEP_IDS = Object.freeze(['6f4b2c10-9e3a-4b18-8c2d-7a1e5f903401', '8d9c4e21-3f5b-4a29-9d3e-1b2c6a804502']);
 
-const isNewLeadDripStep = (templateKey, step) => templateKey === 'new_lead' && NEW_LEAD_DRIP_STEP_IDS.includes(String(step?.id));
+const isGateControlledNewLeadStepId = (id) => (
+  NEW_LEAD_DRIP_STEP_IDS.includes(String(id)) || NEW_LEAD_EXTENDED_STEP_IDS.includes(String(id))
+);
+
+const isNewLeadDripStep = (templateKey, step) => templateKey === 'new_lead' && isGateControlledNewLeadStepId(step?.id);
 
 function enrollmentMeta(enrollment) {
   const raw = enrollment.metadata;
@@ -145,4 +152,4 @@ async function newLeadDripStop(enrollment, recipient = null) {
   }
 }
 
-module.exports = { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS };
+module.exports = { newLeadDripStop, isNewLeadDripStep, isGateControlledNewLeadStepId, NEW_LEAD_DRIP_STEP_IDS, NEW_LEAD_EXTENDED_STEP_IDS };

@@ -1014,6 +1014,7 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
       zoneFunnelCity: zoneInputs.city,
       zoneFunnelCustomerCity: fallbackCity === undefined ? await listFallbackCity(db, customer, address, coords) : fallbackCity,
     } : {}),
+    mintSignedOffers: false,
   });
 }
 

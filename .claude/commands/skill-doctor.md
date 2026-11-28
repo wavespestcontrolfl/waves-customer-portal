@@ -44,7 +44,7 @@ Work the top clusters in order. For each one, before writing anything:
 - Write the rule the way lesson.md says: one behavior to follow, the
   failure it prevents, concrete enough to act on, no round narration, no
   dates, no counts. Match the file's tone and severity scheme.
-- AGENTS.md has a 30 KB budget — run `npm run check:domain-rules` after
+- AGENTS.md has a 26 KB budget — run `npm run check:domain-rules` after
   every AGENTS.md edit and cut narration from the class you are extending
   rather than dropping a rule.
 - Never edit application code or CLAUDE.md rules in this lane. What this

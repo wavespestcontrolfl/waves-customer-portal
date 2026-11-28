@@ -117,19 +117,74 @@ function measurable({ current, config, travel }) {
 // the dry run's "after the overlapping visit moves" row) is held to the
 // floor on real roads like any other ordinary move: failing it, the visit
 // has no such move (Codex #6264 r2).
+// A nonpositive-gain minutes-rule move (admitted when synthetic score drops due
+// to continuity/stability/cluster dilution) MUST have real Google road
+// confirmation; never commit it on an unconfirmed straight-line estimate alone.
+function needsConfirmedRoad(row) {
+  return Boolean(row && row.byMinutes && !(row.gain > 0));
+}
+
+function dropNormalBest(ranked) {
+  const {
+    normalBest: _slot,
+    normalBestScore: _score,
+    normalBestMinutesFloor: _floor,
+    normalBestNeedsRoad: _needs,
+    ...rest
+  } = ranked;
+  return rest;
+}
+
+function settledProjection(ranked, row, road, rowFloor) {
+  return {
+    ...dropNormalBest(ranked),
+    normalBest: { ...row.cand, [ROAD_RESULT]: road || { source: 'estimate' } },
+    normalBestScore: row.sc,
+    ...(row.byMinutes ? { normalBestMinutesFloor: rowFloor } : {}),
+    ...(needsConfirmedRoad(row) ? { normalBestNeedsRoad: true } : {}),
+  };
+}
+
+function projectionRows(ranked) {
+  if (Array.isArray(ranked.normalRankedRows) && ranked.normalRankedRows.length) return ranked.normalRankedRows;
+  return [{
+    cand: ranked.normalBest,
+    sc: ranked.normalBestScore,
+    gain: ranked.normalBestNeedsRoad ? 0 : 1,
+    byMinutes: Boolean(ranked.normalBestMinutesFloor || ranked.normalBestNeedsRoad),
+  }];
+}
+
+function projectionFloor(row, floor, ranked, ctx) {
+  if (!row.byMinutes) return floor;
+  const moveRules = require('./move-rules');
+  return Math.max(floor, ranked.normalBestMinutesFloor || 0, moveRules.minutesRuleFloor(ctx.service, ctx.config));
+}
+
 async function withProjectionChecked(ranked, ctx) {
-  if (!ranked.normalBest) return ranked;
+  const isOverlap = Boolean(ctx.current && ctx.current.conflict && ctx.current.conflict.kind === 'overlap');
+  if (!ranked.normalBest || !isOverlap || ctx.config.mode === 'apply') return ranked;
+  const moveRules = require('./move-rules');
+  const floor = ctx.config.minDayMoveDriveSavingMinutes || 0;
+  const rows = projectionRows(ranked);
+  const top = rows.slice(0, ROAD_CHECK_SLOTS);
+  const fallback = fallbackSlotAfter(rows, moveRules.isSundayDate);
+  let allUnavailable = true;
   try {
-    const road = await roadSaving(ctx.current, ranked.normalBest, ctx.travel);
-    const floor = Math.max(ctx.config.minDayMoveDriveSavingMinutes || 0, ranked.normalBestMinutesFloor || 0);
-    if (road && road.saving_minutes < floor) {
-      const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
-      return rest;
+    for (let i = 0; i < top.length; i += 1) {
+      const row = nextSlotToCheck(top, i, allUnavailable, fallback);
+      const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
+      if (road) allUnavailable = false;
+      const requireRoad = needsConfirmedRoad(row);
+      const rowFloor = projectionFloor(row, floor, ranked, ctx);
+      if ((!road && !requireRoad) || (road && road.saving_minutes >= rowFloor)) {
+        return settledProjection(ranked, row, road, rowFloor);
+      }
     }
-    return { ...ranked, normalBest: { ...ranked.normalBest, [ROAD_RESULT]: road || { source: 'estimate' } } };
+    return dropNormalBest(ranked);
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
-    return ranked;
+    return ranked.normalBestNeedsRoad ? dropNormalBest(ranked) : ranked;
   }
 }
 
@@ -148,6 +203,23 @@ const withRoad = (row, road) => ({ ...row, cand: { ...row.cand, [ROAD_RESULT]: r
  * noMoveReason), with the best slot's numbers in the audit row.
  * Never throws: a failure keeps the model's answer.
  */
+// Find the first score-bar/positive-gain candidate after ROAD_CHECK_SLOTS in
+// the same Sunday tier. Only substituted for the final check slot when every
+// earlier nonpositive-gain slot had no Google road measurement, so normal road
+// runs still check the 3rd-ranked slot while unavailable runs stay bounded at
+// ROAD_CHECK_SLOTS and never approve a fallback unchecked.
+function fallbackSlotAfter(rankedRows, isSundayDate) {
+  const top = (rankedRows || []).slice(0, ROAD_CHECK_SLOTS);
+  if (top.length < ROAD_CHECK_SLOTS || !top.every(needsConfirmedRoad)) return null;
+  const tierSunday = isSundayDate(top[top.length - 1].cand && top[top.length - 1].cand.date);
+  return (rankedRows || []).slice(ROAD_CHECK_SLOTS)
+    .find((row) => !needsConfirmedRoad(row) && isSundayDate(row.cand && row.cand.date) === tierSunday) || null;
+}
+
+function nextSlotToCheck(top, idx, allUnavailable, fallback) {
+  return idx === ROAD_CHECK_SLOTS - 1 && allUnavailable && fallback ? fallback : top[idx];
+}
+
 async function confirmOnRoads(ranked, ctx) {
   const moveRules = require('./move-rules');
   if (!measurable(ctx)) return ranked;
@@ -155,25 +227,39 @@ async function confirmOnRoads(ranked, ctx) {
   if (!ranked.qualifies) return ranked;
   const floor = ctx.config.minDayMoveDriveSavingMinutes;
   const failed = [];
+  const top = (ranked.rankedRows || []).slice(0, ROAD_CHECK_SLOTS);
+  const fallback = fallbackSlotAfter(ranked.rankedRows, moveRules.isSundayDate);
+  let allUnavailable = true;
   try {
-    for (const row of ranked.rankedRows.slice(0, ROAD_CHECK_SLOTS)) {
+    for (let i = 0; i < top.length; i += 1) {
+      const row = nextSlotToCheck(top, i, allUnavailable, fallback);
       const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
-      // No road answer for the best slot: the model's result stands, and the
-      // audit row says the number is the estimate (r2). The fallback list keeps
-      // no unchecked minutes-rule slot below it (apply.js retries take that list).
-      if (!road && !failed.length) return withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
-      const checked = { ...withRoad(row, road), floor: floorOfRow(row, floor, ctx) };
-      if (!road || road.saving_minutes >= checked.floor) return settled(ranked, checked, true);
+      if (road) allUnavailable = false;
+      const requireRoad = needsConfirmedRoad(row);
+      // No road answer for the best slot: for a score-bar or positive-gain slot
+      // the model's result stands (marked as estimate) and unchecked
+      // minutes-rule slots leave the fallback list. A nonpositive-gain
+      // minutes-rule slot requires real road confirmation and continues searching.
+      if (!road && !failed.length && !requireRoad) {
+        return withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
+      }
+      const checked = { ...withRoad(row, road), floor: floorOfRow(row, floor, ctx), unavailable: !road };
+      if ((!road && !requireRoad) || (road && road.saving_minutes >= checked.floor)) return settled(ranked, checked, true);
       failed.push(checked);
     }
     return settled(ranked, failed[0], false);
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
     // A slot roads already refused stays refused: the error only stops the search.
-    // With nothing measured yet, it is the unanswered best slot: the model stands
-    // for it, and no unchecked minutes-rule slot stays in the fallback list.
-    return failed.length ? settled(ranked, failed[0], false)
-      : withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
+    // With nothing measured yet, a nonpositive-gain minutes-rule best slot fails
+    // closed with roadUnavailable; any other best slot stands on the estimate
+    // with unchecked minutes-rule slots removed from the fallback list.
+    if (failed.length) return settled(ranked, failed[0], false);
+    const first = top[0];
+    if (needsConfirmedRoad(first)) {
+      return settled(ranked, { ...withRoad(first, null), floor: floorOfRow(first, floor, ctx), unavailable: true }, false);
+    }
+    return withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
   }
 }
 
@@ -211,11 +297,169 @@ function settled(ranked, row, passed) {
     qualifies: passed,
     byMinutes: passed && !!row.byMinutes,
     roadFailed: !passed,
+    roadUnavailable: !passed && Boolean(row.unavailable),
     // The floor the road check held this slot to (index.js noMoveReason).
     roadFloor: row.floor,
     ranked: passed ? [row.cand] : [],
     rankedRows: passed ? [{ cand: row.cand, sc: row.sc, gain: row.gain, byMinutes: row.byMinutes }] : [],
   };
+}
+
+// Price an array of legs on real Google traffic; returns array of minutes or null if any leg has no Google answer.
+async function lookupGoogleLegs(legs, travel) {
+  if (!Array.isArray(legs) || !legs.length) return null;
+  await travel.preload(legs);
+  const mins = legs.map((leg) => travel.lookup(leg))
+    .map((a) => (a && a.source === 'google_traffic' && Number.isFinite(a.minutes) ? a.minutes : null));
+  return mins.some((m) => m == null) ? null : mins;
+}
+
+async function lookupOneGoogleLeg(leg, travel) {
+  const mins = await lookupGoogleLegs([leg], travel);
+  return mins ? mins[0] : null;
+}
+
+// Real-road drive of a 2-stop source day: home -> first -> second -> home,
+// propagating actual Google travel, window waiting, and service durations so
+// each leg is priced at its real departure minute.
+async function sourceDayRoadDrive(sourceLegs, travel) {
+  if (!sourceLegs || !sourceLegs.date) return null;
+  const { date, home, first, second } = sourceLegs;
+  const dep1 = Number.isFinite(sourceLegs.firstDepMin) ? sourceLegs.firstDepMin : sourceLegs.firstStartMin;
+  if (!Number.isFinite(dep1)) return null;
+  const leg = (from, to, departureMin) => ({ date, from, to, departureMin });
+  const t1 = await lookupOneGoogleLeg(leg(home, first, dep1), travel);
+  if (t1 == null) return null;
+  const start1 = Math.max(dep1 + t1, Number.isFinite(sourceLegs.firstStartMin) ? sourceLegs.firstStartMin : dep1 + t1);
+  const dep2 = Number.isFinite(sourceLegs.firstDurationMin)
+    ? Math.round(start1 + sourceLegs.firstDurationMin)
+    : (Number.isFinite(sourceLegs.interStopDepMin) ? sourceLegs.interStopDepMin : Math.round(start1));
+  const t2 = await lookupOneGoogleLeg(leg(first, second, dep2), travel);
+  if (t2 == null) return null;
+  const start2 = Math.max(dep2 + t2, Number.isFinite(sourceLegs.secondStartMin) ? sourceLegs.secondStartMin : dep2 + t2);
+  const dep3 = Number.isFinite(sourceLegs.secondDurationMin)
+    ? Math.round(start2 + sourceLegs.secondDurationMin)
+    : (Number.isFinite(sourceLegs.returnDepMin) ? sourceLegs.returnDepMin : Math.round(start2));
+  const t3 = await lookupOneGoogleLeg(leg(second, home, dep3), travel);
+  return t3 == null ? null : round2(t1 + t2 + t3);
+}
+
+async function advanceStopsOnRoad(date, startGeo, startDepMin, stops, travel) {
+  let cursorGeo = startGeo;
+  let clock = startDepMin;
+  let total = 0;
+  for (const stop of stops || []) {
+    const mins = await lookupOneGoogleLeg({ date, from: cursorGeo, to: stop.geo, departureMin: clock }, travel);
+    if (mins == null) return null;
+    total += mins;
+    const startAt = Math.max(clock + mins, Number.isFinite(stop.startMin) ? stop.startMin : clock + mins);
+    clock = Math.round(startAt + (Number.isFinite(stop.durationMin) ? stop.durationMin : 0));
+    cursorGeo = stop.geo;
+  }
+  return { total, cursorGeo, clock };
+}
+
+function advanceClockAfterStop(clock, driveMins, stop) {
+  const startAt = Math.max(clock + driveMins, Number.isFinite(stop.startMin) ? stop.startMin : clock + driveMins);
+  return Math.round(startAt + (Number.isFinite(stop.durationMin) ? stop.durationMin : 0));
+}
+
+async function subChainRoadAdded(date, subChain, travel) {
+  if (!subChain || !Number.isFinite(subChain.prevDepMin) || !Number.isFinite(subChain.baseDepMin)) return null;
+  const prop = await advanceStopsOnRoad(date, subChain.prev, subChain.prevDepMin, subChain.proposedStops, travel);
+  if (!prop) return null;
+  const base = await advanceStopsOnRoad(date, subChain.prev, subChain.baseDepMin, subChain.baselineStops, travel);
+  if (!base) return null;
+  let propTotal = prop.total;
+  let baseTotal = base.total;
+  let propGeo = prop.cursorGeo;
+  let baseGeo = base.cursorGeo;
+  let propClock = prop.clock;
+  let baseClock = base.clock;
+  const tail = Array.isArray(subChain.tailStops) ? subChain.tailStops : [];
+  for (let i = 0; i < tail.length; i += 1) {
+    if (i > 0 && propClock === baseClock) return Math.max(0, round2(propTotal - baseTotal));
+    const stop = tail[i];
+    const mp = await lookupOneGoogleLeg({ date, from: propGeo, to: stop.geo, departureMin: propClock }, travel);
+    if (mp == null) return null;
+    const mb = await lookupOneGoogleLeg({ date, from: baseGeo, to: stop.geo, departureMin: baseClock }, travel);
+    if (mb == null) return null;
+    propTotal += mp;
+    baseTotal += mb;
+    propClock = advanceClockAfterStop(propClock, mp, stop);
+    baseClock = advanceClockAfterStop(baseClock, mb, stop);
+    propGeo = stop.geo;
+    baseGeo = stop.geo;
+  }
+  const endGeo = subChain.home || subChain.next;
+  if (tail.length === 0 || propClock !== baseClock) {
+    const mp = await lookupOneGoogleLeg({ date, from: propGeo, to: endGeo, departureMin: propClock }, travel);
+    if (mp == null) return null;
+    const mb = await lookupOneGoogleLeg({ date, from: baseGeo, to: endGeo, departureMin: baseClock }, travel);
+    if (mb == null) return null;
+    propTotal += mp;
+    baseTotal += mb;
+  }
+  return Math.max(0, round2(propTotal - baseTotal));
+}
+
+// Real-road added detour for a pair landing on the same destination day:
+// propagates travel, waiting, and service durations across the affected sub-chain
+// (covering both adjacent and disjoint insertions, including intervening stops).
+async function sameDestRoadAdded(destSpec, travel) {
+  if (!destSpec || !destSpec.date) return null;
+  if (destSpec.subChain) return subChainRoadAdded(destSpec.date, destSpec.subChain, travel);
+  return null;
+}
+
+async function pairAddedRoadDrive(pair, travel) {
+  if (pair.sameDest) return sameDestRoadAdded(pair.sameDestRoadSpec, travel);
+  if (Array.isArray(pair.splitDestRoadSpecs) && pair.splitDestRoadSpecs.length === 2) {
+    const [specA, specB] = pair.splitDestRoadSpecs;
+    const detA = await sameDestRoadAdded(specA, travel);
+    if (detA == null) return null;
+    const detB = await sameDestRoadAdded(specB, travel);
+    return detB == null ? null : round2(detA + detB);
+  }
+  const detA = await roadDetour(pair.slotA, travel);
+  if (detA == null) return null;
+  const detB = await roadDetour(pair.slotB, travel);
+  if (detB == null) return null;
+  return round2(detA + detB);
+}
+
+/**
+ * Confirm the top qualifying 2-stop pair-clearing candidates on real Google roads.
+ * Always requires real Google confirmation (minutes-only pair moves bypass the
+ * per-visit score bar and never commit on an unconfirmed straight-line estimate).
+ */
+async function confirmPairOnRoads(pairs, { sourceLegs, floor, config, travel }) {
+  if (!Array.isArray(pairs) || !pairs.length) return null;
+  if (!config || config.roadCheckEnabled !== true || !travel) return null;
+  try {
+    const sourceDrive = await sourceDayRoadDrive(sourceLegs, travel);
+    if (sourceDrive == null) return null;
+    for (const pair of pairs.slice(0, ROAD_CHECK_SLOTS)) {
+      const addedDrive = await pairAddedRoadDrive(pair, travel);
+      if (addedDrive == null) continue;
+      const saving = round2(sourceDrive - addedDrive);
+      if (saving >= floor) {
+        return {
+          pair,
+          road: {
+            source_drive_minutes: sourceDrive,
+            added_drive_minutes: addedDrive,
+            saving_minutes: saving,
+            source: 'google',
+          },
+        };
+      }
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[auto-dispatch] pair road check failed (fail closed): ${err.message}`);
+    return null;
+  }
 }
 
 // For the run's log line: how many route-matrix legs the run bought.
@@ -229,6 +473,6 @@ function roadResultOf(cand) {
 }
 
 module.exports = {
-  ROAD_LEGS, ROAD_CHECK_SLOTS, roadLegsOf, createRunTravel, deferredToApply, pass1Travel, confirmOnRoads, roadResultOf, spendOf,
-  _internals: { ROAD_RESULT, roadDetour, roadSaving, legsFor, roadCheckBudget },
+  ROAD_LEGS, ROAD_CHECK_SLOTS, roadLegsOf, createRunTravel, deferredToApply, pass1Travel, confirmOnRoads, confirmPairOnRoads, roadResultOf, spendOf,
+  _internals: { ROAD_RESULT, roadDetour, roadSaving, legsFor, roadCheckBudget, sourceDayRoadDrive, sameDestRoadAdded },
 };
