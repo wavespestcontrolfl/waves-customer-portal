@@ -890,30 +890,28 @@ function propertyIdFromCandidateRows(term, rows) {
 }
 
 async function nonSuccessorTermPropertyId(term, conn, rows = null) {
-  if (term?.property_id != null) return String(term.property_id);
-  const rowsCarryProperty = rows === null || (Array.isArray(rows) && rows.some((r) => r?.property_id != null));
+  if (!term) return null;
+  if (term.property_id != null) return String(term.property_id);
+  const canQuery = typeof conn === 'function';
+  const rowsCarryProperty = rows === null || (Array.isArray(rows) && rows.some((r) => r.property_id != null));
   // Prefer the accepted estimate's explicit property BEFORE reading
   // visit-derived stamps so a stale visit stamp at another property never
   // overrides the estimate's own property (Codex pre-push P0). Skip querying
   // estimates only when candidate rows carry no property_id fields at all.
-  if (rowsCarryProperty && term?.source_estimate_id != null && typeof conn === 'function') {
+  if (rowsCarryProperty && term.source_estimate_id != null && canQuery) {
     const est = await conn('estimates').where({ id: term.source_estimate_id }).first('property_id');
     if (est?.property_id != null) return String(est.property_id);
   }
   const fromRows = propertyIdFromCandidateRows(term, rows);
   if (fromRows) return fromRows;
-  if (!rowsCarryProperty || typeof conn !== 'function') return null;
-  if (Array.isArray(rows) && term?.id != null && term?.customer_id != null) {
-    const distinctRowProps = new Set(rows.filter((r) => r?.property_id != null).map((r) => String(r.property_id)));
-    if (distinctRowProps.size > 1) {
-      const linked = await conn('scheduled_services')
-        .where({ customer_id: term.customer_id, annual_prepay_term_id: term.id })
-        .whereNotNull('property_id')
-        .select('property_id');
-      return singleDistinctString((linked || []).map((r) => r.property_id));
-    }
-  }
-  return null;
+  if (!rowsCarryProperty || !canQuery || term.id == null || term.customer_id == null) return null;
+  const distinctRowProps = new Set((rows || []).filter((r) => r.property_id != null).map((r) => String(r.property_id)));
+  if (distinctRowProps.size <= 1) return null;
+  const linked = await conn('scheduled_services')
+    .where({ customer_id: term.customer_id, annual_prepay_term_id: term.id })
+    .whereNotNull('property_id')
+    .select('property_id');
+  return singleDistinctString((linked || []).map((r) => r.property_id));
 }
 
 function addTermLinkedRoots(term, rows, roots) {
