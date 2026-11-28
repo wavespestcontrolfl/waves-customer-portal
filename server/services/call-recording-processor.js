@@ -24480,7 +24480,7 @@ const CallRecordingProcessor = {
       isOutbound: isOutboundCall(call),
       conn: db,
       call,
-      v2ApprovedExtraction,
+      v2DrivesRouting: CALL_EXTRACTION_V2_DRIVES_ROUTING,
       v2CanonicalExtraction,
       transcription,
       callSid,

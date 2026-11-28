@@ -341,12 +341,13 @@ async function propagateCallbackPriceToRecentVisit({
 }
 
 async function syncCallbackPriceIfEligible({
-  scheduledServiceId, appointmentResult, extracted, procToken, customerId, isOutbound, conn, call, v2Extraction, v2ApprovedExtraction, transcription, callSid,
+  scheduledServiceId, appointmentResult, extracted, procToken, customerId, isOutbound, conn, call, v2DrivesRouting = false, v2Extraction, v2CanonicalExtraction, transcription, callSid,
 }) {
   if (scheduledServiceId || appointmentResult?.scheduledServiceId || !customerId || isOutbound) {
     return { updated: false, reason: 'not_eligible' };
   }
-  const effectiveV2 = v2Extraction || v2ApprovedExtraction;
+  if (v2DrivesRouting !== true) return { updated: false, reason: 'v2_routing_disabled' };
+  const effectiveV2 = v2Extraction || v2CanonicalExtraction;
   if (!effectiveV2) return { updated: false, reason: 'no_live_v2_extraction' };
   try {
     return await propagateCallbackPriceToRecentVisit({

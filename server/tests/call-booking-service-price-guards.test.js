@@ -577,7 +577,7 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
       },
     })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
 
-    // Shadow-only v2CanonicalExtraction never propagates callback price
+    // Shadow-only (v2DrivesRouting=false) never propagates callback price
     expect(await syncCallbackPriceIfEligible({
       appointmentResult: { service: null, dateTime: null, scheduleCreated: false, smsSent: false, skippedReason: 'v2_routing_blocked' },
       extracted: { appointment_confirmed: false },
@@ -587,7 +587,7 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
       conn,
       call: { id: 'call-shadow', created_at: new Date('2026-11-28T15:30:00Z') },
       transcription: 'Caller: Confirming the price for the earlier visit is $199.',
-      v2ApprovedExtraction: null,
+      v2DrivesRouting: false,
       v2CanonicalExtraction: {
         scheduling: { status: 'none' },
         service_request: {
@@ -597,7 +597,7 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
           price: { amount_usd: 199, unit: 'one_time', stated_by: 'agent', caller_response: 'accepted', accepted: true },
         },
       },
-    })).toEqual({ updated: false, reason: 'no_live_v2_extraction' });
+    })).toEqual({ updated: false, reason: 'v2_routing_disabled' });
 
     // Unnamed pest_general quote must NOT match a Lawn Pest Knockdown visit
     selectChain.select.mockResolvedValueOnce([{
@@ -681,7 +681,7 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
       },
     })).toEqual({ updated: false, reason: 'no_matching_unpriced_visit' });
 
-    // Unnamed callback with schema enum `pest_general` + explicit prior-visit linkage SUCCEEDS!
+    // Unnamed callback with schema enum `pest_general` + explicit prior-visit linkage SUCCEEDS via canonical V2 in enforce mode!
     selectChain.select.mockResolvedValueOnce([pestVisit]);
     callLockChain.first.mockResolvedValueOnce({ id: 'call-unnamed' });
     const unnamedMatched = await syncCallbackPriceIfEligible({
@@ -694,7 +694,8 @@ describe('PR A1: 60-minute callback price propagation (73b3b240 -> f391c6b9)', (
       call: { id: 'call-unnamed', created_at: new Date('2026-11-28T15:30:00Z'), twilio_call_sid: 'CA999' },
       callSid: 'CA999',
       transcription: 'Caller: Confirming the price for the earlier visit is $199.',
-      v2ApprovedExtraction: {
+      v2DrivesRouting: true,
+      v2CanonicalExtraction: {
         scheduling: { status: 'none' },
         service_request: {
           specific_service_name: null,
