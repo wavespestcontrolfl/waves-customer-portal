@@ -235,21 +235,6 @@ async function isManualChargeAlreadyLogged(lockOutcome, customerId, eventType) {
   return Boolean(existing);
 }
 
-async function claimManualReceiptDelivery(customer, paymentId, lockOutcome) {
-  if (!customer?.phone) return false;
-  if (!lockOutcome?.hasCallerKey || !lockOutcome?.replayed || !paymentId) return true;
-  const q = db('messaging_audit_log');
-  if (!q || typeof q.where !== 'function' || typeof q.whereRaw !== 'function') return !lockOutcome.replayed;
-  const existing = await q
-    .where({ customer_id: customer.id, channel: 'sms', purpose: 'payment_receipt' })
-    .whereRaw(
-      "blocked_code IS NULL AND sent_at IS NOT NULL AND metadata->>'source' = 'admin_manual_charge' AND metadata->>'paymentId' = ?",
-      [String(paymentId)],
-    )
-    .first('id');
-  return !existing;
-}
-
 async function findRecordedCallerKeyedPayment(customerId, idempotencyKey) {
   const q = db('payments');
   if (!q || typeof q.where !== 'function' || typeof q.whereRaw !== 'function') return null;
@@ -632,8 +617,10 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     // An accepted bank payment is not evidence of a completed charge.
     if (payment.status !== 'paid') return res.json(body);
 
-    // Send receipt SMS
-    if (await claimManualReceiptDelivery(customer, payment.id, lockOutcome)) {
+    // Send receipt SMS — pass a stable payment-scoped notificationEventKey so
+    // the downstream atomic billing-text-leg-dedupe claim prevents duplicate
+    // receipts across overlapping or replayed Idempotency-Key requests.
+    if (customer.phone) {
       let receiptUrl = null;
       try {
         const meta = typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata;
@@ -660,6 +647,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           // provenance keeps the receipt on SMS (push routing stays out of
           // operator-triggered sends).
           operatorInitiated: true,
+          notificationEventKey: payment.id ? `admin_manual_charge_receipt:${payment.id}` : undefined,
           body: smsBody,
           metadata: { source: 'admin_manual_charge', paymentId: payment.id || null },
         });
