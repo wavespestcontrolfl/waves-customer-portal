@@ -251,6 +251,15 @@ async function getMyRoute(techId, techName, date, { technician = false } = {}) {
   }
 
   const stops = await query;
+  const { technicianMayReadVisitAccessCodes, redactFreeTextAccessCodes } = require('../technician-visit-scope');
+  const routeStopNotes = (s) => {
+    if (!technician || !techId) return s.notes;
+    const eligible = technicianMayReadVisitAccessCodes(
+      { techRole: 'technician', technicianId: techId },
+      { technician_id: techId, status: s.status, scheduled_date: d },
+    );
+    return eligible ? s.notes : redactFreeTextAccessCodes(s.notes);
+  };
   const completed = stops.filter(s => s.status === 'completed').length;
   const remainingStops = stops.filter(s => !TERMINAL_APPOINTMENT_STATUSES.includes(s.status));
   const nextStop = remainingStops[0];
@@ -266,7 +275,7 @@ async function getMyRoute(techId, techName, date, { technician = false } = {}) {
       address: formatAddress(effectiveServiceAddress(nextStop, nextStop)),
       service_type: nextStop.service_type,
       time_window: nextStop.window_start || null,
-      notes: nextStop.notes,
+      notes: routeStopNotes(nextStop),
       tier: nextStop.waveguard_tier,
       phone: nextStop.phone,
     } : null,
@@ -280,7 +289,7 @@ async function getMyRoute(techId, techName, date, { technician = false } = {}) {
       status: s.status,
       time_window: s.window_start || null,
       tier: s.waveguard_tier,
-      notes: s.notes,
+      notes: routeStopNotes(s),
     })),
   };
 }
@@ -289,6 +298,58 @@ async function getMyRoute(techId, techName, date, { technician = false } = {}) {
 // CRM notes can hold call-derived lines (a second contact named on a call, the
 // caller-ID line quoting the caller); the customer page withholds them from a technician.
 const crmNotesField = (customer, technician) => (technician ? {} : { notes: customer.crm_notes });
+
+function shapeRawPrefsForStop(prefs) {
+  if (!prefs) return null;
+  return {
+    neighborhood_gate_code: prefs.neighborhood_gate_code ?? null,
+    property_gate_code: prefs.property_gate_code ?? null,
+    garage_code: prefs.garage_code ?? null,
+    lockbox_code: prefs.lockbox_code ?? null,
+    parking_notes: prefs.parking_notes ?? null,
+    side_gate_access: prefs.side_gate_access ?? null,
+    access_notes: prefs.access_notes ?? null,
+    pet_count: prefs.pet_count,
+    pet_details: prefs.pet_details,
+    pets_secured_plan: prefs.pets_secured_plan,
+    special_instructions: prefs.special_instructions,
+  };
+}
+
+async function resolveStopPropertyAccess({ customer, todayService, techId, today }) {
+  const {
+    TECH_ACCESS_CODE_ENDED_STATUSES,
+    isVisitLiveForTechAccess,
+    sameHomeForTechVisitPrefs,
+    stripAccessCodePrefs,
+    stripAccessCodesFromBriefBlock,
+  } = require('../technician-visit-scope');
+  const PrevisitBrief = require('../previsit-brief');
+  const visitLive = !!todayService
+    && !TECH_ACCESS_CODE_ENDED_STATUSES.includes(String(todayService.status || 'pending').toLowerCase());
+  const recheckLiveAndHome = async () => {
+    if (!techId) return { ok: true, sameHome: true };
+    const stillLive = await isVisitLiveForTechAccess(db, {
+      visitId: todayService.id, techId, customerId: customer.id, today, visit: todayService,
+    });
+    if (!stillLive) return { ok: false, sameHome: false };
+    const sameHome = await sameHomeForTechVisitPrefs(db, techId, customer.id, todayService, customer);
+    return { ok: true, sameHome };
+  };
+  if (PrevisitBrief.visitFactsGateEnabled()) {
+    if (!todayService || (techId && !visitLive)) return { lostOwnership: false, property: null };
+    const facts = await PrevisitBrief.deterministicVisitFacts(todayService).catch(() => null);
+    const recheck = await recheckLiveAndHome();
+    if (!recheck.ok) return { lostOwnership: true, property: null };
+    const access = facts?.access || null;
+    return { lostOwnership: false, property: recheck.sameHome ? access : stripAccessCodesFromBriefBlock(access) };
+  }
+  if (techId && !visitLive) return { lostOwnership: false, property: null };
+  const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
+  const recheck = techId ? await recheckLiveAndHome() : { ok: true, sameHome: true };
+  if (!recheck.ok) return { lostOwnership: true, property: null };
+  return { lostOwnership: false, property: shapeRawPrefsForStop(recheck.sameHome ? prefs : stripAccessCodePrefs(prefs)) };
+}
 
 async function getStopDetails(input, techId = null, technician = false, forTech = false) {
   // Resolves only a customer this technician is authorized to read; an
@@ -329,60 +390,12 @@ async function getStopDetails(input, techId = null, technician = false, forTech 
   }
 
 
-  // Access/property facts follow the same GATE_VISIT_FACTS policy as the
-  // visit brief (GET /:id/visit-brief): gate on, the shared fail-soft access
-  // block is the source and codes ride a PER-VISIT answer — no live visit
-  // today, no codes. The raw property_preferences dump below (gate off)
-  // predates the gate and bypassed it.
-  let property = null;
-  const PrevisitBrief = require('../previsit-brief');
-  if (PrevisitBrief.visitFactsGateEnabled()) {
-    if (todayService) {
-      let facts = null;
-      try {
-        facts = await PrevisitBrief.deterministicVisitFacts(todayService);
-      } catch { facts = null; }
-      // Re-verify the assignment AFTER the facts queries (same race the
-      // visit-brief route closes, Codex P1 on #3638): they run outside
-      // the scoped fetch above, so a dispatch reassignment during them
-      // would otherwise hand the stale authorized snapshot to the former
-      // technician. Ownership KNOWN lost mid-request → withhold the WHOLE
-      // answer (customer, notes, history), not just the codes — same as
-      // the visit-brief route's post-facts recheck, and INDEPENDENT of
-      // whether the facts read succeeded (a facts failure must not skip
-      // the only post-read ownership check). A facts FAILURE with
-      // ownership intact stays fail-soft: property null, rest intact.
-      // Admin callers (no techId) skip the recheck.
-      if (techId) {
-        const stillOwned = !!(await db('scheduled_services')
-          .where({
-            id: todayService.id,
-            technician_id: techId,
-            customer_id: customer.id,
-            scheduled_date: today,
-          })
-          .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES)
-          .first('id'));
-        if (!stillOwned) return { error: 'Customer not found' };
-      }
-      property = facts ? facts.access : null;
-    }
-  } else {
-    const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
-    property = prefs ? {
-      neighborhood_gate_code: prefs.neighborhood_gate_code,
-      property_gate_code: prefs.property_gate_code,
-      garage_code: prefs.garage_code,
-      lockbox_code: prefs.lockbox_code,
-      parking_notes: prefs.parking_notes,
-      side_gate_access: prefs.side_gate_access,
-      access_notes: prefs.access_notes,
-      pet_count: prefs.pet_count,
-      pet_details: prefs.pet_details,
-      pets_secured_plan: prefs.pets_secured_plan,
-      special_instructions: prefs.special_instructions,
-    } : null;
-  }
+  const accessResult = await resolveStopPropertyAccess({ customer, todayService, techId, today });
+  if (accessResult.lostOwnership) return { error: 'Customer not found' };
+  const { property } = accessResult;
+  const { TECH_ACCESS_CODE_ENDED_STATUSES, redactFreeTextAccessCodes } = require('../technician-visit-scope');
+  const todayServiceLive = !!todayService
+    && !TECH_ACCESS_CODE_ENDED_STATUSES.includes(String(todayService.status || 'pending').toLowerCase());
 
   return {
     customer: {
@@ -399,7 +412,7 @@ async function getStopDetails(input, techId = null, technician = false, forTech 
     todays_service: todayService ? {
       id: todayService.id,
       service_type: todayService.service_type,
-      notes: todayService.notes,
+      notes: (techId && !todayServiceLive) ? redactFreeTextAccessCodes(todayService.notes) : todayService.notes,
       time_window: todayService.window_start,
     } : null,
     recent_history: history.map(h => ({

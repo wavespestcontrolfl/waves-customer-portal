@@ -48,13 +48,17 @@ let mockDatabase;
         contact_phone text, our_endpoint_id text);
       CREATE TABLE messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), conversation_id uuid, channel text,
         direction text, body text, media jsonb DEFAULT '[]', metadata jsonb DEFAULT '{}', message_type text,
-        twilio_sid text, is_read boolean, read_at timestamptz, read_by_admin_user_id uuid,
+        delivery_status text, twilio_sid text, is_read boolean, read_at timestamptz, read_by_admin_user_id uuid,
         updated_at timestamptz, created_at timestamptz DEFAULT now());
       CREATE TABLE sms_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, direction text,
         from_phone text, to_phone text, message_body text, metadata jsonb, created_at timestamptz DEFAULT now(),
         message_type text, status text, twilio_sid text, is_read boolean);
       CREATE TABLE notifications (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), recipient_type text, category text,
         read_at timestamptz, created_at timestamptz DEFAULT now(), link text, metadata jsonb);
+      CREATE TABLE messaging_audit_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), channel text,
+        provider_message_id text, metadata jsonb DEFAULT '{}', created_at timestamptz DEFAULT now());
+      CREATE TABLE message_drafts (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), sms_log_id uuid,
+        intent text, created_at timestamptz DEFAULT now());
     `);
     await MIGRATION.up(mockDatabase);
     tag = require('../services/sms-spam-tag');
@@ -65,27 +69,27 @@ let mockDatabase;
     await mockDatabase.destroy();
   });
   beforeEach(async () => {
-    await mockDatabase.raw('TRUNCATE customers, leads, conversations, messages, sms_log, notifications, sms_spam_senders');
+    await mockDatabase.raw('TRUNCATE customers, leads, conversations, messages, sms_log, notifications, messaging_audit_log, message_drafts, sms_spam_senders');
   });
 
   let sidCounter = 0;
   // One inbound (or outbound) text, in both stores, the way the webhook writes it.
-  async function addText({ from, body = 'hello there', direction = 'inbound', verdict = null, media = [], messageType = null, read = false, customerId = null }) {
+  async function addText({ from, body = 'hello there', direction = 'inbound', verdict = null, media = [], messageType = null, read = false, customerId = null, ourLine = OUR_LINE }) {
     sidCounter += 1;
     const sid = `SM-synthetic-${sidCounter}`;
     const conversationId = randomUUID();
     const metadata = verdict ? { spam_verdict: verdict } : {};
     await mockDatabase('conversations').insert({
       id: conversationId, customer_id: customerId, channel: 'sms',
-      contact_phone: direction === 'inbound' ? from : OUR_LINE, our_endpoint_id: OUR_LINE,
+      contact_phone: direction === 'inbound' ? from : ourLine, our_endpoint_id: ourLine,
     });
     const [message] = await mockDatabase('messages').insert({
       conversation_id: conversationId, channel: 'sms', direction, body, media: JSON.stringify(media),
       metadata: JSON.stringify(metadata), message_type: messageType, twilio_sid: sid, is_read: read,
     }).returning('id');
     await mockDatabase('sms_log').insert({
-      customer_id: customerId, direction, from_phone: direction === 'inbound' ? from : OUR_LINE,
-      to_phone: direction === 'inbound' ? OUR_LINE : from, message_body: body,
+      customer_id: customerId, direction, from_phone: direction === 'inbound' ? from : ourLine,
+      to_phone: direction === 'inbound' ? ourLine : from, message_body: body,
       metadata: JSON.stringify({ ...metadata, media }), message_type: messageType || 'inbound', twilio_sid: sid, is_read: read,
     });
     return { sid, messageId: message.id };
@@ -242,7 +246,106 @@ let mockDatabase;
       const tagged = (await mockDatabase('sms_spam_senders')).length === 1;
       const enforced = await mockDatabase('messages').whereRaw("metadata->'spam_verdict'->>'enforced' = 'true'");
       expect(enforced).toHaveLength(tagged ? 2 : 0);
+      const readMsgs = await mockDatabase('messages').where({ direction: 'inbound', is_read: true });
+      const readLogs = await mockDatabase('sms_log').where({ direction: 'inbound', is_read: true });
+      expect(readMsgs).toHaveLength(tagged ? 2 : 0);
+      expect(readLogs).toHaveLength(tagged ? 2 : 0);
     }
+  });
+
+  test('a late spam-tag read cannot re-mark messages read after untagSpamSender clears the verdict', async () => {
+    const first = await addText({ from: '+19415550100', body: 'Need leads?' });
+    const reads = require('../services/inbound-sms-read');
+    const realMarkRead = reads.markInboundSmsRead;
+    let releaseRead;
+    const holdRead = new Promise((resolve) => { releaseRead = resolve; });
+    let readEntered;
+    const entered = new Promise((resolve) => { readEntered = resolve; });
+    const spy = jest.spyOn(reads, 'markInboundSmsRead').mockImplementationOnce(async (args) => {
+      readEntered();
+      await holdRead;
+      return realMarkRead(args);
+    });
+    try {
+      const tagPromise = tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
+      await entered;
+      // Undo runs after tagSpamSender released the tag lock and selected readIds,
+      // but before markInboundSmsRead runs its locked read update.
+      await tag.untagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
+      releaseRead();
+      await tagPromise;
+      expect((await unified(first.sid)).is_read).toBe(false);
+      expect((await legacy(first.sid)).is_read).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('not spam uses pending-inbox answer rules: excludes other-message drafts, click_followup, and other business lines', async () => {
+    const OTHER_LINE = '+19415550188';
+    const baseTime = Date.now() - 60000;
+    const mkInbound = async (body, ourLine, offsetMs) => {
+      sidCounter += 1;
+      const sid = `SM-rule-${sidCounter}`;
+      const convId = randomUUID();
+      await mockDatabase('conversations').insert({
+        id: convId, channel: 'sms', contact_phone: '+19415550100', our_endpoint_id: ourLine,
+      });
+      const [msg] = await mockDatabase('messages').insert({
+        conversation_id: convId, channel: 'sms', direction: 'inbound', body,
+        media: '[]', metadata: JSON.stringify({ spam_verdict: MODEL_VERDICT }),
+        twilio_sid: sid, is_read: true, created_at: new Date(baseTime + offsetMs),
+      }).returning('*');
+      const [log] = await mockDatabase('sms_log').insert({
+        direction: 'inbound', from_phone: '+19415550100', to_phone: ourLine,
+        message_body: body, metadata: JSON.stringify({ spam_verdict: MODEL_VERDICT }),
+        message_type: 'inbound', twilio_sid: sid, is_read: true, created_at: new Date(baseTime + offsetMs),
+      }).returning('*');
+      return { sid, msg, log, convId };
+    };
+
+    const earlier = await mkInbound('Earlier question', OUR_LINE, 0);
+    const rescuedByOtherDraft = await mkInbound('Rescued after other-message draft', OUR_LINE, 1000);
+    const rescuedByClickFollowup = await mkInbound('Rescued after click followup', OUR_LINE, 2000);
+    const rescuedOtherLine = await mkInbound('Rescued on another line', OTHER_LINE, 3000);
+    const answeredByDirectDraft = await mkInbound('Answered by matching draft', OUR_LINE, 4000);
+
+    // 1. Approved draft answering `earlier` must NOT keep `rescuedByOtherDraft` read.
+    const otherDraftId = randomUUID();
+    await mockDatabase('message_drafts').insert({ id: otherDraftId, sms_log_id: earlier.log.id, intent: 'general_inquiry' });
+    await mockDatabase('messages').insert({
+      conversation_id: rescuedByOtherDraft.convId, channel: 'sms', direction: 'outbound',
+      body: 'Draft for earlier', media: '[]', metadata: JSON.stringify({ draft_id: otherDraftId }),
+      message_type: 'ai_approved', delivery_status: 'delivered', twilio_sid: 'SM-out-other-draft',
+      is_read: true, created_at: new Date(baseTime + 1500),
+    });
+
+    // 2. Click follow-up draft must NOT keep `rescuedByClickFollowup` read.
+    const clickDraftId = randomUUID();
+    await mockDatabase('message_drafts').insert({ id: clickDraftId, sms_log_id: rescuedByClickFollowup.log.id, intent: 'click_followup' });
+    await mockDatabase('messages').insert({
+      conversation_id: rescuedByClickFollowup.convId, channel: 'sms', direction: 'outbound',
+      body: 'Saw you clicked the link', media: '[]', metadata: JSON.stringify({ draft_id: clickDraftId }),
+      message_type: 'manual', delivery_status: 'delivered', twilio_sid: 'SM-out-click',
+      is_read: true, created_at: new Date(baseTime + 2500),
+    });
+
+    // 3. Approved draft answering `answeredByDirectDraft` specifically DOES keep it read.
+    const directDraftId = randomUUID();
+    await mockDatabase('message_drafts').insert({ id: directDraftId, sms_log_id: answeredByDirectDraft.log.id, intent: 'general_inquiry' });
+    await mockDatabase('messages').insert({
+      conversation_id: answeredByDirectDraft.convId, channel: 'sms', direction: 'outbound',
+      body: 'Answering your question directly', media: '[]', metadata: JSON.stringify({ draft_id: directDraftId }),
+      message_type: 'ai_approved', delivery_status: 'delivered', twilio_sid: 'SM-out-direct-draft',
+      is_read: true, created_at: new Date(baseTime + 4500),
+    });
+
+    await tag.untagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
+
+    expect((await unified(rescuedByOtherDraft.sid)).is_read).toBe(false);
+    expect((await unified(rescuedByClickFollowup.sid)).is_read).toBe(false);
+    expect((await unified(rescuedOtherLine.sid)).is_read).toBe(false);
+    expect((await unified(answeredByDirectDraft.sid)).is_read).toBe(true);
   });
 
   // Pre-push audit P1: a tag whose read failed is repaired by the next tag;
@@ -302,11 +405,23 @@ let mockDatabase;
     await expect(tag.tagSpamSender({ number: '', adminUserId: ADMIN })).rejects.toMatchObject({ code: 'INVALID_NUMBER' });
   });
 
-  test('not spam deletes the tag and clears enforced on manual and model verdicts, leaving is_read alone', async () => {
+  test('not spam deletes the tag, clears enforced on manual and model verdicts, and re-opens unanswered inbound rows', async () => {
     const manual = await addText({ from: '+19415550100', body: 'one' });
     const model = await addText({ from: '+19415550100', body: 'two', verdict: MODEL_VERDICT, read: true });
     const shadow = await addText({ from: '+19415550100', body: 'three', verdict: { ...MODEL_VERDICT, enforced: false } });
     const other = await addText({ from: '+19415550101', body: 'four', verdict: MODEL_VERDICT, read: true });
+    // Add an already-answered inbound text from the same sender on a second
+    // business line: Not spam must keep answered rows read while reopening
+    // unanswered ones on the first line.
+    const answered = await addText({ from: '+19415550100', body: 'five', verdict: MODEL_VERDICT, read: true, ourLine: '+19415550188' });
+    const answeredRow = await unified(answered.sid);
+    await mockDatabase('messages').insert({
+      conversation_id: answeredRow.conversation_id, channel: 'sms', direction: 'outbound',
+      body: 'Thanks, we got it', media: '[]', metadata: '{}', message_type: 'manual',
+      delivery_status: 'delivered', twilio_sid: 'SM-outbound-answer', is_read: true,
+      created_at: new Date(new Date(answeredRow.created_at).getTime() + 5000),
+    });
+
     await tag.tagSpamSender({ number: '+19415550100', adminUserId: ADMIN });
     // The tag stamped "one" and "three"; "two" kept its model verdict.
     expect((await unified(manual.sid)).metadata.spam_verdict.method).toBe('manual');
@@ -319,10 +434,12 @@ let mockDatabase;
       for (const row of [await unified(sid), await legacy(sid)]) {
         expect(row.metadata.spam_verdict).toMatchObject({ enforced: false, cleared_by: ADMIN });
         expect(typeof row.metadata.spam_verdict.cleared_at).toBe('string');
-        expect(row.is_read).toBe(true);
+        expect(row.is_read).toBe(false);
       }
       expect(responseFlags({ direction: 'inbound', body: 'x', media: [], metadata: (await unified(sid)).metadata }).spamEnforced).toBe(false);
     }
+    // Answered inbound text stays read.
+    expect((await unified(answered.sid)).is_read).toBe(true);
     // The model's own fields survive the clear.
     expect((await unified(model.sid)).metadata.spam_verdict).toMatchObject({ method: 'model', confidence: 0.95 });
     // A shadow (not enforced) verdict does not count as silenced, so the tag stamped it and the undo cleared it.

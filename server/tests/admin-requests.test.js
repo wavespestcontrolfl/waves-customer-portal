@@ -24,11 +24,11 @@ jest.mock('../middleware/admin-auth', () => ({
     req.techRole = user.role;
     return next();
   },
-  requireTechOrAdmin: (req, res, next) => (
-    ['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'Access denied' })
-  ),
   requireAdmin: (req, res, next) => (
     req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })
+  ),
+  requireTechOrAdmin: (req, res, next) => (
+    ['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'Access denied' })
   ),
 }));
 
@@ -107,7 +107,7 @@ describe('admin requests routes', () => {
     });
   });
 
-  test('rejects technicians on list, photos, and patch before querying the database', async () => {
+  test('rejects technician callers on list, photos, and patch before querying the database', async () => {
     await withServer(async (baseUrl) => {
       const listRes = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer tech' } });
       expect(listRes.status).toBe(403);
@@ -116,10 +116,11 @@ describe('admin requests routes', () => {
       const patchRes = await fetch(`${baseUrl}/admin/requests/${requestId}`, {
         method: 'PATCH',
         headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'resolved' }),
+        body: JSON.stringify({ status: 'acknowledged' }),
       });
       expect(patchRes.status).toBe(403);
       expect(db).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendRequestUpdated).not.toHaveBeenCalled();
     });
   });
 

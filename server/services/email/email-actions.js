@@ -1685,21 +1685,22 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   }
 }
 
-async function handleCustomerRequest(email, classification) {
-  let customer = await db('customers')
-    .whereRaw('LOWER(email) = ?', [normalizeAddress(email.from_address)])
-    .first();
-  const matchedByAddress = !!customer;
+// Unambiguous single-row customer match by exact email (case-insensitive, live
+// customers only). Display names are attacker-typed and never establish
+// customer_id attribution; ambiguous multi-account emails stay unattributed.
+async function findUniqueLiveCustomerByEmail(address) {
+  const normalized = normalizeAddress(address);
+  if (!normalized) return null;
+  const rows = await db('customers')
+    .whereRaw('LOWER(email) = ?', [normalized])
+    .whereNull('deleted_at')
+    .limit(2);
+  if (Array.isArray(rows)) return rows.length === 1 ? rows[0] : null;
+  return rows || null;
+}
 
-  if (!customer && email.from_name) {
-    const parts = email.from_name.split(' ');
-    if (parts.length >= 2) {
-      customer = await db('customers').where(function () {
-        this.whereILike('first_name', `%${parts[0]}%`)
-          .andWhereILike('last_name', `%${parts[parts.length - 1]}%`);
-      }).first();
-    }
-  }
+async function handleCustomerRequest(email, classification) {
+  const customer = await findUniqueLiveCustomerByEmail(email.from_address);
 
   if (customer) {
     await db('emails').where({ id: email.id }).update({
@@ -1707,35 +1708,17 @@ async function handleCustomerRequest(email, classification) {
       auto_action: 'matched_to_customer',
       updated_at: new Date(),
     });
-    // Gmail promotion only for ADDRESS-matched, AUTHENTICATED senders — a
-    // display-name match is attacker-typed text and must not elevate an
-    // unrelated sender's mail.
+    // Gmail promotion only for ADDRESS-matched, AUTHENTICATED senders.
     const { hasAlignedAuth } = require('./inbox-hygiene');
-    if (matchedByAddress && hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
+    if (hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
       try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
     }
   }
-  // Personalization only for ADDRESS-matched customers — a display name is
-  // attacker-typed, and a name-only match must not put a real customer's
-  // first name into a draft addressed to an unrelated sender.
-  await draftReplyForEmail(email, { customer: matchedByAddress ? customer : null, tone: 'service' });
+  await draftReplyForEmail(email, { customer, tone: 'service' });
 }
 
 async function handleComplaint(email, classification) {
-  // Match customer
-  let customer = await db('customers')
-    .whereRaw('LOWER(email) = ?', [normalizeAddress(email.from_address)])
-    .first();
-  const matchedByAddress = !!customer;
-  if (!customer && email.from_name) {
-    const parts = email.from_name.split(' ');
-    if (parts.length >= 2) {
-      customer = await db('customers').where(function () {
-        this.whereILike('first_name', `%${parts[0]}%`)
-          .andWhereILike('last_name', `%${parts[parts.length - 1]}%`);
-      }).first();
-    }
-  }
+  const customer = await findUniqueLiveCustomerByEmail(email.from_address);
 
   await db('emails').where({ id: email.id }).update({
     customer_id: customer?.id || null,
@@ -1745,7 +1728,7 @@ async function handleComplaint(email, classification) {
   });
   // Complaints are always important in Gmail, matched or not.
   try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT', 'STARRED'], []); } catch (e) { /* non-critical */ }
-  await draftReplyForEmail(email, { customer: matchedByAddress ? customer : null, tone: 'complaint' });
+  await draftReplyForEmail(email, { customer, tone: 'complaint' });
 
   try { await gmailClient.modifyLabels(email.gmail_id, ['STARRED'], []); } catch (e) { /* non-critical */ }
 
@@ -1807,6 +1790,8 @@ module.exports = {
   handleSpam,
   emailAutoDraftsEnabled,
   draftReplyForEmail,
+  senderOwnsCustomerFacts,
+  findUniqueLiveCustomerByEmail,
   // Exported for the company facts bank reader test
   __test: { companyFactsSystemEntry },
 };

@@ -35,8 +35,21 @@ jest.mock('../models/db', () => {
   const dbFn = (table) => {
     const b = { _where: {} };
     for (const m of ['whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orderBy', 'limit', 'select', 'returning']) b[m] = () => b;
-    b.where = (w) => { if (w && typeof w === 'object') Object.assign(b._where, w); return b; };
-    b.first = async () => (table === 'technicians' ? state.techs[b._where.id] || null : null);
+    b.where = (w, op, val) => {
+      if (w && typeof w === 'object') Object.assign(b._where, w);
+      else if (val !== undefined) b._where[String(w)] = val;
+      else if (typeof w === 'string' && op !== undefined) b._where[w] = op;
+      return b;
+    };
+    b.first = async () => {
+      if (table === 'technicians') return state.techs[b._where.id] || null;
+      if (table === 'scheduled_services') {
+        const cid = b._where.customer_id || b._where['scheduled_services.customer_id'];
+        return cid === 'cust-1' ? { id: 'svc-1' } : null;
+      }
+      if (table === 'customers') return b._where.id === 'cust-1' ? { id: 'cust-1' } : null;
+      return null;
+    };
     b.update = () => b;
     b.then = (res, rej) => Promise.resolve([]).then(res, rej);
     return b;

@@ -59,7 +59,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/customers/:id/contact-notification-prefs` | admin-customers |
 | GET | `/api/admin/customers/:id/estimates-summary` | admin-customers |
 | GET | `/api/admin/customers/:id/latest-scheduled-service` | admin-customers |
-| POST | `/api/admin/customers/at-address` | admin-customers |
 | GET | `/api/admin/discounts` | admin-discounts |
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |

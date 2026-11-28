@@ -96,8 +96,8 @@ function detectCompetitor(notes) {
 /* ── Urgency indicator logic based on timestamps ──────────── */
 function getUrgencyIndicator(e) {
   // No follow-up badge on a self-serve quote nobody delivered (the list row's
-  // undeliveredSelfServe: plan restart, plan start): the zero-follow-up contract.
-  if (e.undeliveredSelfServe) return null;
+  // undeliveredSelfServe: plan restart, plan start) or an archived estimate.
+  if (e.undeliveredSelfServe || e.archivedAt) return null;
   const now = Date.now();
   const HOUR = 3600000;
 

@@ -4765,6 +4765,8 @@ router.get('/', async (req, res, next) => {
           // to the proposal builder, not the normal edit flow (revise
           // rejects COMMERCIAL rows).
           isCommercialProposal: isCommercialProposalData(estData),
+          fixedBidValidity: hasFixedBidValidity(e),
+          repricePending: siblingRepricePending(e),
           confirmedAppointment,
           automation: leadEstimateAutomationSummary(estData),
           // Estimator-engine drafts keep their operator review material in

@@ -31,12 +31,13 @@ jest.mock('../services/home-note', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const { etDateString } = require('../utils/datetime-et');
 const scheduleRouter = require('../routes/admin-schedule');
 const customersRouter = require('../routes/admin-customers');
 
 const VISIT = '0a1b2c3d-0000-4000-8000-000000000001';
 const CUSTOMER = '0a1b2c3d-0000-4000-8000-000000000002';
-const VISIT_ROW = { id: VISIT, customer_id: CUSTOMER };
+const VISIT_ROW = { id: VISIT, customer_id: CUSTOMER, technician_id: 'tech-1', scheduled_date: etDateString(), status: 'pending' };
 
 // ownsVisit false = the visit exists but is not the technician's (or was reassigned): the ownership-scoped read finds nothing.
 // ownsVisit as an array answers the visit reads in order (the fetch, then each later recheck), so a test can reassign the
@@ -46,14 +47,17 @@ function stubDb({ ownsVisit = true, customerExists = true } = {}) {
   const table = (name) => {
     const q = {};
     q.where = jest.fn(() => q);
+    q.whereIn = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.whereNull = jest.fn(() => q);
     q.forShare = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     q.modify = jest.fn((cb) => { cb(q); return q; });
+    q.select = jest.fn(async () => []);
     q.first = jest.fn(async () => {
       if (name === 'customers') return customerExists ? { id: CUSTOMER } : undefined;
+      if (name === 'property_preferences') return undefined;
       const owns = visitReads.length > 1 ? visitReads.shift() : visitReads[0];
       if (owns === 'throw') throw new Error('connection lost');
       return owns ? VISIT_ROW : undefined;
@@ -102,6 +106,39 @@ describe('visit routes', () => {
       expect(row).toEqual(VISIT_ROW);
       expect(input).toMatchObject({ body: 'New text', expectedNoteId: NOTE.id, expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER, actor: { type: 'technician', id: 'tech-1' } });
       expect(opts.conn).toBeDefined();
+    });
+  });
+
+  test('an assigned technician outside the visit window gets editable:false on GET and 403 read-only on PUT (no stale 409 note leak)', async () => {
+    const table = (name) => {
+      const q = {};
+      q.where = jest.fn(() => q);
+      q.whereNotIn = jest.fn(() => q);
+      q.whereNull = jest.fn(() => q);
+      q.forShare = jest.fn(() => q);
+      q.whereNot = jest.fn(() => q);
+      q.forUpdate = jest.fn(() => q);
+      q.modify = jest.fn((cb) => { cb(q); return q; });
+      q.first = jest.fn(async () => {
+        if (name === 'customers') return { id: CUSTOMER };
+        if (name === 'property_preferences') return { property_gate_code: '4321' };
+        return { ...VISIT_ROW, status: 'completed', scheduled_date: '2026-10-01' };
+      });
+      return q;
+    };
+    db.mockImplementation(table);
+    db.transaction.mockImplementation(async (cb) => cb(table));
+    mockRead.mockResolvedValueOnce({ status: 200, note: { ...NOTE, body: 'Side gate 4321.' }, editable: true, customerId: CUSTOMER });
+    await withServer(async (base) => {
+      const read = await call(base, `/admin/schedule/${VISIT}/home-note`, { role: 'technician' });
+      expect(read.status).toBe(200);
+      const readBody = await read.json();
+      expect(readBody.editable).toBe(false);
+      expect(readBody.note.body).not.toContain('4321');
+      const put = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: readBody.note.body, expectedNoteId: NOTE.id, expectedRevision: 1 } });
+      expect(put.status).toBe(403);
+      expect(await put.json()).toMatchObject({ code: 'home_note_read_only' });
+      expect(mockSave).not.toHaveBeenCalled();
     });
   });
 

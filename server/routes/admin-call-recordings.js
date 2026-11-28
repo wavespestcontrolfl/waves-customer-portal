@@ -15,12 +15,11 @@ const { canonicalTwilioRecordingUrl } = require('../utils/twilio-recording-url')
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// GATE_TECH_LOGIN_PRIVACY: a technician login sees and changes promises and
-// reschedule proposals only for customers on its own route, by the same rule
-// the Communications routes use (technician-visit-scope). Admin logins and
-// the gate being off are unscoped.
+// A technician login unconditionally sees and changes promises and reschedule
+// proposals only for customers on its own route, by the same rule the
+// Communications routes use (technician-visit-scope). Admin logins stay unscoped.
 function techPrivacyOn(req) {
-  return req.techRole === 'technician' && Boolean(require('../config/feature-gates').techLoginPrivacyLive?.());
+  return req.techRole === 'technician';
 }
 // Subquery of the technician's own customer ids, or null when unscoped.
 function ownCustomerScope(req) {
@@ -377,8 +376,8 @@ router.get('/commitments/sms', async (req, res, next) => {
     // OWN channel is off still fails closed with a clear reason from
     // applySmsCommitmentUpdate's per-row gate check (coordinator correction
     // #4, 2026-09-29 — email asks/staff promises share this list+close path).
-    res.json({ commitments: rows.slice(0, pageLimit), enabled: smsCommitmentsEnabled() || gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS'),
-      has_more: hasMore, next_offset: hasMore ? pageOffset + pageLimit : null });
+    res.json(forStaffRole(req, { commitments: rows.slice(0, pageLimit), enabled: smsCommitmentsEnabled() || gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS'),
+      has_more: hasMore, next_offset: hasMore ? pageOffset + pageLimit : null }));
   } catch (err) { next(err); }
 });
 
@@ -387,7 +386,12 @@ router.get('/proposals', async (req, res, next) => {
     const offset = Number(req.query.offset || 0);
     if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
     const proposals = require('../services/call-reschedule-proposals');
-    const rows = await proposals.listProposals(db, { limit: 101, offset, customerScope: ownCustomerScope(req) });
+    const rows = await proposals.listProposals(db, {
+      limit: 101,
+      offset,
+      customerScope: ownCustomerScope(req),
+      ...(techPrivacyOn(req) ? { technicianId: req.technicianId } : {}),
+    });
     res.json(forStaffRole(req, { proposals: rows.slice(0, 100), has_more: rows.length > 100, next_offset: offset + 100 }));
   } catch (err) { next(err); }
 });
@@ -403,6 +407,7 @@ router.post('/proposals/:id/preview', async (req, res, next) => {
     const p = await require('../services/call-reschedule-proposals').previewProposal(db, req.params.id, {
       visitId: req.body?.visit_id,
       actor: { techRole: req.techRole, technicianId: req.technicianId },
+      ...(techPrivacyOn(req) ? { technicianId: req.technicianId } : {}),
     });
     // Render the identity covered by this hash, not a potentially older list row.
     const { id, status, scheduled_date, current_window, service_name, property } = p.selected;
@@ -430,6 +435,7 @@ router.post('/proposals/:id/apply', async (req, res, next) => {
       actor: { techRole: req.techRole, technicianId: req.technicianId },
       visitId: req.body.visit_id,
       previewHash: req.body.preview_hash,
+      ...(techPrivacyOn(req) ? { technicianId: req.technicianId } : {}),
     });
     res.json(result);
   } catch (err) {
