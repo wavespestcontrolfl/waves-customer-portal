@@ -1272,7 +1272,8 @@ describe('executeMerge', () => {
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true }))
       .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
     const lockCall = trx.raw.mock.calls.find(([sql, bindings]) => /pg_advisory_xact_lock\(hashtext\(\?\)\)/.test(String(sql))
-      && !String(bindings?.[0]).startsWith('customer-dunning:'));
+      && !String(bindings?.[0]).startsWith('customer-dunning:')
+      && bindings?.[0] !== 'multi_home_family_members:changes');
     expect(lockCall).toBeTruthy();
     expect(lockCall[1]).toEqual([`customer-duplicate-pair:${[WINNER, LOSER].sort().join(':')}`]);
   });
@@ -1509,9 +1510,9 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
-  it('registers multi_home_family_members with the rowwise drop-collisions handler (both duplicates linked: the winner keeps its family)', () => {
-    const { UNIQUE_COLLISION_HANDLERS, repointRowwiseDropCollisions } = dedupe._test;
-    expect(UNIQUE_COLLISION_HANDLERS.multi_home_family_members).toBe(repointRowwiseDropCollisions);
+  it('registers multi_home_family_members with repointMultiHomeFamilyMembers (writes audit_log and cleans 1-member orphan)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointMultiHomeFamilyMembers } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.multi_home_family_members).toBe(repointMultiHomeFamilyMembers);
   });
 
   describe("service_contact_notification_prefs (contact login): a shared contact's choices fold most-restrictively, never abort (codex #6363 r12)", () => {
