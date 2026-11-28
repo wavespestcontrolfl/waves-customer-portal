@@ -285,14 +285,18 @@ const post = (baseUrl, path, body = {}) => fetch(`${baseUrl}/api/admin/customers
   body: JSON.stringify(body),
 });
 
-// Fresh commits carry the MANDATORY approval fingerprint: fetch it from a
-// preview of the same body first. Repair retries are exempt (open
-// acceptance) and pre-gate refusals never reach the requirement, so those
-// call sites may keep plain post.
+// Fresh commits carry the MANDATORY approval fingerprint + cancellation reason:
+// fetch the fingerprint from a preview of the same body first, defaulting
+// reasonCode to 'price' unless the test explicitly passes one (including null).
+// Repair retries are exempt (open acceptance) and pre-gate refusals never reach
+// the requirement, so those call sites may keep plain post.
 const postCancel = async (baseUrl, body = {}) => {
-  const p = await post(baseUrl, '/cancel-plan/preview', body);
+  const payload = Object.prototype.hasOwnProperty.call(body, 'reasonCode')
+    ? body
+    : { reasonCode: 'price', ...body };
+  const p = await post(baseUrl, '/cancel-plan/preview', payload);
   const fp = p.status === 200 ? (await p.json()).previewFingerprint : null;
-  return post(baseUrl, '/cancel-plan', { ...body, ...(fp ? { previewFingerprint: fp } : {}) });
+  return post(baseUrl, '/cancel-plan', { ...payload, ...(fp ? { previewFingerprint: fp } : {}) });
 };
 
 const PROCESSED = { ok: true, cancelledCount: 3, recurrenceStopped: 2, churned: true, errors: [], keptThrough: null, lateFeeWaived: false };
@@ -521,10 +525,30 @@ describe('POST /:id/cancel-plan', () => {
     // The fee window lapsing between preview and commit changes the
     // approved facts — the fingerprint refuses.
     mockHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 35 });
-    const res = await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint });
+    const res = await post(baseUrl, '/cancel-plan', { reasonCode: 'price', previewFingerprint: preview.previewFingerprint });
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe('preview_changed');
     buildCancellationImpact.mockResolvedValue(base);
+  }));
+
+  test('a fresh commit without reasonCode is refused (400 reason_code_required) while a repair retry stays unblocked', () => withServer(async (baseUrl) => {
+    const missing = await postCancel(baseUrl, { reasonCode: null });
+    expect(missing.status).toBe(400);
+    expect((await missing.json()).code).toBe('reason_code_required');
+    expect(mockState.inserted).toBeUndefined();
+    expect(mockProcess).not.toHaveBeenCalled();
+
+    // Seed an unfinished acceptance from an earlier run; a retry with no reasonCode
+    // still runs and inherits the accepted reason.
+    mockState.service_requests = [{
+      id: 'req-retry-reason', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel plan (Admin (user admin-1))', description: '',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true, effectiveDate: 'now', prepayDisposition: null, reasonCode: 'moving_or_property_change', note: 'moving out' } }),
+      created_at: new Date(), updated_at: new Date(),
+    }];
+    const retry = await post(baseUrl, '/cancel-plan', { reasonCode: null });
+    expect(retry.status).toBe(200);
+    expect(mockProcess).toHaveBeenCalledWith(expect.objectContaining({ churnReasonCode: 'moving_or_property_change' }));
   }));
 
   test('an unverifiable fee lane reads fee-may-apply — never a silent no-fee preview', () => withServer(async (baseUrl) => {
@@ -1456,7 +1480,7 @@ describe('POST /:id/cancel-plan', () => {
     // A recurrence occurrence minted mid-flight: the straggler re-sweep
     // pulls a 4th visit the operator never saw.
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 4 });
-    const body = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
+    const body = await (await post(baseUrl, '/cancel-plan', { reasonCode: 'price', previewFingerprint: preview.previewFingerprint })).json();
     expect(body.processed).toBe(true);
     expect(body.errors).toContain('visits_pulled_beyond_preview');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -1465,18 +1489,18 @@ describe('POST /:id/cancel-plan', () => {
     // minted occurrence is swept keeps the count equal — the swapped id is
     // still an exception.
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 3, cancelledIds: ['v1', 'v2', 'vNEW'] });
-    const swap = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
+    const swap = await (await post(baseUrl, '/cancel-plan', { reasonCode: 'price', previewFingerprint: preview.previewFingerprint })).json();
     expect(swap.errors).toContain('visits_pulled_beyond_preview');
 
     // A MISSING approved visit (it completed mid-run and was delivered,
     // not cancelled) is changed facts too — strict subset flags.
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 2, cancelledIds: ['v1', 'v2'] });
-    const subset = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
+    const subset = await (await post(baseUrl, '/cancel-plan', { reasonCode: 'price', previewFingerprint: preview.previewFingerprint })).json();
     expect(subset.errors).toContain('visits_pulled_beyond_preview');
 
     // The exact approved set reads clean.
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, cancelledCount: 3, cancelledIds: ['v1', 'v2', 'v3'] });
-    const clean = await (await post(baseUrl, '/cancel-plan', { previewFingerprint: preview.previewFingerprint })).json();
+    const clean = await (await post(baseUrl, '/cancel-plan', { reasonCode: 'price', previewFingerprint: preview.previewFingerprint })).json();
     expect(clean.errors).toEqual([]);
     buildCancellationImpact.mockResolvedValue(base);
   }));
@@ -1917,7 +1941,7 @@ describe('POST /:id/cancel-plan', () => {
       const previewBody = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
       expect(previewBody.previewFingerprint).toMatch(/^[0-9a-f]{64}$/);
       // The same facts commit cleanly…
-      const ok = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: previewBody.previewFingerprint });
+      const ok = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', reasonCode: 'price', previewFingerprint: previewBody.previewFingerprint });
       expect(ok.status).toBe(200);
     }));
 
@@ -1926,7 +1950,7 @@ describe('POST /:id/cancel-plan', () => {
       const previewBody = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
       const base = await buildCancellationImpact();
       buildCancellationImpact.mockResolvedValueOnce({ ...base, openBalance: 45 });
-      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: previewBody.previewFingerprint });
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', reasonCode: 'price', previewFingerprint: previewBody.previewFingerprint });
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('preview_changed');
       expect(mockState.inserted).toBeUndefined();
@@ -1936,7 +1960,7 @@ describe('POST /:id/cancel-plan', () => {
       const previewBody = await (await post(baseUrl, '/cancel-plan/preview', { effectiveDate: 'now' })).json();
       // The office edits the term (refund dollars change) during the window.
       mockState.annual_prepay_terms[0].prepay_amount = '999.00';
-      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', previewFingerprint: previewBody.previewFingerprint });
+      const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'now', reasonCode: 'price', previewFingerprint: previewBody.previewFingerprint });
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('preview_changed');
       expect(mockState.inserted).toBeUndefined();
@@ -2447,7 +2471,7 @@ describe('POST /:id/cancel-plan', () => {
       buildCancellationImpact.mockResolvedValue(scopedImpact(templateRows));
       const preview = await (await post(baseUrl, '/cancel-plan/preview', { families: ['lawn_care'] })).json();
       buildCancellationImpact.mockResolvedValue(scopedImpact([{ ...templateRows[1], before: 120, after: 133.33 }, templateRows[0]]));
-      const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'], previewFingerprint: preview.previewFingerprint });
+      const res = await post(baseUrl, '/cancel-plan', { families: ['lawn_care'], reasonCode: 'price', previewFingerprint: preview.previewFingerprint });
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('preview_changed');
       buildCancellationImpact.mockResolvedValue(base);
@@ -3436,7 +3460,7 @@ describe('cancel request is bound to its prepay term', () => {
     expect(preview.effectiveDate).toBe('end_of_coverage');
     expect(preview.prepay).toEqual(expect.objectContaining({ termId: 'term-new', disposition: 'end_at_term', endNowAvailable: false }));
     mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
-    const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', previewFingerprint: preview.previewFingerprint });
+    const res = await post(baseUrl, '/cancel-plan', { effectiveDate: 'end_of_coverage', reasonCode: 'price', previewFingerprint: preview.previewFingerprint });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.requestId).not.toBe('req-old');

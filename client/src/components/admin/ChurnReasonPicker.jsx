@@ -19,8 +19,26 @@ export const CHURN_REASON_OPTIONS = [
 
 const QUICK_CODES = ["price", "results", "moving", "service_quality", "seasonal_pause", "competitor"];
 
+export function initialEditableChurnReasonCode(stage, code) {
+  if (stage !== "churned" || !code || code === "unclassified") return "";
+  return code;
+}
+
 export function isChurnReasonMissing(stage, initialStage, value) {
-  return stage === "churned" && initialStage !== "churned" && !value;
+  return stage === "churned" && initialStage !== "churned" && (!value || value === "unclassified");
+}
+
+export function applyChurnReasonToPayload(payload, editForm, initialForm) {
+  const next = { ...payload };
+  delete next.churnReasonCode;
+  if (editForm.pipelineStage !== "churned") return next;
+  const code = editForm.churnReasonCode || "";
+  if (!code || code === "unclassified") return next;
+  const enteringChurned = initialForm?.pipelineStage !== "churned";
+  if (enteringChurned || code !== (initialForm?.churnReasonCode || "")) {
+    next.churnReasonCode = code;
+  }
+  return next;
 }
 
 export function EditChurnReasonField({

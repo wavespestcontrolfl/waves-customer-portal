@@ -1405,6 +1405,7 @@ function mapCustomerListRow(c) {
     hasActivePlan: hasMembership(c),
     memberSince: c.member_since, active: c.active,
     pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
+    churnReasonCode: c.churn_reason_code,
     leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
     landingPageUrl: c.landing_page_url, companyName: c.company_name,
     propertyType: c.property_type,

@@ -1391,6 +1391,18 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
   }
 }
 
+function assertFreshCancelCommitInputs({ suppliedFingerprint, openAcceptance, reasonCode }) {
+  if (openAcceptance) return;
+  if (!suppliedFingerprint) {
+    throw new CancelPlanError(400, 'preview_fingerprint_required',
+      'This commit must carry the previewFingerprint from a current preview — re-open the preview and confirm from it.');
+  }
+  if (!reasonCode) {
+    throw new CancelPlanError(400, 'reason_code_required',
+      'Pick a cancellation reason before cancelling.');
+  }
+}
+
 async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {}) {
   const input = normalizeInput(raw);
   const actorType = actor && actor.type === 'ib' ? 'ib' : 'admin';
@@ -1821,16 +1833,12 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
   // between validation and the wind-down would apply prices nobody approved
   // — the processor reasserts this snapshot before repricing anything.
   let approvedScopedPricing = null;
-  // The approval boundary is MANDATORY for new destructive commits: both
-  // first-party surfaces always carry the preview's fingerprint, so a
-  // commit without one is a stale or hand-built call bypassing the facts
-  // the operator approves. The one exception is a repair retry of an open
-  // acceptance — its original approved facts are durable on the request,
-  // and the run is idempotent repairs.
-  if (!suppliedFingerprint && !openAcceptance) {
-    throw new CancelPlanError(400, 'preview_fingerprint_required',
-      'This commit must carry the previewFingerprint from a current preview — re-open the preview and confirm from it.');
-  }
+  // The approval boundary + cancellation reason are MANDATORY for new
+  // destructive commits: both first-party surfaces always carry the preview's
+  // fingerprint and a picked reason, so a commit missing either is a stale tab
+  // or direct call. Repair retries of an open acceptance stay exempt and
+  // inherit the accepted facts and reason from the durable request.
+  assertFreshCancelCommitInputs({ suppliedFingerprint, openAcceptance, reasonCode: input.reasonCode });
   // A retry of an accepted run keeps the FIRST approval's clock whether or
   // not it carries a fresh fingerprint: the preview priced the repair set
   // at that instant, and the processor's rails must judge the same visits

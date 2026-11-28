@@ -149,7 +149,12 @@ import CustomerMovingCardV2 from "./CustomerMovingCardV2";
 import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
-import { EditChurnReasonField, isChurnReasonMissing } from "./ChurnReasonPicker";
+import {
+  EditChurnReasonField,
+  applyChurnReasonToPayload,
+  initialEditableChurnReasonCode,
+  isChurnReasonMissing,
+} from "./ChurnReasonPicker";
 import RemovePaymentMethodDialog from "./RemovePaymentMethodDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
@@ -9137,12 +9142,17 @@ function CustomerProfileEditor({
                       "state",
                       "zip",
                     ];
-                    const payload = Object.fromEntries(
+                    const rawPayload = Object.fromEntries(
                       Object.entries(editForm).filter(
                         ([key, value]) =>
                           addressFields.includes(key) ||
                           value !== initialEditForm.current[key],
                       ),
+                    );
+                    const payload = applyChurnReasonToPayload(
+                      rawPayload,
+                      editForm,
+                      initialEditForm.current,
                     );
                     if ("monthlyRate" in payload)
                       payload.monthlyRate =
@@ -11022,7 +11032,7 @@ function useCustomerProfileEditor({
       monthlyRate: c.monthlyRate ?? "",
       tier: str(c.tier),
       pipelineStage: c.pipelineStage || "new_lead",
-      churnReasonCode: str(c.churnReasonCode),
+      churnReasonCode: initialEditableChurnReasonCode(c.pipelineStage, c.churnReasonCode),
       contactRole: str(c.contactRole),
     };
     initialEditForm.current = form;

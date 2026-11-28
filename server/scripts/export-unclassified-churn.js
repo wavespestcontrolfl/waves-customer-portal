@@ -15,8 +15,10 @@
  *   4. Apply after reviewing the dry-run summary:
  *        node server/scripts/export-unclassified-churn.js --apply /tmp/unclassified-churn.csv --confirm
  *
- * Uses zero paid APIs or LLM calls. Only updates rows that are still in a
- * churned/dormant stage with churn_reason_code IS NULL or 'unclassified'.
+ * Zero paid APIs or LLM calls. Never exports unrestricted free-text fields
+ * that could contain PII. Every update is bound to the exported churn episode
+ * (churn_episode_id + churned_at + pipeline_stage) so a customer who
+ * reactivated and churned again between export and apply is never mislabeled.
  */
 
 const fs = require('fs');
@@ -25,9 +27,10 @@ const { normalizeChurnReasonCode, churnCodeForCancelReason } = require('../servi
 const CSV_HEADERS = [
   'customer_id',
   'pipeline_stage',
+  'churn_episode_id',
   'churned_at',
   'monthly_rate',
-  'legacy_churn_reason',
+  'recognized_legacy_code',
   'case_reason_code',
   'suggested_code',
   'new_churn_reason_code',
@@ -51,14 +54,19 @@ function formatDateOnly(val) {
 function buildExportCsv(rows) {
   const lines = [CSV_HEADERS.join(',')];
   for (const r of rows) {
-    const suggested = churnCodeForCancelReason(r.case_reason_code) || '';
+    // Only emit a recognized taxonomy token from legacy churn_reason — never
+    // arbitrary admin free text that could contain names, phones, or notes.
+    const recognizedLegacy = normalizeChurnReasonCode(r.churn_reason, { allowUnclassified: false }) || '';
+    const caseCode = r.case_reason_code || '';
+    const suggested = churnCodeForCancelReason(caseCode) || recognizedLegacy || '';
     const cells = [
       r.id,
       r.pipeline_stage || '',
+      r.churn_episode_id || '',
       formatDateOnly(r.churned_at),
       r.monthly_rate != null ? Number(r.monthly_rate).toFixed(2) : '',
-      r.churn_reason || '',
-      r.case_reason_code || '',
+      recognizedLegacy,
+      caseCode,
       suggested,
       '',
     ];
@@ -135,7 +143,21 @@ function validateAssignments(csvRows) {
       errors.push(`line ${r.__line}: invalid churn reason "${rawCode}" for customer ${id}`);
       continue;
     }
-    accepted.push({ customerId: id, code, line: r.__line });
+    const episodeId = r.churn_episode_id || null;
+    const churnedAt = r.churned_at || null;
+    const pipelineStage = r.pipeline_stage || null;
+    if (!episodeId && !churnedAt) {
+      errors.push(`line ${r.__line}: missing churn_episode_id and churned_at guard for customer ${id}`);
+      continue;
+    }
+    accepted.push({
+      customerId: id,
+      code,
+      churnEpisodeId: episodeId,
+      churnedAt,
+      pipelineStage,
+      line: r.__line,
+    });
   }
 
   return { accepted, errors };
@@ -143,36 +165,88 @@ function validateAssignments(csvRows) {
 
 async function queryUnclassifiedRows(db, { months = 12 } = {}) {
   const clampedMonths = Math.max(1, Math.min(60, parseInt(months, 10) || 12));
+  const effectiveChurnDate = "COALESCE(c.churned_at, (c.pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date)";
+  // Suggest a reason ONLY from a committed whole-account cancellation case
+  // unambiguously tied to THIS churn episode (matching churn_episode_id on the
+  // linked service_request, or for legacy episode-less rows a unique committed
+  // whole-account case on the same churned_at window). Multiple conflicting
+  // matches yield NULL so ambiguous suggestions stay blank.
+  const matchedCaseSql = `(
+    SELECT CASE WHEN COUNT(DISTINCT cc.reason_code) = 1 THEN MAX(cc.reason_code) ELSE NULL END
+    FROM cancellation_cases cc
+    LEFT JOIN service_requests sr ON sr.id = cc.service_request_id
+    WHERE cc.customer_id = c.id
+      AND cc.status = 'committed'
+      AND cc.scope = '[]'::jsonb
+      AND cc.reason_code IS NOT NULL
+      AND (
+        (c.churn_episode_id IS NOT NULL AND sr.metadata -> 'cancel_plan' ->> 'churnEpisodeId' = c.churn_episode_id::text)
+        OR (
+          c.churn_episode_id IS NULL
+          AND c.churned_at IS NOT NULL
+          AND ABS(((cc.created_at AT TIME ZONE 'America/New_York')::date) - c.churned_at) <= 1
+        )
+      )
+  ) as case_reason_code`;
+
   return db('customers as c')
     .whereNull('c.deleted_at')
     .whereIn('c.pipeline_stage', ['churned', 'dormant'])
-    .whereRaw(`COALESCE(c.churned_at, (c.pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date) >= ((NOW() AT TIME ZONE 'America/New_York')::date - (?::int * INTERVAL '1 month'))::date`, [clampedMonths])
+    .whereRaw(`${effectiveChurnDate} >= ((NOW() AT TIME ZONE 'America/New_York')::date - (?::int * INTERVAL '1 month'))::date`, [clampedMonths])
     .where(function unclassifiedOnly() {
       this.whereNull('c.churn_reason_code').orWhere('c.churn_reason_code', 'unclassified');
     })
     .select(
       'c.id',
       'c.pipeline_stage',
-      db.raw(`COALESCE(c.churned_at, (c.pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date) as churned_at`),
+      'c.churn_episode_id',
+      db.raw(`${effectiveChurnDate} as churned_at`),
       db.raw('COALESCE(c.churn_mrr, c.monthly_rate, 0) as monthly_rate'),
       'c.churn_reason',
-      db.raw(`(
-        SELECT cc.reason_code FROM cancellation_cases cc
-        WHERE cc.customer_id = c.id AND cc.reason_code IS NOT NULL
-        ORDER BY cc.created_at DESC LIMIT 1
-      ) as case_reason_code`),
+      db.raw(matchedCaseSql),
     )
     .orderBy('churned_at', 'desc');
 }
 
+function episodeMatchesRow(item, row) {
+  if (item.pipelineStage && row.pipeline_stage !== item.pipelineStage) return false;
+  if (item.churnEpisodeId) {
+    return String(row.churn_episode_id || '') === String(item.churnEpisodeId);
+  }
+  // Legacy episode-less row: must still have NULL episode AND matching churn date.
+  if (row.churn_episode_id != null) return false;
+  return formatDateOnly(row.churned_at) === String(item.churnedAt || '');
+}
+
+function bindEpisodeWhere(qb, item) {
+  if (item.pipelineStage) qb.where('pipeline_stage', item.pipelineStage);
+  else qb.whereIn('pipeline_stage', ['churned', 'dormant']);
+  if (item.churnEpisodeId) {
+    qb.where('churn_episode_id', item.churnEpisodeId);
+  } else {
+    qb.whereNull('churn_episode_id');
+    qb.whereRaw(
+      "COALESCE(churned_at, (pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date) = ?::date",
+      [item.churnedAt],
+    );
+  }
+  return qb;
+}
+
 async function applyAssignments(db, assignments, { confirm = false } = {}) {
   const ids = assignments.map((a) => a.customerId);
-  if (ids.length === 0) return { applied: 0, skipped: [], dryRun: !confirm };
+  if (ids.length === 0) return { applied: 0, wouldApply: 0, eligible: [], skipped: [], dryRun: !confirm };
 
   const existing = await db('customers')
     .whereIn('id', ids)
     .whereNull('deleted_at')
-    .select('id', 'pipeline_stage', 'churn_reason_code');
+    .select(
+      'id',
+      'pipeline_stage',
+      'churn_episode_id',
+      db.raw("COALESCE(churned_at, (pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date) as churned_at"),
+      'churn_reason_code',
+    );
   const byId = new Map(existing.map((r) => [String(r.id), r]));
 
   const eligible = [];
@@ -185,6 +259,8 @@ async function applyAssignments(db, assignments, { confirm = false } = {}) {
       skipped.push({ customerId: item.customerId, reason: `stage_is_${row.pipeline_stage}` });
     } else if (row.churn_reason_code && row.churn_reason_code !== 'unclassified') {
       skipped.push({ customerId: item.customerId, reason: `already_classified_${row.churn_reason_code}` });
+    } else if (!episodeMatchesRow(item, row)) {
+      skipped.push({ customerId: item.customerId, reason: 'episode_changed' });
     } else {
       eligible.push(item);
     }
@@ -197,14 +273,16 @@ async function applyAssignments(db, assignments, { confirm = false } = {}) {
   let applied = 0;
   await db.transaction(async (trx) => {
     for (const item of eligible) {
-      const n = await trx('customers')
-        .where({ id: item.customerId })
-        .whereNull('deleted_at')
-        .whereIn('pipeline_stage', ['churned', 'dormant'])
-        .where(function stillUnclassified() {
-          this.whereNull('churn_reason_code').orWhere('churn_reason_code', 'unclassified');
-        })
-        .update({ churn_reason_code: item.code, updated_at: trx.fn.now() });
+      const q = bindEpisodeWhere(
+        trx('customers')
+          .where({ id: item.customerId })
+          .whereNull('deleted_at')
+          .where(function stillUnclassified() {
+            this.whereNull('churn_reason_code').orWhere('churn_reason_code', 'unclassified');
+          }),
+        item,
+      );
+      const n = await q.update({ churn_reason_code: item.code, updated_at: trx.fn.now() });
       applied += Number(n || 0);
     }
   });

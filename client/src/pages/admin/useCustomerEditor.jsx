@@ -1,6 +1,11 @@
 import { useState } from "react";
 import { Input, Select, Button, Field, ActionFeedback } from "../../components/ui";
-import { EditChurnReasonField, isChurnReasonMissing } from "../../components/admin/ChurnReasonPicker";
+import {
+  EditChurnReasonField,
+  applyChurnReasonToPayload,
+  initialEditableChurnReasonCode,
+  isChurnReasonMissing,
+} from "../../components/admin/ChurnReasonPicker";
 import { adminFetch } from "../../utils/admin-fetch";
 
 function customerEditValues(c) {
@@ -18,7 +23,7 @@ function customerEditValues(c) {
     tier: c.tier || null,
     monthlyRate: c.monthlyRate || "",
     pipelineStage: c.pipelineStage || "new_lead",
-    churnReasonCode: c.churnReasonCode || "",
+    churnReasonCode: initialEditableChurnReasonCode(c.pipelineStage, c.churnReasonCode),
     serviceContactName: c.serviceContactName || "",
     serviceContactPhone: c.serviceContactPhone || "",
     serviceContactEmail: c.serviceContactEmail || "",
@@ -35,14 +40,15 @@ function customerEditValues(c) {
 // the same draft, even while the customer workspace temporarily hides the list.
 export default function useCustomerEditor(onSaved, stages, feedbackEnabled = false) {
   const [editingId, setEditingId] = useState(null);
-  const [initialStage, setInitialStage] = useState(null);
+  const [initialMeta, setInitialMeta] = useState({ pipelineStage: null, churnReasonCode: "" });
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [saveError, setSaveError] = useState("");
   const startEdit = (c) => {
+    const values = customerEditValues(c);
     setEditingId(c.id);
-    setInitialStage(c.pipelineStage || "new_lead");
-    setEditForm(customerEditValues(c));
+    setInitialMeta({ pipelineStage: values.pipelineStage, churnReasonCode: values.churnReasonCode });
+    setEditForm(values);
     setSaveError("");
   };
 
@@ -50,9 +56,10 @@ export default function useCustomerEditor(onSaved, stages, feedbackEnabled = fal
     setSavingEdit(true);
     setSaveError("");
     try {
+      const payload = applyChurnReasonToPayload(editForm, editForm, initialMeta);
       await adminFetch(`/admin/customers/${editingId}`, {
         method: "PUT",
-        body: JSON.stringify(editForm),
+        body: JSON.stringify(payload),
       });
       setEditingId(null);
       onSaved();
@@ -70,7 +77,7 @@ export default function useCustomerEditor(onSaved, stages, feedbackEnabled = fal
     editor: (
       <CustomerEditor
         editForm={editForm}
-        initialStage={initialStage}
+        initialStage={initialMeta.pipelineStage}
         setEditForm={setEditForm}
         savingEdit={savingEdit}
         saveError={feedbackEnabled ? saveError : ""}
@@ -78,7 +85,7 @@ export default function useCustomerEditor(onSaved, stages, feedbackEnabled = fal
         stages={stages}
         onCancel={() => {
           setEditingId(null);
-          setInitialStage(null);
+          setInitialMeta({ pipelineStage: null, churnReasonCode: "" });
           setSaveError("");
         }}
       />
