@@ -7,6 +7,10 @@ jest.mock('../models/db', () => {
   const database = (...args) => mockTransaction(...args);
   database.transaction = (...args) => mockTransaction.transaction(...args);
   database.raw = (...args) => mockTransaction.raw(...args);
+  database.schema = {
+    hasColumn: (...args) => mockTransaction.schema.hasColumn(...args),
+    hasTable: (...args) => mockTransaction.schema.hasTable(...args),
+  };
   return database;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
