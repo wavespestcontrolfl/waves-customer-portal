@@ -621,23 +621,20 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       });
     }
 
+    const body = { success: true, payment, ...(lockOutcome.replayed ? { idempotent_replay: true } : {}) };
     // An accepted bank payment is not evidence of a completed charge.
-    if (payment?.status !== 'paid') {
-      return res.json({ success: true, payment, ...(lockOutcome.replayed ? { idempotent_replay: true } : {}) });
-    }
+    if (payment?.status !== 'paid') return res.json(body);
 
     // Send receipt SMS
-    let receiptUrl = null;
-    try {
-      const raw = payment?.metadata;
-      const meta = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
-      receiptUrl = meta.stripe_receipt_url || null;
-    } catch (_) {}
-
     if (await claimManualReceiptDelivery(customer, payment?.id, lockOutcome)) {
+      let receiptUrl = null;
+      try {
+        const meta = typeof payment?.metadata === 'string' ? JSON.parse(payment.metadata) : payment?.metadata;
+        receiptUrl = meta?.stripe_receipt_url || null;
+      } catch (_) {}
       try {
         const receiptLine = receiptUrl ? ` View receipt: ${receiptUrl}` : '';
-        const body = await renderRequiredSmsTemplate('manual_payment_receipt', {
+        const smsBody = await renderRequiredSmsTemplate('manual_payment_receipt', {
           first_name: customer.first_name || 'there',
           receipt_line: receiptLine,
         }, {
@@ -656,7 +653,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           // provenance keeps the receipt on SMS (push routing stays out of
           // operator-triggered sends).
           operatorInitiated: true,
-          body,
+          body: smsBody,
           metadata: { source: 'admin_manual_charge', paymentId: payment?.id || null },
         });
         if (!result?.sent) logger.warn(`[admin-billing] receipt SMS blocked: ${result?.code || 'unknown'}`);
@@ -665,7 +662,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       }
     }
 
-    res.json({ success: true, payment, ...(lockOutcome.replayed ? { idempotent_replay: true } : {}) });
+    res.json(body);
   } catch (err) { next(err); }
 });
 
