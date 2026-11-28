@@ -116,7 +116,11 @@ describe('ScheduleTab — ordinary windowless visit', () => {
 });
 
 describe('DashboardTab — visit waiting for the customer to pick a day', () => {
-  const waiting = { ...baseVisit, customerPickBy: '2026-11-05T01:00:00.000Z' };
+  // Future pick-by deadline relative to the test clock: 3 days out at 8 PM Eastern (EST/EDT safe).
+  const futurePickBy = new Date(Date.now() + 3 * 86400000).toISOString();
+  const pastPickBy = '2026-11-05T01:00:00.000Z'; // Wed, Nov 4 at 8 PM Eastern (in the past)
+  const waitingFuture = { ...baseVisit, customerPickBy: futurePickBy };
+  const waitingPast = { ...baseVisit, customerPickBy: pastPickBy };
 
   async function renderDashboard(nextVisit, cust = customer) {
     api.getNextService.mockResolvedValue({ next: nextVisit });
@@ -140,26 +144,33 @@ describe('DashboardTab — visit waiting for the customer to pick a day', () => 
     await screen.findByText('Quarterly Pest Control');
   }
 
-  it('replaces broken Confirm Visit + countdown with Pick a time link and pick-by copy', async () => {
-    await renderDashboard(waiting);
+  it('replaces broken Confirm Visit + countdown with Pick a time link, preserves Send photos, and shows future pick-by copy', async () => {
+    await renderDashboard({ ...waitingFuture, prepPhotos: { eligible: true } });
     expect(screen.getByText('New day: your pick')).toBeInTheDocument();
-    expect(screen.getByText(
-      "Pick a new time by Wed, Nov 4 at 8 PM. If you don't, we'll book the best open time and text you 3 days before.",
-    )).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Pick a time' })).toHaveAttribute('href', waiting.rescheduleUrl);
+    expect(screen.getByText(/Pick a new time by .+\. If you don't, we'll book the best open time and text you 3 days before\./)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick a time' })).toHaveAttribute('href', waitingFuture.rescheduleUrl);
+    expect(screen.getByRole('button', { name: 'Send photos' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Confirm Visit' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Reschedule' })).not.toBeInTheDocument();
     expect(screen.queryByText('days')).not.toBeInTheDocument();
   });
 
-  it('omits the Pick a time link for cancelled or read-only contact sessions', async () => {
-    await renderDashboard(waiting, { ...customer, cancelled: true, cancelledAt: '2026-08-22' });
+  it('shows late pick-by wording when the deadline passed while keeping Pick a time available', async () => {
+    await renderDashboard(waitingPast);
+    expect(screen.getByText(
+      "The pick-by time passed (Wed, Nov 4 at 8 PM). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick a time' })).toHaveAttribute('href', waitingPast.rescheduleUrl);
+  });
+
+  it('omits the Pick a time link for cancelled or contact-actor read-only sessions', async () => {
+    await renderDashboard(waitingFuture, { ...customer, cancelled: true, cancelledAt: '2026-08-22' });
     expect(screen.getByText('New day: your pick')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Confirm Visit' })).not.toBeInTheDocument();
 
     cleanup();
-    await renderDashboard(waiting, { ...customer, contactSession: { id: 'c-1' } });
+    await renderDashboard(waitingFuture, { ...customer, actor: { kind: 'contact', id: 'c-1' } });
     expect(screen.getByText('New day: your pick')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Pick a time' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Confirm Visit' })).not.toBeInTheDocument();

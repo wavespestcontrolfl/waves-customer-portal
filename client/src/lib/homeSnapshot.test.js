@@ -187,4 +187,14 @@ describe('saved home reads', () => {
     writeHomeRead(identity, 'cust-1:p1', 'latest-service', { services: [] }, Date.now());
     expect(Object.keys(readHomeReads(identity, 'cust-1:p1'))).toEqual(['latest-service']);
   });
+
+  it('preserves customerPickBy on a saved next-visit so offline views hide the placeholder date', () => {
+    const pickVisitRow = { id: 'v2', serviceType: 'Pest Control', date: '2026-12-08', windowStart: null, customerPickBy: '2026-12-05T01:00:00.000Z', rescheduleUrl: '/reschedule/secret' };
+    writeHomeRead(identity, 'cust-1:p1', 'next-visit', { next: pickVisitRow }, Date.now());
+    const reads = readHomeReads(identity, 'cust-1:p1');
+    expect(reads['next-visit'].data.next).toEqual({
+      id: 'v2', serviceType: 'Pest Control', date: '2026-12-08', windowStart: null, customerPickBy: '2026-12-05T01:00:00.000Z',
+    });
+    expect(localStorage.getItem(HOME_READS_KEY)).not.toContain('secret');
+  });
 });

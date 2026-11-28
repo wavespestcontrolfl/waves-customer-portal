@@ -203,7 +203,7 @@ export function readHomeSnapshot(token) {
 
 // ---- Saved home reads -----------------------------------------------------
 
-const VISIT_FIELDS = ['id', 'serviceType', 'type', 'date', 'windowStart', 'day_only', 'arrival_note'];
+const VISIT_FIELDS = ['id', 'serviceType', 'type', 'date', 'windowStart', 'day_only', 'arrival_note', 'customerPickBy'];
 const pickVisit = (visit) => (visit && typeof visit === 'object' ? pick(visit, VISIT_FIELDS) : null);
 
 // The saved card prints a visit's name, day and arrival window and nothing

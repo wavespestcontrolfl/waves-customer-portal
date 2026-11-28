@@ -2980,10 +2980,15 @@ function SavedVisitDetails({ visits }) {
     {visits.map(visit => <li key={visit.id} style={{ marginBottom: 12 }}>
       <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
       {visit.propertyAddress && <div>{visit.propertyAddress}</div>}
-      <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
-      {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
-      {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
-      {!visit.windowStart && visit.day_only && visit.arrival_note && <div>{visit.arrival_note}</div>}
+      <div>{visit.customerPickBy ? PICK_DAY_LABEL : parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
+      {visit.customerPickBy ? (
+        <div>Pick a time</div>
+      ) : visit.windowStart ? (
+        <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>
+      ) : visit.day_only && visit.arrival_note ? (
+        /* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */
+        <div>{visit.arrival_note}</div>
+      ) : null}
     </li>)}
   </ul>;
 }
@@ -3035,6 +3040,19 @@ function dashboardNextDateLabel({ nextServiceStatus, nextService, nextDate }) {
   return 'No visit scheduled';
 }
 
+function isReadOnlyVisitCustomer(customer) {
+  return !!(customer?.cancelled || customer?.actor?.kind === 'contact');
+}
+
+function customerPickDeadlineNote(pickBy) {
+  const at = new Date(pickBy);
+  const label = formatPickBy(pickBy);
+  if (!Number.isNaN(at.getTime()) && at.getTime() <= Date.now()) {
+    return `The pick-by time passed (${label}). You can still pick a time now, or overnight we'll book the best open time and text you 3 days before.`;
+  }
+  return `Pick a new time by ${label}. If you don't, we'll book the best open time and text you 3 days before.`;
+}
+
 function renderDashboardNextVisitMeta(nextService, muted) {
   if (!nextService) return null;
   if (nextService.customerPickBy) {
@@ -3042,7 +3060,7 @@ function renderDashboardNextVisitMeta(nextService, muted) {
       <>
         <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Pick a time</div>
         <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
-          {`Pick a new time by ${formatPickBy(nextService.customerPickBy)}. If you don't, we'll book the best open time and text you 3 days before.`}
+          {customerPickDeadlineNote(nextService.customerPickBy)}
         </div>
       </>
     );
@@ -3064,15 +3082,30 @@ function renderDashboardNextVisitMeta(nextService, muted) {
   return null;
 }
 
-function renderDashboardPickAction(nextService, customer, buttonStyle) {
-  if (!nextService?.rescheduleUrl || customer?.cancelled || customer?.contactSession) return null;
+function renderDashboardPickLink(nextService, customer, buttonStyle) {
+  if (!nextService?.rescheduleUrl || isReadOnlyVisitCustomer(customer)) return null;
+  return (
+    <a href={nextService.rescheduleUrl} data-glass-accent="" data-glass-size="primary" style={{
+      ...buttonStyle,
+      textDecoration: 'none',
+      position: 'relative',
+    }}>Pick a time</a>
+  );
+}
+
+function renderDashboardPickBar(nextService, customer, primaryStyle, secondaryStyle, onOpenPrepPhotos) {
+  const pickLink = renderDashboardPickLink(nextService, customer, primaryStyle);
+  const prepBtn = nextService?.prepPhotos?.eligible ? (
+    <button type="button" onClick={() => onOpenPrepPhotos(nextService.id)} data-glass-accent="" style={{
+      ...secondaryStyle,
+      position: 'relative',
+    }}>Send photos</button>
+  ) : null;
+  if (!pickLink && !prepBtn) return null;
   return (
     <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
-      <a href={nextService.rescheduleUrl} data-glass-accent="" data-glass-size="primary" style={{
-        ...buttonStyle,
-        textDecoration: 'none',
-        position: 'relative',
-      }}>Pick a time</a>
+      {pickLink}
+      {prepBtn}
     </div>
   );
 }
@@ -3513,7 +3546,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
             )}
           </div>
           {nextService?.customerPickBy ? (
-            renderDashboardPickAction(nextService, customer, dashboardPrimaryButton)
+            renderDashboardPickBar(nextService, customer, dashboardPrimaryButton, dashboardSecondaryButton, setVisitPrepSheetFor)
           ) : nextService ? (
             <div style={{ padding: 20, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
               {!nextService.customerConfirmed ? (
