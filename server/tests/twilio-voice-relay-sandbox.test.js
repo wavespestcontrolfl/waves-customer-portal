@@ -1241,6 +1241,44 @@ describe('POST /relay-sandbox direct GPT-Live Marin default (GATE_VOICE_GPT_LIVE
     expect(outerUpdate).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', call_outcome: 'relay_failed' }));
     expect(ledgerInsert).not.toHaveBeenCalled();
   });
+
+  test('selectable initial-webhook test entry points remain callable: ?cell=72 selects Delta, ?mode=menu renders the keypad <Gather>, and ?cell=09 connects directly to Flux', async () => {
+    // ?cell=72 -> direct GPT-Live Delta (signed over the full URL including query string)
+    const deltaPrime = primeDirectLive();
+    const deltaReq = twilioReq('/relay-sandbox?cell=72', { CallSid: 'CA-sb-delta', From: '+19415550100', To: SANDBOX });
+    deltaReq.query = { cell: '72' };
+    let res = mockRes();
+    await handlerFor('/relay-sandbox')(deltaReq, res);
+    expect(res.body).toContain('<Stream url="wss://portal.example.com/ws/voice-live/CA-sb-delta/');
+    expect(res.body).not.toContain('<Gather');
+    expect(JSON.parse(deltaPrime.stampUpdate.mock.calls[0][0].metadata.bindings[0]).gpt_live).toMatchObject({ cell: '72', voice: 'delta' });
+
+    // Unsigned ?cell=72 still fails closed before any DB write
+    primeDirectLive();
+    const unsignedDelta = twilioReq('/relay-sandbox?cell=72', { CallSid: 'CA-sb-delta-u', From: '+19415550100', To: SANDBOX }, { signed: false });
+    unsignedDelta.query = { cell: '72' };
+    res = mockRes();
+    await handlerFor('/relay-sandbox')(unsignedDelta, res);
+    expect(res.body).toContain('not available right now');
+    expect(db.transaction).not.toHaveBeenCalled();
+
+    // ?mode=menu -> preserves the 2-digit <Gather> keypad menu even with GATE_VOICE_GPT_LIVE_TEST=true
+    primeInsert();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-menu', From: '+19415550100', To: SANDBOX }, query: { mode: 'menu' } }, res);
+    expect(res.body).toContain('<Gather input="dtmf" numDigits="2" timeout="6"');
+    expect(res.body).toContain('<ConversationRelay');
+    expect(res.body).not.toContain('<Stream');
+
+    // ?cell=09 -> direct ConversationRelay profile with one full disclosure clip and no <Gather> wait
+    primeInsert();
+    res = mockRes();
+    await handlerFor('/relay-sandbox')({ body: { CallSid: 'CA-sb-flux', From: '+19415550100', To: SANDBOX }, query: { cell: '09' } }, res);
+    expect(res.body).toMatch(/^<\?xml version="1\.0" encoding="UTF-8"\?><Response><Play>https:\/\/portal\.example\.com\/audio\/waves-greeting-notice\.wav<\/Play><Connect /);
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="flux_partials_probe_v1" />');
+    expect(res.body).not.toContain('<Gather');
+  });
 });
 
 describe('sandboxRelayXml', () => {

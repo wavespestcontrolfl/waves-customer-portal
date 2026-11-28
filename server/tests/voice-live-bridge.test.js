@@ -2546,7 +2546,7 @@ describe('outbound audio volume optimizer (LUT gain + soft-clip limiter)', () =>
     expect(maxAbsOf(sent[0])).toBeLessThanOrEqual(OUTBOUND_LIMITER_CEILING);
   });
 
-  test('passes silence-only and already-loud chunks through byte-identically and soft-clips sudden loud peaks', async () => {
+  test('passes silence-only and already-loud chunks through byte-identically (including immediately after a quiet chunk) and soft-clips embedded peaks', async () => {
     const t = setup();
     await t.ready();
     const silent = Buffer.alloc(160, 0xff).toString('base64');
@@ -2558,22 +2558,30 @@ describe('outbound audio volume optimizer (LUT gain + soft-clip limiter)', () =>
     expect(sent[0]).toBe(silent);
     expect(sent[1]).toBe(loud);
 
-    // Start fresh on a quiet call, then inject an abrupt full-scale peak chunk:
-    // soft-clip limiter guarantees zero hard clipping (> -1.5 dBFS) and fast ducking brings gain back down.
+    // Quiet -> silence -> already-loud transition:
+    // 1) Quiet chunk (-26 dBFS) gets boosted toward -16 dBFS.
+    // 2) Inter-word silence pause passes through untouched without boosting noise.
+    // 3) Immediate above-target loud chunk resets gain to 0 dB and passes through byte-identically (no residual jump).
     const t2 = setup();
     await t2.ready();
     t2.openai.receive({ type: 'session.output_audio.delta', delta: toneChunk(1640, 160) });
-    // Inter-word silence pause must NOT alter held gain or boost silence bytes
     t2.openai.receive({ type: 'session.output_audio.delta', delta: silent });
-    const fullScale = Buffer.alloc(160, 0x00).toString('base64'); // -32124 full scale
-    t2.openai.receive({ type: 'session.output_audio.delta', delta: fullScale });
-    // Two more loud chunks duck the smoothed gain down to 0 dB
-    t2.openai.receive({ type: 'session.output_audio.delta', delta: loud });
-    t2.openai.receive({ type: 'session.output_audio.delta', delta: loud });
     t2.openai.receive({ type: 'session.output_audio.delta', delta: loud });
     sent = t2.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
+    expect(rmsOf(sent[0])).toBeGreaterThan(OUTBOUND_TARGET_RMS * 0.88);
     expect(sent[1]).toBe(silent);
-    expect(maxAbsOf(sent[2])).toBeLessThanOrEqual(OUTBOUND_LIMITER_CEILING);
-    expect(sent[5]).toBe(loud);
+    expect(sent[2]).toBe(loud); // byte-identical immediately after a +10 dB quiet chunk
+
+    // Embedded loud transient inside a quiet-average chunk: gain boosts the quiet speech
+    // while the soft-clip limiter strictly caps the peak at or below OUTBOUND_LIMITER_CEILING (-1.68 dBFS).
+    const spiky = Buffer.alloc(160);
+    for (let i = 0; i < 160; i += 1) spiky[i] = linearToMulaw(i % 2 === 0 ? 1200 : -1200);
+    spiky[40] = 0x00; // -32124 full-scale spike inside a quiet chunk
+    spiky[41] = 0x80; // +32124 full-scale spike inside a quiet chunk
+    const t3 = setup();
+    await t3.ready();
+    t3.openai.receive({ type: 'session.output_audio.delta', delta: spiky.toString('base64') });
+    const spikySent = t3.twilio.sent.filter((m) => m.event === 'media').map((m) => m.media.payload);
+    expect(maxAbsOf(spikySent[0])).toBeLessThanOrEqual(OUTBOUND_LIMITER_CEILING);
   });
 });

@@ -2669,17 +2669,44 @@ async function respondSandboxGatherRelay(req, res, callSid, recordingOk) {
   return res.type('text/xml').send(relayXml.replace('<Response>', `<Response>${gatherInner}${recordingOk ? SANDBOX_RECORDING_XML : ''}`));
 }
 
+async function respondSandboxRelayCell(req, res, callSid, digits, recordingOk) {
+  const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
+  const cell = resolveSandboxCell(digits);
+  logger.info(`[relay-sandbox] direct cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(callSid)}`);
+  await stampRelayProfile(callSid, cell || activeRelayTwiMLOptions());
+  const notice = new VoiceResponse();
+  notice.play(practiceGreetingUrl(req));
+  const noticeInner = notice.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
+  return res.type('text/xml').send(sandboxRelayXml({ callSid, cell, req }).replace('<Response>', `<Response>${noticeInner}${recordingOk ? SANDBOX_RECORDING_XML : ''}`));
+}
+
+function resolveSandboxAnswerMode(req) {
+  const mode = String(req.query?.mode || '').trim().toLowerCase();
+  if (mode === 'menu') return { kind: 'gather' };
+  const queryCell = String(req.query?.cell || '').trim();
+  if (queryCell) {
+    const liveCell = gptLiveCellFor(queryCell);
+    return liveCell ? { kind: 'gpt_live', liveCell } : { kind: 'relay_cell', digits: queryCell };
+  }
+  if (require('../config/feature-gates').voiceGptLiveTestLive()) {
+    return { kind: 'gpt_live', liveCell: GPT_LIVE_DEFAULT_CELL };
+  }
+  return { kind: 'gather' };
+}
+
 router.post('/relay-sandbox', async (req, res) => {
   try {
     if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
     const { CallSid, From, To, CallStatus } = req.body || {};
     if (!CallSid) return refuseSandbox(req, res, 'no CallSid');
-    // GATE_VOICE_GPT_LIVE_TEST on (owner 2026-11-28): direct GPT-Live Marin
+    // GATE_VOICE_GPT_LIVE_TEST on (owner 2026-11-28): plain /relay-sandbox
+    // connects straight to GPT-Live Marin (cell 71); ?cell=72 selects Delta,
+    // ?cell=<code> selects a relay profile directly, and ?mode=menu preserves
+    // the 2-digit <Gather> keypad menu for runners/testers. Any GPT-Live path
     // spends money (ledger reservation + Twilio REST time limit), so fail
-    // closed on unsigned/tampered deliveries BEFORE any DB write, matching
-    // /relay-sandbox/cell.
-    const liveDefault = Boolean(require('../config/feature-gates').voiceGptLiveTestLive());
-    if (liveDefault && !gptLiveRequestSigned(req)) {
+    // closed on unsigned/tampered deliveries BEFORE any DB write.
+    const answerMode = resolveSandboxAnswerMode(req);
+    if (answerMode.kind === 'gpt_live' && !gptLiveRequestSigned(req)) {
       logger.warn(`[gpt-live] unsigned or invalid Twilio signature — refused ${maskSid(CallSid)}`);
       return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
     }
@@ -2760,10 +2787,13 @@ router.post('/relay-sandbox', async (req, res) => {
       twiml.hangup();
       return res.type('text/xml').send(twiml.toString());
     }
-    // Direct GPT-Live Marin default: one short remastered disclosure clip, then
-    // straight into the Media Stream with no 6-second keypad wait or replay.
-    if (liveDefault) {
-      return await respondGptLiveCell(req, res, CallSid, GPT_LIVE_DEFAULT_CELL, recordingOk ? SANDBOX_RECORDING_XML : '');
+    // Direct GPT-Live default (Marin 71, or ?cell=72 Delta): one short
+    // remastered disclosure clip, then straight into the Media Stream.
+    if (answerMode.kind === 'gpt_live') {
+      return await respondGptLiveCell(req, res, CallSid, answerMode.liveCell, recordingOk ? SANDBOX_RECORDING_XML : '');
+    }
+    if (answerMode.kind === 'relay_cell') {
+      return await respondSandboxRelayCell(req, res, CallSid, answerMode.digits, recordingOk);
     }
     return await respondSandboxGatherRelay(req, res, CallSid, recordingOk);
   } catch (err) {
@@ -2774,9 +2804,14 @@ router.post('/relay-sandbox', async (req, res) => {
 
 // =========================================================================
 // GPT-Live trial (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19, spend cap $5).
-// Owner 2026-11-28: when GATE_VOICE_GPT_LIVE_TEST is on, /relay-sandbox
-// answers directly into cell 71 (Marin) after one remastered disclosure clip
-// (no keypad wait). Cell codes 71 / 72 on /relay-sandbox/cell remain intact.
+// Owner 2026-11-28 explicit approval: make GPT-Live Marin (cell 71) the direct
+// default on /relay-sandbox (941-241-2993) with no keypad wait or double replay.
+// Spend impact vs replaced ConversationRelay default: OpenAI GPT-Live ($0.05/min)
+// + Twilio Media Streams (~$0.004/min) = ~$0.054/min, cheaper per minute than
+// Twilio ConversationRelay ($0.07/min + LLM/TTS), bounded by the $5 OpenAI
+// ledger cap and 10-min call cap (~1-2 test calls/day ≈ $0.11-$0.22/day,
+// $3-$5/mo hard-capped on voice minutes). Cell codes 71 / 72 remain callable
+// via /relay-sandbox?cell=72, /relay-sandbox?mode=menu, and /relay-sandbox/cell.
 // Twilio does not allow a query string on a <Stream> url, so the CallSid and
 // the per-call token ride as path segments of /ws/voice-live/.
 // =========================================================================

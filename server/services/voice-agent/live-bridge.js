@@ -749,9 +749,13 @@ class LiveBridge {
     }
     if (voicedCount === 0) return rawDelta !== null ? rawDelta : slice.toString('base64');
     const rms = Math.sqrt(voicedSqSum / voicedCount);
-    const desiredDb = rms >= OUTBOUND_TARGET_RMS
-      ? 0
-      : Math.min(OUTBOUND_MAX_GAIN_DB, 20 * Math.log10(OUTBOUND_TARGET_RMS / rms));
+    // Already at or above -16 dBFS: immediately reset gain to 0 dB and pass
+    // through byte-identically (no residual boost after a quiet chunk).
+    if (rms >= OUTBOUND_TARGET_RMS) {
+      this.outboundGainDb = 0;
+      return rawDelta !== null ? rawDelta : slice.toString('base64');
+    }
+    const desiredDb = Math.min(OUTBOUND_MAX_GAIN_DB, 20 * Math.log10(OUTBOUND_TARGET_RMS / rms));
     if (this.outboundGainDb === null) {
       this.outboundGainDb = desiredDb;
     } else {
