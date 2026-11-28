@@ -507,9 +507,14 @@ export default function SlotPicker({
       const p = freqParams();
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
+      if (latestPickedRequestRef.current !== requestId) return;
       if (!res.ok) {
+        if (res.status === 409) {
+          const refusalBody = await readJsonBody(res);
+          if (latestPickedRequestRef.current !== requestId) return;
+          if (pageTookRefusal(refusalBody)) return;
+        }
         // bookingLimitFrom reads only a 400's body.
-        if (res.status === 409 && pageTookRefusal(await readJsonBody(res))) return;
         throw Object.assign(new Error('slot fetch failed'), { limit: await bookingLimitFrom(res) });
       }
       const body = await res.json();

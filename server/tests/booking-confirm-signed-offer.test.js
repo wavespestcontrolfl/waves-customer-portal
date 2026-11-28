@@ -1893,8 +1893,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
             whereRaw: jest.fn((sql, bindings) => { whereRawCalls.push({ sql, bindings }); return q; }),
             where: jest.fn().mockReturnThis(),
             andWhere: jest.fn().mockReturnThis(),
-            select: jest.fn().mockReturnThis(),
-            limit: jest.fn().mockResolvedValue([
+            select: jest.fn().mockResolvedValue([
               {
                 id: 'cust-other-addr',
                 first_name: 'Pat',

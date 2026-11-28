@@ -1013,7 +1013,7 @@ router.get('/customer-lookup', async (req, res, next) => {
       // number they merely possess. Match the submitted address across all
       // active profiles sharing this US phone (e.g. a legacy 10-digit row and
       // an E.164 row) so an unmatched sibling never hides the real property.
-      const candidates = await queryActiveCustomerByPhone(digits).select(phoneCustomerFields).limit(25);
+      const candidates = await queryActiveCustomerByPhone(digits).select(phoneCustomerFields);
       customer = (candidates || []).find((row) => addressMatchesCustomer(row, address, zip, unit)) || null;
       // address_line2 is needed ABOVE for the unit-aware match but must not
       // be disclosed: a blank submitted unit stays compatible by design, so

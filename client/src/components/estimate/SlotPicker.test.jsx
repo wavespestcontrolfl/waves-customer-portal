@@ -1020,4 +1020,39 @@ describe('SlotPicker Phase 1 — full calendarSlots, AI search race/reset, and l
     expect(screen.getByLabelText(/pick one that works for you/i)).toHaveValue('');
     expect(screen.getByText(dayLabel(initialYmd))).toBeInTheDocument();
   });
+
+  it('ignores a stale 409 refusal from a superseded date pick after a newer AI search starts', async () => {
+    const staleDate = deferred();
+    const initialYmd = ymdFromToday(3);
+    const pickedYmd = ymdFromToday(10);
+    const searchYmd = ymdFromToday(5);
+    const dayLabel = (ymd) => new Date(`${ymd}T12:00:00`)
+      .toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    const onRefusal = vi.fn(() => true);
+    const fetchMock = vi.fn((url, init) => {
+      if (init?.method === 'POST') {
+        return Promise.resolve(jsonResponse({
+          summary: 'Found 1 time',
+          primary: [slot('ai-slot', searchYmd, { windowStart: '11:00' })],
+          expander: [],
+        }));
+      }
+      if (String(url).includes(`date=${pickedYmd}`)) return staleDate.promise;
+      return Promise.resolve(jsonResponse({ primary: [slot('initial-1', initialYmd, { windowStart: '09:00' })], expander: [] }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onRefusal={onRefusal} />);
+    await screen.findByText(dayLabel(initialYmd));
+
+    fireEvent.change(screen.getByLabelText(/pick one that works for you/i), { target: { value: pickedYmd } });
+    fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
+    await screen.findByText(dayLabel(searchYmd));
+
+    // Late 409 from the superseded date request must NOT trigger onRefusal.
+    await act(async () => {
+      staleDate.resolve({ ok: false, status: 409, json: async () => ({ code: 'PLAN_START_STATE_CHANGED', error: 'changed' }) });
+    });
+    expect(onRefusal).not.toHaveBeenCalled();
+    expect(screen.getByText(dayLabel(searchYmd))).toBeInTheDocument();
+  });
 });

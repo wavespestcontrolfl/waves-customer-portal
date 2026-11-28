@@ -204,10 +204,11 @@ function fallbackParse(query, now) {
   // Explicit calendar date ("Dec 3", "December 3rd", "12/3", "2026-12-03")
   // runs BEFORE bare month matching so "Dec 3" resolves to Dec 3 (not Dec 1–31),
   // impossible dates like "Feb 30" stop instead of matching all of Feb, and
-  // negated constraints like "any day except 12/3" never pick the excluded day.
+  // boundary/negated/multi-date phrases ("after 12/3", "12/3 or 12/4", "except 12/3")
+  // never collapse to one date on fallback.
   const explicitDate = parseExplicitDate(q, now);
   if (explicitDate) {
-    return explicitDate.date && !NEGATION_CONSTRAINT_RE.test(q)
+    return explicitDate.date && canFastParseDeterministically(q) && !NEGATION_CONSTRAINT_RE.test(q)
       ? single(explicitDate.date)
       : { dateFrom: null, dateTo: null, timeOfDay, understood: false };
   }
@@ -232,7 +233,8 @@ function fallbackParse(query, now) {
     return range(mon, shiftEtDate(mon, 6));
   }
   if (/\bthis\s+week\b/.test(q)) {
-    return range(today, etDateString(addETDays(now, 6)));
+    const daysToSunday = (7 - etParts(now).dayOfWeek) % 7;
+    return range(today, shiftEtDate(today, daysToSunday));
   }
   if (/\bnext\s+month\b/.test(q)) {
     const { year, month } = etParts(now);
