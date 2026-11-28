@@ -255,6 +255,9 @@ const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
+const { applySpeakerRoleGuard } = require('./call-speaker-role-guard');
+const { resolveCallToTruckBriefForBooking, backfillCallToTruckBriefOnReusedRow } = require('./call-to-truck-brief');
+const { STT_HINTS, TRANSCRIPTION_DOMAIN_HINT_LINE } = require('../config/transcription-vocabulary');
 
 // Prod technician row is named "Adam" (verified 2026-07-08) — the old
 // 'Adam B.' default never name-matched and assignment survived only on the
@@ -451,6 +454,7 @@ const OPENAI_COMPLETENESS_FALLBACK_SECONDS = Number(process.env.OPENAI_COMPLETEN
 const OPENAI_COMPLETENESS_FALLBACK_CHARS = Number(process.env.OPENAI_COMPLETENESS_FALLBACK_CHARS) || 7000;
 const OPENAI_TRANSCRIPTION_PROMPT = `Transcribe this phone call recording for Waves Pest Control (pest control and lawn care, Southwest Florida).
 
+${TRANSCRIPTION_DOMAIN_HINT_LINE}
 Preserve fillers like "um" and "uh", numbers, addresses, phone numbers, and proper nouns exactly as spoken.
 Street names in addresses are real words or proper names — prefer a plausible street name over a nonsense phonetic rendering.
 When a caller spells something letter-by-letter or with phonetic markers like "B as in boy", write each letter and marker separately exactly as spoken — never merge a spelled sequence into a guessed word, email, or web address.
@@ -460,7 +464,7 @@ Use punctuation and line breaks where helpful. Do not summarize, translate, or a
 // itself lives in config/transcription-vocabulary — shared with the live
 // ConversationRelay `hints` attribute so both recognizers learn the same
 // proper nouns.
-const DEFAULT_TRANSCRIPTION_KEYWORDS = require('../config/transcription-vocabulary').STT_HINTS;
+const DEFAULT_TRANSCRIPTION_KEYWORDS = STT_HINTS;
 const ENV_TRANSCRIPTION_KEYWORDS = String(process.env.OPENAI_TRANSCRIPTION_KEYWORDS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
@@ -9550,6 +9554,7 @@ async function transcribeWithGemini(audioBuffer, opts = {}) {
             parts: [
               { inlineData: { mimeType: 'audio/mpeg', data: audioBase64 } },
               { text: `Transcribe this phone call recording for Waves Pest Control (pest control + lawn care, SW Florida).
+${TRANSCRIPTION_DOMAIN_HINT_LINE}
 Call direction: ${direction}.
 External customer/contact phone: ${contactPhone || 'unknown'}.
 
@@ -9898,7 +9903,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
     if (openaiTranscript && !openaiNeedsCompletenessFallback) {
       const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
       if (labeledTranscript) {
-        return {
+        return applySpeakerRoleGuard({
           transcription: labeledTranscript,
           provider: 'openai',
           model: OPENAI_TRANSCRIPTION_MODEL,
@@ -9911,14 +9916,14 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
             fallback_attempted: false,
             pan_count: openai?.panCount || 0,
           },
-        };
+        }, logger);
       }
       logger.warn('[call-proc] OpenAI transcript missing usable Agent/Caller labels; trying Gemini fallback');
     }
 
     const gemini = await transcribeWithGemini(audioBuffer, opts);
     if (gemini?.text) {
-      return {
+      return applySpeakerRoleGuard({
         transcription: gemini.text,
         provider: 'gemini_fallback',
         model: GEMINI_TRANSCRIPTION_MODEL,
@@ -9931,13 +9936,13 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
           // detect the same card; max() avoids double-counting it.
           pan_count: Math.max(openai?.panCount || 0, gemini.panCount || 0),
         },
-      };
+      }, logger);
     }
 
     if (openaiTranscript) {
       const labeledTranscript = await labelTranscriptWithOpenAI(openaiTranscript, opts);
       if (labeledTranscript) {
-        return {
+        return applySpeakerRoleGuard({
           transcription: labeledTranscript,
           provider: 'openai_post_gemini_fallback',
           model: OPENAI_TRANSCRIPTION_MODEL,
@@ -9952,7 +9957,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
             fallback_model: GEMINI_TRANSCRIPTION_MODEL,
             pan_count: openai?.panCount || 0,
           },
-        };
+        }, logger);
       }
       logger.warn('[call-proc] Using raw OpenAI transcript because labeling and Gemini fallback failed');
       return {
@@ -21694,6 +21699,16 @@ const CallRecordingProcessor = {
                   // helper honors): a replay must not close its lead as won
                   // or spawn its follow-up visit (Codex #3361 r8 P1).
                   const primaryRowSkipped = String(primaryRow.status || '') === 'skipped';
+                  primaryRow = await backfillCallToTruckBriefOnReusedRow(trx, primaryRow, {
+                    skip: isAttachedManualBooking || primaryRowSkipped,
+                    callId: call.id,
+                    catalogRows: bookableCallServices,
+                    briefInput: {
+                      callerAni: clarifyAskTargetPhone(call),
+                      customerPrimaryPhone: customer?.phone || null,
+                      v2Extraction: v2ApprovedExtraction || v2CanonicalExtraction,
+                    },
+                  });
                   if (!primaryRowSkipped && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
@@ -22338,17 +22353,24 @@ const CallRecordingProcessor = {
                 // transaction): stamp payer_id (per-job) so the completion
                 // invoice routes to the payer. (propertyLinkage resolved above,
                 // before the attach guard.)
-                // Clean re-service request storage (migration 20260927100000,
-                // hasColumn-guarded like the reservice-public/booking.js
-                // callers): the call extraction's pain_points, trimmed and
-                // capped, as a paraphrase of why the customer called — for
-                // re-service rows only, mirroring is_callback below.
+                // Call-to-Truck Brief (scheduled_services.customer_request +
+                // customer_request_source = 'call', hasColumn-guarded):
+                // populates a clean, structured, customer-report-safe brief
+                // (canonical pests + allowlisted zones or resolved catalog name;
+                // never free-text household/medical prose) for phone bookings,
+                // enforcing GATE_CALL_ENRICH_CODES_REQUIRE_ANI using the
+                // pre-loaded customer phone (zero queries inside trx).
                 const isReServiceBooking = isReServiceCatalogRow(callBookingCatalogRow);
-                const hasCustomerRequestColumn = isReServiceBooking
+                const callBookingCustomerRequest = resolveCallToTruckBriefForBooking({
+                  callerAni: clarifyAskTargetPhone(call),
+                  customerPrimaryPhone: customer?.phone || null,
+                  v2Extraction: v2ApprovedExtraction || v2CanonicalExtraction,
+                  catalogServiceName: callBookingCatalogRow?.name || null,
+                  isAssessmentBooking: isAssessmentServiceRow(callBookingCatalogRow),
+                  isReService: isReServiceBooking,
+                });
+                const hasCustomerRequestColumn = Boolean(callBookingCustomerRequest)
                   && await trx.schema.hasColumn('scheduled_services', 'customer_request');
-                const callBookingCustomerRequest = isReServiceBooking
-                  ? (String(extracted.pain_points || '').trim().slice(0, 400) || null)
-                  : null;
                 const insertData = {
                   customer_id: customerId,
                   payer_id: callBookingPayerId || null,

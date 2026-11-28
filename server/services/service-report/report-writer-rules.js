@@ -10,6 +10,7 @@
  * pest writer and the remaining-service modules other than the two below.
  */
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
+const { customerCopyViolations } = require('./technician-report-copy');
 
 const REPORT_WRITER_RULES_VERSION = 'report_writer_rules_v5';
 
@@ -224,8 +225,9 @@ function bookedReasonBlock(row, scrub) {
   }
   const pestWords = (Array.isArray(pests) ? pests : [])
     .map((pest) => String(pest || '').replace(/[_-]+/g, ' ').trim())
-    .filter(Boolean);
-  const text = scrub(String(row?.customer_request || '').trim()).trim();
+    .filter((word) => word && customerCopyViolations(word).length === 0);
+  const scrubbedText = scrub(String(row?.customer_request || '').trim()).trim();
+  const text = scrubbedText && customerCopyViolations(scrubbedText).length === 0 ? scrubbedText : '';
   if (!text && !pestWords.length) return '';
   const source = Object.hasOwn(BOOKED_REASON_SOURCES, row?.customer_request_source)
     ? BOOKED_REASON_SOURCES[row.customer_request_source]
