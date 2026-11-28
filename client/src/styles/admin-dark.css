@@ -38,13 +38,16 @@
     html.admin-app[data-admin-theme="dark"] .md\:bg-surface-page\/95 {
       background-color: rgba(17, 19, 21, 0.95);
     }
+    html.admin-app[data-admin-theme="dark"] .md\:hover\:bg-zinc-50:hover {
+      background-color: #22262c;
+    }
   }
 
   /* Hover / Active / Disabled states */
-  html.admin-app[data-admin-theme="dark"] :is(.hover\:bg-white:hover, .hover\:bg-zinc-50:hover, .hover\:bg-zinc-100:hover, .hover\:bg-surface-hover:hover, .hover\:bg-slate-50:hover, .hover\:bg-slate-100:hover) {
+  html.admin-app[data-admin-theme="dark"] :is(.hover\:bg-white:hover, .hover\:bg-zinc-50:hover, .hover\:bg-zinc-50\/50:hover, .hover\:bg-zinc-100:hover, .enabled\:hover\:bg-zinc-100:hover:enabled, .focus-visible\:bg-zinc-50:focus-visible, .hover\:bg-surface-hover:hover, .hover\:bg-slate-50:hover, .hover\:bg-slate-100:hover) {
     background-color: #22262c;
   }
-  html.admin-app[data-admin-theme="dark"] :is(.hover\:bg-zinc-200:hover, .active\:bg-zinc-100:active, .active\:bg-zinc-200:active) {
+  html.admin-app[data-admin-theme="dark"] :is(.hover\:bg-zinc-200:hover, .active\:bg-white:active, .active\:bg-zinc-100:active, .active\:bg-zinc-200:active, .aria-pressed\:bg-zinc-100[aria-pressed="true"]) {
     background-color: #2b3038;
   }
   html.admin-app[data-admin-theme="dark"] .active\:bg-zinc-50:active {
@@ -52,6 +55,19 @@
   }
   html.admin-app[data-admin-theme="dark"] .disabled\:bg-zinc-50:disabled {
     background-color: #14171a;
+  }
+  html.admin-app[data-admin-theme="dark"] .disabled\:bg-zinc-100:disabled {
+    background-color: #1c2026;
+  }
+  html.admin-app[data-admin-theme="dark"] .disabled\:hover\:bg-white:hover:disabled {
+    background-color: #181b1f;
+  }
+  html.admin-app[data-admin-theme="dark"] .odd\:bg-zinc-50:nth-child(odd) {
+    background-color: #14171a;
+  }
+  html.admin-app[data-admin-theme="dark"] .file\:bg-white::file-selector-button {
+    background-color: #22262c;
+    color: #f4f5f6;
   }
 
   /* Modal & drawer translucent backdrops stay dark */

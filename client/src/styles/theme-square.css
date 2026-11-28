@@ -91,5 +91,13 @@
     --tech-warn-line: rgba(252, 211, 77, 0.45);
     --tech-warn-text: #fcd34d;
     --tech-error-text: #f87171;
+    --status-green: #6ee7b7;
+    --status-green-bg: rgba(4, 120, 87, 0.22);
+    --status-amber: #fcd34d;
+    --status-amber-bg: rgba(217, 119, 6, 0.2);
+    --status-red: #f87171;
+    --status-red-bg: rgba(200, 49, 47, 0.2);
+    --status-blue: #60a5fa;
+    --status-blue-bg: rgba(10, 126, 194, 0.2);
   }
 }

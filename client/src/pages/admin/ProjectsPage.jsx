@@ -122,12 +122,12 @@ function useConfirmDialog() {
 // ramp (whites/greys/black — owner direction). Names kept so the ~200
 // consumer sites need no churn; the embedded CustomerProjectReportPreview
 // deliberately does NOT read these — it mimics the customer-facing report.
-const ESTIMATE_BG = "#FFFFFF";
-const ESTIMATE_BORDER = "#E4E4E7";
-const ESTIMATE_INPUT_BORDER = "#D4D4D8";
-const ESTIMATE_INPUT_BG = "#FFFFFF";
-const ESTIMATE_TEXT = "#18181B";
-const ESTIMATE_MUTED = "#71717A";
+const ESTIMATE_BG = "var(--surface-primary, #FFFFFF)";
+const ESTIMATE_BORDER = "var(--border-default, #E4E4E7)";
+const ESTIMATE_INPUT_BORDER = "var(--border-strong, #D4D4D8)";
+const ESTIMATE_INPUT_BG = "var(--surface-page, #FFFFFF)";
+const ESTIMATE_TEXT = "var(--text-primary, #18181B)";
+const ESTIMATE_MUTED = "var(--text-secondary, #71717A)";
 
 // Status pills ride the shared Badge on the zinc ramp — sent is the "done"
 // state (strong), draft/closed stay neutral; alert-fg is reserved for
@@ -2580,11 +2580,11 @@ export function ProjectDetail({
     return (
       <div
         style={{
-          background: "#FFFFFF",
-          border: `1px solid #E4E4E7`,
+          background: ESTIMATE_BG,
+          border: `1px solid ${ESTIMATE_BORDER}`,
           borderRadius: 6,
           padding: 24,
-          color: "#71717A",
+          color: ESTIMATE_MUTED,
           display: "flex",
           alignItems: "flex-start",
           justifyContent: "space-between",
@@ -2638,7 +2638,7 @@ export function ProjectDetail({
           justifyContent: "space-between",
           padding: "20px 24px",
           borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-          background: "#FFFFFF",
+          background: ESTIMATE_BG,
         }}
       >
         {" "}
@@ -4095,8 +4095,8 @@ const btnPrimary = {
   borderRadius: 4,
   fontSize: 14,
   fontWeight: 500,
-  background: "#18181B",
-  color: "#fff",
+  background: "var(--text-primary, #18181B)",
+  color: "var(--surface-page, #fff)",
   border: "none",
   cursor: "pointer",
 };
@@ -4106,7 +4106,7 @@ const btnSecondary = {
   borderRadius: 4,
   fontSize: 14,
   fontWeight: 500,
-  background: "#FFFFFF",
+  background: ESTIMATE_BG,
   color: ESTIMATE_TEXT,
   border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
   cursor: "pointer",
