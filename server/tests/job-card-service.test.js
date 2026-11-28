@@ -4175,7 +4175,8 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(febOilCalc.warnings.join(' ')).toContain('Heavy scale or mites');
     expect(febOilCalc.warnings.join(' ')).toContain('under 90°F');
 
-    // Compatible cross-unit rates (10 g/gal protocol vs 0.35-1.05 oz/gal catalog) keep the protocol's 10 g/gal dose in the calculator.
+    // Compatible cross-unit rates (10 g/gal protocol vs 0.35-1.05 oz/gal catalog) keep the protocol's 10 g/gal dose in the calculator
+    // and carry single-use placement and limits (including Antapex's Pharaoh-ant exclusion).
     const antapexOz = { id: 'antapex-oz', name: 'Atticus Antapex WSG', epa_reg_number: '91234-401', default_rate: '0.35-1.05', default_unit: 'oz/gal', label_verified_at: '2027-12-01', active: true };
     const antapexDb = dbFor({
       scheduled_services: [{ id: 'svc16', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly', first_name: 'A', last_name: 'B' }],
@@ -4187,6 +4188,75 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     });
     const antapexCalc = await jobCard.mixForProduct('antapex-oz', 4, { serviceId: 'svc16', dbh: antapexDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
     expect(antapexCalc).toMatchObject({ rateSource: 'protocol', amount: 40, amountMax: null, unit: 'g' });
+    expect(antapexCalc.warnings.join(' ')).toContain('Not for Pharaoh ants');
+
+    // Selecting an uncalibrated sprayer for Bora-Care warns that its minimum spray volume could not be checked.
+    const uncalBoraDb = dbFor({
+      scheduled_services: [{ id: 'svc17', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-03-10', service_type: 'Bora-Care Wood Treatment', service_category: 'termite', first_name: 'A', last_name: 'B' }],
+      products_catalog: [bora],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [{ id: 'sys-bora', name: 'FlowZone #1', system_type: 'backpack', tank_capacity_gal: '4.00' }],
+      scheduled_service_addons: [],
+    });
+    const uncalBoraCalc = await jobCard.mixForProduct('bora', 4, { serviceId: 'svc17', equipmentSystemId: 'sys-bora', dbh: uncalBoraDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-03-10T15:00:00Z') });
+    expect(uncalBoraCalc.amount).toBe(256);
+    expect(uncalBoraCalc.warnings.join(' ')).toContain('verify FlowZone #1 output against this product\'s spray volume or area limit.');
+
+    // Unresolved Copper rows (labelRateMissing) never fuzzy-match a catalog fungicide on the card or calculator.
+    const copperFungicide = { id: 'cu', name: 'Southern Ag Copper Fungicide', epa_reg_number: '829-123', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2027-12-01', active: true };
+    const copperDb = dbFor({
+      scheduled_services: [{ id: 'svc18', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-06-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      property_preferences: [{}],
+      products_catalog: [copperFungicide],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [],
+    });
+    const copperCard = await jobCard.buildJobCard('svc18', { dbh: copperDb, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-06-10T15:00:00Z') });
+    const copperRow = (copperCard.protocol.procedure.fieldGuide?.mixRates || []).find((r) => r.product === 'Copper');
+    expect(copperRow).toBeDefined();
+    expect(copperRow.productId).toBeNull();
+    expect(copperRow.sprayCheck).toBeUndefined();
+    const copperCalc = await jobCard.mixForProduct('cu', 4, { serviceId: 'svc18', dbh: copperDb, deps: { buildPlan: jest.fn() }, now: new Date('2028-06-10T15:00:00Z') });
+    expect(copperCalc).toMatchObject({ rateSource: 'catalog', context: { line: null } });
+
+    // Direct dosing is evaluated per booked service: a direct-dose primary does not suppress an add-on's tank spray amount (and vice versa).
+    const mixedProtocols = {
+      tree_shrub: {
+        name: 'Tree & Shrub Care',
+        visits: [{
+          visit: 1,
+          month: 'Jan',
+          primary: 'Merit 2F soil drench',
+          mixRates: [{ product: 'Merit 2F', where: 'Soil drench', dose: '0.1 to 0.2 fl oz per inch', epa: '432-1312' }],
+        }],
+      },
+      pest: {
+        name: 'Pest Control',
+        visits: [{
+          visit: 1,
+          month: 'Any',
+          primary: 'Merit 2F foliar spray',
+          mixRates: [{ product: 'Merit 2F', where: 'Foliar spray', perGallon: { amount: 0.1, unit: 'fl oz' }, epa: '432-1312' }],
+        }],
+      },
+    };
+    const directFirstDb = dbFor({
+      scheduled_services: [{ id: 'svc19', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', first_name: 'A', last_name: 'B' }],
+      products_catalog: [merit],
+      product_aliases: [],
+      equipment_calibrations: [],
+      equipment_systems: [],
+      scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control', service_key: 'pest_general_quarterly' }],
+    });
+    const directFirstCalc = await jobCard.mixForProduct('merit', 4, { serviceId: 'svc19', dbh: directFirstDb, deps: { buildPlan: jest.fn(), protocols: mixedProtocols }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(directFirstCalc.serviceAmounts).toEqual([
+      expect.objectContaining({ service: 'Tree & Shrub Care', amount: null, fromCard: false }),
+      expect.objectContaining({ service: 'Quarterly Pest Control', amount: 0.4, fromCard: true }),
+    ]);
+    expect(directFirstCalc.warnings.join(' ')).toContain('Tree & Shrub Care: Soil drench: 0.1 to 0.2 fl oz per inch');
 
     const tristarDb = dbFor({
       scheduled_services: [{ id: 'svc8', customer_id: 'c1', technician_id: 'tech-a', scheduled_date: '2028-01-10', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', assigned_equipment_system_id: 'sys-ts', assigned_calibration_id: null, first_name: 'A', last_name: 'B' }],

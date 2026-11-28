@@ -1485,6 +1485,7 @@ function mistingSafetyField(program, effectiveProgramKey) {
 }
 
 function matchMixRateProduct(row, catalog) {
+  if (row?.labelRateMissing) return null;
   const rawName = String(row?.product || '').trim();
   if (!rawName || !Array.isArray(catalog) || !catalog.length) return null;
   const name = rawName.startsWith('TriTek') ? 'TriTek Spray Oil Emulsion (OMRI)' : rawName;
@@ -2442,8 +2443,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   //     (less water). With no rig named, `tank` is whichever calibration is on file and says nothing of the sprayer in the
   //     tech's hand, so it is not judged.
   const lineCarrier = lineCarrierOf(lineBand, protocolLine);
-  const namedRig = Boolean(pickedRig || rigAssignment(svc).equipmentSystemId || rigAssignment(svc).calibrationId);
-  const rigCarrier = namedRig && tank.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
+  const rigCtx = buildMixRigCtx({ pickedRig, svc, tank });
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
@@ -2495,8 +2495,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // card's rate over the area sold, never a tank amount off the catalog default): that is not a withhold, so the warning stands
   // with no number. The booked add-on's own rate (governedRate, per 1,000 sq ft) shows beside it, never the catalog default.
   const governedRate = protocolLine?.governedRate || null;
-  const noTankAmount = !tankMixable || Boolean(protocolLine?.governed) || Boolean(protocolLine?.directDoseOnly);
-  const rigCtx = { rigCarrier, rigName: pickedRig?.name || tank.systemName || 'This rig', rigGalPer1000: tank.carrierGalPer1000 };
+  const noTankAmount = !tankMixable || Boolean(protocolLine?.governed) || isDirectDoseOnlyLine(protocolLine);
   // Two services, two rates: one amount for each, named by service, never one headline from the first (owner 2026-11-26). Each row is
   // worked out by the same function as the single dose (perGallonDose), so its coverage and rig comparison cannot drift from it.
   const serviceRows = noTankAmount || !protocolLine?.conflictLines ? [] : conflictAmounts(protocolLine.conflictLines, labelPerGallon, volume, rigCtx);
@@ -2692,7 +2691,28 @@ function rigVolumeBoundWarnings({ min, max, rigCarrier, rigName, rigGalPer1000 }
   return warnings;
 }
 
+function buildMixRigCtx({ pickedRig, svc, tank }) {
+  const assigned = rigAssignment(svc);
+  const namedRig = Boolean(pickedRig || assigned.equipmentSystemId || assigned.calibrationId);
+  const rigCarrier = namedRig && tank.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
+  return {
+    namedRig,
+    rigCarrier,
+    uncalibratedReason: namedRig && !rigCarrier ? (tank.reason || 'No sprayer calibration on file') : null,
+    rigName: pickedRig?.name || tank.systemName || 'This rig',
+    rigGalPer1000: tank.carrierGalPer1000,
+  };
+}
+
+function uncalibratedRigBoundWarning({ lineCarrier, line, rigCtx }) {
+  if (!rigCtx?.uncalibratedReason) return null;
+  if (!(lineCarrier || line?.minCarrier || line?.maxCarrier || line?.areaCap)) return null;
+  return `${rigCtx.uncalibratedReason} — verify ${rigCtx.rigName} output against this product's spray volume or area limit.`;
+}
+
 function rigLineVolumeWarnings({ lineCarrier, line, band, rigCtx }) {
+  const uncalWarn = uncalibratedRigBoundWarning({ lineCarrier, line, rigCtx });
+  if (uncalWarn) return [uncalWarn];
   const capWarn = areaCapWarning({ band, line, ...rigCtx });
   return [
     rigVolumeWarning({ lineCarrier, ...rigCtx }),
@@ -2702,13 +2722,14 @@ function rigLineVolumeWarnings({ lineCarrier, line, band, rigCtx }) {
 }
 
 function singleDoseWarnings({ lineCarrier, coverage, perGallon, protocolLine, rigCtx, serviceWarnings }) {
-  const capWarn = areaCapWarning({ band: perGallon, line: protocolLine, ...rigCtx });
-  const boundWarnings = rigCtx.rigCarrier
+  const uncalWarn = uncalibratedRigBoundWarning({ lineCarrier, line: protocolLine, rigCtx });
+  const capWarn = uncalWarn ? null : areaCapWarning({ band: perGallon, line: protocolLine, ...rigCtx });
+  const boundWarnings = !uncalWarn && rigCtx.rigCarrier
     ? rigVolumeBoundWarnings({ min: protocolLine?.minCarrier, max: capWarn ? null : protocolLine?.maxCarrier, ...rigCtx })
     : [];
   const labelWarnings = !protocolLine?.conflictLines && Array.isArray(protocolLine?.rowLabelWarnings) ? protocolLine.rowLabelWarnings : [];
   const useNotes = Array.isArray(protocolLine?.doseUseNotes) ? protocolLine.doseUseNotes : [];
-  return [...labelWarnings, rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, capWarn, ...boundWarnings, ...useNotes, ...serviceWarnings].filter(Boolean);
+  return [...labelWarnings, uncalWarn, rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage, capWarn, ...boundWarnings, ...useNotes, ...serviceWarnings].filter(Boolean);
 }
 
 function statedLabelVolume(raw) {
@@ -2893,7 +2914,10 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     const labelWarnings = Array.isArray(line.rowLabelWarnings) ? line.rowLabelWarnings : [];
     const useNotes = Array.isArray(line.doseUseNotes) ? line.doseUseNotes : [];
     const warning = [...lineConditions(line), ...labelWarnings, ...rigLineVolumeWarnings({ lineCarrier, line, band: used, rigCtx }), ...useNotes];
-    if (!used || line.directDoseOnly) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: warning, ...(line.conditional ? { conditional: true } : {}) };
+    if (!used || line.directDoseOnly) {
+      const directWarn = line.directDoseOnly ? [DIRECT_DOSE_NO_TANK] : [];
+      return { service: line.name, amount: null, unit: null, fromCard: false, warnings: [...directWarn, ...warning], ...(line.conditional ? { conditional: true } : {}) };
+    }
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier, tankOverrides: band ? line.tankOverrides : [] });
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
     return {
@@ -2912,10 +2936,19 @@ const AREA_ADDON_NO_TANK = 'Area add-on — apply the label rate on the card ove
 const DIRECT_DOSE_NO_TANK = 'Dose directly per plant or area — see protocol dose below; no tank amount';
 const NOT_TANK_MIX = 'Not a tank mix — apply as labeled';
 
+function isDirectDoseOnlyLine(protocolLine) {
+  if (!protocolLine) return false;
+  return protocolLine.conflictLines?.length
+    ? protocolLine.conflictLines.every((line) => line.directDoseOnly)
+    : Boolean(protocolLine.directDoseOnly);
+}
+
 function noTankDoseResult(protocolLine, governedRate, rateUnit) {
-  const reason = protocolLine?.governed ? AREA_ADDON_NO_TANK : (protocolLine?.directDoseOnly ? DIRECT_DOSE_NO_TANK : NOT_TANK_MIX);
+  const reason = protocolLine?.governed ? AREA_ADDON_NO_TANK : (isDirectDoseOnlyLine(protocolLine) ? DIRECT_DOSE_NO_TANK : NOT_TANK_MIX);
   const labelWarnings = !protocolLine?.conflictLines && Array.isArray(protocolLine?.rowLabelWarnings) ? protocolLine.rowLabelWarnings : [];
-  const useNotes = Array.isArray(protocolLine?.doseUseNotes) ? protocolLine.doseUseNotes : [];
+  const useNotes = protocolLine?.conflictLines?.length
+    ? protocolLine.conflictLines.flatMap((line) => (line.doseUseNotes || []).map((w) => `${line.name}: ${w}`))
+    : (Array.isArray(protocolLine?.doseUseNotes) ? protocolLine.doseUseNotes : []);
   return {
     mix: { amount: null, unit: governedRate?.rateUnit || rateUnit || null, ratePerGallon: null, reason },
     warnings: [...conditionWarnings(protocolLine), ...labelWarnings, ...useNotes],
@@ -3017,8 +3050,26 @@ function directDoseNotes(directRows) {
 
 function mixedMethodUseNotes(tankRow, directRows) {
   if (!tankRow || !directRows.length) return [];
-  const notes = tankRow.where ? [`Tank amount is for: ${tankRow.where}`] : [];
+  const notes = [
+    tankRow.where ? `Tank amount is for: ${tankRow.where}` : null,
+    tankRow.limit ? `Tank limit: ${tankRow.limit}` : null,
+  ].filter(Boolean);
   return [...notes, ...directDoseNotes(directRows)];
+}
+
+function mixRowRestrictionNotes(row, hit) {
+  if (!row) return [];
+  const covered = hit?.selected === false ? String(hit.raw || '').toLowerCase() : '';
+  const parts = [row.where, row.limit]
+    .map((part) => String(part || '').trim())
+    .filter((part) => part && (!covered || !covered.includes(part.toLowerCase())));
+  return parts.length ? [`Protocol use: ${parts.join(' — ')}`] : [];
+}
+
+function candidateDoseUseNotes(row, hit, directRows, directDoseOnly) {
+  if (directDoseOnly) return directDoseNotes(directRows);
+  if (row && directRows.length) return mixedMethodUseNotes(row, directRows);
+  return mixRowRestrictionNotes(row, hit);
 }
 
 function rowLabelWarningsOf(mixRows) {
@@ -3037,11 +3088,12 @@ function expandedMixRowLabel(serviceName, row, relevant) {
 }
 
 function expandedMixRowHit(c, row, hit, relevant, directRows, directDoseOnly) {
+  const synth = syntheticHitFromMixRow(row, hit);
   return {
     c: { ...c, name: expandedMixRowLabel(c.name, row, relevant) },
-    hit: syntheticHitFromMixRow(row, hit),
+    hit: synth,
     mixRows: [row],
-    doseUseNotes: directDoseOnly ? directDoseNotes([row]) : mixedMethodUseNotes(row, directRows),
+    doseUseNotes: candidateDoseUseNotes(row, synth, directRows, directDoseOnly),
     directDoseOnly,
     useSpecific: true,
   };
@@ -3060,9 +3112,9 @@ function candidateProtocolHits(c, resolved, product) {
     return relevant.map((row) => expandedMixRowHit(c, row, hit, relevant, directRows, directDoseOnly));
   }
   const singleRow = relevant[0] || null;
-  const doseUseNotes = directDoseOnly ? directDoseNotes(directRows) : (tankRows.length && directRows.length ? mixedMethodUseNotes(singleRow, directRows) : []);
-  if (!hit) return [{ c, hit: syntheticHitFromMixRow(singleRow), mixRows: singleRow ? [singleRow] : [], doseUseNotes, directDoseOnly }];
-  return [{ c, hit, mixRows: singleRow ? [singleRow] : [], doseUseNotes, directDoseOnly }];
+  const effectiveHit = hit || syntheticHitFromMixRow(singleRow);
+  const doseUseNotes = candidateDoseUseNotes(singleRow, effectiveHit, directRows, directDoseOnly);
+  return [{ c, hit: effectiveHit, mixRows: singleRow ? [singleRow] : [], doseUseNotes, directDoseOnly }];
 }
 
 function protocolHitRate(h) {
@@ -3201,7 +3253,8 @@ function servicesConflict(list, { rateOf, statedVolumeOf }) {
   // Several "if needed" services that differ in target or restriction keep one row each, even at one concentration.
   const conditionalUses = list.filter((h) => h.hit.selected === false);
   const usesDiffer = conditionalUses.length > 1 && new Set(conditionalUses.map((h) => String(h.hit.raw || '').replace(/\s+/g, ' ').trim())).size > 1;
-  const conditionsDiffer = mixed || usesDiffer;
+  const directMixDiffers = list.some((h) => h.directDoseOnly) && list.some((h) => !h.directDoseOnly);
+  const conditionsDiffer = mixed || usesDiffer || directMixDiffers;
   const statesRate = list.some((h) => h.hit.labelUseRate || h.hit.declaredRate || rateOf(h));
   return (rates.size > 1 || conditionsDiffer || volumes.size > 1) && (statesRate || conditionsDiffer);
 }
@@ -3235,7 +3288,7 @@ function areaCapWarning({ band, line, rigName, rigCarrier }) {
 
 // What the hold says of a service whose line passes no rate: "see its card" when it states one that fails the label check or is
 // refused; otherwise only its condition tells it apart from the other service (its own rows below carry the full condition text).
-const noRateText = (line) => (line.rate || line.declared || line.labelUse ? 'see its card' : (line.conditional ? 'if needed' : 'booked'));
+const noRateText = (line) => (line.directDoseOnly ? 'direct dose (no tank)' : (line.rate || line.declared || line.labelUse ? 'see its card' : (line.conditional ? 'if needed' : 'booked')));
 
 // The hold for a product two services on one visit select at different rates: each service's rate where it passes protocolBand
 // against the verified label band (the check a single dose gets), else "see its card".
